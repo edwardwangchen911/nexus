@@ -1,6 +1,9 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// Saved news has a separate read lifecycle, covered in saved-news.test.tsx.
+vi.mock("../../../app/components/saved-news", () => ({ SavedNews: () => null }));
+
 import MarketPage, {
   buildMarketQuery,
   MarketPanel,

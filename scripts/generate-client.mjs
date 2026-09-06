@@ -71,6 +71,7 @@ function generateRuntimeContract(openapi) {
   const rootNames = [
     "IntegrationStatusResponse",
     "MarketPageResponse",
+    "NewsResponse",
     "PortfolioPageResponse",
     "PortfolioSnapshotResponse",
     "BrokerSyncRunResponse",
@@ -117,6 +118,7 @@ function generateRuntimeContract(openapi) {
     `export const runtimeContractSchemas = ${JSON.stringify(runtimeSchemas, null, 2)} as const;`,
     "export const integrationStatusRuntimeSchema = runtimeContractSchemas.IntegrationStatusResponse;",
     "export const marketPageRuntimeSchema = runtimeContractSchemas.MarketPageResponse;",
+    "export const newsRuntimeSchema = runtimeContractSchemas.NewsResponse;",
     "export const portfolioPageRuntimeSchema = runtimeContractSchemas.PortfolioPageResponse;",
     "export const portfolioSnapshotRuntimeSchema = runtimeContractSchemas.PortfolioSnapshotResponse;",
     "export const brokerSyncRunRuntimeSchema = runtimeContractSchemas.BrokerSyncRunResponse;",

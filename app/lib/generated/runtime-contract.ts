@@ -3697,6 +3697,197 @@ export const runtimeContractSchemas = {
     "title": "MetricPairResponse",
     "type": "object"
   },
+  "NewsArticle": {
+    "additionalProperties": false,
+    "properties": {
+      "author": {
+        "maxLength": 2000,
+        "title": "Author",
+        "type": "string"
+      },
+      "created_at": {
+        "format": "date-time",
+        "title": "Created At",
+        "type": "string"
+      },
+      "headline": {
+        "maxLength": 10000,
+        "title": "Headline",
+        "type": "string"
+      },
+      "id": {
+        "title": "Id",
+        "type": "integer"
+      },
+      "source": {
+        "maxLength": 2000,
+        "title": "Source",
+        "type": "string"
+      },
+      "summary": {
+        "maxLength": 100000,
+        "title": "Summary",
+        "type": "string"
+      },
+      "symbols": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Symbols",
+        "type": "array"
+      },
+      "updated_at": {
+        "format": "date-time",
+        "title": "Updated At",
+        "type": "string"
+      },
+      "url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Url"
+      }
+    },
+    "required": [
+      "id",
+      "headline",
+      "summary",
+      "author",
+      "created_at",
+      "updated_at",
+      "symbols",
+      "source"
+    ],
+    "title": "NewsArticle",
+    "type": "object"
+  },
+  "NewsResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "articles": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/NewsArticle"
+        },
+        "maxItems": 50,
+        "title": "Articles",
+        "type": "array"
+      },
+      "content_hash": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Content Hash"
+      },
+      "coverage": {
+        "const": "single_source_bounded",
+        "default": "single_source_bounded",
+        "title": "Coverage",
+        "type": "string"
+      },
+      "delivery": {
+        "const": "delayed_query_latency_unverified",
+        "default": "delayed_query_latency_unverified",
+        "title": "Delivery",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "has_more": {
+        "default": false,
+        "title": "Has More",
+        "type": "boolean"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "received_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Received At"
+      },
+      "source": {
+        "const": "alpaca",
+        "default": "alpaca",
+        "title": "Source",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "saved",
+          "empty",
+          "unavailable",
+          "invalid"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "symbol": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Symbol"
+      },
+      "window_end": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Window End"
+      },
+      "window_start": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Window Start"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "status"
+    ],
+    "title": "NewsResponse",
+    "type": "object"
+  },
   "OpenOrderResponse": {
     "additionalProperties": false,
     "properties": {
@@ -10796,6 +10987,8 @@ export const runtimeContractSchemas = {
 export const integrationStatusRuntimeSchema = runtimeContractSchemas.IntegrationStatusResponse;
 
 export const marketPageRuntimeSchema = runtimeContractSchemas.MarketPageResponse;
+
+export const newsRuntimeSchema = runtimeContractSchemas.NewsResponse;
 
 export const portfolioPageRuntimeSchema = runtimeContractSchemas.PortfolioPageResponse;
 

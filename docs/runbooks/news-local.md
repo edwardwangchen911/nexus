@@ -17,3 +17,23 @@ python -m nexus.ops.news_local collect --repo-root /path/to/repo --symbol AAPL -
 本入口只采集原件，不调用模型、不生成研究结论、不写券商、不建立调度。历史研究不得因新消息被重标。
 
 HTTP 成功且通过凭据反射检查后，身份、schema 或时间窗口核验失败会保存 `rejected-raw.json` 和 `rejected-receipt.json`（0700/0600），后者仅包含固定错误码、原件哈希/长度及接收时间。这组文件不能被正常导入器接纳，可用于离线诊断，不需要重采集。无法完成反射检查的非 JSON 响应和任何密钥反射仍不落盘。HTTP 策略错误保留白名单固定码；现有通用传输未暴露具体 401/403 状态，`NEWS_HTTP_STATUS_REJECTED` 不应推断为某个具体状态。
+
+## 保存到本地平台并查看
+
+采集成功后，使用同一标的的已有证券 UUID 显式导入。`--output` 必须是尚不存在的私有回执文件；程序先预约并写入 started，再执行事务，成功后在同一文件记录 snapshot_id。若报告 `NEWS_IMPORT_CHECK_PERSISTED_STATE`，先按归档收据哈希核查 `data_snapshots`，禁止因回执失败自动重放。
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.news_import \
+  --repo-root /path/to/configured/repo \
+  --instrument-id EXISTING_INSTRUMENT_UUID \
+  --collection-dir /path/to/collected-directory \
+  --output /path/to/new-private-result.json
+```
+
+导入仅允许本地数据库与对象存储；核对归档权限、精确字节、收据、窗口和证券别名后，保存两份原件与一个不可变消息快照。同一收据幂等；新采集追加快照，旧研究与方案不变。复用 DataArtifact/DataSnapshot，无新依赖、迁移或权限配置。对象已写入但事务失败时可能留下未引用原件，保留它们供核查。
+
+市场页选定标的后，在“最新消息”查看本次最新一页。`GET /internal/v1/instruments/{instrument_id}/news` 与相应 BFF 路由只读持久化原件，并重新验证哈希、字节数和时间。未采集、返回空页、原件异常分开表达；不将损坏归档降为空消息。页面列出文章发布时间/修订时间、本机采集时间、查询窗口、来源和原文链接；不加载远程正文或图片。按钮“读取已保存消息”只重新读取本地数据，不采集供应商，不调用模型。切换标的不会显示上一标的的迟到响应。
+
+真实查询可访问只证明现有凭据在这次请求被接受，不推导账户实时权益、零延迟或全面覆盖。新闻未进入既有冻结研究，不能直接改变研究等级、策略方向或交易权限。
+
+回滚：切回此前应用版本即可停止使用新增入口；无需迁移回滚或删除任何原件/快照。不要删除持久化记录来模拟未采集，也不要更新历史研究引用。

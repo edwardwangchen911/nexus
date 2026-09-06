@@ -9,6 +9,7 @@ import {
   brokerActionRuntimeSchema,
   dailyBriefRuntimeSchema,
   marketPageRuntimeSchema,
+  newsRuntimeSchema,
   optimizationJobRuntimeSchema,
   optimizationLifecycleRuntimeSchema,
   optimizationProposalGroupRuntimeSchema,
@@ -205,6 +206,11 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
   if (integrationAction && integrationProviders.includes(integrationAction[1] as (typeof integrationProviders)[number])) {
     const status = safeIntegrationStatus(data);
     return status?.provider === integrationAction[1] ? status : INVALID_DATA;
+  }
+  const news = /^\/internal\/v1\/instruments\/([^/]+)\/news$/.exec(pathname);
+  if (news) {
+    return matchesRuntimeSchema(data, newsRuntimeSchema) && isPlain(data)
+      && sameUuid(data.instrument_id, news[1]) ? data : INVALID_DATA;
   }
   if (pathname === "/internal/v1/market") {
     if (!matchesRuntimeSchema(data, marketPageRuntimeSchema) || !isPlain(data)) return INVALID_DATA;

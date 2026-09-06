@@ -214,6 +214,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/instruments/{instrument_id}/news": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Saved News */
+        get: operations["getSavedNews"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/instruments/{instrument_id}/research": {
         parameters: {
             query?: never;
@@ -2086,6 +2103,11 @@ export interface components {
             /** Thresholds */
             thresholds: string[];
         };
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
         /**
          * IntegrationConnectivityTestRequest
          * @description A deliberately empty non-trading fixture connectivity request.
@@ -2461,6 +2483,95 @@ export interface components {
             champion: string | null;
             /** Delta */
             delta: string | null;
+        };
+        /** NewsArticle */
+        NewsArticle: {
+            /** Author */
+            author: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Headline */
+            headline: string;
+            /** Id */
+            id: number;
+            /** Source */
+            source: string;
+            /** Summary */
+            summary: string;
+            /** Symbols */
+            symbols: string[];
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Url */
+            url?: string | null;
+        };
+        /** NewsEnvelope */
+        NewsEnvelope: {
+            data: components["schemas"]["NewsResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** NewsResponse */
+        NewsResponse: {
+            /**
+             * Articles
+             * @default []
+             */
+            articles: components["schemas"]["NewsArticle"][];
+            /** Content Hash */
+            content_hash?: string | null;
+            /**
+             * Coverage
+             * @default single_source_bounded
+             * @constant
+             */
+            coverage: "single_source_bounded";
+            /**
+             * Delivery
+             * @default delayed_query_latency_unverified
+             * @constant
+             */
+            delivery: "delayed_query_latency_unverified";
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Received At */
+            received_at?: string | null;
+            /**
+             * Source
+             * @default alpaca
+             * @constant
+             */
+            source: "alpaca";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "saved" | "empty" | "unavailable" | "invalid";
+            /** Symbol */
+            symbol?: string | null;
+            /** Window End */
+            window_end?: string | null;
+            /** Window Start */
+            window_start?: string | null;
         };
         /**
          * NexusErrorEnvelope
@@ -5309,6 +5420,19 @@ export interface components {
             /** Value */
             value?: string | null;
         };
+        /** ValidationError */
+        ValidationError: {
+            /** Context */
+            ctx?: Record<string, never>;
+            /** Input */
+            input?: unknown;
+            /** Location */
+            loc: (string | number)[];
+            /** Message */
+            msg: string;
+            /** Error Type */
+            type: string;
+        };
         /** VetoExperimentRequest */
         VetoExperimentRequest: {
             /**
@@ -6064,6 +6188,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getSavedNews: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instrument_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NewsEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

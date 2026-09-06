@@ -1,5 +1,7 @@
 "use client";
 
+import { SavedNews } from "../../components/saved-news";
+
 import { formatDisplayTime } from "../../lib/display-format";
 
 import { formatDisplayDecimal } from "../../lib/display-decimal";
@@ -428,6 +430,8 @@ export function MarketPanel({
                     </button>
                   </div>
                 </section>
+
+                <SavedNews key={`news:${selectedItem.instrument_id}`} instrumentId={selectedItem.instrument_id} />
 
                 {qualityReasons(selectedSeriesForItem, selectedItem).length > 0 ? (
                   <div className="market-reasons" aria-label={`${selectedItem.symbol} 质量原因`}>

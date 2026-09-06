@@ -2965,6 +2965,19 @@
         "title": "GateResultResponse",
         "type": "object"
       },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
       "IntegrationConnectivityTestRequest": {
         "additionalProperties": false,
         "description": "A deliberately empty non-trading fixture connectivity request.",
@@ -4071,6 +4084,214 @@
           "delta"
         ],
         "title": "MetricPairResponse",
+        "type": "object"
+      },
+      "NewsArticle": {
+        "additionalProperties": false,
+        "properties": {
+          "author": {
+            "maxLength": 2000,
+            "title": "Author",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "headline": {
+            "maxLength": 10000,
+            "title": "Headline",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "source": {
+            "maxLength": 2000,
+            "title": "Source",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 100000,
+            "title": "Summary",
+            "type": "string"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Symbols",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "headline",
+          "summary",
+          "author",
+          "created_at",
+          "updated_at",
+          "symbols",
+          "source"
+        ],
+        "title": "NewsArticle",
+        "type": "object"
+      },
+      "NewsEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/NewsResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "NewsEnvelope",
+        "type": "object"
+      },
+      "NewsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "articles": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/NewsArticle"
+            },
+            "maxItems": 50,
+            "title": "Articles",
+            "type": "array"
+          },
+          "content_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Hash"
+          },
+          "coverage": {
+            "const": "single_source_bounded",
+            "default": "single_source_bounded",
+            "title": "Coverage",
+            "type": "string"
+          },
+          "delivery": {
+            "const": "delayed_query_latency_unverified",
+            "default": "delayed_query_latency_unverified",
+            "title": "Delivery",
+            "type": "string"
+          },
+          "execution_locked": {
+            "const": true,
+            "default": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "has_more": {
+            "default": false,
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "received_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Received At"
+          },
+          "source": {
+            "const": "alpaca",
+            "default": "alpaca",
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "saved",
+              "empty",
+              "unavailable",
+              "invalid"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbol"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
+          },
+          "window_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Start"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "status"
+        ],
+        "title": "NewsResponse",
         "type": "object"
       },
       "NexusErrorEnvelope": {
@@ -11544,6 +11765,46 @@
         "title": "TypedMetric",
         "type": "object"
       },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
       "VetoExperimentRequest": {
         "additionalProperties": false,
         "properties": {
@@ -12696,6 +12957,46 @@
           }
         },
         "summary": "Get Broker Sync Run"
+      }
+    },
+    "/internal/v1/instruments/{instrument_id}/news": {
+      "get": {
+        "operationId": "getSavedNews",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instrument_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Instrument Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewsEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Saved News"
       }
     },
     "/internal/v1/instruments/{instrument_id}/research": {
