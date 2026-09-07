@@ -26,7 +26,7 @@ def test_oversized_http_body_is_not_archived(invoke):
         ]
     )
     assert code == 1
-    assert json.loads(captured.err)["code"] == "ALPACA_PRICES_HTTP_FAILED"
+    assert json.loads(captured.err)["code"] == "ALPACA_PRICES_RESPONSE_TOO_LARGE"
     assert not (directory / "page-001.json").exists()
     assert len(invoke.requests) == 1
 
@@ -100,11 +100,19 @@ def test_bad_success_response_is_archived_before_rejection(invoke, raw):
     assert len(invoke.requests) == 1
 
 
-@pytest.mark.parametrize("status", [301, 401, 429, 500])
-def test_http_failure_never_archives_body_or_retries(invoke, status):
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (301, "ALPACA_PRICES_REDIRECT_REJECTED"),
+        (401, "ALPACA_PRICES_STATUS_REJECTED"),
+        (429, "ALPACA_PRICES_RETRY_BUDGET_EXHAUSTED"),
+        (500, "ALPACA_PRICES_RETRY_BUDGET_EXHAUSTED"),
+    ],
+)
+def test_http_failure_never_archives_body_or_retries(invoke, status, expected):
     code, directory, captured = invoke([httpx.Response(status, content=b"raw-private-canary")])
     assert code == 1
-    assert json.loads(captured.err)["code"] == "ALPACA_PRICES_HTTP_FAILED"
+    assert json.loads(captured.err)["code"] == expected
     assert set(p.name for p in directory.iterdir()) == {"manifest.json"}
     assert len(invoke.requests) == 1
 

@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.providers.base import BarsRequest
-from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
+from nexus.providers.http import (
+    AllowedOrigin,
+    FixedOriginHttpClient,
+    HttpPolicyError,
+    HttpRequestPolicy,
+)
 from nexus.providers.market.alpaca_http import (
     AlpacaHttpTransport,
     SqlInstrumentSymbolResolver,
@@ -202,6 +207,16 @@ async def collect_prices(
         error_code = "ALPACA_PRICES_DEADLINE_EXCEEDED"
     except CollectionError as error:
         error_code = str(error)
+    except HttpPolicyError as error:
+        safe_code = str(error)
+        if safe_code not in {
+            "REDIRECT_REJECTED",
+            "RESPONSE_TOO_LARGE",
+            "RETRY_BUDGET_EXHAUSTED",
+            "STATUS_REJECTED",
+        }:
+            safe_code = "HTTP_FAILED"
+        error_code = f"ALPACA_PRICES_{safe_code}"
     except Exception:
         error_code = "ALPACA_PRICES_HTTP_FAILED" if archive is None else archive.phase
     exhausted = exhausted and error_code is None
