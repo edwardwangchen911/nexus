@@ -18,8 +18,10 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from nexus.market.universe import stable_instrument_id
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
+from nexus.persistence.models.market import Instrument
 from nexus.providers.base import BarsRequest
 from nexus.providers.http import (
     AllowedOrigin,
@@ -27,6 +29,7 @@ from nexus.providers.http import (
     HttpPolicyError,
     HttpRequestPolicy,
 )
+from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.alpaca_http import (
     AlpacaHttpTransport,
     SqlInstrumentSymbolResolver,
@@ -126,9 +129,24 @@ async def _resolve_identity(database_url: str, request: BarsRequest, identity_as
         async with asyncio.timeout(15):
             async with AsyncSession(engine) as session, session.begin():
                 await session.execute(text("SET TRANSACTION READ ONLY"))
-                return await SqlInstrumentSymbolResolver(session).resolve(
-                    request.instrument_id, identity_asof
-                )
+                try:
+                    return await SqlInstrumentSymbolResolver(session).resolve(
+                        request.instrument_id, identity_asof
+                    )
+                except MarketProviderPayloadError as error:
+                    if (
+                        str(error) != "INSTRUMENT_SYMBOL_AUTHORITY_INVALID"
+                        or request.instrument_id != stable_instrument_id("SPY")
+                    ):
+                        raise CollectionError("ALPACA_PRICES_IDENTITY_INVALID") from None
+                    master = await session.get(Instrument, request.instrument_id)
+                    if (
+                        master is None
+                        or master.exchange != "ARCX"
+                        or master.currency != "USD"
+                    ):
+                        raise CollectionError("ALPACA_PRICES_IDENTITY_INVALID") from None
+                    return "SPY"
     finally:
         await engine.dispose()
 

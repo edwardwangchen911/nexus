@@ -10,6 +10,7 @@ from uuid import UUID
 import httpx
 import pytest
 from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.market.universe import stable_instrument_id
 from nexus.ops.alpaca_prices_local import _resolve_identity, collect_prices
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.diagnostics import DiagnosticPolicy
@@ -123,6 +124,31 @@ async def setup_trends(url, directory, monkeypatch, *, seed_master=True, adjustm
     client = FakeS3Client()
     archive = load_price_collection(directory, instrument_id=INSTRUMENT)
     return settings, factory, S3ProviderEvidenceStore(settings, client=client), client, archive
+
+
+@pytest.mark.asyncio
+async def test_canonical_spy_benchmark_resolves_without_portfolio_alias(
+    migrated_database_url,
+):
+    spy = stable_instrument_id("SPY")
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    async with factory.begin() as session:
+        session.add(
+            Instrument(
+                id=spy,
+                asset_type="etf",
+                exchange="ARCX",
+                currency="USD",
+                tick_size=None,
+                risk_bucket="EQUITY_ETF",
+            )
+        )
+    request, _ = collection_window(
+        spy, date(2024, 6, 10), date(2024, 6, 14), "all", now=datetime.now(UTC)
+    )
+    assert await _resolve_identity(migrated_database_url, request, request.end.date()) == "SPY"
+    await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio
