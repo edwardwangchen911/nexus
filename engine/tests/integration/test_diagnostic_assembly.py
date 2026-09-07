@@ -419,7 +419,7 @@ async def _seed_spy(session: AsyncSession) -> None:
         Instrument(
             id=SPY_ID,
             asset_type="equity_etf",
-            exchange="XNYS",
+            exchange="ARCX",
             currency="USD",
             tick_size=Decimal("0.01"),
             risk_bucket="us_equity",

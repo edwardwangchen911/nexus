@@ -290,7 +290,7 @@ async def _canonical_spy_series(
             .where(
                 Instrument.id == _SPY_ID,
                 Instrument.asset_type == "equity_etf",
-                Instrument.exchange == "XNYS",
+                Instrument.exchange == "ARCX",
                 Instrument.currency == "USD",
                 Instrument.created_at <= as_of,
                 InstrumentAlias.symbol == "SPY",
