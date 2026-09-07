@@ -37,7 +37,8 @@ describe("three-way proposal comparison", () => {
     const region = screen.getByRole("region", { name: "经济比较结论" });
     expect(region).toHaveTextContent(label);
     expect(region).toHaveTextContent(explanation);
-    expect(region).toHaveTextContent("尚未形成经济比较结论");
+    expect(region).toHaveTextContent("当前流程动作：不进入影子验证，也不执行调整");
+    expect(region).toHaveTextContent("不等于建议保持现状");
     expect(region).not.toHaveTextContent("比较结果：保持现状");
     expect(within(region).getByText("查看原因代码")).toBeVisible();
     expect(within(region).getByText(reason).closest("details")).not.toHaveAttribute("open");
@@ -183,7 +184,9 @@ describe("three-way proposal comparison", () => {
     render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
     const summary = screen.getByRole("region", { name: "经济比较结论" });
+    expect(summary).toHaveTextContent("当前流程动作：不进入影子验证，也不执行调整");
     expect(summary).toHaveTextContent("至少一个方案不具备排名或执行适用性");
+    expect(summary).toHaveTextContent("不等于建议保持现状");
     expect(summary).not.toHaveTextContent("比较结果：最小调整");
     expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
     expect(screen.queryByText(/启动影子验证/)).not.toBeInTheDocument();

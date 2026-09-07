@@ -234,8 +234,8 @@ function EconomicComparisonSummary({ comparison, usable }: { comparison: Proposa
         : compared
           ? "这是基于已保存证据计算的比较结果，不代表已作出人工选择，也不授予执行权限。"
           : !usable
-            ? "尚未形成经济比较结论；至少一个方案不具备排名或执行适用性，不能展示推荐，也不能作为后续操作依据。"
-            : "尚未形成经济比较结论，不能据此认定保持现状或调整更优。"}</p>
+            ? "当前流程动作：不进入影子验证，也不执行调整。至少一个方案不具备排名或执行适用性；这是证据门禁结果，不等于建议保持现状。"
+            : "当前流程动作：不进入影子验证，也不执行调整。尚未形成经济比较结论，不能据此认定保持现状或调整更优。"}</p>
       {comparison?.reasons.length ? (
         <>
           <p>{[...new Set(comparison.reasons.map((reason) => economicReasons.get(reason)
