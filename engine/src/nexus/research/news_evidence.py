@@ -53,7 +53,25 @@ class NewsObservation(BaseModel):
 
 def news_tool_payload(document: NewsObservation) -> dict[str, object]:
     return {
-        **document.model_dump(mode="json", exclude={"raw_text", "receipt_text"}),
+        **document.model_dump(
+            mode="json",
+            exclude={
+                "raw_text",
+                "receipt_text",
+                "schema_version",
+                "instrument_id",
+                "news_snapshot_id",
+                "symbol",
+                "raw_hash",
+                "receipt_hash",
+                "selection",
+                "articles",
+            },
+        ),
+        "articles": [
+            article.model_dump(mode="json", exclude={"author", "symbols"})
+            for article in document.articles
+        ],
         "scope": (
             "供应商新闻标题及摘要，未独立核实；按更新时间选取本页最新5条，非全面覆盖。"
             "缺少摘要时不能推测正文；发布时间不等于本地可用时间。"

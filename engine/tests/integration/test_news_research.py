@@ -127,6 +127,11 @@ async def test_registered_news_is_optional_frozen_research_input(
         observation = entries[0]["news_observation"]
         assert observation["articles"][0]["headline"] == "Synthetic announcement"
         assert "raw_text" not in observation and "receipt_text" not in observation
+        assert "raw_hash" not in observation and "instrument_id" not in observation
+        assert "author" not in observation["articles"][0]
+        assert "symbols" not in observation["articles"][0]
+        assert observation["articles"][0]["summary"] == "Plain <b>text</b>"
+        assert observation["articles"][0]["url"] == "https://example.com/story"
         committee = StagedCodexCommittee(prompts=load_prompt_assets(), tools=tools)
         assert (await committee._inputs(request))["security_snapshot"] == result
         view = await read_research_inputs(
