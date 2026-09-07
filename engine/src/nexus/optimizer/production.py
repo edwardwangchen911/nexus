@@ -56,6 +56,7 @@ class MinimumChangeInputs:
     excess_weight: Decimal
     evidence_complete: bool
     reduction: MinimumChangeResult | None = None
+    unresolved_constraints: tuple[str, ...] = ()
 
 
 async def build_and_persist_proposal_group(
@@ -161,9 +162,27 @@ def _minimum_change_inputs(
     snapshot: PortfolioSnapshot, report: PortfolioDiagnosticReport
 ) -> MinimumChangeInputs:
     """Derive reductions only when Task 11 proves excess, contribution, and liquidity."""
-    violations = tuple(item for item in report.items if item.actionability == "reduce_only")
+    reduction_items = tuple(item for item in report.items if item.actionability == "reduce_only")
+    violations = tuple(
+        item
+        for item in report.items
+        if item.diagnostic_code in {"CONCENTRATION_TOP1", "CONCENTRATION_TOP3"}
+        and item.actionability in {"research", "reduce_only"}
+        and item.metric_value is not None
+        and item.reference_limit is not None
+        and Decimal(item.metric_value) > Decimal(item.reference_limit)
+    )
+    unresolved = tuple(
+        sorted(
+            {
+                item.diagnostic_code.split(":", 1)[0]
+                for item in reduction_items
+                if item.diagnostic_code not in {"CONCENTRATION_TOP1", "CONCENTRATION_TOP3"}
+            }
+        )
+    )
     if not violations:
-        return MinimumChangeInputs((), Decimal("0"), True)
+        return MinimumChangeInputs((), Decimal("0"), not reduction_items, None, unresolved)
     as_of = report.snapshot_as_of
     if as_of is None or any(
         item.metric_value is None
@@ -244,7 +263,13 @@ def _minimum_change_inputs(
         reduction = reduce_to_concentration_limits(candidates, limits)
     except ValueError:
         return MinimumChangeInputs((), Decimal("0"), False)
-    return MinimumChangeInputs(candidates, reduction.cash_released, True, reduction)
+    return MinimumChangeInputs(
+        candidates,
+        reduction.cash_released,
+        True,
+        reduction,
+        unresolved,
+    )
 
 
 def _comparison_inputs(
@@ -282,6 +307,9 @@ def _comparison_inputs(
             instrument_currencies=currencies,
             scenario_evidence=scenario_evidence,
         )
+        unresolved_constraints = tuple(
+            f"unresolved_diagnostic:{code}" for code in minimum_inputs.unresolved_constraints
+        )
         result.append(
             ProposalComparisonInput(
                 variant=proposal.variant,
@@ -291,11 +319,13 @@ def _comparison_inputs(
                 if not incomplete_strategy and not incomplete_minimum and cost_proven else None,
                 unknown_metrics=dimensions.unknown_ranked_dimensions
                 + (("strategy_evidence",) if incomplete_strategy else ())
-                + (("minimum_change_evidence",) if incomplete_minimum else ()),
+                + (("minimum_change_evidence",) if incomplete_minimum else ())
+                + unresolved_constraints,
                 requires_fx=False,
                 source_conflict=False,
                 partial=False,
                 cost_complete=cost_proven,
+                constraint_complete=not unresolved_constraints,
                 evidence_complete=not incomplete_strategy and not incomplete_minimum,
                 dimensions=dimensions,
                 evidence_refs=() if scenario_evidence is None else scenario_evidence.refs,

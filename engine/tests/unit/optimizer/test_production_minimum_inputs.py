@@ -100,9 +100,16 @@ def test_sale_cost_uses_traded_notional_and_real_cost_stays_unknown() -> None:
             update={"proposals": (group.proposals[0], minimum, group.proposals[2])}
         )
         compared = _comparison_inputs(
-            group, report, MinimumChangeInputs((), Decimal(0), True), snapshot,
+            group,
+            report,
+            MinimumChangeInputs(
+                (), Decimal(0), True, unresolved_constraints=("DRAWDOWN_252",)
+            ),
+            snapshot,
             {"commission_bps": "0", "slippage_bps": "10"},
         )[1]
+        assert not compared.constraint_complete
+        assert "unresolved_diagnostic:DRAWDOWN_252" in compared.unknown_metrics
         if scope == "internal_paper":
             # A sale of 10% of NAV at 10 bps costs 0.01% of NAV, not half that.
             assert compared.cost == Decimal("0.0001")
@@ -125,6 +132,22 @@ def test_sector_or_missing_liquidity_proof_fails_closed() -> None:
             Decimal("0"),
             False,
         )
+
+
+def test_concentration_draft_preserves_other_unresolved_constraints() -> None:
+    report = _report(
+        _item("CONCENTRATION_TOP1", "0.58", "0.50", "warning", "research"),
+        _item("DRAWDOWN_252:first", "0.40", "0.15", "critical", "reduce_only"),
+        _item("RISK_BUCKET_EXPOSURE:EQUITY", "1", "0.50", "critical", "reduce_only"),
+        _item(f"LIQUIDITY_DAYS_TO_EXIT:{_FIRST}", "1", "2", "info", "monitor"),
+        _item(f"LIQUIDITY_DAYS_TO_EXIT:{_SECOND}", "1", "2", "info", "monitor"),
+    )
+
+    result = _minimum_change_inputs(_snapshot(), report)
+
+    assert result.evidence_complete
+    assert result.reduction is not None
+    assert result.unresolved_constraints == ("DRAWDOWN_252", "RISK_BUCKET_EXPOSURE")
 
 
 def test_minimum_reduction_recomputes_security_denominator_with_cash() -> None:
