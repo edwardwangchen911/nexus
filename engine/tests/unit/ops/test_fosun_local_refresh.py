@@ -442,8 +442,8 @@ def test_us_holding_codes_exclude_hk_and_non_us_positions() -> None:
     assert _us_holding_codes(holdings) == ("usAAPL",)
 
 
-def test_more_than_twelve_us_holding_codes_fails_closed() -> None:
-    holdings = tuple(_position(f"usT{index:02d}") for index in range(13))
+def test_more_than_twenty_us_holding_codes_fails_closed() -> None:
+    holdings = tuple(_position(f"usT{index:02d}") for index in range(21))
 
     with pytest.raises(ValueError, match="LOCAL_US_HOLDING_BUDGET_EXCEEDED"):
         _us_holding_codes(holdings)
@@ -451,7 +451,7 @@ def test_more_than_twelve_us_holding_codes_fails_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_market_snapshot_uses_one_exact_quote_set_and_one_bar_read_per_code() -> None:
-    codes = tuple(f"usT{index:02d}" for index in range(12))
+    codes = tuple(f"usT{index:02d}" for index in range(20))
     market = _RecordingMarket(codes)
     start = datetime(2026, 8, 31, tzinfo=UTC)
     end = datetime(2026, 8, 31, tzinfo=UTC)
@@ -467,11 +467,11 @@ async def test_market_snapshot_uses_one_exact_quote_set_and_one_bar_read_per_cod
     assert market.calls[0] == ("quotes", codes)
     bar_calls = [payload for operation, payload in market.calls if operation == "bars"]
     assert [call["code"] for call in bar_calls] == list(codes)
-    assert len(bar_calls) == len(set(call["code"] for call in bar_calls)) == 12
+    assert len(bar_calls) == len(set(call["code"] for call in bar_calls)) == 20
     assert snapshot.request_counts == {
         "quotes": 1,
-        "bars": 12,
-        "total": 13,
+        "bars": 20,
+        "total": 21,
     }
 
 
