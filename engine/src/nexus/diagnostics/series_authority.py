@@ -15,8 +15,11 @@ from nexus.diagnostics.evidence import combine_refs
 from nexus.diagnostics.models import EvidenceBinding
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.price_bar_authority import (
+    HASH_VERSION,
     HASH_VERSION_V2,
+    POLICY_VERSION,
     POLICY_VERSION_V2,
+    SOURCE_POLICY_ID,
     SOURCE_POLICY_V2_ID,
     PriceBarSetPreparation,
     prepare_price_bar_set,
@@ -34,6 +37,7 @@ from nexus.providers.base import PriceSeries
 from nexus.quality.source_policy import (
     SourcePolicy,
     SourcePolicyV2,
+    SourcePolicyV3,
     apply_source_policy_v1,
 )
 
@@ -56,8 +60,8 @@ class SeriesAuthority:
 class DiagnosticSourcePolicyAuthority:
     """Typed policy route; callers never infer authority from an evidence string."""
 
-    version: Literal["source_policy_v1", "source_policy_v2"]
-    policy: SourcePolicy | SourcePolicyV2
+    version: Literal["source_policy_v1", "source_policy_v2", "source_policy_v3"]
+    policy: SourcePolicy | SourcePolicyV2 | SourcePolicyV3
     ref: EvidenceRef
 
 
@@ -99,6 +103,20 @@ async def select_authoritative_series(
                 "INSTRUMENT_MARKET_SCOPE_MISMATCH",
             )
         return await _select_v2_series(
+            session,
+            instrument_id,
+            as_of,
+            reader,
+            policy_authority,
+        )
+    if policy_authority.version == "source_policy_v3":
+        if instrument.currency != "USD" or instrument.exchange not in US_EQUITY_EXCHANGES:
+            return _unavailable_series(
+                instrument_id,
+                policy_ref,
+                "INSTRUMENT_MARKET_SCOPE_MISMATCH",
+            )
+        return await _select_v3_series(
             session,
             instrument_id,
             as_of,
@@ -395,6 +413,130 @@ async def _select_v2_series(
             "candidates": tuple(candidate_inputs),
         },
     )
+
+
+async def _select_v3_series(
+    session: AsyncSession,
+    instrument_id: UUID,
+    as_of: datetime,
+    reader: ArtifactByteReader,
+    policy_authority: DiagnosticSourcePolicyAuthority,
+) -> SeriesAuthority:
+    artifact_evidence = aliased(ResearchEvidenceRef)
+    authority_evidence = aliased(ResearchEvidenceRef)
+    rows = (
+        await session.execute(
+            select(
+                PriceSeriesManifest,
+                DataArtifact,
+                PriceBarSetAuthority,
+                artifact_evidence,
+                authority_evidence,
+            )
+            .join(DataArtifact, DataArtifact.id == PriceSeriesManifest.data_artifact_id)
+            .join(artifact_evidence, artifact_evidence.id == PriceSeriesManifest.evidence_ref_id)
+            .join(
+                PriceBarSetAuthority,
+                PriceBarSetAuthority.price_series_manifest_id == PriceSeriesManifest.id,
+            )
+            .join(authority_evidence, authority_evidence.id == PriceBarSetAuthority.evidence_ref_id)
+            .where(
+                PriceSeriesManifest.instrument == str(instrument_id),
+                PriceSeriesManifest.source == "alpaca",
+                PriceSeriesManifest.feed == "sip",
+                PriceSeriesManifest.delivery_mode == "delayed",
+                PriceSeriesManifest.adjustment == "all",
+                PriceSeriesManifest.interval == "1Day",
+                PriceSeriesManifest.end_at <= as_of,
+                PriceSeriesManifest.created_at <= as_of,
+                DataArtifact.source == "alpaca",
+                DataArtifact.schema_version == "price_bars_v1",
+                DataArtifact.created_at <= as_of,
+                DataArtifact.available_at <= as_of,
+                DataArtifact.received_at <= as_of,
+                PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+                PriceBarSetAuthority.hash_version == HASH_VERSION,
+                PriceBarSetAuthority.policy_version == POLICY_VERSION,
+                PriceBarSetAuthority.available_at <= as_of,
+                artifact_evidence.available_at <= as_of,
+                authority_evidence.available_at <= as_of,
+            )
+            .order_by(
+                desc(PriceBarSetAuthority.available_at),
+                desc(DataArtifact.available_at),
+                desc(PriceSeriesManifest.id),
+            )
+        )
+    ).all()
+    candidates: list[dict[str, object]] = []
+    refs: list[EvidenceRef] = [policy_authority.ref]
+    selected: tuple[PriceSeries, EvidenceBinding] | None = None
+    selected_manifest_id: str | None = None
+    for manifest, artifact, authority, artifact_ref, authority_ref in rows:
+        candidate = _candidate_input(manifest, artifact)
+        candidate["price_bar_set_authority"] = _authority_input(authority)
+        parsed_artifact_ref = _research_ref(artifact_ref)
+        parsed_authority_ref = _research_ref(authority_ref)
+        refs.extend((parsed_artifact_ref, parsed_authority_ref))
+        prepared = await prepare_price_bar_set(session, manifest.id)
+        if prepared is None or not _valid_v3_final_authority(
+            manifest, artifact, authority, artifact_ref, authority_ref, prepared, as_of
+        ):
+            candidate["disposition"] = "ineligible"
+            candidates.append(candidate)
+            continue
+        payload = await reader(artifact.uri)
+        series, parsed_ref = parse_price_series_artifact(
+            payload, artifact, manifest, instrument_id
+        )
+        if any(bar.available_at > as_of for bar in series.bars):
+            candidate["disposition"] = "ineligible"
+            candidates.append(candidate)
+            continue
+        binding = EvidenceBinding(
+            available_at=max(
+                artifact.available_at,
+                policy_authority.ref.available_at,
+                authority.available_at,
+                authority_ref.available_at,
+            ),
+            as_of=max(bar.observed_at or bar.available_at for bar in series.bars),
+            session=max(bar.session for bar in series.bars),
+            refs=combine_refs(
+                (parsed_ref, parsed_artifact_ref, parsed_authority_ref),
+                (policy_authority.ref,),
+            ),
+        )
+        candidate["parsed"] = True
+        if selected is None:
+            candidate["disposition"] = "selected"
+            selected = (series, binding)
+            selected_manifest_id = str(manifest.id)
+        else:
+            candidate["disposition"] = "superseded_revision"
+        candidates.append(candidate)
+    selector = {
+        "selected_identity": None if selected is None else ("alpaca", "sip", "all", "delayed"),
+        "quality": "FAIL" if selected is None else "PASS",
+        "reasons": ("NO_ELIGIBLE_SOURCE",) if selected is None else (),
+        "source_conflict": False,
+        "policy_version": policy_authority.version,
+    }
+    return SeriesAuthority(
+        selected=selected,
+        quality="FAIL" if selected is None else "PASS",
+        reasons=("NO_ELIGIBLE_SOURCE",) if selected is None else (),
+        source_conflict=False,
+        relevant_refs=combine_refs(tuple(refs)),
+        canonical_input={
+            "instrument_id": str(instrument_id),
+            "selector": selector,
+            "selected_manifest_id": selected_manifest_id,
+            "candidates": tuple(candidates),
+        },
+    )
+
+
 def _candidate_input(manifest: PriceSeriesManifest, artifact: DataArtifact) -> dict[str, object]:
     return {
         "manifest_id": str(manifest.id),
@@ -457,6 +599,57 @@ def _candidate_input_v2(
         "expires_at": _canonical(capability.expires_at),
     }
     return value
+
+
+def _authority_input(authority: PriceBarSetAuthority) -> dict[str, object]:
+    return {
+        "id": str(authority.id),
+        "source_policy_id": str(authority.source_policy_id),
+        "hash_version": authority.hash_version,
+        "policy_version": authority.policy_version,
+        "content_hash": authority.content_hash,
+        "available_at": _canonical(authority.available_at),
+    }
+
+
+def _valid_v3_final_authority(
+    manifest: PriceSeriesManifest,
+    artifact: DataArtifact,
+    authority: PriceBarSetAuthority,
+    artifact_evidence: ResearchEvidenceRef,
+    authority_evidence: ResearchEvidenceRef,
+    prepared: PriceBarSetPreparation,
+    as_of: datetime,
+) -> bool:
+    return (
+        manifest.provider_capability_id is None
+        and manifest.provider_status_id is None
+        and manifest.provider_status_version is None
+        and manifest.provider_contract_hash is None
+        and manifest.provider_authorized_at is None
+        and artifact_evidence.id == manifest.evidence_ref_id
+        and artifact_evidence.source == artifact.source == manifest.source
+        and artifact_evidence.provider_object_id == f"price-series-manifest:{manifest.id}"
+        and artifact_evidence.revision == artifact.sha256
+        and artifact_evidence.content_hash == artifact.sha256
+        and artifact_evidence.byte_length == artifact.byte_size
+        and artifact_evidence.available_at == artifact.available_at
+        and authority.source_policy_id == SOURCE_POLICY_ID
+        and authority.hash_version == HASH_VERSION
+        and authority.policy_version == POLICY_VERSION
+        and authority.source == manifest.source == authority_evidence.source
+        and authority.provider_object_id
+        == authority_evidence.provider_object_id
+        == f"price-bar-set:{manifest.id}"
+        and authority.revision == authority_evidence.revision == prepared.content_hash
+        and authority.content_hash == authority_evidence.content_hash == prepared.content_hash
+        and authority.byte_length == authority_evidence.byte_length == prepared.byte_length
+        and authority.bar_count == prepared.bar_count
+        and authority.first_session == prepared.first_session
+        and authority.last_session == prepared.last_session
+        and authority.available_at == authority_evidence.available_at == prepared.available_at
+        and authority.available_at <= as_of
+    )
 
 
 def _valid_v2_final_authority(

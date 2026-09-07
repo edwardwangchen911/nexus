@@ -52,6 +52,20 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.alpaca_prices_import \
 
 成功时控制台仅输出安全状态 `stored_context`、`model_called=false`、`research_created=false`；私有结果文件保存精确证据 ID、hash、可用时间和用途限制。同归档再次导入保留首次证据及其时间，不覆盖旧资料；不同接收批次的相同原件可复用内容对象，各自 receipt 仍独立保留。
 
+## 导入诊断价格权威
+
+仅 `adjustment=all`、SIP、USD、`1Day` 且完整读回的单页归档可进入这个入口。它不再请求 Alpaca，不创建研究或订单；原件、规范化 Parquet、manifest、bar records 和 bar-set authority 在本地对象存储与 PostgreSQL 中绑定。多页归档不会只取最后一页，而是明确拒绝。
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.alpaca_adjusted_authority_import \
+  --repo-root "$PWD" \
+  --instrument-id "$NEXUS_PRICE_INSTRUMENT_ID" \
+  --collection-dir "$NEXUS_PRICE_NEW_DIRECTORY" \
+  --output "$NEXUS_PRICE_AUTHORITY_RESULT"
+```
+
+入口要求当前 schema 精确等于 `0045_adjusted_diagnostic_prices`，不自动迁移。控制台仅输出 `stored_authority`、`provider_called=false`、`model_called=false` 和 `execution_locked=true`；精确权威 ID 仅写入指定的私有结果文件。导入后的价格可用时间不能回填旧组合快照；必须在全部持仓及 SPY 都导入后新建一份只读组合快照，再运行确定性诊断。
+
 参数或配置预检失败返回 `rejected`。开始导入后发生错误、中断，或数据库已提交但结果文件写入失败，返回 `unknown`；这不证明数据库没有写入，也不承诺所有对象已回滚。先核对本地数据库及精确归档对应证据，不自动重试、不覆盖结果文件。数据库连接超时10秒、单条命令15秒，导入事务有120秒边界；对象 I/O 沿用既有有界存储实现，退出时另有数据库连接回收步骤。
 
 导入后，只有随后正常创建的新研究快照会选取截止前可用的资料；旧研究不自动补入，新资料也不能单独建立研究基底。还须验证实际研究工具、受保护 API/BFF 与页面，再按正常入口创建新研究；输入可见不代表研究结论合格或正式方案可执行。

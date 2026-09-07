@@ -29,6 +29,10 @@ from nexus.diagnostics.series_authority import (
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.data import (
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
+from nexus.persistence.models.data import (
     SourcePolicy as SourcePolicyRecord,
 )
 from nexus.persistence.models.market import Instrument, InstrumentAlias
@@ -45,9 +49,13 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_V2_ID,
     SOURCE_POLICY_V2_PAYLOAD,
     SOURCE_POLICY_V2_VERSION,
+    SOURCE_POLICY_V3_ID,
+    SOURCE_POLICY_V3_PAYLOAD,
+    SOURCE_POLICY_V3_VERSION,
     SOURCE_POLICY_VERSION,
     load_source_policy_v1,
     load_source_policy_v2,
+    load_source_policy_v3,
 )
 
 _SPY_ID = cast(UUID, stable_instrument_id("SPY"))
@@ -254,7 +262,7 @@ async def assemble_diagnostic_evidence(
 
 def _market_quality(
     *,
-    policy_version: Literal["source_policy_v1", "source_policy_v2"],
+    policy_version: Literal["source_policy_v1", "source_policy_v2", "source_policy_v3"],
     benchmark_available: bool,
     selected_count: int,
     position_count: int,
@@ -324,7 +332,40 @@ async def load_diagnostic_source_policy(
     session: AsyncSession,
     as_of: datetime,
 ) -> DiagnosticSourcePolicyAuthority:
-    """Use v2 once published at the snapshot; retain exact v1 historical replay."""
+    """Use the newest policy published by the snapshot; retain historical replay."""
+    v3_record = await session.scalar(
+        select(SourcePolicyRecord).where(SourcePolicyRecord.id == SOURCE_POLICY_V3_ID)
+    )
+    v3_manifest = await session.scalar(
+        select(PriceSeriesManifest.id)
+        .join(
+            PriceBarSetAuthority,
+            PriceBarSetAuthority.price_series_manifest_id == PriceSeriesManifest.id,
+        )
+        .where(
+            PriceSeriesManifest.source == "alpaca",
+            PriceSeriesManifest.feed == "sip",
+            PriceSeriesManifest.delivery_mode == "delayed",
+            PriceSeriesManifest.adjustment == "all",
+            PriceSeriesManifest.interval == "1Day",
+            PriceSeriesManifest.created_at <= as_of,
+            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+            PriceBarSetAuthority.available_at <= as_of,
+        )
+        .limit(1)
+    )
+    if v3_record is not None and v3_record.created_at <= as_of and v3_manifest is not None:
+        v3_policy = await load_source_policy_v3(session, decision_time=as_of)
+        return DiagnosticSourcePolicyAuthority(
+            version="source_policy_v3",
+            policy=v3_policy,
+            ref=_source_policy_evidence(
+                SOURCE_POLICY_V3_ID,
+                SOURCE_POLICY_V3_VERSION,
+                SOURCE_POLICY_V3_PAYLOAD,
+                v3_record.created_at,
+            ),
+        )
     v2_record = await session.scalar(
         select(SourcePolicyRecord).where(SourcePolicyRecord.id == SOURCE_POLICY_V2_ID)
     )

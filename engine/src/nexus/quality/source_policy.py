@@ -48,6 +48,21 @@ SOURCE_POLICY_V2_PAYLOAD: dict[str, object] = {
     "alpaca": {"mode": "disabled"},
     "purpose": "agent_price_and_daily_bars",
 }
+SOURCE_POLICY_V3_ID = UUID("a434c593-b636-5f4a-ac54-09e93a395c23")
+SOURCE_POLICY_V3_VERSION = "source_policy_v3"
+SOURCE_POLICY_V3_PAYLOAD: dict[str, object] = {
+    "selected_source": "alpaca",
+    "fallback": "disabled",
+    "alpaca": {
+        "feed": "sip",
+        "delivery_mode": "delayed",
+        "adjustment": "all",
+        "interval": "1Day",
+        "market_scope": "US",
+    },
+    "fosun": {"purpose": "display_only_raw_prices"},
+    "purpose": "portfolio_diagnostics_adjusted_daily_bars",
+}
 QUOTE_SOURCE_POLICY_ID = UUID("6d243c22-a020-5d1d-b884-e6240cc2d8bb")
 QUOTE_SOURCE_POLICY_KEY = "market_quote"
 QUOTE_SOURCE_POLICY_VERSION = "quote_source_policy_v1"
@@ -267,6 +282,30 @@ class SourcePolicyV2(BaseModel):
         return require_utc(value)
 
 
+class SourcePolicyV3(BaseModel):
+    """Adjusted daily-bar policy for deterministic portfolio diagnostics."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["market_price"]
+    version: Literal["source_policy_v3"] = "source_policy_v3"
+    schema_version: Literal["3"]
+    available_at: datetime
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != SOURCE_POLICY_V3_ID:
+            raise ValueError("source policy must use the published v3 record")
+        return value
+
+    @field_validator("available_at")
+    @classmethod
+    def _available_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
 class QuoteSourcePolicyV2(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -454,6 +493,35 @@ async def load_source_policy_v2(
         schema_version=cast(Literal["2"], record.schema_version),
         available_at=record.created_at,
         instrument_tick_size=instrument_tick_size,
+    )
+
+
+async def load_source_policy_v3(
+    session: AsyncSession,
+    *,
+    decision_time: datetime,
+) -> SourcePolicyV3:
+    decision_time = require_utc(decision_time)
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == SOURCE_POLICY_V3_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != SOURCE_POLICY_V3_ID
+        or record.schema_version != "3"
+        or record.payload != SOURCE_POLICY_V3_PAYLOAD
+        or record.created_at > decision_time
+    ):
+        raise ValueError("published source_policy_v3 is missing or invalid")
+    return SourcePolicyV3(
+        record_id=record.id,
+        key=cast(Literal["market_price"], record.key),
+        version=cast(Literal["source_policy_v3"], record.version),
+        schema_version=cast(Literal["3"], record.schema_version),
+        available_at=record.created_at,
     )
 
 
