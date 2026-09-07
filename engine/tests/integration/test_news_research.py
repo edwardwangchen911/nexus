@@ -139,3 +139,76 @@ async def test_registered_news_is_optional_frozen_research_input(
             session, snapshot_id=baseline.id, instrument_id=ID, as_of=decision
         )
         assert old_view is not None and old_view.news_observations == ()
+
+
+def test_news_migration_roundtrip_and_runtime_head(temporary_database_url, monkeypatch):
+    from alembic import command
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config("engine/alembic.ini")
+    assert ScriptDirectory.from_config(config).get_heads() == [CURRENT_MIGRATION_HEAD]
+    command.upgrade(config, "0044_news_research")
+    command.downgrade(config, "0043_current_price_trends")
+    command.upgrade(config, "0044_news_research")
+
+
+@pytest.mark.asyncio
+async def test_missing_original_is_rejected_by_reader_and_database_guard(
+    migrated_database_url, tmp_path
+):
+    import json
+
+    from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
+    from nexus.persistence.models.data import DataSnapshot
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import IntegrityError
+
+    _, factory, _, store = await setup(migrated_database_url)
+    archive(tmp_path / "news")
+    async with factory.begin() as session:
+        saved = await import_news(session, store, instrument_id=ID, directory=tmp_path / "news")
+    async with factory.begin() as session:
+        ref = await register_news_evidence(session, store, instrument_id=ID, news_snapshot_id=saved)
+        await seed_filing(session, instrument_id=ID, seed_instrument=False)
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(DataSnapshot).where(
+                DataSnapshot.source == ref.source, DataSnapshot.revision == ref.revision
+            )
+        )
+        payload = dict(row.payload)
+        del payload["raw_text"]
+        # Corrupt only the synthetic source row; leave the frozen ownership guard enabled.
+        await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
+        await session.execute(
+            text("UPDATE data_snapshots SET payload=CAST(:p AS jsonb) WHERE id=:id"),
+            {"p": json.dumps(payload), "id": row.id},
+        )
+        await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+        session.expire(row)
+        assert not await read_news_evidence(
+            session, instrument_id=ID, as_of=datetime.now(UTC), evidence_ids=(ref.id,)
+        )
+        baseline = await prepare_research_snapshot(session, ID, as_of=datetime.now(UTC))
+        assert baseline is not None
+        with pytest.raises(IntegrityError, match="not owned by the instrument"):
+            async with session.begin_nested():
+                session.add(
+                    AgentDataSnapshotEvidenceRecord(
+                        data_snapshot_id=baseline.id,
+                        instrument_id=ID,
+                        evidence_ref_id=ref.id,
+                        authority_kind="research",
+                        selected_at=None,
+                        source=ref.source,
+                        provider_object_id=ref.provider_object_id,
+                        revision=ref.revision,
+                        available_at=ref.available_at,
+                        location=ref.location,
+                        content_hash=ref.content_hash,
+                    )
+                )
+                await session.flush()
