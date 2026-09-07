@@ -12,7 +12,11 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
-from nexus.agents.portfolio_context import PortfolioResearchContext, read_portfolio_context
+from nexus.agents.portfolio_context import (
+    ContextDiagnostic,
+    PortfolioResearchContext,
+    read_portfolio_context,
+)
 from nexus.agents.price_features import compute_price_features
 from nexus.agents.proposal_context import assess_frozen_comparison
 from nexus.agents.tools import ReadOnlyTools, ToolExecutor, ToolInputError
@@ -773,18 +777,22 @@ class _BoundDatabaseExecutors:
             return self._capability_unavailable("get_portfolio_diagnostics")
         if payload["diagnostic_run_id"] != context.diagnostic_run_id:
             raise ToolInputError("tool request exceeds frozen diagnostic authority")
+        item = _context_payload(
+            context,
+            exclude={
+                "position_weight",
+                "cash_weight",
+                "valuation_reason",
+            },
+        )
+        diagnostics, narrowed = _focused_diagnostics(
+            context.diagnostics, instrument_id=self._instrument_id
+        )
+        item["diagnostics"] = [value.model_dump(mode="json") for value in diagnostics]
+        item["diagnostics_truncated"] = context.diagnostics_truncated or narrowed
         return self._result(
             "get_portfolio_diagnostics",
-            [
-                _context_payload(
-                    context,
-                    exclude={
-                        "position_weight",
-                        "cash_weight",
-                        "valuation_reason",
-                    },
-                )
-            ],
+            [item],
         )
 
     async def _require_portfolio_scope(
@@ -808,7 +816,6 @@ class _BoundDatabaseExecutors:
         ) not in (None, self._instrument_id):
             raise ToolInputError("tool request exceeds frozen portfolio authority")
         return context
-
     async def proposal_comparison(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
         context = await read_portfolio_context(
@@ -945,6 +952,23 @@ class _BoundDatabaseExecutors:
             "reason": reason,
             "items": items,
         }
+
+
+def _focused_diagnostics(
+    diagnostics: tuple[ContextDiagnostic, ...], *, instrument_id: UUID
+) -> tuple[tuple[ContextDiagnostic, ...], bool]:
+    """Keep portfolio/category facts and only this security's per-instrument facts."""
+    selected: list[ContextDiagnostic] = []
+    for item in diagnostics:
+        suffix = item.code.rsplit(":", 1)[-1]
+        try:
+            scoped_instrument = UUID(suffix)
+        except ValueError:
+            selected.append(item)
+        else:
+            if scoped_instrument == instrument_id:
+                selected.append(item)
+    return tuple(selected), len(selected) != len(diagnostics)
 
 
 def _macro_record_valid(

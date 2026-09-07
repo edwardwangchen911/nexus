@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from nexus.agents.database_tools import _focused_diagnostics
+from nexus.agents.portfolio_context import ContextDiagnostic
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES, ReadOnlyTools, ToolInputError
 
 
@@ -13,6 +15,36 @@ def test_read_only_catalogue_has_only_the_eight_declared_tools() -> None:
     assert tools.names == EXPECTED_READ_ONLY_TOOL_NAMES
     assert len(tools.names) == 8
     assert not any("order" in name.lower() for name in tools.names)
+
+
+def test_diagnostic_view_keeps_portfolio_categories_and_target_security() -> None:
+    target = UUID(int=1)
+    other = UUID(int=2)
+
+    def item(code: str) -> ContextDiagnostic:
+        return ContextDiagnostic(
+            code=code,
+            severity="info",
+            actionability="research",
+            unknown_reason=None,
+        )
+
+    selected, narrowed = _focused_diagnostics(
+        (
+            item("CONCENTRATION_TOP1"),
+            item("RISK_BUCKET_EXPOSURE:EQUITY"),
+            item(f"VOLATILITY_63:{target}"),
+            item(f"VOLATILITY_63:{other}"),
+        ),
+        instrument_id=target,
+    )
+
+    assert narrowed is True
+    assert tuple(value.code for value in selected) == (
+        "CONCENTRATION_TOP1",
+        "RISK_BUCKET_EXPOSURE:EQUITY",
+        f"VOLATILITY_63:{target}",
+    )
 
 
 def test_tool_payloads_accept_only_typed_allowlisted_fields() -> None:
