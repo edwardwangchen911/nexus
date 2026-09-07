@@ -258,7 +258,7 @@ def main() -> int:
     parser.add_argument("--instrument-id", type=UUID, required=True)
     parser.add_argument("--start", type=date.fromisoformat, required=True)
     parser.add_argument("--end", type=date.fromisoformat, required=True)
-    parser.add_argument("--adjustment", choices=("raw", "split"), required=True)
+    parser.add_argument("--adjustment", choices=("raw", "split", "all"), required=True)
     parser.add_argument("--identity-asof", type=date.fromisoformat)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-pages", type=int, default=10)

@@ -125,15 +125,16 @@ def test_same_output_directory_is_never_overwritten(invoke, tmp_path):
     "extra",
     [
         ("--adjustment", "raw"),
+        ("--adjustment", "all"),
         ("--start", "2024-11-29", "--end", "2024-11-29"),
     ],
 )
-def test_raw_choice_and_early_close_are_actual_request_facts(invoke, extra):
+def test_adjustment_choice_and_early_close_are_actual_request_facts(invoke, extra):
     code, directory, _ = invoke([httpx.Response(200, content=page())], extra=extra)
     assert code == 0
     query = dict(json.loads((directory / "manifest.json").read_bytes())["query"])
-    if "raw" in extra:
-        assert query["adjustment"] == "raw"
+    if "--adjustment" in extra:
+        assert query["adjustment"] == extra[1]
     else:
         assert query["start"] == "2024-11-29T05:00:00Z"
         assert query["end"] == "2024-11-29T18:30:00Z"
@@ -148,7 +149,7 @@ def test_raw_choice_and_early_close_are_actual_request_facts(invoke, extra):
         ("--start", "2020-01-02"),
         ("--max-pages", "0"),
         ("--max-pages", "11"),
-        ("--adjustment", "all"),
+        ("--adjustment", "dividend"),
         ("--instrument-id", "raw-private-canary"),
     ],
 )

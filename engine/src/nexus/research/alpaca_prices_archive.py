@@ -54,7 +54,7 @@ def collection_window(
     clock = require_utc(now)
     calendar = exchange_calendars.get_calendar("XNYS")
     if (
-        adjustment not in {"raw", "split"}
+        adjustment not in {"raw", "split", "all"}
         or not 0 <= (end - start).days <= 366
         or start < calendar.first_session.date()
         or end > calendar.last_session.date()
@@ -71,7 +71,7 @@ def collection_window(
         start=datetime.combine(start, time(), ZoneInfo("America/New_York")).astimezone(UTC),
         end=end_at,
         interval="1Day",
-        adjustment=cast(Literal["raw", "split"], adjustment),
+        adjustment=cast(Literal["raw", "split", "all"], adjustment),
     )
     return request, {
         "source": "exchange_calendars",
