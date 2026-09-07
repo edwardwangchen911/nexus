@@ -222,6 +222,7 @@ async def assemble_diagnostic_evidence(
         prices={key: value[0] for key, value in selected.items()},
         adv20=adv20,
         quality=quality,
+        risk_buckets=_risk_bucket_weights(identities),
         identities=identities,
         trading_sessions=trading_sessions,
         benchmark=None if benchmark is None else benchmark[0],
@@ -258,6 +259,16 @@ async def assemble_diagnostic_evidence(
             "calendar": calendar.canonical_input,
         },
     )
+
+
+def _risk_bucket_weights(
+    identities: dict[UUID, InstrumentIdentity],
+) -> dict[UUID, dict[str, Decimal]]:
+    return {
+        instrument_id: {identity.risk_bucket: Decimal(1)}
+        for instrument_id, identity in identities.items()
+        if identity.risk_bucket is not None
+    }
 
 
 def _market_quality(
