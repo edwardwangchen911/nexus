@@ -14,10 +14,19 @@ from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.fosun_local import load_local_environment
 from nexus.persistence.session import session_factory
 from nexus.research.news import import_news
+from nexus.research.news_evidence import register_news_evidence
 from nexus.settings import EngineSettings
 
 
-async def run(settings: EngineSettings, instrument_id: UUID, directory: Path) -> dict[str, object]:
+async def run(
+    settings: EngineSettings,
+    instrument_id: UUID,
+    directory: Path | None,
+    *,
+    news_snapshot_id: UUID | None = None,
+) -> dict[str, object]:
+    if (directory is None) == (news_snapshot_id is None):
+        raise ValueError("NEWS_IMPORT_SCOPE_INVALID")
     local = {"localhost", "127.0.0.1", "::1"}
     database = make_url(settings.database_url or "sqlite://")
     endpoint = urlsplit(settings.object_store_endpoint or "")
@@ -35,17 +44,33 @@ async def run(settings: EngineSettings, instrument_id: UUID, directory: Path) ->
         raise ValueError("NEWS_LOCAL_SERVICES_REQUIRED")
     store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
     async with session_factory(settings).begin() as session:
-        snapshot_id = await import_news(
-            session, store, instrument_id=instrument_id, directory=directory
+        if directory is not None:
+            snapshot_id = await import_news(
+                session, store, instrument_id=instrument_id, directory=directory
+            )
+            return {"status": "stored", "snapshot_id": str(snapshot_id), "execution_locked": True}
+        assert news_snapshot_id is not None
+        evidence = await register_news_evidence(
+            session,
+            store,
+            instrument_id=instrument_id,
+            news_snapshot_id=news_snapshot_id,
         )
-    return {"status": "stored", "snapshot_id": str(snapshot_id), "execution_locked": True}
+    return {
+        "status": "stored_research_evidence",
+        "snapshot_id": str(news_snapshot_id),
+        "evidence_ref_id": str(evidence.id),
+        "execution_locked": True,
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--instrument-id", type=UUID, required=True)
-    parser.add_argument("--collection-dir", type=Path, required=True)
+    scope = parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--collection-dir", type=Path)
+    scope.add_argument("--news-snapshot-id", type=UUID)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     started = False
@@ -60,13 +85,21 @@ def main() -> None:
                 load_local_environment(args.repo_root, os.environ)
             )
             started = True
-            result = asyncio.run(run(settings, args.instrument_id, args.collection_dir))
+            result = asyncio.run(
+                run(settings, args.instrument_id, None, news_snapshot_id=args.news_snapshot_id)
+                if args.news_snapshot_id is not None
+                else run(settings, args.instrument_id, args.collection_dir)
+            )
             handle.seek(0)
             json.dump(result, handle)
             handle.truncate()
             handle.flush()
             os.fsync(handle.fileno())
-        print(json.dumps({"status": "stored", "execution_locked": True, "model_called": False}))
+        print(
+            json.dumps(
+                {"status": result["status"], "execution_locked": True, "model_called": False}
+            )
+        )
     except Exception:
         print(
             json.dumps(

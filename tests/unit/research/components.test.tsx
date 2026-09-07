@@ -23,7 +23,7 @@ type Distribution = components["schemas"]["ResearchInputIssuerDistribution"];
 function issuerInputs(overrides: Partial<Distribution> = {}): Inputs {
   return {
     display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [], issuer_fund_observations: [], issuer_nav_histories: [], corporate_action_observations: [],
-    company_profiles: [], macro_observations: [], current_price_trends: [],
+    company_profiles: [], macro_observations: [], current_price_trends: [], news_observations: [],
     issuer_distributions: [{
       evidence_ref_id: "0198d600-1000-7000-8000-000000009901", source: "ssga_distribution",
       revision: "issuer-fixture-v1", content_hash: "d".repeat(64),
@@ -153,7 +153,7 @@ describe("research evidence docket", () => {
     const excerpt = "Company has not decided. <script>alert('not executable')</script>";
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
       display_symbol: "TEST", total_facts: 0, truncated: false, facts: [], issuer_distributions: [], issuer_fund_observations: [], issuer_nav_histories: [], corporate_action_observations: [],
-      company_profiles: [], macro_observations: [], current_price_trends: [],
+      company_profiles: [], macro_observations: [], current_price_trends: [], news_observations: [],
       filings: [{ evidence_ref_id: "filing-1", source: "sec", form, accession_number: "0000000001-26-000001", accepted_at: "2026-08-21T20:00:00Z", received_at: "2026-09-02T05:59:00Z", revision: "a".repeat(64), content_hash: "a".repeat(64), disclosure_excerpt: excerpt, disclosure_truncated: true, source_url: source }],
     }} />);
     expect(screen.getByRole("heading", { name: form === "497K" ? "TEST · 已冻结基金资料" : "TEST · 已冻结披露" })).toBeVisible();
@@ -171,7 +171,7 @@ describe("research evidence docket", () => {
   it("shows frozen portfolio context and missing market evidence without a model", () => {
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
       display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [], issuer_distributions: [], issuer_fund_observations: [], issuer_nav_histories: [], corporate_action_observations: [],
-      company_profiles: [], macro_observations: [], current_price_trends: [],
+      company_profiles: [], macro_observations: [], current_price_trends: [], news_observations: [],
       portfolio_context: {
         instrument_id: "instrument", portfolio_snapshot_id: "snapshot",
         snapshot_as_of: "2026-09-02T03:33:00Z", research_as_of: "2026-09-02T06:00:00Z",
@@ -427,5 +427,30 @@ describe("saved experimental research stages", () => {
       evidence_hash: "a".repeat(64), status: "invalid", stages: [],
     } })} />);
     expect(screen.getByText("阶段记录校验失败，暂不展示论点。")).toBeVisible();
+  });
+});
+
+describe("frozen news inputs", () => {
+  it("shows the exact selected version as text with bounded coverage and distinct times", () => {
+    const inputs = issuerInputs();
+    inputs.news_observations = [{
+      evidence_ref_id: "0198d600-1000-7000-8000-000000009905", content_hash: "e".repeat(64),
+      source: "alpaca_news", available_at: "2026-09-06T05:00:00Z", received_at: "2026-09-06T04:00:00Z",
+      window_start: "2026-09-01T00:00:00Z", window_end: "2026-09-06T03:45:00Z",
+      collected_count: 50, has_more: true, primary_source_verified: false, execution_locked: true,
+      articles: [{ id: 1, headline: "<b>Synthetic news</b>", summary: "", author: "Synthetic",
+        source: "Example", symbols: ["TEST"], created_at: "2026-09-05T01:00:00Z",
+        updated_at: "2026-09-05T02:00:00Z", url: null }],
+    }];
+    const { container } = render(<ResearchInputs inputs={inputs} asOf="2026-09-06T06:00:00Z" />);
+    const section = screen.getByRole("region", { name: "本次研究冻结消息" });
+    expect(within(section).getByRole("heading", { name: "<b>Synthetic news</b>" })).toBeVisible();
+    expect(section).toHaveTextContent("未提供摘要，不能据标题推测正文");
+    expect(section).toHaveTextContent("所收集 50 条中的最新 1 条");
+    expect(section).toHaveTextContent("源查询还有未收集内容");
+    expect(section).toHaveTextContent("后续推送不会替换");
+    expect(within(section).getByText("原始接收时间").nextElementSibling).toHaveTextContent("2026-09-06 12:00:00");
+    expect(within(section).getByText("研究证据可用时间").nextElementSibling).toHaveTextContent("2026-09-06 13:00:00");
+    expect(container.querySelector("b")).toBeNull();
   });
 });

@@ -4357,6 +4357,60 @@ export interface components {
             /** Total Net Assets */
             total_net_assets: string | null;
         };
+        /** ResearchInputNews */
+        ResearchInputNews: {
+            /** Articles */
+            articles: components["schemas"]["NewsArticle"][];
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Collected Count */
+            collected_count: number;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /** Has More */
+            has_more: boolean;
+            /**
+             * Primary Source Verified
+             * @default false
+             * @constant
+             */
+            primary_source_verified: false;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /**
+             * Source
+             * @default alpaca_news
+             * @constant
+             */
+            source: "alpaca_news";
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+        };
         /** ResearchInputPriceTrend */
         ResearchInputPriceTrend: {
             /**
@@ -4513,6 +4567,11 @@ export interface components {
              * @default []
              */
             macro_observations: components["schemas"]["ResearchInputMacroObservation"][];
+            /**
+             * News Observations
+             * @default []
+             */
+            news_observations: components["schemas"]["ResearchInputNews"][];
             portfolio_context?: components["schemas"]["PortfolioResearchContext"] | null;
             /** Total Facts */
             total_facts: number;

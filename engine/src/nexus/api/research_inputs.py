@@ -24,6 +24,7 @@ from nexus.api.schemas.agents import (
     ResearchInputMacroObservation,
     ResearchInputNavHistory,
     ResearchInputNavObservation,
+    ResearchInputNews,
     ResearchInputPriceTrend,
     ResearchInputsSummary,
 )
@@ -36,6 +37,7 @@ from nexus.research.alpaca_actions_storage import read_action_observations
 from nexus.research.fmp_profile import SOURCE as PROFILE_SOURCE
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fred_storage import read_fred_observations
+from nexus.research.news_evidence import read_news_evidence
 from nexus.research.sec_disclosures import SecDisclosure, read_disclosures
 from nexus.research.sec_exhibits import SecExhibitDisclosure
 from nexus.research.ssga_distributions import SOURCE, read_distributions
@@ -137,6 +139,9 @@ async def read_research_inputs(
         )
     )
     return ResearchInputsSummary(
+        news_observations=await _read_news_inputs(
+            session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+        ),
         current_price_trends=await _read_price_trend_inputs(
             session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
         ),
@@ -500,4 +505,25 @@ def _fund_observation_response(
         ) for row in document.holdings[:100]),
         total_industries=len(document.industries), total_holdings=len(document.holdings),
         truncated=len(document.industries) > 50 or len(document.holdings) > 100,
+    )
+
+
+async def _read_news_inputs(
+    session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime
+) -> tuple[ResearchInputNews, ...]:
+    references = await _frozen_issuer_references(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id,
+        as_of=as_of, source="alpaca_news",
+    )
+    documents = await read_news_evidence(
+        session, instrument_id=instrument_id, as_of=as_of, evidence_ids=tuple(references)
+    )
+    return tuple(
+        ResearchInputNews(
+            evidence_ref_id=ref_id, content_hash=references[ref_id].content_hash,
+            available_at=doc.available_at, received_at=doc.received_at,
+            window_start=doc.window_start, window_end=doc.window_end,
+            articles=doc.articles, collected_count=doc.collected_count, has_more=doc.has_more,
+        )
+        for ref_id, doc in documents.items()
     )

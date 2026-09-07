@@ -20,6 +20,7 @@ from nexus.research.alpaca_actions_storage import read_action_observations
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
+from nexus.research.news_evidence import read_news_evidence
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
 from nexus.research.ssga_distributions import read_distributions
 from nexus.research.ssga_fund_observations import read_fund_observations
@@ -32,6 +33,7 @@ async def prepare_research_snapshot(
     *,
     as_of: datetime,
     portfolio_snapshot_id: UUID | None = None,
+    news_evidence_id: UUID | None = None,
 ) -> DataSnapshot | None:
     """Bind real filing references; the caller owns the transaction.
 
@@ -169,6 +171,19 @@ async def prepare_research_snapshot(
         sec_refs = [item for item in evidence if item.source == "sec"]
         keep = MAX_FROZEN_EVIDENCE - 2 - len(macro_refs) - len(retained)
         evidence = sec_refs[:keep] + retained + macro_refs
+    if news_evidence_id is not None:
+        news = await read_news_evidence(
+            session,
+            instrument_id=instrument_id,
+            as_of=as_of,
+            evidence_ids=(news_evidence_id,),
+        )
+        if news_evidence_id not in news or len(evidence) >= MAX_FROZEN_EVIDENCE - 2:
+            raise ValueError("OPENAI_NEWS_EVIDENCE_UNAVAILABLE")
+        news_ref = await session.get(ResearchEvidenceRef, news_evidence_id)
+        if news_ref is None:
+            raise ValueError("OPENAI_NEWS_EVIDENCE_UNAVAILABLE")
+        evidence.append(news_ref)
     context = await freeze_portfolio_context(
         session,
         instrument_id,
@@ -189,7 +204,7 @@ async def prepare_research_snapshot(
         payload["scope"] = "persisted_sec_filings_and_issuer_observations"
     if nav:
         payload["scope"] = "persisted_sec_filings_and_issuer_nav_history"
-    if actions or profiles or macro_ids or trends:
+    if actions or profiles or macro_ids or trends or news_evidence_id is not None:
         payload["scope"] = "persisted_research_observations"
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")

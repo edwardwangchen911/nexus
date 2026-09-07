@@ -34,6 +34,25 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.news_import \
 
 市场页选定标的后，在“最新消息”查看本次最新一页。`GET /internal/v1/instruments/{instrument_id}/news` 与相应 BFF 路由只读持久化原件，并重新验证哈希、字节数和时间。未采集、返回空页、原件异常分开表达；不将损坏归档降为空消息。页面列出文章发布时间/修订时间、本机采集时间、查询窗口、来源和原文链接；不加载远程正文或图片。按钮“读取已保存消息”只重新读取本地数据，不采集供应商，不调用模型。切换标的不会显示上一标的的迟到响应。
 
-真实查询可访问只证明现有凭据在这次请求被接受，不推导账户实时权益、零延迟或全面覆盖。新闻未进入既有冻结研究，不能直接改变研究等级、策略方向或交易权限。
+真实查询可访问只证明现有凭据在这次请求被接受，不推导账户实时权益、零延迟或全面覆盖。新消息不会进入既有冻结研究，不能直接改变研究等级、策略方向或交易权限。
 
 回滚：切回此前应用版本即可停止使用新增入口；无需迁移回滚或删除任何原件/快照。不要删除持久化记录来模拟未采集，也不要更新历史研究引用。
+
+## 显式冻结到新研究
+
+市场展示与研究证据分开。可将已保存的**指定消息快照**登记为补充研究证据，然后在新研究准备入口显式传入引用：
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.news_import \
+  --repo-root /path/to/configured/repo --instrument-id EXISTING_INSTRUMENT_UUID \
+  --news-snapshot-id SAVED_NEWS_SNAPSHOT_UUID --output /path/to/new-private-evidence-result.json
+# 在已有本地配置的项目根目录运行：
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.openai_local prepare-research \
+  --instrument-id EXISTING_INSTRUMENT_UUID --news-evidence-id REGISTERED_EVIDENCE_UUID
+```
+
+登记复用已持久化原件，不重新采集或调用模型；同一证券、消息页与选择规则幂等。按 updated_at/id 降序选取该页最新 5 条标题与摘要；保留收集总数、未收集页标记和来源未独立核实边界。规范证据封存精确原件字节、收据、哈希与独立可用时间；模型与 API 仅得到所选条目，不携带原始全文。不得从缺失摘要推测正文。
+
+不传 `--news-evidence-id` 时延续原研究路径；显式无效引用拒绝，不自动回退最新消息。消息不能单独创建研究基础，也不会回填旧研究或解除执行锁。研究页面显示本次冻结消息，后续采集和 WebSocket 推送不会替换它。
+
+此补充入口需要迁移 `0044_news_research`：只扩展现有冻结证据的证券归属校验，无新表或历史数据改写。应用可以回滚停止产生新消息研究；已有新闻研究引用时拒绝降级该迁移，避免破坏历史证据的可读取性。没有新闻研究引用时可按 Alembic 正常降级。实时接收的独立入口见 [news-stream-local.md](news-stream-local.md)，其归档不能冒充上述 REST 查询收据。

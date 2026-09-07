@@ -53,6 +53,7 @@ from nexus.research.current_price_trends_storage import read_current_price_trend
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fred_observations import SCHEMA as FRED_SCHEMA
 from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
+from nexus.research.news_evidence import news_tool_payload, read_news_evidence
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import read_distributions
 from nexus.research.ssga_fund_observations import read_fund_observations
@@ -179,6 +180,12 @@ class _BoundDatabaseExecutors:
             as_of=self._decision_time,
             evidence_ids=self._evidence_ids,
         )
+        news = await read_news_evidence(
+            self._session,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+            evidence_ids=self._evidence_ids,
+        )
         return self._result(
             "get_security_snapshot",
             [
@@ -212,6 +219,11 @@ class _BoundDatabaseExecutors:
                     **(
                         {"company_profile": profiles[record.id].model_dump(mode="json")}
                         if record.id in profiles
+                        else {}
+                    ),
+                    **(
+                        {"news_observation": news_tool_payload(news[record.id])}
+                        if record.id in news
                         else {}
                     ),
                 }

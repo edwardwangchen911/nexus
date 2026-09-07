@@ -363,7 +363,11 @@ async def verify_connection(
 
 
 async def prepare_local_research(
-    settings: EngineSettings, instrument_id: UUID, *, as_of: datetime
+    settings: EngineSettings,
+    instrument_id: UUID,
+    *,
+    as_of: datetime,
+    news_evidence_id: UUID | None = None,
 ) -> dict[str, object]:
     """Freeze already-ingested research inputs; do not enqueue work or contact providers."""
     from nexus.agents.snapshots import prepare_research_snapshot
@@ -375,7 +379,12 @@ async def prepare_local_research(
     }:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
     async with session_factory(settings)() as session, session.begin():
-        snapshot = await prepare_research_snapshot(session, instrument_id, as_of=as_of)
+        snapshot = await prepare_research_snapshot(
+            session,
+            instrument_id,
+            as_of=as_of,
+            news_evidence_id=news_evidence_id,
+        )
         return {
             "status": "RESEARCH_INPUTS_PREPARED" if snapshot else "RESEARCH_EVIDENCE_UNAVAILABLE",
             "data_snapshot_id": str(snapshot.id) if snapshot else None,
@@ -428,6 +437,7 @@ def main() -> int:
     )
     parser.add_argument("--research-request", type=Path)
     parser.add_argument("--instrument-id", type=UUID)
+    parser.add_argument("--news-evidence-id", type=UUID)
     parser.add_argument("--filing-id", type=UUID)
     parser.add_argument("--identity-snapshot-id", type=UUID)
     parser.add_argument("--quarter-metrics", action="store_true")
@@ -462,6 +472,8 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.news_evidence_id is not None and args.action != "prepare-research":
+            raise ValueError("OPENAI_NEWS_ARGUMENTS_INVALID")
         if args.inline_citations and (
             args.action != "setup"
             or not args.structured_synthesis
@@ -582,7 +594,10 @@ def main() -> int:
                 raise ValueError("OPENAI_RESEARCH_INSTRUMENT_REQUIRED")
             result = asyncio.run(
                 prepare_local_research(
-                    settings, args.instrument_id, as_of=args.as_of or datetime.now(UTC)
+                    settings,
+                    args.instrument_id,
+                    as_of=args.as_of or datetime.now(UTC),
+                    news_evidence_id=args.news_evidence_id,
                 )
             )
         elif args.action in {"refresh-research", "refresh-disclosure", "refresh-fund"}:

@@ -11,6 +11,7 @@ from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
+from nexus.providers.news import NewsArticle
 from nexus.research.liquidity_observation import LiquidityObservation
 from nexus.research.sec_exhibit_quarter_metrics import ExhibitQuarterMetrics
 from nexus.research.sec_exhibits import ExhibitText
@@ -481,6 +482,21 @@ class ResearchInputPriceTrend(_StrictAgentSchema):
         return self
 
 
+class ResearchInputNews(_StrictAgentSchema):
+    evidence_ref_id: UUID
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: Literal["alpaca_news"] = "alpaca_news"
+    available_at: AwareDatetime
+    received_at: AwareDatetime
+    window_start: AwareDatetime
+    window_end: AwareDatetime
+    articles: tuple[NewsArticle, ...] = Field(min_length=1, max_length=5)
+    collected_count: int = Field(ge=1, le=50)
+    has_more: bool
+    primary_source_verified: Literal[False] = False
+    execution_locked: Literal[True] = True
+
+
 class ResearchInputsSummary(_StrictAgentSchema):
     display_symbol: str | None = Field(max_length=100)
     filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
@@ -501,6 +517,7 @@ class ResearchInputsSummary(_StrictAgentSchema):
     company_profiles: tuple[ResearchInputCompanyProfile, ...] = Field(default=(), max_length=1)
     macro_observations: tuple[ResearchInputMacroObservation, ...] = Field(default=(), max_length=8)
     current_price_trends: tuple[ResearchInputPriceTrend, ...] = Field(default=(), max_length=1)
+    news_observations: tuple[ResearchInputNews, ...] = Field(default=(), max_length=1)
 
 
 class ResearchAdmissionResponse(_StrictAgentSchema):

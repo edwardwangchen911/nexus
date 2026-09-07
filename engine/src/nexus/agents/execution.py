@@ -243,7 +243,7 @@ async def execute_research_run(
         {"evidence_count": len(evidence_records)},
     )
     if any(
-        record.source == "alpaca_current_trends" for record in evidence_records
+        record.source in {"alpaca_current_trends", "alpaca_news"} for record in evidence_records
     ) and not await load_frozen_evidence(
         session,
         run,
@@ -258,7 +258,9 @@ async def execute_research_run(
             output_sequence=output_sequence,
             event_sequence=event_sequence + 1,
             status="abstained",
-            reason="current_price_trends_invalid",
+            reason="frozen_evidence_invalid"
+            if any(r.source == "alpaca_news" for r in evidence_records)
+            else "current_price_trends_invalid",
         )
     final_price_authority_status = await revalidate_frozen_price_authority(
         session,

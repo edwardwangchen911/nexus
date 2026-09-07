@@ -8076,6 +8076,91 @@ export const runtimeContractSchemas = {
     "title": "ResearchInputNavObservation",
     "type": "object"
   },
+  "ResearchInputNews": {
+    "additionalProperties": false,
+    "properties": {
+      "articles": {
+        "items": {
+          "$ref": "#/components/schemas/NewsArticle"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Articles",
+        "type": "array"
+      },
+      "available_at": {
+        "format": "date-time",
+        "title": "Available At",
+        "type": "string"
+      },
+      "collected_count": {
+        "maximum": 50,
+        "minimum": 1,
+        "title": "Collected Count",
+        "type": "integer"
+      },
+      "content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Content Hash",
+        "type": "string"
+      },
+      "evidence_ref_id": {
+        "format": "uuid",
+        "title": "Evidence Ref Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "has_more": {
+        "title": "Has More",
+        "type": "boolean"
+      },
+      "primary_source_verified": {
+        "const": false,
+        "default": false,
+        "title": "Primary Source Verified",
+        "type": "boolean"
+      },
+      "received_at": {
+        "format": "date-time",
+        "title": "Received At",
+        "type": "string"
+      },
+      "source": {
+        "const": "alpaca_news",
+        "default": "alpaca_news",
+        "title": "Source",
+        "type": "string"
+      },
+      "window_end": {
+        "format": "date-time",
+        "title": "Window End",
+        "type": "string"
+      },
+      "window_start": {
+        "format": "date-time",
+        "title": "Window Start",
+        "type": "string"
+      }
+    },
+    "required": [
+      "evidence_ref_id",
+      "content_hash",
+      "available_at",
+      "received_at",
+      "window_start",
+      "window_end",
+      "articles",
+      "collected_count",
+      "has_more"
+    ],
+    "title": "ResearchInputNews",
+    "type": "object"
+  },
   "ResearchInputPriceTrend": {
     "additionalProperties": false,
     "properties": {
@@ -8437,6 +8522,15 @@ export const runtimeContractSchemas = {
         },
         "maxItems": 8,
         "title": "Macro Observations",
+        "type": "array"
+      },
+      "news_observations": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/ResearchInputNews"
+        },
+        "maxItems": 1,
+        "title": "News Observations",
         "type": "array"
       },
       "portfolio_context": {

@@ -31,7 +31,7 @@ export function actionObservation(overrides: Partial<Observation> = {}): Observa
 export function actionInputs(): components["schemas"]["ResearchInputsSummary"] {
   return {
     display_symbol: "TEST", filings: [], facts: [], total_facts: 0, truncated: false,
-    company_profiles: [], macro_observations: [], current_price_trends: [],
+    company_profiles: [], macro_observations: [], current_price_trends: [], news_observations: [],
     issuer_distributions: [], issuer_fund_observations: [], issuer_nav_histories: [],
     corporate_action_observations: [actionObservation()],
   };

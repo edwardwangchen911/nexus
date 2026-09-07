@@ -166,6 +166,7 @@ async def read_news(
     *,
     instrument_id: UUID,
     now: datetime,
+    snapshot_id: UUID | None = None,
 ) -> NewsResponse:
     row = await session.scalar(
         select(DataSnapshot)
@@ -175,6 +176,7 @@ async def read_news(
             DataSnapshot.schema_version == SCHEMA,
             DataSnapshot.available_at <= now,
             DataSnapshot.created_at <= now,
+            *(() if snapshot_id is None else (DataSnapshot.id == snapshot_id,)),
         )
         .order_by(DataSnapshot.received_at.desc(), DataSnapshot.created_at.desc())
         .limit(1)

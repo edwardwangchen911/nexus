@@ -14,6 +14,7 @@ from nexus.persistence.models.agents import AgentPromptVersionRecord, AgentResea
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.research.current_price_trends_storage import read_current_price_trends
+from nexus.research.news_evidence import read_news_evidence
 
 MAX_FROZEN_EVIDENCE = 100
 
@@ -67,6 +68,16 @@ async def load_frozen_evidence(
             evidence_ids=trend_ids,
         )
     ) != set(trend_ids):
+        return ()
+    news_ids = tuple(record.id for record in ordered if record.source == "alpaca_news")
+    if news_ids and set(
+        await read_news_evidence(
+            session,
+            instrument_id=run.instrument_id,
+            as_of=run.decision_time,
+            evidence_ids=news_ids,
+        )
+    ) != set(news_ids):
         return ()
     return ordered
 

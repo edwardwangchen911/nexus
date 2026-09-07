@@ -26,12 +26,13 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
   const profiles = inputs.company_profiles ?? [];
   const macros = inputs.macro_observations ?? [];
   const trends = inputs.current_price_trends ?? [];
-  const hasProviderInputs = profiles.length > 0 || macros.length > 0 || trends.length > 0;
+  const news = inputs.news_observations ?? [];
+  const hasProviderInputs = profiles.length > 0 || macros.length > 0 || trends.length > 0 || news.length > 0;
   const hasActions = actions.length > 0;
   const hasIssuer = distributions.length > 0 || observations.length > 0 || navHistories.length > 0;
   const hasSec = inputs.filings.length > 0;
   const documentLabel = hasProviderInputs ? "已冻结研究资料" : hasActions ? (hasIssuer || hasSec ? "已冻结研究资料" : "已冻结公司行动资料") : hasIssuer ? (hasSec ? "已冻结研究资料" : "已冻结发行商资料") : inputs.filings.some((filing) => filing.form === "497K") ? "已冻结基金资料" : inputs.filings.some((filing) => filing.form === "6-K") ? "已冻结披露" : "已冻结财报";
-  const sourceLabel = [hasSec ? "SEC" : null, hasIssuer ? "发行商" : null, hasActions || trends.length ? "Alpaca" : null, profiles.length ? "FMP" : null, macros.length ? "FRED" : null].filter(Boolean).join(" / ") || "SEC";
+  const sourceLabel = [hasSec ? "SEC" : null, hasIssuer ? "发行商" : null, hasActions || trends.length || news.length ? "Alpaca" : null, profiles.length ? "FMP" : null, macros.length ? "FRED" : null].filter(Boolean).join(" / ") || "SEC";
   return <article className="decision-card" aria-labelledby="research-inputs-title">
     <header className="decision-card__heading">
       <div><p className="eyebrow">{sourceLabel} · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · {documentLabel}</h2></div>
@@ -85,6 +86,22 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
     {profiles.map((profile) => <ResearchCompanyProfile key={profile.evidence_ref_id} profile={profile} />)}
     {macros.length > 0 ? <ResearchMacroObservations observations={macros} /> : null}
     {trends.map((trend) => <ResearchPriceTrend key={trend.evidence_ref_id} trend={trend} />)}
+    {news.map((observation) => <section className="decision-card__section" key={observation.evidence_ref_id} aria-label="本次研究冻结消息">
+      <h3>本次研究冻结消息</h3>
+      <p>Alpaca 提供的新闻标题与摘要，未经独立核实。按更新时间选取所收集 {observation.collected_count} 条中的最新 {observation.articles.length} 条；{observation.has_more ? "源查询还有未收集内容" : "单一来源有限查询"}，不代表全面覆盖。</p>
+      <p>这是本次研究使用的固定版本，后续推送不会替换。消息本身不构成买卖判断。</p>
+      <dl className="decision-card__authority">
+        <div><dt>原始接收时间</dt><dd>{formatUtc(observation.received_at)}</dd></div>
+        <div><dt>研究证据可用时间</dt><dd>{formatUtc(observation.available_at)}</dd></div>
+      </dl>
+      {observation.articles.map((article) => <div key={article.id}>
+        <h4>{article.headline}</h4>
+        <p>{article.summary || "未提供摘要，不能据标题推测正文。"}</p>
+        <p>来源：{article.source} · 发布：{formatUtc(article.created_at)} · 更新：{formatUtc(article.updated_at)}</p>
+        {article.url ? <a href={article.url} target="_blank" rel="noreferrer">查看来源报道</a> : null}
+      </div>)}
+      <details className="portfolio-disclosure"><summary>查看冻结证据</summary><p>引用：{observation.evidence_ref_id}</p><p style={{ overflowWrap: "anywhere" }}>SHA-256：{observation.content_hash}</p></details>
+    </section>)}
     {distributions.map((distribution) => <section className="decision-card__section" aria-label="发行商现金分红资料" key={distribution.evidence_ref_id}>
       <h3>发行商现金分红资料</h3>
       <p>SSGA 官方资料 · 仅展示该冻结集合内最新一条分红观察，不代表完整分红历史。</p>
