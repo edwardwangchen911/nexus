@@ -9,7 +9,11 @@ COPY engine/pyproject.toml engine/pyproject.toml
 COPY integrations/fosun_gateway/pyproject.toml integrations/fosun_gateway/pyproject.toml
 COPY integrations/fosun_gateway/src integrations/fosun_gateway/src
 COPY contracts/providers/fosun/manifest.json contracts/providers/fosun/manifest.json
-RUN uv sync --frozen --no-dev --no-editable --package nexus-fosun-gateway \
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && uv sync --frozen --no-dev --no-editable --package nexus-fosun-gateway \
+    && apt-get purge --yes --auto-remove git \
+    && rm -rf /var/lib/apt/lists/* \
     && groupadd --system nexus \
     && useradd --system --gid nexus --home-dir /app --shell /usr/sbin/nologin nexus \
     && chown --recursive nexus:nexus /app \
