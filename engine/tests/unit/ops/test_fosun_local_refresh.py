@@ -530,7 +530,7 @@ async def test_market_snapshot_failure_returns_before_any_persistence_input_exis
 
 
 @pytest.mark.asyncio
-async def test_provider_failure_never_opens_database_or_overwrites_previous_snapshot(
+async def test_provider_failure_after_identity_preflight_never_persists_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     instant = datetime(2026, 8, 31, tzinfo=UTC)
@@ -602,11 +602,30 @@ async def test_provider_failure_never_opens_database_or_overwrites_previous_snap
     broker = _Broker()
     market = _FailingMarket(("usAAPL", "usMSFT"))
     database_opened = False
+    database_closed = False
 
-    def _database_must_remain_closed(_url: str, **_kwargs: object) -> object:
+    class _Engine:
+        async def dispose(self) -> None:
+            nonlocal database_closed
+            database_closed = True
+
+    class _Session:
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    def _open_database(_url: str, **_kwargs: object) -> object:
         nonlocal database_opened
         database_opened = True
-        raise AssertionError("database opened before provider reads completed")
+        return _Engine()
+
+    async def _identity_preflight(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(instrument_ids={"usAAPL": uuid4(), "usMSFT": uuid4()})
+
+    def _persistence_must_not_start(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("persistence started after a failed provider read")
 
     monkeypatch.setattr(
         refresh_module,
@@ -621,12 +640,18 @@ async def test_provider_failure_never_opens_database_or_overwrites_previous_snap
     monkeypatch.setattr(refresh_module, "_market_identity", lambda _settings: object())
     monkeypatch.setattr(refresh_module, "FosunGatewayClient", lambda _settings: broker)
     monkeypatch.setattr(refresh_module, "FosunMarketGatewayClient", lambda _identity: market)
-    monkeypatch.setattr(refresh_module, "create_async_engine", _database_must_remain_closed)
+    monkeypatch.setattr(refresh_module, "create_async_engine", _open_database)
+    monkeypatch.setattr(refresh_module, "async_sessionmaker", lambda *_a, **_k: _Session)
+    monkeypatch.setattr(refresh_module, "_load_local_broker_identity", _identity_preflight)
+    monkeypatch.setattr(refresh_module, "S3ProviderEvidenceStore", _persistence_must_not_start)
 
     with pytest.raises(RuntimeError, match="LOCAL_TEST_READ_FAILED"):
-        await refresh_local_fosun(SimpleNamespace(), now=instant)  # type: ignore[arg-type]
+        await refresh_local_fosun(
+            SimpleNamespace(database_url="synthetic"), now=instant
+        )  # type: ignore[arg-type]
 
-    assert database_opened is False
+    assert database_opened is True
+    assert database_closed is True
 
 
 @pytest.mark.parametrize(

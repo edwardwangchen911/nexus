@@ -298,6 +298,10 @@ async def refresh_local_fosun(
             raise ValueError("LOCAL_HOLDINGS_BUDGET_EXCEEDED")
         if any(item.external_account_id != external_account_id for item in holdings):
             raise ValueError("LOCAL_ACCOUNT_SCOPE_MISMATCH")
+        engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions() as session:
+            identity = await _load_local_broker_identity(session, holdings=holdings)
         market_reads = await _read_market_snapshot(
             market,
             codes=_us_holding_codes(holdings),
@@ -305,10 +309,6 @@ async def refresh_local_fosun(
             request_end_at=request_end_at,
             expected_sessions=expected_sessions,
         )
-        engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-        sessions = async_sessionmaker(engine, expire_on_commit=False)
-        async with sessions() as session:
-            identity = await _load_local_broker_identity(session, holdings=holdings)
         store = S3ProviderEvidenceStore(settings)
         # Commit actual market availability before the broker read establishes its cutoff.
         # If the following broker read fails, keep market facts without a new account snapshot.

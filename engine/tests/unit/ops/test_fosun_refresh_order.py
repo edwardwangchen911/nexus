@@ -11,13 +11,21 @@ from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", (None, "market", "broker", "identity_source"))
+@pytest.mark.parametrize(
+    "failure", (None, "identity_preflight", "market", "broker", "identity_source")
+)
 async def test_refresh_commits_market_before_broker_freeze_without_promoting_failed_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
 ) -> None:
     now = datetime.now(UTC)
-    state = {"market": False, "broker": False, "broker_read": False, "closed": set()}
+    state = {
+        "market": False,
+        "market_read": False,
+        "broker": False,
+        "broker_read": False,
+        "closed": set(),
+    }
     instrument_id = uuid4()
     holding = {
         "kind": "position",
@@ -90,6 +98,8 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
             state["closed"].add("engine")
 
     async def identity(*_args, **_kwargs):
+        if failure == "identity_preflight":
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED")
         return SimpleNamespace(
             account_id=uuid4(),
             portfolio_id=uuid4(),
@@ -100,6 +110,7 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
         )
 
     async def market_reads(*_args, **_kwargs):
+        state["market_read"] = True
         return SimpleNamespace(
             codes=("usAAPL",), request_counts={"quotes": 1, "bars": 1, "total": 2}
         )
@@ -156,7 +167,7 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
     monkeypatch.setattr(
         module, "_broker_request_counts", lambda _: {"cash": 2, "holdings": 2, "orders": 2}
     )
-    if failure == "identity_source":
+    if failure in {"identity_preflight", "identity_source"}:
         with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"):
             await module.refresh_local_fosun(SimpleNamespace(database_url="synthetic"))
     elif failure:
@@ -167,7 +178,8 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
         assert result["snapshot_status"] == "READY" and result["provider_requests"]["total"] == 11
         counts = result["provider_requests"]
         assert counts["total"] == sum(value for key, value in counts.items() if key != "total")
-    assert state["market"] is (failure != "market")
+    assert state["market_read"] is (failure != "identity_preflight")
+    assert state["market"] is (failure not in {"identity_preflight", "market"})
     assert state["broker"] is (failure is None)
-    assert state["broker_read"] is (failure != "market")
+    assert state["broker_read"] is (failure not in {"identity_preflight", "market"})
     assert state["closed"] == {"broker", "market", "engine"}
