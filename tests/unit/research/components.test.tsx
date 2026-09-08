@@ -449,6 +449,7 @@ describe("frozen news inputs", () => {
     expect(section).toHaveTextContent("所收集 50 条中的最新 1 条");
     expect(section).toHaveTextContent("源查询还有未收集内容");
     expect(section).toHaveTextContent("后续推送不会替换");
+    expect(section).toHaveTextContent("不代表最终论点实际采用，请以论点引用为准");
     expect(within(section).getByText("原始接收时间").nextElementSibling).toHaveTextContent("2026-09-06 12:00:00");
     expect(within(section).getByText("研究证据可用时间").nextElementSibling).toHaveTextContent("2026-09-06 13:00:00");
     expect(container.querySelector("b")).toBeNull();

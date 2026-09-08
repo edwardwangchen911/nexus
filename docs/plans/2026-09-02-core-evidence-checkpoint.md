@@ -3035,3 +3035,19 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 验证：20项采集/导入单测；2项隔离PostgreSQL正常导入/幂等/API/损坏/空页/身份验证及1项收据回归；50项前端消息、市场页、BFF边界与路由测试；Ruff、Mypy、typecheck、ESLint、生成客户端一致性、build、diffcheck通过。独立集中审查发现并修复拒绝原件丢失及提交后回执误报两项问题。首次本地收据验证误用了Decimal JSON读取器，已改为保留整数的严格去重读取并通过正常PG路径；验收编排的请求层级/异步聚合错误发生在只读阶段，确认无新请求后修正，未重放采集或导入。
 
 私有证据：`outputs/acceptance/news-real-20260906/`，安全摘要为`database-summary.json`、`api-summary.json`、`dom-summary.json`、`runtime-summary.json`；原件、身份、完整DTO与页面截图留在本地私有文件。正常入口和回滚见`docs/runbooks/news-local.md`。回滚应用版本无需删除快照或修改历史研究。
+
+### 冻结消息的一次新研究、内容边界与暂不调整验收（2026-09-08）
+
+在 `main@e00bacd` 先核对主目录与 worktree 均无差异、无研究 worker/watchdog 进程，并以只读事务确认：原新闻 run 仍为 `prepared`、Job 为 `dead_letter/LEASE_EXPIRED`、attempt=1/max=1、outputs=0；绑定该新闻证据的冻结快照只有原快照，没有未使用的新快照或后续新闻 retry run。数据库中三个更晚的研究 run 均未绑定该新闻证据，未把其中的 completed 误作新闻研究完成，也未重放旧 run。
+
+随后使用现有 `retry_after_watchdog.py` 仅执行一次新快照、新 run 和正常 `run-once`。外层 130 秒 watchdog 未触发，约 71 秒返回；持久化终态为 run=`completed`、Job=`succeeded`、attempt=1/max=1、manual_retry=0、10 项输出，输入 78,854、输出 3,197 tokens。费用结算字段已保存，但订阅模式不据此推断实际账单。最终为 `partial / watch / exposure_action=none`，执行仍锁定。API 精确回读同一 run/snapshot、三阶段、最新 5 条冻结消息及无 abstention；BFF/页面在 1440 与 375 宽度逐条一致，完成状态、只读与仅供研究边界可见，无横向溢出、无外部请求。
+
+内容审查没有把模型自报的 `review_conclusion=sufficient` 当作消息影响证明。冻结 manifest 确含 `alpaca_news`，但八个角色论点、最终 theses/counter-theses 和四项 review 均未引用该来源；与最近一份 completed 研究相比，最终仍为 `partial/watch/none`，且两份冻结集合还同时更换了组合上下文并少一项 Fosun 证据，不能把票数或文案差异归因于新闻。五条消息均被供应商标记为相关，但只有一条标题和两条摘要直接提及标的；这仍不足以建立风险、估值或目标权重变化。结论是消息已进入可追溯输入和页面，但没有证据证明它实质改变研究结论；不再为同一证据重复调用模型。
+
+现有三方案草稿晚于此前 completed 研究、早于本次新闻 run，未绑定本次输出。数据库和真实 BFF/页面一致显示：三方案齐全但均不可排名、不可执行，草稿为 partial，诊断未完成、FX 与费用证据不完整、无人工作出选择，经济比较为 `incomparable`，原因含 `COST_EVIDENCE_INCOMPLETE` 与 `COMPARISON_EVIDENCE_INCOMPLETE`，Shadow 被阻断。页面在两种宽度明确“当前不进入影子验证、也不执行调整”是证据门禁，不等于建议保持现状。未创建新方案组、未启动 Shadow、未调用券商或创建订单。
+
+为避免把“进入冻结输入”误写成“最终论点已采用”，消息卡片文案收窄为“提供给研究流程的固定冻结输入；不代表最终论点实际采用，请以论点引用为准”，并新增组件回归。
+
+验证：研究数据库三联终态与引用来源只读核对；真实 API/BFF/DOM 两宽度；现有方案 BFF/DOM 两宽度；`tests/unit/research/components.test.tsx` 49 passed；TypeScript typecheck 与相关两文件 ESLint 通过。运行中的 API 容器未重启，仍是此前 `b71e331` 镜像；本次 SDK worker 明确从主目录 `e00bacd` 代码运行，不能把 API 容器版本扩写为全栈已切到 e00bacd。
+
+私有证据：`outputs/acceptance/news-research-real-20260907/` 下 `retry-worker-summary.json`、`retry-api-summary.json`、`retry-dom-summary.json`、`proposal-state-private.json`、`proposal-dom-summary.json` 及私有截图；完整研究、标的和 ID 不进入本记录。

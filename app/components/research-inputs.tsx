@@ -89,7 +89,7 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
     {news.map((observation) => <section className="decision-card__section" key={observation.evidence_ref_id} aria-label="本次研究冻结消息">
       <h3>本次研究冻结消息</h3>
       <p>Alpaca 提供的新闻标题与摘要，未经独立核实。按更新时间选取所收集 {observation.collected_count} 条中的最新 {observation.articles.length} 条；{observation.has_more ? "源查询还有未收集内容" : "单一来源有限查询"}，不代表全面覆盖。</p>
-      <p>这是本次研究使用的固定版本，后续推送不会替换。消息本身不构成买卖判断。</p>
+      <p>这是提供给本次研究流程的固定冻结输入，后续推送不会替换；不代表最终论点实际采用，请以论点引用为准。消息本身不构成买卖判断。</p>
       <dl className="decision-card__authority">
         <div><dt>原始接收时间</dt><dd>{formatUtc(observation.received_at)}</dd></div>
         <div><dt>研究证据可用时间</dt><dd>{formatUtc(observation.available_at)}</dd></div>
