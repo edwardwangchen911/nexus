@@ -3071,3 +3071,9 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 复用已有受保护 launcher 启动 `local_read_only` Gateway，未新建服务或修改凭据。第一次刷新恰在 replay 保护期末被 `not_ready` 拒绝，Gateway 日志确认只到 HMAC 门口、业务读取为零；核对 replay metadata 后使用 broker/market 两套 mTLS `/health/ready` 各得到 ready，再执行一次有界只读。该读取已成功获取账户、持仓、报价及日线，但在本地身份解析处以 `LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED` 拒绝：当前至少一项新美股没有已验证的本地身份来源。`nexus-fosun-local status` 仍指向原 `2026-09-07T17:39:50Z` READY 快照，无新账户快照或诊断；失败结果已确定，未再重放。Gateway 随后正常退出，8081/8082 关闭。
 
 同一真实拒绝暴露了刷新顺序的请求浪费：旧入口在本地身份校验前先读全部报价/日线。`c77b4a4` 将数据库身份预检移到行情读取前；今后同类新美股只在账户/持仓读取后立即拒绝，不再消耗报价和整批日线请求。未改变证券身份来源门禁、行情顺序、快照不可变性、诊断阈值或执行锁。54 项相关单测、Ruff、相关 Mypy 和 diff-check 通过。下一步仅用最小持仓身份核对确定缺失项；有合法现有来源且属受支持类型时才复用 `instrument_identity_local` 建档，否则保持明确缺口。
+
+### 当前持仓缺失身份分类（2026-09-09）
+
+在 Gateway 双 mTLS ready 后只读账户/持仓，不读报价、日线、订单或流水。受保护核对确认 16 项当前持仓中有 3 项缺失本地身份，三者均不在固定 `us_liquid_v1` 定义中，且现有 FMP profile 均标识为 ETF/基金。随后仅获取一次 SEC `company_tickers_mf.json`：其中 2 项可唯一绑定 CIK/series/class，1 项无目录匹配。完整代码核对证实 `etf_identity_local`/`member_for` 只接纳固定定义成员，因此这不是能用现有入口直接导入的数据缺口。
+
+本轮为避免私人证券代码进入聊天或跟踪文档，仅将完整标识及 FMP/SEC 原件保存在权限受保护的 `outputs/acceptance/current-holdings-identity-20260909/`；跟踪文档只保留聚合分类。共两次账户/持仓只读（4 请求），第二次用于受保护落盘并串接来源；FMP 3 请求、SEC 1 请求，无重试、无模型、无数据库写入、无市场/订单读取。Gateway 已正常退出，8081/8082 关闭。下一步是建立不改动未来股票池的当前持仓 ETF 窄合同，先仅处理已有 SEC 唯一映射的 2 项；第 3 项保持真实未知，不为刷新造身份。
