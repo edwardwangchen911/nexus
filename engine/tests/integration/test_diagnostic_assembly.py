@@ -37,8 +37,10 @@ from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.data import DataArtifact, PriceSeriesManifest
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.persistence.models.portfolio import CashSnapshot
 from nexus.persistence.session import session_factory
 from nexus.providers.base import PriceBar
+from nexus.research.fx import import_dexhkus_vintage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,12 +48,23 @@ SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
 SNAPSHOT_AT = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
 SPY_ID = UUID(str(stable_instrument_id("SPY")))
 HOLIDAY = date(2026, 7, 3)
+DEXHKUS_RAW = b"observation_date,DEXHKUS_20260820\n2026-08-20,7.8500\n"
+DEXHKUS_URL = (
+    "https://alfred.stlouisfed.org/graph/alfredgraph.csv?"
+    "id=DEXHKUS&cosd=2026-08-20&coed=2026-08-20&vintage_date=2026-08-20"
+)
+
+
+class _MemoryFxStore:
+    async def put_if_absent(self, *, key: str, content: bytes) -> str:
+        return f"memory://sha256/{sha256(content).hexdigest()}"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_session", [False, True])
 async def test_partial_market_persists_only_evidenced_liquidity(
-    migrated_database_url: str, missing_session: bool,
+    migrated_database_url: str,
+    missing_session: bool,
 ) -> None:
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
@@ -59,11 +72,16 @@ async def test_partial_market_persists_only_evidenced_liquidity(
     async with factory() as session, session.begin():
         await _seed_spy(session)
         await _add_series(
-            session, payloads, INSTRUMENT_ID, "asset",
+            session,
+            payloads,
+            INSTRUMENT_ID,
+            "asset",
             omitted_session=date(2026, 8, 21) if missing_session else None,
         )
         report = await diagnose_and_persist(
-            session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID,
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=SNAPSHOT_ID,
             artifact_reader=FixtureArtifactReader(payloads),
         )
         assert report.optimization_need == "RESEARCH_REQUIRED"
@@ -117,9 +135,7 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
             artifact_reader=FixtureArtifactReader(payloads),
         )
         with pytest.raises(DiagnosticEvidenceCapabilityUnavailable):
-            await diagnose_and_persist(
-                session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
-            )
+            await diagnose_and_persist(session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID)
         payloads["memory://asset"] += b"tampered-after-persist"
         with pytest.raises(ValueError, match="artifact hash"):
             await diagnose_and_persist(
@@ -171,6 +187,154 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
     assert any(
         ref.object_id.startswith("price-series-manifest:") for ref in liquidity.evidence_refs
     )
+
+
+@pytest.mark.asyncio
+async def test_multicurrency_diagnostic_uses_frozen_qualified_dexhkus_valuation(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(session, payloads, INSTRUMENT_ID, "asset")
+        await _add_series(session, payloads, SPY_ID, "benchmark")
+        await import_dexhkus_vintage(
+            session,
+            payload=DEXHKUS_RAW,
+            url=DEXHKUS_URL,
+            received_at=SNAPSHOT_AT - timedelta(seconds=1),
+            store=_MemoryFxStore(),
+        )
+        snapshot = await load_frozen_snapshot(
+            session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
+        )
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+        assembly = await assemble_diagnostic_evidence(
+            session,
+            snapshot=snapshot,
+            identities=identities,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+        policy = await load_real_advisory_policy_v1(session)
+        expected_hash = diagnostic_input_hash(
+            snapshot=snapshot,
+            assembly=assembly,
+            history=DiagnosticHistory.empty(),
+            policy_version=policy.version,
+        )
+        report = await diagnose_and_persist(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=SNAPSHOT_ID,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+        stored = await session.scalar(
+            select(PortfolioDiagnosticReportRecord).where(
+                PortfolioDiagnosticReportRecord.portfolio_snapshot_id == SNAPSHOT_ID
+            )
+        )
+
+    assert stored is not None
+    assert stored.diagnostic_input_hash == expected_hash
+    fx_item = next(item for item in report.items if item.diagnostic_code == "CURRENCY_EXPOSURE")
+    hkd_value_usd = Decimal("90000") * Decimal("6.125") / Decimal("7.85")
+    assert fx_item.metric_value is not None
+    assert Decimal(fx_item.metric_value) == hkd_value_usd / (hkd_value_usd + Decimal("1000"))
+    assert fx_item.unit == "ratio"
+    assert fx_item.policy_scope == "portfolio:USD"
+    assert fx_item.unknown_reason is None
+    assert {ref.source for ref in fx_item.evidence_refs} >= {
+        "fred",
+        "exchange_calendars",
+        "nexus_db",
+    }
+    fx_input = assembly.canonical_inputs["fx_valuation"]  # type: ignore[index]
+    assert fx_input["unit"] == "HKD per USD"  # type: ignore[index]
+    assert fx_input["rate"] == "7.850000000000"  # type: ignore[index]
+    assert len(fx_input["refs"]) == 2  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_qualified_dexhkus_does_not_hide_unsupported_currency(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(session, payloads, INSTRUMENT_ID, "asset")
+        await _add_series(session, payloads, SPY_ID, "benchmark")
+        await import_dexhkus_vintage(
+            session,
+            payload=DEXHKUS_RAW,
+            url=DEXHKUS_URL,
+            received_at=SNAPSHOT_AT - timedelta(seconds=1),
+            store=_MemoryFxStore(),
+        )
+        session.add(
+            CashSnapshot(
+                portfolio_snapshot_id=SNAPSHOT_ID,
+                currency="CNY",
+                cash_balance=Decimal("1"),
+                available_cash=Decimal("1"),
+                provider_as_of=SNAPSHOT_AT,
+            )
+        )
+        await session.flush()
+        report = await diagnose_and_persist(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=SNAPSHOT_ID,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+
+    fx_item = next(item for item in report.items if item.diagnostic_code == "CURRENCY_EXPOSURE")
+    assert fx_item.metric_value is None
+    assert fx_item.unknown_reason == "FX_QUALIFIED_VIEW_MISSING"
+
+
+@pytest.mark.asyncio
+async def test_dexhkus_received_after_snapshot_does_not_backfill_diagnostic(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(session, payloads, INSTRUMENT_ID, "asset")
+        await _add_series(session, payloads, SPY_ID, "benchmark")
+        await import_dexhkus_vintage(
+            session,
+            payload=DEXHKUS_RAW,
+            url=DEXHKUS_URL,
+            received_at=SNAPSHOT_AT + timedelta(seconds=1),
+            store=_MemoryFxStore(),
+        )
+        snapshot = await load_frozen_snapshot(
+            session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
+        )
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+        assembly = await assemble_diagnostic_evidence(
+            session,
+            snapshot=snapshot,
+            identities=identities,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+        report = await diagnose_and_persist(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=SNAPSHOT_ID,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+
+    assert "fx_valuation" not in assembly.canonical_inputs
+    fx_item = next(item for item in report.items if item.diagnostic_code == "CURRENCY_EXPOSURE")
+    assert fx_item.metric_value is None
+    assert fx_item.unknown_reason == "FX_QUALIFIED_VIEW_MISSING"
 
 
 @pytest.mark.asyncio
@@ -352,9 +516,7 @@ async def test_different_conflict_artifact_changes_input_hash_and_blocked_refs(
     async with factory() as session, session.begin():
         await _seed_spy(session)
         await _add_series(session, payloads, INSTRUMENT_ID, "asset")
-        await _add_series(
-            session, payloads, SPY_ID, "benchmark", invalid_session=HOLIDAY
-        )
+        await _add_series(session, payloads, SPY_ID, "benchmark", invalid_session=HOLIDAY)
         first = await diagnose_and_persist(
             session,
             portfolio_id=PORTFOLIOS[0],
@@ -505,9 +667,7 @@ def _bars(
     invalid_session: date | None = None,
     omitted_session: date | None = None,
 ) -> tuple[PriceBar, ...]:
-    sessions = tuple(
-        session for session in _published_sessions(253) if session != omitted_session
-    )
+    sessions = tuple(session for session in _published_sessions(253) if session != omitted_session)
     bars = tuple(
         PriceBar(
             instrument_id=instrument_id,

@@ -38,6 +38,7 @@ class FxValuation:
     available_at: datetime
     received_at: datetime
     raw_sha256: str
+    evidence_refs: tuple[EvidenceRef, ...]
 
     def input_identity(self) -> dict[str, str]:
         return {
@@ -296,7 +297,7 @@ async def load_dexhkus_valuation(
     calendar_ref = aliased(ResearchEvidenceRef)
     rows = (
         await session.execute(
-            select(MacroObservation, ResearchEvidenceRef, DataArtifact)
+            select(MacroObservation, ResearchEvidenceRef, calendar_ref, DataArtifact)
             .join(ResearchEvidenceRef, ResearchEvidenceRef.id == MacroObservation.evidence_ref_id)
             .join(calendar_ref, calendar_ref.id == MacroObservation.calendar_evidence_ref_id)
             .join(DataArtifact, DataArtifact.sha256 == ResearchEvidenceRef.content_hash)
@@ -328,10 +329,10 @@ async def load_dexhkus_valuation(
     ).all()
     if not rows:
         return None
-    row, evidence, artifact = rows[0]
+    row, evidence, calendar_evidence, artifact = rows[0]
     if row.real_time_start is None or any(
         other.observed_at == row.observed_at and other.real_time_start == row.real_time_start
-        for other, _, _ in rows[1:]
+        for other, _, _, _ in rows[1:]
     ):
         return None
     return FxValuation(
@@ -343,4 +344,20 @@ async def load_dexhkus_valuation(
         row.available_at,
         artifact.received_at,
         artifact.sha256,
+        (
+            EvidenceRef(
+                source=evidence.source,
+                object_id=evidence.provider_object_id,
+                available_at=evidence.available_at,
+                location=evidence.location,
+                content_hash=evidence.content_hash,
+            ),
+            EvidenceRef(
+                source=calendar_evidence.source,
+                object_id=calendar_evidence.provider_object_id,
+                available_at=calendar_evidence.available_at,
+                location=calendar_evidence.location,
+                content_hash=calendar_evidence.content_hash,
+            ),
+        ),
     )

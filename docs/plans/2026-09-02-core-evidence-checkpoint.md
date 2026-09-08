@@ -3051,3 +3051,13 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 验证：研究数据库三联终态与引用来源只读核对；真实 API/BFF/DOM 两宽度；现有方案 BFF/DOM 两宽度；`tests/unit/research/components.test.tsx` 49 passed；TypeScript typecheck 与相关两文件 ESLint 通过。运行中的 API 容器未重启，仍是此前 `b71e331` 镜像；本次 SDK worker 明确从主目录 `e00bacd` 代码运行，不能把 API 容器版本扩写为全栈已切到 e00bacd。
 
 私有证据：`outputs/acceptance/news-research-real-20260907/` 下 `retry-worker-summary.json`、`retry-api-summary.json`、`retry-dom-summary.json`、`proposal-state-private.json`、`proposal-dom-summary.json` 及私有截图；完整研究、标的和 ID 不进入本记录。
+
+### 诊断冻结 DEXHKUS 合格估值与多币种敞口（2026-09-09）
+
+已修复诊断与初始草案之间的 FX 语义断层。正式诊断现仅在快照的非零现金/持仓币种精确为 USD+HKD 时读取已持久化 DEXHKUS；同时要求版本、观察、发布可用、本机接收、记录创建及 FRED/日历证据引用均通过 `snapshot.as_of` 点时限制。合格时以明确 `HKD per USD` 单位把两币种现金和持仓市值统一到 USD，输出确定性最大币种敞口 `CURRENCY_EXPOSURE`；原始账户行与币种不变。
+
+FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件 hash 及 FRED/日历引用均进入 diagnostics canonical input 和 `diagnostic_input_hash`，已知指标落库保留完整 evidence refs。仅在实际选中该 pair 时才增加 canonical FX 字段；单币种、含第三币种或未选中 FX 的输入 hash 不因后来出现 DEXHKUS 而变化。初始草案的现有 `FxValuation.input_identity()` 与 digest 形状保持不变。
+
+边界仍 fail closed：快照后才接收的 FX、第三币种、缺价/非正价格、负现金/负持仓或不合格引用均保持 `FX_QUALIFIED_VIEW_MISSING`，不把缺失当 0，不回填旧快照或已持久诊断。执行锁、方案准入、费用/比较证据和人工选择未放宽；本片没有模型、券商、账户写入或交易调用，也没有迁移、新依赖或部署变更。
+
+验证：87 项 diagnostics 单测通过；隔离 PostgreSQL 中 FX 读取+诊断组装+持久化 12 项、初始草案兼容 10 项通过；Ruff 相关与全 engine 检查通过，相关 20 个源码模块上 Mypy 通过。全 `engine/src` Mypy 仍有两个与本片无关的既有 `no-any-return`（`current_price_trends.py:158`、`sec_exhibits.py:68`），本片未越界修改。真实历史诊断不会被此本地回归重写；已保存但晚于旧快照才接收的 DEXHKUS 不能追溯解除该旧诊断缺口。

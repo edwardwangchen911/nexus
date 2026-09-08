@@ -109,20 +109,11 @@ def diagnose_portfolio(
             tuple(missing_items),
         )
     items = evaluate_currency_scopes(snapshot, market, policy, resolver, snapshot_evidence.refs)
-    currencies = {item.currency for item in snapshot.cash} | {
-        item.currency for item in snapshot.positions
+    currencies = {item.currency for item in snapshot.cash if item.cash_balance != 0} | {
+        item.currency for item in snapshot.positions if item.quantity != 0
     }
     if len(currencies) > 1:
-        items.append(
-            _unknown_item(
-                "CURRENCY_EXPOSURE",
-                "ratio",
-                "FX_QUALIFIED_VIEW_MISSING",
-                "portfolio:unqualified_fx",
-                market,
-                evidence_refs=combine_refs(snapshot_evidence.refs, policy.authority_refs),
-            )
-        )
+        items.append(_currency_exposure_item(snapshot, market, policy, resolver, snapshot_evidence))
     elif currencies:
         items.append(
             _threshold_item(
@@ -174,6 +165,121 @@ def diagnose_portfolio(
             market.trading_sessions if calendar.reason is None else (),
         ),
         tuple(items),
+    )
+
+
+def _currency_exposure_item(
+    snapshot: PortfolioSnapshot,
+    market: MarketEvidence,
+    policy: RealAdvisoryPolicy,
+    resolver: EvidenceResolver,
+    snapshot_evidence: EvidenceResult,
+) -> DiagnosticItem:
+    unknown_refs = combine_refs(snapshot_evidence.refs, policy.authority_refs)
+    currencies = {cash.currency for cash in snapshot.cash if cash.cash_balance != 0} | {
+        position.currency for position in snapshot.positions if position.quantity != 0
+    }
+    fx_candidates = tuple(
+        valuation
+        for valuation in market.fx_valuations
+        if valuation.base_currency == "USD" and valuation.quote_currency == "HKD"
+    )
+    fx = fx_candidates[0] if len(fx_candidates) == 1 else None
+    if (
+        currencies - {"USD", "HKD"}
+        or fx is None
+        or snapshot.as_of is None
+        or fx.received_at > snapshot.as_of
+        or fx.observed_on > snapshot.as_of.date()
+        or fx.vintage > snapshot.as_of.date()
+    ):
+        return _unknown_item(
+            "CURRENCY_EXPOSURE",
+            "ratio",
+            "FX_QUALIFIED_VIEW_MISSING",
+            "portfolio:unqualified_fx",
+            market,
+            evidence_refs=unknown_refs,
+        )
+    fx_evidence = resolver.resolve(fx.evidence, "FX")
+    if fx_evidence.reason is not None:
+        return _unknown_item(
+            "CURRENCY_EXPOSURE",
+            "ratio",
+            "FX_QUALIFIED_VIEW_MISSING",
+            "portfolio:unqualified_fx",
+            market,
+            evidence_refs=combine_refs(unknown_refs, fx_evidence.refs),
+        )
+    values = {currency: Decimal(0) for currency in currencies}
+    refs = list(fx_evidence.refs)
+    for cash in snapshot.cash:
+        if cash.cash_balance == 0:
+            continue
+        evidence = resolver.resolve(
+            market.evidence.cash.get(cash.currency),
+            "CASH",
+            expected_as_of=cash.provider_as_of,
+        )
+        if cash.cash_balance < 0 or evidence.reason is not None:
+            return _unknown_item(
+                "CURRENCY_EXPOSURE",
+                "ratio",
+                "FX_QUALIFIED_VIEW_MISSING",
+                "portfolio:unqualified_fx",
+                market,
+                evidence_refs=unknown_refs,
+            )
+        values[cash.currency] += cash.cash_balance
+        refs.extend(evidence.refs)
+    for position in snapshot.positions:
+        if position.quantity == 0:
+            continue
+        evidence = resolver.resolve(
+            market.evidence.position_prices.get(position.instrument_id),
+            "POSITION_PRICE",
+            expected_as_of=position.provider_as_of,
+        )
+        if (
+            position.quantity < 0
+            or position.current_price is None
+            or position.current_price <= 0
+            or evidence.reason is not None
+        ):
+            return _unknown_item(
+                "CURRENCY_EXPOSURE",
+                "ratio",
+                "FX_QUALIFIED_VIEW_MISSING",
+                "portfolio:unqualified_fx",
+                market,
+                evidence_refs=unknown_refs,
+            )
+        values[position.currency] += position.quantity * position.current_price
+        refs.extend(evidence.refs)
+    usd_values = {
+        currency: value if currency == "USD" else value / fx.quote_per_base
+        for currency, value in values.items()
+    }
+    total = sum(usd_values.values(), Decimal(0))
+    if total <= 0:
+        return _unknown_item(
+            "CURRENCY_EXPOSURE",
+            "ratio",
+            "FX_QUALIFIED_VIEW_MISSING",
+            "portfolio:unqualified_fx",
+            market,
+            evidence_refs=unknown_refs,
+        )
+    exposure = max(usd_values.values()) / total
+    return _threshold_item(
+        "CURRENCY_EXPOSURE",
+        exposure,
+        "ratio",
+        policy.currency_warning,
+        "portfolio:USD",
+        market,
+        warning=exposure > policy.currency_warning,
+        evidence_refs=combine_refs(snapshot_evidence.refs, tuple(refs), policy.authority_refs),
     )
 
 

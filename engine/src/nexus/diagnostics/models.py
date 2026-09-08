@@ -73,6 +73,30 @@ class DiagnosticEvidence(_DiagnosticModel):
     trading_calendar: EvidenceBinding | None = None
 
 
+class QualifiedFxValuation(_DiagnosticModel):
+    """One immutable quote that converts the quote currency into the base currency."""
+
+    base_currency: Literal["USD"] = "USD"
+    quote_currency: Literal["HKD"] = "HKD"
+    quote_per_base: Decimal
+    unit: Literal["HKD per USD"] = "HKD per USD"
+    observed_on: date
+    vintage: date
+    received_at: datetime
+    evidence: EvidenceBinding
+
+    @field_validator("received_at")
+    @classmethod
+    def _received_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+    @model_validator(mode="after")
+    def _positive_rate(self) -> "QualifiedFxValuation":
+        if not self.quote_per_base.is_finite() or self.quote_per_base <= 0:
+            raise ValueError("qualified FX rate must be positive")
+        return self
+
+
 class InstrumentIdentity(_DiagnosticModel):
     """Repository-minted point-in-time instrument identity for scope enforcement."""
 
@@ -164,6 +188,7 @@ class MarketEvidence(_DiagnosticModel):
     source_conflict: bool = False
     conflict_refs: tuple[EvidenceRef, ...] = ()
     incomplete_refs: tuple[EvidenceRef, ...] = ()
+    fx_valuations: tuple[QualifiedFxValuation, ...] = ()
 
     @model_validator(mode="after")
     def _bucket_weights_are_complete(self) -> "MarketEvidence":

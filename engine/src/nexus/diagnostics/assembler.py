@@ -20,6 +20,7 @@ from nexus.diagnostics.models import (
     EvidenceBinding,
     InstrumentIdentity,
     MarketEvidence,
+    QualifiedFxValuation,
 )
 from nexus.diagnostics.series_authority import (
     DiagnosticSourcePolicyAuthority,
@@ -57,6 +58,7 @@ from nexus.quality.source_policy import (
     load_source_policy_v2,
     load_source_policy_v3,
 )
+from nexus.research.fx import load_dexhkus_valuation
 
 _SPY_ID = cast(UUID, stable_instrument_id("SPY"))
 
@@ -204,6 +206,33 @@ async def assemble_diagnostic_evidence(
                 *(() if benchmark is None else benchmark[1].refs),
             )
         )
+    fx = (
+        await load_dexhkus_valuation(
+            session,
+            valuation_time=snapshot.as_of,
+            known_at=snapshot.as_of,
+        )
+        if _requires_dexhkus(snapshot)
+        else None
+    )
+    fx_valuations = (
+        ()
+        if fx is None
+        else (
+            QualifiedFxValuation(
+                quote_per_base=fx.rate_hkd_per_usd,
+                observed_on=fx.observed_on,
+                vintage=fx.vintage,
+                received_at=fx.received_at,
+                evidence=EvidenceBinding(
+                    available_at=fx.available_at,
+                    as_of=datetime.combine(fx.observed_on, datetime.min.time(), UTC),
+                    session=fx.observed_on,
+                    refs=fx.evidence_refs,
+                ),
+            ),
+        )
+    )
     evidence = DiagnosticEvidence(
         snapshot=cast(EvidenceBinding, snapshot_bindings["snapshot"]),
         cash=cast(dict[str, EvidenceBinding], snapshot_bindings["cash"]),
@@ -232,6 +261,7 @@ async def assemble_diagnostic_evidence(
         ),
         conflict_refs=combine_refs(tuple(conflict_refs)),
         incomplete_refs=combine_refs(tuple(incomplete_refs)),
+        fx_valuations=fx_valuations,
     )
     return DiagnosticAssembly(
         market=market,
@@ -257,8 +287,25 @@ async def assemble_diagnostic_evidence(
                 for key, value in sorted(adv20.items(), key=lambda item: str(item[0]))
             },
             "calendar": calendar.canonical_input,
+            **(
+                {}
+                if fx is None
+                else {
+                    "fx_valuation": {
+                        **fx.input_identity(),
+                        "refs": tuple(ref.model_dump(mode="json") for ref in fx.evidence_refs),
+                    }
+                }
+            ),
         },
     )
+
+
+def _requires_dexhkus(snapshot: PortfolioSnapshot) -> bool:
+    currencies = {cash.currency for cash in snapshot.cash if cash.cash_balance != 0} | {
+        position.currency for position in snapshot.positions if position.quantity != 0
+    }
+    return currencies == {"USD", "HKD"}
 
 
 def _risk_bucket_weights(
