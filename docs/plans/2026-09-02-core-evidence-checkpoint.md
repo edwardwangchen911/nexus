@@ -3065,3 +3065,9 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 主线以 `55aae86` 合入后，对当前最新真实快照做了一次零写入复算：旧持久化报告有 1 项 `FX_QUALIFIED_VIEW_MISSING`，新主线能从该快照时点前已接收的合格 DEXHKUS 中产生确定性 `CURRENCY_EXPOSURE`，FX 未知降为 0。旧报告保持不可变；复算仍为 `RESEARCH_REQUIRED`，剩余 4 项未知均不是 FX。
 
 为产生页面可读的新快照/新诊断，随后仅调用一次正常 `nexus-fosun-local refresh`；入口在 Gateway 传输阶段返回 `LOCAL_READ_ONLY_REFRESH_FAILED / transport`。失败后 `status` 仍指向原 READY 快照，无新快照或诊断。本机 8081/8082 无 Gateway 监听，这是本次运行验收的直接阻塞；未自动重试、未重放 Provider/模型，也未为验收回填旧快照。后收 DEXHKUS 仍不能追溯改写任何旧诊断。
+
+### 本地刷新身份预检（2026-09-09）
+
+复用已有受保护 launcher 启动 `local_read_only` Gateway，未新建服务或修改凭据。第一次刷新恰在 replay 保护期末被 `not_ready` 拒绝，Gateway 日志确认只到 HMAC 门口、业务读取为零；核对 replay metadata 后使用 broker/market 两套 mTLS `/health/ready` 各得到 ready，再执行一次有界只读。该读取已成功获取账户、持仓、报价及日线，但在本地身份解析处以 `LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED` 拒绝：当前至少一项新美股没有已验证的本地身份来源。`nexus-fosun-local status` 仍指向原 `2026-09-07T17:39:50Z` READY 快照，无新账户快照或诊断；失败结果已确定，未再重放。Gateway 随后正常退出，8081/8082 关闭。
+
+同一真实拒绝暴露了刷新顺序的请求浪费：旧入口在本地身份校验前先读全部报价/日线。`c77b4a4` 将数据库身份预检移到行情读取前；今后同类新美股只在账户/持仓读取后立即拒绝，不再消耗报价和整批日线请求。未改变证券身份来源门禁、行情顺序、快照不可变性、诊断阈值或执行锁。54 项相关单测、Ruff、相关 Mypy 和 diff-check 通过。下一步仅用最小持仓身份核对确定缺失项；有合法现有来源且属受支持类型时才复用 `instrument_identity_local` 建档，否则保持明确缺口。
