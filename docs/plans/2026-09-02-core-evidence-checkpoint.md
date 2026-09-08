@@ -3060,4 +3060,8 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 
 边界仍 fail closed：快照后才接收的 FX、第三币种、缺价/非正价格、负现金/负持仓或不合格引用均保持 `FX_QUALIFIED_VIEW_MISSING`，不把缺失当 0，不回填旧快照或已持久诊断。执行锁、方案准入、费用/比较证据和人工选择未放宽；本片没有模型、券商、账户写入或交易调用，也没有迁移、新依赖或部署变更。
 
-验证：87 项 diagnostics 单测通过；隔离 PostgreSQL 中 FX 读取+诊断组装+持久化 12 项、初始草案兼容 10 项通过；Ruff 相关与全 engine 检查通过，相关 20 个源码模块上 Mypy 通过。全 `engine/src` Mypy 仍有两个与本片无关的既有 `no-any-return`（`current_price_trends.py:158`、`sec_exhibits.py:68`），本片未越界修改。真实历史诊断不会被此本地回归重写；已保存但晚于旧快照才接收的 DEXHKUS 不能追溯解除该旧诊断缺口。
+验证：87 项 diagnostics 单测通过；隔离 PostgreSQL 中 FX 读取+诊断组装+持久化 12 项、初始草案兼容 10 项通过；Ruff 相关与全 engine 检查通过，相关 20 个源码模块上 Mypy 通过。全 `engine/src` Mypy 仍有两个与本片无关的既有 `no-any-return`（`current_price_trends.py:158`、`sec_exhibits.py:68`），本片未越界修改。
+
+主线以 `55aae86` 合入后，对当前最新真实快照做了一次零写入复算：旧持久化报告有 1 项 `FX_QUALIFIED_VIEW_MISSING`，新主线能从该快照时点前已接收的合格 DEXHKUS 中产生确定性 `CURRENCY_EXPOSURE`，FX 未知降为 0。旧报告保持不可变；复算仍为 `RESEARCH_REQUIRED`，剩余 4 项未知均不是 FX。
+
+为产生页面可读的新快照/新诊断，随后仅调用一次正常 `nexus-fosun-local refresh`；入口在 Gateway 传输阶段返回 `LOCAL_READ_ONLY_REFRESH_FAILED / transport`。失败后 `status` 仍指向原 READY 快照，无新快照或诊断。本机 8081/8082 无 Gateway 监听，这是本次运行验收的直接阻塞；未自动重试、未重放 Provider/模型，也未为验收回填旧快照。后收 DEXHKUS 仍不能追溯改写任何旧诊断。
