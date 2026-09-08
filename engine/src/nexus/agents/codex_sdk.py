@@ -45,6 +45,7 @@ _PROVIDER = "nexus_openai"
 MAX_INPUT_TOKENS = 64000
 MAX_OUTPUT_TOKENS = 8192
 TIMEOUT_SECONDS = 35
+CLIENT_CLOSE_TIMEOUT_SECONDS = 5
 BASE_INSTRUCTIONS = (
     "You are a bounded NEXUS research analyst. Analyze only supplied frozen "
     "evidence. Never invoke tools, access files, or take external actions. "
@@ -114,6 +115,28 @@ class CodexInvocationError(ValueError):
 
 class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
     """Retain the existing TimeoutError catch contract without retaining its text."""
+
+
+def _kill_sdk_process(client: AsyncCodex) -> None:
+    """Force only this SDK client's child process to stop after close stalls."""
+    transport = getattr(getattr(client, "_client", None), "_sync", None)
+    process = getattr(transport, "_proc", None)
+    if process is not None and process.poll() is None:
+        with suppress(Exception):
+            process.kill()
+
+
+async def _close_sdk_client(client: AsyncCodex) -> None:
+    """Never let SDK cleanup outlive the research handler deadline."""
+    close_task = asyncio.create_task(client.close())
+    done, _ = await asyncio.wait((close_task,), timeout=CLIENT_CLOSE_TIMEOUT_SECONDS)
+    if close_task not in done:
+        _kill_sdk_process(client)
+        done, _ = await asyncio.wait((close_task,), timeout=1)
+    if close_task in done:
+        await close_task
+    else:
+        close_task.cancel()
 
 
 @contextmanager
@@ -339,7 +362,7 @@ async def _invoke_codex(
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
         finally:
             with _invocation_boundary("client_close"):
-                await client.close()
+                await _close_sdk_client(client)
             if run_task is not None:
                 with suppress(Exception, asyncio.CancelledError):
                     await asyncio.wait_for(run_task, timeout=1)

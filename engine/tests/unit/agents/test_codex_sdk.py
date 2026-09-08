@@ -1618,6 +1618,40 @@ async def test_timeout_wakes_sdk_notification_thread_before_unregister(
 
 
 @pytest.mark.asyncio
+async def test_timeout_force_stops_sdk_process_when_close_stalls(monkeypatch):
+    client, thread, _, _ = _sdk(monkeypatch)
+    stopped = asyncio.Event()
+
+    class Process:
+        killed = False
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            stopped.set()
+
+    process = Process()
+    client._client._sync = SimpleNamespace(_proc=process)
+
+    async def stall(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    async def close():
+        await stopped.wait()
+
+    thread.run.side_effect = stall
+    client.close.side_effect = close
+    monkeypatch.setattr(codex_sdk, "TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(codex_sdk, "CLIENT_CLOSE_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(codex_sdk.invoke_codex({}), timeout=0.2)
+    assert process.killed
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_unexpected_tool_event_fails_closed(monkeypatch):
     _, _, result, _ = _sdk(monkeypatch)
     result.items = [SimpleNamespace(root=SimpleNamespace(type="commandExecution"))]
