@@ -364,8 +364,14 @@ async def _invoke_codex(
             with _invocation_boundary("client_close"):
                 await _close_sdk_client(client)
             if run_task is not None:
-                with suppress(Exception, asyncio.CancelledError):
-                    await asyncio.wait_for(run_task, timeout=1)
+                done, _ = await asyncio.wait((run_task,), timeout=1)
+                if run_task in done:
+                    with suppress(Exception, asyncio.CancelledError):
+                        await run_task
+                else:
+                    # wait_for() may itself wait forever for a cancellation-resistant
+                    # SDK stream. The child process is already closed or killed here.
+                    run_task.cancel()
     with _invocation_boundary("response_check"):
         measured_usage = None
         if result.usage is not None:
