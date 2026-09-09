@@ -73,6 +73,16 @@ def diagnose_portfolio(
             items.extend(
                 evaluate_currency_scopes(snapshot, market, policy, resolver, snapshot_evidence.refs)
             )
+            if len(_active_currencies(snapshot)) > 1:
+                items.append(
+                    _currency_exposure_item(
+                        snapshot,
+                        market,
+                        policy,
+                        resolver,
+                        snapshot_evidence,
+                    )
+                )
         _assert_fosun_read_only_scope(snapshot, market, items)
         return _report(snapshot, policy, "RESEARCH_REQUIRED", tuple(items))
     resolver = EvidenceResolver(snapshot.as_of)
@@ -109,9 +119,7 @@ def diagnose_portfolio(
             tuple(missing_items),
         )
     items = evaluate_currency_scopes(snapshot, market, policy, resolver, snapshot_evidence.refs)
-    currencies = {item.currency for item in snapshot.cash if item.cash_balance != 0} | {
-        item.currency for item in snapshot.positions if item.quantity != 0
-    }
+    currencies = _active_currencies(snapshot)
     if len(currencies) > 1:
         items.append(_currency_exposure_item(snapshot, market, policy, resolver, snapshot_evidence))
     elif currencies:
@@ -281,6 +289,12 @@ def _currency_exposure_item(
         warning=exposure > policy.currency_warning,
         evidence_refs=combine_refs(snapshot_evidence.refs, tuple(refs), policy.authority_refs),
     )
+
+
+def _active_currencies(snapshot: PortfolioSnapshot) -> set[str]:
+    return {cash.currency for cash in snapshot.cash if cash.cash_balance != 0} | {
+        position.currency for position in snapshot.positions if position.quantity != 0
+    }
 
 
 async def diagnose_and_persist(

@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 import pytest
@@ -178,7 +179,10 @@ def test_unqualified_fx_unknown_binds_snapshot_and_policy_authority() -> None:
     assert fx_item.evidence_refs == (snapshot_ref, policy_ref)
 
 
-def test_qualified_fx_produces_deterministic_max_currency_exposure() -> None:
+@pytest.mark.parametrize("market_quality", ["PASS", "PARTIAL"])
+def test_qualified_fx_produces_deterministic_max_currency_exposure(
+    market_quality: Literal["PASS", "PARTIAL"],
+) -> None:
     snapshot_ref = _ref("snapshot", "a")
     policy_ref = _ref("policy", "b")
     usd_ref = _ref("cash-USD", "c")
@@ -208,7 +212,7 @@ def test_qualified_fx_produces_deterministic_max_currency_exposure() -> None:
         as_of=SNAPSHOT_AT,
     )
     market = MarketEvidence(
-        quality="PASS",
+        quality=market_quality,
         trading_sessions=(date(2026, 8, 21),),
         evidence=DiagnosticEvidence(
             snapshot=_binding(snapshot_ref),
@@ -244,6 +248,9 @@ def test_qualified_fx_produces_deterministic_max_currency_exposure() -> None:
     )
 
     fx_item = next(item for item in report.items if item.diagnostic_code == "CURRENCY_EXPOSURE")
+    assert report.optimization_need == (
+        "RESEARCH_REQUIRED" if market_quality == "PARTIAL" else "NO_ACTION"
+    )
     assert fx_item.metric_value == "0.5"
     assert fx_item.reference_limit == "0.80"
     assert fx_item.policy_scope == "portfolio:USD"
@@ -258,7 +265,10 @@ def test_qualified_fx_produces_deterministic_max_currency_exposure() -> None:
     )
 
 
-def test_fx_received_after_snapshot_remains_unknown_for_pure_diagnostic() -> None:
+@pytest.mark.parametrize("market_quality", ["PASS", "PARTIAL"])
+def test_fx_received_after_snapshot_remains_unknown_for_pure_diagnostic(
+    market_quality: Literal["PASS", "PARTIAL"],
+) -> None:
     snapshot_ref = _ref("snapshot", "a")
     policy_ref = _ref("policy", "b")
     cash_refs = {
@@ -288,7 +298,7 @@ def test_fx_received_after_snapshot_remains_unknown_for_pure_diagnostic() -> Non
     fx_ref = _ref("DEXHKUS", "e")
     calendar_ref = _ref("calendar", "f")
     market = MarketEvidence(
-        quality="PASS",
+        quality=market_quality,
         trading_sessions=(date(2026, 8, 21),),
         evidence=DiagnosticEvidence(
             snapshot=_binding(snapshot_ref),
