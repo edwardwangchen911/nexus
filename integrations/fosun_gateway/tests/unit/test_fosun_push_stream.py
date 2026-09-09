@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import ANY
 
 import pytest
+from nexus_fosun_gateway import push_stream
 from nexus_fosun_gateway.push_stream import (
     MAX_FRAME,
     PUSH_URL,
@@ -34,6 +35,18 @@ class Socket:
 
     async def send(self, message):
         self.sent.append(json.loads(message))
+
+
+class BlockingSocket(Socket):
+    def __init__(self, frames):
+        super().__init__(frames)
+        self.blocked = asyncio.Event()
+
+    async def recv(self):
+        if self.frames:
+            return await super().recv()
+        self.blocked.set()
+        await asyncio.Event().wait()
 
 
 def _sub_reply(code="usAAPL"):
@@ -257,6 +270,7 @@ async def test_invalid_subscription_protocol_never_looks_complete(
     "reply",
     [
         {**SUB_REPLY, "errMsg": "provider refused"},
+        {**SUB_REPLY, "errMsg": {"code": 1, "msg": "provider refused"}},
         {
             **SUB_REPLY,
             "subRep": [{**SUB_REPLY["subRep"][0], "fcode": ["usAAPL"]}],
@@ -275,9 +289,21 @@ async def test_subrep_requires_exactly_one_code_state_without_error_message(tmp_
 
 
 @pytest.mark.asyncio
-async def test_nonempty_error_message_in_heartbeat_is_protocol_failure(tmp_path):
+@pytest.mark.parametrize("error", [None, "", {}])
+async def test_empty_official_error_message_values_are_not_failures(tmp_path, error):
     result = await _collect(
-        socket=Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17, "errMsg": "provider refused"}]),
+        socket=Socket([{**SUB_REPLY, "errMsg": error}]),
+        directory=tmp_path / "run",
+    )
+
+    assert result["status"] == "bounded_complete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["provider refused", {"code": 1, "msg": "provider refused"}])
+async def test_nonempty_error_message_in_heartbeat_is_protocol_failure(tmp_path, error):
+    result = await _collect(
+        socket=Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17, "errMsg": error}]),
         directory=tmp_path / "run",
     )
 
@@ -313,6 +339,23 @@ async def test_disconnect_after_subscription_is_partial_without_reconnect(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_cancellation_after_a_frame_persists_a_readable_partial_receipt(tmp_path):
+    socket = BlockingSocket([SUB_REPLY])
+    directory = tmp_path / "run"
+    task = asyncio.create_task(_collect(socket=socket, directory=directory, duration=1))
+
+    await socket.blocked.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    archive = load_push_archive(directory)
+    assert archive["status"] == "partial"
+    assert archive["receipt"]["stop_reason"] == "CANCELLED"
+    assert archive["frames"] == ((directory / "frame-00000.json").read_bytes(),)
+
+
+@pytest.mark.asyncio
 async def test_secret_reflection_is_not_persisted(tmp_path):
     escaped_secret = "".join(f"\\u{ord(character):04x}" for character in "synthetic-session")
     nested = json.dumps(_dynamic_quote())[:-1] + f',"extra":"{escaped_secret}"}}'
@@ -341,6 +384,7 @@ async def test_secret_reflection_is_not_persisted(tmp_path):
         _quote_frame(price=0),
         _quote_frame(power=13),
         {**_quote_frame(), "errMsg": "provider refused"},
+        {**_quote_frame(), "errMsg": {"code": 1, "msg": "provider refused"}},
     ],
 )
 async def test_invalid_quote_frame_is_archived_then_partial(tmp_path, quote):
@@ -412,6 +456,86 @@ async def test_loader_recomputes_receipt_counters_to_reject_tampering(tmp_path, 
     assert receipt["quote_message_count"] == 1
     assert receipt["heartbeat_sent_count"] == 0
     receipt[field] = value
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_loader_rejects_excess_receipt_entries_before_any_frame_read(tmp_path, monkeypatch):
+    directory = tmp_path / "run"
+    await _collect(socket=Socket([SUB_REPLY]), directory=directory, max_frames=1)
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["frames"].append(dict(receipt["frames"][0]))
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    original_read_private = push_stream._read_private
+
+    def refuse_frame_read(directory_fd, name, maximum):
+        if name != "receipt.json":
+            pytest.fail("loader read a frame before validating receipt frame bounds")
+        return original_read_private(directory_fd, name, maximum)
+
+    monkeypatch.setattr(push_stream, "_read_private", refuse_frame_read)
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_loader_stops_after_the_frame_that_exceeds_aggregate_bytes(tmp_path, monkeypatch):
+    directory = tmp_path / "run"
+    frame = json.dumps(_quote_frame(padding="x" * 1_800_000)).encode()
+    await _collect(
+        socket=Socket([SUB_REPLY, frame, frame, frame, frame, frame]),
+        directory=directory,
+        duration=1,
+        max_frames=10,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+    raw = (directory / "frame-00001.json").read_bytes()
+    for index in (5, 6):
+        name = f"frame-{index:05}.json"
+        path = directory / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        receipt["frames"].append(
+            {
+                "file": name,
+                "received_at": receipt["frames"][1]["received_at"],
+                "raw_sha256": receipt["frames"][1]["raw_sha256"],
+                "raw_byte_length": len(raw),
+            }
+        )
+    receipt["frame_count"] = len(receipt["frames"])
+    receipt["status"] = "partial"
+    receipt["stop_reason"] = "DISCONNECTED"
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    original_read_private = push_stream._read_private
+    frame_reads = []
+
+    def count_frame_read(directory_fd, name, maximum):
+        if name != "receipt.json":
+            frame_reads.append(name)
+        return original_read_private(directory_fd, name, maximum)
+
+    monkeypatch.setattr(push_stream, "_read_private", count_frame_read)
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(directory)
+
+    assert frame_reads == [f"frame-{index:05}.json" for index in range(6)]
+
+
+@pytest.mark.asyncio
+async def test_loader_rejects_received_at_that_moves_backwards(tmp_path):
+    directory = tmp_path / "run"
+    await _collect(
+        socket=Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}]),
+        directory=directory,
+        max_frames=2,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["frames"][0]["received_at"] = receipt["ended_at"]
+    receipt["frames"][1]["received_at"] = receipt["started_at"]
     (directory / "receipt.json").write_text(json.dumps(receipt))
 
     with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):

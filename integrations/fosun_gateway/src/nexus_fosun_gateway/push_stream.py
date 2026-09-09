@@ -173,8 +173,10 @@ def _validate_heartbeat(message: dict[str, Any]) -> int:
 
 
 def _has_nonempty_err_msg(message: dict[str, Any]) -> bool:
-    value = message.get("errMsg")
-    return isinstance(value, str) and bool(value)
+    if "errMsg" not in message:
+        return False
+    value = message["errMsg"]
+    return not (value is None or value == "" or value == {})
 
 
 def _validate_quote_frame(message: dict[str, Any], *, code: str) -> int:
@@ -375,6 +377,9 @@ async def collect_push_quote(
                 receipt["stop_reason"] = "FRAME_LIMIT"
             except TimeoutError:
                 receipt["stop_reason"] = "DURATION_LIMIT"
+            except asyncio.CancelledError:
+                receipt["stop_reason"] = "CANCELLED"
+                raise
             except PushStreamError as error:
                 receipt["stop_reason"] = str(error)
             except Exception:
@@ -382,6 +387,15 @@ async def collect_push_quote(
             finally:
                 receipt["ended_at"] = now().isoformat()
                 receipt["elapsed_monotonic_seconds"] = monotonic_clock() - started_monotonic
+    except asyncio.CancelledError:
+        receipt["stop_reason"] = "CANCELLED"
+        if "ended_at" not in receipt:
+            receipt["ended_at"] = now().isoformat()
+            receipt["elapsed_monotonic_seconds"] = monotonic_clock() - started_monotonic
+        receipt["frame_count"] = len(receipt["frames"])
+        receipt["status"] = "partial" if receipt["subscription_confirmed"] else "failed"
+        _write_private(directory / "receipt.json", json.dumps(receipt, sort_keys=True).encode())
+        raise
     except Exception:
         pass
     if "ended_at" not in receipt:
@@ -499,6 +513,7 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
     subscribed = False
     quote_message_count = 0
+    previous_received: datetime | None = None
     for index, (entry, raw) in enumerate(zip(entries, frames, strict=True)):
         if (
             not isinstance(entry, dict)
@@ -510,8 +525,13 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         ):
             raise PushStreamError("PUSH_ARCHIVE_INVALID")
         received = _require_utc(entry["received_at"])
-        if not start <= received <= end:
+        if (
+            not start <= received <= end
+            or previous_received is not None
+            and received < previous_received
+        ):
             raise PushStreamError("PUSH_ARCHIVE_INVALID")
+        previous_received = received
         message = _message(raw)
         if not subscribed:
             if "subRep" not in message:
@@ -559,7 +579,7 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
 
 
 def load_push_archive(directory: Path) -> dict[str, Any]:
-    """Load and independently validate one private collector archive without network I/O."""
+    """Check consistency only; cannot externally trust a colluding local archive rewrite."""
     try:
         directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
@@ -570,12 +590,22 @@ def load_push_archive(directory: Path) -> dict[str, Any]:
             raise PushStreamError("PUSH_ARCHIVE_INVALID")
         receipt_raw = _read_private(directory_fd, "receipt.json", 256 * 1024)
         receipt = json.loads(receipt_raw, object_pairs_hook=_unique)
-        if not isinstance(receipt, dict) or not isinstance(receipt.get("frames"), list):
+        if (
+            not isinstance(receipt, dict)
+            or not isinstance(receipt.get("frames"), list)
+            or type(receipt.get("requested_max_frames")) is not int
+            or not 1 <= receipt["requested_max_frames"] <= MAX_FRAMES
+            or len(receipt["frames"]) > receipt["requested_max_frames"]
+        ):
             raise PushStreamError("PUSH_ARCHIVE_INVALID")
-        frames = [
-            _read_private(directory_fd, f"frame-{index:05}.json", MAX_FRAME)
-            for index in range(len(receipt["frames"]))
-        ]
+        frames = []
+        byte_count = 0
+        for index in range(len(receipt["frames"])):
+            frame = _read_private(directory_fd, f"frame-{index:05}.json", MAX_FRAME)
+            byte_count += len(frame)
+            if byte_count > MAX_BYTES:
+                raise PushStreamError("PUSH_ARCHIVE_INVALID")
+            frames.append(frame)
         expected_names = {
             "receipt.json",
             *(f"frame-{index:05}.json" for index in range(len(frames))),
