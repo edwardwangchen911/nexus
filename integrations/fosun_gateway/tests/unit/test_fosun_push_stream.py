@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import monotonic
 from unittest.mock import ANY
 
@@ -11,6 +13,7 @@ from nexus_fosun_gateway.push_stream import (
     PUSH_URL,
     PushStreamError,
     collect_push_quote,
+    load_latest_push_quote,
     load_push_archive,
 )
 
@@ -162,6 +165,95 @@ def _controlled_collect(*, socket, directory, monkeypatch, **kwargs):
         now=lambda: datetime(2024, 1, 1, tzinfo=UTC) + timedelta(seconds=clock.elapsed),
         **kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_latest_push_quote_preserves_archive_and_scales_last_price(tmp_path):
+    directory = tmp_path / "run"
+    clock = ReceiveClock(Socket([]))
+    frames = [
+        SUB_REPLY,
+        _quote_frame(price=12_345, power=2),
+        _quote_frame(price=12_346, power=2),
+    ]
+    socket = Socket(frames)
+    clock.socket = socket
+
+    await _collect(
+        socket=socket,
+        directory=directory,
+        max_frames=len(frames),
+        monotonic_clock=clock.monotonic,
+        now=lambda: datetime(2024, 1, 1, tzinfo=UTC)
+        + timedelta(seconds=clock.elapsed),
+    )
+
+    quote = load_latest_push_quote(directory)
+
+    assert quote.code == "usAAPL"
+    assert quote.price == Decimal("123.46")
+    assert quote.provider_quote_date == 20240101
+    assert quote.provider_quote_time == 1_704_067_200_000
+    assert quote.frame_received_at == datetime(2024, 1, 1, tzinfo=UTC)
+    assert quote.archive_completed_at == datetime(2024, 1, 1, tzinfo=UTC)
+    document = json.loads(quote.raw_archive_payload)
+    assert document["schema"] == "fosun_push_quote_archive_v1"
+    assert base64.b64decode(document["receipt_base64"]) == (
+        directory / "receipt.json"
+    ).read_bytes()
+    assert [base64.b64decode(value) for value in document["frames_base64"]] == [
+        (directory / f"frame-{index:05}.json").read_bytes() for index in range(len(frames))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_latest_push_quote_rejects_complete_window_without_quote(tmp_path):
+    directory = tmp_path / "run"
+    await _collect(socket=Socket([SUB_REPLY]), directory=directory)
+
+    with pytest.raises(PushStreamError, match="PUSH_QUOTE_UNAVAILABLE"):
+        load_latest_push_quote(directory)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("price", [0, -1])
+async def test_latest_push_quote_rejects_nonpositive_price(tmp_path, price):
+    directory = tmp_path / "run"
+    await _collect(
+        socket=Socket([SUB_REPLY, _quote_frame(price=price)]),
+        directory=directory,
+        max_frames=2,
+    )
+
+    with pytest.raises(PushStreamError, match="PUSH_QUOTE_UNAVAILABLE"):
+        load_latest_push_quote(directory)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("power", [-1, 13])
+async def test_latest_push_quote_rejects_unpublished_scale(tmp_path, power):
+    directory = tmp_path / "run"
+    await _collect(
+        socket=Socket([SUB_REPLY, _quote_frame(power=power)]),
+        directory=directory,
+        max_frames=2,
+    )
+
+    with pytest.raises(PushStreamError, match="PUSH_QUOTE_UNAVAILABLE"):
+        load_latest_push_quote(directory)
+
+
+@pytest.mark.asyncio
+async def test_latest_push_quote_rejects_partial_archive(tmp_path):
+    directory = tmp_path / "run"
+    result = await _collect(
+        socket=Socket([SUB_REPLY, _quote_frame(), RuntimeError("disconnect")]),
+        directory=directory,
+    )
+    assert result["status"] == "partial"
+
+    with pytest.raises(PushStreamError, match="PUSH_QUOTE_UNAVAILABLE"):
+        load_latest_push_quote(directory)
 
 
 @pytest.mark.asyncio

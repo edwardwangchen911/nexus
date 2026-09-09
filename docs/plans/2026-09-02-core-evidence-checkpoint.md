@@ -3131,3 +3131,7 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 真实验收的前两次受控调用均完成一次会话和 WSS 订阅，但在收到首个成功回执后被本地严格校验拒绝：真实外层 topic 为小写 `subrep`，且成功项省略 schema 中非 required 的三个空数组。两份失败收据和原帧分别保留，未重标、未自动重放；每次都先以脱敏同形回归复现并修复，再使用新目录调用。第三次在 `main@4fc35f8` 只执行一次 20 秒、最多 20 帧的真实 probe，因时长上限正常结束：订阅确认，归档 13 帧，其中 1 个 `subrep`、12 个 `qt`、12 条行情；发送 1 次应用心跳，窗口结束前未收到 ACK。v2 loader 离线重读通过，全部文件权限为 `600`。
 
 三次调用共 3 次 REST 会话请求、3 次 WSS 连接，自动重试 0；模型调用、账户写入、模拟盘/实盘订单均为 0，执行锁未改变。私有归档位于 `.secrets/nexus-fosun-push-acceptance-20260909*`，不进入版本库或聊天。当前已证明复星行情订阅、接收和有界私有归档链路可用，但仍未接 Provider Worker、数据库、API 或页面，也不证明全天覆盖、逐秒必达或持续运行稳定性；下一切片只需复用现有行情 artifact/snapshot 读侧，不新增调度器、事件总线或自动重连。
+
+后续只读接线核查发现，现有 `LatestQuote` 权威链只接纳 REST `fosun_get_quotes` 运行时冻结的 capability/status 与 `fosun_gateway_market_snapshot_v1` 原件。上述已成功 v2 WebSocket 归档没有冻结 Engine 采集时的 capability/status 身份；事后套用当前 REST binding 会错记来源操作和授权时点，因此未将其写入价格权威或放宽数据库门禁。
+
+本切片新增纯读标准化输入：只对 `bounded_complete` 且实际含行情的归档取最后一条价格，按已有 0–12 位 `power` 规则精确缩放并拒绝非正价；`qtDate/qtTime` 只保留原始整数，不推断时区。标准 artifact 以 base64 保留 receipt 和全部 frame 的逐字节可回放性，未使用重序列化内容冒充原件。已有真实成功归档的离线 loader→标准化重读通过，未新建上游连接。真正入库的下一个必要动作是：采集前冻结独立的 push 读权限并绑定归档，再让新 schema 只进入 display-only 查询；研究、风控、交易和 `execution_locked=true` 不变。

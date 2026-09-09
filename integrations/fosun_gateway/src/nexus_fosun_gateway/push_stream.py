@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from math import ceil
 from pathlib import Path
@@ -49,6 +52,19 @@ DYNAMIC_QUOTE_FIELDS = frozenset(
 
 class PushStreamError(ValueError):
     """A stable, value-free collector or archive error."""
+
+
+@dataclass(frozen=True)
+class LatestPushQuote:
+    """One display-only price from a fully validated bounded push archive."""
+
+    code: str
+    price: Decimal
+    provider_quote_date: int
+    provider_quote_time: int
+    frame_received_at: datetime
+    archive_completed_at: datetime
+    raw_archive_payload: bytes
 
 
 class _FixedConnect(connect):
@@ -701,3 +717,49 @@ def load_push_archive(directory: Path) -> dict[str, Any]:
     finally:
         os.close(directory_fd)
     return {**_validate_receipt(receipt, frames), "receipt_raw": receipt_raw}
+
+
+def load_latest_push_quote(directory: Path) -> LatestPushQuote:
+    """Load the last price from a complete archive without inferring provider time zone."""
+    archive = load_push_archive(directory)
+    receipt = archive["receipt"]
+    frames = archive["frames"]
+    if archive["status"] != "bounded_complete" or receipt["quote_message_count"] < 1:
+        raise PushStreamError("PUSH_QUOTE_UNAVAILABLE")
+    latest: dict[str, Any] | None = None
+    frame_received_at: datetime | None = None
+    for entry, raw in zip(receipt["frames"], frames, strict=True):
+        message = _message(raw)
+        if message.get("topic") != TOPIC or "subRep" in message:
+            continue
+        for item in message["items"]:
+            latest = _message(item["msg"].encode())
+            frame_received_at = _require_utc(entry["received_at"])
+    if latest is None or frame_received_at is None:
+        raise PushStreamError("PUSH_QUOTE_UNAVAILABLE")
+    price, power = latest["price"], latest["power"]
+    if (
+        type(price) is not int
+        or type(power) is not int
+        or price <= 0
+        or not 0 <= power <= 12
+    ):
+        raise PushStreamError("PUSH_QUOTE_UNAVAILABLE")
+    raw_archive_payload = json.dumps(
+        {
+            "schema": "fosun_push_quote_archive_v1",
+            "receipt_base64": base64.b64encode(archive["receipt_raw"]).decode("ascii"),
+            "frames_base64": [base64.b64encode(frame).decode("ascii") for frame in frames],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return LatestPushQuote(
+        code=receipt["code"],
+        price=Decimal(price) / (Decimal(10) ** power),
+        provider_quote_date=latest["qtDate"],
+        provider_quote_time=latest["qtTime"],
+        frame_received_at=frame_received_at,
+        archive_completed_at=_require_utc(receipt["ended_at"]),
+        raw_archive_payload=raw_archive_payload,
+    )
