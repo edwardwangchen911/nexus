@@ -13,7 +13,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from threading import Event, Lock, Thread
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
+
+from pydantic import SecretStr
 
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
 from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
@@ -101,6 +103,14 @@ _MIN_DISPATCH_INTERVAL_SECONDS = 1.0
 _SYMBOL_PATTERN = re.compile(r"us[A-Z][A-Z0-9.]{0,14}")
 _PROBE_BUNDLE_ATTESTATION = object()
 _PROBE_CONTROLS_CLOSE_TIMEOUT_SECONDS = 11.0
+
+
+class ProbeTransportSettings(Protocol):
+    fsopenapi_base_url: str
+    fsopenapi_api_key: SecretStr
+    fsopenapi_client_private_key: SecretStr
+    fsopenapi_server_public_key: SecretStr
+    probe_https_proxy_url: str
 
 
 def _utc_now() -> datetime:
@@ -372,6 +382,32 @@ class ProbeTransportBundle:
         if failed:
             raise ProbeSdkError("PROBE_FAILED")
 
+    async def create_push_session(self) -> str:
+        """Create exactly one hardened REST session for a bounded push probe."""
+        if not self.is_bound_to(self._budget):
+            raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
+        client = getattr(self.transport, "_client", None)
+        auth_manager = getattr(client, "auth_manager", None)
+        get_valid_session = getattr(auth_manager, "get_valid_session", None)
+        if not callable(get_valid_session):
+            raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
+        try:
+            with self._budget.operation("Accounts"):
+                result = await asyncio.to_thread(get_valid_session)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception:
+            raise ProbeSdkError("PROBE_FAILED", category="auth") from None
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 3
+            or not isinstance(result[0], str)
+            or not result[0]
+            or not result[0].isascii()
+        ):
+            raise ProbeSdkError("PROBE_FAILED", category="auth")
+        return result[0]
+
 
 async def _close_probe_controls_bounded(controls: ProbeTlsControls) -> None:
     """Keep synchronous session revocation off-loop and bound one-shot shutdown."""
@@ -577,7 +613,7 @@ class PhysicalHttpBudget:
 
 def build_probe_transport(
     manifest_document: object,
-    settings: ProbeProviderSettings,
+    settings: ProbeProviderSettings | ProbeTransportSettings,
     budget: PhysicalHttpBudget,
 ) -> ProbeTransportBundle:
     """Construct the sole admitted, counted, no-retry probe transport."""

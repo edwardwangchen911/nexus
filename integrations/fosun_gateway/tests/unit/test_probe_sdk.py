@@ -2142,6 +2142,28 @@ class _HarnessRequests:
         return self._harness.new_auth_session()
 
 
+@pytest.mark.asyncio
+async def test_push_session_uses_one_hardened_auth_request_and_returns_only_session_id() -> None:
+    budget = _new_budget()
+    transport = InstrumentedTransport(budget)
+
+    def get_valid_session() -> tuple[str, bytes, bytes]:
+        response = transport.auth_module.requests.post("https://provider.invalid/session")
+        assert response.status_code == 200
+        return "synthetic-session", b"synthetic-signing", b"synthetic-encryption"
+
+    transport.client.auth_manager = SimpleNamespace(get_valid_session=get_valid_session)
+    bundle = _probe_bundle(transport, RecordingControls(), budget)
+
+    session = await bundle.create_push_session()
+
+    counts = dict(budget.snapshot().counts)
+    assert session == "synthetic-session"
+    assert counts["Session"] == 1
+    assert counts["Accounts"] == 0
+    await bundle.aclose()
+
+
 def _raw(data: object, request_id: str) -> dict[str, object]:
     return {"code": 0, "requestId": request_id, "data": data}
 

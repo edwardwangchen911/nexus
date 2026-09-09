@@ -202,6 +202,8 @@ async def test_confirmed_silent_quote_window_is_bounded_and_archived_privately(t
                 "max_size": 2 * 1024 * 1024,
                 "max_queue": 1,
                 "compression": None,
+                "ping_interval": None,
+                "proxy": None,
                 "logger": ANY,
             },
         )
@@ -216,6 +218,50 @@ async def test_confirmed_silent_quote_window_is_bounded_and_archived_privately(t
     assert "synthetic-session" not in (tmp_path / "run" / "receipt.json").read_text()
     assert (tmp_path / "run").stat().st_mode & 0o077 == 0
     assert all(path.stat().st_mode & 0o077 == 0 for path in (tmp_path / "run").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_explicit_probe_proxy_is_pinned_without_library_ping(tmp_path):
+    socket = Socket([SUB_REPLY])
+    calls = []
+
+    def connector(url, **kwargs):
+        calls.append((url, kwargs))
+        return socket
+
+    result = await collect_push_quote(
+        code="usAAPL",
+        directory=tmp_path / "run",
+        api_key="synthetic-api-key",
+        session="synthetic-session",
+        duration=0.03,
+        connector=connector,
+        request_id_factory=lambda: "request-123",
+        proxy_url="http://127.0.0.1:9090",
+    )
+
+    assert result["status"] == "bounded_complete"
+    assert calls[0][1]["proxy"] == "http://127.0.0.1:9090"
+    assert calls[0][1]["ping_interval"] is None
+
+
+@pytest.mark.parametrize(
+    "proxy_url",
+    ["", "http://localhost:9090", "http://127.0.0.1:9091", "http://user:secret@127.0.0.1:9090"],
+)
+def test_collector_rejects_unreviewed_proxy_before_creating_archive(tmp_path, proxy_url):
+    with pytest.raises(PushStreamError, match="PUSH_PROXY_INVALID"):
+        asyncio.run(
+            collect_push_quote(
+                code="usAAPL",
+                directory=tmp_path / "run",
+                api_key="synthetic-api-key",
+                session="synthetic-session",
+                proxy_url=proxy_url,
+            )
+        )
+
+    assert not (tmp_path / "run").exists()
 
 
 @pytest.mark.asyncio

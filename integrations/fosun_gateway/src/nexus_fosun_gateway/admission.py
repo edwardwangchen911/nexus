@@ -19,6 +19,10 @@ _READ_ONLY_OPENAPI: dict[str, tuple[str, str]] = {
         "87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808",
     ),
 }
+_PUSH_OPENAPI = (
+    "https://openapi-docs.fosunxcz.com/specs/public/market/push/openapi.yaml",
+    "15f5416f268c9c47cdcef6a2ff7eaaa89ab4b61f1c9927074969b1e3fef32c05",
+)
 _REQUIRED_EVIDENCE = (
     "written_permission",
     "provider_test_vector",
@@ -109,6 +113,29 @@ def probe_ready_sdk_subject(document: object) -> AdmittedSdkSubject | None:
     return _validated_sdk_subject(
         document, status="probe_ready"
     ) or _validated_sdk_subject(document, status="admitted")
+
+
+def push_probe_ready_sdk_subject(document: object) -> AdmittedSdkSubject | None:
+    """Return the frozen subject only when the push contract is bound too."""
+    subject = probe_ready_sdk_subject(document)
+    if subject is None or not isinstance(document, Mapping):
+        return None
+    openapi = document.get("openapi")
+    admission = document.get("admission")
+    if not isinstance(openapi, Mapping) or not isinstance(admission, Mapping):
+        return None
+    contract = openapi.get("push")
+    hashes = admission.get("openapi_sha256")
+    url, digest = _PUSH_OPENAPI
+    if (
+        not isinstance(contract, Mapping)
+        or contract.get("url") != url
+        or contract.get("sha256") != digest
+        or not isinstance(hashes, Mapping)
+        or hashes.get("push") != digest
+    ):
+        return None
+    return subject
 
 
 def _validated_sdk_subject(

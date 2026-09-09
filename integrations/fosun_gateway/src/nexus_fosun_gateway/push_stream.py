@@ -27,6 +27,7 @@ MAX_DURATION_SECONDS = 300
 MAX_FRAMES = 100
 CLOSE_TIMEOUT_SECONDS = 1
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
+LOCAL_PROBE_PROXY_URL = "http://127.0.0.1:9090"
 DYNAMIC_QUOTE_FIELDS = frozenset(
     {
         "qtTime",
@@ -103,6 +104,12 @@ def _validate_heartbeat_interval(value: float) -> float:
     if type(value) not in {int, float} or value != DEFAULT_HEARTBEAT_INTERVAL_SECONDS:
         raise PushStreamError("PUSH_HEARTBEAT_INTERVAL_INVALID")
     return float(value)
+
+
+def _validate_proxy_url(value: str | None) -> str | None:
+    if value not in {None, LOCAL_PROBE_PROXY_URL}:
+        raise PushStreamError("PUSH_PROXY_INVALID")
+    return value
 
 
 def _validate_credential(value: str) -> str:
@@ -249,6 +256,7 @@ async def collect_push_quote(
     connector: Any = _FixedConnect,
     request_id_factory: Any = lambda: token_hex(8),
     heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    proxy_url: str | None = None,
     monotonic_clock: Callable[[], float] = monotonic,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
@@ -256,6 +264,7 @@ async def collect_push_quote(
     code = _validate_code(code)
     duration, max_frames = _validate_limits(duration, max_frames)
     heartbeat_interval_seconds = _validate_heartbeat_interval(heartbeat_interval_seconds)
+    proxy_url = _validate_proxy_url(proxy_url)
     api_key, session = _validate_credential(api_key), _validate_credential(session)
     request_id = _validate_request_id(request_id_factory())
     directory.mkdir(mode=0o700)
@@ -297,6 +306,8 @@ async def collect_push_quote(
             max_size=MAX_FRAME,
             max_queue=1,
             compression=None,
+            ping_interval=None,
+            proxy=proxy_url,
             logger=logger,
         ) as socket:
 

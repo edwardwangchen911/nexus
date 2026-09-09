@@ -2,26 +2,24 @@
 
 ## Current ruling
 
-The SDK and REST contract are **`probe_ready` for one private, local, read-only probe**. This is not
-a production admission. It does
-not activate credentials, call Fosun, start continuous collection, enable push, deploy a service,
-or authorize an order. The runtime boolean alone cannot override the manifest and probe evidence.
+The frozen SDK, REST contracts, and exact push contract are **`probe_ready` for private, local,
+one-shot read-only probes**. This is not a production admission. It does not activate credentials,
+start continuous collection, deploy a service, or authorize an order. The runtime boolean alone
+cannot override the manifest and probe evidence.
 Long-running Provider Worker and production Gateway activation remain separate later gates.
 The reviewed production REST base URL is now bound as
 `https://openapi.fosunxcz.com`; runtime configuration must match it byte-for-byte.
-The SDK source also identifies the production push endpoint as
-`wss://openapi-push.fosunxcz.com/msg/v1/push`, but push is outside the initial
-pull-only activation and does not block it.
+The SDK source and frozen push contract identify the production push endpoint as
+`wss://openapi-push.fosunxcz.com/msg/v1/push`. Only one explicit bounded `qt` probe is admitted;
+continuous push runtime remains closed.
 
 NEXUS now also contains a Gateway-owned offline-tested bounded collector for one explicit `qt`
 subscription. It fixes the reviewed endpoint and 15-second application heartbeat, accepts one
 strict US or HK code, never reconnects, and writes a private size/time/frame-bounded raw archive
 with a consistency-checked receipt. This is reusable implementation evidence only: it has no
 credential-loading CLI or service route, is not wired to Provider Worker, database, API, or Web,
-and no real WebSocket connection may be started under the current REST-only admission. A real
-probe requires separate evidence that the provider-approved private use covers market push; a
-successful connection would prove only that bounded probe, not continuous coverage or runtime
-admission.
+and is not wired to Provider Worker, database, API, or Web. A successful connection proves only
+that bounded probe, not continuous coverage or runtime admission.
 
 The reviewed candidate is tag [`v1.2.0`](https://github.com/fosunwealth/openapi-python-sdk/tree/891d95fb4967efaa682387c1b35966ceea38fb21)
 at commit `891d95fb4967efaa682387c1b35966ceea38fb21`. A separate public-source refresh on
@@ -32,13 +30,17 @@ at commit `891d95fb4967efaa682387c1b35966ceea38fb21`. A separate public-source r
 ## Private-use basis
 
 Both reviewed SDK trees contain `setup.py` but no standard `LICENSE`, `COPYING`, or `NOTICE` file.
-The user confirmed on 2026-08-31 that Fosun OpenAPI access was approved, and Fosun's official
+The user confirmed on 2026-08-31 that Fosun OpenAPI access and market permissions were approved,
+and Fosun's current official [permission guide](https://openapi-docs.fosunxcz.com/docs/content/permission.md)
+states that separately approved OpenAPI market-data permission supports both active queries and
+real-time subscription push. Fosun's official
 [`fw-trading`](https://github.com/fosunwealth/fw-trading/tree/157c52fda8387c2ae658bb2010060df75d269f07)
 repository at commit `157c52fda8387c2ae658bb2010060df75d269f07`
 instructs approved users to install `fsopenapi` and use the production REST base URL. Together these
-form the recorded basis for private, single-user REST read-only use in NEXUS. The manifest therefore
-records `PROVIDER-AUTHORIZED-PRIVATE-USE`; this is not an open-source license, does not authorize
-redistribution, and does not cover push or order execution. A conflicting provider term stops use.
+form the recorded basis for private, single-user REST read-only use and one bounded market push
+probe in NEXUS. The manifest therefore records `PROVIDER-AUTHORIZED-PRIVATE-USE`; this is not an
+open-source license, does not authorize redistribution, continuous push runtime, or order
+execution. A conflicting provider term stops use.
 
 The frozen candidate still calls `requests.Session.request(..., verify=False)` in
 [`fsopenapi/client.py`](https://github.com/fosunwealth/openapi-python-sdk/blob/891d95fb4967efaa682387c1b35966ceea38fb21/fsopenapi/client.py#L154-L158).

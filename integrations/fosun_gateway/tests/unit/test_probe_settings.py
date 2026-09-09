@@ -4,7 +4,7 @@ from pathlib import Path
 import nexus_fosun_gateway.admission as admission
 import pytest
 from nexus_fosun_gateway.admission import admitted_sdk_subject
-from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
+from nexus_fosun_gateway.probe_settings import ProbeProviderSettings, PushProbeProviderSettings
 from pydantic import ValidationError
 
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
@@ -49,6 +49,16 @@ def test_pull_only_admission_does_not_depend_on_deferred_push_contract() -> None
 
     assert subject is not None
     assert subject.provider_base_url == "https://openapi.fosunxcz.com"
+
+
+def test_push_probe_admission_requires_the_exact_frozen_push_contract() -> None:
+    document = json.loads(MANIFEST_PATH.read_bytes())
+
+    subject = admission.push_probe_ready_sdk_subject(document)
+
+    assert subject is not None
+    document["openapi"]["push"]["sha256"] = "0" * 64
+    assert admission.push_probe_ready_sdk_subject(document) is None
 
 
 @pytest.mark.parametrize(
@@ -97,6 +107,56 @@ def test_probe_settings_require_explicit_admission_and_hide_secrets(
     values["FOSUN_SDK_ADMITTED"] = False
     with pytest.raises(ValidationError):
         ProbeProviderSettings.model_validate(values)
+
+
+def test_push_probe_settings_are_minimal_and_hide_provider_material() -> None:
+    values = {
+        "FOSUN_PROVIDER_MANIFEST": str(MANIFEST_PATH),
+        "FOSUN_SDK_ADMITTED": "true",
+        "FOSUN_PROBE_HTTPS_PROXY_URL": "http://127.0.0.1:9090",
+        "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
+        "FSOPENAPI_API_KEY": "synthetic-api-key-canary",
+        "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key-canary",
+        "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-server-key-canary",
+    }
+
+    settings = PushProbeProviderSettings.model_validate(values)
+
+    rendered = repr(settings)
+    assert settings.provider_manifest == MANIFEST_PATH
+    assert settings.sdk_admitted is True
+    assert "synthetic-api-key-canary" not in rendered
+    assert "synthetic-private-key-canary" not in rendered
+    assert "synthetic-server-key-canary" not in rendered
+    assert "output_dir" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("FOSUN_SDK_ADMITTED", "True"),
+        ("FOSUN_PROVIDER_MANIFEST", "relative/manifest.json"),
+        ("FOSUN_PROBE_HTTPS_PROXY_URL", "http://127.0.0.1:9091"),
+        ("FSOPENAPI_BASE_URL", "https://openapi.fosunxcz.com/"),
+        ("FSOPENAPI_API_KEY", " "),
+        ("FSOPENAPI_CLIENT_PRIVATE_KEY", " "),
+        ("FSOPENAPI_SERVER_PUBLIC_KEY", " "),
+    ],
+)
+def test_push_probe_settings_fail_closed(field: str, value: object) -> None:
+    values = {
+        "FOSUN_PROVIDER_MANIFEST": str(MANIFEST_PATH),
+        "FOSUN_SDK_ADMITTED": "true",
+        "FOSUN_PROBE_HTTPS_PROXY_URL": "http://127.0.0.1:9090",
+        "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
+        "FSOPENAPI_API_KEY": "synthetic-api-key",
+        "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",
+        "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-server-key",
+    }
+    values[field] = value
+
+    with pytest.raises(ValidationError):
+        PushProbeProviderSettings.model_validate(values)
 
 
 @pytest.mark.parametrize(

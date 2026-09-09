@@ -105,3 +105,73 @@ class ProbeProviderSettings(BaseSettings):
             ("provider_manifest", self.provider_manifest),
             ("sdk_admitted", self.sdk_admitted),
         ]
+
+
+class PushProbeProviderSettings(BaseSettings):
+    """Only the provider inputs needed by one bounded market push probe."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        env_ignore_empty=True,
+        extra="ignore",
+        hide_input_in_errors=True,
+        populate_by_name=True,
+    )
+
+    provider_manifest: Path = Field(validation_alias="FOSUN_PROVIDER_MANIFEST")
+    sdk_admitted: Literal[True] = Field(validation_alias="FOSUN_SDK_ADMITTED")
+    probe_https_proxy_url: str = Field(validation_alias="FOSUN_PROBE_HTTPS_PROXY_URL")
+    fsopenapi_base_url: str = Field(validation_alias="FSOPENAPI_BASE_URL")
+    fsopenapi_api_key: SecretStr = Field(validation_alias="FSOPENAPI_API_KEY")
+    fsopenapi_client_private_key: SecretStr = Field(
+        validation_alias="FSOPENAPI_CLIENT_PRIVATE_KEY"
+    )
+    fsopenapi_server_public_key: SecretStr = Field(
+        validation_alias="FSOPENAPI_SERVER_PUBLIC_KEY"
+    )
+
+    @field_validator("provider_manifest")
+    @classmethod
+    def manifest_path_is_absolute(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("provider manifest path must be absolute")
+        return value
+
+    @field_validator("sdk_admitted", mode="before")
+    @classmethod
+    def sdk_admitted_accepts_only_exact_true(cls, value: object) -> object:
+        if value is True or value == "true":
+            return True
+        raise ValueError("probe SDK admission switch must be exact true")
+
+    @field_validator("fsopenapi_base_url")
+    @classmethod
+    def provider_base_url_is_exact_https(cls, value: str) -> str:
+        if value != FOSUN_REST_BASE_URL:
+            raise ValueError("provider base URL must be the reviewed Fosun REST origin")
+        return value
+
+    @field_validator("probe_https_proxy_url")
+    @classmethod
+    def probe_https_proxy_is_exact_loopback(cls, value: str) -> str:
+        if value != FOSUN_LOCAL_PROBE_HTTPS_PROXY_URL:
+            raise ValueError("probe HTTPS proxy must be the reviewed local endpoint")
+        return value
+
+    @field_validator(
+        "fsopenapi_api_key",
+        "fsopenapi_client_private_key",
+        "fsopenapi_server_public_key",
+    )
+    @classmethod
+    def provider_material_is_present(cls, value: SecretStr) -> SecretStr:
+        material = value.get_secret_value()
+        if not material.strip() or len(material) > 64 * 1024:
+            raise ValueError("provider material is invalid")
+        return value
+
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        return [
+            ("provider_manifest", self.provider_manifest),
+            ("sdk_admitted", self.sdk_admitted),
+        ]
