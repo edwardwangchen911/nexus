@@ -25,6 +25,7 @@ def test_cash_reduction_changes_drawdown_and_sector_exposure() -> None:
         closes={instrument: closes},
         benchmark=closes,
         sectors={instrument: {"technology": Decimal("1")}},
+        sector_required_ids=frozenset({instrument}),
         refs=(),
     )
     hold = scenario_metrics({instrument: Decimal("1")}, evidence)
@@ -47,6 +48,7 @@ def test_missing_history_or_sector_never_becomes_zero_risk() -> None:
         closes={},
         benchmark={},
         sectors={},
+        sector_required_ids=frozenset({UUID(int=1)}),
         refs=(),
     )
     result = scenario_metrics({UUID(int=1): Decimal("0.5")}, evidence)
@@ -63,6 +65,7 @@ def _evidence(count=253):
         {UUID(int=1): prices},
         prices,
         {},
+        frozenset({UUID(int=1)}),
         (),
     )
 

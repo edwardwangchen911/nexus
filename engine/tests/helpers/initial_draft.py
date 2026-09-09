@@ -76,6 +76,9 @@ async def seed_initial_draft(database_url: str, invalid: str = "") -> tuple[UUID
         )
         for index, instrument_id in enumerate(instrument_ids):
             currency = "HKD" if invalid == "mixed_currency" and index == 1 else "USD"
+            non_equity = (
+                invalid == "non_equity_without_sector" and index == len(instrument_ids) - 1
+            )
             if invalid == "zero_quantity" and index == len(instrument_ids) - 1:
                 quantity = 0
             elif invalid == "negative_quantity" and index == len(instrument_ids) - 1:
@@ -89,11 +92,11 @@ async def seed_initial_draft(database_url: str, invalid: str = "") -> tuple[UUID
             db.add(
                 Instrument(
                     id=instrument_id,
-                    asset_type="equity",
+                    asset_type="exchange_traded_note" if non_equity else "equity",
                     exchange="XNAS",
                     currency=currency,
                     tick_size=Decimal("0.01"),
-                    risk_bucket="us_equity",
+                    risk_bucket="EXCHANGE_TRADED_NOTE" if non_equity else "us_equity",
                 )
             )
             await db.flush()

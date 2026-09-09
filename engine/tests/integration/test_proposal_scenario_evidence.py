@@ -25,12 +25,23 @@ from sqlalchemy import select
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["", "future", "unreviewed", "future_prices", "short64", "raw"])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "",
+        "future",
+        "unreviewed",
+        "future_prices",
+        "short64",
+        "raw",
+        "non_equity_without_sector",
+    ],
+)
 async def test_draft_api_recomputes_risk_from_db_and_rejects_unqualified_sectors(
     migrated_database_url: str,
     invalid: str,
 ) -> None:
-    baseline, diagnostic = await _seed(migrated_database_url)
+    baseline, diagnostic = await _seed(migrated_database_url, invalid)
     payloads: dict[str, bytes] = {}
     async with session_factory(settings(migrated_database_url))() as db, db.begin():
         await _seed_spy(db)
@@ -46,6 +57,8 @@ async def test_draft_api_recomputes_risk_from_db_and_rejects_unqualified_sectors
                 session_count=64 if invalid == "short64" else 253,
                 adjustment="raw" if invalid == "raw" else "all",
             )
+            if invalid == "non_equity_without_sector" and index == 4:
+                continue
             db.add(
                 SectorExposure(
                     instrument_id=instrument,
@@ -88,6 +101,8 @@ async def test_draft_api_recomputes_risk_from_db_and_rejects_unqualified_sectors
         assert minimum["sector_exposure"]["status"] == (
             "unknown" if invalid in {"future", "unreviewed"} else "known"
         )
+        if invalid == "non_equity_without_sector":
+            assert Decimal(hold["sector_exposure"]["value"]) == Decimal("0.9")
         if not invalid:
             assert Decimal(minimum["sector_exposure"]["value"]) < Decimal("1")
         assert not data["shadow_eligibility"]["eligible"]

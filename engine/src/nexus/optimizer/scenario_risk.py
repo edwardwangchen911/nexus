@@ -21,7 +21,7 @@ from nexus.diagnostics.metrics import (
 from nexus.diagnostics.repository import load_instrument_identities
 from nexus.domain.evidence import EvidenceRef
 from nexus.optimizer.compare import TypedMetric
-from nexus.persistence.models.market import SectorExposure
+from nexus.persistence.models.market import Instrument, SectorExposure
 from nexus.providers.broker.base import PortfolioSnapshot
 
 
@@ -33,6 +33,7 @@ class ScenarioEvidence:
     closes: Mapping[UUID, Mapping[date, Decimal]]
     benchmark: Mapping[date, Decimal]
     sectors: Mapping[UUID, Mapping[str, Decimal]]
+    sector_required_ids: frozenset[UUID]
     refs: tuple[EvidenceRef, ...]
 
 
@@ -44,12 +45,24 @@ async def load_scenario_evidence(
     """Reuse DB-qualified price assembly and reviewed point-in-time sector facts."""
     if snapshot.as_of is None:
         raise ValueError("SCENARIO_VALUATION_TIME_MISSING")
-    ids = {p.instrument_id for p in snapshot.positions}
+    ids = {p.instrument_id for p in snapshot.positions if p.quantity > 0}
+    instruments = tuple(
+        await session.scalars(select(Instrument).where(Instrument.id.in_(ids)))
+    )
+    known_instrument_ids = {instrument.id for instrument in instruments}
+    sector_required_ids = frozenset(
+        {
+            instrument.id
+            for instrument in instruments
+            if instrument.risk_bucket.upper() in {"EQUITY", "US_EQUITY"}
+        }
+        | (ids - known_instrument_ids)
+    )
     rows = tuple(
         await session.scalars(
             select(SectorExposure)
             .where(
-                SectorExposure.instrument_id.in_(ids),
+                SectorExposure.instrument_id.in_(sector_required_ids),
                 SectorExposure.as_of <= snapshot.as_of.date(),
                 SectorExposure.created_at <= snapshot.as_of,
                 SectorExposure.reviewed.is_(True),
@@ -60,7 +73,7 @@ async def load_scenario_evidence(
     )
     sectors: dict[UUID, dict[str, Decimal]] = {}
     refs: list[EvidenceRef] = []
-    for instrument_id in sorted(ids, key=str):
+    for instrument_id in sorted(sector_required_ids, key=str):
         candidates = [r for r in rows if r.instrument_id == instrument_id]
         if not candidates:
             continue
@@ -111,7 +124,14 @@ async def load_scenario_evidence(
             if market.evidence.trading_calendar is not None:
                 refs.extend(market.evidence.trading_calendar.refs)
     return ScenarioEvidence(
-        snapshot.id, snapshot.as_of, sessions, closes, benchmark, sectors, tuple(refs)
+        snapshot.id,
+        snapshot.as_of,
+        sessions,
+        closes,
+        benchmark,
+        sectors,
+        sector_required_ids,
+        tuple(refs),
     )
 
 
@@ -140,12 +160,19 @@ def scenario_metrics(
     positive = {i: w for i, w in weights.items() if w > 0}
     if any(ref.available_at > evidence.valuation_time for ref in evidence.refs):
         return result
-    if positive and all(i in evidence.sectors for i in positive):
+    sector_positive = {
+        instrument: weight
+        for instrument, weight in positive.items()
+        if instrument in evidence.sector_required_ids
+    }
+    if all(i in evidence.sectors for i in sector_positive):
         totals: defaultdict[str, Decimal] = defaultdict(lambda: Decimal(0))
-        for instrument, weight in positive.items():
+        for instrument, weight in sector_positive.items():
             for sector, fraction in evidence.sectors[instrument].items():
                 totals[sector] += weight * fraction
-        result["sector_exposure"] = TypedMetric.known(max(totals.values()))
+        result["sector_exposure"] = TypedMetric.known(
+            max(totals.values(), default=Decimal(0))
+        )
     sessions = evidence.sessions[-253:]
     if (
         not positive
