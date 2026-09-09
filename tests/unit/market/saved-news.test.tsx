@@ -35,9 +35,18 @@ it("labels a saved bounded stream without claiming delayed query coverage", asyn
       created_at:"2026-09-05T22:00:00Z",updated_at:"2026-09-05T23:00:00Z"}],
   }}))));
   render(<SavedNews instrumentId={id}/>);
-  expect(await screen.findByText(/一次有界实时订阅/)).toBeTruthy();
+  expect(await screen.findByText(/有界流式订阅，实际发布\/传输延迟未核实/)).toBeTruthy();
   expect(screen.queryByText(/查询截止至少滞后采集 15 分钟/)).toBeNull();
   expect(screen.getByText(/订阅窗口只覆盖/)).toBeTruthy();
+});
+it("keeps an empty stream distinct from an empty delayed query", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({data:{
+    instrument_id:id,status:"empty",symbol:"EXAMPLE",delivery:"stream_bounded",has_more:false,
+    received_at:"2026-09-06T00:00:00Z",window_start:"2026-09-05T23:59:00Z",window_end:"2026-09-06T00:00:00Z",articles:[],
+  }}))));
+  render(<SavedNews instrumentId={id}/>);
+  expect(await screen.findByText(/订阅窗口未收到消息/)).toBeTruthy();
+  expect(screen.queryByText(/本次查询未返回消息/)).toBeNull();
 });
 it("never shows a late response for the previous instrument", async () => {
   let resolve!: (value: Response) => void;

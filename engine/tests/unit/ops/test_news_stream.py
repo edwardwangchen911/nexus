@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from nexus.ops.news_stream import collect_stream, load_stream_archive
@@ -131,3 +132,62 @@ async def test_stream_archive_loader_retains_validated_originals_for_import(tmp_
         (directory / "frame-00000.json").read_bytes(),
         (directory / "frame-00001.json").read_bytes(),
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_archive_rejects_forged_terminal_state_and_overlong_window(tmp_path):
+    socket = Socket([AUTH, SUB])
+    directory = tmp_path / "run"
+    await collect_stream(
+        symbol="EXAMPLE",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        duration=0.03,
+        connector=lambda *args, **kwargs: socket,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["status"] = "partial"
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
+        load_stream_archive(directory)
+    receipt["status"] = "bounded_complete"
+    ended = datetime.fromisoformat(receipt["ended_at"])
+    receipt["started_at"] = (ended - timedelta(seconds=302)).astimezone(UTC).isoformat()
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
+        load_stream_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_stream_archive_rejects_provider_error_frame(tmp_path):
+    socket = Socket([AUTH, SUB, [{"T": "error", "code": 409, "msg": "upstream"}]])
+    directory = tmp_path / "run"
+    await collect_stream(
+        symbol="EXAMPLE",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        connector=lambda *args, **kwargs: socket,
+    )
+    with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
+        load_stream_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_stream_archive_requires_boolean_authentication_state(tmp_path):
+    socket = Socket([AUTH, SUB])
+    directory = tmp_path / "run"
+    await collect_stream(
+        symbol="EXAMPLE",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        duration=0.03,
+        connector=lambda *args, **kwargs: socket,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["authenticated"] = 1
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
+        load_stream_archive(directory)

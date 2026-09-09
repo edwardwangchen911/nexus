@@ -57,27 +57,34 @@ def archive(directory, *, symbol="EXAMPLE", empty=False):
     return raw, receipt
 
 
-def stream_archive(directory, *, symbol="EXAMPLE"):
+def stream_archive(directory, *, symbol="EXAMPLE", article_count=1):
     ended = datetime.now(UTC) - timedelta(seconds=1)
     started = ended - timedelta(seconds=3)
-    article = dict(
-        T="n",
-        id=18,
-        headline="Stream announcement",
-        summary="Stream plain text",
-        author="Example",
-        created_at=(ended - timedelta(hours=2)).isoformat(),
-        updated_at=(ended - timedelta(hours=1)).isoformat(),
-        url="https://example.com/stream",
-        symbols=[symbol],
-        source="synthetic",
-    )
+    articles = [
+        dict(
+            T="n",
+            id=18 + index,
+            headline="Stream announcement",
+            summary="Stream plain text",
+            author="Example",
+            created_at=(ended - timedelta(hours=2)).isoformat(),
+            updated_at=(ended - timedelta(hours=1)).isoformat(),
+            url="https://example.com/stream",
+            symbols=[symbol],
+            source="synthetic",
+        )
+        for index in range(article_count)
+    ]
     frames = [
         json.dumps([{"T": "success", "msg": "authenticated"}]).encode(),
         json.dumps([{"T": "subscription", "news": [symbol]}]).encode(),
-        json.dumps([article]).encode(),
+        *(json.dumps([article]).encode() for article in articles),
     ]
-    received = [started, started + timedelta(seconds=1), ended - timedelta(milliseconds=1)]
+    received = [
+        started,
+        started + timedelta(seconds=1),
+        *(ended - timedelta(milliseconds=1) for _ in articles),
+    ]
     receipt = dict(
         schema="nexus_news_stream_receipt_v1",
         source="alpaca",
@@ -98,7 +105,7 @@ def stream_archive(directory, *, symbol="EXAMPLE"):
             )
             for index, frame in enumerate(frames)
         ],
-        article_count=1,
+        article_count=article_count,
         frame_count=len(frames),
     )
     directory.mkdir(mode=0o700)
@@ -106,7 +113,7 @@ def stream_archive(directory, *, symbol="EXAMPLE"):
         write_private(directory / f"frame-{index:05}.json", frame)
     receipt_raw = json.dumps(receipt, sort_keys=True).encode()
     write_private(directory / "receipt.json", receipt_raw)
-    return frames, receipt_raw, receipt, article
+    return frames, receipt_raw, receipt, articles[0] if articles else None
 
 
 async def setup(url):
@@ -233,6 +240,32 @@ async def test_import_stream_archive_preserves_frames_and_api_readback(
             for object_id in store._client.objects
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_import_rejects_partial_and_overlong_article_archives(
+    migrated_database_url, tmp_path
+):
+    _, factory, _, store = await setup(migrated_database_url)
+    _, _, partial, _ = stream_archive(tmp_path / "partial")
+    partial["status"] = "partial"
+    partial["stop_reason"] = "DISCONNECTED"
+    ((tmp_path / "partial") / "receipt.json").write_text(json.dumps(partial))
+    async with factory.begin() as s:
+        with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
+            await news_research.import_stream_news(
+                s, store, instrument_id=ID, directory=tmp_path / "partial"
+            )
+        assert await s.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+        assert await s.scalar(select(func.count()).select_from(DataArtifact)) == 0
+    stream_archive(tmp_path / "over-limit", article_count=51)
+    async with factory.begin() as s:
+        with pytest.raises(ValueError, match="NEWS_STREAM_ARTICLE_LIMIT"):
+            await news_research.import_stream_news(
+                s, store, instrument_id=ID, directory=tmp_path / "over-limit"
+            )
+        assert await s.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+        assert await s.scalar(select(func.count()).select_from(DataArtifact)) == 0
 
 
 @pytest.mark.asyncio

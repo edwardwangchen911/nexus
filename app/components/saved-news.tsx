@@ -37,7 +37,7 @@ function SavedNewsContent({ instrumentId }: { instrumentId: string }) {
         {loading ? "正在读取" : "读取已保存消息"}
       </button></div>
     <p>{stream
-      ? "单一来源 Alpaca · 一次有界实时订阅，仅在本地保存后读取，不会自动重连或持续采集。"
+      ? "单一来源 Alpaca · 有界流式订阅，实际发布/传输延迟未核实；仅在本地保存后读取，不会自动重连或持续采集。"
       : "单一来源 Alpaca · 查询截止至少滞后采集 15 分钟，实际发布延迟未核实。未启用实时推送或自动采集。"}</p>
     {failed ? <p role="status">消息暂时无法读取，请稍后重新读取。</p> : null}
     {data?.status === "unavailable" ? <p>尚未采集该标的消息，不代表没有重要消息。</p> : null}
@@ -48,7 +48,9 @@ function SavedNewsContent({ instrumentId }: { instrumentId: string }) {
       <p>{stream
         ? "订阅窗口只覆盖本次已接收消息，不代表来源覆盖全部消息。"
         : data.has_more ? "仅展示本次最新一页，仍有更早消息未读取。" : "该查询页已读完，不代表来源覆盖全部消息。"}消息尚未纳入既有冻结研究，也不构成调整依据。</p>
-      {data.status === "empty" ? <p>本次查询未返回消息；这不是“没有消息”的证明。</p> : <ul className="saved-news__list">
+      {data.status === "empty" ? <p>{stream
+        ? "订阅窗口未收到消息；这不是“没有消息”的证明。"
+        : "本次查询未返回消息；这不是“没有消息”的证明。"}</p> : <ul className="saved-news__list">
         {data.articles.map((article) => <li key={article.id}>
           <article>
             <h3>{article.url ? <a href={article.url} target="_blank" rel="noopener noreferrer">{article.headline}</a> : article.headline}</h3>

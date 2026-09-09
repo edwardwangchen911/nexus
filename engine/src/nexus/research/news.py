@@ -183,6 +183,10 @@ async def import_stream_news(
         or not isinstance(frames, tuple)
     ):
         raise ValueError("NEWS_STREAM_ARCHIVE_INVALID")
+    if archive["status"] != "bounded_complete":
+        raise ValueError("NEWS_STREAM_ARCHIVE_INVALID")
+    if len(archive["articles"]) > 50:
+        raise ValueError("NEWS_STREAM_ARTICLE_LIMIT")
     ended = require_utc(datetime.fromisoformat(str(receipt.get("ended_at", ""))))
     if ended > datetime.now(UTC) or not archive["subscription_confirmed"]:
         raise ValueError("NEWS_STREAM_ARCHIVE_INVALID")

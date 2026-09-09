@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
@@ -21,6 +21,8 @@ URL = "wss://stream.data.alpaca.markets/v1beta1/news"
 SCHEMA = "nexus_news_stream_receipt_v1"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_FRAME = 2 * 1024 * 1024
+MAX_DURATION_SECONDS = 300
+CLOSE_TIMEOUT_SECONDS = 1
 
 
 class _FixedConnect(connect):
@@ -42,11 +44,23 @@ def parse_stream_archive(receipt: dict[str, Any], frames: list[bytes]) -> dict[s
     """Revalidate exact inbound originals; return observations, never REST qualification."""
     if receipt.get("schema") != SCHEMA or receipt.get("source") != "alpaca":
         raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
+    if (
+        type(receipt.get("authenticated")) is not bool
+        or type(receipt.get("subscription_confirmed")) is not bool
+        or type(receipt.get("article_count")) is not int
+        or type(receipt.get("frame_count")) is not int
+        or not isinstance(receipt.get("stop_reason"), str)
+        or not isinstance(receipt.get("frames"), list)
+    ):
+        raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
     symbol = validate_symbol(receipt["symbol"])
     start = aware(datetime.fromisoformat(receipt["started_at"]))
     end = aware(datetime.fromisoformat(receipt["ended_at"]))
     if (
         start > end
+        # The collector permits a 300-second receive deadline plus its explicit one-second close
+        # timeout; no larger window is provable from the archived receipt.
+        or end - start > timedelta(seconds=MAX_DURATION_SECONDS + CLOSE_TIMEOUT_SECONDS)
         or receipt.get("transport") != "websocket"
         or receipt.get("status") not in {"bounded_complete", "partial", "failed"}
     ):
@@ -73,12 +87,14 @@ def parse_stream_archive(receipt: dict[str, Any], frames: list[bytes]) -> dict[s
             raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
         for item in _messages(raw):
             if item.get("T") == "success" and item.get("msg") == "authenticated":
+                if authenticated:
+                    raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
                 authenticated = True
-            if item.get("T") == "subscription":
+            elif item.get("T") == "subscription":
                 if not authenticated or item.get("news") != [symbol]:
                     raise NewsError("NEWS_STREAM_SUBSCRIPTION_INVALID")
                 subscribed = True
-            if item.get("T") == "n":
+            elif item.get("T") == "n":
                 if not subscribed:
                     raise NewsError("NEWS_STREAM_SUBSCRIPTION_INVALID")
                 articles.extend(
@@ -86,10 +102,22 @@ def parse_stream_archive(receipt: dict[str, Any], frames: list[bytes]) -> dict[s
                         json.dumps({"news": [item]}).encode(), symbol=symbol, received_at=received
                     ).articles
                 )
+            elif item.get("T") == "error":
+                raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
+            elif item.get("T") != "success":
+                raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
+    expected_status = (
+        "bounded_complete"
+        if subscribed and receipt.get("stop_reason") in {"DURATION_LIMIT", "FRAME_LIMIT"}
+        else "partial"
+        if subscribed
+        else "failed"
+    )
     if (
         receipt["authenticated"] != authenticated
         or receipt["subscription_confirmed"] != subscribed
         or receipt["article_count"] != len(articles)
+        or receipt.get("status") != expected_status
     ):
         raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
     return {
