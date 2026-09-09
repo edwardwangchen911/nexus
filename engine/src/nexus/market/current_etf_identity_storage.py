@@ -20,6 +20,7 @@ from nexus.market.current_etf_identity import (
     CurrentEtfIdentity,
     CurrentEtfShareClassIdentity,
     CurrentGoldTrustIdentity,
+    CurrentHeldNasdaqEtfIdentity,
     CurrentNasdaqEtfIdentity,
     CurrentTreasuryEtfIdentity,
     CurrentUitIdentity,
@@ -86,7 +87,12 @@ class CurrentHoldingBinding(BaseModel):
 
 class CurrentHeldEtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
-    identity: CurrentNasdaqEtfIdentity | CurrentEtfShareClassIdentity | CurrentEtfIdentity
+    identity: (
+        CurrentHeldNasdaqEtfIdentity
+        | CurrentNasdaqEtfIdentity
+        | CurrentEtfShareClassIdentity
+        | CurrentEtfIdentity
+    )
     instrument_id: UUID
     alias_id: UUID
     alias_valid_from: date
@@ -468,11 +474,17 @@ async def import_current_held_etf(
         )
         if not isinstance(
             inputs.identity,
-            CurrentNasdaqEtfIdentity | CurrentEtfShareClassIdentity | CurrentEtfIdentity,
+            CurrentHeldNasdaqEtfIdentity
+            | CurrentNasdaqEtfIdentity
+            | CurrentEtfShareClassIdentity
+            | CurrentEtfIdentity,
         ):
             raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
         identity = cast(
-            CurrentNasdaqEtfIdentity | CurrentEtfShareClassIdentity | CurrentEtfIdentity,
+            CurrentHeldNasdaqEtfIdentity
+            | CurrentNasdaqEtfIdentity
+            | CurrentEtfShareClassIdentity
+            | CurrentEtfIdentity,
             inputs.identity,
         )
         instrument_id = UUID(str(stable_instrument_id(symbol)))

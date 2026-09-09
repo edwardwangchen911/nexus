@@ -109,6 +109,20 @@ class CurrentNasdaqEtfIdentity(CurrentEtfShareClassIdentity):
     )
 
 
+class CurrentHeldNasdaqEtfIdentity(CurrentEtfIdentity):
+    exchange: Literal["XNAS"] = "XNAS"
+    filing_index_class_name: str
+    fmp_cik: str | None
+    fmp_cik_matches_sec: bool | None
+    strategy_statement: str
+    equity_basis: Literal["bound_497k_equity_exposure_and_strategy"] = (
+        "bound_497k_equity_exposure_and_strategy"
+    )
+    ticker_binding_basis: Literal["current_directory_and_bound_497k_index"] = (
+        "current_directory_and_bound_497k_index"
+    )
+
+
 class CurrentGoldTrustIdentity(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     symbol: str
@@ -206,20 +220,9 @@ class _IndexRows(_VisibleText):
         super().handle_endtag(tag)
 
 
-def _nasdaq_identity(
-    *,
-    text: str,
-    index: bytes,
-    submissions: bytes,
-    symbol: str,
-    identifier: str,
-    series: str,
-    share_class: str,
-    fmp_name: str,
-    fmp_exchange: str,
-    stored_at: datetime,
-    now: datetime,
-) -> CurrentNasdaqEtfIdentity:
+def _bound_nasdaq_class(
+    *, index: bytes, symbol: str, series: str, share_class: str
+) -> tuple[str, str | None]:
     parser = _IndexRows()
     parser.feed(index.decode("utf-8-sig"))
     if not parser.scope_seen or parser.scope_depth is not None:
@@ -241,6 +244,26 @@ def _nasdaq_identity(
         or cr[3] not in {"", symbol}
     ):
         raise ValueError
+    return cr[2], cr[3] or None
+
+
+def _nasdaq_identity(
+    *,
+    text: str,
+    index: bytes,
+    submissions: bytes,
+    symbol: str,
+    identifier: str,
+    series: str,
+    share_class: str,
+    fmp_name: str,
+    fmp_exchange: str,
+    stored_at: datetime,
+    now: datetime,
+) -> CurrentNasdaqEtfIdentity:
+    class_name, index_ticker = _bound_nasdaq_class(
+        index=index, symbol=symbol, series=series, share_class=share_class
+    )
     for marker in (
         "Investment Objective",
         "Fund Fees and Expenses",
@@ -264,7 +287,7 @@ def _nasdaq_identity(
     if (
         not isinstance(issuer_name, str)
         or issuer_name.casefold() != name.casefold()
-        or name.removeprefix("Invesco ") != cr[2]
+        or name.removeprefix("Invesco ") != class_name
         or datetime.strptime(cover[1], "%B %d, %Y").date() > now.date()
     ):
         raise ValueError
@@ -330,9 +353,94 @@ def _nasdaq_identity(
         + ", the Fund was reclassified as an open-end management investment company. "
         + purchase[1],
         mapping_stored_at=stored_at,
-        filing_index_ticker=cr[3] or None,
-        filing_index_class_name=cr[2],
+        filing_index_ticker=index_ticker,
+        filing_index_class_name=class_name,
         reclassification_date=changed,
+    )
+
+
+def _current_held_nasdaq_identity(
+    *,
+    text: str,
+    index: bytes,
+    symbol: str,
+    identifier: str,
+    series: str,
+    share_class: str,
+    fmp_name: str,
+    fmp_exchange: str,
+    fmp_cik: str | None,
+    stored_at: datetime,
+    now: datetime,
+) -> CurrentHeldNasdaqEtfIdentity:
+    class_name, index_ticker = _bound_nasdaq_class(
+        index=index, symbol=symbol, series=series, share_class=share_class
+    )
+    cover = text[:1600]
+    dates = set(
+        re.findall(
+            r"(?:January|February|March|April|May|June|July|August|September|October|"
+            r"November|December) [0-9]{1,2}, [0-9]{4}",
+            cover,
+        )
+    )
+    objective = re.search(r"Investment Objective (.+?) Fund Fees and Expenses", text)
+    strategy = re.search(
+        r"Principal Investment Strategy (.+?) Principal Investment Risks", text
+    )
+    purchase = re.search(r"Purchase and Sale of Fund Shares (.+?) Tax Information", text)
+    if (
+        index_ticker != symbol
+        or class_name.casefold() != fmp_name.casefold()
+        or cover.casefold().count(fmp_name.casefold()) != 1
+        or len(re.findall(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", cover)) != 1
+        or cover.count("The Nasdaq Stock Market LLC") != 1
+        or len(dates) != 1
+        or datetime.strptime(next(iter(dates)), "%B %d, %Y").date() > now.date()
+        or text.count("Investment Objective") != 1
+        or text.count("Fund Fees and Expenses") != 1
+        or text.count("Principal Investment Strategy") != 1
+        or text.count("Principal Investment Risks") != 1
+        or text.count("Purchase and Sale of Fund Shares") != 1
+        or text.count("Tax Information") != 1
+        or not objective
+        or not strategy
+        or not purchase
+    ):
+        raise ValueError
+    strategy_text = strategy[1].casefold()
+    purchase_text = purchase[1]
+    if (
+        "swap agreement" not in strategy_text
+        or "underlying security" not in strategy_text
+        or "securities" not in strategy_text
+        or (
+            "Publicly issued equity securities, including common stocks, are subject to market "
+            "risks that may cause their prices to fluctuate over time. Fluctuations in the value "
+            "of equity securities in which the Fund invests, and/or has exposure to"
+        )
+        not in text
+        or "Unlike most ETFs, the Fund currently intends to effect creations and redemptions"
+        not in text
+        or "secondary market" not in purchase_text
+        or "broker-dealer" not in purchase_text
+        or "Authorized Participants" not in purchase_text
+    ):
+        raise ValueError
+    return CurrentHeldNasdaqEtfIdentity(
+        symbol=symbol,
+        cik=identifier,
+        series_id=series,
+        class_id=share_class,
+        legal_name=class_name,
+        fmp_exchange=fmp_exchange,
+        fmp_cik=fmp_cik,
+        fmp_cik_matches_sec=None if fmp_cik is None else fmp_cik == identifier,
+        objective=objective[1],
+        legal_type_statement=purchase[1],
+        mapping_stored_at=stored_at,
+        filing_index_class_name=class_name,
+        strategy_statement=strategy[1],
     )
 
 
@@ -589,8 +697,9 @@ async def _validate_etf_originals(
         fmp, fm_receipt, mapping, submissions, index, raw, receipts_raw, mapping_receipt = contents
         row = parse_profile(fmp, symbol)
         identifier, series, share_class = resolve_fund(_json(mapping), symbol)
+        fmp_cik = None if row.get("cik") is None else cik(row.get("cik"))
         if (
-            cik(row.get("cik")) != identifier
+            (not current_holding_only and fmp_cik != identifier)
             or row.get("currency") != "USD"
             or row.get("isEtf") is not True
             or row.get("exchange")
@@ -692,19 +801,34 @@ async def _validate_etf_originals(
                 now=cutoff,
             )
         elif row["exchange"] in {"NASDAQ", "XNAS"}:
-            identity = _nasdaq_identity(
-                text=text,
-                index=index,
-                submissions=submissions,
-                symbol=symbol,
-                identifier=identifier,
-                series=series,
-                share_class=share_class,
-                fmp_name=name,
-                fmp_exchange=row["exchange"],
-                stored_at=stored_at,
-                now=cutoff,
-            )
+            if current_holding_only:
+                identity = _current_held_nasdaq_identity(
+                    text=text,
+                    index=index,
+                    symbol=symbol,
+                    identifier=identifier,
+                    series=series,
+                    share_class=share_class,
+                    fmp_name=name,
+                    fmp_exchange=row["exchange"],
+                    fmp_cik=fmp_cik,
+                    stored_at=stored_at,
+                    now=cutoff,
+                )
+            else:
+                identity = _nasdaq_identity(
+                    text=text,
+                    index=index,
+                    submissions=submissions,
+                    symbol=symbol,
+                    identifier=identifier,
+                    series=series,
+                    share_class=share_class,
+                    fmp_name=name,
+                    fmp_exchange=row["exchange"],
+                    stored_at=stored_at,
+                    now=cutoff,
+                )
         else:
             cover = re.search(
                 rf"FORM 497K {re.escape(name)} {re.escape(symbol)} "

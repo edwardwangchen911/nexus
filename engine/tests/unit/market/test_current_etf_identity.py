@@ -61,6 +61,50 @@ Tax Information</body></html>""",
         )
 
 
+@pytest.mark.asyncio
+async def test_current_held_nasdaq_equity_fund_uses_bound_497k_strategy():
+    import json
+    from hashlib import sha256
+
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    name = "Synthetic Daily Equity Fund"
+    document = f"""<html><body>497K Summary Prospectus February 27, 2026
+{symbol} {name} The Nasdaq Stock Market LLC Before you invest.
+Investment Objective The Fund seeks daily investment results tied to an underlying security.
+Fund Fees and Expenses Expenses apply.
+Principal Investment Strategy The Fund uses swap agreements and may invest in equity securities.
+The underlying security is common stock of a United States company.
+Principal Investment Risks Publicly issued equity securities, including common stocks, are subject
+to market risks that may cause their prices to fluctuate over time. Fluctuations in the value of
+equity securities in which the Fund invests, and/or has exposure to will affect the Fund.
+Unlike most ETFs, the Fund currently intends to effect creations and redemptions for cash.
+Performance information.
+Purchase and Sale of Fund Shares Individual shares trade in the secondary market through a
+broker-dealer. Only Authorized Participants may transact directly with the Fund.
+Tax Information Taxes apply.</body></html>""".encode()
+    values = list(
+        originals(symbol=symbol, exchange="NASDAQ", company_name=name, document=document)
+    )
+    values[4] = f"""<html><body><div id="seriesDiv"><table>
+<tr><td>Series S000000001</td><td></td><td>{name}</td></tr>
+<tr><td>Class/Contract C000000002</td><td></td><td>{name}</td><td>{symbol}</td></tr>
+</table></div><a href="https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/sample.htm">497K</a>
+</body></html>""".encode()
+    receipts = json.loads(values[6])
+    for receipt, raw in zip(receipts, values[3:6], strict=True):
+        receipt["sha256"] = sha256(raw).hexdigest()
+    values[6] = json.dumps(receipts).encode()
+
+    result = await validate_current_held_etf_originals(
+        symbol=symbol, contents=tuple(values), now=datetime.now(UTC)
+    )
+    assert result.identity.exchange == "XNAS"
+    assert result.identity.asset_type == "equity_etf"
+    assert result.identity.symbol == symbol
+
+
 def test_current_held_etf_proof_has_fail_closed_scope_flags():
     from nexus.market.current_etf_identity_storage import CurrentHeldEtfProof
 
