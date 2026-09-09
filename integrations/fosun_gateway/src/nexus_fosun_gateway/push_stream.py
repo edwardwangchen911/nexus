@@ -10,6 +10,7 @@ import stat
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from math import ceil
 from pathlib import Path
 from secrets import token_hex
 from time import monotonic
@@ -282,6 +283,7 @@ async def collect_push_quote(
         "heartbeat_interval_seconds": heartbeat_interval_seconds,
         "quote_message_count": 0,
         "heartbeat_sent_count": 0,
+        "heartbeat_ack_count": 0,
     }
     byte_count = 0
     logger = logging.Logger("nexus.fosun_push.private", level=logging.CRITICAL + 1)
@@ -362,12 +364,8 @@ async def collect_push_quote(
                         _validate_subscription(message, code=code, request_id=request_id)
                         receipt["subscription_confirmed"] = True
                     elif message.get("topic") == "hb":
-                        await socket.send(
-                            json.dumps(
-                                {"act": "hb", "hbValue": _validate_heartbeat(message)},
-                                separators=(",", ":"),
-                            )
-                        )
+                        _validate_heartbeat(message)
+                        receipt["heartbeat_ack_count"] += 1
                     elif message.get("topic") == TOPIC and "subRep" not in message:
                         receipt["quote_message_count"] += _validate_quote_frame(
                             message, code=code
@@ -471,6 +469,7 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         "frame_count",
         "quote_message_count",
         "heartbeat_sent_count",
+        "heartbeat_ack_count",
         "frames",
     }
     if set(receipt) != expected_keys:
@@ -506,6 +505,8 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         or receipt["quote_message_count"] < 0
         or type(receipt["heartbeat_sent_count"]) is not int
         or receipt["heartbeat_sent_count"] < 0
+        or type(receipt["heartbeat_ack_count"]) is not int
+        or receipt["heartbeat_ack_count"] < 0
         or len(frames) > max_frames
         or len(frames) > MAX_FRAMES
         or sum(map(len, frames)) > MAX_BYTES
@@ -513,6 +514,7 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
     subscribed = False
     quote_message_count = 0
+    heartbeat_ack_count = 0
     previous_received: datetime | None = None
     for index, (entry, raw) in enumerate(zip(entries, frames, strict=True)):
         if (
@@ -543,6 +545,7 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
                 _validate_heartbeat(message)
             except PushStreamError:
                 raise PushStreamError("PUSH_ARCHIVE_INVALID") from None
+            heartbeat_ack_count += 1
         elif message.get("topic") == TOPIC and "subRep" not in message:
             try:
                 quote_message_count += _validate_quote_frame(message, code=code)
@@ -559,10 +562,10 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
     )
     if receipt["subscription_confirmed"] != subscribed or receipt["status"] != expected_status:
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
-    heartbeat_window = duration if receipt["stop_reason"] == "DURATION_LIMIT" else elapsed
     if (
         receipt["quote_message_count"] != quote_message_count
-        or receipt["heartbeat_sent_count"] != int(heartbeat_window // heartbeat_interval)
+        or receipt["heartbeat_ack_count"] != heartbeat_ack_count
+        or receipt["heartbeat_sent_count"] > ceil(elapsed / heartbeat_interval)
     ):
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
     if receipt["status"] == "bounded_complete" and (

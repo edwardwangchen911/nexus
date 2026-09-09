@@ -154,7 +154,7 @@ async def test_confirmed_silent_quote_window_is_bounded_and_archived_privately(t
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_is_echoed_and_quote_frames_are_retained(tmp_path):
+async def test_server_heartbeat_is_recorded_without_reply_and_quote_frames_are_retained(tmp_path):
     quote = _quote_frame()
     socket = Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}, quote])
 
@@ -164,9 +164,10 @@ async def test_heartbeat_is_echoed_and_quote_frames_are_retained(tmp_path):
     assert result["stop_reason"] == "FRAME_LIMIT"
     assert socket.sent == [
         {"act": "sub", "items": [{"topic": "qt", "code": ["usAAPL"]}], "requestid": "request-123"},
-        {"act": "hb", "hbValue": 17},
     ]
-    assert len(load_push_archive(tmp_path / "run")["frames"]) == 3
+    archive = load_push_archive(tmp_path / "run")
+    assert len(archive["frames"]) == 3
+    assert archive["receipt"]["heartbeat_ack_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -231,6 +232,29 @@ async def test_window_over_fifteen_seconds_requires_a_proactive_heartbeat(tmp_pa
     assert result["stop_reason"] == "DURATION_LIMIT"
     assert result["frame_count"] == 1
     archive = load_push_archive(tmp_path / "run")
+    assert archive["receipt"]["heartbeat_sent_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_server_heartbeat_ack_does_not_add_an_outbound_message(tmp_path):
+    moments = iter([0.0, 0.0, 0.0, 15.1, 16.0, 16.0])
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    socket = Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}])
+
+    await _collect(
+        socket=socket,
+        directory=tmp_path / "run",
+        duration=16,
+        monotonic_clock=lambda: next(moments),
+        now=lambda: now,
+    )
+
+    assert socket.sent == [
+        {"act": "sub", "items": [{"topic": "qt", "code": ["usAAPL"]}], "requestid": "request-123"},
+        {"act": "hb", "hbValue": 1_704_067_200_000},
+    ]
+    archive = load_push_archive(tmp_path / "run")
+    assert archive["receipt"]["heartbeat_ack_count"] == 1
     assert archive["receipt"]["heartbeat_sent_count"] == 1
 
 
@@ -356,6 +380,32 @@ async def test_cancellation_after_a_frame_persists_a_readable_partial_receipt(tm
 
 
 @pytest.mark.asyncio
+async def test_loader_accepts_cancelled_archive_without_a_scheduled_fifteen_second_send(tmp_path):
+    moments = iter([0.0, 0.0, 14.9, 15.1])
+    socket = BlockingSocket([SUB_REPLY])
+    directory = tmp_path / "run"
+    task = asyncio.create_task(
+        _collect(
+            socket=socket,
+            directory=directory,
+            duration=20,
+            monotonic_clock=lambda: next(moments),
+            now=lambda: datetime(2024, 1, 1, tzinfo=UTC),
+        )
+    )
+
+    await socket.blocked.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    archive = load_push_archive(directory)
+    assert archive["status"] == "partial"
+    assert archive["receipt"]["stop_reason"] == "CANCELLED"
+    assert archive["receipt"]["heartbeat_sent_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_secret_reflection_is_not_persisted(tmp_path):
     escaped_secret = "".join(f"\\u{ord(character):04x}" for character in "synthetic-session")
     nested = json.dumps(_dynamic_quote())[:-1] + f',"extra":"{escaped_secret}"}}'
@@ -446,7 +496,7 @@ async def test_other_market_code_forms_are_rejected(tmp_path, code):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("field", "value"), [("quote_message_count", 2), ("heartbeat_sent_count", 1)]
+    ("field", "value"), [("quote_message_count", 2), ("heartbeat_sent_count", 999)]
 )
 async def test_loader_recomputes_receipt_counters_to_reject_tampering(tmp_path, field, value):
     directory = tmp_path / "run"
@@ -456,6 +506,24 @@ async def test_loader_recomputes_receipt_counters_to_reject_tampering(tmp_path, 
     assert receipt["quote_message_count"] == 1
     assert receipt["heartbeat_sent_count"] == 0
     receipt[field] = value
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_loader_recomputes_heartbeat_ack_count(tmp_path):
+    directory = tmp_path / "run"
+    await _collect(
+        socket=Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}]),
+        directory=directory,
+        max_frames=2,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+
+    assert receipt["heartbeat_ack_count"] == 1
+    receipt["heartbeat_ack_count"] = 0
     (directory / "receipt.json").write_text(json.dumps(receipt))
 
     with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
