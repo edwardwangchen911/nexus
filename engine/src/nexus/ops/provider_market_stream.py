@@ -1,0 +1,592 @@
+"""One bounded, private Schwab or AllTick market stream capture; never reconnects."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from hashlib import sha256
+from pathlib import Path
+from time import monotonic
+from typing import Any
+
+from websockets.asyncio.client import connect
+
+from nexus.ops.local_recovery import write_private
+from nexus.providers.market.alltick_stream import (
+    AllTickStreamError,
+    AllTickStreamState,
+    build_heartbeat,
+    build_stock_stream_url,
+    build_subscriptions,
+    redact_stock_stream_url,
+)
+from nexus.providers.market.schwab_stream import (
+    SchwabLevelOneState,
+    SchwabStreamCredentials,
+    SchwabStreamError,
+    build_level_one_subscription,
+    build_login,
+    validate_streamer_url,
+)
+
+SCHEMA = "nexus_provider_market_stream_receipt_v1"
+MAX_BYTES = 8 * 1024 * 1024
+MAX_FRAME = 2 * 1024 * 1024
+MAX_FRAMES = 100
+MAX_DURATION_SECONDS = 300
+CLOSE_TIMEOUT_SECONDS = 1
+
+
+class ProviderMarketStreamError(ValueError):
+    """Stable, value-free bounded market stream error."""
+
+
+class _FixedConnect(connect):
+    def process_redirect(self, exc: Exception) -> Exception:
+        return exc
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="source", required=True)
+    for source in ("schwab", "alltick"):
+        child = subparsers.add_parser(source)
+        child.add_argument("--symbol", action="append", required=True)
+        child.add_argument("--output-dir", type=Path, required=True)
+        child.add_argument("--duration", type=float, default=60)
+        child.add_argument("--max-frames", type=int, default=100)
+    return parser
+
+
+async def _run(arguments: argparse.Namespace) -> dict[str, Any]:
+    common = {
+        "symbols": tuple(arguments.symbol),
+        "directory": arguments.output_dir,
+        "duration": arguments.duration,
+        "max_frames": arguments.max_frames,
+    }
+    if arguments.source == "alltick":
+        token = os.environ.get("NEXUS_ALLTICK_STREAM_TOKEN", "")
+        if not token:
+            raise ProviderMarketStreamError("ALLTICK_STREAM_TOKEN_REQUIRED")
+        return await collect_alltick_stream(token=token, **common)
+    values = {
+        name: os.environ.get(environment, "")
+        for name, environment in (
+            ("access_token", "NEXUS_SCHWAB_STREAM_ACCESS_TOKEN"),
+            ("customer_id", "NEXUS_SCHWAB_STREAM_CUSTOMER_ID"),
+            ("correlation_id", "NEXUS_SCHWAB_STREAM_CORRELATION_ID"),
+            ("channel", "NEXUS_SCHWAB_STREAM_CHANNEL"),
+            ("function_id", "NEXUS_SCHWAB_STREAM_FUNCTION_ID"),
+        )
+    }
+    streamer_url = os.environ.get("NEXUS_SCHWAB_STREAM_URL", "")
+    if not streamer_url or any(not value for value in values.values()):
+        raise ProviderMarketStreamError("SCHWAB_STREAM_ENVIRONMENT_REQUIRED")
+    return await collect_schwab_stream(
+        streamer_url=streamer_url,
+        credentials=SchwabStreamCredentials(**values),
+        **common,
+    )
+
+
+def main() -> None:
+    parser = build_parser()
+    try:
+        result = asyncio.run(_run(parser.parse_args()))
+    except (ProviderMarketStreamError, SchwabStreamError, AllTickStreamError) as error:
+        parser.error(str(error))
+    print(json.dumps(result, sort_keys=True))
+
+
+async def collect_schwab_stream(
+    *,
+    symbols: tuple[str, ...],
+    directory: Path,
+    streamer_url: str,
+    credentials: SchwabStreamCredentials,
+    duration: float = 60,
+    max_frames: int = 100,
+    connector: Any = _FixedConnect,
+) -> dict[str, Any]:
+    url = validate_streamer_url(streamer_url)
+    state = SchwabLevelOneState(symbols)
+    return await _collect(
+        source="schwab",
+        symbols=symbols,
+        directory=directory,
+        url=url,
+        archived_origin=url,
+        secrets=(credentials.access_token,),
+        duration=duration,
+        max_frames=max_frames,
+        connector=connector,
+        state=state,
+        schwab_credentials=credentials,
+    )
+
+
+async def collect_alltick_stream(
+    *,
+    symbols: tuple[str, ...],
+    directory: Path,
+    token: str,
+    duration: float = 60,
+    max_frames: int = 100,
+    connector: Any = _FixedConnect,
+) -> dict[str, Any]:
+    state = AllTickStreamState(symbols)
+    url = build_stock_stream_url(token)
+    return await _collect(
+        source="alltick",
+        symbols=symbols,
+        directory=directory,
+        url=url,
+        archived_origin=redact_stock_stream_url(url),
+        secrets=(token,),
+        duration=duration,
+        max_frames=max_frames,
+        connector=connector,
+        state=state,
+    )
+
+
+async def _collect(
+    *,
+    source: str,
+    symbols: tuple[str, ...],
+    directory: Path,
+    url: str,
+    archived_origin: str,
+    secrets: tuple[str, ...],
+    duration: float,
+    max_frames: int,
+    connector: Any,
+    state: SchwabLevelOneState | AllTickStreamState,
+    schwab_credentials: SchwabStreamCredentials | None = None,
+) -> dict[str, Any]:
+    requested_duration, requested_frames = _limits(duration, max_frames)
+    directory.mkdir(mode=0o700)
+    started_at = datetime.now(UTC)
+    started_monotonic = monotonic()
+    deadline = started_monotonic + requested_duration
+    receipt: dict[str, Any] = {
+        "schema": SCHEMA,
+        "source": source,
+        "transport": "websocket",
+        "origin": archived_origin,
+        "symbols": list(symbols),
+        "started_at": started_at.isoformat(),
+        "authenticated": False,
+        "subscription_confirmed": False,
+        "status": "failed",
+        "stop_reason": "CONNECT_FAILED",
+        "frames": [],
+        "observation_count": 0,
+        "requested_duration_seconds": requested_duration,
+        "requested_max_frames": requested_frames,
+    }
+    byte_count = 0
+    cancelled: asyncio.CancelledError | None = None
+    private_logger = logging.Logger(
+        f"nexus.{source}_market_stream.private", level=logging.CRITICAL + 1
+    )
+    private_logger.propagate = False
+    next_heartbeat = monotonic() + 10
+    alltick_acks: set[int] = set()
+    try:
+        async with connector(
+            url,
+            open_timeout=min(10, requested_duration),
+            close_timeout=CLOSE_TIMEOUT_SECONDS,
+            max_size=MAX_FRAME,
+            max_queue=1,
+            compression=None,
+            logger=private_logger,
+        ) as socket:
+            try:
+                receipt["stop_reason"] = "DISCONNECTED"
+                if source == "schwab":
+                    assert schwab_credentials is not None
+                    await socket.send(json.dumps(build_login(schwab_credentials, request_id=1)))
+                else:
+                    for message in build_subscriptions(symbols, sequence=1):
+                        await socket.send(json.dumps(message))
+                while len(receipt["frames"]) < requested_frames:
+                    now = monotonic()
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        receipt["stop_reason"] = "DURATION_LIMIT"
+                        break
+                    if source == "alltick" and now >= next_heartbeat:
+                        await socket.send(
+                            json.dumps(build_heartbeat(sequence=len(receipt["frames"]) + 10))
+                        )
+                        next_heartbeat = now + 10
+                        continue
+                    wait = remaining
+                    if source == "alltick":
+                        wait = min(wait, max(0.001, next_heartbeat - now))
+                    try:
+                        frame = await asyncio.wait_for(socket.recv(), timeout=wait)
+                    except TimeoutError:
+                        if source == "alltick" and monotonic() < deadline:
+                            continue
+                        receipt["stop_reason"] = "DURATION_LIMIT"
+                        break
+                    raw = frame.encode() if isinstance(frame, str) else frame
+                    if not isinstance(raw, bytes):
+                        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_FRAME_INVALID")
+                    byte_count += len(raw)
+                    if len(raw) > MAX_FRAME or byte_count > MAX_BYTES:
+                        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_BYTE_LIMIT")
+                    value = _json_object(raw)
+                    decoded = json.dumps(value, ensure_ascii=False, default=str)
+                    if any(secret.encode() in raw or secret in decoded for secret in secrets):
+                        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_SECRET_REFLECTION")
+                    received_at = datetime.now(UTC)
+                    name = f"frame-{len(receipt['frames']):05}.json"
+                    write_private(directory / name, raw)
+                    receipt["frames"].append(
+                        {
+                            "file": name,
+                            "received_at": received_at.isoformat(),
+                            "raw_sha256": sha256(raw).hexdigest(),
+                            "raw_byte_length": len(raw),
+                        }
+                    )
+                    if source == "schwab":
+                        control = _schwab_control(value)
+                        if control == "login":
+                            receipt["authenticated"] = True
+                            assert schwab_credentials is not None
+                            await socket.send(
+                                json.dumps(
+                                    build_level_one_subscription(
+                                        schwab_credentials, symbols, request_id=2
+                                    )
+                                )
+                            )
+                        elif control == "subscription":
+                            if not receipt["authenticated"]:
+                                raise ProviderMarketStreamError(
+                                    "PROVIDER_MARKET_STREAM_PROTOCOL_INVALID"
+                                )
+                            receipt["subscription_confirmed"] = True
+                        elif control == "heartbeat":
+                            continue
+                        else:
+                            if not receipt["subscription_confirmed"]:
+                                raise ProviderMarketStreamError(
+                                    "PROVIDER_MARKET_STREAM_PROTOCOL_INVALID"
+                                )
+                            receipt["observation_count"] += len(
+                                state.apply(value, received_at=received_at)
+                            )
+                    else:
+                        control_id = _alltick_control(value)
+                        if control_id is not None:
+                            alltick_acks.add(control_id)
+                            receipt["authenticated"] = True
+                            receipt["subscription_confirmed"] = {22003, 22005}.issubset(
+                                alltick_acks
+                            )
+                        else:
+                            if not receipt["subscription_confirmed"]:
+                                raise ProviderMarketStreamError(
+                                    "PROVIDER_MARKET_STREAM_PROTOCOL_INVALID"
+                                )
+                            receipt["observation_count"] += len(
+                                state.apply(value, received_at=received_at)
+                            )
+                else:
+                    receipt["stop_reason"] = "FRAME_LIMIT"
+            except asyncio.CancelledError as error:
+                receipt["stop_reason"] = "CANCELLED"
+                cancelled = error
+            except (ProviderMarketStreamError, SchwabStreamError, AllTickStreamError) as error:
+                receipt["stop_reason"] = str(error)
+            except Exception:
+                pass
+    except asyncio.CancelledError as error:
+        receipt["stop_reason"] = "CANCELLED"
+        cancelled = error
+    except Exception:
+        pass
+    receipt["ended_at"] = datetime.now(UTC).isoformat()
+    receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
+    receipt["frame_count"] = len(receipt["frames"])
+    receipt["status"] = (
+        "bounded_complete"
+        if receipt["subscription_confirmed"]
+        and receipt["stop_reason"] in {"DURATION_LIMIT", "FRAME_LIMIT"}
+        else "partial"
+        if receipt["subscription_confirmed"]
+        else "failed"
+    )
+    write_private(directory / "receipt.json", json.dumps(receipt, sort_keys=True).encode())
+    if cancelled is not None:
+        raise cancelled
+    return _summary(receipt)
+
+
+def load_provider_market_stream_archive(directory: Path) -> dict[str, Any]:
+    """Revalidate a complete private archive and derive observations from originals."""
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(descriptor).st_mode & 0o077:
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+        receipt_raw = _read(descriptor, "receipt.json", 256 * 1024)
+        receipt = _receipt_object(receipt_raw)
+        if not isinstance(receipt.get("frames"), list):
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+        frames = [
+            _read(descriptor, f"frame-{index:05}.json", MAX_FRAME)
+            for index in range(len(receipt["frames"]))
+        ]
+        expected = {"receipt.json", *(f"frame-{index:05}.json" for index in range(len(frames)))}
+        if set(os.listdir(descriptor)) != expected:
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+    finally:
+        os.close(descriptor)
+    _validate_receipt(receipt, frames)
+    if receipt["status"] != "bounded_complete":
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_INCOMPLETE")
+    source = receipt["source"]
+    state: SchwabLevelOneState | AllTickStreamState
+    if source == "schwab":
+        state = SchwabLevelOneState(tuple(receipt["symbols"]))
+    else:
+        state = AllTickStreamState(tuple(receipt["symbols"]))
+    observations: list[Any] = []
+    authenticated = subscribed = False
+    alltick_acks: set[int] = set()
+    for entry, raw in zip(receipt["frames"], frames, strict=True):
+        value = _json_object(raw)
+        received_at = datetime.fromisoformat(entry["received_at"])
+        if source == "schwab":
+            control = _schwab_control(value)
+            if control == "login":
+                authenticated = True
+            elif control == "subscription":
+                subscribed = authenticated
+            elif control == "heartbeat":
+                continue
+            else:
+                if not subscribed:
+                    raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+                observations.extend(state.apply(value, received_at=received_at))
+        else:
+            control_id = _alltick_control(value)
+            if control_id is not None:
+                alltick_acks.add(control_id)
+                authenticated = True
+                subscribed = {22003, 22005}.issubset(alltick_acks)
+            else:
+                if not subscribed:
+                    raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+                observations.extend(state.apply(value, received_at=received_at))
+    if (
+        authenticated != receipt["authenticated"]
+        or subscribed != receipt["subscription_confirmed"]
+        or len(observations) != receipt["observation_count"]
+    ):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+    return {
+        "receipt": receipt,
+        "receipt_raw": receipt_raw,
+        "frames": tuple(frames),
+        "observations": tuple(observations),
+    }
+
+
+def _schwab_control(value: dict[str, Any]) -> str | None:
+    if "notify" in value:
+        if (
+            set(value) != {"notify"}
+            or not isinstance(value["notify"], list)
+            or len(value["notify"]) != 1
+            or not isinstance(value["notify"][0], dict)
+            or set(value["notify"][0]) != {"heartbeat"}
+            or not isinstance(value["notify"][0]["heartbeat"], str)
+            or not value["notify"][0]["heartbeat"].isascii()
+            or not value["notify"][0]["heartbeat"].isdecimal()
+        ):
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_PROTOCOL_INVALID")
+        return "heartbeat"
+    if "response" not in value:
+        return None
+    if set(value) != {"response"} or not isinstance(value["response"], list) or len(
+        value["response"]
+    ) != 1:
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_PROTOCOL_INVALID")
+    response = value["response"][0]
+    if not isinstance(response, dict) or not isinstance(response.get("content"), dict):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_PROTOCOL_INVALID")
+    if response["content"].get("code") != 0:
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_PROVIDER_REJECTED")
+    key = (response.get("service"), response.get("command"), response.get("requestid"))
+    if key == ("ADMIN", "LOGIN", "1"):
+        return "login"
+    if key == ("LEVELONE_EQUITIES", "SUBS", "2"):
+        return "subscription"
+    raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_PROTOCOL_INVALID")
+
+
+def _alltick_control(value: dict[str, Any]) -> int | None:
+    command = value.get("cmd_id")
+    if type(command) is not int or command not in {22001, 22003, 22005}:
+        return None
+    if (
+        value.get("ret") != 200
+        or not isinstance(value.get("msg"), str)
+        or type(value.get("seq_id")) is not int
+        or not isinstance(value.get("trace"), str)
+        or not isinstance(value.get("data"), dict)
+    ):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_PROVIDER_REJECTED")
+    return command
+
+
+def _json_object(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw, parse_float=Decimal, object_pairs_hook=_unique)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_FRAME_INVALID") from None
+    if not isinstance(value, dict):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_FRAME_INVALID")
+    return value
+
+
+def _receipt_object(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID") from None
+    if not isinstance(value, dict):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+    return value
+
+
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_DUPLICATE_KEY")
+        result[key] = value
+    return result
+
+
+def _limits(duration: float, max_frames: int) -> tuple[float, int]:
+    if (
+        type(duration) not in {int, float}
+        or type(max_frames) is not int
+        or not 0 < duration <= MAX_DURATION_SECONDS
+        or not 1 <= max_frames <= MAX_FRAMES
+    ):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_LIMIT_INVALID")
+    return float(duration), max_frames
+
+
+def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> None:
+    required = {
+        "schema", "source", "transport", "origin", "symbols", "started_at", "ended_at",
+        "authenticated", "subscription_confirmed", "status", "stop_reason", "frames",
+        "observation_count", "requested_duration_seconds", "requested_max_frames",
+        "elapsed_monotonic_seconds", "frame_count",
+    }
+    if set(receipt) != required or (
+        receipt.get("schema") != SCHEMA
+        or receipt.get("source") not in {"schwab", "alltick"}
+        or receipt.get("transport") != "websocket"
+        or receipt.get("status") not in {"bounded_complete", "partial", "failed"}
+        or not isinstance(receipt.get("stop_reason"), str)
+        or type(receipt.get("authenticated")) is not bool
+        or type(receipt.get("subscription_confirmed")) is not bool
+        or type(receipt.get("observation_count")) is not int
+        or receipt.get("observation_count", -1) < 0
+        or type(receipt.get("frame_count")) is not int
+        or receipt.get("frame_count", -1) < 0
+        or type(receipt.get("requested_duration_seconds")) is not float
+        or type(receipt.get("requested_max_frames")) is not int
+        or type(receipt.get("elapsed_monotonic_seconds")) is not float
+        or not isinstance(receipt.get("symbols"), list)
+        or not isinstance(receipt.get("frames"), list)
+        or len(frames) != receipt.get("frame_count")
+        or len(frames) != len(receipt["frames"])
+        or (receipt.get("subscription_confirmed") and not receipt.get("authenticated"))
+    ):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+    duration, frame_limit = _limits(
+        receipt["requested_duration_seconds"], receipt["requested_max_frames"]
+    )
+    expected_status = (
+        "bounded_complete"
+        if receipt["subscription_confirmed"]
+        and receipt["stop_reason"] in {"DURATION_LIMIT", "FRAME_LIMIT"}
+        else "partial"
+        if receipt["subscription_confirmed"]
+        else "failed"
+    )
+    expected_origin = (
+        "wss://streamer-api.schwab.com/ws"
+        if receipt["source"] == "schwab"
+        else "wss://quote.alltick.co/quote-stock-b-ws-api?token=REDACTED"
+    )
+    started = datetime.fromisoformat(receipt["started_at"])
+    ended = datetime.fromisoformat(receipt["ended_at"])
+    if (
+        receipt["status"] != expected_status
+        or receipt["origin"] != expected_origin
+        or started.tzinfo is None
+        or ended.tzinfo is None
+        or not started <= ended <= started + timedelta(seconds=duration + CLOSE_TIMEOUT_SECONDS)
+        or not 0 <= receipt["elapsed_monotonic_seconds"] <= duration + CLOSE_TIMEOUT_SECONDS
+        or len(frames) > frame_limit
+        or sum(map(len, frames)) > MAX_BYTES
+        or (
+            receipt["status"] == "bounded_complete"
+            and receipt["stop_reason"] == "FRAME_LIMIT"
+            and len(frames) != frame_limit
+        )
+    ):
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+    previous: datetime | None = None
+    for index, (entry, raw) in enumerate(zip(receipt["frames"], frames, strict=True)):
+        if not isinstance(entry, dict) or entry != {
+            "file": f"frame-{index:05}.json",
+            "received_at": entry.get("received_at"),
+            "raw_sha256": sha256(raw).hexdigest(),
+            "raw_byte_length": len(raw),
+        }:
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+        received = datetime.fromisoformat(entry["received_at"])
+        if not started <= received <= ended or (previous is not None and received < previous):
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+        previous = received
+
+
+def _read(descriptor: int, name: str, maximum: int) -> bytes:
+    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+    try:
+        metadata = os.fstat(child)
+        if metadata.st_mode & 0o077 or metadata.st_size > maximum:
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+        return os.read(child, maximum + 1)
+    finally:
+        os.close(child)
+
+
+def _summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: receipt[key]
+        for key in (
+            "status", "stop_reason", "authenticated", "subscription_confirmed",
+            "observation_count", "frame_count",
+        )
+    }
