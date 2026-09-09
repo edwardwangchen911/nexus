@@ -19,13 +19,16 @@ from nexus.quality.source_policy import (
     INTRADAY_SOURCE_POLICY_V2_ID,
     QUOTE_SOURCE_POLICY_ID,
     QUOTE_SOURCE_POLICY_V2_ID,
+    QUOTE_SOURCE_POLICY_V3_ID,
     SOURCE_POLICY_ID,
     SOURCE_POLICY_V2_ID,
+    SOURCE_POLICY_V3_ID,
     load_fosun_market_admission,
     load_intraday_source_policy_v1,
     load_intraday_source_policy_v2,
     load_quote_source_policy_v1,
     load_quote_source_policy_v2,
+    load_quote_source_policy_v3,
     load_source_policy_v1,
     load_source_policy_v2,
 )
@@ -469,6 +472,10 @@ async def test_canonical_source_policies_are_loadable_and_database_immutable(
             session,
             decision_time=decision_time,
         )
+        v3_quote_policy = await load_quote_source_policy_v3(
+            session,
+            decision_time=decision_time,
+        )
         v2_intraday_policy = await load_intraday_source_policy_v2(
             session,
             decision_time=decision_time,
@@ -485,14 +492,17 @@ async def test_canonical_source_policies_are_loadable_and_database_immutable(
         assert intraday_policy.record_id == INTRADAY_SOURCE_POLICY_ID
         assert v2_policy.record_id == SOURCE_POLICY_V2_ID
         assert v2_quote_policy.record_id == QUOTE_SOURCE_POLICY_V2_ID
+        assert v3_quote_policy.record_id == QUOTE_SOURCE_POLICY_V3_ID
         assert v2_intraday_policy.record_id == INTRADAY_SOURCE_POLICY_V2_ID
         assert records == {
             ("intraday_monitor", INTRADAY_SOURCE_POLICY_ID),
             ("intraday_monitor", INTRADAY_SOURCE_POLICY_V2_ID),
             ("market_price", SOURCE_POLICY_ID),
             ("market_price", SOURCE_POLICY_V2_ID),
+            ("market_price", SOURCE_POLICY_V3_ID),
             ("market_quote", QUOTE_SOURCE_POLICY_ID),
             ("market_quote", QUOTE_SOURCE_POLICY_V2_ID),
+            ("market_quote", QUOTE_SOURCE_POLICY_V3_ID),
         }
         for _, policy_id in records:
             for statement in (

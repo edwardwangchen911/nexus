@@ -11,6 +11,7 @@ import httpx
 import pytest
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
 from nexus.main import create_engine_app
+from nexus.market.database_series import load_intraday_series
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.market.intraday_metrics import (
     IntradayAuthorityView,
@@ -327,15 +328,19 @@ async def _seed_fosun_quote_v2(
     contract_hash: str = "a" * 64,
     received_at: datetime = _DECISION_TIME - timedelta(seconds=10),
     admission: tuple[UUID, UUID, int, datetime] | None = None,
+    operation: str = "fosun_get_quotes",
+    artifact_schema: str = "fosun_gateway_market_snapshot_v1",
+    observed_at: datetime | None = None,
 ) -> tuple[UUID, UUID, int, datetime]:
     if admission is None:
         admission = await _seed_fosun_admission(
             database_url,
-            operation="fosun_get_quotes",
+            operation=operation,
             contract_hash=contract_hash,
             delivery_mode=delivery_mode,
         )
     capability_id, status_id, status_version, _ = admission
+    effective_observed_at = observed_at or received_at
     raw_payload = (
         f"fosun-market-api-v2:{instrument_id}:{delivery_mode}:{received_at.isoformat()}:{last}"
     ).encode()
@@ -349,7 +354,7 @@ async def _seed_fosun_quote_v2(
         bid=None,
         ask=None,
         last=last,
-        observed_at=received_at,
+        observed_at=effective_observed_at,
         available_at=received_at,
         received_at=received_at,
         revision=digest,
@@ -362,9 +367,9 @@ async def _seed_fosun_quote_v2(
                 sha256=digest,
                 byte_size=len(raw_payload),
                 mime_type="application/json",
-                schema_version="fosun_gateway_market_snapshot_v1",
+                schema_version=artifact_schema,
                 source="fosun",
-                observed_at=received_at,
+                observed_at=effective_observed_at,
                 available_at=received_at,
                 received_at=received_at,
             )
@@ -379,7 +384,7 @@ async def _seed_fosun_quote_v2(
                     bid=None,
                     ask=None,
                     last=last,
-                    observed_at=received_at,
+                    observed_at=effective_observed_at,
                     available_at=received_at,
                     received_at=received_at,
                     revision=digest,
@@ -756,6 +761,44 @@ async def test_fosun_quote_requires_its_own_valid_operation_admission(
         assert item["source"] is None
         assert item["quality"] == "FAIL"
         assert item["quality_reasons"] == [expected_quality_reason]
+
+
+@pytest.mark.asyncio
+async def test_authority_bound_fosun_push_quote_is_displayed_only(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    received_at = _DECISION_TIME - timedelta(seconds=10)
+    await _seed_fosun_quote_v2(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        last=Decimal("124.56"),
+        received_at=received_at,
+        observed_at=received_at - timedelta(seconds=5),
+        operation="fosun_subscribe_quotes",
+        artifact_schema="fosun_push_quote_archive_v1",
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    assert item["price"] == "124.560000000000"
+    assert item["source"] == "fosun"
+    assert item["quality"] == "PARTIAL"
+    assert item["quality_reasons"] == [
+        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+        "INTRADAY_BID_ASK_UNAVAILABLE",
+    ]
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session:
+            intraday = await load_intraday_series(session, _AAPL_ID, _DECISION_TIME)
+    finally:
+        await factory.kw["bind"].dispose()
+    assert intraday.trade is None
+    assert intraday.quote is None
 
 
 @pytest.mark.asyncio

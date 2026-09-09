@@ -93,6 +93,23 @@ QUOTE_SOURCE_POLICY_V2_PAYLOAD: dict[str, object] = {
     "alpaca": {"mode": "disabled"},
     "purpose": "display_only_last_price",
 }
+QUOTE_SOURCE_POLICY_V3_ID = UUID("ef11e044-5b1f-53cd-94b7-2ef8c4ac3cda")
+QUOTE_SOURCE_POLICY_V3_VERSION = "quote_source_policy_v3"
+QUOTE_SOURCE_POLICY_V3_PAYLOAD: dict[str, object] = {
+    "selected_source": "fosun",
+    "fallback": "disabled",
+    "fosun": {
+        "feed": "l1",
+        "delivery_modes": ["unknown", "real_time", "delayed"],
+        "artifact_schema_operations": {
+            "fosun_gateway_market_snapshot_v1": "fosun_get_quotes",
+            "fosun_push_quote_archive_v1": "fosun_subscribe_quotes",
+        },
+        "market_scope": "US",
+    },
+    "alpaca": {"mode": "disabled"},
+    "purpose": "display_only_last_price",
+}
 INTRADAY_SOURCE_POLICY_ID = UUID("8fab80c9-5b6a-5b2b-8f36-3b22319b54ef")
 INTRADAY_SOURCE_POLICY_KEY = "intraday_monitor"
 INTRADAY_SOURCE_POLICY_VERSION = "intraday_monitor_policy_v1"
@@ -350,6 +367,28 @@ class IntradaySourcePolicyV2(BaseModel):
         return require_utc(value)
 
 
+class QuoteSourcePolicyV3(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["market_quote"]
+    version: Literal["quote_source_policy_v3"] = "quote_source_policy_v3"
+    schema_version: Literal["3"]
+    available_at: datetime
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != QUOTE_SOURCE_POLICY_V3_ID:
+            raise ValueError("quote policy must use the published v3 record")
+        return value
+
+    @field_validator("available_at")
+    @classmethod
+    def _available_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
 class FosunMarketAdmission(BaseModel):
     """Validated Task 5 authority scoped to one read-only market operation."""
 
@@ -552,6 +591,35 @@ async def load_quote_source_policy_v2(
         key=cast(Literal["market_quote"], record.key),
         version=cast(Literal["quote_source_policy_v2"], record.version),
         schema_version=cast(Literal["2"], record.schema_version),
+        available_at=record.created_at,
+    )
+
+
+async def load_quote_source_policy_v3(
+    session: AsyncSession,
+    *,
+    decision_time: datetime,
+) -> QuoteSourcePolicyV3:
+    decision_time = require_utc(decision_time)
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == QUOTE_SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == QUOTE_SOURCE_POLICY_V3_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != QUOTE_SOURCE_POLICY_V3_ID
+        or record.schema_version != "3"
+        or record.payload != QUOTE_SOURCE_POLICY_V3_PAYLOAD
+        or record.created_at > decision_time
+    ):
+        raise ValueError("published quote_source_policy_v3 is missing or invalid")
+    return QuoteSourcePolicyV3(
+        record_id=record.id,
+        key=cast(Literal["market_quote"], record.key),
+        version=cast(Literal["quote_source_policy_v3"], record.version),
+        schema_version=cast(Literal["3"], record.schema_version),
         available_at=record.created_at,
     )
 

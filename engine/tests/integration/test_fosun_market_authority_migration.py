@@ -16,6 +16,7 @@ from alembic.script import ScriptDirectory
 from nexus.persistence.base import Base
 from nexus.persistence.models import data as data_models
 from nexus.persistence.models import market as market_models
+from nexus.provider_worker import _PROVIDER_TRIGGER_FUNCTIONS
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -157,10 +158,13 @@ def test_alembic_downgrade_forces_read_committed_over_database_default(
     assert error_code == "P3D01"
 
 
-def test_0031_is_single_head_and_metadata_exposes_complete_binding() -> None:
+def test_market_authority_chain_has_one_current_head() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
 
-    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
+    assert scripts.get_heads() == ["0046_fosun_push_quote_authority"]
+    push_quote = scripts.get_revision("0046_fosun_push_quote_authority")
+    assert push_quote is not None
+    assert push_quote.down_revision == "0045_adjusted_diagnostic_prices"
     admission = scripts.get_revision("0031_intraday_schema_admission")
     assert admission is not None
     assert admission.down_revision == "0030_fosun_daily_staging"
@@ -360,12 +364,106 @@ def test_0027_inserts_exact_immutable_v2_policies(migrated_database_url: str) ->
     ]
 
 
+def test_0046_provider_worker_attests_current_market_binding_guard(
+    migrated_database_url: str,
+) -> None:
+    actual = asyncio.run(
+        _function_source_sha256(
+            migrated_database_url,
+            "nexus_validate_fosun_market_binding",
+        )
+    )
+    assert actual == _PROVIDER_TRIGGER_FUNCTIONS[
+        "nexus_validate_fosun_market_binding"
+    ].source_sha256
+
+
 def test_0027_accepts_complete_fosun_quote_binding(
     migrated_database_url: str,
 ) -> None:
     quote_id = asyncio.run(_insert_fosun_quote(migrated_database_url))
 
     assert isinstance(quote_id, UUID)
+
+
+@pytest.mark.parametrize(
+    ("artifact_schema", "operation", "accepted"),
+    [
+        pytest.param(
+            "fosun_gateway_market_snapshot_v1",
+            "fosun_get_quotes",
+            True,
+            id="rest-exact-pair",
+        ),
+        pytest.param(
+            "fosun_push_quote_archive_v1",
+            "fosun_subscribe_quotes",
+            True,
+            id="push-exact-pair",
+        ),
+        pytest.param(
+            "fosun_push_quote_archive_v1",
+            "fosun_get_quotes",
+            False,
+            id="push-rest-cross-pair",
+        ),
+        pytest.param(
+            "fosun_gateway_market_snapshot_v1",
+            "fosun_subscribe_quotes",
+            False,
+            id="rest-push-cross-pair",
+        ),
+        pytest.param(
+            "unknown_quote_archive_v1",
+            "fosun_subscribe_quotes",
+            False,
+            id="unknown-schema",
+        ),
+    ],
+)
+def test_0046_requires_exact_quote_archive_operation_pair(
+    migrated_database_url: str,
+    artifact_schema: str,
+    operation: str,
+    accepted: bool,
+) -> None:
+    overrides = {"artifact_schema": artifact_schema, "operation": operation}
+    if accepted:
+        assert isinstance(
+            asyncio.run(
+                _insert_fosun_quote(
+                    migrated_database_url,
+                    authority_overrides=overrides,
+                )
+            ),
+            UUID,
+        )
+        return
+    with pytest.raises(DBAPIError, match="Fosun market authority") as error:
+        asyncio.run(
+            _insert_fosun_quote(
+                migrated_database_url,
+                authority_overrides=overrides,
+            )
+        )
+    assert error.value.orig.sqlstate == "23514"
+
+
+def test_0046_push_quote_fact_prevents_downgrade(
+    migrated_database_url: str,
+) -> None:
+    asyncio.run(
+        _insert_fosun_quote(
+            migrated_database_url,
+            authority_overrides={
+                "artifact_schema": "fosun_push_quote_archive_v1",
+                "operation": "fosun_subscribe_quotes",
+            },
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="push quote facts prevent downgrade"):
+        command.downgrade(Config("engine/alembic.ini"), "0045_adjusted_diagnostic_prices")
 
 
 @pytest.mark.parametrize(
@@ -816,6 +914,28 @@ def test_0029_empty_downgrade_restores_calendar_append_guard(
     assert restored == before
 
 
+def test_0046_empty_downgrade_restores_exact_v2_quote_guard(
+    temporary_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config("engine/alembic.ini")
+    command.upgrade(config, "0045_adjusted_diagnostic_prices")
+    before = asyncio.run(
+        _function_state(temporary_database_url, "nexus_validate_fosun_market_binding")
+    )
+
+    command.upgrade(config, "0046_fosun_push_quote_authority")
+    command.downgrade(config, "0045_adjusted_diagnostic_prices")
+    restored = asyncio.run(
+        _function_state(temporary_database_url, "nexus_validate_fosun_market_binding")
+    )
+    v3_count = asyncio.run(_quote_v3_policy_count(temporary_database_url))
+
+    assert restored == before
+    assert v3_count == 0
+
+
 def test_0027_downgrade_refuses_bound_fosun_fact(
     temporary_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -966,6 +1086,61 @@ async def _authority_function_configurations(
                 )
             ).tuples()
             return {name: tuple(configuration or ()) for name, configuration in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _function_source_sha256(database_url: str, function_name: str) -> str:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            digest = await connection.scalar(
+                text(
+                    "SELECT encode(public.digest(prosrc, 'sha256'), 'hex') "
+                    "FROM pg_proc WHERE pronamespace='public'::regnamespace "
+                    "AND proname=:function_name"
+                ),
+                {"function_name": function_name},
+            )
+            assert isinstance(digest, str)
+            return digest
+    finally:
+        await engine.dispose()
+
+
+async def _function_state(
+    database_url: str, function_name: str
+) -> tuple[str, tuple[str, ...]]:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text(
+                        "SELECT encode(public.digest(prosrc, 'sha256'), 'hex'), proconfig "
+                        "FROM pg_proc WHERE pronamespace='public'::regnamespace "
+                        "AND proname=:function_name"
+                    ),
+                    {"function_name": function_name},
+                )
+            ).one()
+            return str(row[0]), tuple(row[1] or ())
+    finally:
+        await engine.dispose()
+
+
+async def _quote_v3_policy_count(database_url: str) -> int:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            count = await connection.scalar(
+                text(
+                    "SELECT count(*) FROM source_policies "
+                    "WHERE key='market_quote' AND version='quote_source_policy_v3'"
+                )
+            )
+            assert isinstance(count, int)
+            return count
     finally:
         await engine.dispose()
 
@@ -1421,6 +1596,7 @@ async def _seed_fosun_authority(
     operation: str = "fosun_get_quotes",
     market_scope: str = "US",
     delivery_mode: str = "unknown",
+    artifact_schema: str = "fosun_gateway_market_snapshot_v1",
 ) -> tuple[UUID, UUID, UUID, UUID, datetime, datetime]:
     engine = create_async_engine(database_url)
     capability_id = uuid4()
@@ -1481,10 +1657,14 @@ async def _seed_fosun_authority(
                     "(id,uri,sha256,byte_size,mime_type,schema_version,source,observed_at,"
                     "available_at,received_at,created_at) VALUES "
                     "(:id,'memory://sha256/' || repeat('b',64),repeat('b',64),2,"
-                    "'application/json','fosun_gateway_market_snapshot_v1','fosun',"
+                    "'application/json',:artifact_schema,'fosun',"
                     ":received,:received,:received,:received)"
                 ),
-                {"id": artifact_id, "received": received_at},
+                {
+                    "id": artifact_id,
+                    "received": received_at,
+                    "artifact_schema": artifact_schema,
+                },
             )
             await connection.execute(
                 text(
