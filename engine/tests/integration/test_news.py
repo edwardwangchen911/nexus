@@ -218,9 +218,8 @@ async def test_import_stream_archive_preserves_frames_and_api_readback(
         data = (await http.get(f"/internal/v1/instruments/{ID}/news")).json()["data"]
     assert data["status"] == "saved" and data["execution_locked"] is True
     assert data["delivery"] == "stream_bounded"
-    assert datetime.fromisoformat(data["received_at"].replace("Z", "+00:00")) == datetime.fromisoformat(
-        receipt["ended_at"]
-    )
+    received_at = datetime.fromisoformat(data["received_at"].replace("Z", "+00:00"))
+    assert received_at == datetime.fromisoformat(receipt["ended_at"])
     assert datetime.fromisoformat(data["articles"][0]["created_at"].replace("Z", "+00:00")) == (
         datetime.fromisoformat(article["created_at"])
     )
