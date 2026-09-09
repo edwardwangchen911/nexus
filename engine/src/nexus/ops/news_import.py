@@ -13,7 +13,7 @@ from sqlalchemy.engine import make_url
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.fosun_local import load_local_environment
 from nexus.persistence.session import session_factory
-from nexus.research.news import import_news
+from nexus.research.news import import_news, import_stream_news
 from nexus.research.news_evidence import register_news_evidence
 from nexus.settings import EngineSettings
 
@@ -24,8 +24,9 @@ async def run(
     directory: Path | None,
     *,
     news_snapshot_id: UUID | None = None,
+    stream_directory: Path | None = None,
 ) -> dict[str, object]:
-    if (directory is None) == (news_snapshot_id is None):
+    if sum(value is not None for value in (directory, news_snapshot_id, stream_directory)) != 1:
         raise ValueError("NEWS_IMPORT_SCOPE_INVALID")
     local = {"localhost", "127.0.0.1", "::1"}
     database = make_url(settings.database_url or "sqlite://")
@@ -49,6 +50,11 @@ async def run(
                 session, store, instrument_id=instrument_id, directory=directory
             )
             return {"status": "stored", "snapshot_id": str(snapshot_id), "execution_locked": True}
+        if stream_directory is not None:
+            snapshot_id = await import_stream_news(
+                session, store, instrument_id=instrument_id, directory=stream_directory
+            )
+            return {"status": "stored", "snapshot_id": str(snapshot_id), "execution_locked": True}
         assert news_snapshot_id is not None
         evidence = await register_news_evidence(
             session,
@@ -70,6 +76,7 @@ def main() -> None:
     parser.add_argument("--instrument-id", type=UUID, required=True)
     scope = parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--collection-dir", type=Path)
+    scope.add_argument("--stream-dir", type=Path)
     scope.add_argument("--news-snapshot-id", type=UUID)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -85,11 +92,18 @@ def main() -> None:
                 load_local_environment(args.repo_root, os.environ)
             )
             started = True
-            result = asyncio.run(
-                run(settings, args.instrument_id, None, news_snapshot_id=args.news_snapshot_id)
-                if args.news_snapshot_id is not None
-                else run(settings, args.instrument_id, args.collection_dir)
-            )
+            if args.news_snapshot_id is not None:
+                task = run(
+                    settings,
+                    args.instrument_id,
+                    None,
+                    news_snapshot_id=args.news_snapshot_id,
+                )
+            elif args.stream_dir is not None:
+                task = run(settings, args.instrument_id, None, stream_directory=args.stream_dir)
+            else:
+                task = run(settings, args.instrument_id, args.collection_dir)
+            result = asyncio.run(task)
             handle.seek(0)
             json.dump(result, handle)
             handle.truncate()

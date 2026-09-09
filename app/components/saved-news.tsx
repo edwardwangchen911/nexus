@@ -28,6 +28,7 @@ function SavedNewsContent({ instrumentId }: { instrumentId: string }) {
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [instrumentId, read]);
+  const stream = data?.delivery === "stream_bounded";
   return <section className="saved-news" aria-label="最新消息" aria-busy={loading}>
     <div className="section-heading"><h2>最新消息</h2>
       <button className="button button--quiet" type="button" disabled={loading} onClick={() => {
@@ -35,14 +36,18 @@ function SavedNewsContent({ instrumentId }: { instrumentId: string }) {
       }}>
         {loading ? "正在读取" : "读取已保存消息"}
       </button></div>
-    <p>单一来源 Alpaca · 查询截止至少滞后采集 15 分钟，实际发布延迟未核实。未启用实时推送或自动采集。</p>
+    <p>{stream
+      ? "单一来源 Alpaca · 一次有界实时订阅，仅在本地保存后读取，不会自动重连或持续采集。"
+      : "单一来源 Alpaca · 查询截止至少滞后采集 15 分钟，实际发布延迟未核实。未启用实时推送或自动采集。"}</p>
     {failed ? <p role="status">消息暂时无法读取，请稍后重新读取。</p> : null}
     {data?.status === "unavailable" ? <p>尚未采集该标的消息，不代表没有重要消息。</p> : null}
     {data?.status === "invalid" ? <p role="status">已保存消息的原件校验未通过，暂不展示。</p> : null}
     {data && ["saved", "empty"].includes(data.status) ? <>
       <p>{data.symbol} · 采集时间 {formatDisplayTime(data.received_at)}<br />
-        查询窗口 {formatDisplayTime(data.window_start)} 至 {formatDisplayTime(data.window_end)}</p>
-      <p>{data.has_more ? "仅展示本次最新一页，仍有更早消息未读取。" : "该查询页已读完，不代表来源覆盖全部消息。"}消息尚未纳入既有冻结研究，也不构成调整依据。</p>
+        {stream ? "订阅窗口" : "查询窗口"} {formatDisplayTime(data.window_start)} 至 {formatDisplayTime(data.window_end)}</p>
+      <p>{stream
+        ? "订阅窗口只覆盖本次已接收消息，不代表来源覆盖全部消息。"
+        : data.has_more ? "仅展示本次最新一页，仍有更早消息未读取。" : "该查询页已读完，不代表来源覆盖全部消息。"}消息尚未纳入既有冻结研究，也不构成调整依据。</p>
       {data.status === "empty" ? <p>本次查询未返回消息；这不是“没有消息”的证明。</p> : <ul className="saved-news__list">
         {data.articles.map((article) => <li key={article.id}>
           <article>

@@ -2534,9 +2534,9 @@ export interface components {
             /**
              * Delivery
              * @default delayed_query_latency_unverified
-             * @constant
+             * @enum {string}
              */
-            delivery: "delayed_query_latency_unverified";
+            delivery: "delayed_query_latency_unverified" | "stream_bounded";
             /**
              * Execution Locked
              * @default true

@@ -27,6 +27,18 @@ it("renders untrusted news as text with explicit timing and coverage", async () 
   expect(screen.getByText(/查询截止至少滞后采集 15 分钟/)).toBeTruthy();
   expect(screen.getByText(/仍有更早消息未读取/)).toBeTruthy();
 });
+it("labels a saved bounded stream without claiming delayed query coverage", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({data:{
+    instrument_id:id,status:"saved",symbol:"EXAMPLE",delivery:"stream_bounded",has_more:false,
+    received_at:"2026-09-06T00:00:00Z",window_start:"2026-09-05T23:59:00Z",window_end:"2026-09-06T00:00:00Z",
+    articles:[{id:2,headline:"Stream",summary:"Plain",source:"synthetic",author:"Example",url:null,
+      created_at:"2026-09-05T22:00:00Z",updated_at:"2026-09-05T23:00:00Z"}],
+  }}))));
+  render(<SavedNews instrumentId={id}/>);
+  expect(await screen.findByText(/一次有界实时订阅/)).toBeTruthy();
+  expect(screen.queryByText(/查询截止至少滞后采集 15 分钟/)).toBeNull();
+  expect(screen.getByText(/订阅窗口只覆盖/)).toBeTruthy();
+});
 it("never shows a late response for the previous instrument", async () => {
   let resolve!: (value: Response) => void;
   const fetcher = vi.fn().mockImplementationOnce(() => new Promise<Response>((done) => { resolve=done; }))

@@ -16,6 +16,7 @@ from nexus.ops.local_recovery import write_private
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.session import session_factory
+from nexus.research import news as news_research
 from nexus.research.news import import_news, read_news, validate_archive
 from nexus.settings import EngineSettings
 from pydantic import SecretStr
@@ -54,6 +55,58 @@ def archive(directory, *, symbol="EXAMPLE", empty=False):
     write_private(directory / "raw.json", raw)
     write_private(directory / "receipt.json", json.dumps(receipt).encode())
     return raw, receipt
+
+
+def stream_archive(directory, *, symbol="EXAMPLE"):
+    ended = datetime.now(UTC) - timedelta(seconds=1)
+    started = ended - timedelta(seconds=3)
+    article = dict(
+        T="n",
+        id=18,
+        headline="Stream announcement",
+        summary="Stream plain text",
+        author="Example",
+        created_at=(ended - timedelta(hours=2)).isoformat(),
+        updated_at=(ended - timedelta(hours=1)).isoformat(),
+        url="https://example.com/stream",
+        symbols=[symbol],
+        source="synthetic",
+    )
+    frames = [
+        json.dumps([{"T": "success", "msg": "authenticated"}]).encode(),
+        json.dumps([{"T": "subscription", "news": [symbol]}]).encode(),
+        json.dumps([article]).encode(),
+    ]
+    received = [started, started + timedelta(seconds=1), ended - timedelta(milliseconds=1)]
+    receipt = dict(
+        schema="nexus_news_stream_receipt_v1",
+        source="alpaca",
+        transport="websocket",
+        symbol=symbol,
+        started_at=started.isoformat(),
+        ended_at=ended.isoformat(),
+        authenticated=True,
+        subscription_confirmed=True,
+        status="bounded_complete",
+        stop_reason="DURATION_LIMIT",
+        frames=[
+            dict(
+                file=f"frame-{index:05}.json",
+                received_at=received[index].isoformat(),
+                raw_sha256=sha256(frame).hexdigest(),
+                raw_byte_length=len(frame),
+            )
+            for index, frame in enumerate(frames)
+        ],
+        article_count=1,
+        frame_count=len(frames),
+    )
+    directory.mkdir(mode=0o700)
+    for index, frame in enumerate(frames):
+        write_private(directory / f"frame-{index:05}.json", frame)
+    receipt_raw = json.dumps(receipt, sort_keys=True).encode()
+    write_private(directory / "receipt.json", receipt_raw)
+    return frames, receipt_raw, receipt, article
 
 
 async def setup(url):
@@ -136,6 +189,45 @@ async def test_import_read_api_idempotent_and_corruption(migrated_database_url, 
         assert (
             await read_news(s, store, instrument_id=UUID(int=18), now=datetime.now(UTC))
         ).status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_import_stream_archive_preserves_frames_and_api_readback(
+    migrated_database_url, tmp_path
+):
+    settings, factory, _, store = await setup(migrated_database_url)
+    frames, receipt_raw, receipt, article = stream_archive(tmp_path / "stream")
+    async with factory.begin() as s:
+        first = await news_research.import_stream_news(
+            s, store, instrument_id=ID, directory=tmp_path / "stream"
+        )
+    async with factory.begin() as s:
+        assert first == await news_research.import_stream_news(
+            s, store, instrument_id=ID, directory=tmp_path / "stream"
+        )
+        assert await s.scalar(select(func.count()).select_from(DataSnapshot)) == 1
+        assert await s.scalar(select(func.count()).select_from(DataArtifact)) == 4
+    app = create_engine_app(settings)
+    app.state.news_object_store = store
+    app.dependency_overrides[require_service_actor] = lambda: VerifiedServiceActor(
+        actor_id="test", request_id=new_uuid7(), key_id="test"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        data = (await http.get(f"/internal/v1/instruments/{ID}/news")).json()["data"]
+    assert data["status"] == "saved" and data["execution_locked"] is True
+    assert data["delivery"] == "stream_bounded"
+    assert data["received_at"] == receipt["ended_at"]
+    assert data["articles"][0]["created_at"] == article["created_at"]
+    assert data["articles"][0]["updated_at"] == article["updated_at"]
+    assert data["content_hash"] == sha256(receipt_raw).hexdigest()
+    assert {sha256(frame).hexdigest() for frame in frames}.issubset(
+        set(
+            object_id.rsplit("/", 1)[-1].removesuffix(".json")
+            for object_id in store._client.objects
+        )
+    )
 
 
 @pytest.mark.asyncio

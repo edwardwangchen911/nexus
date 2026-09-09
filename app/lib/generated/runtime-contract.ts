@@ -3796,8 +3796,11 @@ export const runtimeContractSchemas = {
         "type": "string"
       },
       "delivery": {
-        "const": "delayed_query_latency_unverified",
         "default": "delayed_query_latency_unverified",
+        "enum": [
+          "delayed_query_latency_unverified",
+          "stream_bounded"
+        ],
         "title": "Delivery",
         "type": "string"
       },
