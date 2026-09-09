@@ -53,7 +53,7 @@ from nexus.persistence.models.market import (
 from nexus.providers.base import DeliveryMode, PriceSeries
 from nexus.quality.market import xnys_session_window
 from nexus.quality.source_policy import (
-    load_quote_source_policy_v2,
+    load_quote_source_policy_v3,
     load_source_policy_v2,
     select_price_series,
 )
@@ -318,7 +318,19 @@ class MarketService:
                 LatestQuote.provider_authorized_at.is_not(None),
                 LatestQuote.provider_authorized_at <= decision_time,
                 DataArtifact.source == "fosun",
-                DataArtifact.schema_version == "fosun_gateway_market_snapshot_v1",
+                or_(
+                    and_(
+                        DataArtifact.schema_version
+                        == "fosun_gateway_market_snapshot_v1",
+                        ProviderCapability.payload["operation"].as_string()
+                        == "fosun_get_quotes",
+                    ),
+                    and_(
+                        DataArtifact.schema_version == "fosun_push_quote_archive_v1",
+                        ProviderCapability.payload["operation"].as_string()
+                        == "fosun_subscribe_quotes",
+                    ),
+                ),
                 DataArtifact.available_at <= decision_time,
                 DataArtifact.received_at <= decision_time,
                 LatestQuote.revision == DataArtifact.sha256,
@@ -328,7 +340,6 @@ class MarketService:
                 ProviderCapability.contract_hash == LatestQuote.provider_contract_hash,
                 ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
                 ProviderCapability.expires_at > LatestQuote.provider_authorized_at,
-                ProviderCapability.payload["operation"].as_string() == "fosun_get_quotes",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
                 ProviderCapability.payload["delivery_mode"].as_string()
                 == LatestQuote.delivery_mode,
@@ -349,7 +360,7 @@ class MarketService:
             quotes_by_instrument[quote.instrument_id].append(quote)
         watchlisted = await self._watchlisted_ids(instrument_ids)
         try:
-            await load_quote_source_policy_v2(
+            await load_quote_source_policy_v3(
                 self._session,
                 decision_time=decision_time,
             )

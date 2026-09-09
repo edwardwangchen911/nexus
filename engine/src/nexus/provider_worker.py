@@ -375,7 +375,7 @@ _PROVIDER_TRIGGER_FUNCTIONS = {
         True,
     ),
     "nexus_validate_fosun_market_binding": _ProviderTriggerFunctionSpec(
-        "7a9ed40c0ef254d114336b009006679de5c827f2a746b6abd00a6f9183266a9d",
+        "da60c12b5dc22cba5bdfa6e7332cb2bc0ca403eb1124525f1e2d25e0dea6ce3b",
         True,
     ),
     "nexus_validate_intraday_bar_set_authority": _ProviderTriggerFunctionSpec(

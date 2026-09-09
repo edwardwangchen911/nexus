@@ -3135,3 +3135,13 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 后续只读接线核查发现，现有 `LatestQuote` 权威链只接纳 REST `fosun_get_quotes` 运行时冻结的 capability/status 与 `fosun_gateway_market_snapshot_v1` 原件。上述已成功 v2 WebSocket 归档没有冻结 Engine 采集时的 capability/status 身份；事后套用当前 REST binding 会错记来源操作和授权时点，因此未将其写入价格权威或放宽数据库门禁。
 
 本切片新增纯读标准化输入：只对 `bounded_complete` 且实际含行情的归档取最后一条价格，按已有 0–12 位 `power` 规则精确缩放并拒绝非正价；`qtDate/qtTime` 只保留原始整数，不推断时区。标准 artifact 以 base64 保留 receipt 和全部 frame 的逐字节可回放性，未使用重序列化内容冒充原件。已有真实成功归档的离线 loader→标准化重读通过，未新建上游连接。真正入库的下一个必要动作是：采集前冻结独立的 push 读权限并绑定归档，再让新 schema 只进入 display-only 查询；研究、风控、交易和 `execution_locked=true` 不变。
+
+### 复星 Push 权限绑定与 Display-only 数据合同（2026-09-09）
+
+采集前权限已从 REST 行情中独立出来：Engine 只在既有 Fosun `read_only` 状态和合同哈希有效时创建或复用 `fosun_subscribe_quotes` capability，并输出规范化 authority 文档；Gateway v3 收据绑定该文档 SHA-256。无现有只读状态、状态已失效、权限时间或合同不一致时均在建立 WSS 前拒绝，不能采集后补造权限。传输虽为 WebSocket，delivery mode 仍保持 `unknown`，未把尚未核实的实际发布延迟标成实时。
+
+新增 0046 不可变 `quote_source_policy_v3` 与数据库触发器合同。`fosun_gateway_market_snapshot_v1 → fosun_get_quotes` 和 `fosun_push_quote_archive_v1 → fosun_subscribe_quotes` 仅接受两组精确配对，交叉配对及未知 schema 均拒绝。MarketService 只将两组 authority-bound 最新价用于 display-only 页面/API；`database_series` 仍只接 REST schema/operation，因此 push 不进入 intraday/daily、诊断、研究、回测或交易权威。执行锁及人工批准边界未改变。
+
+迁移保留 Provider Worker 对触发器源码摘要和固定 `search_path` 的验证；有 push 事实时拒绝降级，无事实时 `0045 → 0046 → 0045` 精确恢复旧 v2 函数与策略。隔离 PostgreSQL 的 API、策略、迁移、权限角色完整相关回归 131 项通过，Provider Worker 单测 62 项通过；Ruff、Mypy、单一 Alembic head 与 diff-check 通过。全程未连接 Fosun/Alpaca、未写真实账户库、未调用模型或创建订单。
+
+当前仍没有新的真实 v3 push 归档或持久化 `LatestQuote`，所以不能宣称真实页面已收到复星推送价格。下一必要切片是产品化 prepare/import 入口：采集前落盘冻结 authority，导入时校验 v3 digest、代码/身份与时间窗后写入对象存储和 `LatestQuote`，再用一次有界真实 probe 验收 API/BFF/页面；不新增调度器、事件总线或自动重连。
