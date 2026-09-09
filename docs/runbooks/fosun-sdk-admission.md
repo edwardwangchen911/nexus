@@ -21,6 +21,13 @@ credential-loading CLI or service route, is not wired to Provider Worker, databa
 and is not wired to Provider Worker, database, API, or Web. A successful connection proves only
 that bounded probe, not continuous coverage or runtime admission.
 
+The first bounded real push acceptance on 2026-09-09 used the normal product CLI with one HK code,
+a 20-second duration, a 20-frame ceiling, one REST session request, one WSS connection, and zero
+automatic retries. It ended at the duration limit with subscription confirmed, 13 archived frames
+and 12 quote messages; the strict loader reread the v2 archive successfully. One application
+heartbeat was sent and recorded but no acknowledgement arrived before the window ended. This
+admits no scheduler, reconnect loop, database import, API/Web display, or continuous runtime.
+
 The reviewed candidate is tag [`v1.2.0`](https://github.com/fosunwealth/openapi-python-sdk/tree/891d95fb4967efaa682387c1b35966ceea38fb21)
 at commit `891d95fb4967efaa682387c1b35966ceea38fb21`. A separate public-source refresh on
 2026-08-27 found `main` still at
