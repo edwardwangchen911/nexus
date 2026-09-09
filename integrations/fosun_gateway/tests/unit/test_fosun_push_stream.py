@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from unittest.mock import ANY
 
 import pytest
@@ -60,11 +61,45 @@ class ReceiveClock:
         return self.elapsed
 
     async def wait_for(self, receive, timeout):
-        if self.socket.frames:
+        if receive.cr_code.co_name != "recv" or self.socket.frames:
             return await receive
         receive.close()
         self.elapsed += timeout
         raise TimeoutError
+
+
+class EchoSocket(Socket):
+    ack_kind = "matching"
+
+    async def send(self, message):
+        await super().send(message)
+        sent = json.loads(message)
+        if sent["act"] == "hb":
+            value = sent["hbValue"] + (1 if self.ack_kind == "unknown" else 0)
+            self.frames.append({"topic": "hb", "hbValue": value})
+            if self.ack_kind == "duplicate":
+                self.frames.append({"topic": "hb", "hbValue": value})
+
+
+class SendBlockingSocket(Socket):
+    def __init__(self, act):
+        super().__init__([SUB_REPLY])
+        self.act = act
+        self.start = monotonic()
+        self.offset = 0.0
+
+    def clock(self):
+        return monotonic() - self.start + self.offset
+
+    async def recv(self):
+        result = await super().recv()
+        self.offset = 15.0
+        return result
+
+    async def send(self, message):
+        if json.loads(message)["act"] == self.act:
+            await asyncio.Event().wait()
+        await super().send(message)
 
 
 def _sub_reply(code="usAAPL"):
@@ -113,6 +148,18 @@ def _collect(*, socket, directory, **kwargs):
         max_frames=kwargs.pop("max_frames", 100),
         connector=lambda *args, **connector_kwargs: socket,
         request_id_factory=lambda: "request-123",
+        **kwargs,
+    )
+
+
+def _controlled_collect(*, socket, directory, monkeypatch, **kwargs):
+    clock = ReceiveClock(socket)
+    monkeypatch.setattr(push_stream.asyncio, "wait_for", clock.wait_for)
+    return _collect(
+        socket=socket,
+        directory=directory,
+        monotonic_clock=clock.monotonic,
+        now=lambda: datetime(2024, 1, 1, tzinfo=UTC) + timedelta(seconds=clock.elapsed),
         **kwargs,
     )
 
@@ -172,20 +219,48 @@ async def test_confirmed_silent_quote_window_is_bounded_and_archived_privately(t
 
 
 @pytest.mark.asyncio
-async def test_server_heartbeat_is_recorded_without_reply_and_quote_frames_are_retained(tmp_path):
+async def test_unsolicited_heartbeat_ack_is_rejected_without_reply(tmp_path):
     quote = _quote_frame()
     socket = Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}, quote])
 
     result = await _collect(socket=socket, directory=tmp_path / "run", max_frames=3)
 
-    assert result["status"] == "bounded_complete"
-    assert result["stop_reason"] == "FRAME_LIMIT"
+    assert result["status"] == "partial"
+    assert result["stop_reason"] == "PROTOCOL_INVALID"
     assert socket.sent == [
         {"act": "sub", "items": [{"topic": "qt", "code": ["usAAPL"]}], "requestid": "request-123"},
     ]
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(tmp_path / "run")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("act", "duration", "status"), [("sub", 0.03, "failed"), ("hb", 15.03, "partial")]
+)
+async def test_blocked_outbound_send_cannot_outlive_deadline(tmp_path, act, duration, status):
+    socket = SendBlockingSocket(act)
+    task = asyncio.create_task(
+        _collect(
+            socket=socket,
+            directory=tmp_path / "run",
+            duration=duration,
+            monotonic_clock=socket.clock,
+        )
+    )
+    done, pending = await asyncio.wait({task}, timeout=0.2)
+    if pending:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert done, "collector remained blocked after the requested deadline"
+    result = task.result()
+    assert result["stop_reason"] == "DURATION_LIMIT"
+    assert result["status"] == status
     archive = load_push_archive(tmp_path / "run")
-    assert len(archive["frames"]) == 3
-    assert archive["receipt"]["heartbeat_ack_count"] == 1
+    assert archive["receipt"]["heartbeat_sent_count"] == 0
+    assert len(socket.sent) == (0 if act == "sub" else 1)
 
 
 @pytest.mark.asyncio
@@ -214,10 +289,9 @@ async def test_silent_window_sends_bounded_heartbeats_without_archiving_them(
         "items": [{"topic": "qt", "code": ["usAAPL"]}],
         "requestid": "request-123",
     }
-    assert all(
-        sent == {"act": "hb", "hbValue": 1_704_067_200_000}
-        for sent in socket.sent[1:]
-    )
+    assert socket.sent[1:] == [
+        {"act": "hb", "hbValue": 1_704_067_200_000 + index} for index in range(sent_count)
+    ]
     assert len(socket.sent) == sent_count + 1
     archive = load_push_archive(tmp_path / "run")
     assert archive["receipt"]["heartbeat_sent_count"] == len(socket.sent) - 1
@@ -247,24 +321,19 @@ async def test_heartbeat_interval_cannot_create_excess_outbound_traffic(tmp_path
     directory = tmp_path / "run"
 
     with pytest.raises(PushStreamError, match="^PUSH_HEARTBEAT_INTERVAL_INVALID$"):
-        await _collect(
-            socket=socket, directory=directory, heartbeat_interval_seconds=interval
-        )
+        await _collect(socket=socket, directory=directory, heartbeat_interval_seconds=interval)
 
     assert socket.sent == []
     assert not directory.exists()
 
 
 @pytest.mark.asyncio
-async def test_window_over_fifteen_seconds_requires_a_proactive_heartbeat(tmp_path):
-    moments = iter([0.0, 0.0, 15.1, 16.0, 16.0])
-
-    result = await _collect(
+async def test_window_over_fifteen_seconds_requires_a_proactive_heartbeat(tmp_path, monkeypatch):
+    result = await _controlled_collect(
         socket=Socket([SUB_REPLY]),
         directory=tmp_path / "run",
         duration=16,
-        monotonic_clock=lambda: next(moments),
-        now=lambda: datetime(2024, 1, 1, tzinfo=UTC),
+        monkeypatch=monkeypatch,
     )
 
     assert result["status"] == "bounded_complete"
@@ -275,26 +344,114 @@ async def test_window_over_fifteen_seconds_requires_a_proactive_heartbeat(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_server_heartbeat_ack_does_not_add_an_outbound_message(tmp_path):
-    moments = iter([0.0, 0.0, 0.0, 15.1, 16.0, 16.0])
-    now = datetime(2024, 1, 1, tzinfo=UTC)
-    socket = Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}])
+async def test_server_heartbeat_ack_does_not_add_an_outbound_message(tmp_path, monkeypatch):
+    socket = EchoSocket([SUB_REPLY])
 
-    await _collect(
+    await _controlled_collect(
         socket=socket,
         directory=tmp_path / "run",
         duration=16,
-        monotonic_clock=lambda: next(moments),
-        now=lambda: now,
+        monkeypatch=monkeypatch,
     )
 
     assert socket.sent == [
         {"act": "sub", "items": [{"topic": "qt", "code": ["usAAPL"]}], "requestid": "request-123"},
-        {"act": "hb", "hbValue": 1_704_067_200_000},
+        {"act": "hb", "hbValue": 1_704_067_215_000},
     ]
     archive = load_push_archive(tmp_path / "run")
     assert archive["receipt"]["heartbeat_ack_count"] == 1
     assert archive["receipt"]["heartbeat_sent_count"] == 1
+    assert archive["receipt"].get("heartbeats") == [
+        {"value": 1_704_067_215_000, "after_frame_count": 1, "elapsed_monotonic_seconds": 15.0}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("value", True),
+        ("value", 17),
+        ("after_frame_count", 2),
+        ("after_frame_count", -1),
+        ("elapsed_monotonic_seconds", 14.9),
+        ("elapsed_monotonic_seconds", 17.0),
+    ],
+)
+async def test_loader_requires_consistent_heartbeat_send_evidence(
+    tmp_path, monkeypatch, field, value
+):
+    directory = tmp_path / "run"
+    await _controlled_collect(
+        socket=EchoSocket([SUB_REPLY]),
+        directory=directory,
+        duration=16,
+        monkeypatch=monkeypatch,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+    assert "heartbeats" in receipt
+    receipt["heartbeats"][0][field] = value
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(directory)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent_count", [0, 1])
+async def test_legacy_archive_is_readable_only_without_missing_heartbeat_evidence(
+    tmp_path, sent_count
+):
+    directory = tmp_path / "run"
+    await _collect(socket=Socket([SUB_REPLY]), directory=directory, max_frames=1)
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["schema"] = "nexus_fosun_push_receipt_v1"
+    receipt.pop("heartbeats")
+    receipt.pop("outbound_send_timed_out")
+    receipt["heartbeat_sent_count"] = sent_count
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+
+    if sent_count:
+        with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+            load_push_archive(directory)
+    else:
+        assert load_push_archive(directory)["receipt"] == receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack_kind", ["unknown", "duplicate"])
+async def test_heartbeat_ack_must_match_one_pending_send(tmp_path, monkeypatch, ack_kind):
+    socket = EchoSocket([SUB_REPLY])
+    socket.ack_kind = ack_kind
+    result = await _controlled_collect(
+        socket=socket,
+        directory=tmp_path / "run",
+        duration=16,
+        monkeypatch=monkeypatch,
+    )
+
+    assert result["status"] == "partial"
+    assert result["stop_reason"] == "PROTOCOL_INVALID"
+    assert len(socket.sent) == 2
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(tmp_path / "run")
+
+
+@pytest.mark.asyncio
+async def test_loader_cannot_allow_a_heartbeat_before_the_first_interval(tmp_path):
+    directory = tmp_path / "run"
+    await _collect(socket=Socket([SUB_REPLY]), directory=directory, max_frames=1)
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["heartbeat_sent_count"] = 1
+    # Preserve schema shape, also colluding with the send record when it exists.
+    if "heartbeats" in receipt:
+        receipt["heartbeats"] = [
+            {"value": 1, "after_frame_count": 1, "elapsed_monotonic_seconds": 0.0}
+        ]
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(directory)
 
 
 @pytest.mark.asyncio
@@ -420,7 +577,7 @@ async def test_cancellation_after_a_frame_persists_a_readable_partial_receipt(tm
 
 @pytest.mark.asyncio
 async def test_loader_accepts_cancelled_archive_without_a_scheduled_fifteen_second_send(tmp_path):
-    moments = iter([0.0, 0.0, 14.9, 15.1])
+    moments = iter([0.0, 0.0, 0.0, 14.9, 15.1])
     socket = BlockingSocket([SUB_REPLY])
     directory = tmp_path / "run"
     task = asyncio.create_task(
@@ -457,10 +614,7 @@ async def test_secret_reflection_is_not_persisted(tmp_path):
     assert result["stop_reason"] == "SECRET_REFLECTION"
     assert result["frame_count"] == 1
     assert not (tmp_path / "run" / "frame-00001.json").exists()
-    assert all(
-        "synthetic-session" not in path.read_text()
-        for path in (tmp_path / "run").iterdir()
-    )
+    assert all("synthetic-session" not in path.read_text() for path in (tmp_path / "run").iterdir())
 
 
 @pytest.mark.asyncio
@@ -598,10 +752,9 @@ async def test_optional_s2c_metadata_is_preserved_when_types_are_valid(tmp_path)
     metadata = {"id": 1, "time": 1_704_067_200_123, "cache": 0, "requestid": "request-123"}
     frames = [
         {**SUB_REPLY, **metadata},
-        {"topic": "hb", "hbValue": 17, **metadata},
         {**_quote_frame(), **metadata},
     ]
-    result = await _collect(socket=Socket(frames), directory=tmp_path / "run", max_frames=3)
+    result = await _collect(socket=Socket(frames), directory=tmp_path / "run", max_frames=2)
 
     assert result["status"] == "bounded_complete"
     assert load_push_archive(tmp_path / "run")["frames"] == tuple(
@@ -612,12 +765,19 @@ async def test_optional_s2c_metadata_is_preserved_when_types_are_valid(tmp_path)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("ids", "valid"),
-    [([5, 5], False), ([5, 4], False), ([5, 6], True), ([5, None, 4], True), ([None, 4], True)],
+    [
+        ([5, 5], False),
+        ([5, 4], False),
+        ([5, 6], True),
+        ([5, None, 4], False),
+        ([5, None, 5], False),
+        ([5, None, 6], True),
+        ([None, 4], True),
+    ],
 )
 async def test_consecutive_quote_ids_must_increase_only_when_both_are_known(tmp_path, ids, valid):
     frames = [SUB_REPLY]
     for value in ids:
-        frames.append({"topic": "hb", "hbValue": 17, "id": 999})
         frames.append(_quote_frame() if value is None else {**_quote_frame(), "id": value})
 
     result = await _collect(
@@ -670,12 +830,13 @@ async def test_loader_recomputes_receipt_counters_to_reject_tampering(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_loader_recomputes_heartbeat_ack_count(tmp_path):
+async def test_loader_recomputes_heartbeat_ack_count(tmp_path, monkeypatch):
     directory = tmp_path / "run"
-    await _collect(
-        socket=Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}]),
+    await _controlled_collect(
+        socket=EchoSocket([SUB_REPLY]),
         directory=directory,
-        max_frames=2,
+        duration=16,
+        monkeypatch=monkeypatch,
     )
     receipt = json.loads((directory / "receipt.json").read_text())
 
