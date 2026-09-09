@@ -34,6 +34,7 @@ describe("plain-language display labels", () => {
   });
   it("clarifies policy scope while preserving its identity", () => {
     expect(policyScopeLabel("portfolio")).toBe("组合范围");
+    expect(policyScopeLabel("portfolio:USD")).toBe("组合范围：USD");
     expect(policyScopeLabel("currency:USD")).toBe("币种范围：USD");
     expect(policyScopeLabel("instrument:0198d600-1000-7000-8000-000000001501")).toBe("标的范围：0198d600-1000-7000-8000-000000001501");
     expect(policyScopeLabel("custom_scope")).toBe("未识别范围（custom_scope）");

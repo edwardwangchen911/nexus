@@ -139,6 +139,7 @@ export function actorLabel(value: string): string {
 
 export function policyScopeLabel(value: string): string {
   if (value === "portfolio") return "组合范围";
+  if (/^portfolio:[A-Z]{3}$/.test(value)) return `组合范围：${value.slice(10)}`;
   if (/^currency:[A-Z]{3}$/.test(value)) return `币种范围：${value.slice(9)}`;
   if (/^instrument:[0-9a-f-]{36}$/i.test(value)) return `标的范围：${value.slice(11)}`;
   return `未识别范围（${value}）`;
