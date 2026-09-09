@@ -24,7 +24,9 @@ class FrozenFosunMarketAuthority(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     source: Literal["fosun"] = "fosun"
-    operation: Literal["fosun_get_quotes", "fosun_get_bars"]
+    operation: Literal[
+        "fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"
+    ]
     market_scope: Literal["US"] = "US"
     delivery_mode: Literal["unknown", "real_time", "delayed"]
     capability_id: UUID
@@ -99,7 +101,9 @@ async def load_frozen_fosun_market_authority(
     session: AsyncSession,
     *,
     check_time: datetime,
-    operation: Literal["fosun_get_quotes", "fosun_get_bars"],
+    operation: Literal[
+        "fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"
+    ],
     delivery_mode: Literal["unknown", "real_time", "delayed"] | None = None,
 ) -> FrozenFosunMarketAuthority | None:
     """Load one exact current authority at the caller's actual wall-clock time."""

@@ -32,6 +32,7 @@ from nexus_fosun_gateway.security.provider_environment import (
 )
 
 _ARGUMENT_NAMES = {"--manifest", "--code", "--duration", "--max-frames", "--output-dir"}
+_OPTIONAL_ARGUMENT_NAMES = {"--authority-sha256"}
 _ENVIRONMENT_NAMES = (
     "FOSUN_PROVIDER_MANIFEST",
     "FOSUN_SDK_ADMITTED",
@@ -131,6 +132,7 @@ async def _execute_once(
             duration=plan["duration"],
             max_frames=plan["max_frames"],
             proxy_url=LOCAL_PROBE_PROXY_URL,
+            authority_sha256=plan["authority_sha256"],
         )
         archive = load(plan["output_dir"])
         if archive.get("status") != collected.get("status"):
@@ -175,15 +177,16 @@ async def _execute_once(
 
 
 def _parse_arguments(arguments: tuple[str, ...]) -> dict[str, Any]:
-    if len(arguments) != len(_ARGUMENT_NAMES) * 2:
+    if len(arguments) not in {len(_ARGUMENT_NAMES) * 2, (len(_ARGUMENT_NAMES) + 1) * 2}:
         raise ValueError
     values: dict[str, str] = {}
     for index in range(0, len(arguments), 2):
         name, value = arguments[index], arguments[index + 1]
-        if name not in _ARGUMENT_NAMES or name in values:
+        if name not in _ARGUMENT_NAMES | _OPTIONAL_ARGUMENT_NAMES or name in values:
             raise ValueError
         values[name] = value
-    if set(values) != _ARGUMENT_NAMES:
+    names = set(values)
+    if names != _ARGUMENT_NAMES and names != _ARGUMENT_NAMES | _OPTIONAL_ARGUMENT_NAMES:
         raise ValueError
     manifest = _absolute_path(values["--manifest"])
     output_dir = _absolute_path(values["--output-dir"])
@@ -197,12 +200,19 @@ def _parse_arguments(arguments: tuple[str, ...]) -> dict[str, Any]:
     _validate_limits(duration, max_frames)
     if duration > 60:
         raise ValueError
+    authority_sha256 = values.get("--authority-sha256")
+    if authority_sha256 is not None and (
+        len(authority_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in authority_sha256)
+    ):
+        raise ValueError
     return {
         "manifest": manifest,
         "code": _validate_code(values["--code"]),
         "duration": float(duration),
         "max_frames": max_frames,
         "output_dir": output_dir,
+        "authority_sha256": authority_sha256,
     }
 
 

@@ -366,7 +366,9 @@ class FosunMarketAdmission(BaseModel):
     admitted_contract_hash: str
     provider: Literal["fosun"]
     mode: Literal["read_only"]
-    operation: Literal["fosun_get_quotes", "fosun_get_bars"]
+    operation: Literal[
+        "fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"
+    ]
     market_scope: Literal["US"]
     delivery_mode: Literal["unknown", "real_time", "delayed"]
     contract_hash: str
@@ -591,7 +593,11 @@ async def load_fosun_market_admission(
     market_scope: str,
 ) -> FosunMarketAdmission | None:
     decision_time = require_utc(decision_time)
-    if operation not in {"fosun_get_quotes", "fosun_get_bars"} or market_scope != "US":
+    if operation not in {
+        "fosun_get_quotes",
+        "fosun_get_bars",
+        "fosun_subscribe_quotes",
+    } or market_scope != "US":
         return None
     service = IntegrationStatusService(session, decision_time)
     status = await service.find_status("fosun")
@@ -632,7 +638,12 @@ async def load_fosun_market_admission(
         admitted_contract_hash=status.admitted_contract_hash,
         provider="fosun",
         mode="read_only",
-        operation=cast(Literal["fosun_get_quotes", "fosun_get_bars"], payload_operation),
+        operation=cast(
+            Literal[
+                "fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"
+            ],
+            payload_operation,
+        ),
         market_scope=cast(Literal["US"], payload_market_scope),
         delivery_mode=cast(
             Literal["unknown", "real_time", "delayed"], payload_delivery_mode
