@@ -1530,6 +1530,7 @@ async def test_sdk_uses_ephemeral_read_only_thread_schema_and_cleanup(monkeypatc
     assert len(codex_sdk._Batch.model_validate_json(raw).roles) == 8
     assert usage.input_tokens == 300 and usage.provider_calls == 1
     options = client.thread_start.call_args.kwargs
+    assert options["model"] == "gpt-5.6-terra"
     assert options["ephemeral"] is True
     assert options["approval_mode"] is ApprovalMode.deny_all
     assert options["sandbox"] is Sandbox.read_only

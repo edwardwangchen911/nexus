@@ -3275,3 +3275,26 @@ BFF 概览已经指向该新方案组，详情接口返回三个方案均 `stale
 过期”，明确提示费用和比较证据不完整、“不进入影子验证，也不执行调整”；页面没有
 Shadow 启动按钮。详情并发读取 Shadow 返回 404 是“尚未启动”的预期空状态，不是页面
 故障。全程没有模型、券商调用、模拟盘或实盘订单，执行锁不变。
+
+### 当前模型迁移与最新组合研究闭环（2026-09-10）
+
+最新组合对应的手动日根完成本地物化、冻结校验与正式诊断后，首次研究运行在旧的
+`gpt-5.4-mini` 调用边界失败并以 `model_usage_uncertain` 终态保存；未重放该 run。
+本地日志同时确认仓库仍固定旧模型，而当前 Codex 模型目录已不再提供该 ID。按官方
+GPT-5.6 迁移指引，最小改为平衡质量与成本的 `gpt-5.6-terra`，保留 low reasoning、
+零工具、单次 Job、输入输出上限、订阅计价与执行锁；没有新增路由或升级 SDK 依赖。
+
+首个 Terra run 在模型调用前被输入预检拒绝。持久化诊断明确为 `input_too_large` /
+`preflight`，输入输出 token 均为空；原因是离线计数器只允许旧模型使用已固定的
+`o200k_base`，对 Terra 退化为 UTF-8 字节上界。计数器现仅增加 Terra 的同编码识别，
+未知模型仍保守回退。相关 SDK、token 与聚合预算回归 155 项通过、6 项因本机无官方
+词表 fixture 跳过，Ruff 与定向 Mypy 通过。
+
+修复后使用新的真实 UTC 冻结时刻登记且仅运行一次独立研究：run
+`01a08717-5574-7eee-9452-3f1d5e401e52` 与 Job 均 completed/succeeded，Job 尝试
+1/1、研究 retry 0，事件链完整经过 prepared、running、validated、audited、
+synthesized、completed；保存 8 个角色输出及综合/完成输出，实测输入 84,155、输出
+2,579 tokens。最终研究质量仍为 `partial`、立场 `watch`、exposure action `none`，
+保留 7 项 uncertainty 与 4 项综合复核，不等于投资结论合格，不解除
+`execution_locked=true`。下一步只把这份已保存研究绑定进同一日根的只读 v2 草稿；
+费用证据和三方案经济比较缺口继续独立保留。

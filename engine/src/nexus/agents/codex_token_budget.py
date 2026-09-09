@@ -63,7 +63,9 @@ def payload_input_units(text: str, *, model: str) -> int:
     """Count ordinary wire-text tokens, or conservatively fall back to UTF-8 bytes."""
     fallback = len(text.encode("utf-8"))
     try:
-        if model != "gpt-5.4-mini" or metadata.version("tiktoken") != "0.14.0":
+        if model not in {"gpt-5.4-mini", "gpt-5.6-terra"} or metadata.version(
+            "tiktoken"
+        ) != "0.14.0":
             return fallback
         tiktoken = importlib.import_module("tiktoken")
         data = local_vocabulary()

@@ -84,7 +84,7 @@ def test_official_encoding_counts_ordinary_text_offline(
     path = tmp_path / "o200k_base.tiktoken"
     path.write_bytes(official_vocab)
     monkeypatch.setattr(budget, "tokenizer_cache_path", lambda: path)
-    assert budget.payload_input_units(text, model="gpt-5.4-mini") == expected
+    assert budget.payload_input_units(text, model="gpt-5.6-terra") == expected
     assert not forbid_network
 
 
@@ -104,7 +104,7 @@ def test_real_encoding_merges_synthetic_vocabulary_without_official_asset(
     monkeypatch.setattr(budget, "tokenizer_cache_path", lambda: path)
     monkeypatch.setattr(budget, "VOCABULARY_SHA256", hashlib.sha256(data).hexdigest())
     text = "abc abc"
-    count = budget.payload_input_units(text, model="gpt-5.4-mini")
+    count = budget.payload_input_units(text, model="gpt-5.6-terra")
     assert count == 3 and count < len(text.encode())
     assert not forbid_network
 

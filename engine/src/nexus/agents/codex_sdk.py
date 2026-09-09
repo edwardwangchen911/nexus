@@ -40,7 +40,7 @@ from nexus.agents.tools import ReadOnlyToolRegistry
 from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import ResearchClaim
 
-MODEL_ID = "gpt-5.4-mini"
+MODEL_ID = "gpt-5.6-terra"
 _PROVIDER = "nexus_openai"
 MAX_INPUT_TOKENS = 64000
 MAX_OUTPUT_TOKENS = 8192
