@@ -3097,3 +3097,15 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 首次验收刷新在 Gateway 未运行时返回 `transport`，且业务同步记录未新增；持续运行 Compose 入口又因缺少既有 activation artifact 在容器创建前停止，未伪造材料。随后使用已有受保护本地 launcher 恢复双 mTLS Gateway；启动就绪窗口中的一次刷新返回 `not_ready`，仍未产生同步记录。分别确认 broker/market `/health/ready` 后仅执行一次新的正常只读刷新。新 READY 快照仍完整保存 16 条行、16 条报价、16 组日线且报价缺失为零，正式诊断已持久化。两项结构性未知均消失，已知指标由旧报告的 2 项增加为 6 项；报告仍为 `RESEARCH_REQUIRED`，剩余未知仅是 `MARKET_EVIDENCE_UNAVAILABLE` 以及 12 条实际持仓的 `ADV20_MISSING`。前者来自当前 Fosun raw 日线不具备公司行动调整权威，后者来自复星成交量单位/缩放未验证；未将这些真实缺口降级或填零。
 
 验证：`test_diagnostic_evidence.py` 26 项通过，新增回归已完成失败→通过；Ruff 相关文件通过，`portfolio_evaluator.py` Mypy 通过。`test_diagnostic_assembly.py` 在当前环境因隔离 PostgreSQL 条件缺失为 11 项 skipped，未将跳过计为通过。真实验收无模型调用、无订单、无模拟盘或实盘写入，`execution_locked=true` 语义不变。
+
+### 调整后价格权威覆盖与正式诊断闭环（2026-09-09）
+
+沿最新 READY 快照的真实范围核对后，正式 source policy v3 所需集合为 12 条非零持仓和固定基准，共 13 项。原有 Alpaca SIP/delayed/all/1Day 权威仅覆盖其中 10 项，缺少 2 项 ETF 与 1 项 ETN；这是真实价格证据缺口，不是零数量历史行造成的分母错误。先为缺失 3 项各执行一次正常采集和权威导入，再刷新确认市场价格证据已关闭；当时序列只到 2026-09-04，最近 20 个交易日窗口仅命中 18 日，因此 12 条 `ADV20_MISSING` 仍真实保留。
+
+随后按 2025-09-08 至 2026-09-09 的有界窗口补齐全部 13 项。首次给出的更早起点超过产品 CLI 的 366 天硬限制，13 次均在联网前被本地预检拒绝，外部请求和归档均为零；确认持久化状态后校正起点，每项仅发起一次真实请求。13 份原件均分页结束、readback 合格并通过现有 authority import，未改 source policy、成交量定义或诊断阈值。新权威晚于旧快照，未回填历史；只在新权威落盘后再执行一次正常只读刷新。
+
+最新新建快照仍为 16 条券商持仓行，其中 12 条非零、4 条零数量历史行；16 条报价全部成功，现金流质量 PASS。正式诊断共 82 项，82 项 `unknown_reason` 均为空，`MARKET_EVIDENCE_UNAVAILABLE` 与 `ADV20_MISSING` 均已消失，12 条退出天数在页面均显示为已知。报告仍为 `RESEARCH_REQUIRED`，原因已经转为确定性已知风险：集中度、币种暴露、历史回撤与风险类别暴露，而不是数据接线缺口；其中 monitor 67 项、research 3 项、reduce_only 12 项。未据此生成目标权重或订单，执行继续锁定。
+
+真实读取验收使用当前 Engine 与仓库已有 Vinext 实例完成。组合页显示快照已就绪、账户快照核验通过、需要补充证据和当前不可执行；诊断时点与最新快照一致，不含只读初步诊断，也不再显示上述两类市场/流动性缺口。应用 readiness 仍因通用 worker 心跳过期返回 unready，数据库、迁移和对象存储均 ready；未把页面 200 或账户快照核验通过误写为研究结论合格。复星 Gateway 在两次必要刷新后按精确会话正常退出，8081/8082 均关闭。全程无模型、账户写入、模拟盘或实盘订单。
+
+私有证据保存在 `.secrets/nexus-alpaca-adjusted-20260909/`；包含 13 份归档 manifest 和逐项导入结果，不进入版本库或聊天。费用证据仍是独立后续缺口：当前 `cost_complete=false` 正确反映真实账户费用 authority 尚未冻结，不能用零佣金政策或回测 bps 假设替代，也不影响本片价格与诊断闭环结论。
