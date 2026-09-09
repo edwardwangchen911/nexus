@@ -1,7 +1,9 @@
 """Normal ETF entry, real isolated PostgreSQL, synthetic sources and object store."""
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import uuid4
 
 import exchange_calendars
@@ -18,6 +20,62 @@ from nexus.providers.broker.fosun_contracts import PositionItem
 from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
+
+
+def etn_archive(path, *, symbol="SYNZ"):
+    path.mkdir(mode=0o700)
+    submissions = json.dumps(
+        {
+            "cik": "0000123456",
+            "name": "Synthetic Bank",
+            "tickers": ["BANK"],
+            "exchanges": ["Nasdaq"],
+            "filings": {
+                "recent": {
+                    "accessionNumber": ["0000123456-26-000001"],
+                    "acceptanceDateTime": ["2026-01-02T12:00:00.000Z"],
+                    "form": ["424B2"],
+                    "primaryDocument": ["synthetic.htm"],
+                }
+            },
+        }
+    ).encode()
+    index = b"""<html><body>SEC Accession No. 0000123456-26-000001
+CIK: 0000123456 Form 424B2
+<a href="synthetic.htm">synthetic.htm</a></body></html>"""
+    document = f"""<html><body>Filed Pursuant to Rule 424(b)(2)
+Synthetic Bank CIK: 0000123456 Synthetic Market Exposure Exchange Traded Notes due January 2, 2036
+Ticker Symbol: {symbol} Listing Exchange: The Nasdaq Stock Market LLC
+The notes are senior unsecured debt securities of Synthetic Bank.
+</body></html>""".encode()
+    raws = (submissions, index, document)
+    urls = (
+        "https://data.sec.gov/submissions/CIK0000123456.json",
+        "https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/"
+        "0000123456-26-000001-index.html",
+        "https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/synthetic.htm",
+    )
+    receipts = json.dumps(
+        [
+            {
+                "source_url": url,
+                "received_at": "2026-01-02T12:01:00+00:00",
+                "sha256": sha256(raw).hexdigest(),
+                "byte_length": len(raw),
+                "http_status": 200,
+            }
+            for url, raw in zip(urls, raws, strict=True)
+        ]
+    ).encode()
+    for name, raw in zip(
+        ("submissions.raw", "filing-index.raw", "disclosure.raw", "receipts.json"),
+        (*raws, receipts),
+        strict=True,
+    ):
+        target = path / name
+        target.write_bytes(raw)
+        target.chmod(0o600)
+    return path
 
 
 def config(url):
@@ -160,6 +218,49 @@ Tax Information</body></html>"""
         )
         assert len(universe["members"]) == 49
         assert symbol not in {member["symbol"] for member in universe["members"]}
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias(
+    migrated_database_url, tmp_path
+):
+    from nexus.market.current_etn_identity_storage import (
+        import_current_held_etn,
+        read_current_held_etn,
+    )
+    from nexus.market.universe import stable_instrument_id
+    from nexus.ops.fosun_local_refresh import _load_local_broker_identity
+
+    symbol = "SYNZ"
+    settings = config(migrated_database_url)
+    sec = etn_archive(tmp_path / "etn")
+    store = MemoryStore()
+    factory = session_factory(settings)
+    try:
+        accounts_page, holdings_page, holding = held_pages(symbol)
+        async with factory() as session, session.begin():
+            result = await import_current_held_etn(
+                session,
+                store,
+                symbol=symbol,
+                sec_archive=sec,
+                accounts_page=accounts_page,
+                holdings_page=holdings_page,
+            )
+        async with factory() as session:
+            proof = await read_current_held_etn(session, store, snapshot_id=result.snapshot_id)
+            instrument = await session.get(Instrument, proof.instrument_id)
+            assert proof.instrument_id == stable_instrument_id(symbol)
+            assert proof.directory_match is False
+            assert proof.execution_locked and not proof.universe_published
+            assert instrument is not None
+            assert instrument.asset_type == "exchange_traded_note"
+            assert instrument.risk_bucket == "EXCHANGE_TRADED_NOTE"
+            broker_identity = await _load_local_broker_identity(session, holdings=(holding,))
+            assert broker_identity.instrument_ids["us" + symbol] == proof.instrument_id
+            assert await session.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
     finally:
         await factory.kw["bind"].dispose()
 
