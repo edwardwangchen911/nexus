@@ -80,6 +80,8 @@ class CurrentHoldingBinding(BaseModel):
     accounts_as_of: AwareDatetime
     holdings_as_of: AwareDatetime
     provider_code: str
+    account_quality: Literal["PASS"] = "PASS"
+    holdings_quality: Literal["PARTIAL"] = "PARTIAL"
     currency: Literal["USD"] = "USD"
     position_nonzero: Literal[True] = True
     sha256: str
@@ -213,6 +215,8 @@ def _binding_payload(
         "accounts_as_of": require_utc(accounts_as_of).isoformat(),
         "holdings_as_of": require_utc(holdings_as_of).isoformat(),
         "provider_code": provider_code,
+        "account_quality": "PASS",
+        "holdings_quality": "PARTIAL",
         "currency": "USD",
         "position_nonzero": True,
     }
@@ -239,7 +243,7 @@ def current_holding_binding(
             symbol != symbol.strip().upper()
             or not symbol
             or accounts_page.quality != "PASS"
-            or holdings_page.quality != "PASS"
+            or holdings_page.quality != "PARTIAL"
             or accounts_page.has_more
             or holdings_page.has_more
             or not accounts_at <= holdings_at <= cutoff

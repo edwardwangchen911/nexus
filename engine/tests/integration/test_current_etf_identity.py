@@ -62,7 +62,7 @@ def held_pages(symbol, *, request_id="synthetic-holdings-request", as_of=None):
             has_more=False,
             next_cursor=None,
             as_of=as_of,
-            quality="PASS",
+            quality="PARTIAL",
         ),
         holding,
     )

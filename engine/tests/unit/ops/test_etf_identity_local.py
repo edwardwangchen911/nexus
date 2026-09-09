@@ -50,15 +50,21 @@ def test_current_holding_binding_requires_complete_pass_account_scoped_page():
     binding = current_holding_binding(
         symbol="SYNX",
         accounts_page=page(items=[account()], request_id="accounts-request"),
-        holdings_page=page(items=[holding()], request_id="holdings-request"),
+        holdings_page=page(
+            items=[holding()], request_id="holdings-request", quality="PARTIAL"
+        ),
         now=NOW,
     )
     assert binding.holdings_source_request_id == "holdings-request"
     assert binding.holdings_as_of == NOW
     assert binding.provider_code == "usSYNX"
+    assert binding.account_quality == "PASS"
+    assert binding.holdings_quality == "PARTIAL"
 
 
-@pytest.mark.parametrize("case", ["partial", "paged", "missing", "cross_account", "stale"])
+@pytest.mark.parametrize(
+    "case", ["unexpected_quality", "paged", "missing", "cross_account", "stale"]
+)
 def test_current_holding_binding_fails_closed(case):
     from nexus.market.current_etf_identity_storage import current_holding_binding
 
@@ -72,7 +78,7 @@ def test_current_holding_binding_fails_closed(case):
             )
         ],
         request_id="holdings-request",
-        quality="PARTIAL" if case == "partial" else "PASS",
+        quality="PASS" if case == "unexpected_quality" else "PARTIAL",
         has_more=case == "paged",
         as_of=as_of,
     )
