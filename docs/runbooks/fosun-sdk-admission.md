@@ -13,6 +13,16 @@ The SDK source also identifies the production push endpoint as
 `wss://openapi-push.fosunxcz.com/msg/v1/push`, but push is outside the initial
 pull-only activation and does not block it.
 
+NEXUS now also contains a Gateway-owned offline-tested bounded collector for one explicit `qt`
+subscription. It fixes the reviewed endpoint and 15-second application heartbeat, accepts one
+strict US or HK code, never reconnects, and writes a private size/time/frame-bounded raw archive
+with a consistency-checked receipt. This is reusable implementation evidence only: it has no
+credential-loading CLI or service route, is not wired to Provider Worker, database, API, or Web,
+and no real WebSocket connection may be started under the current REST-only admission. A real
+probe requires separate evidence that the provider-approved private use covers market push; a
+successful connection would prove only that bounded probe, not continuous coverage or runtime
+admission.
+
 The reviewed candidate is tag [`v1.2.0`](https://github.com/fosunwealth/openapi-python-sdk/tree/891d95fb4967efaa682387c1b35966ceea38fb21)
 at commit `891d95fb4967efaa682387c1b35966ceea38fb21`. A separate public-source refresh on
 2026-08-27 found `main` still at
