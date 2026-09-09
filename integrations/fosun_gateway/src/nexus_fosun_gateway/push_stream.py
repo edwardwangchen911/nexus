@@ -137,7 +137,7 @@ def _validate_request_id(value: str) -> str:
 def _validate_subscription(message: dict[str, Any], *, code: str, request_id: str) -> None:
     reply = message.get("subRep")
     if (
-        message.get("topic") != TOPIC
+        message.get("topic") not in {TOPIC, "subrep"}
         or message.get("requestid") != request_id
         or not isinstance(reply, list)
         or len(reply) != 1

@@ -281,6 +281,21 @@ async def test_unsolicited_heartbeat_ack_is_rejected_without_reply(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_provider_subscription_reply_topic_is_accepted(tmp_path):
+    reply = {**SUB_REPLY, "topic": "subrep", "time": 1_704_067_200_000}
+
+    result = await _collect(socket=Socket([reply]), directory=tmp_path / "run")
+
+    assert result == {
+        "status": "bounded_complete",
+        "stop_reason": "DURATION_LIMIT",
+        "subscription_confirmed": True,
+        "frame_count": 1,
+    }
+    assert load_push_archive(tmp_path / "run")["status"] == "bounded_complete"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("act", "duration", "status"), [("sub", 0.03, "failed"), ("hb", 15.03, "partial")]
 )
