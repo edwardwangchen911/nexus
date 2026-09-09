@@ -42,6 +42,16 @@ def member_for(symbol: str) -> UniverseDefinitionMember:
     raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
 
 
+def require_outside_fixed_etf_definition(symbol: str) -> None:
+    """Fail closed unless the fixed definition loads and the symbol is absent from it."""
+
+    definition = load_us_liquid_v1_definition(date(2026, 1, 1))
+    if symbol != symbol.strip().upper() or not symbol or any(
+        member.symbol == symbol for member in definition.members
+    ):
+        raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
+
+
 class CurrentEtfIdentity(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     symbol: str
@@ -555,13 +565,24 @@ class _Replay:
         return self.values[path_segments]
 
 
-async def validate_etf_originals(
-    *, symbol: str, contents: tuple[bytes, ...], now: datetime, allow_treasury: bool = False
+async def _validate_etf_originals(
+    *,
+    symbol: str,
+    contents: tuple[bytes, ...],
+    now: datetime,
+    allow_treasury: bool = False,
+    current_holding_only: bool = False,
 ) -> EtfInputs:
     try:
-        member = member_for(symbol)
-        if allow_treasury != (member.asset_type == "non_equity_etf"):
-            raise ValueError
+        if current_holding_only:
+            require_outside_fixed_etf_definition(symbol)
+            asset_type = "equity_etf"
+            if allow_treasury:
+                raise ValueError
+        else:
+            asset_type = member_for(symbol).asset_type
+            if allow_treasury != (asset_type == "non_equity_etf"):
+                raise ValueError
         cutoff = require_utc(now)
         if len(contents) != 8 or any(not b or len(b) > MAX_SEC_BYTES for b in contents):
             raise ValueError
@@ -657,7 +678,7 @@ async def validate_etf_originals(
             | CurrentTreasuryEtfIdentity
             | CurrentGoldTrustIdentity
         )
-        if member.asset_type == "non_equity_etf":
+        if asset_type == "non_equity_etf":
             identity = _treasury_identity(
                 text=text,
                 index=index,
@@ -740,3 +761,27 @@ async def validate_etf_originals(
         )
     except (ValueError, TypeError, KeyError, IndexError, UnicodeError, RecursionError) as error:
         raise ValueError("CURRENT_ETF_IDENTITY_INVALID") from error
+
+
+async def validate_etf_originals(
+    *, symbol: str, contents: tuple[bytes, ...], now: datetime, allow_treasury: bool = False
+) -> EtfInputs:
+    return await _validate_etf_originals(
+        symbol=symbol,
+        contents=contents,
+        now=now,
+        allow_treasury=allow_treasury,
+    )
+
+
+async def validate_current_held_etf_originals(
+    *, symbol: str, contents: tuple[bytes, ...], now: datetime
+) -> EtfInputs:
+    """Validate a current holding without admitting it to the fixed research universe."""
+
+    return await _validate_etf_originals(
+        symbol=symbol,
+        contents=contents,
+        now=now,
+        current_holding_only=True,
+    )

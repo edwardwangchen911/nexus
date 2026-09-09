@@ -14,6 +14,8 @@ from nexus.ops.instrument_identity_local import prepare_universe
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias, UniverseSnapshot
 from nexus.persistence.session import session_factory
+from nexus.providers.broker.fosun_contracts import PositionItem
+from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
 
@@ -22,6 +24,144 @@ def config(url):
     return EngineSettings(database_url=url).model_copy(
         update={"object_store_endpoint": "http://127.0.0.1:9000"}
     )
+
+
+def held_pages(symbol, *, request_id="synthetic-holdings-request", as_of=None):
+    as_of = as_of or datetime.now(UTC)
+    account = {
+        "kind": "account",
+        "external_account_id": "synthetic-account",
+        "status": "active",
+        "base_currency": "USD",
+    }
+    holding = PositionItem(
+        kind="position",
+        external_account_id="synthetic-account",
+        instrument_code="us" + symbol,
+        currency="USD",
+        quantity="1",
+        available_quantity="1",
+        frozen_quantity="0",
+        average_cost="10",
+        diluted_cost=None,
+        current_price="11",
+        provider_as_of=as_of,
+    )
+    return (
+        GatewayResponsePage(
+            items=(account,),
+            source_request_id="synthetic-accounts-request",
+            has_more=False,
+            next_cursor=None,
+            as_of=as_of,
+            quality="PASS",
+        ),
+        GatewayResponsePage(
+            items=(holding.model_dump(mode="json"),),
+            source_request_id=request_id,
+            has_more=False,
+            next_cursor=None,
+            as_of=as_of,
+            quality="PASS",
+        ),
+        holding,
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_held_etf_import_is_read_only_and_outside_fixed_universe(
+    migrated_database_url, tmp_path
+):
+    from nexus.market.current_etf_identity_storage import (
+        import_current_held_etf,
+        read_current_held_etf,
+    )
+    from nexus.market.universe import stable_instrument_id
+
+    symbol = "SYNX"
+    document = b"""<html><body>FORM 497K Synthetic Held Equity Fund SYNX | NYSE Arca
+Summary Prospectus Investment Objective The Synthetic Held Equity Fund seeks to track
+an index composed of broadly diversified U.S. equities. Fees and Expenses
+Purchase and Sale of Fund Shares The Fund is an exchange-traded fund.
+Tax Information</body></html>"""
+    settings = config(migrated_database_url)
+    fm, sec, mapping = archives(
+        tmp_path,
+        symbol=symbol,
+        company_name="Synthetic Held Equity Fund",
+        document=document,
+    )
+    store = MemoryStore()
+    factory = session_factory(settings)
+    try:
+        accounts_page, holdings_page, holding = held_pages(symbol)
+        async with factory() as session, session.begin():
+            result = await import_current_held_etf(
+                session,
+                store,
+                symbol=symbol,
+                fmp_archive=fm,
+                sec_archive=sec,
+                mapping_file=mapping,
+                accounts_page=accounts_page,
+                holdings_page=holdings_page,
+            )
+        async with factory() as session:
+            proof = await read_current_held_etf(session, store, snapshot_id=result.snapshot_id)
+            assert proof.scope == "fosun_current_holding"
+            assert proof.holding.holdings_source_request_id == "synthetic-holdings-request"
+            assert proof.instrument_id == stable_instrument_id(symbol)
+            assert proof.execution_locked
+            assert not proof.universe_published
+            assert not proof.new_position_eligible
+            assert not proof.historical_backtest_eligible
+            assert await session.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
+            from nexus.ops.fosun_local_refresh import _load_local_broker_identity
+
+            broker_identity = await _load_local_broker_identity(session, holdings=(holding,))
+            assert broker_identity.instrument_ids["us" + symbol] == proof.instrument_id
+
+        second_accounts, second_holdings, _ = held_pages(
+            symbol, request_id="synthetic-holdings-request-2"
+        )
+        async with factory() as session, session.begin():
+            second = await import_current_held_etf(
+                session,
+                store,
+                symbol=symbol,
+                fmp_archive=fm,
+                sec_archive=sec,
+                mapping_file=mapping,
+                accounts_page=second_accounts,
+                holdings_page=second_holdings,
+            )
+        assert second.instrument_id == result.instrument_id
+        assert second.snapshot_id != result.snapshot_id
+        async with factory() as session, session.begin():
+            repeated = await import_current_held_etf(
+                session,
+                store,
+                symbol=symbol,
+                fmp_archive=fm,
+                sec_archive=sec,
+                mapping_file=mapping,
+                accounts_page=second_accounts,
+                holdings_page=second_holdings,
+            )
+        assert repeated.status == "existing"
+        assert repeated.snapshot_id == second.snapshot_id
+        effective = (
+            exchange_calendars.get_calendar("XNYS")
+            .date_to_session(datetime.now(UTC).date() + timedelta(days=7), direction="next")
+            .date()
+        )
+        universe = await prepare_universe(
+            settings, effective_session=effective, store=store, use_etf_identities=True
+        )
+        assert len(universe["members"]) == 49
+        assert symbol not in {member["symbol"] for member in universe["members"]}
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio

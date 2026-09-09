@@ -7,6 +7,74 @@ from helpers.current_etf_identity import originals, share_class_document
 
 
 @pytest.mark.asyncio
+async def test_current_held_equity_etf_can_be_validated_without_joining_fixed_universe():
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    document = b"""<html><body>FORM 497K Synthetic Held Equity Fund SYNX | NYSE Arca
+Summary Prospectus Investment Objective The Synthetic Held Equity Fund seeks to track
+an index composed of broadly diversified U.S. equities. Fees and Expenses
+Purchase and Sale of Fund Shares The Fund is an exchange-traded fund.
+Tax Information</body></html>"""
+    result = await validate_current_held_etf_originals(
+        symbol=symbol,
+        contents=originals(
+            symbol=symbol,
+            company_name="Synthetic Held Equity Fund",
+            document=document,
+        ),
+        now=datetime.now(UTC),
+    )
+
+    assert result.identity.symbol == symbol
+    assert result.identity.asset_type == "equity_etf"
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        from nexus.market.current_etf_identity import member_for
+
+        member_for(symbol)
+
+
+@pytest.mark.asyncio
+async def test_current_held_validation_fails_closed_when_fixed_definition_is_unavailable(
+    monkeypatch,
+):
+    from nexus.market import current_etf_identity as identity
+
+    monkeypatch.setattr(
+        identity,
+        "load_us_liquid_v1_definition",
+        lambda _effective: (_ for _ in ()).throw(ValueError("definition unavailable")),
+    )
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await identity.validate_current_held_etf_originals(
+            symbol="SYNX",
+            contents=originals(
+                symbol="SYNX",
+                company_name="Synthetic Held Equity Fund",
+                document=b"""<html><body>FORM 497K Synthetic Held Equity Fund SYNX | NYSE Arca
+Summary Prospectus Investment Objective The Synthetic Held Equity Fund seeks to track
+an index composed of broadly diversified U.S. equities. Fees and Expenses
+Purchase and Sale of Fund Shares The Fund is an exchange-traded fund.
+Tax Information</body></html>""",
+            ),
+            now=datetime.now(UTC),
+        )
+
+
+def test_current_held_etf_proof_has_fail_closed_scope_flags():
+    from nexus.market.current_etf_identity_storage import CurrentHeldEtfProof
+
+    assert {
+        "scope",
+        "holding",
+        "universe_published",
+        "new_position_eligible",
+        "historical_backtest_eligible",
+        "execution_locked",
+    } <= CurrentHeldEtfProof.model_fields.keys()
+
+
+@pytest.mark.asyncio
 async def test_bound_equity_fund_preserves_coarse_exchange_and_unknown_receipt():
     from nexus.market.current_etf_identity import validate_etf_originals
 
