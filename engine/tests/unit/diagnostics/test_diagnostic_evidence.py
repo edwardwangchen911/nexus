@@ -123,6 +123,51 @@ def test_snapshot_only_diagnosis_does_not_turn_unpriced_holdings_into_cash_only(
     assert not any(item.diagnostic_code == "CONCENTRATION_TOP1" for item in report.items)
 
 
+def test_zero_quantity_rows_do_not_invalidate_active_position_valuation() -> None:
+    snapshot = _snapshot()
+    closed_id = UUID("0198d500-1000-7000-8000-000000000014")
+    snapshot = snapshot.model_copy(
+        update={
+            "positions": snapshot.positions
+            + (
+                snapshot.positions[0].model_copy(
+                    update={
+                        "instrument_id": closed_id,
+                        "quantity": Decimal(0),
+                        "available_quantity": Decimal(0),
+                        "current_price": Decimal("75"),
+                    }
+                ),
+            )
+        }
+    )
+
+    market = _market(snapshot)
+    market = market.model_copy(
+        update={
+            "identities": {
+                **market.identities,
+                closed_id: InstrumentIdentity.standard(closed_id),
+            }
+        }
+    )
+    report = diagnose_portfolio(
+        snapshot,
+        market,
+        DiagnosticHistory.empty(),
+        RealAdvisoryPolicy.v1(),
+    )
+    items = {item.diagnostic_code: item for item in report.items}
+
+    assert not any(
+        item.unknown_reason in {"POSITION_QUANTITY_INVALID", "POSITION_PRICE_EVIDENCE_MISSING"}
+        for item in report.items
+    )
+    assert items["CASH_RATIO"].metric_value == "0.5"
+    assert items["CONCENTRATION_TOP1"].metric_value == "1"
+    assert not any(str(closed_id) in item.diagnostic_code for item in report.items)
+
+
 def test_known_diagnostic_item_requires_immutable_evidence() -> None:
     with pytest.raises(ValueError, match="evidence_refs"):
         DiagnosticItem(

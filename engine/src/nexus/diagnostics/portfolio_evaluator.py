@@ -28,7 +28,8 @@ def evaluate_currency_scopes(
     for cash in snapshot.cash:
         cash_by_currency[cash.currency] += cash.cash_balance
     for position in snapshot.positions:
-        positions_by_currency[position.currency].append(position)
+        if position.quantity != 0:
+            positions_by_currency[position.currency].append(position)
     items: list[DiagnosticItem] = []
     for currency in sorted(set(positions_by_currency) | set(cash_by_currency)):
         items.extend(

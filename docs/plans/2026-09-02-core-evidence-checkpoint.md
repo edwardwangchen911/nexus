@@ -3087,3 +3087,13 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 修复后只再执行一次正常只读刷新。最新 READY 快照为 16 项持仓、报价缺失 0、现金流 PASS；持久诊断为 5 项且仍 `RESEARCH_REQUIRED`。其中唯一 `CURRENCY_EXPOSURE` 已有确定值、无 `unknown_reason`、口径为 `portfolio:USD`，证据来源同时包含 FRED、exchange_calendars 与快照数据库引用。这是风险展示的情景归一值，不是券商换汇或可执行 `converted_view`；原币种账本仍分开展示。
 
 数据库、API/BFF 和页面均指向同一最新快照。BFF 对合格 FX 项返回有值且无未知原因，快照仍 `DISPLAY_READY / DECISION_READY / execution_locked=true`；`DECISION_READY` 只表示快照与对账可用，不解锁执行。组合页实际显示“币种暴露”、值非未知、“需要补充证据”及“当前不可执行”；`9aa3e43` 仅将原本的“未识别范围（portfolio:USD）”修正为“组合范围：USD”。概览页同样读到新快照、`RESEARCH_REQUIRED` 与实盘执行锁定。Gateway 在验收后正常退出，8081/8082 均关闭；本轮无模型调用、订单、模拟盘或实盘写入。
+
+### 零数量历史行不再污染组合诊断（2026-09-09）
+
+最新真实 READY 快照包含 16 条券商持仓行，其中 12 条数量为正，4 条数量、可用数量和冻结数量均为零；零数量行仍带历史成本与当前价格。旧诊断把全部 16 条都送入估值，因而同时产生 `POSITION_QUANTITY_INVALID`，并把该无效状态二次映射成误导性的 `POSITION_PRICE_EVIDENCE_MISSING`。这不是价格缺失，也不是复星行情失败，而是诊断没有区分当前持仓与券商保留的零数量历史行。
+
+最小修复只在 `evaluate_currency_scopes` 进入估值前排除 `quantity == 0` 的行；原始快照、页面展示、身份和证据均保留，负数量、缺价、非正价格及证据时点错误继续 fail closed。回归测试使用一条正常持仓加一条无价格证据的零数量历史行，验证现金比例与集中度仍按正常持仓计算，且不会生成该历史行的证券级诊断。
+
+首次验收刷新在 Gateway 未运行时返回 `transport`，且业务同步记录未新增；持续运行 Compose 入口又因缺少既有 activation artifact 在容器创建前停止，未伪造材料。随后使用已有受保护本地 launcher 恢复双 mTLS Gateway；启动就绪窗口中的一次刷新返回 `not_ready`，仍未产生同步记录。分别确认 broker/market `/health/ready` 后仅执行一次新的正常只读刷新。新 READY 快照仍完整保存 16 条行、16 条报价、16 组日线且报价缺失为零，正式诊断已持久化。两项结构性未知均消失，已知指标由旧报告的 2 项增加为 6 项；报告仍为 `RESEARCH_REQUIRED`，剩余未知仅是 `MARKET_EVIDENCE_UNAVAILABLE` 以及 12 条实际持仓的 `ADV20_MISSING`。前者来自当前 Fosun raw 日线不具备公司行动调整权威，后者来自复星成交量单位/缩放未验证；未将这些真实缺口降级或填零。
+
+验证：`test_diagnostic_evidence.py` 26 项通过，新增回归已完成失败→通过；Ruff 相关文件通过，`portfolio_evaluator.py` Mypy 通过。`test_diagnostic_assembly.py` 在当前环境因隔离 PostgreSQL 条件缺失为 11 项 skipped，未将跳过计为通过。真实验收无模型调用、无订单、无模拟盘或实盘写入，`execution_locked=true` 语义不变。
