@@ -3077,3 +3077,13 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 在 Gateway 双 mTLS ready 后只读账户/持仓，不读报价、日线、订单或流水。受保护核对确认 16 项当前持仓中有 3 项缺失本地身份，三者均不在固定 `us_liquid_v1` 定义中，且现有 FMP profile 均标识为 ETF/基金。随后仅获取一次 SEC `company_tickers_mf.json`：其中 2 项可唯一绑定 CIK/series/class，1 项无目录匹配。完整代码核对证实 `etf_identity_local`/`member_for` 只接纳固定定义成员，因此这不是能用现有入口直接导入的数据缺口。
 
 本轮为避免私人证券代码进入聊天或跟踪文档，仅将完整标识及 FMP/SEC 原件保存在权限受保护的 `outputs/acceptance/current-holdings-identity-20260909/`；跟踪文档只保留聚合分类。共两次账户/持仓只读（4 请求），第二次用于受保护落盘并串接来源；FMP 3 请求、SEC 1 请求，无重试、无模型、无数据库写入、无市场/订单读取。Gateway 已正常退出，8081/8082 关闭。下一步是建立不改动未来股票池的当前持仓 ETF 窄合同，先仅处理已有 SEC 唯一映射的 2 项；第 3 项保持真实未知，不为刷新造身份。
+
+### 当前持仓 ETF/ETN 身份闭合与新快照验收（2026-09-09）
+
+三项当前持仓缺失身份已按合法现有来源分开闭合：两项用 SEC 基金目录的唯一 CIK/series/class 绑定当前持仓 ETF；剩余一项不再沿用供应商 `isEtf=true` 标签猜测类型，而是以该持仓的 FMP ticker/CUSIP/ISIN 收据与 SEC 424B2 债务合同精确绑定，落为 `exchange_traded_note`。证据要求同时绑定发行人/CIK/交易所、法律标题与到期结构，并拒绝把标的指数、成分或相邻产品段落当作证券身份。三项均只服务已验证的当前持仓，`universe_published=false`、不允许新建仓或历史回测，执行始终锁定。早期 v1/v2 证据保留为追加历史，严格读取只接受 v3，未删除或重标旧记录。
+
+身份闭合后执行一次正常产品只读刷新，新建 READY 组合快照：16 项持仓、16 项报价及 16 组日线均成功，报价缺失为 0，现金流质量 PASS。这份快照暴露了一个最小诊断接线缺口：已按冻结时点绑定合格 DEXHKUS，但 `market.quality=PARTIAL` 的提前返回没有输出不依赖历史收益序列的币种暴露。`cea8230` 仅在快照证据合格且活跃币种多于一种时补回既有 `CURRENCY_EXPOSURE` 计算；第三币种、缺失/重复 FX、晚到或未来证据、逐项现金/持仓时点校验仍 fail closed，PARTIAL 结论仍固定 `RESEARCH_REQUIRED`。
+
+修复后只再执行一次正常只读刷新。最新 READY 快照为 16 项持仓、报价缺失 0、现金流 PASS；持久诊断为 5 项且仍 `RESEARCH_REQUIRED`。其中唯一 `CURRENCY_EXPOSURE` 已有确定值、无 `unknown_reason`、口径为 `portfolio:USD`，证据来源同时包含 FRED、exchange_calendars 与快照数据库引用。这是风险展示的情景归一值，不是券商换汇或可执行 `converted_view`；原币种账本仍分开展示。
+
+数据库、API/BFF 和页面均指向同一最新快照。BFF 对合格 FX 项返回有值且无未知原因，快照仍 `DISPLAY_READY / DECISION_READY / execution_locked=true`；`DECISION_READY` 只表示快照与对账可用，不解锁执行。组合页实际显示“币种暴露”、值非未知、“需要补充证据”及“当前不可执行”；`9aa3e43` 仅将原本的“未识别范围（portfolio:USD）”修正为“组合范围：USD”。概览页同样读到新快照、`RESEARCH_REQUIRED` 与实盘执行锁定。Gateway 在验收后正常退出，8081/8082 均关闭；本轮无模型调用、订单、模拟盘或实盘写入。
