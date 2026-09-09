@@ -19,6 +19,7 @@ from nexus.persistence.models.optimization import (
 )
 from nexus.persistence.models.portfolio import (
     CashSnapshot,
+    PositionSnapshot,
 )
 from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
@@ -114,6 +115,35 @@ async def test_first_draft_is_created_readable_and_replayed_without_formal_admis
 
 
 @pytest.mark.asyncio
+async def test_zero_quantity_history_is_retained_but_does_not_block_initial_draft(
+    migrated_database_url: str,
+) -> None:
+    baseline, diagnostic = await _seed(migrated_database_url, "zero_quantity")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://test",
+    ) as client:
+        response = await _post(client, baseline, diagnostic)
+        assert response.status_code == 201, response.text
+        proposals = response.json()["data"]["proposals"]
+        assert all(len(proposal["positions"]) == 4 for proposal in proposals)
+        assert all(
+            str(UUID(int=805))
+            not in {position["instrument_id"] for position in proposal["positions"]}
+            for proposal in proposals
+        )
+
+    async with session_factory(settings(migrated_database_url))() as db:
+        positions = tuple(
+            await db.scalars(
+                select(PositionSnapshot).where(PositionSnapshot.portfolio_snapshot_id == baseline)
+            )
+        )
+        assert len(positions) == 5
+        assert sum(position.quantity == 0 for position in positions) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -125,6 +155,7 @@ async def test_first_draft_is_created_readable_and_replayed_without_formal_admis
         "missing_liquidity",
         "future_evidence",
         "blocked_report",
+        "negative_quantity",
     ],
 )
 async def test_initial_draft_refuses_unproved_baseline_without_writing(

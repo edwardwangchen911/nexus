@@ -76,7 +76,16 @@ async def seed_initial_draft(database_url: str, invalid: str = "") -> tuple[UUID
         )
         for index, instrument_id in enumerate(instrument_ids):
             currency = "HKD" if invalid == "mixed_currency" and index == 1 else "USD"
-            quantity = 60 if index == 0 else 40 if invalid == "insufficient_names" else 10
+            if invalid == "zero_quantity" and index == len(instrument_ids) - 1:
+                quantity = 0
+            elif invalid == "negative_quantity" and index == len(instrument_ids) - 1:
+                quantity = -1
+            elif index == 0:
+                quantity = 60
+            elif invalid == "insufficient_names":
+                quantity = 40
+            else:
+                quantity = 10
             db.add(
                 Instrument(
                     id=instrument_id,

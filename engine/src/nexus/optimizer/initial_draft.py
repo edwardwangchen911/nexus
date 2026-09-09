@@ -119,6 +119,11 @@ async def create_initial_draft(
         portfolio_id=record.portfolio_id,
         snapshot_id=record.id,
     )
+    # Keep the immutable broker snapshot intact while excluding closed historical
+    # rows from the derived baseline used to construct proposal positions.
+    snapshot = snapshot.model_copy(
+        update={"positions": tuple(p for p in snapshot.positions if p.quantity != 0)}
+    )
     identities = await load_instrument_identities(session, snapshot=snapshot)
     if (
         not snapshot.positions
