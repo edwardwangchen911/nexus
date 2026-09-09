@@ -2,18 +2,29 @@
 
 import hashlib
 import json
+from datetime import timedelta
+from uuid import UUID
 
 import httpx
 import pytest
 from helpers.optimization_api import seed_readable_group
 from helpers.portfolio_api import (
+    ACCOUNTS,
+    CLOCK,
     INSTRUMENT_ID,
     ORDER_INSTRUMENT_ID,
+    PORTFOLIOS,
     app,
     headers,
     seed_portfolio_list,
     settings,
 )
+from nexus.persistence.models.optimization import (
+    OptimizationProposalGroupRecord,
+    OptimizationProposalRecord,
+    ProposalComparisonRecord,
+)
+from nexus.persistence.models.portfolio import BrokerSyncRun, PortfolioSnapshotRecord
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
@@ -186,6 +197,76 @@ async def test_group_get_is_closed_three_way_and_what_if_requires_its_allowed_un
         "instrument_count": 1,
         "request_hash": hashlib.sha256(body).hexdigest(),
     }
+
+
+@pytest.mark.asyncio
+async def test_group_get_marks_comparisons_stale_after_a_newer_ready_snapshot(
+    migrated_database_url: str,
+) -> None:
+    """A later broker baseline must not leave an old proposal looking current."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        group_id, _ = await seed_readable_group(session)
+        run = BrokerSyncRun(
+            id=UUID("0198d500-1000-7000-8000-000000000061"),
+            account_id=ACCOUNTS[0],
+            portfolio_id=PORTFOLIOS[0],
+            trigger_kind="MANUAL",
+            actor_id="newer-baseline",
+            route="broker-sync",
+            idempotency_key="newer-baseline",
+            request_hash="6" * 64,
+            status="READY",
+            accepted_at=CLOCK,
+            completed_at=CLOCK + timedelta(seconds=1),
+            attempt_count=1,
+            failure_reason=None,
+            cash_flow_quality="PASS",
+        )
+        snapshot = PortfolioSnapshotRecord(
+            id=UUID("0198d500-1000-7000-8000-000000000062"),
+            portfolio_id=PORTFOLIOS[0],
+            sync_run_id=run.id,
+            stale_from_snapshot_id=None,
+            status="READY",
+            as_of=CLOCK + timedelta(seconds=1),
+            position_hash_version="broker_position_hash_v1",
+            position_hash="6" * 64,
+            order_hash_version="broker_order_hash_v1",
+            order_hash="7" * 64,
+            source_request_ids=[],
+            source_observations=[],
+        )
+        session.add_all((run, snapshot))
+
+    path = f"/internal/v1/optimization-proposals/{group_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert all(proposal["comparison"]["metrics"]["stale"] for proposal in data["proposals"])
+    assert data["economic_comparison"] == {
+        "status": "incomparable",
+        "recommendation": None,
+        "reasons": ["COMPARISON_EVIDENCE_INCOMPLETE"],
+    }
+    assert "COMPARISON_STALE" in data["shadow_eligibility"]["reasons"]
+    async with factory() as session:
+        group = await session.get(OptimizationProposalGroupRecord, group_id)
+        persisted_stale = tuple(
+            await session.scalars(
+                select(ProposalComparisonRecord.metrics["stale"].as_boolean())
+                .join(OptimizationProposalRecord)
+                .where(OptimizationProposalRecord.proposal_group_id == group_id)
+            )
+        )
+    assert group is not None and group.authority_stale is False
+    assert persisted_stale == (False, False, False)
 
 
 @pytest.mark.asyncio

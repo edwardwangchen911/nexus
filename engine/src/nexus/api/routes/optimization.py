@@ -80,6 +80,7 @@ from nexus.persistence.models.optimization import (
     ProposalComparisonRecord,
     ProposalPositionRecord,
 )
+from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.reconciliation.admission_claim import claim_or_lock, validate_request_identity
 from nexus.reconciliation.persistence_errors import (
@@ -361,6 +362,26 @@ async def get_optimization_group(
     group = await session.get(OptimizationProposalGroupRecord, proposal_group_id)
     if group is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Proposal group was not found.", status_code=404)
+    baseline = await session.get(
+        PortfolioSnapshotRecord, group.baseline_portfolio_snapshot_id
+    )
+    if baseline is None:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL, "Proposal baseline is missing.", status_code=409
+        )
+    latest_ready_snapshot_id = await session.scalar(
+        select(PortfolioSnapshotRecord.id)
+        .where(
+            PortfolioSnapshotRecord.portfolio_id == baseline.portfolio_id,
+            PortfolioSnapshotRecord.status == "READY",
+        )
+        .order_by(
+            PortfolioSnapshotRecord.created_at.desc(),
+            PortfolioSnapshotRecord.id.desc(),
+        )
+        .limit(1)
+    )
+    baseline_superseded = latest_ready_snapshot_id != baseline.id
     try:
         research_context = read_draft_research_context(
             await session.get(DataSnapshot, group.data_snapshot_id),
@@ -450,7 +471,7 @@ async def get_optimization_group(
                             constraint_complete=cast(bool, metrics["constraint_complete"]),
                             eligibility_complete=cast(bool, metrics["eligibility_complete"]),
                             evidence_complete=cast(bool, metrics["evidence_complete"]),
-                            stale=cast(bool, metrics["stale"]),
+                            stale=cast(bool, metrics["stale"]) or baseline_superseded,
                             unknown_metrics=tuple(cast(Sequence[str], metrics["unknown_metrics"])),
                             authority=ProposalComparisonAuthorityResponse.model_validate(
                                 metrics["authority"]

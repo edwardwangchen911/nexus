@@ -30,24 +30,7 @@ async def require_proposal_baseline(
 ) -> UUID:
     """Hold the same account lock as admission until the caller's transaction ends."""
     now = require_utc(now)
-    account_id = await session.scalar(
-        select(Portfolio.account_id).where(Portfolio.id == portfolio_id)
-    )
-    if account_id is None:
-        raise SnapshotNotProposalEligible("portfolio is not available")
-    account = await session.scalar(
-        select(Account).where(Account.id == account_id).with_for_update()
-    )
-    if account is None or account.status != "ACTIVE":
-        raise SnapshotNotProposalEligible("broker account is not active")
-    active = await session.scalar(
-        select(BrokerSyncRun.id).where(
-            BrokerSyncRun.portfolio_id == portfolio_id,
-            BrokerSyncRun.status == "ACTIVE",
-        )
-    )
-    if active is not None:
-        raise SnapshotNotProposalEligible("an active broker sync blocks proposals")
+    await lock_portfolio_sync_boundary(session, portfolio_id=portfolio_id)
     latest = await session.scalar(
         select(PortfolioSnapshotRecord)
         .where(PortfolioSnapshotRecord.portfolio_id == portfolio_id)
@@ -73,6 +56,34 @@ async def require_proposal_baseline(
     ):
         raise SnapshotNotProposalEligible("broker read capability is not currently valid")
     return latest.id
+
+
+async def lock_portfolio_sync_boundary(
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID,
+) -> None:
+    """Serialize consumers with sync admission and an in-flight finalization."""
+    account_id = await session.scalar(
+        select(Portfolio.account_id).where(Portfolio.id == portfolio_id)
+    )
+    if account_id is None:
+        raise SnapshotNotProposalEligible("portfolio is not available")
+    account = await session.scalar(
+        select(Account).where(Account.id == account_id).with_for_update()
+    )
+    if account is None or account.status != "ACTIVE":
+        raise SnapshotNotProposalEligible("broker account is not active")
+    active = await session.scalar(
+        select(BrokerSyncRun.id)
+        .where(
+            BrokerSyncRun.portfolio_id == portfolio_id,
+            BrokerSyncRun.status == "ACTIVE",
+        )
+        .with_for_update()
+    )
+    if active is not None:
+        raise SnapshotNotProposalEligible("an active broker sync blocks proposals")
 
 
 async def _lock_fosun_authority(

@@ -22,6 +22,8 @@ from nexus.persistence.models.optimization import (
 )
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.quality.source_policy import SOURCE_POLICY_ID, load_source_policy_v1
+from nexus.reconciliation.persistence_errors import SnapshotNotProposalEligible
+from nexus.reconciliation.proposal_guard import lock_portfolio_sync_boundary
 
 TargetStatus = Literal["compared", "shadowing", "validated", "rejected", "expired"]
 _ALLOWED = {
@@ -92,6 +94,24 @@ async def has_executable_shadow_authority(
         )
     )
     snapshot = await session.get(PortfolioSnapshotRecord, group.baseline_portfolio_snapshot_id)
+    latest_ready_snapshot_id = None
+    if snapshot is not None:
+        try:
+            await lock_portfolio_sync_boundary(session, portfolio_id=snapshot.portfolio_id)
+            latest_ready_snapshot_id = await session.scalar(
+                select(PortfolioSnapshotRecord.id)
+                .where(
+                    PortfolioSnapshotRecord.portfolio_id == snapshot.portfolio_id,
+                    PortfolioSnapshotRecord.status == "READY",
+                )
+                .order_by(
+                    PortfolioSnapshotRecord.created_at.desc(),
+                    PortfolioSnapshotRecord.id.desc(),
+                )
+                .limit(1)
+            )
+        except SnapshotNotProposalEligible:
+            pass
     report = await session.get(PortfolioDiagnosticReportRecord, group.diagnostic_report_id)
     data_snapshot = await session.get(DataSnapshot, group.data_snapshot_id)
     optimizer_policy = await session.get(OptimizationPolicyRecord, group.policy_id)
@@ -143,6 +163,7 @@ async def has_executable_shadow_authority(
             for position in strategy_positions
         )
         and snapshot is not None
+        and latest_ready_snapshot_id == snapshot.id
         and snapshot.status == "READY"
         and report is not None
         and report.portfolio_id == snapshot.portfolio_id
