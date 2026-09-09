@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import stat
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -24,6 +25,25 @@ MAX_FRAME = 2 * 1024 * 1024
 MAX_DURATION_SECONDS = 300
 MAX_FRAMES = 100
 CLOSE_TIMEOUT_SECONDS = 1
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
+MAX_POWER = 12
+DYNAMIC_QUOTE_FIELDS = frozenset(
+    {
+        "qtTime",
+        "qtDate",
+        "power",
+        "tradeStatus",
+        "price",
+        "chgVal",
+        "chgPct",
+        "pClose",
+        "open",
+        "high",
+        "low",
+        "vol",
+        "turnover",
+    }
+)
 
 
 class PushStreamError(ValueError):
@@ -57,11 +77,20 @@ def _message(raw: bytes) -> dict[str, Any]:
 def _validate_code(code: str) -> str:
     if (
         not isinstance(code, str)
-        or len(code) < 4
-        or len(code) > 17
-        or not code.startswith("us")
-        or not code[2:].replace(".", "").replace("-", "").isalnum()
-        or not code[2:].isupper()
+        or not (
+            (
+                4 <= len(code) <= 17
+                and code.startswith("us")
+                and code[2:].replace(".", "").replace("-", "").isalnum()
+                and code[2:].isupper()
+            )
+            or (
+                len(code) == 7
+                and code.startswith("hk")
+                and code[2:].isascii()
+                and code[2:].isdigit()
+            )
+        )
     ):
         raise PushStreamError("PUSH_CODE_INVALID")
     return code
@@ -76,6 +105,12 @@ def _validate_limits(duration: float, max_frames: int) -> tuple[float, int]:
     ):
         raise PushStreamError("PUSH_LIMIT_INVALID")
     return float(duration), max_frames
+
+
+def _validate_heartbeat_interval(value: float) -> float:
+    if type(value) not in {int, float} or not 0 < value <= DEFAULT_HEARTBEAT_INTERVAL_SECONDS:
+        raise PushStreamError("PUSH_HEARTBEAT_INTERVAL_INVALID")
+    return float(value)
 
 
 def _validate_credential(value: str) -> str:
@@ -108,28 +143,66 @@ def _validate_subscription(message: dict[str, Any], *, code: str, request_id: st
         or not isinstance(reply, list)
         or len(reply) != 1
         or not isinstance(reply[0], dict)
+        or _has_nonempty_err_msg(message)
     ):
         raise PushStreamError("SUBSCRIPTION_INVALID")
     item = reply[0]
     if (
         item.get("topic") != TOPIC
-        or item.get("scode") != [code]
-        or not isinstance(item.get("fcode"), list)
-        or not isinstance(item.get("invalid"), list)
-        or not isinstance(item.get("denied"), list)
+        or _has_nonempty_err_msg(item)
+        or any(
+            not isinstance(item.get(name), list)
+            for name in ("scode", "fcode", "invalid", "denied")
+        )
     ):
         raise PushStreamError("SUBSCRIPTION_INVALID")
-    if item["denied"]:
+    collections = {name: item[name] for name in ("scode", "fcode", "invalid", "denied")}
+    if any(any(value != code for value in values) for values in collections.values()):
+        raise PushStreamError("SUBSCRIPTION_INVALID")
+    if collections == {"scode": [], "fcode": [], "invalid": [], "denied": [code]}:
         raise PushStreamError("SUBSCRIPTION_DENIED")
-    if item["invalid"] or item["fcode"]:
+    if collections != {"scode": [code], "fcode": [], "invalid": [], "denied": []}:
         raise PushStreamError("SUBSCRIPTION_INVALID")
 
 
 def _validate_heartbeat(message: dict[str, Any]) -> int:
     value = message.get("hbValue")
-    if message.get("topic") != "hb" or type(value) is not int:
+    if message.get("topic") != "hb" or _has_nonempty_err_msg(message) or type(value) is not int:
         raise PushStreamError("PROTOCOL_INVALID")
     return value
+
+
+def _has_nonempty_err_msg(message: dict[str, Any]) -> bool:
+    value = message.get("errMsg")
+    return isinstance(value, str) and bool(value)
+
+
+def _validate_quote_frame(message: dict[str, Any], *, code: str) -> int:
+    items = message.get("items")
+    if (
+        message.get("topic") != TOPIC
+        or _has_nonempty_err_msg(message)
+        or not isinstance(items, list)
+        or not items
+    ):
+        raise PushStreamError("QUOTE_INVALID")
+    for item in items:
+        if not isinstance(item, dict) or set(item) != {"code", "msg"} or item.get("code") != code:
+            raise PushStreamError("QUOTE_INVALID")
+        encoded = item.get("msg")
+        if not isinstance(encoded, str):
+            raise PushStreamError("QUOTE_INVALID")
+        try:
+            quote = _message(encoded.encode())
+        except PushStreamError:
+            raise PushStreamError("QUOTE_INVALID") from None
+        if _has_nonempty_err_msg(quote) or not DYNAMIC_QUOTE_FIELDS.issubset(quote):
+            raise PushStreamError("QUOTE_INVALID")
+        if any(type(quote[field]) is not int for field in DYNAMIC_QUOTE_FIELDS):
+            raise PushStreamError("QUOTE_INVALID")
+        if not 0 <= quote["power"] <= MAX_POWER or quote["price"] <= 0:
+            raise PushStreamError("QUOTE_INVALID")
+    return len(items)
 
 
 def _check_secret_reflection(
@@ -138,6 +211,22 @@ def _check_secret_reflection(
     rendered = json.dumps(message, ensure_ascii=False)
     if any(value.encode() in raw or value in rendered for value in credentials):
         raise PushStreamError("SECRET_REFLECTION")
+
+
+def _check_nested_secret_reflection(
+    message: dict[str, Any], credentials: tuple[str, str]
+) -> None:
+    items = message.get("items")
+    if not isinstance(items, list):
+        return
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("msg"), str):
+            continue
+        try:
+            nested = _message(item["msg"].encode())
+        except PushStreamError:
+            continue
+        _check_secret_reflection(b"", nested, credentials)
 
 
 def _write_private(path: Path, content: bytes) -> None:
@@ -158,16 +247,20 @@ async def collect_push_quote(
     max_frames: int = MAX_FRAMES,
     connector: Any = _FixedConnect,
     request_id_factory: Any = lambda: token_hex(8),
+    heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    monotonic_clock: Callable[[], float] = monotonic,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
     """Open one quote subscription, archive inbound originals, and never reconnect."""
     code = _validate_code(code)
     duration, max_frames = _validate_limits(duration, max_frames)
+    heartbeat_interval_seconds = _validate_heartbeat_interval(heartbeat_interval_seconds)
     api_key, session = _validate_credential(api_key), _validate_credential(session)
     request_id = _validate_request_id(request_id_factory())
     directory.mkdir(mode=0o700)
     directory.chmod(0o700)
-    started = datetime.now(UTC)
-    started_monotonic = monotonic()
+    started = now()
+    started_monotonic = monotonic_clock()
     deadline = started_monotonic + duration
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
@@ -184,6 +277,9 @@ async def collect_push_quote(
         "frames": [],
         "requested_duration_seconds": duration,
         "requested_max_frames": max_frames,
+        "heartbeat_interval_seconds": heartbeat_interval_seconds,
+        "quote_message_count": 0,
+        "heartbeat_sent_count": 0,
     }
     byte_count = 0
     logger = logging.Logger("nexus.fosun_push.private", level=logging.CRITICAL + 1)
@@ -211,11 +307,31 @@ async def collect_push_quote(
                     )
                 )
                 receipt["stop_reason"] = "DISCONNECTED"
+                next_heartbeat = started_monotonic + heartbeat_interval_seconds
                 while len(receipt["frames"]) < max_frames:
-                    remaining = deadline - monotonic()
+                    current_monotonic = monotonic_clock()
+                    remaining = deadline - current_monotonic
                     if remaining <= 0:
                         raise TimeoutError
-                    frame = await asyncio.wait_for(socket.recv(), timeout=remaining)
+                    until_heartbeat = next_heartbeat - current_monotonic
+                    if until_heartbeat <= 0:
+                        await socket.send(
+                            json.dumps(
+                                {"act": "hb", "hbValue": int(now().timestamp() * 1000)},
+                                separators=(",", ":"),
+                            )
+                        )
+                        receipt["heartbeat_sent_count"] += 1
+                        next_heartbeat += heartbeat_interval_seconds
+                        continue
+                    try:
+                        frame = await asyncio.wait_for(
+                            socket.recv(), timeout=min(remaining, until_heartbeat)
+                        )
+                    except TimeoutError:
+                        if monotonic_clock() >= deadline:
+                            raise
+                        continue
                     raw = frame.encode() if isinstance(frame, str) else frame
                     if not isinstance(raw, bytes):
                         raise PushStreamError("FRAME_INVALID")
@@ -226,7 +342,8 @@ async def collect_push_quote(
                         raise PushStreamError("BYTE_LIMIT")
                     message = _message(raw)
                     _check_secret_reflection(raw, message, (api_key, session))
-                    received = datetime.now(UTC)
+                    _check_nested_secret_reflection(message, (api_key, session))
+                    received = now()
                     name = f"frame-{len(receipt['frames']):05}.json"
                     _write_private(directory / name, raw)
                     receipt["frames"].append(
@@ -249,7 +366,11 @@ async def collect_push_quote(
                                 separators=(",", ":"),
                             )
                         )
-                    elif message.get("topic") != TOPIC or "subRep" in message:
+                    elif message.get("topic") == TOPIC and "subRep" not in message:
+                        receipt["quote_message_count"] += _validate_quote_frame(
+                            message, code=code
+                        )
+                    else:
                         raise PushStreamError("PROTOCOL_INVALID")
                 receipt["stop_reason"] = "FRAME_LIMIT"
             except TimeoutError:
@@ -259,13 +380,13 @@ async def collect_push_quote(
             except Exception:
                 pass
             finally:
-                receipt["ended_at"] = datetime.now(UTC).isoformat()
-                receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
+                receipt["ended_at"] = now().isoformat()
+                receipt["elapsed_monotonic_seconds"] = monotonic_clock() - started_monotonic
     except Exception:
         pass
     if "ended_at" not in receipt:
-        receipt["ended_at"] = datetime.now(UTC).isoformat()
-        receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
+        receipt["ended_at"] = now().isoformat()
+        receipt["elapsed_monotonic_seconds"] = monotonic_clock() - started_monotonic
     receipt["frame_count"] = len(receipt["frames"])
     receipt["status"] = (
         "bounded_complete"
@@ -328,11 +449,14 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         "ended_at",
         "requested_duration_seconds",
         "requested_max_frames",
+        "heartbeat_interval_seconds",
         "elapsed_monotonic_seconds",
         "subscription_confirmed",
         "status",
         "stop_reason",
         "frame_count",
+        "quote_message_count",
+        "heartbeat_sent_count",
         "frames",
     }
     if set(receipt) != expected_keys:
@@ -342,6 +466,10 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
     duration, max_frames = _validate_limits(
         receipt["requested_duration_seconds"], receipt["requested_max_frames"]
     )
+    try:
+        heartbeat_interval = _validate_heartbeat_interval(receipt["heartbeat_interval_seconds"])
+    except PushStreamError:
+        raise PushStreamError("PUSH_ARCHIVE_INVALID") from None
     elapsed = receipt["elapsed_monotonic_seconds"]
     start, end = _require_utc(receipt["started_at"]), _require_utc(receipt["ended_at"])
     entries = receipt["frames"]
@@ -360,12 +488,17 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         or not isinstance(receipt["stop_reason"], str)
         or not isinstance(entries, list)
         or receipt["frame_count"] != len(frames)
+        or type(receipt["quote_message_count"]) is not int
+        or receipt["quote_message_count"] < 0
+        or type(receipt["heartbeat_sent_count"]) is not int
+        or receipt["heartbeat_sent_count"] < 0
         or len(frames) > max_frames
         or len(frames) > MAX_FRAMES
         or sum(map(len, frames)) > MAX_BYTES
     ):
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
     subscribed = False
+    quote_message_count = 0
     for index, (entry, raw) in enumerate(zip(entries, frames, strict=True)):
         if (
             not isinstance(entry, dict)
@@ -386,8 +519,16 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
             _validate_subscription(message, code=code, request_id=request_id)
             subscribed = True
         elif message.get("topic") == "hb":
-            _validate_heartbeat(message)
-        elif message.get("topic") != TOPIC or "subRep" in message:
+            try:
+                _validate_heartbeat(message)
+            except PushStreamError:
+                raise PushStreamError("PUSH_ARCHIVE_INVALID") from None
+        elif message.get("topic") == TOPIC and "subRep" not in message:
+            try:
+                quote_message_count += _validate_quote_frame(message, code=code)
+            except PushStreamError:
+                raise PushStreamError("PUSH_ARCHIVE_INVALID") from None
+        else:
             raise PushStreamError("PUSH_ARCHIVE_INVALID")
     expected_status = (
         "bounded_complete"
@@ -397,6 +538,12 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         else "failed"
     )
     if receipt["subscription_confirmed"] != subscribed or receipt["status"] != expected_status:
+        raise PushStreamError("PUSH_ARCHIVE_INVALID")
+    heartbeat_window = duration if receipt["stop_reason"] == "DURATION_LIMIT" else elapsed
+    if (
+        receipt["quote_message_count"] != quote_message_count
+        or receipt["heartbeat_sent_count"] != int(heartbeat_window // heartbeat_interval)
+    ):
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
     if receipt["status"] == "bounded_complete" and (
         (
