@@ -243,7 +243,6 @@ def main() -> None:
             json.dumps(
                 dict(
                     status=status,
-                    directory_match=False,
                     historical_backtest_eligible=False,
                     universe_published=False,
                     execution_locked=True,

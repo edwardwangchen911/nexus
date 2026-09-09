@@ -28,8 +28,10 @@ def _originals(*, symbol: str = "SYNZ", exchange: str = "Nasdaq") -> tuple[bytes
 CIK: 0000123456 Form 424B2
 <a href="synthetic.htm">synthetic.htm</a></body></html>"""
     document = f"""<html><body>Filed Pursuant to Rule 424(b)(2)
-Synthetic Bank CIK: 0000123456 Synthetic Market Exposure Exchange Traded Notes due January 2, 2036
-Ticker Symbol: {symbol} Listing Exchange: The Nasdaq Stock Market LLC
+<table><tr><td>Synthetic Bank CIK: 0000123456</td></tr>
+<tr><td>Synthetic Market Exposure Exchange Traded Notes due January 2, 2036</td></tr>
+<tr><td>CUSIP</td><td>Ticker Symbol</td></tr><tr><td>000000000</td><td>{symbol}</td></tr></table>
+Listing Exchange: The Nasdaq Stock Market LLC
 The notes are senior unsecured debt securities of Synthetic Bank.
 The notes are not shares of an exchange-traded fund and do not represent equity ownership.
 </body></html>""".encode()
@@ -70,7 +72,16 @@ def test_current_held_etn_accepts_only_explicit_sec_debt_and_listing_identity():
 
 @pytest.mark.parametrize(
     "change",
-    ["fixed_member", "wrong_exchange", "not_debt", "wrong_symbol", "wrong_form"],
+    [
+        "fixed_member",
+        "wrong_exchange",
+        "not_debt",
+        "wrong_symbol",
+        "wrong_form",
+        "duplicate_title",
+        "duplicate_ticker",
+        "issuer_mismatch",
+    ],
 )
 def test_current_held_etn_rejects_unscoped_or_ambiguous_identity(change, monkeypatch):
     from nexus.market import current_etn_identity as identity
@@ -92,10 +103,24 @@ def test_current_held_etn_rejects_unscoped_or_ambiguous_identity(change, monkeyp
         )
     elif change == "wrong_symbol":
         values[2] = values[2].replace(b"SYNZ", b"OTHER")
-    else:
+    elif change == "wrong_form":
         submissions = json.loads(values[0])
         submissions["filings"]["recent"]["form"] = ["10-K"]
         values[0] = json.dumps(submissions).encode()
+    elif change == "duplicate_title":
+        values[2] = values[2].replace(
+            b"<tr><td>CUSIP</td>",
+            b"<tr><td>Other Exchange Traded Notes due January 3, 2037</td></tr>"
+            b"<tr><td>CUSIP</td>",
+        )
+    elif change == "duplicate_ticker":
+        values[2] = values[2].replace(
+            b"</table>",
+            b"<tr><td>CUSIP</td><td>Ticker Symbol</td></tr>"
+            b"<tr><td>111111111</td><td>SYNZ</td></tr></table>",
+        )
+    else:
+        values[2] = values[2].replace(b"Synthetic Bank", b"Synthetic Fund")
     receipts = json.loads(values[3])
     for receipt, raw in zip(receipts, values[:3], strict=True):
         receipt["sha256"] = sha256(raw).hexdigest()

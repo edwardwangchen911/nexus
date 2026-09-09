@@ -36,7 +36,7 @@ class CurrentHeldEtnIdentity(BaseModel):
     symbol: str
     cik: str
     issuer_name: str
-    note_title_sha256: str
+    cover_binding_sha256: str
     asset_type: Literal["exchange_traded_note"] = "exchange_traded_note"
     risk_bucket: Literal["EXCHANGE_TRADED_NOTE"] = "EXCHANGE_TRADED_NOTE"
     currency: Literal["USD"] = "USD"
@@ -83,6 +83,38 @@ class _Links(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "a" and (href := dict(attrs).get("href")):
             self.links.append(href)
+
+
+class _Rows(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[tuple[str, ...]] = []
+        self.row: list[str] | None = None
+        self.cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            if self.row is not None:
+                raise ValueError
+            self.row = []
+        elif tag in {"td", "th"} and self.row is not None:
+            if self.cell is not None:
+                raise ValueError
+            self.cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self.cell is not None:
+            self.cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"td", "th"} and self.cell is not None and self.row is not None:
+            self.row.append(" ".join("".join(self.cell).split()))
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            if self.cell is not None:
+                raise ValueError
+            self.rows.append(tuple(self.row))
+            self.row = None
 
 
 def _json(raw: bytes) -> Any:
@@ -167,54 +199,82 @@ def validate_current_held_etn_originals(
         ):
             raise ValueError
         text = _visible(document_raw)
-        symbol_positions = [
-            match.start() for match in re.finditer(r"\b" + re.escape(symbol) + r"\b", text)
-        ]
-        title_matches = list(
-            re.finditer(
-                r"(?:Exchange.Traded Notes?|ETNs?)\s+due\s+"
-                r"[A-Za-z]+\s+[0-9]{1,2},\s+20[0-9]{2}",
-                text,
-                re.IGNORECASE,
-            )
-        )
-        bound_titles = [
-            match
-            for match in title_matches
-            if min((abs(match.start() - position) for position in symbol_positions), default=9999)
-            <= 500
-        ]
-        listing_matches = [
-            (exchange, legal_exchange)
-            for _sec_exchange, (exchange, legal_exchange) in _EXCHANGES.items()
-            if min(
-                (
-                    abs(match.start() - position)
-                    for match in re.finditer(re.escape(legal_exchange), text, re.IGNORECASE)
-                    for position in symbol_positions
-                ),
-                default=9999,
-            )
-            <= 1500
-        ]
         issuer_tokens = re.findall(r"[A-Za-z0-9]+", issuer_name)
-        issuer_positions: list[int] = []
-        for width in range(len(issuer_tokens), 1, -1):
-            issuer_core = r"\W+".join(re.escape(token) for token in issuer_tokens[:width])
-            issuer_positions = [
-                match.start() for match in re.finditer(issuer_core, text, re.IGNORECASE)
-            ]
-            if issuer_positions:
-                break
+        minimum_width = 2 if len(issuer_tokens) == 2 else 3
+        if len(issuer_tokens) < minimum_width:
+            raise ValueError
+        issuer_core = r"\W+".join(
+            re.escape(token) for token in issuer_tokens[:minimum_width]
+        )
+        issuer_positions = [
+            match.start() for match in re.finditer(issuer_core, text, re.IGNORECASE)
+        ]
         cik_positions = [
             match.start()
             for match in re.finditer(r"\b0*" + str(int(issuer_cik)) + r"\b", text)
         ]
+        rows = _Rows()
+        rows.feed(document_raw.decode("utf-8-sig"))
+        ticker_rows: list[int] = []
+        for row_number, row in enumerate(rows.rows[1:], start=1):
+            headers = rows.rows[row_number - 1]
+            if len(headers) != len(row):
+                continue
+            for column, (header, value) in enumerate(zip(headers, row, strict=True)):
+                if (
+                    re.fullmatch(r"Ticker(?:\s+Trading)?\s+Symbol", header, re.IGNORECASE)
+                    and value == symbol
+                    and sum(cell == symbol for cell in row) == 1
+                    and column < len(row)
+                ):
+                    ticker_rows.append(row_number)
+        if len(ticker_rows) != 1:
+            raise ValueError
+        cover_rows = " ".join(
+            " ".join(row) for row in rows.rows[max(0, ticker_rows[0] - 25) : ticker_rows[0] + 1]
+        )
+        cover_titles = list(
+            re.finditer(r"(?:Exchange.Traded Notes?|ETNs?)", cover_rows, re.IGNORECASE)
+        )
         if (
-            len(bound_titles) < 1
-            or len(listing_matches) != 1
-            or not re.search(r"\bsenior unsecured\b", text, re.IGNORECASE)
-            or not re.search(r"\bdebt securities\b", text, re.IGNORECASE)
+            len(cover_titles) != 1
+            or not re.search(r"\bdue\b|\bmaturity\b", cover_rows, re.IGNORECASE)
+            or not re.search(issuer_core, cover_rows, re.IGNORECASE)
+            or not re.search(r"\b0*" + str(int(issuer_cik)) + r"\b", cover_rows)
+        ):
+            raise ValueError
+        segments = re.split(r"(?<=[.!?])\s+|\s{2,}", text)
+        cover_windows: list[str] = []
+        for segment_number, segment in enumerate(segments):
+            if len(re.findall(r"\b" + re.escape(symbol) + r"\b", segment)) != 1:
+                continue
+            window = " ".join(
+                segments[max(0, segment_number - 6) : segment_number + 7]
+            )
+            exchanges = [
+                (exchange, legal_exchange)
+                for _name, (exchange, legal_exchange) in _EXCHANGES.items()
+                if re.search(re.escape(legal_exchange), window, re.IGNORECASE)
+            ]
+            if len(exchanges) == 1 and re.search(issuer_core, window, re.IGNORECASE):
+                cover_windows.append(exchanges[0][0])
+        senior_segments = [
+            segment
+            for segment in segments
+            if re.search(r"\bsenior unsecured\b", segment, re.IGNORECASE)
+            and re.search(r"\bnotes?\b|\bETNs?\b", segment, re.IGNORECASE)
+            and re.search(issuer_core, segment, re.IGNORECASE)
+        ]
+        debt_segments = [
+            segment
+            for segment in segments
+            if re.search(r"\bdebt securities\b", segment, re.IGNORECASE)
+            and re.search(r"\bnotes?\b|\bETNs?\b", segment, re.IGNORECASE)
+        ]
+        if (
+            len(cover_windows) != 1
+            or len(senior_segments) != 1
+            or not debt_segments
             or not issuer_positions
             or min(
                 (
@@ -228,15 +288,15 @@ def validate_current_held_etn_originals(
             or re.search(r"\bsubject to completion\b", text[:5000], re.IGNORECASE)
         ):
             raise ValueError
-        exchange, _listing = listing_matches[0]
+        exchange = cover_windows[0]
         exchange = cast(Literal["XNAS", "XNYS", "XASE", "ARCX"], exchange)
         sec_exchange = next(name for name, value in _EXCHANGES.items() if value[0] == exchange)
         identity = CurrentHeldEtnIdentity(
             symbol=symbol,
             cik=issuer_cik,
             issuer_name=issuer_name,
-            note_title_sha256=sha256(
-                " ".join(bound_titles[0][0].casefold().split()).encode()
+            cover_binding_sha256=sha256(
+                " ".join(cover_rows.casefold().split()).encode()
             ).hexdigest(),
             exchange=exchange,
             sec_exchange=sec_exchange,

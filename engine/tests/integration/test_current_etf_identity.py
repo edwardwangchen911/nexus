@@ -44,8 +44,10 @@ def etn_archive(path, *, symbol="SYNZ"):
 CIK: 0000123456 Form 424B2
 <a href="synthetic.htm">synthetic.htm</a></body></html>"""
     document = f"""<html><body>Filed Pursuant to Rule 424(b)(2)
-Synthetic Bank CIK: 0000123456 Synthetic Market Exposure Exchange Traded Notes due January 2, 2036
-Ticker Symbol: {symbol} Listing Exchange: The Nasdaq Stock Market LLC
+<table><tr><td>Synthetic Bank CIK: 0000123456</td></tr>
+<tr><td>Synthetic Market Exposure Exchange Traded Notes due January 2, 2036</td></tr>
+<tr><td>CUSIP</td><td>Ticker Symbol</td></tr><tr><td>000000000</td><td>{symbol}</td></tr></table>
+Listing Exchange: The Nasdaq Stock Market LLC
 The notes are senior unsecured debt securities of Synthetic Bank.
 </body></html>""".encode()
     raws = (submissions, index, document)
@@ -249,11 +251,21 @@ async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias
                 accounts_page=accounts_page,
                 holdings_page=holdings_page,
             )
+        async with factory() as session, session.begin():
+            repeated = await import_current_held_etn(
+                session,
+                store,
+                symbol=symbol,
+                sec_archive=sec,
+                accounts_page=accounts_page,
+                holdings_page=holdings_page,
+            )
+            assert repeated.status == "existing"
+            assert repeated.snapshot_id == result.snapshot_id
         async with factory() as session:
             proof = await read_current_held_etn(session, store, snapshot_id=result.snapshot_id)
             instrument = await session.get(Instrument, proof.instrument_id)
             assert proof.instrument_id == stable_instrument_id(symbol)
-            assert proof.directory_match is False
             assert proof.execution_locked and not proof.universe_published
             assert instrument is not None
             assert instrument.asset_type == "exchange_traded_note"
@@ -261,6 +273,13 @@ async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias
             broker_identity = await _load_local_broker_identity(session, holdings=(holding,))
             assert broker_identity.instrument_ids["us" + symbol] == proof.instrument_id
             assert await session.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
+        async with factory() as session:
+            alias = await session.get(InstrumentAlias, proof.alias_id)
+            assert alias is not None
+            alias.symbol = "OTHER"
+            with session.no_autoflush:
+                with pytest.raises(ValueError, match="CURRENT_HELD_ETN_READBACK_INVALID"):
+                    await read_current_held_etn(session, store, snapshot_id=result.snapshot_id)
     finally:
         await factory.kw["bind"].dispose()
 

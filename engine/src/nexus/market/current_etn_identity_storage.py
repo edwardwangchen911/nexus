@@ -49,7 +49,6 @@ class CurrentHeldEtnProof(BaseModel):
     holding: CurrentHoldingBinding
     sec_url: str
     artifacts: tuple[ArtifactBinding, ...]
-    directory_match: Literal[False] = False
     universe_published: Literal[False] = False
     new_position_eligible: Literal[False] = False
     historical_backtest_eligible: Literal[False] = False
@@ -139,12 +138,12 @@ async def import_current_held_etn(
                 if (
                     prior.identity.symbol,
                     prior.identity.cik,
-                    prior.identity.note_title_sha256,
+                    prior.identity.cover_binding_sha256,
                     prior.identity.exchange,
                 ) != (
                     inputs.identity.symbol,
                     inputs.identity.cik,
-                    inputs.identity.note_title_sha256,
+                    inputs.identity.cover_binding_sha256,
                     inputs.identity.exchange,
                 ):
                     raise ValueError("CURRENT_ETN_MASTER_CONFLICT")
@@ -261,7 +260,6 @@ async def read_current_held_etn(
             or proof.checked_at > now
             or snapshot.created_at > now
             or len(proof.artifacts) != 4
-            or proof.directory_match is not False
         ):
             raise ValueError
         contents: list[bytes] = []
@@ -295,6 +293,8 @@ async def read_current_held_etn(
             or instrument.tick_size is not None
             or len(aliases) != 1
             or aliases[0].id != proof.alias_id
+            or aliases[0].symbol != proof.identity.symbol
+            or aliases[0].instrument_id != instrument.id
             or aliases[0].valid_from != proof.alias_valid_from
             or proof.alias_valid_from > proof.checked_at.date()
         ):
