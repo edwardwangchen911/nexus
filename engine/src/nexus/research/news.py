@@ -400,6 +400,8 @@ async def _read_stream_news(
             or stored_receipt != receipt
             or ended != row.received_at
             or ended > now
+            or validated["status"] != "bounded_complete"
+            or len(validated["articles"]) > 50
         ):
             raise ValueError
         return NewsResponse(

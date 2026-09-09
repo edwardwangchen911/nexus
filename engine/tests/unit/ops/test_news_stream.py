@@ -55,6 +55,10 @@ async def test_confirmed_silent_window_is_not_permission_failure(tmp_path):
     assert len(calls) == 1
     assert socket.sent == [{"action": "subscribe", "news": ["EXAMPLE"]}]
     assert load_stream_archive(tmp_path / "run")["articles"] == ()
+    receipt = json.loads((tmp_path / "run" / "receipt.json").read_text())
+    assert receipt["requested_duration_seconds"] == 0.03
+    assert receipt["requested_max_frames"] == 100
+    assert 0.03 <= receipt["elapsed_monotonic_seconds"] <= 1.03
     assert "example-secret" not in (tmp_path / "run" / "receipt.json").read_text()
 
 
@@ -154,6 +158,56 @@ async def test_stream_archive_rejects_forged_terminal_state_and_overlong_window(
     receipt["status"] = "bounded_complete"
     ended = datetime.fromisoformat(receipt["ended_at"])
     receipt["started_at"] = (ended - timedelta(seconds=302)).astimezone(UTC).isoformat()
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
+        load_stream_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_stream_archive_rejects_forged_terminal_state_that_misses_requested_bound(tmp_path):
+    socket = Socket([AUTH, SUB])
+    directory = tmp_path / "run"
+    await collect_stream(
+        symbol="EXAMPLE",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        duration=0.03,
+        connector=lambda *args, **kwargs: socket,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt.update(
+        status="bounded_complete",
+        stop_reason="FRAME_LIMIT",
+        requested_duration_seconds=60.0,
+        requested_max_frames=3,
+        elapsed_monotonic_seconds=0.03,
+    )
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
+        load_stream_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_stream_archive_rejects_duration_terminal_state_below_requested_elapsed(tmp_path):
+    socket = Socket([AUTH, SUB])
+    directory = tmp_path / "run"
+    await collect_stream(
+        symbol="EXAMPLE",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        duration=0.03,
+        connector=lambda *args, **kwargs: socket,
+    )
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt.update(
+        status="bounded_complete",
+        stop_reason="DURATION_LIMIT",
+        requested_duration_seconds=1.0,
+        requested_max_frames=100,
+        elapsed_monotonic_seconds=0.03,
+    )
     (directory / "receipt.json").write_text(json.dumps(receipt))
     with pytest.raises(ValueError, match="NEWS_STREAM_ARCHIVE_INVALID"):
         load_stream_archive(directory)

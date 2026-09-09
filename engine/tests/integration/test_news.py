@@ -107,6 +107,9 @@ def stream_archive(directory, *, symbol="EXAMPLE", article_count=1):
         ],
         article_count=article_count,
         frame_count=len(frames),
+        requested_duration_seconds=3.0,
+        requested_max_frames=100,
+        elapsed_monotonic_seconds=3.0,
     )
     directory.mkdir(mode=0o700)
     for index, frame in enumerate(frames):
@@ -266,6 +269,78 @@ async def test_stream_import_rejects_partial_and_overlong_article_archives(
             )
         assert await s.scalar(select(func.count()).select_from(DataSnapshot)) == 0
         assert await s.scalar(select(func.count()).select_from(DataArtifact)) == 0
+
+
+@pytest.mark.asyncio
+async def test_read_stream_news_rejects_legacy_partial_snapshot(migrated_database_url, tmp_path):
+    _, factory, _, store = await setup(migrated_database_url)
+    frames, _, receipt, _ = stream_archive(tmp_path / "stream")
+    async with factory.begin() as s:
+        await news_research.import_stream_news(
+            s, store, instrument_id=ID, directory=tmp_path / "stream"
+        )
+    shift = timedelta(seconds=1)
+    partial = {
+        **receipt,
+        "status": "partial",
+        "stop_reason": "DISCONNECTED",
+        "started_at": (datetime.fromisoformat(receipt["started_at"]) + shift).isoformat(),
+        "ended_at": (datetime.fromisoformat(receipt["ended_at"]) + shift).isoformat(),
+        "frames": [
+            {
+                **entry,
+                "received_at": (datetime.fromisoformat(entry["received_at"]) + shift).isoformat(),
+            }
+            for entry in receipt["frames"]
+        ],
+    }
+    partial_raw = json.dumps(partial, sort_keys=True).encode()
+    partial_hash = sha256(partial_raw).hexdigest()
+    partial_snapshot_id = new_uuid7()
+    ended = datetime.fromisoformat(partial["ended_at"])
+    uri = await store.put_if_absent(
+        key=f"raw/alpaca/news/news_stream_receipt_v1/{partial_hash}.json", content=partial_raw
+    )
+    async with factory.begin() as s:
+        s.add(
+            DataArtifact(
+                uri=uri,
+                sha256=partial_hash,
+                byte_size=len(partial_raw),
+                mime_type="application/json",
+                schema_version="news_stream_receipt_v1",
+                source=news_research.SOURCE,
+                observed_at=ended,
+                available_at=ended,
+                received_at=ended,
+            )
+        )
+        snapshot = DataSnapshot(
+            id=partial_snapshot_id,
+            source=news_research.SOURCE,
+            provider_object_id=f"news:{ID}",
+            revision=partial_hash,
+            observed_at=ended,
+            available_at=ended,
+            received_at=ended,
+            schema_version=news_research.STREAM_SCHEMA,
+            payload={
+                "instrument_id": str(ID),
+                "receipt": partial,
+                "frame_hashes": [sha256(frame).hexdigest() for frame in frames],
+            },
+        )
+        s.add(snapshot)
+    async with factory() as s:
+        assert (
+            await news_research.read_news(
+                s,
+                store,
+                instrument_id=ID,
+                now=datetime.now(UTC) + timedelta(minutes=1),
+                snapshot_id=partial_snapshot_id,
+            )
+        ).status == "invalid"
 
 
 @pytest.mark.asyncio

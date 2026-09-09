@@ -49,6 +49,9 @@ def parse_stream_archive(receipt: dict[str, Any], frames: list[bytes]) -> dict[s
         or type(receipt.get("subscription_confirmed")) is not bool
         or type(receipt.get("article_count")) is not int
         or type(receipt.get("frame_count")) is not int
+        or type(receipt.get("requested_duration_seconds")) is not float
+        or type(receipt.get("requested_max_frames")) is not int
+        or type(receipt.get("elapsed_monotonic_seconds")) is not float
         or not isinstance(receipt.get("stop_reason"), str)
         or not isinstance(receipt.get("frames"), list)
     ):
@@ -56,11 +59,17 @@ def parse_stream_archive(receipt: dict[str, Any], frames: list[bytes]) -> dict[s
     symbol = validate_symbol(receipt["symbol"])
     start = aware(datetime.fromisoformat(receipt["started_at"]))
     end = aware(datetime.fromisoformat(receipt["ended_at"]))
+    requested_duration = receipt["requested_duration_seconds"]
+    requested_max_frames = receipt["requested_max_frames"]
+    elapsed = receipt["elapsed_monotonic_seconds"]
     if (
-        start > end
-        # The collector permits a 300-second receive deadline plus its explicit one-second close
-        # timeout; no larger window is provable from the archived receipt.
-        or end - start > timedelta(seconds=MAX_DURATION_SECONDS + CLOSE_TIMEOUT_SECONDS)
+        not 0 < requested_duration <= MAX_DURATION_SECONDS
+        or not 1 <= requested_max_frames <= 100
+        or not 0 <= elapsed <= requested_duration + CLOSE_TIMEOUT_SECONDS
+        or start > end
+        # The collector permits only the requested receive deadline plus its explicit one-second
+        # close timeout; no larger wall-clock window is provable from this receipt.
+        or end - start > timedelta(seconds=requested_duration + CLOSE_TIMEOUT_SECONDS)
         or receipt.get("transport") != "websocket"
         or receipt.get("status") not in {"bounded_complete", "partial", "failed"}
     ):
@@ -120,6 +129,17 @@ def parse_stream_archive(receipt: dict[str, Any], frames: list[bytes]) -> dict[s
         or receipt.get("status") != expected_status
     ):
         raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
+    if receipt["status"] == "bounded_complete" and (
+        (
+            receipt["stop_reason"] == "DURATION_LIMIT"
+            and not requested_duration <= elapsed <= requested_duration + CLOSE_TIMEOUT_SECONDS
+        )
+        or (
+            receipt["stop_reason"] == "FRAME_LIMIT"
+            and receipt["frame_count"] != requested_max_frames
+        )
+    ):
+        raise NewsError("NEWS_STREAM_ARCHIVE_INVALID")
     return {
         "articles": tuple(articles),
         "authenticated": authenticated,
@@ -166,7 +186,12 @@ async def collect_stream(
     connector: Any = _FixedConnect,
 ) -> dict[str, Any]:
     validate_symbol(symbol)
-    if not 0 < duration <= 300 or not 1 <= max_frames <= 100:
+    if (
+        type(duration) not in {int, float}
+        or type(max_frames) is not int
+        or not 0 < duration <= MAX_DURATION_SECONDS
+        or not 1 <= max_frames <= 100
+    ):
         raise NewsError("NEWS_STREAM_LIMIT_INVALID")
     if any(
         not x or not x.isascii() or any(not 33 <= ord(c) <= 126 for c in x) for x in (key, secret)
@@ -174,7 +199,9 @@ async def collect_stream(
         raise NewsError("NEWS_STREAM_CREDENTIALS_INVALID")
     directory.mkdir(mode=0o700)
     started = datetime.now(UTC)
-    deadline = monotonic() + duration
+    requested_duration = float(duration)
+    started_monotonic = monotonic()
+    deadline = started_monotonic + requested_duration
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
         "source": "alpaca",
@@ -187,6 +214,8 @@ async def collect_stream(
         "stop_reason": "CONNECT_FAILED",
         "frames": [],
         "article_count": 0,
+        "requested_duration_seconds": requested_duration,
+        "requested_max_frames": max_frames,
     }
     byte_count = 0
     # Dedicated logger prevents websocket debug logs from exposing auth headers or frames.
@@ -279,6 +308,7 @@ async def collect_stream(
         else "failed"
     )
     receipt["ended_at"] = datetime.now(UTC).isoformat()
+    receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
     receipt["frame_count"] = len(receipt["frames"])
     write_private(directory / "receipt.json", json.dumps(receipt, sort_keys=True).encode())
     return {
