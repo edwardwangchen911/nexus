@@ -1,8 +1,12 @@
-"""Deterministic instrument identifiers and ETF exposure admission."""
+"""Deterministic instrument identifiers and reviewed sector-exposure admission."""
 
+import csv
+import io
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -23,6 +27,17 @@ EQUITY_SECTOR_CODES = (
     "real_estate",
     "utilities",
 )
+_REVIEWED_SECTOR_FIELDS = (
+    "instrument_id",
+    "sector_code",
+    "weight",
+    "as_of",
+    "source_url",
+    "content_hash",
+)
+_CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
+_MAX_REVIEWED_SECTOR_BYTES = 1024 * 1024
+_MAX_REVIEWED_SECTOR_ROWS = 512
 
 
 def stable_instrument_id(symbol: str) -> InstrumentId:
@@ -53,6 +68,74 @@ class SectorExposureRecord(BaseModel):
         if isinstance(value, float):
             raise TypeError("exposure weight must not be a binary float")
         return value
+
+
+def parse_reviewed_sector_csv(raw: bytes) -> tuple[SectorExposureRecord, ...]:
+    """Parse one bounded, operator-reviewed sector snapshot without inferring authority."""
+    try:
+        if not 0 < len(raw) <= _MAX_REVIEWED_SECTOR_BYTES:
+            raise ValueError
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
+        if tuple(reader.fieldnames or ()) != _REVIEWED_SECTOR_FIELDS:
+            raise ValueError
+        rows = list(reader)
+        if not 0 < len(rows) <= _MAX_REVIEWED_SECTOR_ROWS:
+            raise ValueError
+        records: list[SectorExposureRecord] = []
+        identities: set[tuple[UUID, str]] = set()
+        snapshots: dict[UUID, tuple[date, str, str]] = {}
+        for row in rows:
+            if set(row) != set(_REVIEWED_SECTOR_FIELDS) or any(
+                value is None for value in row.values()
+            ):
+                raise ValueError
+            instrument_id = UUID(row["instrument_id"])
+            sector_code = row["sector_code"]
+            weight = Decimal(row["weight"])
+            as_of = date.fromisoformat(row["as_of"])
+            source_url = row["source_url"]
+            content_hash = row["content_hash"]
+            source = urlsplit(source_url)
+            identity = (instrument_id, sector_code)
+            snapshot = (as_of, source_url, content_hash)
+            if (
+                str(instrument_id) != row["instrument_id"]
+                or sector_code not in EQUITY_SECTOR_CODES
+                or not Decimal(0) <= weight <= Decimal(1)
+                or source.scheme != "https"
+                or not source.hostname
+                or source.username is not None
+                or source.password is not None
+                or source.fragment
+                or _CONTENT_HASH.fullmatch(content_hash) is None
+                or identity in identities
+                or (instrument_id in snapshots and snapshots[instrument_id] != snapshot)
+            ):
+                raise ValueError
+            identities.add(identity)
+            snapshots[instrument_id] = snapshot
+            records.append(
+                SectorExposureRecord(
+                    instrument_id=InstrumentId(instrument_id),
+                    sector_code=sector_code,
+                    weight=weight,
+                    as_of=as_of,
+                    source_url=source_url,
+                    content_hash=content_hash,
+                    synthetic=False,
+                    reviewed=True,
+                )
+            )
+        return tuple(sorted(records, key=lambda item: (item.instrument_id.int, item.sector_code)))
+    except (
+        UnicodeError,
+        csv.Error,
+        KeyError,
+        TypeError,
+        ValueError,
+        ArithmeticError,
+    ):
+        raise ValueError("SECTOR_EXPOSURE_CSV_INVALID") from None
 
 
 class PositionEligibility(BaseModel):

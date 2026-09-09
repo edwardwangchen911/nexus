@@ -79,6 +79,9 @@ async def seed_initial_draft(database_url: str, invalid: str = "") -> tuple[UUID
             non_equity = (
                 invalid == "non_equity_without_sector" and index == len(instrument_ids) - 1
             )
+            rounded_etf = (
+                invalid == "rounded_etf_sector_total" and index == len(instrument_ids) - 1
+            )
             if invalid == "zero_quantity" and index == len(instrument_ids) - 1:
                 quantity = 0
             elif invalid == "negative_quantity" and index == len(instrument_ids) - 1:
@@ -92,7 +95,13 @@ async def seed_initial_draft(database_url: str, invalid: str = "") -> tuple[UUID
             db.add(
                 Instrument(
                     id=instrument_id,
-                    asset_type="exchange_traded_note" if non_equity else "equity",
+                    asset_type=(
+                        "exchange_traded_note"
+                        if non_equity
+                        else "equity_etf"
+                        if rounded_etf
+                        else "equity"
+                    ),
                     exchange="XNAS",
                     currency=currency,
                     tick_size=Decimal("0.01"),

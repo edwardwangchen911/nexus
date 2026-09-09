@@ -35,6 +35,7 @@ from sqlalchemy import select
         "short64",
         "raw",
         "non_equity_without_sector",
+        "rounded_etf_sector_total",
     ],
 )
 async def test_draft_api_recomputes_risk_from_db_and_rejects_unqualified_sectors(
@@ -58,6 +59,25 @@ async def test_draft_api_recomputes_risk_from_db_and_rejects_unqualified_sectors
                 adjustment="raw" if invalid == "raw" else "all",
             )
             if invalid == "non_equity_without_sector" and index == 4:
+                continue
+            if invalid == "rounded_etf_sector_total" and index == 4:
+                for sector, weight in (
+                    ("financials", "0.400"),
+                    ("technology", "0.599"),
+                ):
+                    db.add(
+                        SectorExposure(
+                            instrument_id=instrument,
+                            sector_code=sector,
+                            weight=Decimal(weight),
+                            as_of=(CLOCK - timedelta(days=1)).date(),
+                            source_url="https://issuer.example/rounded-etf.csv",
+                            content_hash="b" * 64,
+                            synthetic=False,
+                            reviewed=True,
+                            created_at=CLOCK - timedelta(days=1),
+                        )
+                    )
                 continue
             db.add(
                 SectorExposure(

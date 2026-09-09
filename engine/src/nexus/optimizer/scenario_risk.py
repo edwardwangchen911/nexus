@@ -46,14 +46,15 @@ async def load_scenario_evidence(
     if snapshot.as_of is None:
         raise ValueError("SCENARIO_VALUATION_TIME_MISSING")
     ids = {p.instrument_id for p in snapshot.positions if p.quantity > 0}
-    instruments = tuple(
-        await session.scalars(select(Instrument).where(Instrument.id.in_(ids)))
-    )
-    known_instrument_ids = {instrument.id for instrument in instruments}
+    instruments = {
+        instrument.id: instrument
+        for instrument in await session.scalars(select(Instrument).where(Instrument.id.in_(ids)))
+    }
+    known_instrument_ids = set(instruments)
     sector_required_ids = frozenset(
         {
             instrument.id
-            for instrument in instruments
+            for instrument in instruments.values()
             if instrument.risk_bucket.upper() in {"EQUITY", "US_EQUITY"}
         }
         | (ids - known_instrument_ids)
@@ -79,9 +80,18 @@ async def load_scenario_evidence(
             continue
         latest = [r for r in candidates if r.as_of == candidates[0].as_of]
         weights = {r.sector_code: r.weight for r in latest}
-        if len(weights) != len(latest) or sum(weights.values(), Decimal(0)) != 1:
+        total = sum(weights.values(), Decimal(0))
+        instrument = instruments.get(instrument_id)
+        valid_total = (
+            Decimal("0.995") <= total <= Decimal("1.005")
+            if instrument is not None and instrument.asset_type == "equity_etf"
+            else total == Decimal(1)
+        )
+        if len(weights) != len(latest) or not valid_total:
             continue
-        sectors[instrument_id] = weights
+        sectors[instrument_id] = {
+            sector: weight / total for sector, weight in weights.items()
+        }
         refs.extend(
             EvidenceRef(
                 source="nexus_db",

@@ -1,8 +1,12 @@
 import csv
+import io
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import nexus.backtest.universe as universe
+import nexus.market.universe as market_universe
+import pytest
 from nexus.market.universe import (
     EQUITY_SECTOR_CODES,
     SectorExposureRecord,
@@ -19,10 +23,75 @@ STOCKS = {
 ETFS = {"SPY", "QQQ", "IWM", "DIA", "VTI", "TLT", "GLD"}
 
 
+def _reviewed_sector_csv(*rows: tuple[str, str, str, str, str, str]) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(
+        ("instrument_id", "sector_code", "weight", "as_of", "source_url", "content_hash")
+    )
+    writer.writerows(rows)
+    return output.getvalue().encode()
+
+
 def _seed_rows() -> list[dict[str, str]]:
     seed_path = Path(universe.__file__).resolve().parent / "data/us_liquid_v1.csv"
     with seed_path.open(newline="", encoding="utf-8") as seed_file:
         return list(csv.DictReader(seed_file))
+
+
+def test_reviewed_sector_csv_parses_exact_traceable_rows() -> None:
+    instrument = stable_instrument_id("SPY")
+    records = market_universe.parse_reviewed_sector_csv(
+        _reviewed_sector_csv(
+            (
+                str(instrument),
+                "information_technology",
+                "0.600000",
+                "2026-09-09",
+                "https://issuer.example/fund/sector.csv",
+                "a" * 64,
+            ),
+            (
+                str(instrument),
+                "financials",
+                "0.400000",
+                "2026-09-09",
+                "https://issuer.example/fund/sector.csv",
+                "a" * 64,
+            ),
+        )
+    )
+
+    assert [(row.sector_code, row.weight) for row in records] == [
+        ("financials", Decimal("0.400000")),
+        ("information_technology", Decimal("0.600000")),
+    ]
+    assert all(row.reviewed and not row.synthetic for row in records)
+
+
+def test_reviewed_sector_csv_rejects_untraceable_or_ambiguous_rows() -> None:
+    instrument = stable_instrument_id("SPY")
+    duplicated = _reviewed_sector_csv(
+        (
+            str(instrument),
+            "information_technology",
+            "1",
+            "2026-09-09",
+            "file:///tmp/sector.csv",
+            "b" * 64,
+        ),
+        (
+            str(instrument),
+            "information_technology",
+            "1",
+            "2026-09-09",
+            "file:///tmp/sector.csv",
+            "b" * 64,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="SECTOR_EXPOSURE_CSV_INVALID"):
+        market_universe.parse_reviewed_sector_csv(duplicated)
 
 
 def test_us_liquid_v1_has_exact_versioned_symbol_sets_and_stable_ids() -> None:
