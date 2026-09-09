@@ -41,6 +41,10 @@ def _arguments(tmp_path: Path) -> list[str]:
     ]
 
 
+def _bound_arguments(tmp_path: Path) -> list[str]:
+    return [*_arguments(tmp_path), "--authority-sha256", "a" * 64]
+
+
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
         provider_manifest=MANIFEST_PATH,
@@ -102,6 +106,45 @@ async def test_push_probe_runs_one_session_and_one_bounded_collection(tmp_path, 
     assert calls[0]["proxy_url"] == "http://127.0.0.1:9090"
     assert calls[0]["duration"] == 20.0
     assert calls[0]["max_frames"] == 20
+
+
+@pytest.mark.asyncio
+async def test_push_probe_binds_prepared_authority_digest(tmp_path, monkeypatch):
+    bundle = FakeBundle()
+    calls = []
+    monkeypatch.setenv("FOSUN_PROVIDER_MANIFEST", str(MANIFEST_PATH))
+    monkeypatch.setattr(
+        push_probe_cli.PushProbeProviderSettings,
+        "model_validate",
+        lambda _values: _settings(),
+    )
+
+    async def collect(**kwargs):
+        calls.append(kwargs)
+        kwargs["directory"].mkdir(mode=0o700)
+        return {
+            "status": "bounded_complete",
+            "stop_reason": "DURATION_LIMIT",
+            "subscription_confirmed": True,
+            "frame_count": 2,
+        }
+
+    def build_transport(_manifest, _settings, budget):
+        budget.bind_http_controls()
+        with budget.operation("Accounts"):
+            budget.before_dispatch("auth")
+            budget.after_response("auth", 200)
+        return bundle
+
+    result = await push_probe_cli._execute_once(
+        tuple(_bound_arguments(tmp_path)),
+        build_transport=build_transport,
+        collect=collect,
+        load=lambda _directory: {"status": "bounded_complete"},
+    )
+
+    assert result["status"] == "bounded_complete"
+    assert calls[0]["authority_sha256"] == "a" * 64
 
 
 @pytest.mark.asyncio

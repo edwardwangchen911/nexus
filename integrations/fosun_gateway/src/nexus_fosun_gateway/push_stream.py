@@ -23,6 +23,7 @@ from websockets.asyncio.client import connect
 
 PUSH_URL = "wss://openapi-push.fosunxcz.com/msg/v1/push"
 SCHEMA = "nexus_fosun_push_receipt_v2"
+SCHEMA_V3 = "nexus_fosun_push_receipt_v3"
 TOPIC = "qt"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_FRAME = 2 * 1024 * 1024
@@ -64,6 +65,7 @@ class LatestPushQuote:
     provider_quote_time: int
     frame_received_at: datetime
     archive_completed_at: datetime
+    authority_sha256: str | None
     raw_archive_payload: bytes
 
 
@@ -277,6 +279,7 @@ async def collect_push_quote(
     proxy_url: str | None = None,
     monotonic_clock: Callable[[], float] = monotonic,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    authority_sha256: str | None = None,
 ) -> dict[str, object]:
     """Open one quote subscription, archive inbound originals, and never reconnect."""
     code = _validate_code(code)
@@ -284,6 +287,12 @@ async def collect_push_quote(
     heartbeat_interval_seconds = _validate_heartbeat_interval(heartbeat_interval_seconds)
     proxy_url = _validate_proxy_url(proxy_url)
     api_key, session = _validate_credential(api_key), _validate_credential(session)
+    if authority_sha256 is not None and (
+        not isinstance(authority_sha256, str)
+        or len(authority_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in authority_sha256)
+    ):
+        raise PushStreamError("PUSH_AUTHORITY_INVALID")
     request_id = _validate_request_id(request_id_factory())
     directory.mkdir(mode=0o700)
     directory.chmod(0o700)
@@ -291,7 +300,7 @@ async def collect_push_quote(
     started_monotonic = monotonic_clock()
     deadline = started_monotonic + duration
     receipt: dict[str, Any] = {
-        "schema": SCHEMA,
+        "schema": SCHEMA_V3 if authority_sha256 is not None else SCHEMA,
         "source": "fosun",
         "transport": "websocket",
         "origin": PUSH_URL,
@@ -312,6 +321,8 @@ async def collect_push_quote(
         "heartbeats": [],
         "outbound_send_timed_out": False,
     }
+    if authority_sha256 is not None:
+        receipt["authority_sha256"] = authority_sha256
     byte_count = 0
     logger = logging.Logger("nexus.fosun_push.private", level=logging.CRITICAL + 1)
     logger.propagate = False
@@ -501,6 +512,8 @@ def _require_utc(value: object) -> datetime:
 
 def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str, Any]:
     legacy = receipt.get("schema") == "nexus_fosun_push_receipt_v1"
+    current = receipt.get("schema") == SCHEMA
+    bound = receipt.get("schema") == SCHEMA_V3
     expected_keys = {
         "schema",
         "source",
@@ -528,6 +541,8 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
     }
     if legacy:
         expected_keys -= {"heartbeats", "outbound_send_timed_out"}
+    if bound:
+        expected_keys.add("authority_sha256")
     if set(receipt) != expected_keys:
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
     heartbeats = receipt.get("heartbeats", [])
@@ -545,8 +560,7 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
     start, end = _require_utc(receipt["started_at"]), _require_utc(receipt["ended_at"])
     entries = receipt["frames"]
     if (
-        receipt["schema"] != SCHEMA
-        and not legacy
+        not (legacy or current or bound)
         or receipt["source"] != "fosun"
         or receipt["transport"] != "websocket"
         or receipt["origin"] != PUSH_URL
@@ -576,6 +590,15 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
         or len(frames) > max_frames
         or len(frames) > MAX_FRAMES
         or sum(map(len, frames)) > MAX_BYTES
+    ):
+        raise PushStreamError("PUSH_ARCHIVE_INVALID")
+    if bound and (
+        not isinstance(receipt["authority_sha256"], str)
+        or len(receipt["authority_sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in receipt["authority_sha256"]
+        )
     ):
         raise PushStreamError("PUSH_ARCHIVE_INVALID")
     heartbeat_sends: dict[int, int] = {}
@@ -761,5 +784,6 @@ def load_latest_push_quote(directory: Path) -> LatestPushQuote:
         provider_quote_time=latest["qtTime"],
         frame_received_at=frame_received_at,
         archive_completed_at=_require_utc(receipt["ended_at"]),
+        authority_sha256=receipt.get("authority_sha256"),
         raw_archive_payload=raw_archive_payload,
     )
