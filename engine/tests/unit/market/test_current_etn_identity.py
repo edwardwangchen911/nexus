@@ -15,7 +15,7 @@ def _originals(*, symbol: str = "SYNZ", exchange: str = "Nasdaq") -> tuple[bytes
                 "companyName": "Synthetic Market Exposure ETN",
                 "currency": "USD",
                 "cusip": "000000000",
-                "isin": "US0000000000",
+                "isin": "US0000000002",
                 "exchange": "NASDAQ",
                 "isEtf": True,
                 "isFund": False,
@@ -56,7 +56,8 @@ CIK: 0000123456 Form 424B2
     document = f"""<html><body>Filed Pursuant to Rule 424(b)(2)
 <table><tr><td>Synthetic Bank CIK: 0000123456</td></tr>
 <tr><td>Synthetic Market Exposure Exchange Traded Notes due January 2, 2036</td></tr>
-<tr><td>CUSIP</td><td>Ticker Symbol</td></tr><tr><td>000000000</td><td>{symbol}</td></tr></table>
+<tr><td>CUSIP</td><td>Ticker Symbol</td><td>ISIN</td></tr>
+<tr><td>000000000</td><td>{symbol}</td><td>US0000000002</td></tr></table>
 Listing Exchange: The Nasdaq Stock Market LLC
 The notes are senior unsecured debt securities of Synthetic Bank.
 The notes are not shares of an exchange-traded fund and do not represent equity ownership.
@@ -108,6 +109,7 @@ def test_current_held_etn_accepts_only_explicit_sec_debt_and_listing_identity():
         "duplicate_ticker",
         "issuer_mismatch",
         "wrong_cusip",
+        "underlying_block",
     ],
 )
 def test_current_held_etn_rejects_unscoped_or_ambiguous_identity(change, monkeypatch):
@@ -143,15 +145,19 @@ def test_current_held_etn_rejects_unscoped_or_ambiguous_identity(change, monkeyp
     elif change == "duplicate_ticker":
         values[4] = values[4].replace(
             b"</table>",
-            b"<tr><td>CUSIP</td><td>Ticker Symbol</td></tr>"
-            b"<tr><td>111111111</td><td>SYNZ</td></tr></table>",
+            b"<tr><td>CUSIP</td><td>Ticker Symbol</td><td>ISIN</td></tr>"
+            b"<tr><td>111111111</td><td>SYNZ</td><td>US1111111118</td></tr></table>",
         )
     elif change == "issuer_mismatch":
         values[4] = values[4].replace(b"Synthetic Bank", b"Synthetic Fund")
-    else:
+    elif change == "wrong_cusip":
         profile = json.loads(values[0])
         profile[0]["cusip"] = "111111111"
         values[0] = json.dumps(profile).encode()
+    else:
+        values[4] = values[4].replace(
+            b"Synthetic Market Exposure", b"Underlying Reference Asset Synthetic Market Exposure"
+        )
     fmp_receipt = json.loads(values[1])
     fmp_receipt["raw_sha256"] = sha256(values[0]).hexdigest()
     fmp_receipt["raw_byte_length"] = len(values[0])

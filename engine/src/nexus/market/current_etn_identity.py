@@ -18,7 +18,7 @@ from nexus.providers.fmp_profile import _invalid_constant, _unique, parse_profil
 from nexus.research.sec_disclosures import _VisibleText
 
 SOURCE = "current_held_etn_identity"
-SCHEMA = "current_held_etn_identity_v2"
+SCHEMA = "current_held_etn_identity_v3"
 _EXCHANGES = {
     "Nasdaq": ("XNAS", "The Nasdaq Stock Market LLC"),
     "NYSE": ("XNYS", "New York Stock Exchange"),
@@ -93,15 +93,19 @@ class _Links(HTMLParser):
             self.links.append(href)
 
 
-class _Rows(HTMLParser):
+class _Tables(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
-        self.rows: list[tuple[str, ...]] = []
+        self.tables: list[list[tuple[str, ...]]] = []
+        self.table_stack: list[int] = []
         self.row: list[str] | None = None
         self.cell: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "tr":
+        if tag == "table":
+            self.tables.append([])
+            self.table_stack.append(len(self.tables) - 1)
+        elif tag == "tr":
             if self.row is not None:
                 raise ValueError
             self.row = []
@@ -121,8 +125,28 @@ class _Rows(HTMLParser):
         elif tag == "tr" and self.row is not None:
             if self.cell is not None:
                 raise ValueError
-            self.rows.append(tuple(self.row))
+            if not self.table_stack:
+                raise ValueError
+            self.tables[self.table_stack[-1]].append(tuple(self.row))
             self.row = None
+        elif tag == "table":
+            if not self.table_stack:
+                raise ValueError
+            self.table_stack.pop()
+
+
+def _valid_isin(value: str, cusip_value: str) -> bool:
+    if not re.fullmatch(r"US[A-Z0-9]{10}", value) or value[2:11] != cusip_value:
+        return False
+    expanded = "".join(
+        character if character.isdigit() else str(ord(character) - ord("A") + 10)
+        for character in value
+    )
+    total = 0
+    for position, character in enumerate(reversed(expanded)):
+        digit = int(character) * (2 if position % 2 else 1)
+        total += digit // 10 + digit % 10
+    return total % 10 == 0
 
 
 def _json(raw: bytes) -> Any:
@@ -173,7 +197,7 @@ def validate_current_held_etn_originals(
             or not isinstance(cusip_value, str)
             or re.fullmatch(r"[A-Z0-9]{9}", cusip_value) is None
             or not isinstance(isin_value, str)
-            or re.fullmatch(r"[A-Z]{2}[A-Z0-9]{10}", isin_value) is None
+            or not _valid_isin(isin_value, cusip_value)
             or not isinstance(fmp_exchange, str)
         ):
             raise ValueError
@@ -252,59 +276,76 @@ def validate_current_held_etn_originals(
             match.start()
             for match in re.finditer(r"\b0*" + str(int(issuer_cik)) + r"\b", text)
         ]
-        rows = _Rows()
-        rows.feed(document_raw.decode("utf-8-sig"))
-        ticker_rows: list[int] = []
-        for row_number, row in enumerate(rows.rows[1:], start=1):
-            headers = rows.rows[row_number - 1]
-            if len(headers) != len(row):
-                continue
-            for header, value in zip(headers, row, strict=True):
-                if (
-                    re.fullmatch(r"Ticker(?:\s+Trading)?\s+Symbol", header, re.IGNORECASE)
-                    and value == symbol
-                    and sum(cell == symbol for cell in row) == 1
-                    and any(
-                        re.fullmatch(
-                            r"CUSIP(?:\s+(?:Number|No\.?))?",
-                            candidate_header,
-                            re.IGNORECASE,
-                        )
-                        and candidate_value == cusip_value
-                        for candidate_header, candidate_value in zip(headers, row, strict=True)
+        tables = _Tables()
+        tables.feed(document_raw.decode("utf-8-sig"))
+        identifier_tables: list[int] = []
+        for table_number, table in enumerate(tables.tables):
+            for row_number, row in enumerate(table[1:], start=1):
+                headers = table[row_number - 1]
+                if len(headers) != len(row):
+                    continue
+                pairs = tuple(zip(headers, row, strict=True))
+                ticker_values = [
+                    value
+                    for header, value in pairs
+                    if re.fullmatch(
+                        r"Ticker(?:\s+Trading)?\s+Symbol", header, re.IGNORECASE
                     )
+                ]
+                cusip_values = [
+                    value
+                    for header, value in pairs
+                    if re.fullmatch(
+                        r"CUSIP(?:\s+(?:Number|No\.?))?", header, re.IGNORECASE
+                    )
+                ]
+                isin_values = [
+                    value
+                    for header, value in pairs
+                    if re.fullmatch(
+                        r"ISIN(?:\s+(?:Number|No\.?|\([^()]+\)))?", header, re.IGNORECASE
+                    )
+                ]
+                if (
+                    ticker_values == [symbol]
+                    and cusip_values == [cusip_value]
+                    and isin_values == [isin_value]
+                    and sum(cell == symbol for cell in row) == 1
                 ):
-                    ticker_rows.append(row_number)
-        if len(ticker_rows) != 1:
+                    identifier_tables.append(table_number)
+        nonempty_tables = [
+            number
+            for number, table in enumerate(tables.tables)
+            if any(any(cell for cell in row) for row in table)
+        ]
+        if len(identifier_tables) != 1 or identifier_tables[0] not in nonempty_tables[:12]:
             raise ValueError
-        cover_rows = " ".join(
-            " ".join(row) for row in rows.rows[max(0, ticker_rows[0] - 25) : ticker_rows[0] + 1]
-        )
-        cover_titles = list(
-            re.finditer(r"(?:Exchange.Traded Notes?|ETNs?)", cover_rows, re.IGNORECASE)
+        product_position = nonempty_tables.index(identifier_tables[0])
+        product_tables = nonempty_tables[max(0, product_position - 5) : product_position + 1]
+        product_block = " ".join(
+            " ".join(" ".join(row) for row in tables.tables[number])
+            for number in product_tables
         )
         if (
-            len(cover_titles) != 1
-            or not re.search(r"\bdue\b|\bmaturity\b", cover_rows, re.IGNORECASE)
-            or not re.search(issuer_core, cover_rows, re.IGNORECASE)
-            or not re.search(r"\b0*" + str(int(issuer_cik)) + r"\b", cover_rows)
+            len(re.findall(r"(?:Exchange.Traded Notes?|ETNs?)", product_block, re.IGNORECASE))
+            != 1
+            or not re.search(r"\bdue\b|\bmaturity\b", product_block, re.IGNORECASE)
+            or not re.search(issuer_core, product_block, re.IGNORECASE)
+            or not re.search(r"\b0*" + str(int(issuer_cik)) + r"\b", product_block)
+            or re.search(
+                r"\b(?:underlying|reference asset|index constituent)\b",
+                product_block,
+                re.IGNORECASE,
+            )
         ):
             raise ValueError
         segments = re.split(r"(?<=[.!?])\s+|\s{2,}", text)
-        cover_windows: list[str] = []
-        for segment_number, segment in enumerate(segments):
-            if len(re.findall(r"\b" + re.escape(symbol) + r"\b", segment)) != 1:
-                continue
-            window = " ".join(
-                segments[max(0, segment_number - 6) : segment_number + 7]
-            )
-            exchanges = [
-                (exchange, legal_exchange)
-                for _name, (exchange, legal_exchange) in _EXCHANGES.items()
-                if re.search(re.escape(legal_exchange), window, re.IGNORECASE)
-            ]
-            if len(exchanges) == 1 and re.search(issuer_core, window, re.IGNORECASE):
-                cover_windows.append(exchanges[0][0])
+        front_matter = " ".join(segments[:10])
+        exchanges = [
+            (exchange, legal_exchange)
+            for _name, (exchange, legal_exchange) in _EXCHANGES.items()
+            if re.search(re.escape(legal_exchange), front_matter, re.IGNORECASE)
+        ]
         senior_segments = [
             segment
             for segment in segments
@@ -319,7 +360,11 @@ def validate_current_held_etn_originals(
             and re.search(r"\bnotes?\b|\bETNs?\b", segment, re.IGNORECASE)
         ]
         if (
-            len(cover_windows) != 1
+            len(exchanges) != 1
+            or len(re.findall(r"\b" + re.escape(symbol) + r"\b", front_matter)) != 1
+            or not re.search(r"(?:Exchange.Traded Notes?|ETNs?)", front_matter, re.IGNORECASE)
+            or not re.search(r"\bdue\b|\bmaturity\b", front_matter, re.IGNORECASE)
+            or not re.search(issuer_core, front_matter, re.IGNORECASE)
             or len(senior_segments) != 1
             or not debt_segments
             or not issuer_positions
@@ -335,7 +380,7 @@ def validate_current_held_etn_originals(
             or re.search(r"\bsubject to completion\b", text[:5000], re.IGNORECASE)
         ):
             raise ValueError
-        exchange = cover_windows[0]
+        exchange = exchanges[0][0]
         exchange = cast(Literal["XNAS", "XNYS", "XASE", "ARCX"], exchange)
         sec_exchange = next(name for name, value in _EXCHANGES.items() if value[0] == exchange)
         identity = CurrentHeldEtnIdentity(
@@ -346,7 +391,7 @@ def validate_current_held_etn_originals(
             isin=isin_value,
             fmp_exchange=fmp_exchange,
             cover_binding_sha256=sha256(
-                " ".join(cover_rows.casefold().split()).encode()
+                " ".join(product_block.casefold().split()).encode()
             ).hexdigest(),
             exchange=exchange,
             sec_exchange=sec_exchange,

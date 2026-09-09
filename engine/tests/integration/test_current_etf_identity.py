@@ -34,7 +34,7 @@ def etn_archive(path, *, symbol="SYNZ"):
                 "companyName": "Synthetic Market Exposure ETN",
                 "currency": "USD",
                 "cusip": "000000000",
-                "isin": "US0000000000",
+                "isin": "US0000000002",
                 "exchange": "NASDAQ",
                 "isEtf": True,
                 "isFund": False,
@@ -79,7 +79,8 @@ CIK: 0000123456 Form 424B2
     document = f"""<html><body>Filed Pursuant to Rule 424(b)(2)
 <table><tr><td>Synthetic Bank CIK: 0000123456</td></tr>
 <tr><td>Synthetic Market Exposure Exchange Traded Notes due January 2, 2036</td></tr>
-<tr><td>CUSIP</td><td>Ticker Symbol</td></tr><tr><td>000000000</td><td>{symbol}</td></tr></table>
+<tr><td>CUSIP</td><td>Ticker Symbol</td><td>ISIN</td></tr>
+<tr><td>000000000</td><td>{symbol}</td><td>US0000000002</td></tr></table>
 Listing Exchange: The Nasdaq Stock Market LLC
 The notes are senior unsecured debt securities of Synthetic Bank.
 </body></html>""".encode()
