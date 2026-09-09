@@ -24,6 +24,39 @@ from sqlalchemy import func, select
 
 def etn_archive(path, *, symbol="SYNZ"):
     path.mkdir(mode=0o700)
+    fmp_path, sec_path = path / "fmp", path / "sec"
+    fmp_path.mkdir(mode=0o700)
+    sec_path.mkdir(mode=0o700)
+    fmp = json.dumps(
+        [
+            {
+                "symbol": symbol,
+                "companyName": "Synthetic Market Exposure ETN",
+                "currency": "USD",
+                "cusip": "000000000",
+                "isin": "US0000000000",
+                "exchange": "NASDAQ",
+                "isEtf": True,
+                "isFund": False,
+            }
+        ]
+    ).encode()
+    fmp_receipt = json.dumps(
+        {
+            "schema": "fmp_profile_receipt_v1",
+            "source": "fmp",
+            "origin": "https://financialmodelingprep.com",
+            "path": "/stable/profile",
+            "symbol": symbol,
+            "raw_sha256": sha256(fmp).hexdigest(),
+            "raw_byte_length": len(fmp),
+            "received_at": "2026-01-02T12:01:00+00:00",
+        }
+    ).encode()
+    for name, raw in (("profile.json", fmp), ("receipt.json", fmp_receipt)):
+        target = fmp_path / name
+        target.write_bytes(raw)
+        target.chmod(0o600)
     submissions = json.dumps(
         {
             "cik": "0000123456",
@@ -74,10 +107,10 @@ The notes are senior unsecured debt securities of Synthetic Bank.
         (*raws, receipts),
         strict=True,
     ):
-        target = path / name
+        target = sec_path / name
         target.write_bytes(raw)
         target.chmod(0o600)
-    return path
+    return fmp_path, sec_path
 
 
 def config(url):
@@ -237,7 +270,7 @@ async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias
 
     symbol = "SYNZ"
     settings = config(migrated_database_url)
-    sec = etn_archive(tmp_path / "etn")
+    fmp, sec = etn_archive(tmp_path / "etn")
     store = MemoryStore()
     factory = session_factory(settings)
     try:
@@ -247,6 +280,7 @@ async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias
                 session,
                 store,
                 symbol=symbol,
+                fmp_archive=fmp,
                 sec_archive=sec,
                 accounts_page=accounts_page,
                 holdings_page=holdings_page,
@@ -256,6 +290,7 @@ async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias
                 session,
                 store,
                 symbol=symbol,
+                fmp_archive=fmp,
                 sec_archive=sec,
                 accounts_page=accounts_page,
                 holdings_page=holdings_page,

@@ -56,13 +56,14 @@ class CurrentHeldEtnProof(BaseModel):
 
 
 def load_current_held_etn_archives(
-    *, symbol: str, sec_archive: Path, now: datetime
+    *, symbol: str, fmp_archive: Path, sec_archive: Path, now: datetime
 ) -> CurrentHeldEtnInputs:
-    contents = _private_files(
+    fmp = _private_files(fmp_archive, ("profile.json", "receipt.json"))
+    sec = _private_files(
         sec_archive,
         ("submissions.raw", "filing-index.raw", "disclosure.raw", "receipts.json"),
     )
-    return validate_current_held_etn_originals(symbol=symbol, contents=contents, now=now)
+    return validate_current_held_etn_originals(symbol=symbol, contents=fmp + sec, now=now)
 
 
 def _revision(inputs: CurrentHeldEtnInputs, holding: CurrentHoldingBinding) -> str:
@@ -74,6 +75,7 @@ async def import_current_held_etn(
     store: IdentityStore,
     *,
     symbol: str,
+    fmp_archive: Path,
     sec_archive: Path,
     accounts_page: GatewayResponsePage,
     holdings_page: GatewayResponsePage,
@@ -96,7 +98,9 @@ async def import_current_held_etn(
             )
         except ValueError:
             raise ValueError("CURRENT_HELD_ETN_HOLDING_INVALID") from None
-        inputs = load_current_held_etn_archives(symbol=symbol, sec_archive=sec_archive, now=now)
+        inputs = load_current_held_etn_archives(
+            symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive, now=now
+        )
         instrument_id = UUID(str(stable_instrument_id(symbol)))
         revision = _revision(inputs, holding)
         existing = await session.scalar(
@@ -129,6 +133,7 @@ async def import_current_held_etn(
                 await session.scalars(
                     select(DataSnapshot).where(
                         DataSnapshot.source == SOURCE,
+                        DataSnapshot.schema_version == SCHEMA,
                         DataSnapshot.provider_object_id == f"identity:{symbol}",
                     )
                 )
@@ -163,10 +168,11 @@ async def import_current_held_etn(
             artifact = await session.scalar(
                 select(DataArtifact).where(DataArtifact.sha256 == digest)
             )
-            received = inputs.received[number] if number < 3 else max(inputs.received)
+            source = "fmp" if number < 2 else "sec"
+            received = inputs.received[number]
             if artifact is None:
                 uri = await store.put_if_absent(
-                    key=f"raw/sec/current-held-etn/{digest}.raw", content=content
+                    key=f"raw/{source}/current-held-etn/{digest}.raw", content=content
                 )
                 await session.execute(
                     insert(DataArtifact)
@@ -174,7 +180,7 @@ async def import_current_held_etn(
                         uri=uri,
                         sha256=digest,
                         byte_size=len(content),
-                        source="sec",
+                        source=source,
                         schema_version=f"current_held_etn_original_{number}_v1",
                         mime_type="application/octet-stream",
                         received_at=received,
@@ -186,7 +192,7 @@ async def import_current_held_etn(
                 artifact = await session.scalar(
                     select(DataArtifact).where(DataArtifact.sha256 == digest)
                 )
-            if artifact is None or artifact.source != "sec":
+            if artifact is None or artifact.source != source:
                 raise ValueError("CURRENT_ETN_ARTIFACT_CONFLICT")
             binding = _binding(artifact)
             if await _read_artifact(store, binding) != content:
@@ -259,15 +265,19 @@ async def read_current_held_etn(
             != (proof.checked_at,) * 3
             or proof.checked_at > now
             or snapshot.created_at > now
-            or len(proof.artifacts) != 4
+            or len(proof.artifacts) != 6
         ):
             raise ValueError
         contents: list[bytes] = []
-        for binding in proof.artifacts:
+        for number, binding in enumerate(proof.artifacts):
             artifact = await session.scalar(
                 select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
             )
-            if artifact is None or artifact.source != "sec" or _binding(artifact) != binding:
+            if (
+                artifact is None
+                or artifact.source != ("fmp" if number < 2 else "sec")
+                or _binding(artifact) != binding
+            ):
                 raise ValueError
             contents.append(await _read_artifact(store, binding))
         inputs = validate_current_held_etn_originals(

@@ -14,9 +14,9 @@ from uuid import UUID
 import httpx
 from sqlalchemy import text
 
-from nexus.market.current_etn_identity import validate_current_held_etn_originals
 from nexus.market.current_etn_identity_storage import (
     import_current_held_etn,
+    load_current_held_etn_archives,
     read_current_held_etn,
 )
 from nexus.market.current_identity_storage import CurrentIdentityImportResult
@@ -73,6 +73,7 @@ async def collect_sec(
     settings: EngineSettings,
     *,
     symbol: str,
+    fmp_archive: Path,
     locator_file: Path,
     output_dir: Path,
     contact: str,
@@ -129,14 +130,10 @@ async def collect_sec(
                     json.dumps(receipts[-1]).encode(),
                 )
     write_private(output_dir / "receipts.json", json.dumps(receipts).encode())
-    validate_current_held_etn_originals(
+    load_current_held_etn_archives(
         symbol=symbol,
-        contents=(
-            (output_dir / "submissions.raw").read_bytes(),
-            (output_dir / "filing-index.raw").read_bytes(),
-            (output_dir / "disclosure.raw").read_bytes(),
-            (output_dir / "receipts.json").read_bytes(),
-        ),
+        fmp_archive=fmp_archive,
+        sec_archive=output_dir,
         now=datetime.now(UTC),
     )
 
@@ -146,6 +143,7 @@ async def import_identity(
     broker_settings: BrokerWorkerSettings,
     *,
     symbol: str,
+    fmp_archive: Path,
     sec_archive: Path,
 ) -> CurrentIdentityImportResult:
     _local(settings)
@@ -168,6 +166,7 @@ async def import_identity(
                 session,
                 storage,
                 symbol=symbol,
+                fmp_archive=fmp_archive,
                 sec_archive=sec_archive,
                 accounts_page=accounts_page,
                 holdings_page=holdings_page,
@@ -198,10 +197,12 @@ def main() -> None:
     commands = parser.add_subparsers(dest="action", required=True)
     collector = commands.add_parser("collect-sec")
     collector.add_argument("--symbol", required=True)
+    collector.add_argument("--fmp-archive", type=Path, required=True)
     collector.add_argument("--locator-file", type=Path, required=True)
     collector.add_argument("--output-dir", type=Path, required=True)
     importer = commands.add_parser("import-held")
     importer.add_argument("--symbol", required=True)
+    importer.add_argument("--fmp-archive", type=Path, required=True)
     importer.add_argument("--sec-archive", type=Path, required=True)
     importer.add_argument("--output", type=Path, required=True)
     reader = commands.add_parser("read-held")
@@ -215,6 +216,7 @@ def main() -> None:
                 collect_sec(
                     settings,
                     symbol=args.symbol,
+                    fmp_archive=args.fmp_archive,
                     locator_file=args.locator_file,
                     output_dir=args.output_dir,
                     contact=environment.get("SEC_CONTACT", ""),
@@ -229,6 +231,7 @@ def main() -> None:
                     settings,
                     BrokerWorkerSettings.model_validate(environment),
                     symbol=args.symbol,
+                    fmp_archive=args.fmp_archive,
                     sec_archive=args.sec_archive,
                 )
             )

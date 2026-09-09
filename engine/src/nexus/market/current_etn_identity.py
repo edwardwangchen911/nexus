@@ -14,11 +14,11 @@ from pydantic import BaseModel, ConfigDict
 from nexus.domain.time import require_utc
 from nexus.market.current_etf_identity import require_outside_fixed_etf_definition
 from nexus.market.current_identity import MAX_SEC_BYTES, cik
-from nexus.providers.fmp_profile import _invalid_constant, _unique
+from nexus.providers.fmp_profile import _invalid_constant, _unique, parse_profile
 from nexus.research.sec_disclosures import _VisibleText
 
 SOURCE = "current_held_etn_identity"
-SCHEMA = "current_held_etn_identity_v1"
+SCHEMA = "current_held_etn_identity_v2"
 _EXCHANGES = {
     "Nasdaq": ("XNAS", "The Nasdaq Stock Market LLC"),
     "NYSE": ("XNYS", "New York Stock Exchange"),
@@ -36,6 +36,14 @@ class CurrentHeldEtnIdentity(BaseModel):
     symbol: str
     cik: str
     issuer_name: str
+    cusip: str
+    isin: str
+    fmp_exchange: str
+    fmp_is_etf: Literal[True] = True
+    fmp_is_fund: Literal[False] = False
+    provider_classification_basis: Literal["provider_etf_label_overridden_by_sec_debt_contract"] = (
+        "provider_etf_label_overridden_by_sec_debt_contract"
+    )
     cover_binding_sha256: str
     asset_type: Literal["exchange_traded_note"] = "exchange_traded_note"
     risk_bucket: Literal["EXCHANGE_TRADED_NOTE"] = "EXCHANGE_TRADED_NOTE"
@@ -135,14 +143,45 @@ def validate_current_held_etn_originals(
     try:
         require_outside_fixed_etf_definition(symbol)
         cutoff = require_utc(now)
-        if len(contents) != 4 or any(not raw or len(raw) > MAX_SEC_BYTES for raw in contents):
+        if len(contents) != 6 or any(not raw or len(raw) > MAX_SEC_BYTES for raw in contents):
             raise ValueError
-        submissions_raw, index_raw, document_raw, receipts_raw = contents
+        fmp_raw, fmp_receipt_raw, submissions_raw, index_raw, document_raw, receipts_raw = contents
+        fmp = parse_profile(fmp_raw, symbol)
+        fmp_receipt = _json(fmp_receipt_raw)
+        if fmp_receipt != dict(
+            schema="fmp_profile_receipt_v1",
+            source="fmp",
+            origin="https://financialmodelingprep.com",
+            path="/stable/profile",
+            symbol=symbol,
+            raw_sha256=sha256(fmp_raw).hexdigest(),
+            raw_byte_length=len(fmp_raw),
+            received_at=fmp_receipt["received_at"],
+        ):
+            raise ValueError
+        fmp_received = require_utc(datetime.fromisoformat(fmp_receipt["received_at"]))
+        cusip_value, isin_value, fmp_exchange = (
+            fmp.get("cusip"),
+            fmp.get("isin"),
+            fmp.get("exchange"),
+        )
+        if (
+            fmp_received > cutoff
+            or fmp.get("currency") != "USD"
+            or fmp.get("isEtf") is not True
+            or fmp.get("isFund") is not False
+            or not isinstance(cusip_value, str)
+            or re.fullmatch(r"[A-Z0-9]{9}", cusip_value) is None
+            or not isinstance(isin_value, str)
+            or re.fullmatch(r"[A-Z]{2}[A-Z0-9]{10}", isin_value) is None
+            or not isinstance(fmp_exchange, str)
+        ):
+            raise ValueError
         receipts = _json(receipts_raw)
         if not isinstance(receipts, list) or len(receipts) != 3:
             raise ValueError
         received: list[datetime] = []
-        for receipt, raw in zip(receipts, contents[:3], strict=True):
+        for receipt, raw in zip(receipts, contents[2:5], strict=True):
             if receipt != dict(
                 source_url=receipt["source_url"],
                 received_at=receipt["received_at"],
@@ -220,12 +259,20 @@ def validate_current_held_etn_originals(
             headers = rows.rows[row_number - 1]
             if len(headers) != len(row):
                 continue
-            for column, (header, value) in enumerate(zip(headers, row, strict=True)):
+            for header, value in zip(headers, row, strict=True):
                 if (
                     re.fullmatch(r"Ticker(?:\s+Trading)?\s+Symbol", header, re.IGNORECASE)
                     and value == symbol
                     and sum(cell == symbol for cell in row) == 1
-                    and column < len(row)
+                    and any(
+                        re.fullmatch(
+                            r"CUSIP(?:\s+(?:Number|No\.?))?",
+                            candidate_header,
+                            re.IGNORECASE,
+                        )
+                        and candidate_value == cusip_value
+                        for candidate_header, candidate_value in zip(headers, row, strict=True)
+                    )
                 ):
                     ticker_rows.append(row_number)
         if len(ticker_rows) != 1:
@@ -295,6 +342,9 @@ def validate_current_held_etn_originals(
             symbol=symbol,
             cik=issuer_cik,
             issuer_name=issuer_name,
+            cusip=cusip_value,
+            isin=isin_value,
+            fmp_exchange=fmp_exchange,
             cover_binding_sha256=sha256(
                 " ".join(cover_rows.casefold().split()).encode()
             ).hexdigest(),
@@ -306,7 +356,7 @@ def validate_current_held_etn_originals(
             identity=identity,
             contents=contents,
             sec_url=receipts[2]["source_url"],
-            received=tuple(received),
+            received=(fmp_received, fmp_received, *received, max(received)),
         )
     except (ValueError, TypeError, KeyError, IndexError, UnicodeError) as error:
         raise ValueError("CURRENT_ETN_IDENTITY_INVALID") from error
