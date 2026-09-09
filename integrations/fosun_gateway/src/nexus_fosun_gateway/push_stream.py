@@ -27,7 +27,6 @@ MAX_DURATION_SECONDS = 300
 MAX_FRAMES = 100
 CLOSE_TIMEOUT_SECONDS = 1
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
-MAX_POWER = 12
 DYNAMIC_QUOTE_FIELDS = frozenset(
     {
         "qtTime",
@@ -109,7 +108,7 @@ def _validate_limits(duration: float, max_frames: int) -> tuple[float, int]:
 
 
 def _validate_heartbeat_interval(value: float) -> float:
-    if type(value) not in {int, float} or not 0 < value <= DEFAULT_HEARTBEAT_INTERVAL_SECONDS:
+    if type(value) not in {int, float} or value != DEFAULT_HEARTBEAT_INTERVAL_SECONDS:
         raise PushStreamError("PUSH_HEARTBEAT_INTERVAL_INVALID")
     return float(value)
 
@@ -180,13 +179,23 @@ def _has_nonempty_err_msg(message: dict[str, Any]) -> bool:
     return not (value is None or value == "" or value == {})
 
 
-def _validate_quote_frame(message: dict[str, Any], *, code: str) -> int:
+def _validate_metadata(message: dict[str, Any]) -> None:
+    if any(
+        field in message and type(message[field]) is not int for field in ("id", "time", "cache")
+    ) or ("requestid" in message and not isinstance(message["requestid"], str)):
+        raise PushStreamError("PROTOCOL_INVALID")
+
+
+def _validate_quote_frame(
+    message: dict[str, Any], *, code: str, previous_id: int | None = None
+) -> int:
     items = message.get("items")
     if (
         message.get("topic") != TOPIC
         or _has_nonempty_err_msg(message)
         or not isinstance(items, list)
         or not items
+        or previous_id is not None and "id" in message and message["id"] <= previous_id
     ):
         raise PushStreamError("QUOTE_INVALID")
     for item in items:
@@ -202,8 +211,6 @@ def _validate_quote_frame(message: dict[str, Any], *, code: str) -> int:
         if _has_nonempty_err_msg(quote) or not DYNAMIC_QUOTE_FIELDS.issubset(quote):
             raise PushStreamError("QUOTE_INVALID")
         if any(type(quote[field]) is not int for field in DYNAMIC_QUOTE_FIELDS):
-            raise PushStreamError("QUOTE_INVALID")
-        if not 0 <= quote["power"] <= MAX_POWER or quote["price"] <= 0:
             raise PushStreamError("QUOTE_INVALID")
     return len(items)
 
@@ -224,11 +231,11 @@ def _check_nested_secret_reflection(
         return
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("msg"), str):
-            continue
+            raise PushStreamError("QUOTE_INVALID")
         try:
             nested = _message(item["msg"].encode())
-        except PushStreamError:
-            continue
+        except (PushStreamError, UnicodeError):
+            raise PushStreamError("QUOTE_INVALID") from None
         _check_secret_reflection(b"", nested, credentials)
 
 
@@ -312,6 +319,7 @@ async def collect_push_quote(
                 )
                 receipt["stop_reason"] = "DISCONNECTED"
                 next_heartbeat = started_monotonic + heartbeat_interval_seconds
+                previous_quote_id: int | None = None
                 while len(receipt["frames"]) < max_frames:
                     current_monotonic = monotonic_clock()
                     remaining = deadline - current_monotonic
@@ -358,6 +366,7 @@ async def collect_push_quote(
                             "raw_byte_length": len(raw),
                         }
                     )
+                    _validate_metadata(message)
                     if not receipt["subscription_confirmed"]:
                         if "subRep" not in message:
                             raise PushStreamError("PROTOCOL_INVALID")
@@ -368,8 +377,9 @@ async def collect_push_quote(
                         receipt["heartbeat_ack_count"] += 1
                     elif message.get("topic") == TOPIC and "subRep" not in message:
                         receipt["quote_message_count"] += _validate_quote_frame(
-                            message, code=code
+                            message, code=code, previous_id=previous_quote_id
                         )
+                        previous_quote_id = message.get("id")
                     else:
                         raise PushStreamError("PROTOCOL_INVALID")
                 receipt["stop_reason"] = "FRAME_LIMIT"
@@ -515,6 +525,7 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
     subscribed = False
     quote_message_count = 0
     heartbeat_ack_count = 0
+    previous_quote_id: int | None = None
     previous_received: datetime | None = None
     for index, (entry, raw) in enumerate(zip(entries, frames, strict=True)):
         if (
@@ -535,6 +546,10 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
             raise PushStreamError("PUSH_ARCHIVE_INVALID")
         previous_received = received
         message = _message(raw)
+        try:
+            _validate_metadata(message)
+        except PushStreamError:
+            raise PushStreamError("PUSH_ARCHIVE_INVALID") from None
         if not subscribed:
             if "subRep" not in message:
                 raise PushStreamError("PUSH_ARCHIVE_INVALID")
@@ -548,7 +563,10 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> dict[str,
             heartbeat_ack_count += 1
         elif message.get("topic") == TOPIC and "subRep" not in message:
             try:
-                quote_message_count += _validate_quote_frame(message, code=code)
+                quote_message_count += _validate_quote_frame(
+                    message, code=code, previous_id=previous_quote_id
+                )
+                previous_quote_id = message.get("id")
             except PushStreamError:
                 raise PushStreamError("PUSH_ARCHIVE_INVALID") from None
         else:

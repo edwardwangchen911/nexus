@@ -49,6 +49,24 @@ class BlockingSocket(Socket):
         await asyncio.Event().wait()
 
 
+class ReceiveClock:
+    """Advance only when a silent receive exhausts its real protocol timeout."""
+
+    def __init__(self, socket):
+        self.socket = socket
+        self.elapsed = 0.0
+
+    def monotonic(self):
+        return self.elapsed
+
+    async def wait_for(self, receive, timeout):
+        if self.socket.frames:
+            return await receive
+        receive.close()
+        self.elapsed += timeout
+        raise TimeoutError
+
+
 def _sub_reply(code="usAAPL"):
     return {
         "topic": "qt",
@@ -171,15 +189,22 @@ async def test_server_heartbeat_is_recorded_without_reply_and_quote_frames_are_r
 
 
 @pytest.mark.asyncio
-async def test_silent_window_sends_proactive_heartbeat_without_archiving_it(tmp_path):
+@pytest.mark.parametrize(
+    ("duration", "sent_count"), [(14, 0), (15, 0), (16, 1), (46, 3), (300, 19)]
+)
+async def test_silent_window_sends_bounded_heartbeats_without_archiving_them(
+    tmp_path, monkeypatch, duration, sent_count
+):
     socket = Socket([SUB_REPLY])
+    clock = ReceiveClock(socket)
+    monkeypatch.setattr(push_stream.asyncio, "wait_for", clock.wait_for)
     now = datetime(2024, 1, 1, tzinfo=UTC)
 
     result = await _collect(
         socket=socket,
         directory=tmp_path / "run",
-        duration=0.035,
-        heartbeat_interval_seconds=0.01,
+        duration=duration,
+        monotonic_clock=clock.monotonic,
         now=lambda: now,
     )
 
@@ -193,7 +218,7 @@ async def test_silent_window_sends_proactive_heartbeat_without_archiving_it(tmp_
         sent == {"act": "hb", "hbValue": 1_704_067_200_000}
         for sent in socket.sent[1:]
     )
-    assert len(socket.sent) >= 2
+    assert len(socket.sent) == sent_count + 1
     archive = load_push_archive(tmp_path / "run")
     assert archive["receipt"]["heartbeat_sent_count"] == len(socket.sent) - 1
     assert archive["receipt"]["quote_message_count"] == 0
@@ -208,12 +233,26 @@ async def test_window_shorter_than_heartbeat_interval_needs_no_proactive_heartbe
         socket=socket,
         directory=tmp_path / "run",
         duration=0.01,
-        heartbeat_interval_seconds=0.1,
     )
 
     assert socket.sent == [
         {"act": "sub", "items": [{"topic": "qt", "code": ["usAAPL"]}], "requestid": "request-123"}
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [0.0, 1e-12, 0.01, 14.99, 15.01, True])
+async def test_heartbeat_interval_cannot_create_excess_outbound_traffic(tmp_path, interval):
+    socket = Socket([ConnectionError()])
+    directory = tmp_path / "run"
+
+    with pytest.raises(PushStreamError, match="^PUSH_HEARTBEAT_INTERVAL_INVALID$"):
+        await _collect(
+            socket=socket, directory=directory, heartbeat_interval_seconds=interval
+        )
+
+    assert socket.sent == []
+    assert not directory.exists()
 
 
 @pytest.mark.asyncio
@@ -417,10 +456,41 @@ async def test_secret_reflection_is_not_persisted(tmp_path):
     assert result["status"] == "partial"
     assert result["stop_reason"] == "SECRET_REFLECTION"
     assert result["frame_count"] == 1
+    assert not (tmp_path / "run" / "frame-00001.json").exists()
     assert all(
         "synthetic-session" not in path.read_text()
         for path in (tmp_path / "run").iterdir()
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested_format", ['{{"extra":"{}",}}', '{{"extra":"{}"', '["{}"]'])
+async def test_malformed_nested_json_cannot_archive_unicode_escaped_session(
+    tmp_path, nested_format
+):
+    escaped_secret = "".join(f"\\u{ord(character):04x}" for character in "synthetic-session")
+    nested = nested_format.format(escaped_secret)
+    frame = {"topic": "qt", "items": [{"code": "usAAPL", "msg": nested}]}
+
+    result = await _collect(socket=Socket([SUB_REPLY, frame]), directory=tmp_path / "run")
+
+    assert result["status"] == "partial"
+    assert result["stop_reason"] == "QUOTE_INVALID"
+    assert result["frame_count"] == 1
+    assert not (tmp_path / "run" / "frame-00001.json").exists()
+    assert load_push_archive(tmp_path / "run")["receipt"]["quote_message_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", ["[]", "null", [], None, {}, '{"extra":"\ud800"}'])
+async def test_nested_message_must_parse_as_object_before_archiving(tmp_path, nested):
+    frame = {"topic": "qt", "items": [{"code": "usAAPL", "msg": nested}]}
+
+    result = await _collect(socket=Socket([SUB_REPLY, frame]), directory=tmp_path / "run")
+
+    assert result["stop_reason"] == "QUOTE_INVALID"
+    assert result["frame_count"] == 1
+    assert not (tmp_path / "run" / "frame-00001.json").exists()
 
 
 @pytest.mark.asyncio
@@ -429,10 +499,7 @@ async def test_secret_reflection_is_not_persisted(tmp_path):
     [
         {"topic": "qt", "items": []},
         {"topic": "qt", "items": [{"code": "usMSFT", "msg": json.dumps(_dynamic_quote())}]},
-        {"topic": "qt", "items": [{"code": "usAAPL", "msg": "[]"}]},
         _quote_frame(price=True),
-        _quote_frame(price=0),
-        _quote_frame(power=13),
         {**_quote_frame(), "errMsg": "provider refused"},
         {**_quote_frame(), "errMsg": {"code": 1, "msg": "provider refused"}},
     ],
@@ -450,7 +517,7 @@ async def test_invalid_quote_frame_is_archived_then_partial(tmp_path, quote):
 
 
 @pytest.mark.asyncio
-async def test_quote_nested_duplicate_key_is_rejected_after_private_archive(tmp_path):
+async def test_quote_nested_duplicate_key_is_rejected_before_private_archive(tmp_path):
     duplicate = (
         '{"qtTime":1704067200000,"qtDate":20240101,"power":1,"tradeStatus":1,'
         '"price":101,"price":102,"chgVal":2,"chgPct":3,"pClose":99,"open":100,'
@@ -462,12 +529,14 @@ async def test_quote_nested_duplicate_key_is_rejected_after_private_archive(tmp_
 
     assert result["status"] == "partial"
     assert result["stop_reason"] == "QUOTE_INVALID"
-    assert result["frame_count"] == 2
+    assert result["frame_count"] == 1
+    assert not (tmp_path / "run" / "frame-00001.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_valid_quote_is_preserved_without_timezone_or_normalization(tmp_path):
-    quote = _quote_frame(qtTime=1_704_067_200_123, price=101)
+@pytest.mark.parametrize(("price", "power"), [(101, 1), (0, 1), (-101, 1), (101, 13), (101, -1)])
+async def test_valid_quote_is_preserved_without_timezone_or_normalization(tmp_path, price, power):
+    quote = _quote_frame(qtTime=1_704_067_200_123, price=price, power=power)
     socket = Socket([SUB_REPLY, quote])
 
     await _collect(socket=socket, directory=tmp_path / "run", max_frames=2)
@@ -475,6 +544,94 @@ async def test_valid_quote_is_preserved_without_timezone_or_normalization(tmp_pa
     archive = load_push_archive(tmp_path / "run")
     assert archive["receipt"]["quote_message_count"] == 1
     assert archive["frames"][1] == json.dumps(quote, separators=(",", ":")).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", sorted(_dynamic_quote()))
+@pytest.mark.parametrize("invalid", [True, 1.0, "1", None])
+async def test_each_required_quote_field_must_be_a_non_bool_integer(tmp_path, field, invalid):
+    result = await _collect(
+        socket=Socket([SUB_REPLY, _quote_frame(**{field: invalid})]),
+        directory=tmp_path / "run",
+        max_frames=2,
+    )
+
+    assert result["status"] == "partial"
+    assert result["stop_reason"] == "QUOTE_INVALID"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["subscription", "heartbeat", "quote"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", True),
+        ("id", "1"),
+        ("time", 1.0),
+        ("time", False),
+        ("cache", None),
+        ("cache", True),
+        ("requestid", 1),
+    ],
+)
+async def test_optional_s2c_metadata_rejects_wrong_types(tmp_path, kind, field, value):
+    frame = {
+        "subscription": SUB_REPLY,
+        "heartbeat": {"topic": "hb", "hbValue": 17},
+        "quote": _quote_frame(),
+    }[kind]
+    frames = [] if kind == "subscription" else [SUB_REPLY]
+    frames.append({**frame, field: value})
+
+    result = await _collect(
+        socket=Socket(frames), directory=tmp_path / "run", max_frames=len(frames)
+    )
+
+    assert result["status"] in {"partial", "failed"}
+    assert result["stop_reason"] == "PROTOCOL_INVALID"
+    with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+        load_push_archive(tmp_path / "run")
+
+
+@pytest.mark.asyncio
+async def test_optional_s2c_metadata_is_preserved_when_types_are_valid(tmp_path):
+    metadata = {"id": 1, "time": 1_704_067_200_123, "cache": 0, "requestid": "request-123"}
+    frames = [
+        {**SUB_REPLY, **metadata},
+        {"topic": "hb", "hbValue": 17, **metadata},
+        {**_quote_frame(), **metadata},
+    ]
+    result = await _collect(socket=Socket(frames), directory=tmp_path / "run", max_frames=3)
+
+    assert result["status"] == "bounded_complete"
+    assert load_push_archive(tmp_path / "run")["frames"] == tuple(
+        json.dumps(frame, separators=(",", ":")).encode() for frame in frames
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ids", "valid"),
+    [([5, 5], False), ([5, 4], False), ([5, 6], True), ([5, None, 4], True), ([None, 4], True)],
+)
+async def test_consecutive_quote_ids_must_increase_only_when_both_are_known(tmp_path, ids, valid):
+    frames = [SUB_REPLY]
+    for value in ids:
+        frames.append({"topic": "hb", "hbValue": 17, "id": 999})
+        frames.append(_quote_frame() if value is None else {**_quote_frame(), "id": value})
+
+    result = await _collect(
+        socket=Socket(frames), directory=tmp_path / "run", max_frames=len(frames)
+    )
+
+    if valid:
+        assert result["status"] == "bounded_complete"
+        assert load_push_archive(tmp_path / "run")["receipt"]["quote_message_count"] == len(ids)
+    else:
+        assert result["status"] == "partial"
+        assert result["stop_reason"] == "QUOTE_INVALID"
+        with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
+            load_push_archive(tmp_path / "run")
 
 
 @pytest.mark.asyncio
