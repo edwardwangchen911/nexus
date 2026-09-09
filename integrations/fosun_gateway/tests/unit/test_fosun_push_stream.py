@@ -282,7 +282,12 @@ async def test_unsolicited_heartbeat_ack_is_rejected_without_reply(tmp_path):
 
 @pytest.mark.asyncio
 async def test_provider_subscription_reply_topic_is_accepted(tmp_path):
-    reply = {**SUB_REPLY, "topic": "subrep", "time": 1_704_067_200_000}
+    reply = {
+        "topic": "subrep",
+        "time": 1_704_067_200_000,
+        "requestid": "request-123",
+        "subRep": [{"topic": "qt", "scode": ["usAAPL"]}],
+    }
 
     result = await _collect(socket=Socket([reply]), directory=tmp_path / "run")
 

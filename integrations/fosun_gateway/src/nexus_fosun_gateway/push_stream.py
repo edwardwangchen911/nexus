@@ -149,12 +149,14 @@ def _validate_subscription(message: dict[str, Any], *, code: str, request_id: st
     if (
         item.get("topic") != TOPIC
         or _has_nonempty_err_msg(item)
-        or any(
-            not isinstance(item.get(name), list) for name in ("scode", "fcode", "invalid", "denied")
-        )
     ):
         raise PushStreamError("SUBSCRIPTION_INVALID")
-    collections = {name: item[name] for name in ("scode", "fcode", "invalid", "denied")}
+    collections = {
+        name: item[name] if name in item else []
+        for name in ("scode", "fcode", "invalid", "denied")
+    }
+    if any(not isinstance(values, list) for values in collections.values()):
+        raise PushStreamError("SUBSCRIPTION_INVALID")
     if any(any(value != code for value in values) for values in collections.values()):
         raise PushStreamError("SUBSCRIPTION_INVALID")
     if collections == {"scode": [], "fcode": [], "invalid": [], "denied": [code]}:
