@@ -7,20 +7,21 @@ import os
 import sys
 from pathlib import Path
 
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
+from nexus.diagnostics.repository import load_frozen_snapshot, load_instrument_identities
 from nexus.market.sector_exposure_storage import persist_reviewed_sector_exposures
-from nexus.market.universe import parse_reviewed_sector_csv
+from nexus.market.universe import EQUITY_SECTOR_CODES, parse_reviewed_sector_csv
 from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.local_recovery import write_private
+from nexus.optimizer.scenario_risk import load_scenario_evidence
+from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 
 
-async def run(
-    settings: EngineSettings,
-    *,
-    csv_path: Path,
-) -> dict[str, object]:
+def _require_local_database(settings: EngineSettings) -> None:
     database = make_url(settings.database_url or "")
     if (
         database.drivername != "postgresql+asyncpg"
@@ -28,6 +29,14 @@ async def run(
         or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         raise ValueError("SECTOR_EXPOSURE_LOCAL_DATABASE_REQUIRED")
+
+
+async def run(
+    settings: EngineSettings,
+    *,
+    csv_path: Path,
+) -> dict[str, object]:
+    _require_local_database(settings)
     records = parse_reviewed_sector_csv(csv_path.read_bytes())
     async with session_factory(settings).begin() as session:
         ids = await persist_reviewed_sector_exposures(session, records)
@@ -40,16 +49,122 @@ async def run(
     }
 
 
+async def export_review_template(
+    settings: EngineSettings,
+    *,
+    output_path: Path,
+) -> dict[str, object]:
+    """Write private identifiers only to a new operator-owned local review file."""
+    _require_local_database(settings)
+    parent = output_path.parent
+    if (
+        parent.is_symlink()
+        or not parent.is_dir()
+        or parent.stat().st_mode & 0o077
+        or output_path.exists()
+    ):
+        raise ValueError("SECTOR_EXPOSURE_PRIVATE_OUTPUT_REQUIRED")
+    factory = session_factory(settings)
+    async with factory() as session, session.begin():
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        record = await session.scalar(
+            select(PortfolioSnapshotRecord)
+            .where(
+                PortfolioSnapshotRecord.status == "READY",
+                PortfolioSnapshotRecord.as_of.is_not(None),
+            )
+            .order_by(
+                PortfolioSnapshotRecord.created_at.desc(),
+                PortfolioSnapshotRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        if record is None or record.as_of is None:
+            raise ValueError("SECTOR_EXPOSURE_READY_SNAPSHOT_REQUIRED")
+        snapshot = await load_frozen_snapshot(
+            session, portfolio_id=record.portfolio_id, snapshot_id=record.id
+        )
+        evidence = await load_scenario_evidence(session, snapshot)
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+        missing = evidence.sector_required_ids - evidence.sectors.keys()
+        items: list[dict[str, object]] = []
+        for instrument_id in missing:
+            identity = identities.get(instrument_id)
+            if (
+                identity is None
+                or identity.canonical_ticker is None
+                or identity.asset_type is None
+                or identity.restriction == "UNRESOLVED"
+            ):
+                raise ValueError("SECTOR_EXPOSURE_REVIEW_IDENTITY_MISSING")
+            items.append(
+                {
+                    "symbol": identity.canonical_ticker,
+                    "instrument_id": str(instrument_id),
+                    "asset_type": identity.asset_type,
+                    "import_row": {
+                        "instrument_id": str(instrument_id),
+                        "sector_code": "",
+                        "weight": "",
+                        "as_of": "",
+                        "source_url": "",
+                        "content_hash": "",
+                    },
+                }
+            )
+        items.sort(key=lambda item: str(item["symbol"]))
+        payload = {
+            "format": "nexus_sector_exposure_review_v1",
+            "portfolio_snapshot_id": str(record.id),
+            "portfolio_snapshot_as_of": record.as_of.isoformat(),
+            "import_columns": [
+                "instrument_id",
+                "sector_code",
+                "weight",
+                "as_of",
+                "source_url",
+                "content_hash",
+            ],
+            "allowed_sector_codes": list(EQUITY_SECTOR_CODES),
+            "rules": {
+                "common_stock": "exactly one row with weight 1",
+                "equity_etf": "one or more rows totaling 0.995 through 1.005",
+                "source": "reviewed HTTPS source and SHA256 of the reviewed original",
+            },
+            "missing_instruments": items,
+        }
+    write_private(
+        output_path,
+        (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode(),
+    )
+    return {
+        "status": "review_template_written",
+        "required_instrument_count": len(evidence.sector_required_ids),
+        "missing_instrument_count": len(items),
+        "execution_locked": True,
+        "model_called": False,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-    parser.add_argument("--csv", type=Path, required=True)
+    operation = parser.add_mutually_exclusive_group(required=True)
+    operation.add_argument("--csv", type=Path)
+    operation.add_argument("--review-template", type=Path)
     args = parser.parse_args()
     try:
         settings = EngineSettings.model_validate(
             load_local_environment(args.repo_root, os.environ)
         )
-        result = asyncio.run(run(settings, csv_path=args.csv))
+        result = asyncio.run(
+            run(settings, csv_path=args.csv)
+            if args.csv is not None
+            else export_review_template(settings, output_path=args.review_template)
+        )
     except (Exception, KeyboardInterrupt):
         print(
             json.dumps(

@@ -17,7 +17,20 @@ instrument_id,sector_code,weight,as_of,source_url,content_hash
 - 普通股票必须且只能有一行、权重为 1；权益 ETF 可以有多行，合计必须在
   0.995–1.005。所有行必须对应已有 USD 权益 Instrument。
 
-运行：
+先为最新 READY 组合生成私有审核模板：
+
+```bash
+mkdir -m 700 /absolute/private/path/sector-review
+uv run --project engine nexus-engine-sector-exposure-local \
+  --repo-root /absolute/path/to/repo \
+  --review-template /absolute/private/path/sector-review/review.json
+```
+
+模板只列出正数量、需要行业风险输入且在该冻结时点没有合格证据的标的，并给出允许的
+行业代码和待填写导入行。文件以 `0600` 新建且不覆盖已有文件；终端只返回聚合数量，
+不输出持仓代码或内部标识。模板是人工审核工作单，不是行业证据，也不能直接解除门禁。
+
+审核完成后，将 `import_row` 按上述严格列顺序整理为 CSV，再运行：
 
 ```bash
 uv run --project engine nexus-engine-sector-exposure-local \
