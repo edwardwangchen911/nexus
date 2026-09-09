@@ -29,6 +29,11 @@ class Socket:
         self.sent.append(json.loads(message))
 
 
+class SlowCloseSocket(Socket):
+    async def __aexit__(self, *args):
+        await asyncio.sleep(1.2)
+
+
 AUTH = [{"T": "success", "msg": "authenticated"}]
 SUB = [{"T": "subscription", "news": ["EXAMPLE"]}]
 
@@ -60,6 +65,30 @@ async def test_confirmed_silent_window_is_not_permission_failure(tmp_path):
     assert receipt["requested_max_frames"] == 100
     assert 0.03 <= receipt["elapsed_monotonic_seconds"] <= 1.03
     assert "example-secret" not in (tmp_path / "run" / "receipt.json").read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("frames", "duration", "max_frames", "reason"),
+    [([AUTH, SUB], 0.02, 100, "DURATION_LIMIT"), ([AUTH, SUB], 1.0, 2, "FRAME_LIMIT")],
+)
+async def test_close_cleanup_is_not_part_of_bounded_subscription_window(
+    tmp_path, frames, duration, max_frames, reason
+):
+    directory = tmp_path / reason
+    result = await collect_stream(
+        symbol="EXAMPLE",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        duration=duration,
+        max_frames=max_frames,
+        connector=lambda *args, **kwargs: SlowCloseSocket(frames),
+    )
+    assert result["stop_reason"] == reason and result["status"] == "bounded_complete"
+    receipt = json.loads((directory / "receipt.json").read_text())
+    assert receipt["elapsed_monotonic_seconds"] < 0.2
+    assert load_stream_archive(directory)["status"] == "bounded_complete"
 
 
 @pytest.mark.asyncio

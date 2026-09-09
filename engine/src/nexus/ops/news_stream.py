@@ -236,67 +236,74 @@ async def collect_stream(
             compression=None,
             logger=logger,
         ) as socket:
-            receipt["stop_reason"] = "DISCONNECTED"
-            while len(receipt["frames"]) < max_frames:
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    raise TimeoutError
-                frame = await asyncio.wait_for(socket.recv(), timeout=remaining)
-                raw = frame.encode() if isinstance(frame, str) else frame
-                byte_count += len(raw)
-                if byte_count > MAX_BYTES:
-                    raise NewsError("BYTE_LIMIT")
-                # Decode before any storage so escaped secret reflections are rejected too.
-                messages = _messages(raw)
-                decoded = json.dumps(messages, ensure_ascii=False)
-                if any(x.encode() in raw or x in decoded for x in (key, secret)):
-                    raise NewsError("SECRET_REFLECTION")
-                received = datetime.now(UTC)
-                name = f"frame-{len(receipt['frames']):05}.json"
-                write_private(directory / name, raw)
-                receipt["frames"].append(
-                    {
-                        "file": name,
-                        "received_at": received.isoformat(),
-                        "raw_sha256": sha256(raw).hexdigest(),
-                        "raw_byte_length": len(raw),
-                    }
-                )
-                for item in messages:
-                    kind = item.get("T")
-                    if kind == "error":
-                        code = item.get("code")
-                        raise NewsError(
-                            f"PROVIDER_{code}"
-                            if type(code) is int
-                            and code in {400, 401, 402, 403, 404, 405, 406, 407, 409, 410, 500}
-                            else "PROVIDER_ERROR"
-                        )
-                    if kind == "success" and item.get("msg") == "authenticated":
-                        if receipt["authenticated"]:
+            try:
+                receipt["stop_reason"] = "DISCONNECTED"
+                while len(receipt["frames"]) < max_frames:
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    frame = await asyncio.wait_for(socket.recv(), timeout=remaining)
+                    raw = frame.encode() if isinstance(frame, str) else frame
+                    byte_count += len(raw)
+                    if byte_count > MAX_BYTES:
+                        raise NewsError("BYTE_LIMIT")
+                    # Decode before any storage so escaped secret reflections are rejected too.
+                    messages = _messages(raw)
+                    decoded = json.dumps(messages, ensure_ascii=False)
+                    if any(x.encode() in raw or x in decoded for x in (key, secret)):
+                        raise NewsError("SECRET_REFLECTION")
+                    received = datetime.now(UTC)
+                    name = f"frame-{len(receipt['frames']):05}.json"
+                    write_private(directory / name, raw)
+                    receipt["frames"].append(
+                        {
+                            "file": name,
+                            "received_at": received.isoformat(),
+                            "raw_sha256": sha256(raw).hexdigest(),
+                            "raw_byte_length": len(raw),
+                        }
+                    )
+                    for item in messages:
+                        kind = item.get("T")
+                        if kind == "error":
+                            code = item.get("code")
+                            raise NewsError(
+                                f"PROVIDER_{code}"
+                                if type(code) is int
+                                and code in {400, 401, 402, 403, 404, 405, 406, 407, 409, 410, 500}
+                                else "PROVIDER_ERROR"
+                            )
+                        if kind == "success" and item.get("msg") == "authenticated":
+                            if receipt["authenticated"]:
+                                raise NewsError("PROTOCOL_INVALID")
+                            receipt["authenticated"] = True
+                            await socket.send(json.dumps({"action": "subscribe", "news": [symbol]}))
+                        elif kind == "subscription":
+                            if not receipt["authenticated"] or item.get("news") != [symbol]:
+                                raise NewsError("SUBSCRIPTION_INVALID")
+                            receipt["subscription_confirmed"] = True
+                        elif kind == "n":
+                            if not receipt["subscription_confirmed"]:
+                                raise NewsError("SUBSCRIPTION_INVALID")
+                            parse_news(
+                                json.dumps({"news": [item]}).encode(),
+                                symbol=symbol,
+                                received_at=received,
+                            )
+                            receipt["article_count"] += 1
+                        elif kind != "success":
                             raise NewsError("PROTOCOL_INVALID")
-                        receipt["authenticated"] = True
-                        await socket.send(json.dumps({"action": "subscribe", "news": [symbol]}))
-                    elif kind == "subscription":
-                        if not receipt["authenticated"] or item.get("news") != [symbol]:
-                            raise NewsError("SUBSCRIPTION_INVALID")
-                        receipt["subscription_confirmed"] = True
-                    elif kind == "n":
-                        if not receipt["subscription_confirmed"]:
-                            raise NewsError("SUBSCRIPTION_INVALID")
-                        parse_news(
-                            json.dumps({"news": [item]}).encode(),
-                            symbol=symbol,
-                            received_at=received,
-                        )
-                        receipt["article_count"] += 1
-                    elif kind != "success":
-                        raise NewsError("PROTOCOL_INVALID")
-            receipt["stop_reason"] = "FRAME_LIMIT"
-    except TimeoutError:
-        receipt["stop_reason"] = "DURATION_LIMIT"
-    except NewsError as error:
-        receipt["stop_reason"] = str(error)
+                receipt["stop_reason"] = "FRAME_LIMIT"
+            except TimeoutError:
+                receipt["stop_reason"] = "DURATION_LIMIT"
+            except NewsError as error:
+                receipt["stop_reason"] = str(error)
+            except Exception:
+                pass  # No upstream exception text, close reason, headers, or credentials escape.
+            finally:
+                # Freeze the receive window before context-manager close cleanup starts.
+                receipt["ended_at"] = datetime.now(UTC).isoformat()
+                receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
     except Exception:
         pass  # No upstream exception text, close reason, headers, or credentials escape.
     receipt["status"] = (
@@ -307,8 +314,10 @@ async def collect_stream(
         if receipt["subscription_confirmed"]
         else "failed"
     )
-    receipt["ended_at"] = datetime.now(UTC).isoformat()
-    receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
+    if "ended_at" not in receipt:
+        # Connection establishment did not create a receive window; retain a failed local receipt.
+        receipt["ended_at"] = datetime.now(UTC).isoformat()
+        receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
     receipt["frame_count"] = len(receipt["frames"])
     write_private(directory / "receipt.json", json.dumps(receipt, sort_keys=True).encode())
     return {
