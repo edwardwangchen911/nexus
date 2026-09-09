@@ -3163,3 +3163,26 @@ Engine import 不依赖 Gateway 包，而是从内嵌 v3 receipt 与原始 frame
 本次私有 v3 失败收据已保留，权限摘要绑定成功；因订阅未被批准，没有生成 handoff，没有执行 import。事后 live 库仍为 push artifact 0、push quote 0，仅保留 1 个事前冻结的只读 subscribe capability；模型调用、账户写入和订单均为 0，`execution_locked=true` 不变。按失败不自动重试规则，未更换美股代码继续试探。
 
 当前真实阻塞是该复星账户/会话对美股 `qt` 推送的上游订阅拒绝，而不是本地 prepare/import 、数据库、对象存储或 API 缺口。在上游美股 push entitlement 确认变化前，不重放相同调用；也不用旧 HK 归档事后补 authority。
+
+### Alpaca IEX 股票行情 WebSocket 最小接线（2026-09-09）
+
+新增手动、单标的、单连接的 Alpaca IEX 股票行情 WebSocket 入口，固定免费 IEX feed，
+同时订阅 trade/quote；按时长、帧数、单帧及总字节上限停止，不自动重连。完整原始帧、
+逐帧哈希、实际接收时间和停止原因只写入 0700/0600 私有目录；仅认证、订阅确认且至少
+收到一条行情的 `bounded_complete` 归档可导入。导入复用对象存储与 `LatestQuote`，只允许
+唯一有效的美国交易所 USD ticker 身份，并精确核对重放的 artifact 内容及三个时间字段。
+
+0047 发布 display-only `intraday_monitor_policy_v3`：Fosun 原有权威路径保持不变，新增
+Alpaca/iex/real_time + `alpaca_stock_stream_v1` 的精确组合。历史决策时点早于 v3 时仍按
+完整 v2 读取且不接纳 Alpaca；当前读侧按实际 available_at 选最新来源。Alpaca 观察不进入
+日线、研究、诊断、回测、风控或交易，未新增调度器、事件总线、自动 fallback 或持续服务。
+
+隔离 PostgreSQL 的采集归档、幂等导入、读侧、非美股拒绝、历史策略回放、artifact 不可
+改删及迁移往返 26 项通过；相关单测 15 项、Ruff 与定向 Mypy 通过。真实库已升级到
+`0047_alpaca_market_stream`，API 使用当前镜像重建并完成应用启动；未写入新的行情事实。
+
+唯一一次 AAPL/IEX 真实调用已完成 Alpaca WebSocket 连接与认证，但实际 subscription
+确认只返回 trades/quotes/corrections/cancelErrors，省略未订阅频道，而首版解析器要求
+这些频道显式为空数组，因此收据为 `SUBSCRIPTION_INVALID`，行情 0 条、数据库写入 0。
+本地已按真实报文修复为“缺省或空数组”并补回归；遵循首错停止和不自动重放，本切片没有
+再次连接。下一次只需一轮新的有界采集即可完成真实 trade/quote → DB/API/页面验收。

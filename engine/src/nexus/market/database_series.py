@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, false, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -52,7 +52,8 @@ from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.providers.base import InstrumentId, PriceBar, PriceSeries
 from nexus.quality.source_policy import (
-    load_intraday_source_policy_v2,
+    IntradaySourcePolicyV3,
+    load_intraday_source_policy,
 )
 
 _MAX_DAILY_CANDIDATES = 16
@@ -305,7 +306,7 @@ async def load_intraday_series(
     """Load one whole-source intraday view without admitting legacy evidence."""
     decision = require_utc(decision_time)
     try:
-        await load_intraday_source_policy_v2(
+        policy = await load_intraday_source_policy(
             session,
             decision_time=decision_time,
         )
@@ -396,15 +397,17 @@ async def load_intraday_series(
             (authority.available_at, authority.id, _price_bar(record)) for record in records
         )
 
+    allow_alpaca = isinstance(policy, IntradaySourcePolicyV3)
     candidates = tuple(
         _intraday_candidate(key, rows)
         for key, rows in grouped.items()
-        if _intraday_provenance_allowed(*key)
+        if _intraday_provenance_allowed(*key, allow_alpaca=allow_alpaca)
     )
     observations = await _latest_intraday_observations(
         session,
         instrument_id=instrument_id,
         decision_time=decision,
+        allow_alpaca=allow_alpaca,
     )
     selected_key = _select_intraday_key(candidates, observations)
     if selected_key is None:
@@ -566,9 +569,25 @@ def _provider_mode(
     return "read_only"
 
 
-def _intraday_provenance_allowed(source: str, feed: str, delivery_mode: str) -> bool:
-    return (
-        source == "fosun" and feed == "l1" and delivery_mode in {"unknown", "real_time", "delayed"}
+def _intraday_provenance_allowed(
+    source: str,
+    feed: str,
+    delivery_mode: str,
+    *,
+    allow_alpaca: bool = True,
+) -> bool:
+    return bool(
+        (
+            source == "fosun"
+            and feed == "l1"
+            and delivery_mode in {"unknown", "real_time", "delayed"}
+        )
+        or (
+            allow_alpaca
+            and source == "alpaca"
+            and feed == "iex"
+            and delivery_mode == "real_time"
+        )
     )
 
 
@@ -607,6 +626,7 @@ async def _latest_intraday_observations(
     *,
     instrument_id: UUID,
     decision_time: datetime,
+    allow_alpaca: bool,
 ) -> tuple[LatestQuote, ...]:
     ranked = (
         select(
@@ -639,32 +659,52 @@ async def _latest_intraday_observations(
             LatestQuote.received_at <= decision_time,
             LatestQuote.observed_at <= decision_time,
             LatestQuote.observed_at >= decision_time - _INTRADAY_LOOKBACK,
-            LatestQuote.event_kind == "snapshot",
-            LatestQuote.source == "fosun",
-            LatestQuote.feed == "l1",
-            LatestQuote.delivery_mode.in_(("unknown", "real_time", "delayed")),
             LatestQuote.evidence_status == "verified",
             LatestQuote.data_artifact_id.is_not(None),
-            LatestQuote.provider_capability_id.is_not(None),
-            LatestQuote.provider_status_id.is_not(None),
-            LatestQuote.provider_status_version.is_not(None),
-            LatestQuote.provider_contract_hash.is_not(None),
-            LatestQuote.provider_authorized_at.is_not(None),
-            LatestQuote.provider_authorized_at <= decision_time,
-            DataArtifact.source == "fosun",
-            DataArtifact.schema_version == "fosun_gateway_market_snapshot_v1",
             DataArtifact.available_at <= decision_time,
             DataArtifact.received_at <= decision_time,
             LatestQuote.revision == DataArtifact.sha256,
-            ProviderCapability.provider == "fosun",
-            ProviderCapability.capability == "READ_ONLY",
-            ProviderCapability.schema_version == "1",
-            ProviderCapability.contract_hash == LatestQuote.provider_contract_hash,
-            ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
-            ProviderCapability.expires_at > LatestQuote.provider_authorized_at,
-            ProviderCapability.payload["operation"].as_string() == "fosun_get_quotes",
-            ProviderCapability.payload["market_scope"].as_string() == "US",
-            ProviderCapability.payload["delivery_mode"].as_string() == LatestQuote.delivery_mode,
+            or_(
+                and_(
+                    LatestQuote.event_kind == "snapshot",
+                    LatestQuote.source == "fosun",
+                    LatestQuote.feed == "l1",
+                    LatestQuote.delivery_mode.in_(("unknown", "real_time", "delayed")),
+                    LatestQuote.provider_capability_id.is_not(None),
+                    LatestQuote.provider_status_id.is_not(None),
+                    LatestQuote.provider_status_version.is_not(None),
+                    LatestQuote.provider_contract_hash.is_not(None),
+                    LatestQuote.provider_authorized_at.is_not(None),
+                    LatestQuote.provider_authorized_at <= decision_time,
+                    DataArtifact.source == "fosun",
+                    DataArtifact.schema_version == "fosun_gateway_market_snapshot_v1",
+                    ProviderCapability.provider == "fosun",
+                    ProviderCapability.capability == "READ_ONLY",
+                    ProviderCapability.schema_version == "1",
+                    ProviderCapability.contract_hash == LatestQuote.provider_contract_hash,
+                    ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
+                    ProviderCapability.expires_at > LatestQuote.provider_authorized_at,
+                    ProviderCapability.payload["operation"].as_string() == "fosun_get_quotes",
+                    ProviderCapability.payload["market_scope"].as_string() == "US",
+                    ProviderCapability.payload["delivery_mode"].as_string()
+                    == LatestQuote.delivery_mode,
+                ),
+                and_(
+                    true() if allow_alpaca else false(),
+                    LatestQuote.event_kind.in_(("trade", "quote")),
+                    LatestQuote.source == "alpaca",
+                    LatestQuote.feed == "iex",
+                    LatestQuote.delivery_mode == "real_time",
+                    LatestQuote.provider_capability_id.is_(None),
+                    LatestQuote.provider_status_id.is_(None),
+                    LatestQuote.provider_status_version.is_(None),
+                    LatestQuote.provider_contract_hash.is_(None),
+                    LatestQuote.provider_authorized_at.is_(None),
+                    DataArtifact.source == "alpaca",
+                    DataArtifact.schema_version == "alpaca_stock_stream_v1",
+                    DataArtifact.mime_type == "application/json",
+                ),
+            ),
         )
         .subquery()
     )

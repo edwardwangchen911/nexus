@@ -161,7 +161,10 @@ def test_alembic_downgrade_forces_read_committed_over_database_default(
 def test_market_authority_chain_has_one_current_head() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
 
-    assert scripts.get_heads() == ["0046_fosun_push_quote_authority"]
+    assert scripts.get_heads() == ["0047_alpaca_market_stream"]
+    alpaca_stream = scripts.get_revision("0047_alpaca_market_stream")
+    assert alpaca_stream is not None
+    assert alpaca_stream.down_revision == "0046_fosun_push_quote_authority"
     push_quote = scripts.get_revision("0046_fosun_push_quote_authority")
     assert push_quote is not None
     assert push_quote.down_revision == "0045_adjusted_diagnostic_prices"

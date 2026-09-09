@@ -142,6 +142,25 @@ INTRADAY_SOURCE_POLICY_V2_PAYLOAD: dict[str, object] = {
     "alpaca": {"mode": "disabled"},
     "purpose": "display_only_intraday_monitor",
 }
+INTRADAY_SOURCE_POLICY_V3_ID = UUID("778e9ef4-2af4-5166-9f17-06087448de7f")
+INTRADAY_SOURCE_POLICY_V3_VERSION = "intraday_monitor_policy_v3"
+INTRADAY_SOURCE_POLICY_V3_PAYLOAD: dict[str, object] = {
+    "selection": "latest_available",
+    "fosun": {
+        "feed": "l1",
+        "delivery_modes": ["unknown", "real_time", "delayed"],
+        "artifact_schema": "fosun_gateway_market_snapshot_v1",
+        "market_scope": "US",
+    },
+    "alpaca": {
+        "feed": "iex",
+        "delivery_mode": "real_time",
+        "transport": "websocket",
+        "artifact_schema": "alpaca_stock_stream_v1",
+        "market_scope": "US",
+    },
+    "purpose": "display_only_intraday_monitor",
+}
 _PRIORITY = ("fosun", "alpaca", "fixture")
 
 
@@ -359,6 +378,28 @@ class IntradaySourcePolicyV2(BaseModel):
     def _canonical_record(cls, value: UUID) -> UUID:
         if value != INTRADAY_SOURCE_POLICY_V2_ID:
             raise ValueError("intraday policy must use the published v2 record")
+        return value
+
+    @field_validator("available_at")
+    @classmethod
+    def _available_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
+class IntradaySourcePolicyV3(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["intraday_monitor"]
+    version: Literal["intraday_monitor_policy_v3"] = "intraday_monitor_policy_v3"
+    schema_version: Literal["3"]
+    available_at: datetime
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != INTRADAY_SOURCE_POLICY_V3_ID:
+            raise ValueError("intraday policy must use the published v3 record")
         return value
 
     @field_validator("available_at")
@@ -651,6 +692,70 @@ async def load_intraday_source_policy_v2(
         schema_version=cast(Literal["2"], record.schema_version),
         available_at=record.created_at,
     )
+
+
+async def load_intraday_source_policy_v3(
+    session: AsyncSession,
+    *,
+    decision_time: datetime,
+) -> IntradaySourcePolicyV3:
+    decision_time = require_utc(decision_time)
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == INTRADAY_SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == INTRADAY_SOURCE_POLICY_V3_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != INTRADAY_SOURCE_POLICY_V3_ID
+        or record.schema_version != "3"
+        or record.payload != INTRADAY_SOURCE_POLICY_V3_PAYLOAD
+        or record.created_at > decision_time
+    ):
+        raise ValueError("published intraday source policy v3 is missing or invalid")
+    return IntradaySourcePolicyV3(
+        record_id=record.id,
+        key=cast(Literal["intraday_monitor"], record.key),
+        version=cast(Literal["intraday_monitor_policy_v3"], record.version),
+        schema_version=cast(Literal["3"], record.schema_version),
+        available_at=record.created_at,
+    )
+
+
+async def load_intraday_source_policy(
+    session: AsyncSession,
+    *,
+    decision_time: datetime,
+) -> IntradaySourcePolicyV2 | IntradaySourcePolicyV3:
+    """Load the policy that was published at the decision time.
+
+    The current v3 row must remain intact even when replaying a decision that
+    predates it; otherwise a damaged current policy could silently fall back.
+    """
+    decision_time = require_utc(decision_time)
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == INTRADAY_SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == INTRADAY_SOURCE_POLICY_V3_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != INTRADAY_SOURCE_POLICY_V3_ID
+        or record.schema_version != "3"
+        or record.payload != INTRADAY_SOURCE_POLICY_V3_PAYLOAD
+    ):
+        raise ValueError("published intraday source policy v3 is missing or invalid")
+    if record.created_at <= decision_time:
+        return IntradaySourcePolicyV3(
+            record_id=record.id,
+            key=cast(Literal["intraday_monitor"], record.key),
+            version=cast(Literal["intraday_monitor_policy_v3"], record.version),
+            schema_version=cast(Literal["3"], record.schema_version),
+            available_at=record.created_at,
+        )
+    return await load_intraday_source_policy_v2(session, decision_time=decision_time)
 
 
 async def load_fosun_market_admission(

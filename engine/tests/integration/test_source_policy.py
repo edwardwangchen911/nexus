@@ -16,6 +16,7 @@ from nexus.providers.base import PriceBar, PriceSeries
 from nexus.quality.source_policy import (
     INTRADAY_SOURCE_POLICY_V2_ID,
     INTRADAY_SOURCE_POLICY_V2_PAYLOAD,
+    INTRADAY_SOURCE_POLICY_V3_ID,
     QUOTE_SOURCE_POLICY_V2_ID,
     SOURCE_POLICY_ID,
     SOURCE_POLICY_V2_ID,
@@ -26,6 +27,7 @@ from nexus.quality.source_policy import (
     current_proposal_shadow_price_authority_available,
     current_strategy_rnd_adjusted_authority_available,
     load_fosun_market_admission,
+    load_intraday_source_policy,
     load_intraday_source_policy_v2,
     load_quote_source_policy_v2,
     load_source_policy_v2,
@@ -33,7 +35,7 @@ from nexus.quality.source_policy import (
     select_price_series,
 )
 from nexus.settings import EngineSettings
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 INSTRUMENT_ID = UUID("29e18e7a-78fb-5fc1-a65a-6641fbc1cc64")
 DECISION_TIME = datetime(2026, 8, 21, 22, tzinfo=UTC)
@@ -93,6 +95,35 @@ async def test_v2_policy_is_not_visible_before_its_publication_time(
                 session,
                 decision_time=record.created_at - timedelta(microseconds=1),
             )
+
+
+@pytest.mark.asyncio
+async def test_intraday_policy_replay_uses_v2_before_valid_v3_publication(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        v2 = await session.scalar(
+            select(SourcePolicy).where(SourcePolicy.id == INTRADAY_SOURCE_POLICY_V2_ID)
+        )
+        assert v2 is not None
+        decision_time = v2.created_at + timedelta(days=1)
+        future = decision_time + timedelta(days=1)
+    async with factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE source_policies DISABLE TRIGGER USER"))
+        await session.execute(
+            text("UPDATE source_policies SET created_at=:future WHERE id=:id"),
+            {"future": future, "id": INTRADAY_SOURCE_POLICY_V3_ID},
+        )
+        await session.execute(text("ALTER TABLE source_policies ENABLE TRIGGER USER"))
+
+    async with factory() as session:
+        policy = await load_intraday_source_policy(
+            session,
+            decision_time=decision_time,
+        )
+
+    assert policy.record_id == INTRADAY_SOURCE_POLICY_V2_ID
 
 
 def test_public_selector_is_async_and_owns_all_authority_loading() -> None:
