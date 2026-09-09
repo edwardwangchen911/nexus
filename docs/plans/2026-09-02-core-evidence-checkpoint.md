@@ -3145,3 +3145,11 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 迁移保留 Provider Worker 对触发器源码摘要和固定 `search_path` 的验证；有 push 事实时拒绝降级，无事实时 `0045 → 0046 → 0045` 精确恢复旧 v2 函数与策略。隔离 PostgreSQL 的 API、策略、迁移、权限角色完整相关回归 131 项通过，Provider Worker 单测 62 项通过；Ruff、Mypy、单一 Alembic head 与 diff-check 通过。全程未连接 Fosun/Alpaca、未写真实账户库、未调用模型或创建订单。
 
 当前仍没有新的真实 v3 push 归档或持久化 `LatestQuote`，所以不能宣称真实页面已收到复星推送价格。下一必要切片是产品化 prepare/import 入口：采集前落盘冻结 authority，导入时校验 v3 digest、代码/身份与时间窗后写入对象存储和 `LatestQuote`，再用一次有界真实 probe 验收 API/BFF/页面；不新增调度器、事件总线或自动重连。
+
+### 复星 Push prepare/import 产品入口（2026-09-09）
+
+新增手动 `nexus-engine-fosun-push-local prepare/import` 闭环。prepare 使用数据库时钟，在 WSS 前冻结 `fosun_subscribe_quotes` capability/status 与精确 US ticker alias 身份；Gateway 只在 v3 `bounded_complete` 归档通过自身 loader 后生成 `nexus_fosun_push_quote_handoff_v1` 私有交接文件，不获得 Engine 数据库或对象存储权限。
+
+Engine import 不依赖 Gateway 包，而是从内嵌 v3 receipt 与原始 frames 独立核对文件集、哈希、长度、时间顺序、订阅回执、最后 quote 的代码/价格/`qtDate`/`qtTime`/接收时间，再与 handoff 比对。权限摘要、冻结 alias 或当前 authority 任一变化即拒绝。私有输入使用 `O_NOFOLLOW` 和有界读取；原件写入内容寻址对象后回读，然后幂等写入 `DataArtifact` 与 display-only `LatestQuote`。异时刻重放复用首次授权写入时点，内容冲突失败关闭。
+
+隔离 PostgreSQL 中 prepare/import 、时间窗拒绝、handoff 价格篡改拒绝、对象回读、两次幂等导入与 `MarketService` 展示读取通过；现有迁移/市场 API 相关 104 项通过，Gateway push 定向 186 项通过，Ruff、Mypy、CLI help 与 diff-check 通过。本切片没有新连接 Provider、没有调用模型或创建订单；`delivery_mode=unknown`、研究不可用与 `execution_locked=true` 不变。下一步只是用一次新 v3 有界真实 probe 执行该流程并核对实际 API/BFF/页面，不扩展到持续运行。

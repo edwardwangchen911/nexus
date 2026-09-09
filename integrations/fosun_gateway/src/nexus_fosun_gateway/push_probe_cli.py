@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import stat
@@ -24,6 +26,7 @@ from nexus_fosun_gateway.push_stream import (
     _validate_code,
     _validate_limits,
     collect_push_quote,
+    load_latest_push_quote,
     load_push_archive,
 )
 from nexus_fosun_gateway.security.provider_environment import (
@@ -32,7 +35,7 @@ from nexus_fosun_gateway.security.provider_environment import (
 )
 
 _ARGUMENT_NAMES = {"--manifest", "--code", "--duration", "--max-frames", "--output-dir"}
-_OPTIONAL_ARGUMENT_NAMES = {"--authority-sha256"}
+_OPTIONAL_ARGUMENT_NAMES = {"--authority-sha256", "--normalized-output"}
 _ENVIRONMENT_NAMES = (
     "FOSUN_PROVIDER_MANIFEST",
     "FOSUN_SDK_ADMITTED",
@@ -102,6 +105,7 @@ async def _execute_once(
     build_transport: Callable[..., Any] = build_probe_transport,
     collect: Callable[..., Any] = collect_push_quote,
     load: Callable[[Path], dict[str, Any]] = load_push_archive,
+    load_quote: Callable[[Path], Any] = load_latest_push_quote,
 ) -> dict[str, object]:
     bundle: Any = None
     budget: PhysicalHttpBudget | None = None
@@ -149,6 +153,14 @@ async def _execute_once(
             or not 0 <= frame_count <= plan["max_frames"]
         ):
             raise PushStreamError("PUSH_ARCHIVE_INVALID")
+        normalized_output = plan["normalized_output"]
+        if status == "bounded_complete" and normalized_output is not None:
+            quote = load_quote(plan["output_dir"])
+            _write_normalized_quote(
+                normalized_output,
+                quote,
+                archive_started_at=archive["receipt"]["started_at"],
+            )
         result = {
             "status": status,
             "code": "OK" if status == "bounded_complete" else "PUSH_PROBE_INCOMPLETE",
@@ -177,7 +189,9 @@ async def _execute_once(
 
 
 def _parse_arguments(arguments: tuple[str, ...]) -> dict[str, Any]:
-    if len(arguments) not in {len(_ARGUMENT_NAMES) * 2, (len(_ARGUMENT_NAMES) + 1) * 2}:
+    if len(arguments) % 2 or not len(_ARGUMENT_NAMES) * 2 <= len(arguments) <= (
+        len(_ARGUMENT_NAMES | _OPTIONAL_ARGUMENT_NAMES) * 2
+    ):
         raise ValueError
     values: dict[str, str] = {}
     for index in range(0, len(arguments), 2):
@@ -186,7 +200,7 @@ def _parse_arguments(arguments: tuple[str, ...]) -> dict[str, Any]:
             raise ValueError
         values[name] = value
     names = set(values)
-    if names != _ARGUMENT_NAMES and names != _ARGUMENT_NAMES | _OPTIONAL_ARGUMENT_NAMES:
+    if not _ARGUMENT_NAMES <= names:
         raise ValueError
     manifest = _absolute_path(values["--manifest"])
     output_dir = _absolute_path(values["--output-dir"])
@@ -206,6 +220,16 @@ def _parse_arguments(arguments: tuple[str, ...]) -> dict[str, Any]:
         or any(character not in "0123456789abcdef" for character in authority_sha256)
     ):
         raise ValueError
+    normalized_output_value = values.get("--normalized-output")
+    normalized_output = (
+        None if normalized_output_value is None else _absolute_path(normalized_output_value)
+    )
+    if normalized_output is not None:
+        if authority_sha256 is None or normalized_output.exists():
+            raise ValueError
+        normalized_parent = normalized_output.parent.stat()
+        if not stat.S_ISDIR(normalized_parent.st_mode) or normalized_parent.st_mode & 0o077:
+            raise ValueError
     return {
         "manifest": manifest,
         "code": _validate_code(values["--code"]),
@@ -213,7 +237,33 @@ def _parse_arguments(arguments: tuple[str, ...]) -> dict[str, Any]:
         "max_frames": max_frames,
         "output_dir": output_dir,
         "authority_sha256": authority_sha256,
+        "normalized_output": normalized_output,
     }
+
+
+def _write_normalized_quote(path: Path, quote: Any, *, archive_started_at: str) -> None:
+    raw_archive = quote.raw_archive_payload
+    document = {
+        "schema": "nexus_fosun_push_quote_handoff_v1",
+        "archive_started_at": archive_started_at,
+        "code": quote.code,
+        "price": str(quote.price),
+        "provider_quote_date": quote.provider_quote_date,
+        "provider_quote_time": quote.provider_quote_time,
+        "frame_received_at": quote.frame_received_at.isoformat().replace("+00:00", "Z"),
+        "archive_completed_at": quote.archive_completed_at.isoformat().replace("+00:00", "Z"),
+        "authority_sha256": quote.authority_sha256,
+        "raw_archive_sha256": hashlib.sha256(raw_archive).hexdigest(),
+        "raw_archive_base64": base64.b64encode(raw_archive).decode("ascii"),
+    }
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
 
 
 def _absolute_path(value: str) -> Path:
