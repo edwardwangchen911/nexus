@@ -10,7 +10,7 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class MarketStreamObservation:
-    source: Literal["schwab", "alltick"]
+    source: Literal["schwab"]
     symbol: str
     received_at: datetime
     sequence: int | None

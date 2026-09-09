@@ -2,17 +2,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from nexus.providers.market.alltick_stream import (
-    AllTickStreamState,
-    build_stock_stream_url,
-    redact_stock_stream_url,
-)
-from nexus.providers.market.alltick_stream import (
-    build_heartbeat as build_alltick_heartbeat,
-)
-from nexus.providers.market.alltick_stream import (
-    build_subscriptions as build_alltick_subscriptions,
-)
 from nexus.providers.market.schwab_stream import (
     SchwabLevelOneState,
     SchwabStreamCredentials,
@@ -115,53 +104,3 @@ def test_schwab_builders_allow_only_the_fixed_stream_origin_and_read_only_servic
             "fields": "0,1,2,3,4,5,6,7,8,9,13,16,25,34,35,37,38,39,40,41",
         },
     }
-
-
-def test_alltick_parses_trade_and_quote_without_claiming_a_delay_entitlement() -> None:
-    state = AllTickStreamState(("AAPL.US",))
-    trade = state.apply(
-        {
-            "cmd_id": 22998,
-            "data": {
-                "code": "AAPL.US",
-                "seq": 1_605_509_068_000_001,
-                "tick_time": 1_789_912_201,
-                "price": "227.15",
-                "volume": "2",
-                "turnover": "454.30",
-                "trade_direction": 1,
-            },
-        },
-        received_at=RECEIVED_AT,
-    )
-    quote = state.apply(
-        {
-            "cmd_id": 22999,
-            "data": {
-                "code": "AAPL.US",
-                "seq": 1_605_509_068_000_002,
-                "tick_time": 1_789_912_201_250,
-                "bids": [{"price": "227.14", "volume": "200"}],
-                "asks": [{"price": "227.18", "volume": "100"}],
-            },
-        },
-        received_at=RECEIVED_AT,
-    )
-
-    assert trade[0].last == Decimal("227.15")
-    assert trade[0].provider_time_unit == "seconds"
-    assert quote[0].bid == Decimal("227.14")
-    assert quote[0].ask == Decimal("227.18")
-    assert quote[0].provider_time_unit == "milliseconds"
-    assert quote[0].delayed is None
-
-
-def test_alltick_builders_keep_token_out_of_messages_and_redacted_urls() -> None:
-    url = build_stock_stream_url("secret token")
-    subscriptions = build_alltick_subscriptions(("AAPL.US", "SPY.US"), sequence=7)
-
-    assert url == "wss://quote.alltick.co/quote-stock-b-ws-api?token=secret%20token"
-    assert redact_stock_stream_url(url) == "wss://quote.alltick.co/quote-stock-b-ws-api?token=REDACTED"
-    assert all("secret" not in str(message) for message in subscriptions)
-    assert [message["cmd_id"] for message in subscriptions] == [22004, 22002]
-    assert build_alltick_heartbeat(sequence=9)["cmd_id"] == 22000

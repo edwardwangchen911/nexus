@@ -4,7 +4,6 @@ import json
 import pytest
 from nexus.ops.provider_market_stream import (
     build_parser,
-    collect_alltick_stream,
     collect_schwab_stream,
     load_provider_market_stream_archive,
 )
@@ -87,7 +86,7 @@ SCHWAB_DATA = {
 }
 
 
-def test_market_stream_cli_never_accepts_credentials_on_the_command_line() -> None:
+def test_market_stream_cli_supports_only_schwab_without_command_line_credentials() -> None:
     parsed = build_parser().parse_args(
         ["schwab", "--symbol", "AAPL", "--output-dir", "/tmp/archive"]
     )
@@ -99,11 +98,9 @@ def test_market_stream_cli_never_accepts_credentials_on_the_command_line() -> No
             [
                 "alltick",
                 "--symbol",
-                "AAPL.US",
+                "TSLA.US",
                 "--output-dir",
                 "/tmp/archive",
-                "--token",
-                "must-not-be-a-process-argument",
             ]
         )
 
@@ -147,65 +144,6 @@ async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> N
     assert not any(
         "access-token" in item.read_text() for item in directory.iterdir()
     )
-
-
-@pytest.mark.asyncio
-async def test_alltick_stream_collects_trade_and_quote_without_archiving_token(tmp_path) -> None:
-    acknowledgements = [
-        {"ret": 200, "msg": "pong", "cmd_id": 22001, "seq_id": 10, "trace": "h", "data": {}},
-        {"ret": 200, "msg": "ok", "cmd_id": 22005, "seq_id": 1, "trace": "a", "data": {}},
-        {"ret": 200, "msg": "ok", "cmd_id": 22003, "seq_id": 2, "trace": "b", "data": {}},
-    ]
-    trade = {
-        "cmd_id": 22998,
-        "data": {
-            "code": "AAPL.US",
-            "seq": 3,
-            "tick_time": 1_789_912_201,
-            "price": "227.15",
-            "volume": "2",
-            "turnover": "454.30",
-            "trade_direction": 1,
-        },
-    }
-    quote = {
-        "cmd_id": 22999,
-        "data": {
-            "code": "AAPL.US",
-            "seq": 4,
-            "tick_time": 1_789_912_201_250,
-            "bids": [{"price": "227.14", "volume": "200"}],
-            "asks": [{"price": "227.18", "volume": "100"}],
-        },
-    }
-    socket = Socket([*acknowledgements, trade, quote])
-    calls: list[str] = []
-
-    def connector(url: str, **kwargs: object):
-        del kwargs
-        calls.append(url)
-        return socket
-
-    directory = tmp_path / "alltick"
-    result = await collect_alltick_stream(
-        symbols=("AAPL.US",),
-        directory=directory,
-        token="secret-token",
-        duration=1,
-        max_frames=5,
-        connector=connector,
-    )
-
-    assert result["status"] == "bounded_complete"
-    assert result["observation_count"] == 2
-    assert calls == [
-        "wss://quote.alltick.co/quote-stock-b-ws-api?token=secret-token"
-    ]
-    assert [message["cmd_id"] for message in socket.sent[:2]] == [22004, 22002]
-    archive = load_provider_market_stream_archive(directory)
-    assert archive["receipt"]["origin"].endswith("token=REDACTED")
-    assert archive["observations"][-1].bid.as_tuple().exponent == -2
-    assert not any("secret-token" in item.read_text() for item in directory.iterdir())
 
 
 @pytest.mark.asyncio
