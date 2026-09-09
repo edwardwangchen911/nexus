@@ -3,7 +3,11 @@ import json
 from decimal import Decimal
 
 import pytest
-from nexus.ops.alpaca_market_stream import collect_market_stream, load_market_stream_archive
+from nexus.ops.alpaca_market_stream import (
+    collect_market_stream,
+    import_market_stream,
+    load_market_stream_archive,
+)
 
 
 class Socket:
@@ -137,6 +141,48 @@ async def test_bounded_iex_stream_roundtrips_latest_trade_and_quote(tmp_path) ->
     assert archive.quote.ask == Decimal("227.18")
     assert archive.raw_payload
     assert b"example-secret" not in archive.raw_payload
+
+
+@pytest.mark.asyncio
+async def test_bounded_overnight_stream_uses_official_feed_and_stays_archive_only(
+    tmp_path,
+) -> None:
+    socket = Socket([CONNECTED, AUTHENTICATED, SUBSCRIBED, DATA])
+    calls: list[str] = []
+
+    def connector(url: str, **kwargs: object):
+        del kwargs
+        calls.append(url)
+        return socket
+
+    directory = tmp_path / "run"
+    result = await collect_market_stream(
+        symbol="AAPL",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        feed="overnight",
+        max_frames=4,
+        connector=connector,
+    )
+
+    assert result["status"] == "bounded_complete"
+    assert calls == ["wss://stream.data.alpaca.markets/v1beta1/overnight"]
+    archive = load_market_stream_archive(directory)
+    assert archive.feed == "overnight"
+    assert archive.trade is not None
+    assert archive.quote is not None
+    with pytest.raises(
+        ValueError,
+        match="ALPACA_MARKET_STREAM_IMPORT_FEED_UNSUPPORTED",
+    ):
+        await import_market_stream(
+            None,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            instrument_id=None,  # type: ignore[arg-type]
+            directory=directory,
+            imported_at=archive.completed_at,
+        )
 
 
 @pytest.mark.asyncio

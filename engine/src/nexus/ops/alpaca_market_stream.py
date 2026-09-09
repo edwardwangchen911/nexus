@@ -1,4 +1,4 @@
-"""One bounded Alpaca IEX stock stream; archives originals and never reconnects."""
+"""One bounded Alpaca stock stream; archives originals and never reconnects."""
 
 from __future__ import annotations
 
@@ -40,7 +40,13 @@ from nexus.providers.market.snapshot_contracts import SnapshotQuote, SnapshotTra
 from nexus.providers.news import _unique, validate_symbol
 from nexus.settings import EngineSettings
 
-URL = "wss://stream.data.alpaca.markets/v2/iex"
+FEEDS = {
+    "iex": ("wss://stream.data.alpaca.markets/v2/iex", "real_time"),
+    "overnight": (
+        "wss://stream.data.alpaca.markets/v1beta1/overnight",
+        "indicative_real_time_quote_delayed_trade",
+    ),
+}
 SCHEMA = "nexus_alpaca_market_stream_receipt_v1"
 ARCHIVE_SCHEMA = "alpaca_stock_stream_v1"
 MAX_BYTES = 8 * 1024 * 1024
@@ -189,9 +195,13 @@ def _parse_archive(
         receipt.get("schema") != SCHEMA
         or receipt.get("source") != "alpaca"
         or receipt.get("transport") != "websocket"
-        or receipt.get("origin") != URL
-        or receipt.get("feed") != "iex"
-        or receipt.get("delivery_mode") != "real_time"
+        or not isinstance(receipt.get("feed"), str)
+        or receipt["feed"] not in FEEDS
+        or (
+            receipt.get("origin"),
+            receipt.get("delivery_mode"),
+        )
+        != FEEDS[receipt["feed"]]
         or receipt.get("status") != "bounded_complete"
         or receipt.get("stop_reason") not in {"DURATION_LIMIT", "FRAME_LIMIT"}
         or type(receipt.get("authenticated")) is not bool
@@ -294,7 +304,7 @@ def _parse_archive(
     latest_quote = max(quotes, key=lambda value: (value[1].observed_at, value[0]), default=None)
     return MarketStreamArchive(
         symbol=symbol,
-        feed="iex",
+        feed=receipt["feed"],
         started_at=started,
         completed_at=ended,
         trade=None if latest_trade is None else latest_trade[1],
@@ -347,6 +357,8 @@ async def import_market_stream(
     if imported_at.tzinfo is None or imported_at.utcoffset() != timedelta(0):
         raise MarketStreamError("ALPACA_MARKET_STREAM_IMPORT_TIME_INVALID")
     archive = load_market_stream_archive(directory)
+    if archive.feed != "iex":
+        raise MarketStreamError("ALPACA_MARKET_STREAM_IMPORT_FEED_UNSUPPORTED")
     observations = tuple(value for value in (archive.trade, archive.quote) if value is not None)
     if (
         archive.completed_at > imported_at
@@ -476,11 +488,16 @@ async def collect_market_stream(
     directory: Path,
     key: str,
     secret: str,
+    feed: str = "iex",
     duration: float = 60,
     max_frames: int = MAX_FRAMES,
     connector: Any = _FixedConnect,
 ) -> dict[str, object]:
     symbol = validate_symbol(symbol)
+    try:
+        url, delivery_mode = FEEDS[feed]
+    except (KeyError, TypeError):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_FEED_INVALID") from None
     if (
         type(duration) not in {int, float}
         or type(max_frames) is not int
@@ -513,9 +530,9 @@ async def collect_market_stream(
         "schema": SCHEMA,
         "source": "alpaca",
         "transport": "websocket",
-        "origin": URL,
-        "feed": "iex",
-        "delivery_mode": "real_time",
+        "origin": url,
+        "feed": feed,
+        "delivery_mode": delivery_mode,
         "symbol": symbol,
         "started_at": started.isoformat().replace("+00:00", "Z"),
         "authenticated": False,
@@ -535,7 +552,7 @@ async def collect_market_stream(
     logger.propagate = False
     try:
         async with connector(
-            URL,
+            url,
             additional_headers={
                 "APCA-API-KEY-ID": key,
                 "APCA-API-SECRET-KEY": secret,
@@ -726,6 +743,7 @@ def main(argv: list[str] | None = None) -> int:
     collect_parser = commands.add_parser("collect")
     collect_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     collect_parser.add_argument("--symbol", required=True)
+    collect_parser.add_argument("--feed", choices=tuple(FEEDS), default="iex")
     collect_parser.add_argument("--output-dir", type=Path, required=True)
     collect_parser.add_argument("--duration", type=float, default=60)
     collect_parser.add_argument("--max-frames", type=int, default=MAX_FRAMES)
@@ -745,6 +763,7 @@ def main(argv: list[str] | None = None) -> int:
                     directory=args.output_dir,
                     key=environment.get("ALPACA_API_KEY_ID", ""),
                     secret=environment.get("ALPACA_API_SECRET_KEY", ""),
+                    feed=args.feed,
                     duration=args.duration,
                     max_frames=args.max_frames,
                 )
