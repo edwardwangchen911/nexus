@@ -9,7 +9,8 @@ from nexus.risk.authority import (
     load_risk_market_snapshot,
     prepare_risk_market_snapshot,
 )
-from test_authority import _decision
+
+from engine.tests.unit.risk.test_authority import _decision
 
 
 def request(**changes):

@@ -17,7 +17,8 @@ from nexus.ops import news_import
 from nexus.ops.openai_local import prepare_database
 from nexus.research.news import import_news
 from nexus.research.news_evidence import read_news_evidence, register_news_evidence
-from test_news import ID, archive, setup
+
+from engine.tests.integration.test_news import ID, archive, setup
 
 
 @pytest.mark.asyncio

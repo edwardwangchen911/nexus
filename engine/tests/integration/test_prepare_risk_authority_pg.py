@@ -15,7 +15,8 @@ from nexus.risk.authority import (
 )
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from test_risk_authority_pg import (
+
+from engine.tests.integration.test_risk_authority_pg import (
     CALENDAR_ID,
     DECISION_SESSION,
     DECISION_TIME,
