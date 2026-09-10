@@ -124,5 +124,7 @@ def test_queues_priorities_and_retry_policies_are_closed() -> None:
     assert JOB_PRIORITIES[JobType.PAPER_EXECUTE_DUE] == 260
     assert JOB_PRIORITIES[JobType.PAPER_PERFORMANCE] == 220
     assert JOB_PRIORITIES[JobType.AGENT_RESEARCH] == 180
+    assert JobType.AGENT_PORTFOLIO_DECISION.value == "agent.portfolio_decision"
+    assert JOB_PRIORITIES[JobType.AGENT_PORTFOLIO_DECISION] == 180
     assert JOB_PRIORITIES[JobType.STRATEGY_RND] == 20
     assert set(JOB_PRIORITIES) == set(JobType)

@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -36,6 +36,7 @@ from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
     AgentResearchRunRecord,
+    PortfolioDecisionBudgetReservationRecord,
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
@@ -129,29 +130,42 @@ async def reserve_daily_budget(
         raise BudgetExhausted("stale pricing cannot reserve research budget")
     business_date = now.date()
     await _lock_budget_day(session, business_date.isoformat())
-    used = await session.scalar(
-        select(
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            AgentDailyBudgetReservationRecord.state == "reserved",
-                            AgentDailyBudgetReservationRecord.reserved_usd,
-                        ),
-                        (
-                            AgentDailyBudgetReservationRecord.state == "settled",
-                            AgentDailyBudgetReservationRecord.settled_usd,
-                        ),
-                        else_=Decimal("0"),
-                    )
-                ),
-                0,
-            )
-        ).where(AgentDailyBudgetReservationRecord.business_date == business_date)
-    )
-    if Decimal(str(used)) + worst_case_usd > daily_limit_usd:
+    used = await _shared_daily_budget_used(session, business_date=business_date)
+    if used + worst_case_usd > daily_limit_usd:
         raise BudgetExhausted("daily research budget exhausted")
     reservation = AgentDailyBudgetReservationRecord(
+        business_date=business_date,
+        run_id=run_id,
+        pricing_version=pricing_version,
+        reserved_usd=worst_case_usd,
+        settled_usd=None,
+        state="reserved",
+    )
+    session.add(reservation)
+    await session.flush()
+    return reservation
+
+
+async def reserve_portfolio_decision_budget(
+    session: AsyncSession,
+    *,
+    run_id: UUID,
+    now: datetime,
+    daily_limit_usd: Decimal,
+    worst_case_usd: Decimal,
+    pricing_version: str,
+    pricing_fresh: bool,
+) -> PortfolioDecisionBudgetReservationRecord:
+    """Reserve portfolio decision work against the same Agent daily limit."""
+    _validate_budget_inputs(now, daily_limit_usd, worst_case_usd, pricing_version)
+    if not pricing_fresh:
+        raise BudgetExhausted("stale pricing cannot reserve research budget")
+    business_date = now.date()
+    await _lock_budget_day(session, business_date.isoformat())
+    used = await _shared_daily_budget_used(session, business_date=business_date)
+    if used + worst_case_usd > daily_limit_usd:
+        raise BudgetExhausted("daily research budget exhausted")
+    reservation = PortfolioDecisionBudgetReservationRecord(
         business_date=business_date,
         run_id=run_id,
         pricing_version=pricing_version,
@@ -492,6 +506,30 @@ async def _locked_reservation(
     if reservation is None:
         raise BudgetExhausted("reservation is not available")
     return reservation
+
+
+async def _shared_daily_budget_used(session: AsyncSession, *, business_date: date) -> Decimal:
+    totals: list[Decimal] = []
+    for model in (
+        AgentDailyBudgetReservationRecord,
+        PortfolioDecisionBudgetReservationRecord,
+    ):
+        used = await session.scalar(
+            select(
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (model.state == "reserved", model.reserved_usd),
+                            (model.state == "settled", model.settled_usd),
+                            else_=Decimal("0"),
+                        )
+                    ),
+                    0,
+                )
+            ).where(model.business_date == business_date)
+        )
+        totals.append(Decimal(str(used)))
+    return sum(totals, Decimal("0"))
 
 
 async def _lock_budget_day(session: AsyncSession, business_date: str) -> None:
