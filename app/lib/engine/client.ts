@@ -220,12 +220,16 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const news = /^\/internal\/v1\/instruments\/([^/]+)\/news$/.exec(path);
   if (news && validateUuid(news[1])) return template === "/internal/v1/instruments/{instrument_id}/news";
   if (template === "/internal/v1/optimization-proposal-drafts") return path === template;
-  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
+  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
   if (integration && integrationProviders.includes(integration[1] as (typeof integrationProviders)[number])) {
     return template === `/internal/v1/integrations/{provider}/${integration[2]}`;
+  }
+  const portfolioDecision = /^\/internal\/v1\/portfolio-decision-runs\/([^/]+)$/.exec(path);
+  if (portfolioDecision && validateUuid(portfolioDecision[1])) {
+    return template === "/internal/v1/portfolio-decision-runs/{run_id}";
   }
   const watchlist = /^\/internal\/v1\/watchlist\/([^/]+)$/.exec(path);
   if (
@@ -451,6 +455,7 @@ function isAnalysisPath(pathname: string): boolean {
     || pathname.includes("/optimization-proposal-drafts")
     || pathname.endsWith("/what-if/evaluate")
     || pathname.endsWith("/portfolio-scenarios/evaluate")
+    || pathname.includes("/portfolio-decision-runs")
     || pathname.includes("/research-runs")
     || pathname.includes("/instruments/") && (pathname.endsWith("/research") || pathname.endsWith("/research-admission"))
     || pathname.includes("/briefs/")

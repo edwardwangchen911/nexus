@@ -534,6 +534,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/portfolio-decision-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Portfolio Decision Run
+         * @description Admit one immutable run without executing model work in the API process.
+         */
+        post: operations["createPortfolioDecisionRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/portfolio-decision-runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Portfolio Decision Run
+         * @description Return only a run owned by the authenticated local actor.
+         */
+        get: operations["getPortfolioDecisionRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/portfolio-scenarios/evaluate": {
         parameters: {
             query?: never;
@@ -942,6 +982,33 @@ export interface components {
             max_turnover: string;
             /** Minimum Cash */
             minimum_cash: string;
+            /**
+             * Objective
+             * @constant
+             */
+            objective: "reduce_security_concentration";
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "adjustment_scenario_constraints_v1";
+            /**
+             * Universe Policy
+             * @constant
+             */
+            universe_policy: "current_holdings_only";
+        };
+        /** AdjustmentScenarioConstraintsV1 */
+        AdjustmentScenarioConstraintsV1: {
+            /**
+             * Allow New Positions
+             * @constant
+             */
+            allow_new_positions: false;
+            /** Max Turnover */
+            max_turnover: number | string;
+            /** Minimum Cash */
+            minimum_cash: number | string;
             /**
              * Objective
              * @constant
@@ -1657,7 +1724,7 @@ export interface components {
          * @description Client-visible error codes defined by the API contract.
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "SIMULATION_WRITE_DISABLED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SCENARIO_BASELINE_NOT_READY" | "SCENARIO_DIAGNOSTIC_MISMATCH" | "SCENARIO_AS_OF_MISMATCH" | "SCENARIO_OBJECTIVE_UNSUPPORTED" | "SCENARIO_INPUT_INVALID" | "SCENARIO_US_EQUITY_SCOPE_INVALID" | "INTERNAL_ERROR";
+        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "SIMULATION_WRITE_DISABLED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SCENARIO_BASELINE_NOT_READY" | "SCENARIO_DIAGNOSTIC_MISMATCH" | "SCENARIO_AS_OF_MISMATCH" | "SCENARIO_OBJECTIVE_UNSUPPORTED" | "SCENARIO_INPUT_INVALID" | "SCENARIO_US_EQUITY_SCOPE_INVALID" | "PORTFOLIO_DECISION_AUTHORITY_MISMATCH" | "PORTFOLIO_DECISION_INPUT_UNSAFE" | "PORTFOLIO_DECISION_BUDGET_EXHAUSTED" | "INTERNAL_ERROR";
         /** EvidenceCompletenessSummary */
         EvidenceCompletenessSummary: {
             /** Complete */
@@ -3176,6 +3243,116 @@ export interface components {
             /** Unrealized Pnl */
             unrealized_pnl: string;
         };
+        /** PortfolioDecisionCitationResponse */
+        PortfolioDecisionCitationResponse: {
+            /** Citation Id */
+            citation_id: string;
+            evidence: components["schemas"]["EvidenceRef"];
+        };
+        /** PortfolioDecisionCreateRequest */
+        PortfolioDecisionCreateRequest: {
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /** Expected Scenario Result Hash */
+            expected_scenario_result_hash: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            scenario_request: components["schemas"]["PortfolioScenarioRequestV1"];
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "portfolio_decision_create_v1";
+        };
+        /** PortfolioDecisionOutputResponse */
+        PortfolioDecisionOutputResponse: {
+            /** Error Code */
+            error_code: ("PORTFOLIO_DECISION_TOOL_REQUIRED" | "PORTFOLIO_DECISION_TOOL_LIMIT_EXCEEDED" | "PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH" | "PORTFOLIO_DECISION_OUTPUT_INVALID" | "PORTFOLIO_DECISION_MODEL_FAILED" | "PORTFOLIO_DECISION_PERSISTENCE_UNCERTAIN" | "PORTFOLIO_DECISION_AUTHORITY_INVALID") | null;
+            intent: components["schemas"]["PortfolioResearchIntentV1"] | null;
+            /** Scenario Result Hash */
+            scenario_result_hash: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "completed" | "abstained" | "failed";
+        };
+        /** PortfolioDecisionRunEnvelope */
+        PortfolioDecisionRunEnvelope: {
+            data: components["schemas"]["PortfolioDecisionRunResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PortfolioDecisionRunResponse */
+        PortfolioDecisionRunResponse: {
+            /** Citations */
+            citations: components["schemas"]["PortfolioDecisionCitationResponse"][];
+            /**
+             * Decision Time
+             * Format: date-time
+             */
+            decision_time: string;
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /** Expected Scenario Result Hash */
+            expected_scenario_result_hash: string;
+            /** Input Tokens */
+            input_tokens?: number | null;
+            /**
+             * Objective
+             * @constant
+             */
+            objective: "reduce_security_concentration";
+            output: components["schemas"]["PortfolioDecisionOutputResponse"] | null;
+            /** Output Tokens */
+            output_tokens?: number | null;
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /** Reserved Cost Usd */
+            reserved_cost_usd: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Scenario Request Hash */
+            scenario_request_hash: string;
+            /**
+             * Schema Version
+             * @default portfolio_decision_run_v1
+             * @constant
+             */
+            schema_version: "portfolio_decision_run_v1";
+            /** Settled Cost Usd */
+            settled_cost_usd: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "prepared" | "running" | "completed" | "abstained" | "failed";
+        };
         /** PortfolioDiagnosticEnvelope */
         PortfolioDiagnosticEnvelope: {
             data: components["schemas"]["PortfolioDiagnosticResponse"];
@@ -3210,8 +3387,40 @@ export interface components {
             /** Trading Day */
             trading_day: string | null;
         };
+        /** PortfolioInvalidationConditionV1 */
+        PortfolioInvalidationConditionV1: {
+            /** Citation Ids */
+            citation_ids: string[];
+            /**
+             * Operator
+             * @enum {string}
+             */
+            operator: "lt" | "lte" | "eq" | "gte" | "gt";
+            /**
+             * Signal
+             * @enum {string}
+             */
+            signal: "portfolio.security_top1" | "portfolio.cash_weight" | "portfolio.scenario_objective_status" | "portfolio.estimated_cost_status";
+            /** Threshold */
+            threshold: string;
+            /**
+             * Unit
+             * @enum {string}
+             */
+            unit: "ratio" | "state";
+        };
         /** @enum {string} */
         PortfolioKind: "real_read_only" | "internal_paper" | "shadow";
+        /** PortfolioLimitationV1 */
+        PortfolioLimitationV1: {
+            /**
+             * Code
+             * @constant
+             */
+            code: "estimated_cost";
+            /** Text */
+            text: string;
+        };
         PortfolioListItem: components["schemas"]["PortfolioListItemResponse"] | components["schemas"]["InternalPaperPortfolioListItemResponse"];
         /** PortfolioListItemResponse */
         PortfolioListItemResponse: {
@@ -3252,6 +3461,13 @@ export interface components {
             items: components["schemas"]["PortfolioListItem"][];
             /** Next Cursor */
             next_cursor: string | null;
+        };
+        /** PortfolioResearchClaimV1 */
+        PortfolioResearchClaimV1: {
+            /** Citation Ids */
+            citation_ids: string[];
+            /** Text */
+            text: string;
         };
         /**
          * PortfolioResearchContext
@@ -3318,6 +3534,74 @@ export interface components {
             /** Valuation Reason */
             valuation_reason: "INCOMPLETE_CURRENCY_VALUATION" | null;
         };
+        /** PortfolioResearchIntentV1 */
+        PortfolioResearchIntentV1: {
+            /**
+             * Assessment
+             * @enum {string}
+             */
+            assessment: "explore_adjustment" | "observe";
+            /** Citation Ids */
+            citation_ids: string[];
+            /**
+             * Confidence
+             * @enum {string}
+             */
+            confidence: "low" | "medium" | "high";
+            /**
+             * Decision Time
+             * Format: date-time
+             */
+            decision_time: string;
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Horizon
+             * @enum {string}
+             */
+            horizon: "short_term" | "medium_term" | "long_term";
+            /** Invalidation Conditions */
+            invalidation_conditions: components["schemas"]["PortfolioInvalidationConditionV1"][];
+            /** Limitations */
+            limitations: components["schemas"]["PortfolioLimitationV1"][];
+            /**
+             * Objective
+             * @constant
+             */
+            objective: "reduce_security_concentration";
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /** Rationale */
+            rationale: components["schemas"]["PortfolioResearchClaimV1"][];
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Scenario Result Hash */
+            scenario_result_hash: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "portfolio_research_intent_v1";
+        };
         /** PortfolioScenarioEnvelope */
         PortfolioScenarioEnvelope: {
             data: components["schemas"]["PortfolioScenarioResponse"];
@@ -3331,6 +3615,30 @@ export interface components {
              */
             as_of: string;
             constraints: components["schemas"]["AdjustmentScenarioConstraintsRequest"];
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "portfolio_scenario_request_v1";
+        };
+        /** PortfolioScenarioRequestV1 */
+        PortfolioScenarioRequestV1: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            constraints: components["schemas"]["AdjustmentScenarioConstraintsV1"];
             /**
              * Diagnostic Report Id
              * Format: uuid
@@ -7446,6 +7754,127 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PaperPortfolioEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    createPortfolioDecisionRun: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PortfolioDecisionCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Portfolio decision run accepted or replayed. */
+            202: {
+                headers: {
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioDecisionRunEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getPortfolioDecisionRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioDecisionRunEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */

@@ -19,6 +19,7 @@ import {
   paperPortfolioRuntimeSchema,
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
+  portfolioDecisionRunRuntimeSchema,
   portfolioScenarioRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
   readinessRuntimeSchema,
@@ -40,9 +41,9 @@ import {
 import { integrationProviders } from "../integrations/providers";
 import { sameUuid } from "../optimization/uuid";
 
-export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SIMULATION_WRITE_DISABLED" | "SCENARIO_BASELINE_NOT_READY" | "SCENARIO_DIAGNOSTIC_MISMATCH" | "SCENARIO_AS_OF_MISMATCH" | "SCENARIO_OBJECTIVE_UNSUPPORTED" | "SCENARIO_INPUT_INVALID" | "SCENARIO_US_EQUITY_SCOPE_INVALID" | "INTERNAL_ERROR";
+export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SIMULATION_WRITE_DISABLED" | "SCENARIO_BASELINE_NOT_READY" | "SCENARIO_DIAGNOSTIC_MISMATCH" | "SCENARIO_AS_OF_MISMATCH" | "SCENARIO_OBJECTIVE_UNSUPPORTED" | "SCENARIO_INPUT_INVALID" | "SCENARIO_US_EQUITY_SCOPE_INVALID" | "PORTFOLIO_DECISION_INPUT_UNSAFE" | "PORTFOLIO_DECISION_AUTHORITY_MISMATCH" | "PORTFOLIO_DECISION_BUDGET_EXHAUSTED" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
-  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], SIMULATION_WRITE_DISABLED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], SCENARIO_BASELINE_NOT_READY: [409], SCENARIO_DIAGNOSTIC_MISMATCH: [409], SCENARIO_AS_OF_MISMATCH: [409], SCENARIO_OBJECTIVE_UNSUPPORTED: [422], SCENARIO_INPUT_INVALID: [409], SCENARIO_US_EQUITY_SCOPE_INVALID: [409], INTERNAL_ERROR: [500],
+  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], SIMULATION_WRITE_DISABLED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], SCENARIO_BASELINE_NOT_READY: [409], SCENARIO_DIAGNOSTIC_MISMATCH: [409], SCENARIO_AS_OF_MISMATCH: [409], SCENARIO_OBJECTIVE_UNSUPPORTED: [422], SCENARIO_INPUT_INVALID: [409], SCENARIO_US_EQUITY_SCOPE_INVALID: [409], PORTFOLIO_DECISION_INPUT_UNSAFE: [422], PORTFOLIO_DECISION_AUTHORITY_MISMATCH: [409], PORTFOLIO_DECISION_BUDGET_EXHAUSTED: [409], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
 const DRAFT_FX_MESSAGE = "当前快照含非美元现金，缺少汇率估值，暂不能生成可比草稿。";
@@ -75,6 +76,9 @@ export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> =
   SCENARIO_OBJECTIVE_UNSUPPORTED: "The requested scenario objective is not supported.",
   SCENARIO_INPUT_INVALID: "The frozen portfolio inputs are invalid for scenario analysis.",
   SCENARIO_US_EQUITY_SCOPE_INVALID: "The USD equity scope cannot be established from frozen identities.",
+  PORTFOLIO_DECISION_INPUT_UNSAFE: "The portfolio decision request is unsafe.",
+  PORTFOLIO_DECISION_AUTHORITY_MISMATCH: "The portfolio decision authority does not match the request.",
+  PORTFOLIO_DECISION_BUDGET_EXHAUSTED: "The portfolio decision budget is exhausted.",
   INTERNAL_ERROR: "The request could not be completed.",
 };
 
@@ -358,6 +362,19 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       && scenarioSemanticsValid(data)
       ? data
       : INVALID_DATA;
+  }
+  const portfolioDecision = /^\/(?:api|internal)\/v1\/portfolio-decision-runs(?:\/([^/]+))?$/.exec(pathname);
+  if (portfolioDecision && (!portfolioDecision[1] || validateUuid(portfolioDecision[1]))) {
+    const method = requestMethod?.toUpperCase();
+    if ((portfolioDecision[1] === undefined && method !== "POST")
+      || (portfolioDecision[1] !== undefined && method !== "GET")
+      || !matchesRuntimeSchema(data, portfolioDecisionRunRuntimeSchema)
+      || !isPlain(data)
+      || portfolioDecision[1] !== undefined && !sameUuid(data.run_id, portfolioDecision[1])
+      || data.execution_locked !== true) {
+      return INVALID_DATA;
+    }
+    return data;
   }
   if (pathname === "/internal/v1/research-runs") {
     return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data) && researchAuthorityValid(data)

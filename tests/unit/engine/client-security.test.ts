@@ -103,6 +103,35 @@ function marketEnvelope(barCount = 1) {
   };
 }
 
+function portfolioDecisionEnvelope() {
+  return {
+    data: {
+      schema_version: "portfolio_decision_run_v1",
+      run_id: "0198d500-1000-7000-8000-000000000241",
+      portfolio_id: "0198d500-1000-7000-8000-000000000341",
+      portfolio_snapshot_id: "0198d500-1000-7000-8000-000000000041",
+      diagnostic_report_id: "0198d500-1000-7000-8000-000000000141",
+      decision_time: "2026-09-10T08:00:00Z",
+      scenario_request_hash: "a".repeat(64),
+      expected_scenario_result_hash: "b".repeat(64),
+      objective: "reduce_security_concentration",
+      status: "prepared",
+      reserved_cost_usd: "0.01",
+      settled_cost_usd: null,
+      input_tokens: null,
+      output_tokens: null,
+      output: null,
+      citations: [],
+      execution_locked: true,
+    },
+    meta: {
+      request_id: engineRequestId,
+      schema_version: "1",
+      as_of: "2026-09-10T08:00:00Z",
+    },
+  };
+}
+
 function jsonResponse(value: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -346,6 +375,59 @@ describe("engineFetch runtime boundary", () => {
     }, { method: "POST", actor, body });
     await expectSafeInternalError(rejected);
     expect(calls).toBe(1);
+  });
+
+  it("allowlists and signs portfolio decision create/read paths only", async () => {
+    setEngineEnvironment();
+    vi.spyOn(Date, "now").mockReturnValue(1_789_027_200_000);
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input: String(input), init });
+      return jsonResponse(
+        portfolioDecisionEnvelope(),
+        init?.method === "POST" ? 202 : 200,
+        init?.method === "POST"
+          ? { location: "/api/v1/portfolio-decision-runs/0198d500-1000-7000-8000-000000000241" }
+          : {},
+      );
+    });
+    const body = new Uint8Array([123, 125]);
+
+    expect((await engineFetch("/internal/v1/portfolio-decision-runs", {
+      method: "POST",
+      actor,
+      body,
+    })).status).toBe(202);
+    expect((await engineFetch({
+      template: "/internal/v1/portfolio-decision-runs/{run_id}",
+      path: "/internal/v1/portfolio-decision-runs/0198d500-1000-7000-8000-000000000241",
+    }, { method: "GET", actor })).status).toBe(200);
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "http://127.0.0.1:8000/internal/v1/portfolio-decision-runs",
+      "http://127.0.0.1:8000/internal/v1/portfolio-decision-runs/0198d500-1000-7000-8000-000000000241",
+    ]);
+    for (const [index, call] of calls.entries()) {
+      const sentHeaders = new Headers(call.init?.headers);
+      const expected = createEngineHmacHeaders({
+        keyId: "test-current",
+        secret: "nexus-test-hmac-key-32-bytes!!!!",
+        method: index === 0 ? "POST" : "GET",
+        pathAndQuery: new URL(call.input).pathname,
+        timestamp: 1_789_027_200,
+        nonce: sentHeaders.get("x-nexus-nonce")!,
+        actorId: actor.userId,
+        requestId: actor.requestId,
+        body: index === 0 ? body : new Uint8Array(),
+      });
+      expect(sentHeaders.get("x-nexus-signature")).toBe(expected["X-Nexus-Signature"]);
+    }
+
+    await expectSafeInternalError(await engineFetch({
+      template: "/internal/v1/portfolio-decision-runs/{run_id}",
+      path: "/internal/v1/portfolio-decision-runs/not-a-uuid",
+    }, { method: "GET", actor }));
+    expect(calls).toHaveLength(2);
   });
 
   it("sends and signs one canonical allowlisted market query", async () => {

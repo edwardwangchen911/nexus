@@ -5213,6 +5213,235 @@ export const runtimeContractSchemas = {
     "title": "PaperPositionResponse",
     "type": "object"
   },
+  "PortfolioDecisionCitationResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "citation_id": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Citation Id",
+        "type": "string"
+      },
+      "evidence": {
+        "$ref": "#/components/schemas/EvidenceRef"
+      }
+    },
+    "required": [
+      "citation_id",
+      "evidence"
+    ],
+    "title": "PortfolioDecisionCitationResponse",
+    "type": "object"
+  },
+  "PortfolioDecisionOutputResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "error_code": {
+        "anyOf": [
+          {
+            "enum": [
+              "PORTFOLIO_DECISION_TOOL_REQUIRED",
+              "PORTFOLIO_DECISION_TOOL_LIMIT_EXCEEDED",
+              "PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH",
+              "PORTFOLIO_DECISION_OUTPUT_INVALID",
+              "PORTFOLIO_DECISION_MODEL_FAILED",
+              "PORTFOLIO_DECISION_PERSISTENCE_UNCERTAIN",
+              "PORTFOLIO_DECISION_AUTHORITY_INVALID"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Error Code"
+      },
+      "intent": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioResearchIntentV1"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "scenario_result_hash": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Scenario Result Hash"
+      },
+      "status": {
+        "enum": [
+          "completed",
+          "abstained",
+          "failed"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "scenario_result_hash",
+      "intent",
+      "error_code"
+    ],
+    "title": "PortfolioDecisionOutputResponse",
+    "type": "object"
+  },
+  "PortfolioDecisionRunResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "citations": {
+        "items": {
+          "$ref": "#/components/schemas/PortfolioDecisionCitationResponse"
+        },
+        "maxItems": 100,
+        "title": "Citations",
+        "type": "array"
+      },
+      "decision_time": {
+        "format": "date-time",
+        "title": "Decision Time",
+        "type": "string"
+      },
+      "diagnostic_report_id": {
+        "format": "uuid",
+        "title": "Diagnostic Report Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "expected_scenario_result_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Expected Scenario Result Hash",
+        "type": "string"
+      },
+      "input_tokens": {
+        "anyOf": [
+          {
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Input Tokens"
+      },
+      "objective": {
+        "const": "reduce_security_concentration",
+        "title": "Objective",
+        "type": "string"
+      },
+      "output": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioDecisionOutputResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "output_tokens": {
+        "anyOf": [
+          {
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Output Tokens"
+      },
+      "portfolio_id": {
+        "format": "uuid",
+        "title": "Portfolio Id",
+        "type": "string"
+      },
+      "portfolio_snapshot_id": {
+        "format": "uuid",
+        "title": "Portfolio Snapshot Id",
+        "type": "string"
+      },
+      "reserved_cost_usd": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Reserved Cost Usd",
+        "type": "string"
+      },
+      "run_id": {
+        "format": "uuid",
+        "title": "Run Id",
+        "type": "string"
+      },
+      "scenario_request_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Scenario Request Hash",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "portfolio_decision_run_v1",
+        "default": "portfolio_decision_run_v1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "settled_cost_usd": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Settled Cost Usd"
+      },
+      "status": {
+        "enum": [
+          "prepared",
+          "running",
+          "completed",
+          "abstained",
+          "failed"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id",
+      "portfolio_id",
+      "portfolio_snapshot_id",
+      "diagnostic_report_id",
+      "decision_time",
+      "scenario_request_hash",
+      "expected_scenario_result_hash",
+      "objective",
+      "status",
+      "reserved_cost_usd",
+      "settled_cost_usd",
+      "output",
+      "citations"
+    ],
+    "title": "PortfolioDecisionRunResponse",
+    "type": "object"
+  },
   "PortfolioDiagnosticResponse": {
     "additionalProperties": false,
     "properties": {
@@ -5283,6 +5512,87 @@ export const runtimeContractSchemas = {
       "items"
     ],
     "title": "PortfolioDiagnosticResponse",
+    "type": "object"
+  },
+  "PortfolioInvalidationConditionV1": {
+    "additionalProperties": false,
+    "properties": {
+      "citation_ids": {
+        "items": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Citation Ids",
+        "type": "array"
+      },
+      "operator": {
+        "enum": [
+          "lt",
+          "lte",
+          "eq",
+          "gte",
+          "gt"
+        ],
+        "title": "Operator",
+        "type": "string"
+      },
+      "signal": {
+        "enum": [
+          "portfolio.security_top1",
+          "portfolio.cash_weight",
+          "portfolio.scenario_objective_status",
+          "portfolio.estimated_cost_status"
+        ],
+        "title": "Signal",
+        "type": "string"
+      },
+      "threshold": {
+        "maxLength": 40,
+        "minLength": 1,
+        "title": "Threshold",
+        "type": "string"
+      },
+      "unit": {
+        "enum": [
+          "ratio",
+          "state"
+        ],
+        "title": "Unit",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signal",
+      "operator",
+      "threshold",
+      "unit",
+      "citation_ids"
+    ],
+    "title": "PortfolioInvalidationConditionV1",
+    "type": "object"
+  },
+  "PortfolioLimitationV1": {
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "const": "estimated_cost",
+        "title": "Code",
+        "type": "string"
+      },
+      "text": {
+        "maxLength": 300,
+        "minLength": 1,
+        "title": "Text",
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "text"
+    ],
+    "title": "PortfolioLimitationV1",
     "type": "object"
   },
   "PortfolioListItem": {
@@ -5415,6 +5725,33 @@ export const runtimeContractSchemas = {
       "next_cursor"
     ],
     "title": "PortfolioPageResponse",
+    "type": "object"
+  },
+  "PortfolioResearchClaimV1": {
+    "additionalProperties": false,
+    "properties": {
+      "citation_ids": {
+        "items": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Citation Ids",
+        "type": "array"
+      },
+      "text": {
+        "maxLength": 500,
+        "minLength": 1,
+        "title": "Text",
+        "type": "string"
+      }
+    },
+    "required": [
+      "text",
+      "citation_ids"
+    ],
+    "title": "PortfolioResearchClaimV1",
     "type": "object"
   },
   "PortfolioResearchContext": {
@@ -5625,6 +5962,138 @@ export const runtimeContractSchemas = {
       "diagnostics_truncated"
     ],
     "title": "PortfolioResearchContext",
+    "type": "object"
+  },
+  "PortfolioResearchIntentV1": {
+    "additionalProperties": false,
+    "properties": {
+      "assessment": {
+        "enum": [
+          "explore_adjustment",
+          "observe"
+        ],
+        "title": "Assessment",
+        "type": "string"
+      },
+      "citation_ids": {
+        "items": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "maxItems": 100,
+        "minItems": 1,
+        "title": "Citation Ids",
+        "type": "array"
+      },
+      "confidence": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "title": "Confidence",
+        "type": "string"
+      },
+      "decision_time": {
+        "format": "date-time",
+        "title": "Decision Time",
+        "type": "string"
+      },
+      "diagnostic_report_id": {
+        "format": "uuid",
+        "title": "Diagnostic Report Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "horizon": {
+        "enum": [
+          "short_term",
+          "medium_term",
+          "long_term"
+        ],
+        "title": "Horizon",
+        "type": "string"
+      },
+      "invalidation_conditions": {
+        "items": {
+          "$ref": "#/components/schemas/PortfolioInvalidationConditionV1"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Invalidation Conditions",
+        "type": "array"
+      },
+      "limitations": {
+        "items": {
+          "$ref": "#/components/schemas/PortfolioLimitationV1"
+        },
+        "maxItems": 8,
+        "title": "Limitations",
+        "type": "array"
+      },
+      "objective": {
+        "const": "reduce_security_concentration",
+        "title": "Objective",
+        "type": "string"
+      },
+      "portfolio_id": {
+        "format": "uuid",
+        "title": "Portfolio Id",
+        "type": "string"
+      },
+      "portfolio_snapshot_id": {
+        "format": "uuid",
+        "title": "Portfolio Snapshot Id",
+        "type": "string"
+      },
+      "rationale": {
+        "items": {
+          "$ref": "#/components/schemas/PortfolioResearchClaimV1"
+        },
+        "maxItems": 4,
+        "minItems": 1,
+        "title": "Rationale",
+        "type": "array"
+      },
+      "run_id": {
+        "format": "uuid",
+        "title": "Run Id",
+        "type": "string"
+      },
+      "scenario_result_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Scenario Result Hash",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "portfolio_research_intent_v1",
+        "title": "Schema Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "run_id",
+      "portfolio_id",
+      "portfolio_snapshot_id",
+      "diagnostic_report_id",
+      "decision_time",
+      "assessment",
+      "objective",
+      "horizon",
+      "confidence",
+      "rationale",
+      "invalidation_conditions",
+      "limitations",
+      "scenario_result_hash",
+      "citation_ids",
+      "execution_locked"
+    ],
+    "title": "PortfolioResearchIntentV1",
     "type": "object"
   },
   "PortfolioScenarioResponse": {
@@ -11383,6 +11852,8 @@ export const optimizationLifecycleRuntimeSchema = runtimeContractSchemas.Optimiz
 export const optimizationProposalGroupRuntimeSchema = runtimeContractSchemas.OptimizationProposalGroupResponse;
 
 export const portfolioScenarioRuntimeSchema = runtimeContractSchemas.PortfolioScenarioResponse;
+
+export const portfolioDecisionRunRuntimeSchema = runtimeContractSchemas.PortfolioDecisionRunResponse;
 
 export const shadowStartRuntimeSchema = runtimeContractSchemas.ShadowStartData;
 

@@ -915,7 +915,7 @@ BFF 用生成客户端调用 `/internal/v1/...`。资源名和响应 Schema 与 
 - 写请求的 `Idempotency-Key`、资源 version；
 - 默认读取超时 10 秒、写入 30 秒、研究创建 10 秒内只负责入队。
 
-HMAC v1 的 canonical bytes 固定为 UTF-8：`UPPER_METHOD + "\n" + normalized_path_and_query + "\n" + unix_timestamp_seconds + "\n" + nonce + "\n" + lowercase_body_sha256_hex`。`normalized_path_and_query` 使用原始 path 与按 percent-encoded key、value 字节序排序的 query pair（重复 key 不合并）；空 body 的 SHA-256 仍计算 0 字节正文。`X-Nexus-Signature` 为 HMAC-SHA256 的无 padding base64url。服务端先校验 60 秒时间窗和 key ID，再常量时间比较签名；签名通过后才在同一业务事务中以 `(key_id, nonce)` 唯一插入 `used_nonces`，唯一冲突表示重放。时间窗、key 或签名失败不写 nonce 或业务记录；重放失败只保留第一次成功请求的 nonce。双密钥轮换通过 `X-Nexus-Key-Id` 选择当前或上一把只读验证密钥，BFF 只使用当前签名密钥。
+HMAC v1 的 canonical bytes 固定为 UTF-8：`UPPER_METHOD + "\n" + normalized_path_and_query + "\n" + unix_timestamp_seconds + "\n" + nonce + "\n" + actor_id + "\n" + request_id + "\n" + lowercase_body_sha256_hex`。`normalized_path_and_query` 使用原始 path 与按 percent-encoded key、value 字节序排序的 query pair（重复 key 不合并）；空 body 的 SHA-256 仍计算 0 字节正文。`X-Nexus-Signature` 为 HMAC-SHA256 的无 padding base64url。服务端先校验 60 秒时间窗和 key ID，再常量时间比较签名；签名通过后才在同一业务事务中以 `(key_id, nonce)` 唯一插入 `used_nonces`，唯一冲突表示重放。时间窗、key 或签名失败不写 nonce 或业务记录；重放失败只保留第一次成功请求的 nonce。双密钥轮换通过 `X-Nexus-Key-Id` 选择当前或上一把只读验证密钥，BFF 只使用当前签名密钥。BFF 与 Engine 必须同步升级该 canonical 合同；任何 actor 或 request ID 篡改均应在认证阶段失败。
 
 OpenAPI 文件由 FastAPI 生成并提交到 `contracts/openapi.json`；TypeScript 客户端生成到 `app/lib/generated/`。手写前端不得复制 Pydantic 字段定义。
 

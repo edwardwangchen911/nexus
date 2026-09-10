@@ -413,15 +413,15 @@ git commit -m "feat: execute recoverable portfolio decision runs"
 - Produces: `POST /internal/v1/portfolio-decision-runs`、`GET /internal/v1/portfolio-decision-runs/{run_id}`。
 - Produces: matching BFF routes.
 
-- [ ] **Step 1: 写 Engine API 失败测试**
+- [x] **Step 1: 写 Engine API 失败测试**
 
 覆盖 202/Location、幂等 replay、raw-body 冲突、strict 422、authority 409、budget 409、actor mismatch 404、GET output citation resolution，以及旧 proposal/Shadow/order/fill 零增量。
 
-- [ ] **Step 2: 实现 Engine schemas/routes**
+- [x] **Step 2: 实现 Engine schemas/routes**
 
 POST 直接读取 bounded raw body 后再 Pydantic 校验，以 raw bytes 生成 `request_hash`。GET 查询必须带 `run.id == run_id` 与 `run.actor_id == actor.actor_id`；不存在统一 404。
 
-- [ ] **Step 3: 写并实现 BFF 测试**
+- [x] **Step 3: 写并实现 BFF 测试**
 
 Vitest 必须断言：
 
@@ -431,7 +431,7 @@ Vitest 必须断言：
 - GET body 的 run/snapshot/diagnostic/expected-result hash 与请求作用域不一致时返回安全错误；
 - 不透传 provider 原始错误。
 
-- [ ] **Step 4: 生成并核验合同**
+- [x] **Step 4: 生成并核验合同**
 
 ```bash
 npm run generate:client
@@ -440,7 +440,7 @@ npm run check:generated
 
 该脚本通过当前 `create_engine_app(EngineSettings.for_test()).openapi()` 生成 OpenAPI、TypeScript schema 和 runtime contract。
 
-- [ ] **Step 5: 验证并提交 Task 5**
+- [x] **Step 5: 验证并提交 Task 5**
 
 ```bash
 cd engine

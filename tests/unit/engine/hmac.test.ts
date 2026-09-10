@@ -20,7 +20,7 @@ describe("createEngineHmacHeaders", () => {
       "X-Nexus-Actor-Id": "nexus-test-user",
       "X-Request-Id": "0198f7a0-1111-7777-8111-111111111114",
       "X-Nexus-Body-SHA256": "5d2235c37b076326bed7b94bb8315b5141c2edc8b2a74a5e737146e2c20fc117",
-      "X-Nexus-Signature": "AcCgtVoeHFg46x1y6ggnVthTrQwuBH1GoyulelJ-lYo",
+      "X-Nexus-Signature": "V24uqeWT6IRlTSLmtFLg6JG0_hOrwqXL8cLVv3lEryg",
     });
   });
 
@@ -41,7 +41,7 @@ describe("createEngineHmacHeaders", () => {
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
     expect(headers["X-Nexus-Signature"]).toBe(
-      "wtOOjfEZFK97l-HA0wHlkyZ9p0-rM7fL3S0NLk7t7js",
+      "HjZkokAjFBSArHcRVFhPTOVoC5FHVmvI2y-XBdJLm2w",
     );
   });
 
@@ -62,7 +62,7 @@ describe("createEngineHmacHeaders", () => {
       "c7935850b16d3e9a0d211b542fcd1e181e13209ab365bb7d7e022d64f8738a8b",
     );
     expect(headers["X-Nexus-Signature"]).toBe(
-      "FTX4MTbJapN28aKxVkVhDAfEVYuVRQKQl2F9wNKeQLE",
+      "tzudGRTkZulCGSRTwrfGCuxNKrelYOkeHbZB3AY6rTI",
     );
   });
 
@@ -73,6 +73,6 @@ describe("createEngineHmacHeaders", () => {
       timestamp: 1787371200, nonce: "0198f7a0-1111-7777-8111-111111111117",
       actorId: "nexus-test-user", requestId: "0198f7a0-1111-7777-8111-111111111114", body: new Uint8Array(),
     });
-    expect(headers["X-Nexus-Signature"]).toBe("jATOKzEs-blPMZIdQUpWdevDjE7YuPZiBAmW4w9yFws");
+    expect(headers["X-Nexus-Signature"]).toBe("bX7Fk1NhjdPDa6s1O_ngNnGVEgrfOedj0dAcy5Ycchc");
   });
 });

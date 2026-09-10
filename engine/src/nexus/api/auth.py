@@ -36,6 +36,8 @@ def canonical_hmac_v1(
     path_and_query: str,
     timestamp: int,
     nonce: str,
+    actor_id: str,
+    request_id: str,
     body: bytes,
 ) -> str:
     """Return the UTF-8 HMAC v1 canonical form before it is signed."""
@@ -53,7 +55,15 @@ def canonical_hmac_v1(
         normalized_path_and_query = f"{normalized_path_and_query}?{normalized_query}"
     body_sha256 = hashlib.sha256(body).hexdigest()
     return "\n".join(
-        (method.upper(), normalized_path_and_query, str(timestamp), nonce, body_sha256)
+        (
+            method.upper(),
+            normalized_path_and_query,
+            str(timestamp),
+            nonce,
+            actor_id,
+            request_id,
+            body_sha256,
+        )
     )
 
 
@@ -122,7 +132,15 @@ def verify_hmac_signature_v1(
     if path_and_query is None:
         raise _unauthenticated()
     try:
-        canonical = canonical_hmac_v1(request.method, path_and_query, timestamp, str(nonce), body)
+        canonical = canonical_hmac_v1(
+            request.method,
+            path_and_query,
+            timestamp,
+            str(nonce),
+            actor_id,
+            str(request_id),
+            body,
+        )
     except ValueError:
         raise _unauthenticated() from None
     expected = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).digest()

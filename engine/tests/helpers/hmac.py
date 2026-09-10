@@ -21,6 +21,8 @@ def build_test_hmac_headers(
     key_id: str = TEST_HMAC_KEY_ID,
     secret: str = TEST_HMAC_SECRET,
     nonce: str = TEST_NONCE,
+    actor_id: str = TEST_ACTOR_ID,
+    request_id: str = TEST_REQUEST_ID,
     timestamp: int | None = None,
     signature_override: str | None = None,
 ) -> dict[str, str]:
@@ -35,7 +37,9 @@ def build_test_hmac_headers(
     query = "&".join(f"{key}={value}" for key, value in pairs)
     normalized = parsed.path if not query else f"{parsed.path}?{query}"
     body_hash = hashlib.sha256(body).hexdigest()
-    canonical = "\n".join((method.upper(), normalized, str(issued_at), nonce, body_hash))
+    canonical = "\n".join(
+        (method.upper(), normalized, str(issued_at), nonce, actor_id, request_id, body_hash)
+    )
     signature = (
         base64.urlsafe_b64encode(
         hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).digest()
@@ -49,6 +53,6 @@ def build_test_hmac_headers(
         "X-Nexus-Nonce": nonce,
         "X-Nexus-Body-SHA256": body_hash,
         "X-Nexus-Signature": signature_override or signature,
-        "X-Nexus-Actor-Id": TEST_ACTOR_ID,
-        "X-Request-Id": TEST_REQUEST_ID,
+        "X-Nexus-Actor-Id": actor_id,
+        "X-Request-Id": request_id,
     }

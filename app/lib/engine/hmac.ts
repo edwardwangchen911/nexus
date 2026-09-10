@@ -21,6 +21,8 @@ export function createEngineHmacHeaders(input: EngineHmacInput): Record<string, 
     normalizePathAndQuery(input.pathAndQuery),
     String(input.timestamp),
     input.nonce,
+    input.actorId,
+    input.requestId,
     bodyHash,
   ].join("\n");
   const signature = createHmac("sha256", input.secret)

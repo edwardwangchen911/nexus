@@ -54,8 +54,20 @@ def app(database_url: str, *, now: datetime = CLOCK):
     return engine_app
 
 
-def headers(method: str, path: str, body: bytes = b"") -> dict[str, str]:
-    signed = build_test_hmac_headers(method, path, body, nonce=str(uuid7()))
+def headers(
+    method: str,
+    path: str,
+    body: bytes = b"",
+    *,
+    actor_id: str = "nexus-test-user",
+) -> dict[str, str]:
+    signed = build_test_hmac_headers(
+        method,
+        path,
+        body,
+        nonce=str(uuid7()),
+        actor_id=actor_id,
+    )
     if body:
         signed["Content-Type"] = "application/json"
     return signed

@@ -12,28 +12,28 @@ HMAC_KEY = "nexus-test-hmac-key-32-bytes!!!!"
             "/internal/v1/research-runs?instrument_id=abc&tag=a&tag=z",
             b'{"instrument_id":"abc"}',
             "0198f7a0-1111-7777-8111-111111111111",
-            "AcCgtVoeHFg46x1y6ggnVthTrQwuBH1GoyulelJ-lYo",
+            "V24uqeWT6IRlTSLmtFLg6JG0_hOrwqXL8cLVv3lEryg",
         ),
         (
             "GET",
             "/internal/v1/system-status?tag=z&tag=a&instrument_id=abc",
             b"",
             "0198f7a0-1111-7777-8111-111111111112",
-            "wtOOjfEZFK97l-HA0wHlkyZ9p0-rM7fL3S0NLk7t7js",
+            "HjZkokAjFBSArHcRVFhPTOVoC5FHVmvI2y-XBdJLm2w",
         ),
         (
             "POST",
             "/internal/v1/research-runs?z=%E4%B8%AD&a=%2F&a=%20",
             '{"note":"中文"}'.encode(),
             "0198f7a0-1111-7777-8111-111111111113",
-            "FTX4MTbJapN28aKxVkVhDAfEVYuVRQKQl2F9wNKeQLE",
+            "tzudGRTkZulCGSRTwrfGCuxNKrelYOkeHbZB3AY6rTI",
         ),
         (
             "GET",
             "/internal%2Fv1/system-status?space=+&space=%20&tag=%E4%B8%AD&tag=%E4%B8%AD",
             b"",
             "0198f7a0-1111-7777-8111-111111111117",
-            "jATOKzEs-blPMZIdQUpWdevDjE7YuPZiBAmW4w9yFws",
+            "bX7Fk1NhjdPDa6s1O_ngNnGVEgrfOedj0dAcy5Ycchc",
         ),
     ],
 )
@@ -45,7 +45,15 @@ def test_hmac_v1_golden_vectors_are_byte_exact(
     expected_signature: str,
 ) -> None:
     """Changing query normalization, UTF-8 bytes, or empty-body hashing breaks interop."""
-    canonical = canonical_hmac_v1(method, path_and_query, 1787371200, nonce, body)
+    canonical = canonical_hmac_v1(
+        method,
+        path_and_query,
+        1787371200,
+        nonce,
+        "nexus-test-user",
+        "0198f7a0-1111-7777-8111-111111111114",
+        body,
+    )
 
     assert sign_hmac_v1(HMAC_KEY, canonical) == expected_signature
     assert canonical.endswith(
@@ -69,5 +77,7 @@ def test_hmac_v1_rejects_malformed_percent_escapes() -> None:
             "/internal/v1/system-status?bad=%ZZ",
             1787371200,
             "0198f7a0-1111-7777-8111-111111111111",
+            "nexus-test-user",
+            "0198f7a0-1111-7777-8111-111111111114",
             b"",
         )

@@ -19,12 +19,14 @@ from nexus.api.routes.news import router as news_router
 from nexus.api.routes.optimization import router as optimization_router
 from nexus.api.routes.overview import router as overview_router
 from nexus.api.routes.paper import router as paper_router
+from nexus.api.routes.portfolio_decisions import router as portfolio_decisions_router
 from nexus.api.routes.portfolios import router as portfolios_router
 from nexus.api.routes.research import router as research_router
 from nexus.api.routes.risk_audit import router as risk_audit_router
 from nexus.api.routes.strategies import router as strategies_router
 from nexus.api.routes.system import router as system_router
 from nexus.api.schemas.optimization import PortfolioScenarioRequest, WhatIfRequest
+from nexus.api.schemas.portfolio_decisions import PortfolioDecisionCreateRequest
 from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.domain.ids import new_uuid7
 from nexus.market.object_store import S3ProviderEvidenceStore
@@ -101,6 +103,7 @@ def create_engine_app(
     app.include_router(overview_router)
     app.include_router(optimization_router)
     app.include_router(paper_router)
+    app.include_router(portfolio_decisions_router)
     app.include_router(broker_sync_router)
     app.include_router(broker_simulation_router)
     app.include_router(research_router)
@@ -120,7 +123,7 @@ def _install_what_if_request_schema(app: FastAPI) -> None:
         document = original_openapi()
         components = document.setdefault("components", {})
         schemas = components.setdefault("schemas", {})
-        for model in (WhatIfRequest, PortfolioScenarioRequest):
+        for model in (WhatIfRequest, PortfolioScenarioRequest, PortfolioDecisionCreateRequest):
             request_schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
             definitions = request_schema.pop("$defs", {})
             schemas.update(definitions)
