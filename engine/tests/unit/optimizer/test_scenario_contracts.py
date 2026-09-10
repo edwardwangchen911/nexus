@@ -118,6 +118,7 @@ def _evaluation_payload() -> dict[str, object]:
         "diagnostic_report_id": _REPORT_ID,
         "diagnostic_input_hash": "c" * 64,
         "valuation_time": _AS_OF,
+        "valuation_scope": "currency:USD",
         "objective": "reduce_security_concentration",
         "analysis_status": "partial",
         "objective_status": "improved_not_met",

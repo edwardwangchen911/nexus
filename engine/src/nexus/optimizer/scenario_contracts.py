@@ -104,6 +104,7 @@ class PortfolioScenarioEvaluationV1(_StrictScenarioModel):
     diagnostic_report_id: UUID
     diagnostic_input_hash: str = Field(pattern=_HASH_PATTERN)
     valuation_time: datetime
+    valuation_scope: Literal["currency:USD"]
     objective: ScenarioObjective
     analysis_status: Literal["partial"]
     objective_status: ScenarioObjectiveStatus

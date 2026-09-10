@@ -16,7 +16,7 @@
 - 不新增依赖，不新增数据库迁移，不修改 `.openai/hosting.json`。
 - `execution_locked=true`，请求不得接受权重、证券列表、数量、金额或订单。
 - 只允许当前正持仓减仓或保持，差额进入现金；不得新增、增持、做空或杠杆。
-- 集中度是 security-only 分母；现金腿计入单边换手。
+- 估值域固定为 `currency:USD`；只纳入身份权威确认的 USD 标准美股，`00656.HK` 不换算、不调整。集中度是该域 security-only 分母；现金腿计入单边换手。
 - 全部权重用 `Decimal`，API 用十进制字符串，调整步长固定为 `0.0001`。
 - 页面加载和刷新只读；只有明确点击才调用本地计算 POST，且不得调用 Provider、模型、Shadow 或交易入口。
 - unknown 保持 unknown；成本未知仍可分析，但不得显示为可执行或推荐。
@@ -112,7 +112,7 @@ git commit -m "feat: define portfolio scenario contracts"
 - Create: `engine/tests/unit/optimizer/test_scenario_engine.py`
 
 **Interfaces:**
-- Consumes: Task 1 合同、`PortfolioSnapshot`、`PortfolioDiagnosticReport`、`RealAdvisoryPolicy`。
+- Consumes: Task 1 合同、`PortfolioSnapshot`、`PortfolioDiagnosticReport`、`InstrumentIdentity` 映射、`RealAdvisoryPolicy`、权威 `diagnostic_report_id` 与 `diagnostic_input_hash`。
 - Produces: `evaluate_adjustment_scenario(...) -> PortfolioScenarioEvaluationV1`。
 
 - [ ] **Step 1: 写预算充足和预算不足的失败测试**
@@ -121,7 +121,7 @@ git commit -m "feat: define portfolio scenario contracts"
 
 - [ ] **Step 2: 写不交易和不可行测试**
 
-覆盖已满足目标返回 `unchanged`、单证券返回 `infeasible`、一个基点无法推进、请求现金下限低于系统值时采用系统值。
+覆盖已满足目标返回 `unchanged`、单证券返回 `infeasible`、一个基点无法推进、请求现金下限低于系统值时采用系统值，以及不可出售数量形成的目标权重下限。
 
 - [ ] **Step 3: 写确定性与口径测试**
 
@@ -132,6 +132,8 @@ git commit -m "feat: define portfolio scenario contracts"
 - security-only Top1/Top3/HHI 不把现金计入分母；
 - 出售 5% 并转现金得到 5% 单边换手；
 - 舍入余数只进入现金；
+- 估值域固定返回 `currency:USD`，港股只读持仓不进入权重和候选；
+- USD 持仓缺少标准美股身份时失败关闭；
 - 成本为 `unknown/COST_MODEL_NOT_AVAILABLE`，`execution_locked=true`。
 
 - [ ] **Step 4: 运行测试确认入口缺失**
@@ -142,7 +144,7 @@ uv run pytest engine/tests/unit/optimizer/test_scenario_engine.py -q --import-mo
 
 - [ ] **Step 5: 实现权威输入校验和指标函数**
 
-私有 helper 仅负责：快照/诊断绑定、含现金权重、security-only 指标、现金腿换手和稳定候选排序。禁止数据库、时钟、随机数、网络或日志副作用。
+私有 helper 仅负责：快照/诊断/诊断哈希绑定、标准美股身份过滤、USD 域含现金权重、冻结 USD Top1 指标复核、可出售下限、security-only 指标、现金腿换手和稳定候选排序。禁止数据库、时钟、随机数、网络或日志副作用。
 
 - [ ] **Step 6: 实现一个基点循环**
 

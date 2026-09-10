@@ -39,7 +39,8 @@
 
 - `execution_locked` 恒为 `true`。
 - 请求不接受目标权重、数量、金额、订单或证券列表。
-- 标的集合只来自所选冻结快照的正持仓。
+- 首版估值域固定为 `currency:USD`；标的集合只来自冻结快照中经身份权威确认的 USD 标准美股正持仓。
+- `00656.HK` 和其他非 USD 持仓继续只读展示，不进入候选、不参与 USD 域权重，也不做隐含 FX 换算。
 - Engine 只读取业务事实，进行纯计算；持久化仅限现有安全边界要求的幂等声明和非敏感审计摘要。
 - 不写候选、持仓、订单、成交、Shadow 或外部账户。
 - 页面加载和普通刷新只读取既有持久化事实；只有用户明确点击“生成调整情景”才调用本地确定性 POST。
@@ -67,7 +68,7 @@ effective_minimum_cash = max(policy.cash_minimum, constraints.minimum_cash)
 
 ### 3.1 权重与集中度
 
-- 组合权重以快照的同一估值口径计算，现金与证券权重总和必须为 1。
+- 组合权重在固定 `currency:USD` 域内计算，USD 现金与经身份确认的 USD 标准美股权重总和必须为 1。
 - `security_top1`、`security_top3` 和 `security_hhi` 的分母是证券市值总额，不含现金。
 - 页面必须写明“证券持仓内占比”，不得描述为含现金总资产占比。
 - 候选只允许证券权重保持或下降，差额进入现金。
@@ -140,6 +141,7 @@ class PortfolioScenarioEvaluationV1(StrictModel):
     diagnostic_report_id: UUID
     diagnostic_input_hash: str
     valuation_time: datetime
+    valuation_scope: Literal["currency:USD"]
     objective: ScenarioObjective
     analysis_status: Literal["partial"]
     objective_status: ScenarioObjectiveStatus
@@ -174,8 +176,11 @@ def evaluate_adjustment_scenario(
     *,
     snapshot: PortfolioSnapshot,
     report: PortfolioDiagnosticReport,
+    identities: Mapping[UUID, InstrumentIdentity],
     constraints: AdjustmentScenarioConstraintsV1,
     policy: RealAdvisoryPolicy,
+    diagnostic_report_id: UUID,
+    diagnostic_input_hash: str,
     request_hash: str,
 ) -> PortfolioScenarioEvaluationV1:
     ...
@@ -183,17 +188,19 @@ def evaluate_adjustment_scenario(
 
 算法固定如下：
 
-1. 校验快照状态、正净值、诊断绑定和时间一致性；失败返回领域错误，不生成候选。
-2. 从快照计算含现金组合权重，再计算 security-only Top1、Top3 和 HHI。
-3. 计算有效最低现金和最大单边换手预算。
-4. 若当前 `security_top1 <= policy.single_name_warning` 且现金满足要求，返回 `unchanged`。
-5. 每轮按当前 security-only 权重降序选择可减仓证券，权重相同时按 `instrument_id` 字典序稳定决胜。阶段 A 不从组合级诊断反推逐标的严重度，也不因缺少流动性数据改变排序。
-6. 将一个基点的组合总权重从该证券转入现金。
-7. 每轮重新计算 security-only 指标、现金和单边换手，不缓存旧排名。
-8. `security_top1` 达到阈值且现金达到有效最低值时返回 `met`。
-9. 预算耗尽但 Top1 严格下降时返回 `improved_not_met`，不得越过预算。
-10. 合法候选与基线相同或 Top1 未下降时返回 `unchanged`。
-11. 单证券组合、无法保留至少一个基点正证券仓位或不存在合法一步动作时返回 `infeasible`。
+1. 校验快照状态、诊断绑定、时间、诊断哈希和政策版本一致性；失败返回领域错误，不生成候选。
+2. 用身份权威筛选 `restriction=STANDARD`、`currency=USD` 且交易所属于 `US_EQUITY_EXCHANGES` 的正持仓；任何 USD 持仓身份缺失或越界均失败关闭。
+3. 只汇总 USD 现金和上述美股市值，拒绝负现金、缺失/非正价格、非正数量或不可出售数量异常；非 USD 资产不换算、不进入本情景。
+4. 计算 USD 域含现金组合权重，再计算 security-only Top1、Top3 和 HHI；重算 Top1 必须与冻结诊断中唯一的 `CONCENTRATION_TOP1/currency:USD` 指标、阈值、严重度和证据时点一致，否则失败关闭。
+5. 计算有效最低现金、每个持仓基于 `available_quantity` 的最小合法权重和最大单边换手预算。
+6. 若当前 `security_top1 <= policy.single_name_warning` 且现金满足要求，返回 `unchanged`。
+7. 每轮按当前 security-only 权重降序选择仍可出售的证券，权重相同时按 `instrument_id` 字典序稳定决胜。阶段 A 不从组合级诊断反推逐标的严重度，也不因缺少流动性数据改变排序。
+8. 将不超过一个基点的组合总权重从该证券转入现金，不得低于其不可出售数量对应的最小权重。
+9. 每轮重新计算 security-only 指标、现金和单边换手，不缓存旧排名。
+10. `security_top1` 达到阈值且现金达到有效最低值时返回 `met`。
+11. 预算耗尽但 Top1 严格下降时返回 `improved_not_met`，不得越过预算。
+12. 合法候选与基线相同或 Top1 未下降时返回 `unchanged`。
+13. 单证券组合、出售能力耗尽或结构性下限导致目标无法改善时返回 `infeasible`；已经严格改善但未达阈值时返回 `improved_not_met` 并保留具体原因。
 
 `estimated_cost` 的基线为已知零，候选在阶段 A 保持 `unknown/COST_MODEL_NOT_AVAILABLE`。因此所有成功的阶段 A 响应固定为 `analysis_status=partial`；unknown 不阻止分析显示，但响应不得声称可执行。无法计算目标指标时不伪造 `unavailable` 结果，而是由 API 返回稳定拒绝码。
 
@@ -235,6 +242,7 @@ Engine API 必须：
 - `SCENARIO_AS_OF_MISMATCH`
 - `SCENARIO_OBJECTIVE_UNSUPPORTED`
 - `SCENARIO_INPUT_INVALID`
+- `SCENARIO_US_EQUITY_SCOPE_INVALID`
 
 ## 7. 页面
 
@@ -269,13 +277,16 @@ Engine API 必须：
 3. 已满足 Top1 和现金目标：`unchanged`，不为了产生动作强制交易。
 4. 单一证券：`infeasible`，不清仓伪装降低 security-only 集中度。
 5. 请求最低现金低于系统值：采用系统最低现金。
-6. 成本未知：`partial` 可展示，`execution_locked=true`。
-7. 快照、诊断或时间不一致：稳定拒绝且纯引擎不运行。
-8. 请求包含权重、证券列表或额外字段：422。
-9. 同一规范化输入重复计算得到相同 `result_hash`。
-10. 页面加载和刷新没有 POST；只有明确点击产生一次本地确定性 POST。
-11. 页面不调用 Provider、模型、Shadow、订单或成交入口。
-12. 一个现有真实只读快照通过正常产品入口返回分析结果；若基线未达到要求，则准确返回基线拒绝，不伪造成功。
+6. 部分持仓不可出售：目标权重不低于不可出售数量对应下限。
+7. 含 `00656.HK`：它不进入 USD 情景且不发生隐含 FX 换算。
+8. USD 持仓身份缺失或不是标准美股：失败关闭。
+9. 成本未知：`partial` 可展示，`execution_locked=true`。
+10. 快照、诊断、诊断哈希或时间不一致：稳定拒绝且不生成候选。
+11. 请求包含权重、证券列表或额外字段：422。
+12. 同一规范化输入重复计算得到相同 `result_hash`。
+13. 页面加载和刷新没有 POST；只有明确点击产生一次本地确定性 POST。
+14. 页面不调用 Provider、模型、Shadow、订单或成交入口。
+15. 一个现有真实只读快照通过正常产品入口返回分析结果；若基线未达到要求，则准确返回基线拒绝，不伪造成功。
 
 ## 9. 阶段 A 完成定义
 
