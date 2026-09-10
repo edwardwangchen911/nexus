@@ -14,6 +14,7 @@ from pydantic import BaseModel, ValidationError
 
 from nexus.agents.codex_versions import (
     PORTFOLIO_DECISION_MAX_INPUT_TOKENS,
+    PORTFOLIO_DECISION_MAX_INPUT_TOKENS_PER_TURN,
     PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS,
     PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN,
     PORTFOLIO_DECISION_MAX_TOOL_CALLS,
@@ -145,6 +146,14 @@ class CodexPortfolioResponsesClient:
             output_model=model,
             max_wire_bytes=PORTFOLIO_DECISION_MAX_WIRE_BYTES,
         )
+        if usage.input_tokens > PORTFOLIO_DECISION_MAX_INPUT_TOKENS_PER_TURN:
+            raise ResponseShapeError(
+                "portfolio decision Codex turn input exceeds limit",
+                usage=NormalizedUsage(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                ),
+            )
         if usage.output_tokens > PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN:
             raise ResponseShapeError(
                 "portfolio decision Codex turn output exceeds limit",

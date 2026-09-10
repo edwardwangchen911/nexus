@@ -218,6 +218,84 @@ async def test_codex_transport_accepts_reported_sdk_overhead_within_aggregate_li
 
 
 @pytest.mark.asyncio
+async def test_codex_transport_rejects_first_turn_input_over_64000_with_known_usage() -> None:
+    calls = 0
+
+    async def invoke(
+        payload: dict[str, object], **kwargs: object
+    ) -> tuple[str, UsageSnapshot]:
+        nonlocal calls
+        calls += 1
+        del payload
+        del kwargs
+        return json.dumps({"objective": "reduce_security_concentration"}), UsageSnapshot(
+            input_tokens=64_001,
+            output_tokens=44,
+        )
+
+    client = portfolio_decision_model.CodexPortfolioResponsesClient(
+        invoke=invoke,
+        model_id="configured-model",
+        pricing_version="pricing-v1",
+    )
+    model = ResponsesPortfolioDecisionModel(
+        client=client,
+        config=_config().model_copy(
+            update={"max_input_tokens": 128_000, "max_output_tokens": 16_384}
+        ),
+    )
+
+    with pytest.raises(PortfolioDecisionModelError) as raised:
+        await model.request_scenario(
+            context=_context(), prompt="bounded prompt", tools=_tools()
+        )
+
+    assert raised.value.usage_known is True
+    assert raised.value.usage.input_tokens == 64_001
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_codex_transport_rejects_second_turn_input_over_64000_with_known_usage() -> None:
+    calls = 0
+
+    async def invoke(
+        payload: dict[str, object], **kwargs: object
+    ) -> tuple[str, UsageSnapshot]:
+        nonlocal calls
+        calls += 1
+        del payload
+        del kwargs
+        body = {"objective": "reduce_security_concentration"} if calls == 1 else _intent()
+        input_tokens = 1_000 if calls == 1 else 64_001
+        return json.dumps(body), UsageSnapshot(input_tokens=input_tokens, output_tokens=44)
+
+    client = portfolio_decision_model.CodexPortfolioResponsesClient(
+        invoke=invoke,
+        model_id="configured-model",
+        pricing_version="pricing-v1",
+    )
+    model = ResponsesPortfolioDecisionModel(
+        client=client,
+        config=_config().model_copy(
+            update={"max_input_tokens": 128_000, "max_output_tokens": 16_384}
+        ),
+    )
+    first = await model.request_scenario(
+        context=_context(), prompt="bounded prompt", tools=_tools()
+    )
+
+    with pytest.raises(PortfolioDecisionModelError) as raised:
+        await model.request_intent(
+            context=_context(), prompt="bounded prompt", frozen=_frozen(), first_turn=first
+        )
+
+    assert raised.value.usage_known is True
+    assert raised.value.usage.input_tokens == 65_001
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_two_turn_model_calls_one_tool_then_returns_bound_intent() -> None:
     client = _Client(_intent())
     model = ResponsesPortfolioDecisionModel(client=client, config=_config())
