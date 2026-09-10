@@ -38,6 +38,7 @@ class DiagnosticItemResponse(_StrictSchema):
 
 
 class PortfolioDiagnosticResponse(_StrictSchema):
+    diagnostic_report_id: UUID | None
     portfolio_snapshot_id: UUID
     snapshot_as_of: datetime
     trading_day: date | None
@@ -48,10 +49,16 @@ class PortfolioDiagnosticResponse(_StrictSchema):
     items: tuple[DiagnosticItemResponse, ...]
 
     @classmethod
-    def from_report(cls, report: PortfolioDiagnosticReport) -> "PortfolioDiagnosticResponse":
+    def from_report(
+        cls,
+        report: PortfolioDiagnosticReport,
+        *,
+        diagnostic_report_id: UUID | None,
+    ) -> "PortfolioDiagnosticResponse":
         if report.snapshot_as_of is None:
             raise ValueError("persisted diagnostic snapshot time is unavailable")
         return cls(
+            diagnostic_report_id=diagnostic_report_id,
             portfolio_snapshot_id=report.portfolio_snapshot_id,
             snapshot_as_of=report.snapshot_as_of,
             trading_day=report.trading_day,

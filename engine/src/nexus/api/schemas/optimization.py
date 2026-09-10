@@ -6,9 +6,10 @@ from typing import Literal
 from uuid import UUID
 
 from nexus.api.schemas.integrations import SuccessMetaResponse
-from nexus.domain.decimal import DecimalString
+from nexus.domain.decimal import DecimalString, RatioDecimalString
 from nexus.optimizer.models import ProposalGroupStatus, ProposalVariant
 from nexus.optimizer.research_context import DailyResearchContextRequest, FrozenDailyResearchContext
+from nexus.optimizer.scenario_contracts import ScenarioObjective, ScenarioObjectiveStatus
 from nexus.optimizer.what_if import WhatIfEvaluation
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -43,6 +44,38 @@ class WhatIfRequest(_StrictOptimizationSchema):
     ) -> tuple[WhatIfPositionRequest, ...]:
         if len({position.instrument_id for position in value}) != len(value):
             raise ValueError("instrument ids must be unique")
+        return value
+
+
+class AdjustmentScenarioConstraintsRequest(_StrictOptimizationSchema):
+    schema_version: Literal["adjustment_scenario_constraints_v1"]
+    objective: ScenarioObjective
+    max_turnover: RatioDecimalString
+    minimum_cash: RatioDecimalString
+    universe_policy: Literal["current_holdings_only"]
+    allow_new_positions: Literal[False]
+
+    @field_validator("max_turnover", "minimum_cash")
+    @classmethod
+    def _ratio_range(cls, value: str) -> str:
+        decimal = Decimal(value)
+        if not decimal.is_finite() or decimal < 0 or decimal > 1:
+            raise ValueError("scenario ratios must be within zero and one")
+        return value
+
+
+class PortfolioScenarioRequest(_StrictOptimizationSchema):
+    schema_version: Literal["portfolio_scenario_request_v1"]
+    portfolio_snapshot_id: UUID
+    diagnostic_report_id: UUID
+    as_of: datetime
+    constraints: AdjustmentScenarioConstraintsRequest
+
+    @field_validator("as_of")
+    @classmethod
+    def _utc_as_of(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("as_of must be UTC")
         return value
 
 
@@ -508,4 +541,62 @@ class WhatIfResponse(_StrictOptimizationSchema):
 
 class WhatIfEnvelope(_StrictOptimizationSchema):
     data: WhatIfResponse
+    meta: SuccessMetaResponse
+
+
+class ScenarioMetricResponse(_StrictOptimizationSchema):
+    status: Literal["known", "unknown"]
+    value: DecimalString | None
+    reason: str | None
+
+    @model_validator(mode="after")
+    def _status_matches_payload(self) -> "ScenarioMetricResponse":
+        if self.status == "known" and (self.value is None or self.reason is not None):
+            raise ValueError("known scenario metric requires only a value")
+        if self.status == "unknown" and (self.value is not None or not self.reason):
+            raise ValueError("unknown scenario metric requires only a reason")
+        return self
+
+
+class ScenarioMetricSetResponse(_StrictOptimizationSchema):
+    security_top1: ScenarioMetricResponse
+    security_top3: ScenarioMetricResponse
+    security_hhi: ScenarioMetricResponse
+    cash_weight: ScenarioMetricResponse
+    one_way_turnover: ScenarioMetricResponse
+    estimated_cost: ScenarioMetricResponse
+
+
+class ScenarioPositionResponse(_StrictOptimizationSchema):
+    instrument_id: UUID
+    current_weight: DecimalString
+    target_weight: DecimalString
+    action: Literal["reduce", "maintain"]
+    reason_code: Literal["CONCENTRATION_REDUCTION", "BASELINE_WEIGHT"]
+
+
+class PortfolioScenarioResponse(_StrictOptimizationSchema):
+    schema_version: Literal["portfolio_scenario_evaluation_v1"]
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    portfolio_snapshot_id: UUID
+    diagnostic_report_id: UUID
+    diagnostic_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    valuation_time: datetime
+    valuation_scope: Literal["currency:USD"]
+    objective: ScenarioObjective
+    analysis_status: Literal["partial"]
+    objective_status: ScenarioObjectiveStatus
+    baseline: ScenarioMetricSetResponse
+    candidate: ScenarioMetricSetResponse
+    positions: tuple[ScenarioPositionResponse, ...] = Field(min_length=1, max_length=100)
+    cash_current_weight: DecimalString
+    cash_target_weight: DecimalString
+    hard_constraint_reasons: tuple[str, ...]
+    unknown_metrics: tuple[str, ...]
+    execution_locked: Literal[True]
+
+
+class PortfolioScenarioEnvelope(_StrictOptimizationSchema):
+    data: PortfolioScenarioResponse
     meta: SuccessMetaResponse

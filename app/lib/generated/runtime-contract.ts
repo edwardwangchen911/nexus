@@ -5216,6 +5216,18 @@ export const runtimeContractSchemas = {
   "PortfolioDiagnosticResponse": {
     "additionalProperties": false,
     "properties": {
+      "diagnostic_report_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Diagnostic Report Id"
+      },
       "items": {
         "items": {
           "$ref": "#/components/schemas/DiagnosticItemResponse"
@@ -5262,6 +5274,7 @@ export const runtimeContractSchemas = {
       }
     },
     "required": [
+      "diagnostic_report_id",
       "portfolio_snapshot_id",
       "snapshot_as_of",
       "trading_day",
@@ -5612,6 +5625,140 @@ export const runtimeContractSchemas = {
       "diagnostics_truncated"
     ],
     "title": "PortfolioResearchContext",
+    "type": "object"
+  },
+  "PortfolioScenarioResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "analysis_status": {
+        "const": "partial",
+        "title": "Analysis Status",
+        "type": "string"
+      },
+      "baseline": {
+        "$ref": "#/components/schemas/ScenarioMetricSetResponse"
+      },
+      "candidate": {
+        "$ref": "#/components/schemas/ScenarioMetricSetResponse"
+      },
+      "cash_current_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cash Current Weight",
+        "type": "string"
+      },
+      "cash_target_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cash Target Weight",
+        "type": "string"
+      },
+      "diagnostic_input_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Diagnostic Input Hash",
+        "type": "string"
+      },
+      "diagnostic_report_id": {
+        "format": "uuid",
+        "title": "Diagnostic Report Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "hard_constraint_reasons": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Hard Constraint Reasons",
+        "type": "array"
+      },
+      "objective": {
+        "const": "reduce_security_concentration",
+        "title": "Objective",
+        "type": "string"
+      },
+      "objective_status": {
+        "enum": [
+          "met",
+          "improved_not_met",
+          "unchanged",
+          "infeasible"
+        ],
+        "title": "Objective Status",
+        "type": "string"
+      },
+      "portfolio_snapshot_id": {
+        "format": "uuid",
+        "title": "Portfolio Snapshot Id",
+        "type": "string"
+      },
+      "positions": {
+        "items": {
+          "$ref": "#/components/schemas/ScenarioPositionResponse"
+        },
+        "maxItems": 100,
+        "minItems": 1,
+        "title": "Positions",
+        "type": "array"
+      },
+      "request_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Request Hash",
+        "type": "string"
+      },
+      "result_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Result Hash",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "portfolio_scenario_evaluation_v1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "unknown_metrics": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Unknown Metrics",
+        "type": "array"
+      },
+      "valuation_scope": {
+        "const": "currency:USD",
+        "title": "Valuation Scope",
+        "type": "string"
+      },
+      "valuation_time": {
+        "format": "date-time",
+        "title": "Valuation Time",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "request_hash",
+      "result_hash",
+      "portfolio_snapshot_id",
+      "diagnostic_report_id",
+      "diagnostic_input_hash",
+      "valuation_time",
+      "valuation_scope",
+      "objective",
+      "analysis_status",
+      "objective_status",
+      "baseline",
+      "candidate",
+      "positions",
+      "cash_current_weight",
+      "cash_target_weight",
+      "hard_constraint_reasons",
+      "unknown_metrics",
+      "execution_locked"
+    ],
+    "title": "PortfolioScenarioResponse",
     "type": "object"
   },
   "PortfolioSnapshotResponse": {
@@ -9418,6 +9565,130 @@ export const runtimeContractSchemas = {
     "title": "RoleVote",
     "type": "object"
   },
+  "ScenarioMetricResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "status": {
+        "enum": [
+          "known",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "value": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Value"
+      }
+    },
+    "required": [
+      "status",
+      "value",
+      "reason"
+    ],
+    "title": "ScenarioMetricResponse",
+    "type": "object"
+  },
+  "ScenarioMetricSetResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cash_weight": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "estimated_cost": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "one_way_turnover": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "security_hhi": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "security_top1": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "security_top3": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      }
+    },
+    "required": [
+      "security_top1",
+      "security_top3",
+      "security_hhi",
+      "cash_weight",
+      "one_way_turnover",
+      "estimated_cost"
+    ],
+    "title": "ScenarioMetricSetResponse",
+    "type": "object"
+  },
+  "ScenarioPositionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "reduce",
+          "maintain"
+        ],
+        "title": "Action",
+        "type": "string"
+      },
+      "current_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Current Weight",
+        "type": "string"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "reason_code": {
+        "enum": [
+          "CONCENTRATION_REDUCTION",
+          "BASELINE_WEIGHT"
+        ],
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "target_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Target Weight",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "current_weight",
+      "target_weight",
+      "action",
+      "reason_code"
+    ],
+    "title": "ScenarioPositionResponse",
+    "type": "object"
+  },
   "SearchAxisSummaryResponse": {
     "additionalProperties": false,
     "properties": {
@@ -11110,6 +11381,8 @@ export const optimizationJobRuntimeSchema = runtimeContractSchemas.OptimizationJ
 export const optimizationLifecycleRuntimeSchema = runtimeContractSchemas.OptimizationLifecycleData;
 
 export const optimizationProposalGroupRuntimeSchema = runtimeContractSchemas.OptimizationProposalGroupResponse;
+
+export const portfolioScenarioRuntimeSchema = runtimeContractSchemas.PortfolioScenarioResponse;
 
 export const shadowStartRuntimeSchema = runtimeContractSchemas.ShadowStartData;
 

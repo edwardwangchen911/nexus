@@ -25,12 +25,18 @@ from nexus.api.schemas.optimization import (
     OptimizationProposalGroupResponse,
     OptimizationProposalPositionResponse,
     OptimizationProposalResponse,
+    PortfolioScenarioEnvelope,
+    PortfolioScenarioRequest,
+    PortfolioScenarioResponse,
     ProposalAdmissionRequest,
     ProposalComparisonAuthorityResponse,
     ProposalComparisonDimensionsResponse,
     ProposalComparisonMetricsResponse,
     ProposalComparisonResponse,
     ProposalDraftRequest,
+    ScenarioMetricResponse,
+    ScenarioMetricSetResponse,
+    ScenarioPositionResponse,
     ShadowAttemptResponse,
     ShadowCheckpointResponse,
     ShadowCoverageResponse,
@@ -55,10 +61,21 @@ from nexus.api.schemas.optimization import (
     WhatIfResponse,
 )
 from nexus.audit.service import append_audit_event
+from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
+from nexus.diagnostics.repository import (
+    load_frozen_snapshot,
+    load_instrument_identities,
+    read_report,
+)
 from nexus.domain.decimal import decimal_to_string
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
-from nexus.optimizer.compare import ComparableProposal, ComparisonDimensions, compare_proposals
+from nexus.optimizer.compare import (
+    ComparableProposal,
+    ComparisonDimensions,
+    TypedMetric,
+    compare_proposals,
+)
 from nexus.optimizer.construction import load_analysis_construction_inputs
 from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.optimizer.initial_draft import InitialDraftUnavailable, create_initial_draft
@@ -71,8 +88,17 @@ from nexus.optimizer.models import (
 )
 from nexus.optimizer.repository import has_executable_shadow_authority
 from nexus.optimizer.research_context import read_draft_research_context
+from nexus.optimizer.scenario_contracts import (
+    AdjustmentScenarioConstraintsV1,
+    PortfolioScenarioEvaluationV1,
+    PortfolioScenarioRequestV1,
+    ScenarioMetricSetV1,
+    canonical_scenario_hash,
+)
+from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
 from nexus.optimizer.what_if import evaluate_what_if as evaluate_what_if_weights
 from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
@@ -80,7 +106,12 @@ from nexus.persistence.models.optimization import (
     ProposalComparisonRecord,
     ProposalPositionRecord,
 )
-from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.persistence.models.portfolio import (
+    Account,
+    BrokerSyncRun,
+    Portfolio,
+    PortfolioSnapshotRecord,
+)
 from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.reconciliation.admission_claim import claim_or_lock, validate_request_identity
 from nexus.reconciliation.persistence_errors import (
@@ -90,6 +121,7 @@ from nexus.reconciliation.persistence_errors import (
 from nexus.shadow.models import ShadowMetrics, ShadowMetricValue, VariantMetrics
 from nexus.shadow.query import ShadowGroupView, load_shadow_view
 from nexus.shadow.start import start_proposal_shadow
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -108,9 +140,7 @@ _CREATE_RESPONSES = {
     **_ERROR_RESPONSES,
 }
 
-_IdempotencyKey = Annotated[
-    str, Header(alias="Idempotency-Key", min_length=1, max_length=255)
-]
+_IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=255)]
 _IfMatch = Annotated[str, Header(alias="If-Match", min_length=1, max_length=64)]
 
 _WHAT_IF_REQUEST_BODY = {
@@ -119,11 +149,23 @@ _WHAT_IF_REQUEST_BODY = {
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WhatIfRequest"}}},
     }
 }
+_SCENARIO_REQUEST_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/PortfolioScenarioRequest"}
+            }
+        },
+    }
+}
 _PROPOSAL_ADMISSION_REQUEST_BODY = {
     "requestBody": {
         "required": True,
         "content": {
-            "application/json": {"schema": {"$ref": "#/components/schemas/ProposalAdmissionRequest"}}
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/ProposalAdmissionRequest"}
+            }
         },
     }
 }
@@ -142,7 +184,9 @@ _LIFECYCLE_REQUEST_BODY = {
 async def _bounded_what_if_request(request: Request) -> WhatIfRequest:
     """Read and cache at most 64 KiB before JSON parsing or HMAC verification."""
     if not _is_json_media_type(request.headers.get("Content-Type")):
-        raise NexusError(ErrorCode.VALIDATION_ERROR, "Content-Type must be application/json.", status_code=422)
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Content-Type must be application/json.", status_code=422
+        )
     content_length = request.headers.get("Content-Length")
     if content_length is not None:
         if not _is_canonical_content_length(content_length):
@@ -161,13 +205,54 @@ async def _bounded_what_if_request(request: Request) -> WhatIfRequest:
     try:
         return WhatIfRequest.model_validate_json(raw_body)
     except ValueError as error:
-        raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422) from error
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422
+        ) from error
+
+
+async def _bounded_scenario_request(request: Request) -> PortfolioScenarioRequest:
+    """Apply the existing exact 64 KiB analysis boundary to a scenario request."""
+    if not _is_json_media_type(request.headers.get("Content-Type")):
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR,
+            "Content-Type must be application/json.",
+            status_code=422,
+        )
+    content_length = request.headers.get("Content-Length")
+    if content_length is not None:
+        if not _is_canonical_content_length(content_length):
+            raise NexusError(
+                ErrorCode.VALIDATION_ERROR, "Content-Length is invalid.", status_code=422
+            )
+        if int(content_length) > _MAX_WHAT_IF_BYTES:
+            raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > _MAX_WHAT_IF_BYTES - len(body):
+            raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
+        body.extend(chunk)
+    raw_body = bytes(body)
+    setattr(request, "_body", raw_body)
+    try:
+        return PortfolioScenarioRequest.model_validate_json(raw_body)
+    except ValidationError as error:
+        if any(item["loc"] == ("constraints", "objective") for item in error.errors()):
+            raise NexusError(
+                ErrorCode.SCENARIO_OBJECTIVE_UNSUPPORTED,
+                "Scenario objective is not supported.",
+                status_code=422,
+            ) from error
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422
+        ) from error
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422
+        ) from error
 
 
 def _is_canonical_content_length(value: str) -> bool:
-    return value == "0" or (
-        value.isascii() and value.isdecimal() and value[0] in "123456789"
-    )
+    return value == "0" or (value.isascii() and value.isdecimal() and value[0] in "123456789")
 
 
 def _is_json_media_type(value: str | None) -> bool:
@@ -180,6 +265,208 @@ def _is_json_media_type(value: str | None) -> bool:
         name.strip().lower() == "charset" and separator == "=" and raw_value.strip()
         for parameter in parts[1:]
         for name, separator, raw_value in (parameter.partition("="),)
+    )
+
+
+@router.post(
+    "/internal/v1/portfolio-scenarios/evaluate",
+    response_model=PortfolioScenarioEnvelope,
+    responses=_ERROR_RESPONSES,
+    openapi_extra=_SCENARIO_REQUEST_BODY,
+)
+async def evaluate_portfolio_scenario(
+    request: Request,
+    idempotency_key: _IdempotencyKey,
+    payload: PortfolioScenarioRequest = Depends(_bounded_scenario_request),
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> PortfolioScenarioEnvelope:
+    """Generate one deterministic, ephemeral, permanently locked scenario."""
+    raw_body = await request.body()
+    snapshot_record = await session.get(PortfolioSnapshotRecord, payload.portfolio_snapshot_id)
+    if snapshot_record is None:
+        raise NexusError(ErrorCode.NOT_FOUND, "Portfolio snapshot was not found.", status_code=404)
+    diagnostic_record = await session.get(
+        PortfolioDiagnosticReportRecord, payload.diagnostic_report_id
+    )
+    if diagnostic_record is None:
+        raise NexusError(ErrorCode.NOT_FOUND, "Diagnostic report was not found.", status_code=404)
+    if (
+        diagnostic_record.portfolio_snapshot_id != snapshot_record.id
+        or diagnostic_record.portfolio_id != snapshot_record.portfolio_id
+        or diagnostic_record.policy_id != REAL_ADVISORY_POLICY_ID
+    ):
+        raise NexusError(
+            ErrorCode.SCENARIO_DIAGNOSTIC_MISMATCH,
+            "Scenario authority does not match the requested frozen snapshot.",
+            status_code=409,
+        )
+    now = _utc_now(request)
+    qualified_snapshot_id = await session.scalar(
+        select(PortfolioSnapshotRecord.id)
+        .join(Portfolio, Portfolio.id == PortfolioSnapshotRecord.portfolio_id)
+        .join(Account, Account.id == Portfolio.account_id)
+        .join(BrokerSyncRun, BrokerSyncRun.id == PortfolioSnapshotRecord.sync_run_id)
+        .where(
+            PortfolioSnapshotRecord.id == snapshot_record.id,
+            PortfolioSnapshotRecord.status == "READY",
+            PortfolioSnapshotRecord.created_at <= now,
+            PortfolioSnapshotRecord.as_of.is_not(None),
+            PortfolioSnapshotRecord.as_of <= now,
+            Account.provider == "fosun",
+            Account.status == "ACTIVE",
+            BrokerSyncRun.cash_flow_quality == "PASS",
+        )
+    )
+    if qualified_snapshot_id is None or diagnostic_record.created_at > now:
+        raise NexusError(
+            ErrorCode.SCENARIO_BASELINE_NOT_READY,
+            "Portfolio snapshot is not an eligible optimization baseline.",
+            status_code=409,
+        )
+    if diagnostic_record.snapshot_as_of != payload.as_of or snapshot_record.as_of != payload.as_of:
+        raise NexusError(
+            ErrorCode.SCENARIO_AS_OF_MISMATCH,
+            "Scenario authority does not match the requested valuation time.",
+            status_code=409,
+        )
+    idempotency_request_hash = hashlib.sha256(raw_body).hexdigest()
+    route = "/internal/v1/portfolio-scenarios/evaluate"
+    _validate_claim(actor.actor_id, route, idempotency_key, idempotency_request_hash)
+    try:
+        claim, owner = await claim_or_lock(
+            session,
+            actor.actor_id,
+            route,
+            idempotency_key,
+            idempotency_request_hash,
+            "portfolio_scenario_v1",
+        )
+    except IdempotencyConflict as error:
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Idempotency key has a different request body.",
+            status_code=409,
+        ) from error
+    if not owner and claim.request_hash != idempotency_request_hash:
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Idempotency key has a different request body.",
+            status_code=409,
+        )
+    try:
+        snapshot = await load_frozen_snapshot(
+            session,
+            portfolio_id=snapshot_record.portfolio_id,
+            snapshot_id=snapshot_record.id,
+        )
+        report = await read_report(session, diagnostic_record)
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+        policy = await load_real_advisory_policy_v1(session)
+        constraints = AdjustmentScenarioConstraintsV1(
+            schema_version=payload.constraints.schema_version,
+            objective=payload.constraints.objective,
+            max_turnover=Decimal(payload.constraints.max_turnover),
+            minimum_cash=Decimal(payload.constraints.minimum_cash),
+            universe_policy=payload.constraints.universe_policy,
+            allow_new_positions=payload.constraints.allow_new_positions,
+        )
+        scenario_request = PortfolioScenarioRequestV1(
+            schema_version=payload.schema_version,
+            portfolio_snapshot_id=payload.portfolio_snapshot_id,
+            diagnostic_report_id=payload.diagnostic_report_id,
+            as_of=payload.as_of,
+            constraints=constraints,
+        )
+        result = evaluate_adjustment_scenario(
+            snapshot=snapshot,
+            report=report,
+            identities=identities,
+            constraints=constraints,
+            policy=policy,
+            diagnostic_report_id=diagnostic_record.id,
+            diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
+            request_hash=canonical_scenario_hash(scenario_request),
+        )
+    except ValueError as error:
+        reason = str(error)
+        try:
+            code = ErrorCode(reason)
+        except ValueError:
+            code = ErrorCode.SCENARIO_BASELINE_NOT_READY
+        raise NexusError(
+            code,
+            "Scenario evaluation authority is incomplete.",
+            status_code=409,
+        ) from error
+    if owner:
+        await append_audit_event(
+            session,
+            actor_id=actor.actor_id,
+            action="portfolio_scenario_evaluated",
+            schema_version="1",
+            payload={
+                "request_hash": result.request_hash,
+                "policy_version": policy.version,
+                "instrument_count": len(result.positions),
+                "analysis_status": result.analysis_status,
+                "objective_status": result.objective_status,
+            },
+            occurred_at=_utc_now(request),
+        )
+    return PortfolioScenarioEnvelope(
+        data=_scenario_response(result),
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=result.valuation_time),
+    )
+
+
+def _scenario_response(result: PortfolioScenarioEvaluationV1) -> PortfolioScenarioResponse:
+    def metric(value: TypedMetric) -> ScenarioMetricResponse:
+        return ScenarioMetricResponse(
+            status=value.status,
+            value=None if value.value is None else decimal_to_string(value.value),
+            reason=value.reason,
+        )
+
+    def metric_set(value: ScenarioMetricSetV1) -> ScenarioMetricSetResponse:
+        return ScenarioMetricSetResponse(
+            security_top1=metric(value.security_top1),
+            security_top3=metric(value.security_top3),
+            security_hhi=metric(value.security_hhi),
+            cash_weight=metric(value.cash_weight),
+            one_way_turnover=metric(value.one_way_turnover),
+            estimated_cost=metric(value.estimated_cost),
+        )
+
+    return PortfolioScenarioResponse(
+        schema_version=result.schema_version,
+        request_hash=result.request_hash,
+        result_hash=result.result_hash,
+        portfolio_snapshot_id=result.portfolio_snapshot_id,
+        diagnostic_report_id=result.diagnostic_report_id,
+        diagnostic_input_hash=result.diagnostic_input_hash,
+        valuation_time=result.valuation_time,
+        valuation_scope=result.valuation_scope,
+        objective=result.objective,
+        analysis_status=result.analysis_status,
+        objective_status=result.objective_status,
+        baseline=metric_set(result.baseline),
+        candidate=metric_set(result.candidate),
+        positions=tuple(
+            ScenarioPositionResponse(
+                instrument_id=position.instrument_id,
+                current_weight=decimal_to_string(position.current_weight),
+                target_weight=decimal_to_string(position.target_weight),
+                action=position.action,
+                reason_code=position.reason_code,
+            )
+            for position in result.positions
+        ),
+        cash_current_weight=decimal_to_string(result.cash_current_weight),
+        cash_target_weight=decimal_to_string(result.cash_target_weight),
+        hard_constraint_reasons=result.hard_constraint_reasons,
+        unknown_metrics=result.unknown_metrics,
+        execution_locked=result.execution_locked,
     )
 
 
@@ -297,10 +584,16 @@ async def admit_optimization_proposal(
         data_snapshot_id=body.data_snapshot_id,
         cost_policy_id=body.cost_policy_id,
     )
-    construction = None if loaded is not None else await load_analysis_construction_inputs(
-        session, portfolio_snapshot_id=body.portfolio_snapshot_id,
-        data_snapshot_id=body.data_snapshot_id, cost_policy_id=body.cost_policy_id,
-        now=_utc_now(request),
+    construction = (
+        None
+        if loaded is not None
+        else await load_analysis_construction_inputs(
+            session,
+            portfolio_snapshot_id=body.portfolio_snapshot_id,
+            data_snapshot_id=body.data_snapshot_id,
+            cost_policy_id=body.cost_policy_id,
+            now=_utc_now(request),
+        )
     )
     if loaded is None and construction is None:
         raise NexusError(
@@ -409,22 +702,26 @@ async def get_optimization_group(
     by_variant = {child.variant: child for child in children}
     variants = ("hold_current", "minimum_change", "strategy_target")
     if tuple(by_variant) != variants:
-        raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal group variants are invalid.", status_code=409)
-    symbol_rows = (await session.execute(
-        select(InstrumentAlias.instrument_id, InstrumentAlias.symbol)
-        .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
-        .join(ProposalPositionRecord, ProposalPositionRecord.instrument_id == Instrument.id)
-        .where(
-            ProposalPositionRecord.proposal_id.in_(child.id for child in children),
-            Instrument.created_at <= group.valuation_time,
-            InstrumentAlias.created_at <= group.valuation_time,
-            InstrumentAlias.alias_type == "ticker",
-            InstrumentAlias.valid_from <= group.valuation_time.date(),
-            InstrumentAlias.valid_to.is_(None)
-            | (InstrumentAlias.valid_to >= group.valuation_time.date()),
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL, "Proposal group variants are invalid.", status_code=409
         )
-        .distinct()
-    )).all()
+    symbol_rows = (
+        await session.execute(
+            select(InstrumentAlias.instrument_id, InstrumentAlias.symbol)
+            .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
+            .join(ProposalPositionRecord, ProposalPositionRecord.instrument_id == Instrument.id)
+            .where(
+                ProposalPositionRecord.proposal_id.in_(child.id for child in children),
+                Instrument.created_at <= group.valuation_time,
+                InstrumentAlias.created_at <= group.valuation_time,
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.valid_from <= group.valuation_time.date(),
+                InstrumentAlias.valid_to.is_(None)
+                | (InstrumentAlias.valid_to >= group.valuation_time.date()),
+            )
+            .distinct()
+        )
+    ).all()
     symbols = {instrument_id: symbol for instrument_id, symbol in symbol_rows}
     proposal_data: list[OptimizationProposalResponse] = []
     for child in children:
@@ -489,7 +786,9 @@ async def get_optimization_group(
                 ErrorCode.DATA_PARTIAL, "Proposal comparison is invalid.", status_code=409
             ) from error
     reasons = _shadow_eligibility_reasons(group, proposal_data)
-    if not reasons and not current_proposal_shadow_price_authority_available(group.source_policy_id):
+    if not reasons and not current_proposal_shadow_price_authority_available(
+        group.source_policy_id
+    ):
         reasons.append("SHADOW_PRICE_AUTHORITY_UNAVAILABLE")
     if not reasons and not await has_executable_shadow_authority(session, group):
         reasons.append("PERSISTED_SHADOW_AUTHORITY_INCOMPLETE")
@@ -533,23 +832,35 @@ async def create_optimization_draft(
     _validate_claim(actor.actor_id, "initial-optimization-draft", idempotency_key, request_hash)
     try:
         result = await create_initial_draft(
-            session, portfolio_snapshot_id=body.portfolio_snapshot_id,
-            diagnostic_report_id=body.diagnostic_report_id, actor_id=actor.actor_id,
-            idempotency_key=idempotency_key, request_hash=request_hash, now=_utc_now(request),
+            session,
+            portfolio_snapshot_id=body.portfolio_snapshot_id,
+            diagnostic_report_id=body.diagnostic_report_id,
+            actor_id=actor.actor_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            now=_utc_now(request),
             artifact_reader=getattr(request.app.state, "diagnostic_artifact_reader", None),
             research_context=body.research_context,
         )
     except IdempotencyConflict as error:
-        raise NexusError(ErrorCode.IDEMPOTENCY_CONFLICT, "Draft request conflicts with prior request.", status_code=409) from error
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Draft request conflicts with prior request.",
+            status_code=409,
+        ) from error
     except InitialDraftUnavailable as error:
         raise NexusError(
-            ErrorCode.DATA_PARTIAL, "Stored facts do not support an initial draft.",
-            status_code=409, details={"reason": error.reason},
+            ErrorCode.DATA_PARTIAL,
+            "Stored facts do not support an initial draft.",
+            status_code=409,
+            details={"reason": error.reason},
         ) from error
     except ValueError as error:
         raise NexusError(
-            ErrorCode.DATA_PARTIAL, "Stored facts do not support an initial draft.",
-            status_code=409, details={"reason": "INITIAL_DRAFT_EVIDENCE_INCOMPLETE"},
+            ErrorCode.DATA_PARTIAL,
+            "Stored facts do not support an initial draft.",
+            status_code=409,
+            details={"reason": "INITIAL_DRAFT_EVIDENCE_INCOMPLETE"},
         ) from error
     return await get_optimization_group(result.group_id, actor=actor, session=session)
 
@@ -602,7 +913,9 @@ async def _transition_endpoint(
         ) from error
     return OptimizationLifecycleEnvelope(
         data=OptimizationLifecycleData(
-            proposal_group_id=group.group_id, status=group.status, version=group.version  # type: ignore[arg-type]
+            proposal_group_id=group.group_id,
+            status=cast(ProposalGroupStatus, group.status),
+            version=group.version,
         ),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=_utc_now(request)),
     )
@@ -796,9 +1109,7 @@ def _shadow_group_response(view: ShadowGroupView) -> ShadowGroupResponse:
                     initial_outcomes=tuple(
                         ShadowOutcomeResponse(
                             instrument_id=outcome.instrument_id,
-                            side=cast(
-                                Literal["buy", "sell", "rebalance"], outcome.side
-                            ),
+                            side=cast(Literal["buy", "sell", "rebalance"], outcome.side),
                             status=cast(
                                 Literal["filled", "missing_bar", "untradable"],
                                 outcome.status,
@@ -808,9 +1119,7 @@ def _shadow_group_response(view: ShadowGroupView) -> ShadowGroupResponse:
                                 None
                                 if outcome.fill is None
                                 else ShadowFillResponse(
-                                    side=cast(
-                                        Literal["buy", "sell"], outcome.fill.side
-                                    ),
+                                    side=cast(Literal["buy", "sell"], outcome.fill.side),
                                     quantity=decimal_to_string(outcome.fill.quantity),
                                     price=decimal_to_string(outcome.fill.price),
                                     notional=decimal_to_string(outcome.fill.notional),
@@ -922,9 +1231,7 @@ async def reject_optimization_group(
     session: AsyncSession = Depends(transactional_session),
 ) -> OptimizationLifecycleEnvelope:
     _validate_if_match(if_match, body.version)
-    return await _transition_endpoint(
-        group_id, request, body, idempotency_key, actor, session
-    )
+    return await _transition_endpoint(group_id, request, body, idempotency_key, actor, session)
 
 
 def _validate_if_match(value: str, version: int) -> None:
@@ -957,26 +1264,33 @@ def _economic_comparison(
     for proposal in proposals:
         comparison = proposal.comparison
         metrics = comparison.metrics
-        inputs.append(ComparableProposal(
-            variant=proposal.variant,
-            dimensions=ComparisonDimensions.model_validate(metrics.dimensions.model_dump()),
-            requires_fx=group.requires_fx or comparison.requires_fx,
-            constraint_complete=metrics.constraint_complete,
-            eligibility_complete=metrics.eligibility_complete,
-            evidence_complete=(
-                group.baseline_ready and group.diagnostic_complete
-                and metrics.evidence_complete and metrics.ranking_eligible
-                and not metrics.unknown_metrics and not comparison.non_executable
-                and not proposal.analysis_only
-                and proposal.portfolio_scope == group.portfolio_scope
-                and metrics.authority == expected_authority
-                and (proposal.variant != "strategy_target" or proposal.strategy_evidence_complete)
-            ),
-            stale=group.authority_stale or metrics.stale,
-            partial=group.partial,
-            source_conflict=group.source_conflict,
-            cost_complete=cost_complete and comparison.cost_complete,
-        ))
+        inputs.append(
+            ComparableProposal(
+                variant=proposal.variant,
+                dimensions=ComparisonDimensions.model_validate(metrics.dimensions.model_dump()),
+                requires_fx=group.requires_fx or comparison.requires_fx,
+                constraint_complete=metrics.constraint_complete,
+                eligibility_complete=metrics.eligibility_complete,
+                evidence_complete=(
+                    group.baseline_ready
+                    and group.diagnostic_complete
+                    and metrics.evidence_complete
+                    and metrics.ranking_eligible
+                    and not metrics.unknown_metrics
+                    and not comparison.non_executable
+                    and not proposal.analysis_only
+                    and proposal.portfolio_scope == group.portfolio_scope
+                    and metrics.authority == expected_authority
+                    and (
+                        proposal.variant != "strategy_target" or proposal.strategy_evidence_complete
+                    )
+                ),
+                stale=group.authority_stale or metrics.stale,
+                partial=group.partial,
+                source_conflict=group.source_conflict,
+                cost_complete=cost_complete and comparison.cost_complete,
+            )
+        )
     assessment = compare_proposals(tuple(inputs))
     return EconomicComparisonResponse(
         status=assessment.status,

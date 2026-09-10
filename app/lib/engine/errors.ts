@@ -19,6 +19,7 @@ import {
   paperPortfolioRuntimeSchema,
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
+  portfolioScenarioRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
   readinessRuntimeSchema,
   researchAdmissionRuntimeSchema,
@@ -39,9 +40,9 @@ import {
 import { integrationProviders } from "../integrations/providers";
 import { sameUuid } from "../optimization/uuid";
 
-export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SIMULATION_WRITE_DISABLED" | "INTERNAL_ERROR";
+export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SIMULATION_WRITE_DISABLED" | "SCENARIO_BASELINE_NOT_READY" | "SCENARIO_DIAGNOSTIC_MISMATCH" | "SCENARIO_AS_OF_MISMATCH" | "SCENARIO_OBJECTIVE_UNSUPPORTED" | "SCENARIO_INPUT_INVALID" | "SCENARIO_US_EQUITY_SCOPE_INVALID" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
-  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], SIMULATION_WRITE_DISABLED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
+  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], SIMULATION_WRITE_DISABLED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], SCENARIO_BASELINE_NOT_READY: [409], SCENARIO_DIAGNOSTIC_MISMATCH: [409], SCENARIO_AS_OF_MISMATCH: [409], SCENARIO_OBJECTIVE_UNSUPPORTED: [422], SCENARIO_INPUT_INVALID: [409], SCENARIO_US_EQUITY_SCOPE_INVALID: [409], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
 const DRAFT_FX_MESSAGE = "当前快照含非美元现金，缺少汇率估值，暂不能生成可比草稿。";
@@ -68,6 +69,12 @@ export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> =
   EVOLUTION_BLOCKED: "The strategy evolution action is blocked.",
   AUTHORITY_UNAVAILABLE: "The strategy evolution authority is unavailable.",
   PROVIDER_UNAVAILABLE: "The provider is unavailable.",
+  SCENARIO_BASELINE_NOT_READY: "The frozen portfolio baseline is not ready for scenario analysis.",
+  SCENARIO_DIAGNOSTIC_MISMATCH: "The diagnostic report does not match the portfolio snapshot.",
+  SCENARIO_AS_OF_MISMATCH: "The valuation time does not match the frozen evidence.",
+  SCENARIO_OBJECTIVE_UNSUPPORTED: "The requested scenario objective is not supported.",
+  SCENARIO_INPUT_INVALID: "The frozen portfolio inputs are invalid for scenario analysis.",
+  SCENARIO_US_EQUITY_SCOPE_INVALID: "The USD equity scope cannot be established from frozen identities.",
   INTERNAL_ERROR: "The request could not be completed.",
 };
 
@@ -343,6 +350,15 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       ? data
       : INVALID_DATA;
   }
+  if (pathname === "/internal/v1/portfolio-scenarios/evaluate") {
+    return matchesRuntimeSchema(data, portfolioScenarioRuntimeSchema) && isPlain(data)
+      && data.execution_locked === true
+      && data.analysis_status === "partial"
+      && data.valuation_scope === "currency:USD"
+      && scenarioSemanticsValid(data)
+      ? data
+      : INVALID_DATA;
+  }
   if (pathname === "/internal/v1/research-runs") {
     return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data) && researchAuthorityValid(data)
       ? data
@@ -425,6 +441,80 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       : INVALID_DATA;
   }
   return schemaPath === undefined && isPlain(data) ? data : INVALID_DATA;
+}
+
+function scenarioSemanticsValid(data: Record<string, unknown>): boolean {
+  if (!Array.isArray(data.positions)
+    || !isPlain(data.baseline) || !isPlain(data.candidate)
+    || typeof data.cash_current_weight !== "string"
+    || typeof data.cash_target_weight !== "string") return false;
+  const seen = new Set<string>();
+  const currentWeights = [data.cash_current_weight];
+  const targetWeights = [data.cash_target_weight];
+  for (const position of data.positions) {
+    if (!isPlain(position) || typeof position.instrument_id !== "string"
+      || typeof position.current_weight !== "string"
+      || typeof position.target_weight !== "string") return false;
+    const identity = position.instrument_id.toLowerCase();
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    const order = compareUnsignedDecimals(position.target_weight, position.current_weight);
+    if (order === null || order > 0) return false;
+    if (order < 0
+      ? position.action !== "reduce" || position.reason_code !== "CONCENTRATION_REDUCTION"
+      : position.action !== "maintain" || position.reason_code !== "BASELINE_WEIGHT") return false;
+    currentWeights.push(position.current_weight);
+    targetWeights.push(position.target_weight);
+  }
+  if (!decimalSumIsOne(currentWeights) || !decimalSumIsOne(targetWeights)
+    || !scenarioMetricSetValid(data.baseline) || !scenarioMetricSetValid(data.candidate)) {
+    return false;
+  }
+  const baselineCash = data.baseline.cash_weight;
+  const candidateCash = data.candidate.cash_weight;
+  return isPlain(baselineCash) && isPlain(candidateCash)
+    && baselineCash.status === "known" && candidateCash.status === "known"
+    && typeof baselineCash.value === "string" && typeof candidateCash.value === "string"
+    && compareUnsignedDecimals(baselineCash.value, data.cash_current_weight) === 0
+    && compareUnsignedDecimals(candidateCash.value, data.cash_target_weight) === 0;
+}
+
+function scenarioMetricSetValid(value: Record<string, unknown>): boolean {
+  return Object.values(value).every((metric) => isPlain(metric)
+    && (metric.status === "known"
+      ? typeof metric.value === "string" && parseUnsignedDecimal(metric.value) !== null
+        && metric.reason === null
+      : metric.status === "unknown" && metric.value === null
+        && typeof metric.reason === "string" && metric.reason.length > 0));
+}
+
+function parseUnsignedDecimal(value: string): { units: bigint; scale: number } | null {
+  const match = /^(0|[1-9]\d*)(?:\.(\d+))?$/.exec(value);
+  if (!match) return null;
+  const fraction = match[2] ?? "";
+  return { units: BigInt(`${match[1]}${fraction}`), scale: fraction.length };
+}
+
+function compareUnsignedDecimals(left: string, right: string): number | null {
+  const a = parseUnsignedDecimal(left);
+  const b = parseUnsignedDecimal(right);
+  if (a === null || b === null) return null;
+  const scale = Math.max(a.scale, b.scale);
+  const leftUnits = a.units * BigInt(10) ** BigInt(scale - a.scale);
+  const rightUnits = b.units * BigInt(10) ** BigInt(scale - b.scale);
+  return leftUnits < rightUnits ? -1 : leftUnits > rightUnits ? 1 : 0;
+}
+
+function decimalSumIsOne(values: string[]): boolean {
+  const parsed = values.map(parseUnsignedDecimal);
+  if (parsed.some((value) => value === null)) return false;
+  const exact = parsed as { units: bigint; scale: number }[];
+  const scale = Math.max(...exact.map((value) => value.scale));
+  const total = exact.reduce(
+    (sum, value) => sum + value.units * BigInt(10) ** BigInt(scale - value.scale),
+    BigInt(0),
+  );
+  return total === BigInt(10) ** BigInt(scale);
 }
 
 // The Engine has already verified the stored hash; keep its context-only/time/identity

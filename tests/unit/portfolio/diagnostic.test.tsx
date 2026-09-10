@@ -9,7 +9,7 @@ import { portfolio, portfolioId, snapshot, snapshotId } from "./fixtures";
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it("loads a diagnostic through the real portfolio page without starting a provider refresh", async () => {
-  const report = { ...diagnosticReport("RESEARCH_REQUIRED"), portfolio_snapshot_id: snapshotId };
+  const report = { ...diagnosticReport("RESEARCH_REQUIRED"), portfolio_snapshot_id: snapshotId, snapshot_as_of: snapshot.as_of! };
   const read = vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
     if (path.startsWith("/api/v1/portfolios?")) return Response.json({ data: { items: [portfolio], next_cursor: null } });
@@ -20,8 +20,11 @@ it("loads a diagnostic through the real portfolio page without starting a provid
   vi.stubGlobal("fetch", read);
   render(<PortfolioPage />);
   expect(await screen.findByRole("region", { name: "当前快照诊断" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "生成调整情景" })).toBeEnabled();
   expect(screen.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toBeVisible();
   expect(read).toHaveBeenCalledTimes(3);
+  const calls = read.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+  expect(calls.every((call) => (call[1]?.method ?? "GET") === "GET")).toBe(true);
 });
 
 it("shows a snapshot-bound preliminary diagnosis without suggesting execution", async () => {
@@ -43,10 +46,23 @@ it("shows a snapshot-bound preliminary diagnosis without suggesting execution", 
 });
 
 it("rejects a report from a different snapshot instead of mixing portfolio facts", async () => {
+  const onReport = vi.fn();
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ data: diagnosticReport() })));
-  render(<PortfolioDiagnostic portfolioId={portfolioId} snapshotId={snapshotId} />);
+  render(<PortfolioDiagnostic portfolioId={portfolioId} snapshotId={snapshotId} onReport={onReport} />);
   expect(await screen.findByText(/诊断暂不可用/)).toBeVisible();
+  expect(onReport).toHaveBeenLastCalledWith(null);
   expect(screen.queryByRole("listitem", { name: /CONCENTRATION_TOP1/ })).not.toBeInTheDocument();
+});
+
+it("reports only a formally identified snapshot-bound diagnosis to its parent", async () => {
+  const report = { ...diagnosticReport(), portfolio_snapshot_id: snapshotId };
+  const onReport = vi.fn();
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ data: report })));
+
+  render(<PortfolioDiagnostic portfolioId={portfolioId} snapshotId={snapshotId} onReport={onReport} />);
+
+  await screen.findByRole("region", { name: "当前快照诊断" });
+  expect(onReport).toHaveBeenLastCalledWith(report);
 });
 
 it("keeps diagnosis read failures local without hiding account facts or retrying", async () => {

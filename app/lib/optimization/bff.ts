@@ -2,7 +2,7 @@ import { validate as validateUuid } from "uuid";
 
 import { NexusBffError } from "../engine/errors";
 
-const DECIMAL = /^(?:0(?:\.\d{1,18})?|1(?:\.0{1,18})?)$/;
+const DECIMAL = /^(?:0(?:\.\d{1,38})?|1(?:\.0{1,38})?)$/;
 
 export type ExactJson = { bytes: Uint8Array; value: Record<string, unknown> };
 
@@ -76,6 +76,39 @@ export function requireWhatIf(value: Record<string, unknown>): void {
   }
 }
 
+export function requirePortfolioScenarioRequest(value: Record<string, unknown>): void {
+  requireExactKeys(value, [
+    "schema_version",
+    "portfolio_snapshot_id",
+    "diagnostic_report_id",
+    "as_of",
+    "constraints",
+  ]);
+  if (value.schema_version !== "portfolio_scenario_request_v1"
+    || typeof value.portfolio_snapshot_id !== "string" || !validateUuid(value.portfolio_snapshot_id)
+    || typeof value.diagnostic_report_id !== "string" || !validateUuid(value.diagnostic_report_id)
+    || typeof value.as_of !== "string" || !isUtcIso(value.as_of)
+    || !isPlain(value.constraints)) {
+    throw invalid("The portfolio scenario request is invalid.");
+  }
+  requireExactKeys(value.constraints, [
+    "schema_version",
+    "objective",
+    "max_turnover",
+    "minimum_cash",
+    "universe_policy",
+    "allow_new_positions",
+  ]);
+  if (value.constraints.schema_version !== "adjustment_scenario_constraints_v1"
+    || value.constraints.objective !== "reduce_security_concentration"
+    || typeof value.constraints.max_turnover !== "string" || !DECIMAL.test(value.constraints.max_turnover)
+    || typeof value.constraints.minimum_cash !== "string" || !DECIMAL.test(value.constraints.minimum_cash)
+    || value.constraints.universe_policy !== "current_holdings_only"
+    || value.constraints.allow_new_positions !== false) {
+    throw invalid("The portfolio scenario request is invalid.");
+  }
+}
+
 export function proposalGroupId(request: Request, action?: "shadow" | "reject"): string {
   const suffix = action ? `/${action}` : "";
   const match = new RegExp(`^/api/v1/optimization-proposals/([^/]+)${suffix}$`).exec(new URL(request.url).pathname);
@@ -96,4 +129,10 @@ function invalid(message: string): NexusBffError {
 
 function isPlain(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUtcIso(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 19) === value.slice(0, 19);
 }

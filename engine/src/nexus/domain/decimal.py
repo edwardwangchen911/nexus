@@ -10,6 +10,13 @@ DecimalString = Annotated[
     str,
     StringConstraints(max_length=40, pattern=r"^-?(0|[1-9]\d*)(\.\d+)?$"),
 ]
+RatioDecimalString = Annotated[
+    str,
+    StringConstraints(
+        max_length=40,
+        pattern=r"^(?:0(?:\.\d{1,38})?|1(?:\.0{1,38})?)$",
+    ),
+]
 _DECIMAL_STRING_PATTERN = re.compile(r"^-?(0|[1-9]\d*)(\.\d+)?$")
 
 

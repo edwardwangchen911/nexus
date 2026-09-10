@@ -4,32 +4,43 @@ import { useEffect, useState } from "react";
 import type { components } from "../lib/generated/schema";
 import { DiagnosticList, OptimizationNeedPanel } from "./diagnostic-list";
 
-type Report = components["schemas"]["PortfolioDiagnosticResponse"];
+export type PortfolioDiagnosticReport = components["schemas"]["PortfolioDiagnosticResponse"];
 
-export function PortfolioDiagnostic({ portfolioId, snapshotId }: { portfolioId: string; snapshotId: string }): React.ReactElement {
-  const [report, setReport] = useState<Report | null>(null);
+export function PortfolioDiagnostic({ portfolioId, snapshotId, onReport }: {
+  portfolioId: string;
+  snapshotId: string;
+  onReport?: (report: PortfolioDiagnosticReport | null) => void;
+}): React.ReactElement {
+  const [report, setReport] = useState<PortfolioDiagnosticReport | null>(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
+    onReport?.(null);
     async function load(): Promise<void> {
       try {
         const response = await fetch(`/api/v1/portfolios/${encodeURIComponent(portfolioId)}/diagnostics/latest`, {
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
         });
         if (!response.ok) throw new Error("diagnostic read failed");
-        const envelope = await response.json() as { data: Report };
+        const envelope = await response.json() as { data: PortfolioDiagnosticReport };
         if (envelope.data?.portfolio_snapshot_id !== snapshotId || !Array.isArray(envelope.data.items)) {
           throw new Error("diagnostic snapshot mismatch");
         }
-        if (active) setReport(envelope.data);
+        if (active) {
+          setReport(envelope.data);
+          onReport?.(envelope.data);
+        }
       } catch {
-        if (active) setFailed(true);
+        if (active) {
+          setFailed(true);
+          onReport?.(null);
+        }
       }
     }
     void load();
-    return () => { active = false; controller.abort(); };
-  }, [portfolioId, snapshotId]);
+    return () => { active = false; controller.abort(); onReport?.(null); };
+  }, [onReport, portfolioId, snapshotId]);
 
   if (failed) return <p className="inline-notice" role="status">诊断暂不可用，资产事实仍可查看。可刷新页面重新读取，不会触发复星请求。</p>;
   if (!report) return <p className="inline-notice" role="status">正在读取快照诊断…</p>;

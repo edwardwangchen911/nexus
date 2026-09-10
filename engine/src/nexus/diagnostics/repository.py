@@ -405,6 +405,13 @@ async def _comparable_history(
 async def latest_report(
     session: AsyncSession, *, portfolio_id: UUID
 ) -> PortfolioDiagnosticReport | None:
+    persisted = await latest_report_with_id(session, portfolio_id=portfolio_id)
+    return None if persisted is None else persisted[1]
+
+
+async def latest_report_with_id(
+    session: AsyncSession, *, portfolio_id: UUID
+) -> tuple[UUID, PortfolioDiagnosticReport] | None:
     policy = await load_real_advisory_policy_v1(session)
     record = await session.scalar(
         select(PortfolioDiagnosticReportRecord)
@@ -419,7 +426,7 @@ async def latest_report(
         return None
     if record.policy_id != REAL_ADVISORY_POLICY_ID or record.policy_version != policy.version:
         raise ValueError("diagnostic report policy authority is invalid")
-    return await read_report(session, record)
+    return record.id, await read_report(session, record)
 
 
 async def read_report(

@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 from nexus.api.errors import NexusError
-from nexus.api.routes.optimization import _bounded_what_if_request
+from nexus.api.routes.optimization import _bounded_scenario_request, _bounded_what_if_request
 from starlette.requests import Request
 
 _BODY = (
@@ -13,6 +13,16 @@ _BODY = (
     b'"policy_version":"optimizer_v1",'
     b'"positions":[{"instrument_id":"0198d500-1000-7000-8000-000000000001",'
     b'"weight":"0.2"}]}'
+)
+_SCENARIO_BODY = (
+    b'{"schema_version":"portfolio_scenario_request_v1",'
+    b'"portfolio_snapshot_id":"0198d500-1000-7000-8000-000000000041",'
+    b'"diagnostic_report_id":"0198d500-1000-7000-8000-000000000141",'
+    b'"as_of":"2026-08-24T03:59:00Z","constraints":{'
+    b'"schema_version":"adjustment_scenario_constraints_v1",'
+    b'"objective":"reduce_security_concentration","max_turnover":"0.1",'
+    b'"minimum_cash":"0.1","universe_policy":"current_holdings_only",'
+    b'"allow_new_positions":false}}'
 )
 
 
@@ -81,3 +91,30 @@ async def test_bounded_reader_accepts_json_charset_and_preserves_exact_raw_bytes
     payload = await _bounded_what_if_request(request)
     assert payload.proposal_group_id == UUID("0198d500-1000-7000-8000-000000000111")
     assert await request.body() == _BODY
+
+
+@pytest.mark.asyncio
+async def test_scenario_reader_reuses_exact_bounded_body_without_accepting_weights() -> None:
+    request = _request(
+        (_SCENARIO_BODY,),
+        {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(_SCENARIO_BODY)),
+        },
+    )
+    payload = await _bounded_scenario_request(request)
+    assert payload.portfolio_snapshot_id == UUID("0198d500-1000-7000-8000-000000000041")
+    assert payload.constraints.max_turnover == "0.1"
+    assert await request.body() == _SCENARIO_BODY
+
+    weighted = _SCENARIO_BODY[:-1] + b',"positions":[]}'
+    invalid = _request((weighted,), {"Content-Type": "application/json"})
+    with pytest.raises(NexusError) as error:
+        await _bounded_scenario_request(invalid)
+    assert error.value.status_code == 422
+
+    unsupported = _SCENARIO_BODY.replace(b'"reduce_security_concentration"', b'"maximize_return"')
+    invalid_objective = _request((unsupported,), {"Content-Type": "application/json"})
+    with pytest.raises(NexusError) as error:
+        await _bounded_scenario_request(invalid_objective)
+    assert error.value.code.value == "SCENARIO_OBJECTIVE_UNSUPPORTED"
