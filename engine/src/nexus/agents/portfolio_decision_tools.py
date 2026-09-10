@@ -32,7 +32,7 @@ from nexus.diagnostics.repository import (
 from nexus.domain.evidence import EvidenceRef
 from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
-    PortfolioScenarioEvaluationV1,
+    PortfolioScenarioEvaluationV2,
     ScenarioMetricSetV1,
     canonical_scenario_hash,
 )
@@ -84,7 +84,7 @@ _FORBIDDEN_PROJECTION_KEYS = frozenset(
     }
 )
 
-type ScenarioExecutor = Callable[[], PortfolioScenarioEvaluationV1]
+type ScenarioExecutor = Callable[[], PortfolioScenarioEvaluationV2]
 
 
 class PortfolioDecisionToolRegistry(Protocol):
@@ -184,7 +184,7 @@ class PortfolioDecisionTools:
         if request.objective != self._objective:
             raise ToolInputError("tool objective does not match frozen authority")
         evaluation = self._executor()
-        if not isinstance(evaluation, PortfolioScenarioEvaluationV1):
+        if not isinstance(evaluation, PortfolioScenarioEvaluationV2):
             raise ToolInputError("portfolio scenario executor returned an invalid result")
         if evaluation.objective != self._objective:
             raise ToolInputError("scenario objective does not match frozen authority")
@@ -263,7 +263,7 @@ async def build_portfolio_decision_tools(
         allow_new_positions=frozen.allow_new_positions,
     )
 
-    def execute_scenario() -> PortfolioScenarioEvaluationV1:
+    def execute_scenario() -> PortfolioScenarioEvaluationV2:
         return evaluate_adjustment_scenario(
             snapshot=snapshot,
             report=report,
@@ -284,7 +284,7 @@ async def build_portfolio_decision_tools(
 
 
 def project_scenario_for_agent(
-    evaluation: PortfolioScenarioEvaluationV1,
+    evaluation: PortfolioScenarioEvaluationV2,
     *,
     citation_ids: tuple[str, ...],
 ) -> AgentScenarioProjectionV1:

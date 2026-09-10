@@ -3688,6 +3688,7 @@ export interface components {
             cash_current_weight: string;
             /** Cash Target Weight */
             cash_target_weight: string;
+            cost_breakdown: components["schemas"]["ScenarioCostBreakdownResponse"];
             /** Diagnostic Input Hash */
             diagnostic_input_hash: string;
             /**
@@ -3727,7 +3728,7 @@ export interface components {
              * Schema Version
              * @constant
              */
-            schema_version: "portfolio_scenario_evaluation_v1";
+            schema_version: "portfolio_scenario_evaluation_v2";
             /** Unknown Metrics */
             unknown_metrics: string[];
             /**
@@ -5386,6 +5387,36 @@ export interface components {
              * @enum {string}
              */
             reason: "USER_REQUESTED" | "PERFORMANCE_REGRESSION" | "DATA_QUALITY_CONCERN" | "OPERATIONAL_RISK";
+        };
+        /** ScenarioCostBreakdownResponse */
+        ScenarioCostBreakdownResponse: {
+            /** Available At */
+            available_at: string | null;
+            /**
+             * Basis
+             * @constant
+             */
+            basis: "portfolio_value_ratio";
+            commission: components["schemas"]["ScenarioMetricResponse"];
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /** Evidence Hash */
+            evidence_hash: string | null;
+            /** Evidence Version */
+            evidence_version: string | null;
+            regulatory_fees: components["schemas"]["ScenarioMetricResponse"];
+            slippage: components["schemas"]["ScenarioMetricResponse"];
+            spread: components["schemas"]["ScenarioMetricResponse"];
+            tax_impact: components["schemas"]["ScenarioMetricResponse"];
+            total_estimated_cost_ex_tax: components["schemas"]["ScenarioMetricResponse"];
+            /**
+             * Valuation Time
+             * Format: date-time
+             */
+            valuation_time: string;
         };
         /** ScenarioMetricResponse */
         ScenarioMetricResponse: {

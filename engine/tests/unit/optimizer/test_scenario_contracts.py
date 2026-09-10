@@ -8,7 +8,7 @@ import pytest
 from nexus.optimizer.compare import TypedMetric
 from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
-    PortfolioScenarioEvaluationV1,
+    PortfolioScenarioEvaluationV2,
     PortfolioScenarioRequestV1,
     ScenarioMetricSetV1,
     ScenarioPositionV1,
@@ -111,7 +111,7 @@ def _metrics(*, cash: str, turnover: str, cost: TypedMetric) -> ScenarioMetricSe
 
 def _evaluation_payload() -> dict[str, object]:
     return {
-        "schema_version": "portfolio_scenario_evaluation_v1",
+        "schema_version": "portfolio_scenario_evaluation_v2",
         "request_hash": _HASH,
         "result_hash": "b" * 64,
         "portfolio_snapshot_id": _SNAPSHOT_ID,
@@ -126,7 +126,7 @@ def _evaluation_payload() -> dict[str, object]:
         "candidate": _metrics(
             cash="0.15",
             turnover="0.05",
-            cost=TypedMetric.unknown("COST_MODEL_NOT_AVAILABLE"),
+            cost=TypedMetric.unknown("COST_EVIDENCE_INCOMPLETE"),
         ),
         "positions": (
             ScenarioPositionV1(
@@ -148,12 +148,26 @@ def _evaluation_payload() -> dict[str, object]:
         "cash_target_weight": "0.15",
         "hard_constraint_reasons": ("TURNOVER_BUDGET_EXHAUSTED",),
         "unknown_metrics": ("estimated_cost",),
+        "cost_breakdown": {
+            "currency": "USD",
+            "valuation_time": _AS_OF,
+            "basis": "portfolio_value_ratio",
+            "evidence_version": None,
+            "evidence_hash": None,
+            "available_at": None,
+            "commission": TypedMetric.unknown("BROKER_COMMISSION_SCHEDULE_UNAVAILABLE"),
+            "spread": TypedMetric.unknown("BID_ASK_EVIDENCE_UNAVAILABLE"),
+            "slippage": TypedMetric.unknown("SLIPPAGE_MODEL_UNAVAILABLE"),
+            "regulatory_fees": TypedMetric.unknown("REGULATORY_FEE_SCHEDULE_UNAVAILABLE"),
+            "tax_impact": TypedMetric.unknown("TAX_DATA_UNAVAILABLE"),
+            "total_estimated_cost_ex_tax": TypedMetric.unknown("COST_EVIDENCE_INCOMPLETE"),
+        },
         "execution_locked": True,
     }
 
 
 def test_evaluation_accepts_one_balanced_reduce_only_candidate() -> None:
-    evaluation = PortfolioScenarioEvaluationV1.model_validate(_evaluation_payload())
+    evaluation = PortfolioScenarioEvaluationV2.model_validate(_evaluation_payload())
 
     assert evaluation.cash_target_weight == Decimal("0.15")
     assert evaluation.positions[0].action == "reduce"
@@ -177,7 +191,7 @@ def test_evaluation_rejects_unbalanced_unlocked_or_unbound_results(
     payload.update(update)
 
     with pytest.raises(ValidationError, match=error_fragment):
-        PortfolioScenarioEvaluationV1.model_validate(payload)
+        PortfolioScenarioEvaluationV2.model_validate(payload)
 
 
 def test_evaluation_rejects_duplicate_instruments() -> None:
@@ -186,7 +200,67 @@ def test_evaluation_rejects_duplicate_instruments() -> None:
     payload["positions"] = (first, first)
 
     with pytest.raises(ValidationError, match="unique instruments"):
-        PortfolioScenarioEvaluationV1.model_validate(payload)
+        PortfolioScenarioEvaluationV2.model_validate(payload)
+
+
+def test_cost_breakdown_rejects_known_component_without_evidence_authority() -> None:
+    payload = _evaluation_payload()
+    breakdown = payload["cost_breakdown"]  # type: ignore[assignment]
+    breakdown["commission"] = TypedMetric.known("0.001")  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="known scenario costs require evidence authority"):
+        PortfolioScenarioEvaluationV2.model_validate(payload)
+
+
+def test_cost_breakdown_rejects_known_tax_without_evidence_authority() -> None:
+    payload = _evaluation_payload()
+    breakdown = payload["cost_breakdown"]  # type: ignore[assignment]
+    breakdown["tax_impact"] = TypedMetric.known("-0.001")  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="known scenario costs require evidence authority"):
+        PortfolioScenarioEvaluationV2.model_validate(payload)
+
+
+def test_cost_breakdown_rejects_total_that_does_not_sum_known_components() -> None:
+    payload = _evaluation_payload()
+    breakdown = payload["cost_breakdown"]  # type: ignore[assignment]
+    breakdown.update(  # type: ignore[union-attr]
+        {
+            "evidence_version": "broker_cost_evidence_v1",
+            "evidence_hash": "e" * 64,
+            "available_at": _AS_OF,
+            "commission": TypedMetric.known("0.001"),
+            "spread": TypedMetric.known("0.002"),
+            "slippage": TypedMetric.known("0.003"),
+            "regulatory_fees": TypedMetric.known("0.004"),
+            "total_estimated_cost_ex_tax": TypedMetric.known("0.009"),
+        }
+    )
+    payload["candidate"] = _metrics(cash="0.15", turnover="0.05", cost=TypedMetric.known("0.009"))
+
+    with pytest.raises(ValidationError, match="total must equal known components"):
+        PortfolioScenarioEvaluationV2.model_validate(payload)
+
+
+def test_cost_breakdown_rejects_negative_known_cost() -> None:
+    payload = _evaluation_payload()
+    breakdown = payload["cost_breakdown"]  # type: ignore[assignment]
+    breakdown.update(  # type: ignore[union-attr]
+        {
+            "evidence_version": "broker_cost_evidence_v1",
+            "evidence_hash": "e" * 64,
+            "available_at": _AS_OF,
+            "commission": TypedMetric.known("-0.001"),
+            "spread": TypedMetric.known("0.002"),
+            "slippage": TypedMetric.known("0.003"),
+            "regulatory_fees": TypedMetric.known("0.004"),
+            "total_estimated_cost_ex_tax": TypedMetric.known("0.008"),
+        }
+    )
+    payload["candidate"] = _metrics(cash="0.15", turnover="0.05", cost=TypedMetric.known("0.008"))
+
+    with pytest.raises(ValidationError, match="scenario costs cannot be negative"):
+        PortfolioScenarioEvaluationV2.model_validate(payload)
 
 
 def test_canonical_hash_normalizes_equivalent_financial_values() -> None:
@@ -214,6 +288,39 @@ def test_canonical_hash_excludes_only_the_root_result_hash() -> None:
     changed = {**payload, "result_hash": "d" * 64}
 
     assert canonical_scenario_hash(payload) == canonical_scenario_hash(changed)
+
+
+def test_canonical_hash_binds_each_cost_evidence_authority_field() -> None:
+    payload = _evaluation_payload()
+    breakdown = payload["cost_breakdown"]  # type: ignore[assignment]
+    breakdown.update(  # type: ignore[union-attr]
+        {
+            "evidence_version": "broker_cost_evidence_v1",
+            "evidence_hash": "e" * 64,
+            "available_at": _AS_OF,
+        }
+    )
+    evaluation = PortfolioScenarioEvaluationV2.model_validate(payload)
+    original = canonical_scenario_hash(evaluation)
+    changed_hashes = {
+        canonical_scenario_hash(
+            evaluation.model_copy(
+                update={
+                    "cost_breakdown": evaluation.cost_breakdown.model_copy(
+                        update={field: value}
+                    )
+                }
+            )
+        )
+        for field, value in (
+            ("evidence_version", "broker_cost_evidence_v2"),
+            ("evidence_hash", "f" * 64),
+            ("available_at", _AS_OF - timedelta(seconds=1)),
+        )
+    }
+
+    assert original not in changed_hashes
+    assert len(changed_hashes) == 3
 
 
 @pytest.mark.parametrize("unsafe", [0.1, Decimal("NaN"), {_FIRST_ID: "bad-key"}])

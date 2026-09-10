@@ -34,6 +34,7 @@ from nexus.api.schemas.optimization import (
     ProposalComparisonMetricsResponse,
     ProposalComparisonResponse,
     ProposalDraftRequest,
+    ScenarioCostBreakdownResponse,
     ScenarioMetricResponse,
     ScenarioMetricSetResponse,
     ScenarioPositionResponse,
@@ -90,7 +91,7 @@ from nexus.optimizer.repository import has_executable_shadow_authority
 from nexus.optimizer.research_context import read_draft_research_context
 from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
-    PortfolioScenarioEvaluationV1,
+    PortfolioScenarioEvaluationV2,
     PortfolioScenarioRequestV1,
     ScenarioMetricSetV1,
     canonical_scenario_hash,
@@ -332,15 +333,21 @@ async def evaluate_portfolio_scenario(
         )
     idempotency_request_hash = hashlib.sha256(raw_body).hexdigest()
     route = "/internal/v1/portfolio-scenarios/evaluate"
-    _validate_claim(actor.actor_id, route, idempotency_key, idempotency_request_hash)
+    idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v2"
+    _validate_claim(
+        actor.actor_id,
+        idempotency_namespace,
+        idempotency_key,
+        idempotency_request_hash,
+    )
     try:
         claim, owner = await claim_or_lock(
             session,
             actor.actor_id,
-            route,
+            idempotency_namespace,
             idempotency_key,
             idempotency_request_hash,
-            "portfolio_scenario_v1",
+            "portfolio_scenario_v2",
         )
     except IdempotencyConflict as error:
         raise NexusError(
@@ -348,10 +355,13 @@ async def evaluate_portfolio_scenario(
             "Idempotency key has a different request body.",
             status_code=409,
         ) from error
-    if not owner and claim.request_hash != idempotency_request_hash:
+    if not owner and (
+        claim.request_hash != idempotency_request_hash
+        or claim.schema_version != "portfolio_scenario_v2"
+    ):
         raise NexusError(
             ErrorCode.IDEMPOTENCY_CONFLICT,
-            "Idempotency key has a different request body.",
+            "Idempotency key has an incompatible request or response contract.",
             status_code=409,
         )
     try:
@@ -420,7 +430,7 @@ async def evaluate_portfolio_scenario(
     )
 
 
-def _scenario_response(result: PortfolioScenarioEvaluationV1) -> PortfolioScenarioResponse:
+def _scenario_response(result: PortfolioScenarioEvaluationV2) -> PortfolioScenarioResponse:
     def metric(value: TypedMetric) -> ScenarioMetricResponse:
         return ScenarioMetricResponse(
             status=value.status,
@@ -466,6 +476,22 @@ def _scenario_response(result: PortfolioScenarioEvaluationV1) -> PortfolioScenar
         cash_target_weight=decimal_to_string(result.cash_target_weight),
         hard_constraint_reasons=result.hard_constraint_reasons,
         unknown_metrics=result.unknown_metrics,
+        cost_breakdown=ScenarioCostBreakdownResponse(
+            currency=result.cost_breakdown.currency,
+            valuation_time=result.cost_breakdown.valuation_time,
+            basis=result.cost_breakdown.basis,
+            evidence_version=result.cost_breakdown.evidence_version,
+            evidence_hash=result.cost_breakdown.evidence_hash,
+            available_at=result.cost_breakdown.available_at,
+            commission=metric(result.cost_breakdown.commission),
+            spread=metric(result.cost_breakdown.spread),
+            slippage=metric(result.cost_breakdown.slippage),
+            regulatory_fees=metric(result.cost_breakdown.regulatory_fees),
+            tax_impact=metric(result.cost_breakdown.tax_impact),
+            total_estimated_cost_ex_tax=metric(
+                result.cost_breakdown.total_estimated_cost_ex_tax
+            ),
+        ),
         execution_locked=result.execution_locked,
     )
 

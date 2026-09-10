@@ -18,7 +18,7 @@ from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.optimization import OptimizationProposalGroupRecord
 from nexus.persistence.models.paper import PaperFillRecord, PaperOrderRecord
 from nexus.persistence.models.portfolio import PositionSnapshot
-from nexus.persistence.models.runtime import AuditEvent
+from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord
 from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
@@ -159,11 +159,50 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     assert data["portfolio_snapshot_id"] == str(SNAPSHOT_ID)
+    assert data["schema_version"] == "portfolio_scenario_evaluation_v2"
     assert data["diagnostic_report_id"] == str(report_id)
     assert data["valuation_scope"] == "currency:USD"
     assert data["analysis_status"] == "partial"
     assert data["execution_locked"] is True
     assert data["unknown_metrics"] == ["estimated_cost"]
+    assert data["cost_breakdown"] == {
+        "currency": "USD",
+        "valuation_time": "2026-08-24T03:59:00Z",
+        "basis": "portfolio_value_ratio",
+        "evidence_version": None,
+        "evidence_hash": None,
+        "available_at": None,
+        "commission": {
+            "status": "unknown",
+            "value": None,
+            "reason": "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE",
+        },
+        "spread": {
+            "status": "unknown",
+            "value": None,
+            "reason": "BID_ASK_EVIDENCE_UNAVAILABLE",
+        },
+        "slippage": {
+            "status": "unknown",
+            "value": None,
+            "reason": "SLIPPAGE_MODEL_UNAVAILABLE",
+        },
+        "regulatory_fees": {
+            "status": "unknown",
+            "value": None,
+            "reason": "REGULATORY_FEE_SCHEDULE_UNAVAILABLE",
+        },
+        "tax_impact": {
+            "status": "unknown",
+            "value": None,
+            "reason": "TAX_DATA_UNAVAILABLE",
+        },
+        "total_estimated_cost_ex_tax": {
+            "status": "unknown",
+            "value": None,
+            "reason": "COST_EVIDENCE_INCOMPLETE",
+        },
+    }
     assert data["positions"] == [
         {
             "instrument_id": str(US_INSTRUMENT_ID),
@@ -190,6 +229,13 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
                 PaperFillRecord,
             )
         }
+        idempotency_records = list(
+            await session.scalars(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == "scenario-evaluate-1"
+                )
+            )
+        )
     assert len(audit) == 1
     assert business_writes == {
         "optimization_proposal_groups": 0,
@@ -197,6 +243,9 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
         "paper_orders": 0,
         "paper_fills": 0,
     }
+    assert len(idempotency_records) == 1
+    assert idempotency_records[0].route.endswith(":portfolio_scenario_evaluation_v2")
+    assert idempotency_records[0].schema_version == "portfolio_scenario_v2"
     assert audit[0].payload == {
         "request_hash": data["request_hash"],
         "policy_version": "real_advisory_policy_v1",

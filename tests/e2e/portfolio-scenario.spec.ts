@@ -66,9 +66,9 @@ async function installFixtures(page: Page): Promise<void> {
 
 function result() {
   const known = (value: string) => ({ status: "known", value, reason: null });
-  const unknown = { status: "unknown", value: null, reason: "COST_MODEL_NOT_AVAILABLE" };
+  const unknown = { status: "unknown", value: null, reason: "COST_EVIDENCE_INCOMPLETE" };
   return {
-    schema_version: "portfolio_scenario_evaluation_v1", request_hash: "a".repeat(64),
+    schema_version: "portfolio_scenario_evaluation_v2", request_hash: "a".repeat(64),
     result_hash: "b".repeat(64), diagnostic_input_hash: "c".repeat(64),
     portfolio_snapshot_id: snapshotId, diagnostic_report_id: reportId, valuation_time: asOf,
     valuation_scope: "currency:USD", objective: "reduce_security_concentration",
@@ -77,6 +77,15 @@ function result() {
     candidate: { security_top1: known("0.65"), security_top3: known("0.65"), security_hhi: known("0.4225"), cash_weight: known("0.35"), one_way_turnover: known("0.15"), estimated_cost: unknown },
     positions: [{ instrument_id: snapshot.positions[0].instrument_id, current_weight: "0.8", target_weight: "0.65", action: "reduce", reason_code: "CONCENTRATION_REDUCTION" }],
     cash_current_weight: "0.2", cash_target_weight: "0.35", hard_constraint_reasons: [], unknown_metrics: ["estimated_cost"],
+    cost_breakdown: {
+      currency: "USD", valuation_time: asOf, basis: "portfolio_value_ratio", evidence_version: null, evidence_hash: null, available_at: null,
+      commission: { status: "unknown", value: null, reason: "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE" },
+      spread: { status: "unknown", value: null, reason: "BID_ASK_EVIDENCE_UNAVAILABLE" },
+      slippage: { status: "unknown", value: null, reason: "SLIPPAGE_MODEL_UNAVAILABLE" },
+      regulatory_fees: { status: "unknown", value: null, reason: "REGULATORY_FEE_SCHEDULE_UNAVAILABLE" },
+      tax_impact: { status: "unknown", value: null, reason: "TAX_DATA_UNAVAILABLE" },
+      total_estimated_cost_ex_tax: unknown,
+    },
   };
 }
 

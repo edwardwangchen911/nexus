@@ -26,7 +26,8 @@ from nexus.diagnostics.policy import RealAdvisoryPolicy
 from nexus.domain.evidence import EvidenceRef
 from nexus.optimizer.compare import TypedMetric
 from nexus.optimizer.scenario_contracts import (
-    PortfolioScenarioEvaluationV1,
+    PortfolioScenarioEvaluationV2,
+    ScenarioCostBreakdownV1,
     ScenarioMetricSetV1,
     ScenarioPositionV1,
     canonical_scenario_hash,
@@ -54,9 +55,9 @@ def _metrics(*, top1: str, cash: str, turnover: str) -> ScenarioMetricSetV1:
     )
 
 
-def _evaluation() -> PortfolioScenarioEvaluationV1:
-    draft = PortfolioScenarioEvaluationV1(
-        schema_version="portfolio_scenario_evaluation_v1",
+def _evaluation() -> PortfolioScenarioEvaluationV2:
+    draft = PortfolioScenarioEvaluationV2(
+        schema_version="portfolio_scenario_evaluation_v2",
         request_hash="a" * 64,
         result_hash="0" * 64,
         portfolio_snapshot_id=_SNAPSHOT_ID,
@@ -89,6 +90,20 @@ def _evaluation() -> PortfolioScenarioEvaluationV1:
         cash_target_weight=Decimal("0.15"),
         hard_constraint_reasons=("TURNOVER_BUDGET_EXHAUSTED",),
         unknown_metrics=("estimated_cost",),
+        cost_breakdown=ScenarioCostBreakdownV1(
+            currency="USD",
+            valuation_time=_NOW,
+            basis="portfolio_value_ratio",
+            evidence_version=None,
+            evidence_hash=None,
+            available_at=None,
+            commission=TypedMetric.unknown("BROKER_COMMISSION_SCHEDULE_UNAVAILABLE"),
+            spread=TypedMetric.unknown("BID_ASK_EVIDENCE_UNAVAILABLE"),
+            slippage=TypedMetric.unknown("SLIPPAGE_MODEL_UNAVAILABLE"),
+            regulatory_fees=TypedMetric.unknown("REGULATORY_FEE_SCHEDULE_UNAVAILABLE"),
+            tax_impact=TypedMetric.unknown("TAX_DATA_UNAVAILABLE"),
+            total_estimated_cost_ex_tax=TypedMetric.unknown("COST_EVIDENCE_INCOMPLETE"),
+        ),
         execution_locked=True,
     )
     return draft.model_copy(update={"result_hash": canonical_scenario_hash(draft)})
@@ -99,7 +114,7 @@ async def test_registry_rejects_caller_authority_before_scenario_execution() -> 
     calls = 0
     evaluation = _evaluation()
 
-    def execute_scenario() -> PortfolioScenarioEvaluationV1:
+    def execute_scenario() -> PortfolioScenarioEvaluationV2:
         nonlocal calls
         calls += 1
         return evaluation
@@ -148,6 +163,7 @@ async def test_projection_never_exposes_position_identity_or_execution_fields() 
     )
     wire = json.dumps(result, sort_keys=True)
     assert result["changed_position_count"] == 1
+    assert "execution_eligible" not in result
     for forbidden in (
         "positions",
         "instrument_id",

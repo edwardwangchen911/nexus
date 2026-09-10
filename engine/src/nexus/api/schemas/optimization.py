@@ -567,6 +567,21 @@ class ScenarioMetricSetResponse(_StrictOptimizationSchema):
     estimated_cost: ScenarioMetricResponse
 
 
+class ScenarioCostBreakdownResponse(_StrictOptimizationSchema):
+    currency: Literal["USD"]
+    valuation_time: datetime
+    basis: Literal["portfolio_value_ratio"]
+    evidence_version: str | None
+    evidence_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")
+    available_at: datetime | None
+    commission: ScenarioMetricResponse
+    spread: ScenarioMetricResponse
+    slippage: ScenarioMetricResponse
+    regulatory_fees: ScenarioMetricResponse
+    tax_impact: ScenarioMetricResponse
+    total_estimated_cost_ex_tax: ScenarioMetricResponse
+
+
 class ScenarioPositionResponse(_StrictOptimizationSchema):
     instrument_id: UUID
     current_weight: DecimalString
@@ -576,7 +591,7 @@ class ScenarioPositionResponse(_StrictOptimizationSchema):
 
 
 class PortfolioScenarioResponse(_StrictOptimizationSchema):
-    schema_version: Literal["portfolio_scenario_evaluation_v1"]
+    schema_version: Literal["portfolio_scenario_evaluation_v2"]
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     portfolio_snapshot_id: UUID
@@ -594,6 +609,7 @@ class PortfolioScenarioResponse(_StrictOptimizationSchema):
     cash_target_weight: DecimalString
     hard_constraint_reasons: tuple[str, ...]
     unknown_metrics: tuple[str, ...]
+    cost_breakdown: ScenarioCostBreakdownResponse
     execution_locked: Literal[True]
 
 

@@ -191,7 +191,7 @@ async def build_portfolio_decision_tools(
 ) -> PortfolioDecisionToolRegistry: ...
 
 def project_scenario_for_agent(
-    evaluation: PortfolioScenarioEvaluationV1,
+    evaluation: PortfolioScenarioEvaluationV2,
     *,
     citation_ids: tuple[str, ...],
 ) -> AgentScenarioProjectionV1: ...

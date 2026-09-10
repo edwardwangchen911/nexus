@@ -22,6 +22,14 @@ const METRICS = [
   ["one_way_turnover", "单向换手率", "ratio"],
   ["estimated_cost", "预估交易成本", "ratio"],
 ] as const;
+const COST_COMPONENTS = [
+  ["commission", "券商佣金"],
+  ["spread", "买卖价差"],
+  ["slippage", "滑点"],
+  ["regulatory_fees", "监管费用"],
+  ["tax_impact", "税务影响"],
+  ["total_estimated_cost_ex_tax", "成本合计（不含税）"],
+] as const;
 
 const STATUS_LABELS: Record<ScenarioResponse["objective_status"], string> = {
   met: "目标已达到",
@@ -196,6 +204,18 @@ function ScenarioResult({ result, symbols }: { result: ScenarioResponse; symbols
           <td>{metricValue(result.baseline[key], unit)}</td><td>{metricValue(result.candidate[key], unit)}</td></tr>)}</tbody>
       </table>
     </div>
+    <div className="portfolio-scenario__costs">
+      <h4>调整情景成本证据</h4>
+      <p className="portfolio-scenario__scope">口径：{result.cost_breakdown.currency} 组合价值比例 · 冻结估值时点 {new Date(result.cost_breakdown.valuation_time).toLocaleString("zh-CN")}</p>
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- keyboard users need to scroll wide cost tables */}
+      <div className="table-scroll" role="region" aria-label="成本证据可横向滚动" tabIndex={0}>
+        <table className="portfolio-scenario__table" aria-label="调整情景成本证据">
+          <thead><tr><th scope="col">成本项</th><th scope="col">当前证据</th></tr></thead>
+          <tbody>{COST_COMPONENTS.map(([key, label]) => <tr key={key}><th scope="row">{label}</th>
+            <td>{metricValue(result.cost_breakdown[key], "ratio")}</td></tr>)}</tbody>
+        </table>
+      </div>
+    </div>
     {result.positions.length > 0 ? <div className="portfolio-scenario__positions">
       <h4>情景中的证券仓位</h4><ul>{result.positions.map((position) => <li key={position.instrument_id}>
         <strong>{symbols.get(position.instrument_id) ?? "未命名标的"}</strong>
@@ -203,7 +223,7 @@ function ScenarioResult({ result, symbols }: { result: ScenarioResponse; symbols
       </li>)}</ul>
     </div> : null}
     {result.hard_constraint_reasons.length > 0 ? <p className="inline-notice inline-notice--error">约束说明：{result.hard_constraint_reasons.map(reasonLabel).join("；")}</p> : null}
-    <p className="portfolio-scenario__footnote">交易成本尚未建模，税务与其他未知风险不在本次比较中。此结果仅供分析，交易保持锁定。</p>
+    <p className="portfolio-scenario__footnote">风险指标仍可供分析；成本证据未完成，不能进入执行或 Shadow。税务继续保持未知，交易保持锁定。</p>
   </div>;
 }
 

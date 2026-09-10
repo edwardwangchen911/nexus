@@ -6175,6 +6175,9 @@ export const runtimeContractSchemas = {
         "title": "Cash Target Weight",
         "type": "string"
       },
+      "cost_breakdown": {
+        "$ref": "#/components/schemas/ScenarioCostBreakdownResponse"
+      },
       "diagnostic_input_hash": {
         "pattern": "^[0-9a-f]{64}$",
         "title": "Diagnostic Input Hash",
@@ -6237,7 +6240,7 @@ export const runtimeContractSchemas = {
         "type": "string"
       },
       "schema_version": {
-        "const": "portfolio_scenario_evaluation_v1",
+        "const": "portfolio_scenario_evaluation_v2",
         "title": "Schema Version",
         "type": "string"
       },
@@ -6278,6 +6281,7 @@ export const runtimeContractSchemas = {
       "cash_target_weight",
       "hard_constraint_reasons",
       "unknown_metrics",
+      "cost_breakdown",
       "execution_locked"
     ],
     "title": "PortfolioScenarioResponse",
@@ -10134,6 +10138,95 @@ export const runtimeContractSchemas = {
       "vote"
     ],
     "title": "RoleVote",
+    "type": "object"
+  },
+  "ScenarioCostBreakdownResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "available_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Available At"
+      },
+      "basis": {
+        "const": "portfolio_value_ratio",
+        "title": "Basis",
+        "type": "string"
+      },
+      "commission": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "evidence_hash": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Evidence Hash"
+      },
+      "evidence_version": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Evidence Version"
+      },
+      "regulatory_fees": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "slippage": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "spread": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "tax_impact": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "total_estimated_cost_ex_tax": {
+        "$ref": "#/components/schemas/ScenarioMetricResponse"
+      },
+      "valuation_time": {
+        "format": "date-time",
+        "title": "Valuation Time",
+        "type": "string"
+      }
+    },
+    "required": [
+      "currency",
+      "valuation_time",
+      "basis",
+      "evidence_version",
+      "evidence_hash",
+      "available_at",
+      "commission",
+      "spread",
+      "slippage",
+      "regulatory_fees",
+      "tax_impact",
+      "total_estimated_cost_ex_tax"
+    ],
+    "title": "ScenarioCostBreakdownResponse",
     "type": "object"
   },
   "ScenarioMetricResponse": {

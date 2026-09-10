@@ -493,7 +493,8 @@ function scenarioSemanticsValid(data: Record<string, unknown>): boolean {
     && baselineCash.status === "known" && candidateCash.status === "known"
     && typeof baselineCash.value === "string" && typeof candidateCash.value === "string"
     && compareUnsignedDecimals(baselineCash.value, data.cash_current_weight) === 0
-    && compareUnsignedDecimals(candidateCash.value, data.cash_target_weight) === 0;
+    && compareUnsignedDecimals(candidateCash.value, data.cash_target_weight) === 0
+    && scenarioCostBreakdownValid(data.cost_breakdown, data.candidate, data.valuation_time);
 }
 
 function scenarioMetricSetValid(value: Record<string, unknown>): boolean {
@@ -503,6 +504,69 @@ function scenarioMetricSetValid(value: Record<string, unknown>): boolean {
         && metric.reason === null
       : metric.status === "unknown" && metric.value === null
         && typeof metric.reason === "string" && metric.reason.length > 0));
+}
+
+function scenarioCostBreakdownValid(
+  value: unknown,
+  candidate: Record<string, unknown>,
+  valuationTime: unknown,
+): boolean {
+  if (!isPlain(value) || !isPlain(candidate.estimated_cost)
+    || contextMicroseconds(value.valuation_time) !== contextMicroseconds(valuationTime)) return false;
+  const authorityAbsent = value.evidence_version === null
+    && value.evidence_hash === null && value.available_at === null;
+  const authorityComplete = typeof value.evidence_version === "string"
+    && value.evidence_version.length > 0
+    && typeof value.evidence_hash === "string"
+    && /^[0-9a-f]{64}$/.test(value.evidence_hash)
+    && contextMicroseconds(value.available_at) !== null
+    && contextMicroseconds(value.valuation_time) !== null
+    && contextMicroseconds(value.available_at)! <= contextMicroseconds(value.valuation_time)!;
+  if (!authorityAbsent && !authorityComplete) return false;
+
+  const componentNames = ["commission", "spread", "slippage", "regulatory_fees"];
+  const components = componentNames.map((name) => value[name]);
+  if (!components.every((metric) => scenarioCostMetricValid(metric, false))
+    || !scenarioCostMetricValid(value.tax_impact, true)
+    || !scenarioCostMetricValid(value.total_estimated_cost_ex_tax, false)) return false;
+  const allMetrics = [...components, value.tax_impact, value.total_estimated_cost_ex_tax];
+  if (authorityAbsent && allMetrics.some((metric) => isPlain(metric) && metric.status === "known")) {
+    return false;
+  }
+
+  const total = value.total_estimated_cost_ex_tax;
+  const allComponentsKnown = components.every((metric) => isPlain(metric) && metric.status === "known");
+  if (!isPlain(total)
+    || (allComponentsKnown
+      ? total.status !== "known"
+        || !decimalListSumEquals(
+          components.map((metric) => isPlain(metric) ? metric.value : null),
+          total.value,
+        )
+      : total.status !== "unknown")) return false;
+  return scenarioMetricsEqual(candidate.estimated_cost, total);
+}
+
+function scenarioCostMetricValid(value: unknown, allowNegative: boolean): boolean {
+  if (!isPlain(value)) return false;
+  if (value.status === "unknown") {
+    return value.value === null && typeof value.reason === "string" && value.reason.length > 0;
+  }
+  if (value.status !== "known" || value.reason !== null) return false;
+  const parsed = parseExactDecimal(value.value);
+  return parsed !== null && (allowNegative || parsed.coefficient >= BigInt(0));
+}
+
+function scenarioMetricsEqual(left: unknown, right: unknown): boolean {
+  if (!isPlain(left) || !isPlain(right) || left.status !== right.status
+    || left.reason !== right.reason) return false;
+  if (left.value === null || right.value === null) return left.value === right.value;
+  const a = parseExactDecimal(left.value);
+  const b = parseExactDecimal(right.value);
+  if (a === null || b === null) return false;
+  const scale = Math.max(a.scale, b.scale);
+  return a.coefficient * BigInt(10) ** BigInt(scale - a.scale)
+    === b.coefficient * BigInt(10) ** BigInt(scale - b.scale);
 }
 
 function parseUnsignedDecimal(value: string): { units: bigint; scale: number } | null {

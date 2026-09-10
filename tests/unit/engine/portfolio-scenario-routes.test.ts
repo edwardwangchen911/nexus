@@ -74,11 +74,11 @@ function scenarioEnvelope() {
     security_hhi: known("1"),
     cash_weight: known("0.2"),
     one_way_turnover: known("0"),
-    estimated_cost: { status: "unknown", value: null, reason: "COST_MODEL_NOT_AVAILABLE" },
+    estimated_cost: { status: "unknown", value: null, reason: "COST_EVIDENCE_INCOMPLETE" },
   };
   return {
     data: {
-      schema_version: "portfolio_scenario_evaluation_v1",
+      schema_version: "portfolio_scenario_evaluation_v2",
       request_hash: "a".repeat(64),
       result_hash: "b".repeat(64),
       portfolio_snapshot_id: snapshotId,
@@ -102,6 +102,16 @@ function scenarioEnvelope() {
       cash_target_weight: "0.2",
       hard_constraint_reasons: ["STRUCTURAL_CONCENTRATION_FLOOR"],
       unknown_metrics: ["estimated_cost"],
+      cost_breakdown: {
+        currency: "USD", valuation_time: "2026-08-24T03:59:00Z", basis: "portfolio_value_ratio",
+        evidence_version: null, evidence_hash: null, available_at: null,
+        commission: { status: "unknown", value: null, reason: "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE" },
+        spread: { status: "unknown", value: null, reason: "BID_ASK_EVIDENCE_UNAVAILABLE" },
+        slippage: { status: "unknown", value: null, reason: "SLIPPAGE_MODEL_UNAVAILABLE" },
+        regulatory_fees: { status: "unknown", value: null, reason: "REGULATORY_FEE_SCHEDULE_UNAVAILABLE" },
+        tax_impact: { status: "unknown", value: null, reason: "TAX_DATA_UNAVAILABLE" },
+        total_estimated_cost_ex_tax: { status: "unknown", value: null, reason: "COST_EVIDENCE_INCOMPLETE" },
+      },
       execution_locked: true,
     },
     meta: {
@@ -230,5 +240,62 @@ describe("portfolio scenario BFF route", () => {
       "/internal/v1/portfolio-scenarios/evaluate",
       "POST",
     )).toBeNull();
+  });
+
+  it("fails closed when cost evidence semantics are tampered", () => {
+    const cases = [
+      () => {
+        const value = scenarioEnvelope();
+        value.data.cost_breakdown.valuation_time = "2026-08-24T03:58:00Z";
+        return value;
+      },
+      () => {
+        const value = scenarioEnvelope();
+        Object.assign(value.data.cost_breakdown, { evidence_version: "broker_cost_evidence_v1" });
+        return value;
+      },
+      () => {
+        const value = scenarioEnvelope();
+        Object.assign(value.data.cost_breakdown, {
+          commission: { status: "known", value: "0.001", reason: null },
+        });
+        return value;
+      },
+      () => {
+        const value = scenarioEnvelope();
+        Object.assign(value.data.candidate, {
+          estimated_cost: { status: "unknown", value: null, reason: "DIFFERENT_REASON" },
+        });
+        return value;
+      },
+      () => {
+        const value = scenarioEnvelope();
+        Object.assign(value.data.cost_breakdown, {
+          evidence_version: "broker_cost_evidence_v1",
+          evidence_hash: "e".repeat(64),
+          available_at: "2026-08-24T03:59:00Z",
+          commission: { status: "known", value: "0.001", reason: null },
+          spread: { status: "known", value: "0.002", reason: null },
+          slippage: { status: "known", value: "0.003", reason: null },
+          regulatory_fees: { status: "known", value: "0.004", reason: null },
+          total_estimated_cost_ex_tax: { status: "known", value: "0.009", reason: null },
+        });
+        Object.assign(value.data.candidate, {
+          estimated_cost: { status: "known", value: "0.009", reason: null },
+        });
+        return value;
+      },
+    ];
+
+    for (const build of cases) {
+      expect(rebuildAllowedEngineResponse(
+        200,
+        build(),
+        new Headers(),
+        undefined,
+        "/internal/v1/portfolio-scenarios/evaluate",
+        "POST",
+      )).toBeNull();
+    }
   });
 });

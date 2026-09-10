@@ -14,7 +14,8 @@ from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.optimizer.compare import TypedMetric
 from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
-    PortfolioScenarioEvaluationV1,
+    PortfolioScenarioEvaluationV2,
+    ScenarioCostBreakdownV1,
     ScenarioMetricSetV1,
     ScenarioObjectiveStatus,
     ScenarioPositionV1,
@@ -41,7 +42,7 @@ def evaluate_adjustment_scenario(
     diagnostic_report_id: UUID,
     diagnostic_input_hash: str,
     request_hash: str,
-) -> PortfolioScenarioEvaluationV1:
+) -> PortfolioScenarioEvaluationV2:
     """Return one ephemeral scenario without persistence or external I/O."""
     with localcontext() as context:
         context.prec = 28
@@ -68,7 +69,7 @@ def _evaluate(
     diagnostic_report_id: UUID,
     diagnostic_input_hash: str,
     request_hash: str,
-) -> PortfolioScenarioEvaluationV1:
+) -> PortfolioScenarioEvaluationV2:
     _validate_binding(snapshot, report, policy, diagnostic_input_hash)
     assert snapshot.as_of is not None
     positions = _usd_positions(snapshot, identities)
@@ -139,8 +140,8 @@ def _evaluate(
         )
         for instrument_id in sorted(current)
     )
-    draft = PortfolioScenarioEvaluationV1(
-        schema_version="portfolio_scenario_evaluation_v1",
+    draft = PortfolioScenarioEvaluationV2(
+        schema_version="portfolio_scenario_evaluation_v2",
         request_hash=request_hash,
         result_hash="0" * 64,
         portfolio_snapshot_id=snapshot.id,
@@ -158,6 +159,7 @@ def _evaluate(
         cash_target_weight=target_cash,
         hard_constraint_reasons=() if reason is None else (reason,),
         unknown_metrics=("estimated_cost",),
+        cost_breakdown=_unavailable_real_costs(snapshot.as_of),
         execution_locked=True,
     )
     return draft.model_copy(update={"result_hash": canonical_scenario_hash(draft)})
@@ -388,6 +390,24 @@ def _metric_set(
         estimated_cost=(
             TypedMetric.known(_ZERO)
             if baseline
-            else TypedMetric.unknown("COST_MODEL_NOT_AVAILABLE")
+            else TypedMetric.unknown("COST_EVIDENCE_INCOMPLETE")
         ),
+    )
+
+
+def _unavailable_real_costs(as_of: datetime) -> ScenarioCostBreakdownV1:
+    """Describe current real-account cost gaps without substituting simulation assumptions."""
+    return ScenarioCostBreakdownV1(
+        currency="USD",
+        valuation_time=as_of,
+        basis="portfolio_value_ratio",
+        evidence_version=None,
+        evidence_hash=None,
+        available_at=None,
+        commission=TypedMetric.unknown("BROKER_COMMISSION_SCHEDULE_UNAVAILABLE"),
+        spread=TypedMetric.unknown("BID_ASK_EVIDENCE_UNAVAILABLE"),
+        slippage=TypedMetric.unknown("SLIPPAGE_MODEL_UNAVAILABLE"),
+        regulatory_fees=TypedMetric.unknown("REGULATORY_FEE_SCHEDULE_UNAVAILABLE"),
+        tax_impact=TypedMetric.unknown("TAX_DATA_UNAVAILABLE"),
+        total_estimated_cost_ex_tax=TypedMetric.unknown("COST_EVIDENCE_INCOMPLETE"),
     )

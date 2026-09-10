@@ -363,6 +363,10 @@ async def test_get_is_actor_scoped_and_resolves_only_intent_citations(
     factory = session_factory(settings(migrated_database_url))
     await _seed_authority(factory)
     _install_admission_authority(monkeypatch)
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_persistence.canonical_portfolio_tool_hash",
+        lambda: "0" * 64,
+    )
     create_path = "/internal/v1/portfolio-decision-runs"
     body = _payload()
     async with httpx.AsyncClient(

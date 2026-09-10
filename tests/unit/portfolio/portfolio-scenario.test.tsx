@@ -23,7 +23,7 @@ function scenario(objectiveStatus: ScenarioResponse["objective_status"] = "impro
   const known = (value: string) => ({ status: "known" as const, value, reason: null });
   const unknown = (reason: string) => ({ status: "unknown" as const, value: null, reason });
   return {
-    schema_version: "portfolio_scenario_evaluation_v1",
+    schema_version: "portfolio_scenario_evaluation_v2",
     request_hash: "a".repeat(64), result_hash: "b".repeat(64), diagnostic_input_hash: "c".repeat(64),
     portfolio_snapshot_id: snapshotId, diagnostic_report_id: reportId,
     valuation_time: snapshot.as_of!, valuation_scope: "currency:USD",
@@ -31,11 +31,11 @@ function scenario(objectiveStatus: ScenarioResponse["objective_status"] = "impro
     analysis_status: "partial", execution_locked: true,
     baseline: {
       security_top1: known("0.7"), security_top3: known("0.9"), security_hhi: known("0.55"),
-      cash_weight: known("0.1"), one_way_turnover: known("0"), estimated_cost: unknown("COST_MODEL_NOT_AVAILABLE"),
+      cash_weight: known("0.1"), one_way_turnover: known("0"), estimated_cost: unknown("COST_EVIDENCE_INCOMPLETE"),
     },
     candidate: {
       security_top1: known("0.55"), security_top3: known("0.75"), security_hhi: known("0.4"),
-      cash_weight: known("0.25"), one_way_turnover: known("0.15"), estimated_cost: unknown("COST_MODEL_NOT_AVAILABLE"),
+      cash_weight: known("0.25"), one_way_turnover: known("0.15"), estimated_cost: unknown("COST_EVIDENCE_INCOMPLETE"),
     },
     positions: [{
       instrument_id: snapshot.positions[0].instrument_id,
@@ -46,6 +46,16 @@ function scenario(objectiveStatus: ScenarioResponse["objective_status"] = "impro
     }],
     cash_current_weight: "0.1", cash_target_weight: "0.25",
     hard_constraint_reasons: [], unknown_metrics: ["estimated_cost"],
+    cost_breakdown: {
+      currency: "USD", valuation_time: snapshot.as_of!, basis: "portfolio_value_ratio",
+      evidence_version: null, evidence_hash: null, available_at: null,
+      commission: unknown("BROKER_COMMISSION_SCHEDULE_UNAVAILABLE"),
+      spread: unknown("BID_ASK_EVIDENCE_UNAVAILABLE"),
+      slippage: unknown("SLIPPAGE_MODEL_UNAVAILABLE"),
+      regulatory_fees: unknown("REGULATORY_FEE_SCHEDULE_UNAVAILABLE"),
+      tax_impact: unknown("TAX_DATA_UNAVAILABLE"),
+      total_estimated_cost_ex_tax: unknown("COST_EVIDENCE_INCOMPLETE"),
+    },
   };
 }
 
@@ -107,7 +117,12 @@ it("posts intent and constraints without client-authored weights, then compares 
   const comparison = screen.getByRole("table", { name: "当前组合与调整情景比较" });
   expect(within(comparison).getByText("70%")).toBeVisible();
   expect(within(comparison).getByText("55%")).toBeVisible();
-  expect(screen.getByText(/交易成本尚未建模/)).toBeVisible();
+  const costs = screen.getByRole("table", { name: "调整情景成本证据" });
+  expect(within(costs).getByText("券商佣金")).toBeVisible();
+  expect(within(costs).getByText("缺少适用的券商佣金费率依据")).toBeVisible();
+  expect(within(costs).getByText("缺少冻结时点的买卖报价依据")).toBeVisible();
+  expect(within(costs).getByText("税务资料不可用")).toBeVisible();
+  expect(screen.getByText(/成本证据未完成，不能进入执行或 Shadow/)).toBeVisible();
   expect(screen.getByText(/Top1、Top3 与 HHI.*证券市值为分母，不含现金/)).toBeVisible();
   expect(screen.getAllByText(/交易保持锁定/).length).toBeGreaterThanOrEqual(2);
   expect(screen.getByRole("button", { name: "让 Agent 解读" })).toBeEnabled();

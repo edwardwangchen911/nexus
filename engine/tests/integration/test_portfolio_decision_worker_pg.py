@@ -407,6 +407,57 @@ async def test_worker_terminalizes_invalid_authority_without_calling_provider(
 
 
 @pytest.mark.asyncio
+async def test_worker_terminalizes_a_pre_upgrade_active_run_without_provider_call(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_persistence.canonical_portfolio_tool_hash",
+        lambda: "0" * 64,
+    )
+    await _admit(factory, monkeypatch, idempotency_key="pre-upgrade-tool-authority")
+    async with factory() as session:
+        run = await session.scalar(select(PortfolioDecisionRunRecord))
+        assert run is not None
+        run_id = run.id
+    client = _Client({}, factory)
+
+    worked = await run_core_worker_once(
+        factory,
+        responses_client=client,
+        worker_id="portfolio-decision-pre-upgrade",
+        worker_started_at=NOW,
+        process_version="test-worker-v2",
+        migration_head="0049_pd_terminal_phases",
+        clock=lambda: NOW,
+    )
+
+    async with factory() as session:
+        stored = await session.get(PortfolioDecisionRunRecord, run_id)
+        job = await session.scalar(select(Job).where(Job.job_type == "agent.portfolio_decision"))
+        output = await session.scalar(
+            select(PortfolioDecisionOutputRecord).where(
+                PortfolioDecisionOutputRecord.run_id == run_id
+            )
+        )
+        reservation = await session.scalar(
+            select(PortfolioDecisionBudgetReservationRecord).where(
+                PortfolioDecisionBudgetReservationRecord.run_id == run_id
+            )
+        )
+    assert worked is True and client.responses.calls == []
+    assert stored is not None and (stored.status, stored.provider_phase) == ("failed", "none")
+    assert job is not None and job.last_error_code == "PORTFOLIO_DECISION_AUTHORITY_INVALID"
+    assert output is not None and output.details == {
+        "error_code": "PORTFOLIO_DECISION_AUTHORITY_INVALID",
+        "execution_locked": True,
+    }
+    assert reservation is not None and reservation.state == "released"
+
+
+@pytest.mark.asyncio
 async def test_worker_skips_failed_dependency_without_calling_provider(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,

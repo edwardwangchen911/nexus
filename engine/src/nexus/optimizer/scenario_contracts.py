@@ -96,8 +96,61 @@ class ScenarioMetricSetV1(_StrictScenarioModel):
     estimated_cost: TypedMetric
 
 
-class PortfolioScenarioEvaluationV1(_StrictScenarioModel):
-    schema_version: Literal["portfolio_scenario_evaluation_v1"]
+class ScenarioCostBreakdownV1(_StrictScenarioModel):
+    """Candidate transaction-cost components on one frozen USD valuation basis."""
+
+    currency: Literal["USD"]
+    valuation_time: datetime
+    basis: Literal["portfolio_value_ratio"]
+    evidence_version: str | None = Field(default=None, min_length=1, max_length=100)
+    evidence_hash: str | None = Field(default=None, pattern=_HASH_PATTERN)
+    available_at: datetime | None = None
+    commission: TypedMetric
+    spread: TypedMetric
+    slippage: TypedMetric
+    regulatory_fees: TypedMetric
+    tax_impact: TypedMetric
+    total_estimated_cost_ex_tax: TypedMetric
+
+    @field_validator("valuation_time", "available_at")
+    @classmethod
+    def _canonical_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else require_utc(value)
+
+    @model_validator(mode="after")
+    def _authority_matches_metrics(self) -> ScenarioCostBreakdownV1:
+        authority = (self.evidence_version, self.evidence_hash, self.available_at)
+        if any(value is None for value in authority) and any(
+            value is not None for value in authority
+        ):
+            raise ValueError("scenario cost authority must be complete or absent")
+        components = (self.commission, self.spread, self.slippage, self.regulatory_fees)
+        if any(
+            item.status == "known" and item.value is not None and item.value < _ZERO
+            for item in (*components, self.total_estimated_cost_ex_tax)
+        ):
+            raise ValueError("scenario costs cannot be negative")
+        evidenced_metrics = (*components, self.tax_impact, self.total_estimated_cost_ex_tax)
+        if authority == (None, None, None) and any(
+            item.status == "known" for item in evidenced_metrics
+        ):
+            raise ValueError("known scenario costs require evidence authority")
+        if self.available_at is not None and self.available_at > self.valuation_time:
+            raise ValueError("scenario cost evidence cannot be available after valuation")
+        if all(item.status == "known" for item in components):
+            expected = sum((item.value for item in components if item.value is not None), _ZERO)
+            if (
+                self.total_estimated_cost_ex_tax.status != "known"
+                or self.total_estimated_cost_ex_tax.value != expected
+            ):
+                raise ValueError("scenario cost total must equal known components")
+        elif self.total_estimated_cost_ex_tax.status != "unknown":
+            raise ValueError("scenario cost total must remain unknown when a component is unknown")
+        return self
+
+
+class PortfolioScenarioEvaluationV2(_StrictScenarioModel):
+    schema_version: Literal["portfolio_scenario_evaluation_v2"]
     request_hash: str = Field(pattern=_HASH_PATTERN)
     result_hash: str = Field(pattern=_HASH_PATTERN)
     portfolio_snapshot_id: UUID
@@ -115,6 +168,7 @@ class PortfolioScenarioEvaluationV1(_StrictScenarioModel):
     cash_target_weight: Decimal = Field(ge=_ZERO, le=_ONE)
     hard_constraint_reasons: tuple[str, ...]
     unknown_metrics: tuple[str, ...]
+    cost_breakdown: ScenarioCostBreakdownV1
     execution_locked: Literal[True]
 
     @field_validator("valuation_time")
@@ -123,7 +177,7 @@ class PortfolioScenarioEvaluationV1(_StrictScenarioModel):
         return require_utc(value)
 
     @model_validator(mode="after")
-    def _balanced_reduce_only_result(self) -> PortfolioScenarioEvaluationV1:
+    def _balanced_reduce_only_result(self) -> PortfolioScenarioEvaluationV2:
         if len({position.instrument_id for position in self.positions}) != len(self.positions):
             raise ValueError("scenario positions require unique instruments")
         current_total = sum(
@@ -141,6 +195,10 @@ class PortfolioScenarioEvaluationV1(_StrictScenarioModel):
             or self.candidate.cash_weight.value != self.cash_target_weight
         ):
             raise ValueError("scenario cash metrics must match cash weights")
+        if self.cost_breakdown.valuation_time != self.valuation_time:
+            raise ValueError("scenario cost time must match valuation time")
+        if self.cost_breakdown.total_estimated_cost_ex_tax != self.candidate.estimated_cost:
+            raise ValueError("scenario cost total must match candidate metric")
         return self
 
 

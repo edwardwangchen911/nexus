@@ -133,8 +133,22 @@ class ScenarioMetricSetV1(StrictModel):
     one_way_turnover: TypedMetric
     estimated_cost: TypedMetric
 
-class PortfolioScenarioEvaluationV1(StrictModel):
-    schema_version: Literal["portfolio_scenario_evaluation_v1"]
+class ScenarioCostBreakdownV1(StrictModel):
+    currency: Literal["USD"]
+    valuation_time: datetime
+    basis: Literal["portfolio_value_ratio"]
+    evidence_version: str | None
+    evidence_hash: str | None
+    available_at: datetime | None
+    commission: TypedMetric
+    spread: TypedMetric
+    slippage: TypedMetric
+    regulatory_fees: TypedMetric
+    tax_impact: TypedMetric
+    total_estimated_cost_ex_tax: TypedMetric
+
+class PortfolioScenarioEvaluationV2(StrictModel):
+    schema_version: Literal["portfolio_scenario_evaluation_v2"]
     request_hash: str
     result_hash: str
     portfolio_snapshot_id: UUID
@@ -152,6 +166,7 @@ class PortfolioScenarioEvaluationV1(StrictModel):
     cash_target_weight: Decimal
     hard_constraint_reasons: tuple[str, ...]
     unknown_metrics: tuple[str, ...]
+    cost_breakdown: ScenarioCostBreakdownV1
     execution_locked: Literal[True]
 ```
 
@@ -163,6 +178,8 @@ class PortfolioScenarioEvaluationV1(StrictModel):
 - 标的集合等于快照的正证券持仓集合；
 - 当前证券加当前现金、目标证券加目标现金分别精确等于 1；
 - `request_hash` 对规范化请求计算，`result_hash` 对不含自身哈希字段的规范化结果计算；
+- 成本证据权威三元组完整或全部缺失；已知成本必须有权威，不含税成本合计必须精确等于佣金、价差、滑点和监管费用之和；
+- `cost_breakdown.valuation_time` 与结果估值时点一致，`total_estimated_cost_ex_tax` 与候选的 `estimated_cost` 一致；
 - `execution_locked` 只能为 `true`。
 
 阶段 A 不定义 `scenario_id`、`mandate_id`、版本、选择状态、`decision_status` 或 `shadow_eligible`。
@@ -182,7 +199,7 @@ def evaluate_adjustment_scenario(
     diagnostic_report_id: UUID,
     diagnostic_input_hash: str,
     request_hash: str,
-) -> PortfolioScenarioEvaluationV1:
+) -> PortfolioScenarioEvaluationV2:
     ...
 ```
 
@@ -202,7 +219,7 @@ def evaluate_adjustment_scenario(
 12. 合法候选与基线相同或 Top1 未下降时返回 `unchanged`。
 13. 单证券组合、出售能力耗尽或结构性下限导致目标无法改善时返回 `infeasible`；已经严格改善但未达阈值时返回 `improved_not_met` 并保留具体原因。
 
-`estimated_cost` 的基线为已知零，候选在阶段 A 保持 `unknown/COST_MODEL_NOT_AVAILABLE`。因此所有成功的阶段 A 响应固定为 `analysis_status=partial`；unknown 不阻止分析显示，但响应不得声称可执行。无法计算目标指标时不伪造 `unavailable` 结果，而是由 API 返回稳定拒绝码。
+`estimated_cost` 的基线为已知零；候选在阶段 A 返回逐项成本证据，缺少实际费率、冻结买卖报价、滑点模型或税务资料时保持对应 unknown，且不含税合计为 `unknown/COST_EVIDENCE_INCOMPLETE`。因此所有成功的阶段 A 响应固定为 `analysis_status=partial`；unknown 不阻止分析显示，但响应不得声称可执行。无法计算目标指标时不伪造 `unavailable` 结果，而是由 API 返回稳定拒绝码。
 
 ## 6. API 与数据流
 

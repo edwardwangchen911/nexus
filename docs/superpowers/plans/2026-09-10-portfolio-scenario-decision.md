@@ -46,7 +46,7 @@
 
 **Interfaces:**
 - Consumes: `nexus.optimizer.compare.TypedMetric`、`nexus.domain.time.require_utc`。
-- Produces: `AdjustmentScenarioConstraintsV1`、`PortfolioScenarioRequestV1`、`ScenarioPositionV1`、`ScenarioMetricSetV1`、`PortfolioScenarioEvaluationV1`。
+- Produces: `AdjustmentScenarioConstraintsV1`、`PortfolioScenarioRequestV1`、`ScenarioPositionV1`、`ScenarioMetricSetV1`、`ScenarioCostBreakdownV1`、`PortfolioScenarioEvaluationV2`。
 
 - [ ] **Step 1: 写拒绝浮点和额外字段的失败测试**
 
@@ -113,7 +113,7 @@ git commit -m "feat: define portfolio scenario contracts"
 
 **Interfaces:**
 - Consumes: Task 1 合同、`PortfolioSnapshot`、`PortfolioDiagnosticReport`、`InstrumentIdentity` 映射、`RealAdvisoryPolicy`、权威 `diagnostic_report_id` 与 `diagnostic_input_hash`。
-- Produces: `evaluate_adjustment_scenario(...) -> PortfolioScenarioEvaluationV1`。
+- Produces: `evaluate_adjustment_scenario(...) -> PortfolioScenarioEvaluationV2`。
 
 - [ ] **Step 1: 写预算充足和预算不足的失败测试**
 
@@ -134,7 +134,7 @@ git commit -m "feat: define portfolio scenario contracts"
 - 舍入余数只进入现金；
 - 估值域固定返回 `currency:USD`，港股只读持仓不进入权重和候选；
 - USD 持仓缺少标准美股身份时失败关闭；
-- 成本为 `unknown/COST_MODEL_NOT_AVAILABLE`，`execution_locked=true`。
+- 候选逐项成本保持证据化 unknown，不含税合计为 `unknown/COST_EVIDENCE_INCOMPLETE`，`execution_locked=true`。
 
 - [ ] **Step 4: 运行测试确认入口缺失**
 

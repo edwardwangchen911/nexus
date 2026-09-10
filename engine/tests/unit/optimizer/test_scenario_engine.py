@@ -180,6 +180,43 @@ def test_budget_sufficient_meets_top1_with_cash_leg_turnover() -> None:
     assert result.execution_locked is True
 
 
+def test_unknown_real_costs_are_split_without_claiming_a_total() -> None:
+    result = _evaluate(_snapshot(("30", "10", "10", "10", "10", "10", "10", "10")))
+
+    assert result.cost_breakdown.currency == "USD"
+    assert result.cost_breakdown.valuation_time == _AS_OF
+    assert result.cost_breakdown.basis == "portfolio_value_ratio"
+    assert result.cost_breakdown.evidence_version is None
+    assert result.cost_breakdown.evidence_hash is None
+    assert result.cost_breakdown.available_at is None
+    assert {
+        "commission": result.cost_breakdown.commission.reason,
+        "spread": result.cost_breakdown.spread.reason,
+        "slippage": result.cost_breakdown.slippage.reason,
+        "regulatory_fees": result.cost_breakdown.regulatory_fees.reason,
+        "tax_impact": result.cost_breakdown.tax_impact.reason,
+        "total_estimated_cost_ex_tax": result.cost_breakdown.total_estimated_cost_ex_tax.reason,
+    } == {
+        "commission": "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE",
+        "spread": "BID_ASK_EVIDENCE_UNAVAILABLE",
+        "slippage": "SLIPPAGE_MODEL_UNAVAILABLE",
+        "regulatory_fees": "REGULATORY_FEE_SCHEDULE_UNAVAILABLE",
+        "tax_impact": "TAX_DATA_UNAVAILABLE",
+        "total_estimated_cost_ex_tax": "COST_EVIDENCE_INCOMPLETE",
+    }
+    assert all(
+        metric.status == "unknown"
+        for metric in (
+            result.cost_breakdown.commission,
+            result.cost_breakdown.spread,
+            result.cost_breakdown.slippage,
+            result.cost_breakdown.regulatory_fees,
+            result.cost_breakdown.tax_impact,
+            result.cost_breakdown.total_estimated_cost_ex_tax,
+        )
+    )
+
+
 def test_budget_exhaustion_returns_strict_improvement_without_overspend() -> None:
     result = _evaluate(
         _snapshot(("30", "10", "10", "10", "10", "10", "10", "10")),
