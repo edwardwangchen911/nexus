@@ -82,6 +82,10 @@ class EngineSettings(_SafeSettings):
         default=None,
         validation_alias="AGENT_RUNTIME_MODE",
     )
+    portfolio_decision_runtime_mode: AgentRuntimeMode | None = Field(
+        default=None,
+        validation_alias="PORTFOLIO_DECISION_RUNTIME_MODE",
+    )
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_extraction_model: str | None = Field(
         default=None,

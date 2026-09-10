@@ -38,7 +38,6 @@ from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.persistence.session import session_factory
 from nexus.providers.broker.base import PortfolioSnapshot
 from nexus.settings import AgentRuntimeMode
-from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from tests.integration.test_portfolio_decision_admission_pg import (
@@ -63,10 +62,7 @@ def _app(database_url: str):
 def _runtime_app(database_url: str, runtime_mode: AgentRuntimeMode):
     configured = settings(database_url).model_copy(
         update={
-            "agent_runtime_mode": runtime_mode,
-            "openai_api_key": SecretStr("fixture-key"),
-            "openai_extraction_model": "gpt-5.4-mini-2026-03-17",
-            "openai_reasoning_model": "gpt-5.4-mini-2026-03-17",
+            "portfolio_decision_runtime_mode": runtime_mode,
         }
     )
     engine_app = create_engine_app(configured)

@@ -180,12 +180,13 @@ async def create_portfolio_decision_run(
 
 
 def _runtime_model_authority(settings: EngineSettings) -> tuple[str | None, str | None]:
-    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+    runtime_mode = settings.portfolio_decision_runtime_mode or settings.agent_runtime_mode
+    if runtime_mode is AgentRuntimeMode.CODEX_SDK:
         from nexus.agents.codex_sdk import MODEL_ID
         from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
 
         return MODEL_ID, PORTFOLIO_DECISION_CONFIG_VERSION
-    if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES:
+    if runtime_mode is AgentRuntimeMode.RESPONSES:
         from nexus.ops.openai_local import _CONFIG, MODEL_ID
 
         return MODEL_ID, str(_CONFIG["version"])

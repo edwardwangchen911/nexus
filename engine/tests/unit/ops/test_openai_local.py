@@ -349,3 +349,17 @@ def test_paid_portfolio_transport_binds_the_complete_registered_configuration(
         {"input_usd_per_million": Decimal("0")},
     ):
         assert client.supports_model_config(expected.model_copy(update=update)) is False
+
+
+def test_api_can_select_responses_authority_without_holding_provider_credentials() -> None:
+    from nexus.settings import AgentRuntimeMode, EngineSettings
+
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus",
+        environment="development",
+        portfolio_decision_runtime_mode="responses",
+    )
+
+    assert settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE
+    assert settings.portfolio_decision_runtime_mode is AgentRuntimeMode.RESPONSES
+    assert settings.openai_api_key is None
