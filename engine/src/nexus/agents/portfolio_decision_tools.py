@@ -350,6 +350,7 @@ def canonical_portfolio_tool_hash() -> str:
     implementation_paths = (
         Path(__file__).resolve(),
         module_root / "optimizer/scenario_contracts.py",
+        module_root / "optimizer/scenario_cost_evidence.py",
         module_root / "optimizer/scenario_engine.py",
     )
     authority = {

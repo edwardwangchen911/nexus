@@ -367,5 +367,16 @@ async def test_builder_validates_tool_hash_and_accepts_frozen_valuation_before_d
         with pytest.raises(ToolInputError, match="tool authority does not match"):
             await build_portfolio_decision_tools(ReadOnlySession(), run)  # type: ignore[arg-type]
 
+    def drift_cost_reference(path: Path) -> bytes:
+        content = original_read_bytes(path)
+        if path.name == "scenario_cost_evidence.py":
+            return content + b"\n# changed public rate reference"
+        return content
+
+    with monkeypatch.context() as implementation_drift:
+        implementation_drift.setattr(Path, "read_bytes", drift_cost_reference)
+        with pytest.raises(ToolInputError, match="tool authority does not match"):
+            await build_portfolio_decision_tools(ReadOnlySession(), run)  # type: ignore[arg-type]
+
     tools = await build_portfolio_decision_tools(ReadOnlySession(), run)  # type: ignore[arg-type]
     assert tools.names == ("evaluate_adjustment_scenario",)

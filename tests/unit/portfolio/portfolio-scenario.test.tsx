@@ -48,11 +48,12 @@ function scenario(objectiveStatus: ScenarioResponse["objective_status"] = "impro
     hard_constraint_reasons: [], unknown_metrics: ["estimated_cost"],
     cost_breakdown: {
       currency: "USD", valuation_time: snapshot.as_of!, basis: "portfolio_value_ratio",
-      evidence_version: null, evidence_hash: null, available_at: null,
+      evidence_version: "us_regulatory_fee_reference_2026_verified_20260911_v1",
+      evidence_hash: "e".repeat(64), available_at: "2026-02-28T00:00:00Z",
       commission: unknown("BROKER_COMMISSION_SCHEDULE_UNAVAILABLE"),
       spread: unknown("BID_ASK_EVIDENCE_UNAVAILABLE"),
       slippage: unknown("SLIPPAGE_MODEL_UNAVAILABLE"),
-      regulatory_fees: unknown("REGULATORY_FEE_SCHEDULE_UNAVAILABLE"),
+      regulatory_fees: unknown("BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE"),
       tax_impact: unknown("TAX_DATA_UNAVAILABLE"),
       total_estimated_cost_ex_tax: unknown("COST_EVIDENCE_INCOMPLETE"),
     },
@@ -122,6 +123,10 @@ it("posts intent and constraints without client-authored weights, then compares 
   expect(within(costs).getByText("缺少适用的券商佣金费率依据")).toBeVisible();
   expect(within(costs).getByText("缺少冻结时点的买卖报价依据")).toBeVisible();
   expect(within(costs).getByText("税务资料不可用")).toBeVisible();
+  expect(screen.getByText(/公开监管费率参考已记录/)).toHaveTextContent(
+    "us_regulatory_fee_reference_2026_verified_20260911_v1",
+  );
+  expect(screen.getByText(/摘要哈希，不代表官方原件已归档，也不等于复星账户实际收费依据/)).toBeVisible();
   expect(screen.getByText(/成本证据未完成，不能进入执行或 Shadow/)).toBeVisible();
   expect(screen.getByText(/Top1、Top3 与 HHI.*证券市值为分母，不含现金/)).toBeVisible();
   expect(screen.getAllByText(/交易保持锁定/).length).toBeGreaterThanOrEqual(2);

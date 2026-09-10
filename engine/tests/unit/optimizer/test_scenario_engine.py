@@ -186,9 +186,13 @@ def test_unknown_real_costs_are_split_without_claiming_a_total() -> None:
     assert result.cost_breakdown.currency == "USD"
     assert result.cost_breakdown.valuation_time == _AS_OF
     assert result.cost_breakdown.basis == "portfolio_value_ratio"
-    assert result.cost_breakdown.evidence_version is None
-    assert result.cost_breakdown.evidence_hash is None
-    assert result.cost_breakdown.available_at is None
+    assert (
+        result.cost_breakdown.evidence_version
+        == "us_regulatory_fee_reference_2026_verified_20260911_v1"
+    )
+    assert result.cost_breakdown.evidence_hash is not None
+    assert len(result.cost_breakdown.evidence_hash) == 64
+    assert result.cost_breakdown.available_at == datetime(2026, 2, 28, tzinfo=UTC)
     assert {
         "commission": result.cost_breakdown.commission.reason,
         "spread": result.cost_breakdown.spread.reason,
@@ -200,7 +204,7 @@ def test_unknown_real_costs_are_split_without_claiming_a_total() -> None:
         "commission": "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE",
         "spread": "BID_ASK_EVIDENCE_UNAVAILABLE",
         "slippage": "SLIPPAGE_MODEL_UNAVAILABLE",
-        "regulatory_fees": "REGULATORY_FEE_SCHEDULE_UNAVAILABLE",
+        "regulatory_fees": "BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE",
         "tax_impact": "TAX_DATA_UNAVAILABLE",
         "total_estimated_cost_ex_tax": "COST_EVIDENCE_INCOMPLETE",
     }
@@ -322,9 +326,7 @@ def test_real_usd_listed_security_asset_types_are_supported() -> None:
         ("equity_etf", "XNAS"),
         ("exchange_traded_note", "ARCX"),
     )
-    for position, (asset_type, exchange) in zip(
-        snapshot.positions, real_asset_types, strict=True
-    ):
+    for position, (asset_type, exchange) in zip(snapshot.positions, real_asset_types, strict=True):
         identities[position.instrument_id] = identities[position.instrument_id].model_copy(
             update={"asset_type": asset_type, "exchange": exchange}
         )

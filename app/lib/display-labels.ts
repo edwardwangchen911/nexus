@@ -69,6 +69,7 @@ const reasons: Record<string, string> = {
   BID_ASK_EVIDENCE_UNAVAILABLE: "缺少冻结时点的买卖报价依据",
   SLIPPAGE_MODEL_UNAVAILABLE: "缺少适用的滑点模型依据",
   REGULATORY_FEE_SCHEDULE_UNAVAILABLE: "缺少适用的监管费率依据",
+  BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE: "公开监管费率已核验，但缺少券商向账户转嫁、聚合与舍入依据",
   TURNOVER_BUDGET_EXHAUSTED: "换手预算已用尽",
   STRUCTURAL_CONCENTRATION_FLOOR: "当前持仓结构存在无法继续降低的集中度下限",
   SELLABLE_QUANTITY_EXHAUSTED: "可卖数量已用尽",

@@ -169,9 +169,9 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
         "currency": "USD",
         "valuation_time": "2026-08-24T03:59:00Z",
         "basis": "portfolio_value_ratio",
-        "evidence_version": None,
-        "evidence_hash": None,
-        "available_at": None,
+        "evidence_version": "us_regulatory_fee_reference_2026_verified_20260911_v1",
+        "evidence_hash": "56c13aeb742a7ad616834408ac63dea4210f22fa6c7443ccbb7c082782a60138",
+        "available_at": "2026-02-28T00:00:00Z",
         "commission": {
             "status": "unknown",
             "value": None,
@@ -190,7 +190,7 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
         "regulatory_fees": {
             "status": "unknown",
             "value": None,
-            "reason": "REGULATORY_FEE_SCHEDULE_UNAVAILABLE",
+            "reason": "BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE",
         },
         "tax_impact": {
             "status": "unknown",

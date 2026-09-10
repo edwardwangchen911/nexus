@@ -21,6 +21,7 @@ from nexus.optimizer.scenario_contracts import (
     ScenarioPositionV1,
     canonical_scenario_hash,
 )
+from nexus.optimizer.scenario_cost_evidence import regulatory_fee_reference
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
 
 _ZERO = Decimal("0")
@@ -397,17 +398,24 @@ def _metric_set(
 
 def _unavailable_real_costs(as_of: datetime) -> ScenarioCostBreakdownV1:
     """Describe current real-account cost gaps without substituting simulation assumptions."""
+    regulatory_reference = regulatory_fee_reference(as_of)
     return ScenarioCostBreakdownV1(
         currency="USD",
         valuation_time=as_of,
         basis="portfolio_value_ratio",
-        evidence_version=None,
-        evidence_hash=None,
-        available_at=None,
+        evidence_version=(None if regulatory_reference is None else regulatory_reference.version),
+        evidence_hash=(
+            None if regulatory_reference is None else regulatory_reference.evidence_hash
+        ),
+        available_at=(None if regulatory_reference is None else regulatory_reference.available_at),
         commission=TypedMetric.unknown("BROKER_COMMISSION_SCHEDULE_UNAVAILABLE"),
         spread=TypedMetric.unknown("BID_ASK_EVIDENCE_UNAVAILABLE"),
         slippage=TypedMetric.unknown("SLIPPAGE_MODEL_UNAVAILABLE"),
-        regulatory_fees=TypedMetric.unknown("REGULATORY_FEE_SCHEDULE_UNAVAILABLE"),
+        regulatory_fees=TypedMetric.unknown(
+            "REGULATORY_FEE_SCHEDULE_UNAVAILABLE"
+            if regulatory_reference is None
+            else "BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE"
+        ),
         tax_impact=TypedMetric.unknown("TAX_DATA_UNAVAILABLE"),
         total_estimated_cost_ex_tax=TypedMetric.unknown("COST_EVIDENCE_INCOMPLETE"),
     )

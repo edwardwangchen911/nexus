@@ -207,6 +207,9 @@ function ScenarioResult({ result, symbols }: { result: ScenarioResponse; symbols
     <div className="portfolio-scenario__costs">
       <h4>调整情景成本证据</h4>
       <p className="portfolio-scenario__scope">口径：{result.cost_breakdown.currency} 组合价值比例 · 冻结估值时点 {new Date(result.cost_breakdown.valuation_time).toLocaleString("zh-CN")}</p>
+      {result.cost_breakdown.evidence_version && result.cost_breakdown.available_at ? <p className="portfolio-scenario__scope">
+        公开监管费率参考已记录：{result.cost_breakdown.evidence_version} · 参考可用时点 {new Date(result.cost_breakdown.available_at).toLocaleString("zh-CN")}。当前仅绑定规范化摘要哈希，不代表官方原件已归档，也不等于复星账户实际收费依据。
+      </p> : null}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- keyboard users need to scroll wide cost tables */}
       <div className="table-scroll" role="region" aria-label="成本证据可横向滚动" tabIndex={0}>
         <table className="portfolio-scenario__table" aria-label="调整情景成本证据">
