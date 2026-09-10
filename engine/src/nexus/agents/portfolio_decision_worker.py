@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nexus.agents.codex_versions import PORTFOLIO_DECISION_LEASE_SECONDS
 from nexus.agents.portfolio_decision_execution import (
     PortfolioDecisionExecutionAuthority,
     PortfolioDecisionExecutionError,
@@ -41,7 +42,6 @@ from nexus.persistence.models.runtime import Job
 
 Clock = Callable[[], datetime]
 _JOB_SCHEMA_VERSION = "portfolio_decision_job_v1"
-_LEASE_SECONDS = 60
 
 
 async def run_portfolio_decision_worker_once(
@@ -79,7 +79,7 @@ async def run_portfolio_decision_worker_once(
             queue=QueueName.GENERAL,
             worker_id=worker_id,
             now=claim_time,
-            lease_seconds=_LEASE_SECONDS,
+            lease_seconds=PORTFOLIO_DECISION_LEASE_SECONDS,
             job_types=(JobType.AGENT_PORTFOLIO_DECISION.value,),
             job_ids=job_ids,
         )

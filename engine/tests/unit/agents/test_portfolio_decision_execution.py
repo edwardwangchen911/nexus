@@ -183,7 +183,7 @@ async def test_execution_authority_builds_only_the_frozen_aggregate_context(
     assert isinstance(authority, PortfolioDecisionExecutionAuthority)
     assert authority.prompt == "bounded portfolio decision prompt"
     assert authority.model_config.max_tool_calls == 1
-    assert authority.model_config.absolute_timeout_seconds == Decimal("80")
+    assert authority.model_config.absolute_timeout_seconds == Decimal("105")
     assert authority.tools is tools
     assert [item.code for item in authority.context.current_diagnostics] == [
         "CONCENTRATION_TOP1",

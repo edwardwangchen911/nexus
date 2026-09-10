@@ -15,10 +15,11 @@ PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS = 16_384
 PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN = 8_192
 PORTFOLIO_DECISION_MAX_TOOL_CALLS = 1
 PORTFOLIO_DECISION_MAX_WIRE_BYTES = 64_000
-# The portfolio flow has two provider turns. Codex SDK still caps each turn at
-# 35 seconds; this aggregate deadline leaves a bounded cleanup margin without
-# adding retries or increasing the two-call limit for either transport.
-PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS = Decimal("80")
+PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS = 45
+# Two provider turns plus bounded SDK cleanup remain below the dedicated lease.
+# This does not add retries or increase the two-call limit for either transport.
+PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS = Decimal("105")
+PORTFOLIO_DECISION_LEASE_SECONDS = 120
 STRUCTURED_CONFIG_VERSIONS = frozenset(
     {
         STRUCTURED_CONFIG_VERSION,

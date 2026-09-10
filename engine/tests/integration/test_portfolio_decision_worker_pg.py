@@ -232,10 +232,10 @@ async def test_reconcile_after_output_checkpoint_crash_never_replays_provider(
         reclaimed = await reclaim_expired_jobs(
             session,
             queue=QueueName.GENERAL,
-            now=NOW + timedelta(seconds=61),
+            now=NOW + timedelta(seconds=121),
         )
         reconciled = await reconcile_orphaned_portfolio_decisions(
-            session, now=NOW + timedelta(seconds=61)
+            session, now=NOW + timedelta(seconds=121)
         )
 
     async with factory() as session:

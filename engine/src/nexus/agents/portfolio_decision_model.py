@@ -103,9 +103,9 @@ class CodexPortfolioResponsesClient:
         if not model_id or not pricing_version:
             raise ValueError("portfolio decision Codex model is required")
         if invoke is None:
-            from nexus.agents.codex_sdk import invoke_codex
+            from nexus.agents.codex_sdk import invoke_codex_portfolio
 
-            invoke = invoke_codex
+            invoke = invoke_codex_portfolio
         self._model_id = model_id
         self._pricing_version = pricing_version
         self._invoke = invoke

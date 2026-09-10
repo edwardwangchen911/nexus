@@ -24,6 +24,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nexus.agents.codex_token_budget import input_preflight_units
 from nexus.agents.codex_versions import CONFIG_VERSION as CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS as PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS,
+)
 from nexus.agents.codex_versions import STAGED_CONFIG_VERSION as STAGED_CONFIG_VERSION
 from nexus.agents.codex_versions import STRUCTURED_CONFIG_VERSION as STRUCTURED_CONFIG_VERSION
 from nexus.agents.committee import (
@@ -292,12 +295,35 @@ async def invoke_codex(
 ) -> tuple[str, UsageSnapshot]:
     with _invocation_boundary("preflight"):
         return await _invoke_codex(
-            payload, output_model=output_model, max_wire_bytes=max_wire_bytes
+            payload,
+            output_model=output_model,
+            max_wire_bytes=max_wire_bytes,
+            timeout_seconds=TIMEOUT_SECONDS,
+        )
+
+
+async def invoke_codex_portfolio(
+    payload: Mapping[str, object],
+    *,
+    output_model: type[BaseModel] = _Batch,
+    max_wire_bytes: int = 55808,
+) -> tuple[str, UsageSnapshot]:
+    """Run one portfolio turn without changing the default research deadline."""
+    with _invocation_boundary("preflight"):
+        return await _invoke_codex(
+            payload,
+            output_model=output_model,
+            max_wire_bytes=max_wire_bytes,
+            timeout_seconds=PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS,
         )
 
 
 async def _invoke_codex(
-    payload: Mapping[str, object], *, output_model: type[BaseModel], max_wire_bytes: int = 55808
+    payload: Mapping[str, object],
+    *,
+    output_model: type[BaseModel],
+    max_wire_bytes: int,
+    timeout_seconds: int,
 ) -> tuple[str, UsageSnapshot]:
     wire = codex_request_wire(payload)
     if type(max_wire_bytes) is not int or max_wire_bytes not in {55808, 64000}:
@@ -315,7 +341,7 @@ async def _invoke_codex(
         run_task = None
         phase: InvocationPhase = "account"
         try:
-            async with asyncio.timeout(TIMEOUT_SECONDS):
+            async with asyncio.timeout(timeout_seconds):
                 with _invocation_boundary("account"):
                     account = await client.account(refresh_token=False)
                     if account.account is None or not isinstance(

@@ -336,7 +336,7 @@ def test_paid_portfolio_transport_binds_the_complete_registered_configuration(
         max_input_tokens=64_000,
         max_output_tokens=8_192,
         max_tool_calls=1,
-        absolute_timeout_seconds=Decimal("80"),
+        absolute_timeout_seconds=Decimal("105"),
         input_usd_per_million=Decimal("0.75"),
         output_usd_per_million=Decimal("4.50"),
     )

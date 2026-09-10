@@ -1574,6 +1574,25 @@ async def test_timeout_closes_sdk_without_retry(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_portfolio_sdk_timeout_is_isolated_from_the_default(monkeypatch):
+    observed: list[int] = []
+
+    async def invoke(
+        payload, *, output_model, max_wire_bytes, timeout_seconds
+    ):
+        del payload, output_model, max_wire_bytes
+        observed.append(timeout_seconds)
+        return "{}", UsageSnapshot()
+
+    monkeypatch.setattr(codex_sdk, "_invoke_codex", invoke)
+
+    await codex_sdk.invoke_codex({})
+    await codex_sdk.invoke_codex_portfolio({})
+
+    assert observed == [35, 45]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("external_cancel", [False, True])
 async def test_timeout_wakes_sdk_notification_thread_before_unregister(
     monkeypatch, external_cancel
