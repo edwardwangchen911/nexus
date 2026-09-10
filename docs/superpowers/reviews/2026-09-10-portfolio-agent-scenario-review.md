@@ -54,3 +54,29 @@
 方案没有引入 Mandate CRUD、候选/选择业务表、通用求解器、新 Agent 委员会、新队列/Worker 进程、自动重试、Shadow 或交易能力。新增三张表分别服务于 durable run、不可变 output 和跨运行类型共享预算，均有当前阶段的直接恢复或审计需求；不能安全地复用强制绑定单标身份的旧研究表。
 
 因此最终结论是：架构有必要调整，但范围已收敛到实现 Agent 可调用确定性情景工具所需的最小闭环，不属于为未来场景预建平台。
+
+## 6. 实施期验证（2026-09-10）
+
+Tasks 1–6 已形成合同、迁移、单工具投影、预算与幂等、两轮模型适配、短事务 worker、
+Engine/BFF 及显式触发页面。Task 7 新增的隔离跨层回归先通过正式情景 API 取得 result hash，
+再经正常 Engine admission 创建 run；除无网络 deterministic Responses transport 外，不替换
+冻结权威 loader 或正式工具 registry。用例验证两轮 provider turn、一次真实工具执行、持久化
+output、预算结算、citation 反解和 authenticated GET；模型输入既没有逐标字段，也没有可识别的
+逐标 ID、symbol 或当前/目标权重值。所有结果继续保持交易锁；方案、Shadow、模拟订单和成交表
+零增量。
+
+该真实路径发现并修复了一项此前模拟 registry 未覆盖的 Important 接线缺陷：情景引擎的成本
+unknown 原因 `COST_MODEL_NOT_AVAILABLE` 不符合 Agent 投影 allowlist，导致第一次工具调用后
+保守 abstain。修复仅在 Agent 投影边界映射为更粗粒度的
+`COST_EVIDENCE_INCOMPLETE`，保留原始情景合同，并增加直接回归；单证券不可改善案例最终输出
+`observe`，未把 infeasible 包装成调整建议。
+
+实施期 UI 审查曾发现两项 Important：挂起 GET 可绕过 45 秒观察上限，以及按 portfolio
+前缀删除恢复记录会破坏多标签页幂等。实现已改为给每次 GET 绑定剩余总时限，并以完整
+snapshot/report/result hash 作用域键隔离而不跨 scope 删除；定向复核后 Critical=0、
+Important=0。当前剩余项不是设计或代码审查问题，而是功能分支合入、共享数据库迁移及
+对应 Engine/general Worker 运行更新；完成这些前不得把 synthetic 验收表述为真实页面闭环。
+
+Task 7 定向复审确认上轮 authority seam 阻塞已关闭：正式 loader、registry、worker 和 GET 均在
+测试中真实执行，只有 Responses transport 被替换；隐私值断言和成本原因码回归有效。最终结果
+为 Critical=0、Important=0，可以提交，但不改变上述共享运行版本阻塞。

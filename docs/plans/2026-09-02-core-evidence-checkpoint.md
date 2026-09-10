@@ -3330,3 +3330,27 @@ synthesized、completed；保存 8 个角色输出及综合/完成输出，实�
 修复后，真实组合、快照、正式诊断与情景 BFF/Engine 均返回 200；快照仍为 `READY / DECISION_READY / PASS`，正式诊断仍为 `RESEARCH_REQUIRED`。显式情景返回 12 个证券、`improved_not_met` 和 `analysis_status=partial`，交易成本保持 `estimated_cost` unknown，硬约束未被绕过，`execution_locked=true`。真实 Chrome 页面中的生成按钮可用，点击后显示候选、分析不完整、成本未知和交易锁。两次使用不同幂等键的有界验收只使脱敏审计事件从 2 增至 4；方案组保持 3，Shadow、模拟订单和成交均保持 0。未调用 Provider、模型、券商同步、模拟盘或实盘。
 
 阶段 A 到此停止，不顺手增加 Mandate、Agent 工具、候选选择、Shadow 或通用求解器。随后按现有 Compose 项目只重建并替换 API 容器，没有启动 Worker、Provider 或 Gateway，也没有执行迁移或数据刷新。常用 58000 Engine 已加载本次主线代码，3302 页面重新验证正式诊断和情景请求均返回 200；真实 Chrome 页面按钮可用，点击后继续显示一个 partial 候选、成本未知和交易锁。最后一次不同幂等键的运行验收只使脱敏审计事件从 4 增至 5，方案组仍为 3，Shadow、模拟订单和成交仍为 0。旧镜像内容 ID 在构建完成时已被本地运行时清理，不能秒级切回；需要回滚时使用前一 Git 提交按同一 Compose 命令重建 API。
+
+### 组合 Agent 决策链隔离跨层验收（2026-09-10）
+
+新增一条使用正常 Engine admission 的 PostgreSQL 跨层回归：先由正式情景 API 计算并取得
+result hash，再显式 POST 登记一个 durable 组合决策 run。general worker 只注入无网络的
+deterministic Responses transport；冻结权威重建和 `evaluate_adjustment_scenario` 均使用正式
+loader/registry，实现两轮调用后再从 authenticated GET 读回完成结果。模型传输载荷不含
+`positions`、`instrument_id`、`symbol`、`current_weight` 或 `target_weight` 字段，也不含用例中
+可识别的逐标 ID、symbol 和当前/目标权重值；两个 provider turn 均固定 `store=false`。
+
+隔离 PostgreSQL 17 从空库迁移到唯一 head `0049_pd_terminal_phases` 后，组合决策相关 79 项
+回归通过；新跨层用例同时核对 run 的情景结果哈希、output 内容哈希、citation 映射及预算结算。
+真实 registry 首次接线还暴露出情景成本原因码与 Agent allowlist 不一致，现已在投影边界将
+`COST_MODEL_NOT_AVAILABLE` 收敛为 `COST_EVIDENCE_INCOMPLETE` 并补单元回归，不改情景引擎或
+执行准入。本用例因单一证券无法降低证券内集中度，API 正确返回 `observe`、成本 limitation 和
+`execution_locked=true`，没有编造可行调整。验收前后
+`optimization_proposal_groups`、`shadow_groups`、`paper_orders`、`paper_fills` 均为零。
+前端 65 项聚焦回归、生成合同、TypeScript、ESLint 与 Vinext production build 通过。
+
+运行预检确认当前功能位于隔离分支 `feature/portfolio-agent-scenario`，尚未进入 `main`；现有
+3302 页面进程来自主 checkout 的旧运行版本，未发现可安全归属给本任务的 Engine/general
+Worker，现有业务 PostgreSQL 由其他工作线持有。因此本轮没有迁移、重启或替换共享服务，
+也没有发起真实模型、Provider、broker refresh、Shadow、订单或成交调用。真实页面验收的
+精确阻塞是“主线尚未集成且对应运行版本未启动”，不是组合数据或券商权限缺失。

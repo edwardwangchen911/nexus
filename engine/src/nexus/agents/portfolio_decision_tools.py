@@ -33,6 +33,7 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
     PortfolioScenarioEvaluationV1,
+    ScenarioMetricSetV1,
     canonical_scenario_hash,
 )
 from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
@@ -297,12 +298,8 @@ def project_scenario_for_agent(
                 "objective": evaluation.objective,
                 "objective_status": evaluation.objective_status,
                 "analysis_status": evaluation.analysis_status,
-                "baseline": AgentScenarioMetricSetV1.model_validate(
-                    evaluation.baseline.model_dump(mode="python")
-                ),
-                "candidate": AgentScenarioMetricSetV1.model_validate(
-                    evaluation.candidate.model_dump(mode="python")
-                ),
+                "baseline": _project_metric_set(evaluation.baseline),
+                "candidate": _project_metric_set(evaluation.candidate),
                 "unknown_metrics": evaluation.unknown_metrics,
                 "hard_constraint_reasons": evaluation.hard_constraint_reasons,
                 "changed_position_count": sum(
@@ -316,6 +313,18 @@ def project_scenario_for_agent(
         )
     except (TypeError, ValidationError) as error:
         raise ToolInputError("portfolio scenario projection is invalid") from error
+
+
+def _project_metric_set(metrics: ScenarioMetricSetV1) -> AgentScenarioMetricSetV1:
+    payload = metrics.model_dump(mode="python")
+    cost = payload.get("estimated_cost")
+    if isinstance(cost, dict) and cost.get("status") == "unknown":
+        payload["estimated_cost"] = {
+            "status": "unknown",
+            "value": None,
+            "reason": "COST_EVIDENCE_INCOMPLETE",
+        }
+    return AgentScenarioMetricSetV1.model_validate(payload)
 
 
 def canonical_portfolio_evidence_manifest_hash(

@@ -526,7 +526,7 @@ git commit -m "feat: show locked portfolio agent interpretation"
 - Consumes: Tasks 1-6 complete system.
 - Produces: one real frozen portfolio acceptance record; no execution eligibility.
 
-- [ ] **Step 1: 写跨层集成测试**
+- [x] **Step 1: 写跨层集成测试**
 
 通过正常 Engine admission 创建 run，injected deterministic Responses transport 发出一次工具调用和一次严格 intent。断言：
 
@@ -537,7 +537,7 @@ git commit -m "feat: show locked portfolio agent interpretation"
 - `execution_locked=true`；
 - proposal group、Shadow、paper order/fill 均零增量。
 
-- [ ] **Step 2: 运行聚焦后端回归**
+- [x] **Step 2: 运行聚焦后端回归**
 
 ```bash
 cd engine
@@ -546,7 +546,7 @@ uv run ruff check src/nexus/agents src/nexus/jobs src/nexus/api tests/unit/agent
 uv run mypy src/nexus/agents/portfolio_decision_contracts.py src/nexus/agents/portfolio_decision_tools.py src/nexus/agents/portfolio_decision_model.py src/nexus/agents/portfolio_decision_persistence.py src/nexus/agents/portfolio_decision_execution.py src/nexus/agents/portfolio_decision_worker.py
 ```
 
-- [ ] **Step 3: 运行聚焦前端回归**
+- [x] **Step 3: 运行聚焦前端回归**
 
 ```bash
 npm test -- tests/unit/engine/portfolio-decision-routes.test.ts tests/unit/portfolio/portfolio-agent-interpretation.test.tsx tests/unit/portfolio/portfolio-scenario.test.tsx tests/unit/portfolio/page.test.tsx
@@ -558,7 +558,7 @@ npm run build
 
 - [ ] **Step 4: 执行迁移预检与共享服务更新**
 
-先确认当前 head、活动 Worker 版本和无未终态组合 run，再 upgrade 到 0048。只重建需要新 Engine 代码的 API/general Worker；不重启 Provider、Fosun Gateway 或 broker 服务，不触发数据刷新或模型调用。
+先确认当前 head、活动 Worker 版本和无未终态组合 run，再 upgrade 到当前唯一 head（现为 `0049_pd_terminal_phases`）。只重建需要新 Engine 代码的 API/general Worker；不重启 Provider、Fosun Gateway 或 broker 服务，不触发数据刷新或模型调用。
 
 - [ ] **Step 5: 执行一个真实只读验收**
 
@@ -572,15 +572,15 @@ npm run build
 - Provider、broker refresh、Shadow、orders、fills 无调用；
 - DB 中 proposal group、Shadow、paper order/fill 验收前后零增量。
 
-- [ ] **Step 6: 更新证据并最终审查**
+- [x] **Step 6: 更新证据并最终审查**
 
 在现有 checkpoint 和 review 文件中记录用户可见结果、运行版本、验证命令、真实阻塞和回滚条件。执行一次代码审查，任何资金、预算、fence、幂等或隐私 Important 必须修复并定向复验。
 
-- [ ] **Step 7: 提交 Task 7**
+- [x] **Step 7: 提交 Task 7**
 
 ```bash
-git add engine/tests/integration/test_portfolio_decision_e2e.py docs/plans/2026-09-02-core-evidence-checkpoint.md docs/superpowers/reviews/2026-09-10-portfolio-agent-scenario-review.md
-git commit -m "docs: verify portfolio agent scenario loop"
+git add engine/src/nexus/agents/portfolio_decision_tools.py engine/tests/unit/agents/test_portfolio_decision_tools.py engine/tests/integration/test_portfolio_decision_e2e.py docs/plans/2026-09-02-core-evidence-checkpoint.md docs/superpowers/reviews/2026-09-10-portfolio-agent-scenario-review.md
+git commit -m "fix: verify portfolio agent scenario loop"
 ```
 
 ## Stop conditions

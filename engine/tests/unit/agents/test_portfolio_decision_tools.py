@@ -185,6 +185,19 @@ def test_projection_rejects_a_noncanonical_evaluation_hash() -> None:
         project_scenario_for_agent(evaluation, citation_ids=("c" * 64,))
 
 
+def test_projection_maps_scenario_cost_gap_to_agent_allowlisted_reason() -> None:
+    evaluation = _evaluation()
+    candidate = evaluation.candidate.model_copy(
+        update={"estimated_cost": TypedMetric.unknown("COST_MODEL_NOT_AVAILABLE")}
+    )
+    draft = evaluation.model_copy(update={"candidate": candidate, "result_hash": "0" * 64})
+    evaluation = draft.model_copy(update={"result_hash": canonical_scenario_hash(draft)})
+
+    projection = project_scenario_for_agent(evaluation, citation_ids=("c" * 64,))
+
+    assert projection.candidate.estimated_cost == TypedMetric.unknown("COST_EVIDENCE_INCOMPLETE")
+
+
 def test_citation_ids_bind_run_index_and_full_evidence_identity() -> None:
     refs = (
         EvidenceRef(
