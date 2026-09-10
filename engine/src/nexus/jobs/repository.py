@@ -462,6 +462,36 @@ async def heartbeat_job(
     return lease.expires_at
 
 
+async def checkpoint_job(
+    session: AsyncSession,
+    *,
+    claim: ClaimedJob,
+    now: datetime,
+    apply: JobApply,
+    extend_seconds: int = 30,
+) -> datetime:
+    """Apply one short business checkpoint under the current fenced lease."""
+    now = _utc(now, field="now")
+    if not 1 <= extend_seconds <= 60:
+        raise ValueError("extend_seconds must be between 1 and 60")
+    job, lease, attempt = await _lock_active_claim(session, claim=claim, now=now)
+    if now < lease.heartbeat_at:
+        raise LeaseLostError("job lease heartbeat cannot move backwards")
+    await apply(session)
+    if (
+        job.status != JobStatus.RUNNING.value
+        or lease.lease_token != claim.lease_token
+        or lease.fence_token != claim.fence_token
+        or lease.worker_id != claim.worker_id
+        or attempt.outcome != "running"
+    ):
+        raise LeaseLostError("job lease changed during checkpoint")
+    lease.heartbeat_at = now
+    lease.expires_at = max(lease.expires_at, now + timedelta(seconds=extend_seconds))
+    await session.flush()
+    return lease.expires_at
+
+
 async def finalize_job(
     session: AsyncSession,
     *,
