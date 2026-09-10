@@ -61,6 +61,11 @@ def test_openapi_exposes_only_redacted_integration_contracts() -> None:
     assert len(operation_ids) == len(set(operation_ids))
     assert "HTTPValidationError" not in schemas
     assert "ValidationError" not in schemas
+    assert paths["/internal/v1/instruments/{instrument_id}/news"]["get"]["responses"][
+        "422"
+    ]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/NexusErrorEnvelope"
+    }
     delivery_mode_schema = {
         "enum": ["real_time", "delayed", "fixture", "unknown"],
         "type": "string",
@@ -95,9 +100,21 @@ def test_openapi_exposes_only_redacted_integration_contracts() -> None:
         assert headers["If-Match"]["required"] is True
         assert "ETag" in operation["responses"]["200"]["headers"]
 
+    integration_paths = {
+        path: paths[path]
+        for path in (
+            "/internal/v1/integrations",
+            "/internal/v1/integrations/{provider}/test",
+            "/internal/v1/integrations/{provider}/mode",
+        )
+    }
+    integration_contract = {
+        "paths": integration_paths,
+        "schemas": _referenced_schema_contract(roots=integration_paths, schemas=schemas),
+    }
+    assert "NexusErrorResponse" in integration_contract["schemas"]
     public_contract_words = {
-        word.lower()
-        for word in _walk_openapi_strings(document)
+        word.lower() for word in _walk_openapi_strings(integration_contract)
     }
     assert not any(
         forbidden in value
@@ -261,3 +278,23 @@ def _walk_openapi_strings(value: object) -> list[str]:
     if isinstance(value, list):
         return [item for child in value for item in _walk_openapi_strings(child)]
     return [value] if isinstance(value, str) else []
+
+
+def _referenced_schema_contract(
+    *, roots: object, schemas: dict[str, object]
+) -> dict[str, object]:
+    """Resolve every component schema reachable from the selected operations."""
+    reference_prefix = "#/components/schemas/"
+    selected: dict[str, object] = {}
+    pending = _walk_openapi_strings(roots)
+    while pending:
+        reference = pending.pop()
+        if not reference.startswith(reference_prefix):
+            continue
+        name = reference.removeprefix(reference_prefix)
+        if name in selected:
+            continue
+        schema = schemas[name]
+        selected[name] = schema
+        pending.extend(_walk_openapi_strings(schema))
+    return selected

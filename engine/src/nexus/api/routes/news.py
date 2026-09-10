@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
-from nexus.api.schemas.integrations import SuccessMetaResponse
+from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.research.news import NewsResponse, read_news
 from pydantic import BaseModel, ConfigDict
@@ -25,6 +25,7 @@ class NewsEnvelope(BaseModel):
     "/internal/v1/instruments/{instrument_id}/news",
     response_model=NewsEnvelope,
     operation_id="getSavedNews",
+    responses={401: {"model": NexusErrorEnvelope}, 422: {"model": NexusErrorEnvelope}},
 )
 async def saved_news(
     request: Request,
