@@ -3415,3 +3415,10 @@ Engine 静态 latest 路由放在 UUID 动态路由之前，按 actor 与完整�
 其他 actor 和错误情景哈希均为 404。前端聚焦回归、TypeScript、ESLint、生成合同检查和
 Playwright 显式创建/刷新恢复用例通过。本片无模型、Provider、券商、Shadow、订单或成交调用，
 `execution_locked=true` 不变；未新增表、迁移、通用列表接口或自动任务。
+
+该链路已作为 `main@5ebca51e` 集成并完成本地真实页面验收。仅替换 API 容器后，在全新且无
+NEXUS Agent localStorage 的隔离浏览器中显式生成一次确定性只读情景，页面随后通过
+`GET /internal/v1/portfolio-decision-runs/latest` 返回 200，自动恢复既有“建议继续研究调整”及
+“中等置信度”结果；页面未出现“让 Agent 解读”的新建按钮。验收前后决策 run/output 均保持
+6/6，方案组保持 3，Shadow、模拟订单与成交均保持 0；浏览器控制台无错误。没有 POST 新决策
+运行，没有调用模型、Provider 或券商，交易锁定语义保持不变。
