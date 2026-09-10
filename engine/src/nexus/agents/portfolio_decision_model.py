@@ -393,6 +393,10 @@ class ResponsesPortfolioDecisionModel:
             raise self._error("PORTFOLIO_DECISION_MODEL_FAILED") from error
         allowance = replace(
             allowance,
+            # Provider usage includes transport instructions and output schemas that
+            # are absent from the business payload byte estimate. The aggregate
+            # model limit remains the authoritative post-call ceiling.
+            input_token_ceiling=self._config.max_input_tokens - self.usage.input_tokens,
             max_output_tokens=min(
                 allowance.max_output_tokens,
                 PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN,

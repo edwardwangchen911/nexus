@@ -187,6 +187,37 @@ async def test_codex_transport_preserves_known_usage_for_invalid_structured_outp
 
 
 @pytest.mark.asyncio
+async def test_codex_transport_accepts_reported_sdk_overhead_within_aggregate_limit() -> None:
+    async def invoke(
+        payload: dict[str, object], **kwargs: object
+    ) -> tuple[str, UsageSnapshot]:
+        del payload
+        del kwargs
+        return json.dumps({"objective": "reduce_security_concentration"}), UsageSnapshot(
+            input_tokens=8_795,
+            output_tokens=44,
+        )
+
+    client = portfolio_decision_model.CodexPortfolioResponsesClient(
+        invoke=invoke,
+        model_id="configured-model",
+        pricing_version="pricing-v1",
+    )
+    config = _config().model_copy(
+        update={"max_input_tokens": 128_000, "max_output_tokens": 16_384}
+    )
+    model = ResponsesPortfolioDecisionModel(client=client, config=config)
+
+    first = await model.request_scenario(
+        context=_context(), prompt="bounded prompt", tools=_tools()
+    )
+
+    assert first.projection.result_hash == RESULT_HASH
+    assert model.usage.input_tokens == 8_795
+    assert model.usage.output_tokens == 44
+
+
+@pytest.mark.asyncio
 async def test_two_turn_model_calls_one_tool_then_returns_bound_intent() -> None:
     client = _Client(_intent())
     model = ResponsesPortfolioDecisionModel(client=client, config=_config())
