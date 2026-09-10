@@ -303,6 +303,38 @@ class PortfolioInvalidationConditionV1(_StrictPortfolioDecisionModel):
         return self
 
 
+class PortfolioRatioInvalidationConditionV1(PortfolioInvalidationConditionV1):
+    signal: Literal["portfolio.security_top1", "portfolio.cash_weight"]
+    threshold: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=40, pattern=_RATIO_TEXT.pattern),
+    ]
+    unit: Literal["ratio"]
+
+
+class PortfolioScenarioStatusInvalidationConditionV1(PortfolioInvalidationConditionV1):
+    signal: Literal["portfolio.scenario_objective_status"]
+    operator: Literal["eq"]
+    threshold: Literal["met", "improved_not_met", "unchanged", "infeasible"]
+    unit: Literal["state"]
+
+
+class PortfolioEstimatedCostStatusInvalidationConditionV1(
+    PortfolioInvalidationConditionV1
+):
+    signal: Literal["portfolio.estimated_cost_status"]
+    operator: Literal["eq"]
+    threshold: Literal["known", "unknown"]
+    unit: Literal["state"]
+
+
+PortfolioInvalidationConditionSchemaV1 = (
+    PortfolioRatioInvalidationConditionV1
+    | PortfolioScenarioStatusInvalidationConditionV1
+    | PortfolioEstimatedCostStatusInvalidationConditionV1
+)
+
+
 class PortfolioLimitationV1(_StrictPortfolioDecisionModel):
     code: Literal["estimated_cost"]
     text: str = Field(min_length=1, max_length=300)
@@ -325,7 +357,7 @@ class PortfolioResearchIntentV1(_StrictPortfolioDecisionModel):
     horizon: Literal["short_term", "medium_term", "long_term"]
     confidence: Literal["low", "medium", "high"]
     rationale: tuple[PortfolioResearchClaimV1, ...] = Field(min_length=1, max_length=4)
-    invalidation_conditions: tuple[PortfolioInvalidationConditionV1, ...] = Field(
+    invalidation_conditions: tuple[PortfolioInvalidationConditionSchemaV1, ...] = Field(
         min_length=1, max_length=5
     )
     limitations: tuple[PortfolioLimitationV1, ...] = Field(max_length=8)

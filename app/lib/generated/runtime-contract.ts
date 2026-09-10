@@ -5514,7 +5514,7 @@ export const runtimeContractSchemas = {
     "title": "PortfolioDiagnosticResponse",
     "type": "object"
   },
-  "PortfolioInvalidationConditionV1": {
+  "PortfolioEstimatedCostStatusInvalidationConditionV1": {
     "additionalProperties": false,
     "properties": {
       "citation_ids": {
@@ -5528,37 +5528,25 @@ export const runtimeContractSchemas = {
         "type": "array"
       },
       "operator": {
-        "enum": [
-          "lt",
-          "lte",
-          "eq",
-          "gte",
-          "gt"
-        ],
+        "const": "eq",
         "title": "Operator",
         "type": "string"
       },
       "signal": {
-        "enum": [
-          "portfolio.security_top1",
-          "portfolio.cash_weight",
-          "portfolio.scenario_objective_status",
-          "portfolio.estimated_cost_status"
-        ],
+        "const": "portfolio.estimated_cost_status",
         "title": "Signal",
         "type": "string"
       },
       "threshold": {
-        "maxLength": 40,
-        "minLength": 1,
+        "enum": [
+          "known",
+          "unknown"
+        ],
         "title": "Threshold",
         "type": "string"
       },
       "unit": {
-        "enum": [
-          "ratio",
-          "state"
-        ],
+        "const": "state",
         "title": "Unit",
         "type": "string"
       }
@@ -5570,7 +5558,7 @@ export const runtimeContractSchemas = {
       "unit",
       "citation_ids"
     ],
-    "title": "PortfolioInvalidationConditionV1",
+    "title": "PortfolioEstimatedCostStatusInvalidationConditionV1",
     "type": "object"
   },
   "PortfolioLimitationV1": {
@@ -5725,6 +5713,61 @@ export const runtimeContractSchemas = {
       "next_cursor"
     ],
     "title": "PortfolioPageResponse",
+    "type": "object"
+  },
+  "PortfolioRatioInvalidationConditionV1": {
+    "additionalProperties": false,
+    "properties": {
+      "citation_ids": {
+        "items": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Citation Ids",
+        "type": "array"
+      },
+      "operator": {
+        "enum": [
+          "lt",
+          "lte",
+          "eq",
+          "gte",
+          "gt"
+        ],
+        "title": "Operator",
+        "type": "string"
+      },
+      "signal": {
+        "enum": [
+          "portfolio.security_top1",
+          "portfolio.cash_weight"
+        ],
+        "title": "Signal",
+        "type": "string"
+      },
+      "threshold": {
+        "maxLength": 40,
+        "minLength": 1,
+        "pattern": "^(?:0(?:\\.\\d{1,38})?|1(?:\\.0{1,38})?)$",
+        "title": "Threshold",
+        "type": "string"
+      },
+      "unit": {
+        "const": "ratio",
+        "title": "Unit",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signal",
+      "operator",
+      "threshold",
+      "unit",
+      "citation_ids"
+    ],
+    "title": "PortfolioRatioInvalidationConditionV1",
     "type": "object"
   },
   "PortfolioResearchClaimV1": {
@@ -6020,7 +6063,17 @@ export const runtimeContractSchemas = {
       },
       "invalidation_conditions": {
         "items": {
-          "$ref": "#/components/schemas/PortfolioInvalidationConditionV1"
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/PortfolioRatioInvalidationConditionV1"
+            },
+            {
+              "$ref": "#/components/schemas/PortfolioScenarioStatusInvalidationConditionV1"
+            },
+            {
+              "$ref": "#/components/schemas/PortfolioEstimatedCostStatusInvalidationConditionV1"
+            }
+          ]
         },
         "maxItems": 5,
         "minItems": 1,
@@ -6228,6 +6281,55 @@ export const runtimeContractSchemas = {
       "execution_locked"
     ],
     "title": "PortfolioScenarioResponse",
+    "type": "object"
+  },
+  "PortfolioScenarioStatusInvalidationConditionV1": {
+    "additionalProperties": false,
+    "properties": {
+      "citation_ids": {
+        "items": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Citation Ids",
+        "type": "array"
+      },
+      "operator": {
+        "const": "eq",
+        "title": "Operator",
+        "type": "string"
+      },
+      "signal": {
+        "const": "portfolio.scenario_objective_status",
+        "title": "Signal",
+        "type": "string"
+      },
+      "threshold": {
+        "enum": [
+          "met",
+          "improved_not_met",
+          "unchanged",
+          "infeasible"
+        ],
+        "title": "Threshold",
+        "type": "string"
+      },
+      "unit": {
+        "const": "state",
+        "title": "Unit",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signal",
+      "operator",
+      "threshold",
+      "unit",
+      "citation_ids"
+    ],
+    "title": "PortfolioScenarioStatusInvalidationConditionV1",
     "type": "object"
   },
   "PortfolioSnapshotResponse": {

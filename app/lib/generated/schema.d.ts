@@ -3382,27 +3382,30 @@ export interface components {
             /** Trading Day */
             trading_day: string | null;
         };
-        /** PortfolioInvalidationConditionV1 */
-        PortfolioInvalidationConditionV1: {
+        /** PortfolioEstimatedCostStatusInvalidationConditionV1 */
+        PortfolioEstimatedCostStatusInvalidationConditionV1: {
             /** Citation Ids */
             citation_ids: string[];
             /**
              * Operator
-             * @enum {string}
+             * @constant
              */
-            operator: "lt" | "lte" | "eq" | "gte" | "gt";
+            operator: "eq";
             /**
              * Signal
+             * @constant
+             */
+            signal: "portfolio.estimated_cost_status";
+            /**
+             * Threshold
              * @enum {string}
              */
-            signal: "portfolio.security_top1" | "portfolio.cash_weight" | "portfolio.scenario_objective_status" | "portfolio.estimated_cost_status";
-            /** Threshold */
-            threshold: string;
+            threshold: "known" | "unknown";
             /**
              * Unit
-             * @enum {string}
+             * @constant
              */
-            unit: "ratio" | "state";
+            unit: "state";
         };
         /** @enum {string} */
         PortfolioKind: "real_read_only" | "internal_paper" | "shadow";
@@ -3456,6 +3459,28 @@ export interface components {
             items: components["schemas"]["PortfolioListItem"][];
             /** Next Cursor */
             next_cursor: string | null;
+        };
+        /** PortfolioRatioInvalidationConditionV1 */
+        PortfolioRatioInvalidationConditionV1: {
+            /** Citation Ids */
+            citation_ids: string[];
+            /**
+             * Operator
+             * @enum {string}
+             */
+            operator: "lt" | "lte" | "eq" | "gte" | "gt";
+            /**
+             * Signal
+             * @enum {string}
+             */
+            signal: "portfolio.security_top1" | "portfolio.cash_weight";
+            /** Threshold */
+            threshold: string;
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "ratio";
         };
         /** PortfolioResearchClaimV1 */
         PortfolioResearchClaimV1: {
@@ -3564,7 +3589,7 @@ export interface components {
              */
             horizon: "short_term" | "medium_term" | "long_term";
             /** Invalidation Conditions */
-            invalidation_conditions: components["schemas"]["PortfolioInvalidationConditionV1"][];
+            invalidation_conditions: (components["schemas"]["PortfolioRatioInvalidationConditionV1"] | components["schemas"]["PortfolioScenarioStatusInvalidationConditionV1"] | components["schemas"]["PortfolioEstimatedCostStatusInvalidationConditionV1"])[];
             /** Limitations */
             limitations: components["schemas"]["PortfolioLimitationV1"][];
             /**
@@ -3715,6 +3740,31 @@ export interface components {
              * Format: date-time
              */
             valuation_time: string;
+        };
+        /** PortfolioScenarioStatusInvalidationConditionV1 */
+        PortfolioScenarioStatusInvalidationConditionV1: {
+            /** Citation Ids */
+            citation_ids: string[];
+            /**
+             * Operator
+             * @constant
+             */
+            operator: "eq";
+            /**
+             * Signal
+             * @constant
+             */
+            signal: "portfolio.scenario_objective_status";
+            /**
+             * Threshold
+             * @enum {string}
+             */
+            threshold: "met" | "improved_not_met" | "unchanged" | "infeasible";
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "state";
         };
         /** PortfolioSnapshotEnvelope */
         PortfolioSnapshotEnvelope: {

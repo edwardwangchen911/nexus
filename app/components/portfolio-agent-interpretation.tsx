@@ -9,6 +9,9 @@ import type { components } from "../lib/generated/schema";
 import { sameUuid } from "../lib/optimization/uuid";
 
 type DecisionRun = components["schemas"]["PortfolioDecisionRunResponse"];
+type InvalidationCondition = NonNullable<
+  NonNullable<DecisionRun["output"]>["intent"]
+>["invalidation_conditions"][number];
 type ScenarioRequest = components["schemas"]["PortfolioScenarioRequest"];
 type ScenarioResponse = components["schemas"]["PortfolioScenarioResponse"];
 type StoredRun = { idempotencyKey: string; runId: string | null };
@@ -333,7 +336,7 @@ function DecisionResult({ run }: { run: DecisionRun }): React.ReactElement {
 }
 
 function conditionLabel(
-  condition: components["schemas"]["PortfolioInvalidationConditionV1"],
+  condition: InvalidationCondition,
 ): string {
   const signal = condition.signal === "portfolio.scenario_objective_status" ? "情景目标状态"
     : condition.signal === "portfolio.security_top1" ? "最大单项权重"

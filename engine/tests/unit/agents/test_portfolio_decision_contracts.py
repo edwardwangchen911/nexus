@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from jsonschema import ValidationError as JsonSchemaValidationError
+from jsonschema import validate as validate_json_schema
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
     PortfolioDecisionInputV1,
@@ -164,6 +166,22 @@ def test_invalidation_condition_rejects_meaningless_combinations(
                 "citation_ids": [HASH_A],
             }
         )
+
+
+def test_intent_json_schema_encodes_state_signal_operator_matrix() -> None:
+    payload = _intent_payload()
+    schema = PortfolioResearchIntentV1.model_json_schema(mode="serialization")
+    validate_json_schema(instance=payload, schema=schema)
+    payload["invalidation_conditions"][0] = {  # type: ignore[index]
+        "signal": "portfolio.scenario_objective_status",
+        "operator": "gt",
+        "threshold": "unchanged",
+        "unit": "state",
+        "citation_ids": [HASH_A],
+    }
+
+    with pytest.raises(JsonSchemaValidationError):
+        validate_json_schema(instance=payload, schema=schema)
 
 
 def test_validate_intent_requires_one_limitation_per_unknown() -> None:
