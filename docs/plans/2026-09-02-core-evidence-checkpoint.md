@@ -3371,3 +3371,16 @@ Worker，现有业务 PostgreSQL 由其他工作线持有。因此本轮没有�
 unavailable，因其原本未运行且当前配置为 `fixture`。带完整 scope 的组合决策 BFF GET 经 HMAC 到达
 Engine，对不存在的 UUIDv7 稳定返回 `404 NOT_FOUND`；验收后组合决策、Shadow、模拟订单和
 成交仍为零。下一步是明确触发一次受控 Codex SDK Worker 真实只读验收；不启动 fixture 常驻 Worker。
+
+### 监管费公开参考与账户收费边界（2026-09-11）
+
+情景成本合同现记录一份版本化的 SEC Section 31、FINRA TAF 与复星客户收费通知条款摘要；
+摘要哈希、可用时点和人工核验区间进入确定性结果及 Agent 工具权威哈希。它不归档官方原件，
+也不把监管机构对 SRO/会员的费率推断为复星账户实际扣费。监管费仍为 unknown，精确缺口改为
+券商转嫁、聚合与舍入依据不可用；佣金、价差、滑点、税务和成本合计继续保持 unknown，
+`analysis_status=partial`、`execution_locked=true` 不变。区间外快照不附加该参考。
+
+主线 `d0d1da21` 重建本地 Engine API 后，使用最新已持久化真实只读组合通过正常 HMAC 产品入口
+显式生成一次情景：返回 `improved_not_met`、上述参考版本和精确监管费缺口，未启动 Worker、
+调用模型或刷新券商，也未创建方案、Shadow、订单或成交。实现经 97/100 复核通过；PostgreSQL
+集成测试因本 worktree 未配置隔离 `DATABASE_URL` 而跳过，未计为通过。
