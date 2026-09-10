@@ -218,6 +218,11 @@ def test_projection_rejects_unknown_risk_or_unbounded_reason_text() -> None:
     with pytest.raises(ValidationError):
         AgentScenarioProjectionV1.model_validate(invalid_ratio)
 
+    unknown_cost_gap = _projection_payload()
+    unknown_cost_gap["cost_gap_codes"] = ["UNVERIFIED_ACCOUNT_FEE"]
+    with pytest.raises(ValidationError):
+        AgentScenarioProjectionV1.model_validate(unknown_cost_gap)
+
 
 @pytest.mark.parametrize(
     ("field", "value"),

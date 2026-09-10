@@ -33,6 +33,14 @@ HardConstraintReason = Literal[
     "STRUCTURAL_CONCENTRATION_FLOOR",
     "SELLABLE_QUANTITY_EXHAUSTED",
 ]
+CostGapReason = Literal[
+    "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE",
+    "BID_ASK_EVIDENCE_UNAVAILABLE",
+    "SLIPPAGE_MODEL_UNAVAILABLE",
+    "REGULATORY_FEE_SCHEDULE_UNAVAILABLE",
+    "BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE",
+    "TAX_DATA_UNAVAILABLE",
+]
 CitationIds = Annotated[tuple[Hash64, ...], Field(min_length=1, max_length=100)]
 
 _UUID_TEXT = re.compile(
@@ -168,6 +176,7 @@ class AgentScenarioProjectionV1(_StrictPortfolioDecisionModel):
     baseline: AgentScenarioMetricSetV1
     candidate: AgentScenarioMetricSetV1
     unknown_metrics: tuple[Literal["estimated_cost"], ...] = Field(max_length=1)
+    cost_gap_codes: tuple[CostGapReason, ...] = Field(default=(), max_length=5)
     hard_constraint_reasons: tuple[HardConstraintReason, ...] = Field(max_length=20)
     changed_position_count: int = Field(ge=0, le=100)
     result_hash: Hash64
@@ -177,6 +186,7 @@ class AgentScenarioProjectionV1(_StrictPortfolioDecisionModel):
     @model_validator(mode="after")
     def _validate_projection(self) -> AgentScenarioProjectionV1:
         _require_unique(self.unknown_metrics, label="unknown metrics")
+        _require_unique(self.cost_gap_codes, label="cost gap codes")
         _require_unique(self.citation_ids, label="citation ids")
         _require_unique(self.hard_constraint_reasons, label="hard constraint reasons")
         for metrics in (self.baseline, self.candidate):
@@ -319,9 +329,7 @@ class PortfolioScenarioStatusInvalidationConditionV1(PortfolioInvalidationCondit
     unit: Literal["state"]
 
 
-class PortfolioEstimatedCostStatusInvalidationConditionV1(
-    PortfolioInvalidationConditionV1
-):
+class PortfolioEstimatedCostStatusInvalidationConditionV1(PortfolioInvalidationConditionV1):
     signal: Literal["portfolio.estimated_cost_status"]
     operator: Literal["eq"]
     threshold: Literal["known", "unknown"]

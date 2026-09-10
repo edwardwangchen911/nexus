@@ -163,6 +163,13 @@ async def test_projection_never_exposes_position_identity_or_execution_fields() 
     )
     wire = json.dumps(result, sort_keys=True)
     assert result["changed_position_count"] == 1
+    assert result["cost_gap_codes"] == [
+        "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE",
+        "BID_ASK_EVIDENCE_UNAVAILABLE",
+        "SLIPPAGE_MODEL_UNAVAILABLE",
+        "REGULATORY_FEE_SCHEDULE_UNAVAILABLE",
+        "TAX_DATA_UNAVAILABLE",
+    ]
     assert "execution_eligible" not in result
     for forbidden in (
         "positions",

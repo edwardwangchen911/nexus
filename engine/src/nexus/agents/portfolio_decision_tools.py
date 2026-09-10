@@ -52,6 +52,7 @@ _PROJECTION_KEYS = frozenset(
         "baseline",
         "candidate",
         "unknown_metrics",
+        "cost_gap_codes",
         "hard_constraint_reasons",
         "changed_position_count",
         "result_hash",
@@ -301,6 +302,7 @@ def project_scenario_for_agent(
                 "baseline": _project_metric_set(evaluation.baseline),
                 "candidate": _project_metric_set(evaluation.candidate),
                 "unknown_metrics": evaluation.unknown_metrics,
+                "cost_gap_codes": _cost_gap_codes(evaluation),
                 "hard_constraint_reasons": evaluation.hard_constraint_reasons,
                 "changed_position_count": sum(
                     position.current_weight != position.target_weight
@@ -325,6 +327,22 @@ def _project_metric_set(metrics: ScenarioMetricSetV1) -> AgentScenarioMetricSetV
             "reason": "COST_EVIDENCE_INCOMPLETE",
         }
     return AgentScenarioMetricSetV1.model_validate(payload)
+
+
+def _cost_gap_codes(evaluation: PortfolioScenarioEvaluationV2) -> tuple[str, ...]:
+    costs = evaluation.cost_breakdown
+    components = (
+        costs.commission,
+        costs.spread,
+        costs.slippage,
+        costs.regulatory_fees,
+        costs.tax_impact,
+    )
+    return tuple(
+        metric.reason
+        for metric in components
+        if metric.status == "unknown" and metric.reason is not None
+    )
 
 
 def canonical_portfolio_evidence_manifest_hash(
