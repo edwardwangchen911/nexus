@@ -7,10 +7,18 @@ from uuid import UUID, uuid4
 
 import pytest
 from nexus.agents.budget import BudgetExhausted
-from nexus.agents.persistence import reserve_daily_budget, reserve_portfolio_decision_budget
+from nexus.agents.persistence import (
+    release_portfolio_decision_budget_if_reserved,
+    require_reserved_portfolio_decision_budget,
+    reserve_daily_budget,
+    reserve_portfolio_decision_budget,
+    settle_full_portfolio_decision_budget,
+    settle_portfolio_decision_budget,
+)
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     PortfolioDecisionBudgetReservationRecord,
+    PortfolioDecisionRunRecord,
 )
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -196,6 +204,83 @@ async def test_research_reservation_counts_settled_and_ignores_released_decision
             pricing_fresh=True,
         )
     assert reservation.reserved_usd == Decimal("0.60")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_decision_budget_lifecycle_preserves_known_unknown_and_released_usage(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    known_id, unknown_id, released_id = uuid4(), uuid4(), uuid4()
+    await _seed_runs(
+        factory,
+        research_run_ids=(),
+        decision_run_ids=(known_id, unknown_id, released_id),
+    )
+    for run_id in (known_id, unknown_id, released_id):
+        async with factory() as session, session.begin():
+            await reserve_portfolio_decision_budget(
+                session,
+                run_id=run_id,
+                now=_NOW,
+                daily_limit_usd=Decimal("10"),
+                worst_case_usd=Decimal("1"),
+                pricing_version="pricing-v1",
+                pricing_fresh=True,
+            )
+
+    async with factory() as session, session.begin():
+        await require_reserved_portfolio_decision_budget(session, run_id=known_id)
+        await settle_portfolio_decision_budget(
+            session,
+            run_id=known_id,
+            actual_usd=Decimal("0.25"),
+            input_tokens=100,
+            output_tokens=50,
+        )
+    async with factory() as session, session.begin():
+        await settle_full_portfolio_decision_budget(session, run_id=unknown_id)
+    async with factory() as session, session.begin():
+        await release_portfolio_decision_budget_if_reserved(session, run_id=released_id)
+
+    async with factory() as session:
+        reservations = {
+            row.run_id: row
+            for row in await session.scalars(
+                select(PortfolioDecisionBudgetReservationRecord).where(
+                    PortfolioDecisionBudgetReservationRecord.run_id.in_(
+                        (known_id, unknown_id, released_id)
+                    )
+                )
+            )
+        }
+        runs = {
+            row.id: row
+            for row in await session.scalars(
+                select(PortfolioDecisionRunRecord).where(
+                    PortfolioDecisionRunRecord.id.in_((known_id, unknown_id, released_id))
+                )
+            )
+        }
+    assert (
+        reservations[known_id].state,
+        reservations[known_id].settled_usd,
+        runs[known_id].settled_cost_usd,
+        runs[known_id].input_tokens,
+        runs[known_id].output_tokens,
+    ) == ("settled", Decimal("0.250000000000"), Decimal("0.250000000000"), 100, 50)
+    assert (
+        reservations[unknown_id].state,
+        reservations[unknown_id].settled_usd,
+        runs[unknown_id].settled_cost_usd,
+        runs[unknown_id].input_tokens,
+        runs[unknown_id].output_tokens,
+    ) == ("settled", Decimal("1.000000000000"), Decimal("1.000000000000"), None, None)
+    assert (
+        reservations[released_id].state,
+        reservations[released_id].settled_usd,
+        runs[released_id].settled_cost_usd,
+    ) == ("released", None, None)
 
 
 async def _seed_runs(

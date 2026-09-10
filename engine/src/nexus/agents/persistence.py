@@ -37,6 +37,7 @@ from nexus.persistence.models.agents import (
     AgentPromptVersionRecord,
     AgentResearchRunRecord,
     PortfolioDecisionBudgetReservationRecord,
+    PortfolioDecisionRunRecord,
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
@@ -175,6 +176,70 @@ async def reserve_portfolio_decision_budget(
     )
     session.add(reservation)
     await session.flush()
+    return reservation
+
+
+async def require_reserved_portfolio_decision_budget(
+    session: AsyncSession, *, run_id: UUID
+) -> PortfolioDecisionBudgetReservationRecord:
+    """Lock and require the exact open portfolio-decision reservation."""
+    _, reservation = await _locked_portfolio_decision_budget(session, run_id)
+    await _lock_budget_day(session, reservation.business_date.isoformat())
+    if reservation.state != "reserved":
+        raise BudgetExhausted("portfolio decision run has no open budget reservation")
+    return reservation
+
+
+async def settle_portfolio_decision_budget(
+    session: AsyncSession,
+    *,
+    run_id: UUID,
+    actual_usd: Decimal,
+    input_tokens: int,
+    output_tokens: int,
+) -> PortfolioDecisionBudgetReservationRecord:
+    """Settle one portfolio-decision reservation using complete known usage."""
+    _require_nonnegative_decimal(actual_usd, "actual_usd")
+    if input_tokens < 0 or output_tokens < 0:
+        raise ValueError("token usage must be non-negative")
+    run, reservation = await _locked_portfolio_decision_budget(session, run_id)
+    await _lock_budget_day(session, reservation.business_date.isoformat())
+    if reservation.state != "reserved" or actual_usd > reservation.reserved_usd:
+        raise BudgetExhausted("portfolio decision reservation cannot settle reported usage")
+    reservation.settled_usd = actual_usd
+    reservation.state = "settled"
+    run.settled_cost_usd = actual_usd
+    run.input_tokens = input_tokens
+    run.output_tokens = output_tokens
+    await session.flush()
+    return reservation
+
+
+async def settle_full_portfolio_decision_budget(
+    session: AsyncSession, *, run_id: UUID
+) -> PortfolioDecisionBudgetReservationRecord:
+    """Conservatively retain the full reservation when provider usage is unknown."""
+    run, reservation = await _locked_portfolio_decision_budget(session, run_id)
+    await _lock_budget_day(session, reservation.business_date.isoformat())
+    if reservation.state != "reserved":
+        raise BudgetExhausted("portfolio decision reservation cannot be held")
+    reservation.settled_usd = reservation.reserved_usd
+    reservation.state = "settled"
+    run.settled_cost_usd = reservation.reserved_usd
+    await session.flush()
+    return reservation
+
+
+async def release_portfolio_decision_budget_if_reserved(
+    session: AsyncSession, *, run_id: UUID
+) -> PortfolioDecisionBudgetReservationRecord:
+    """Release unused portfolio-decision capacity without changing terminal accounting."""
+    _, reservation = await _locked_portfolio_decision_budget(session, run_id)
+    await _lock_budget_day(session, reservation.business_date.isoformat())
+    if reservation.state == "reserved":
+        reservation.state = "released"
+        reservation.settled_usd = None
+        await session.flush()
     return reservation
 
 
@@ -506,6 +571,25 @@ async def _locked_reservation(
     if reservation is None:
         raise BudgetExhausted("reservation is not available")
     return reservation
+
+
+async def _locked_portfolio_decision_budget(
+    session: AsyncSession, run_id: UUID
+) -> tuple[PortfolioDecisionRunRecord, PortfolioDecisionBudgetReservationRecord]:
+    run = await session.get(PortfolioDecisionRunRecord, run_id, with_for_update=True)
+    reservation = await session.scalar(
+        select(PortfolioDecisionBudgetReservationRecord)
+        .where(PortfolioDecisionBudgetReservationRecord.run_id == run_id)
+        .with_for_update()
+    )
+    if run is None or reservation is None:
+        raise BudgetExhausted("portfolio decision reservation is not available")
+    if (
+        run.reserved_cost_usd != reservation.reserved_usd
+        or run.pricing_version != reservation.pricing_version
+    ):
+        raise BudgetExhausted("portfolio decision reservation authority does not match run")
+    return run, reservation
 
 
 async def _shared_daily_budget_used(session: AsyncSession, *, business_date: date) -> Decimal:
