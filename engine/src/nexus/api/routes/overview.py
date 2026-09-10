@@ -135,7 +135,9 @@ async def get_overview(
             portfolio_snapshot=None,
             snapshot_as_of=report.snapshot_as_of,
             trading_day=report.trading_day,
-            diagnostic_report=PortfolioDiagnosticResponse.from_report(report),
+            diagnostic_report=PortfolioDiagnosticResponse.from_report(
+                report, diagnostic_report_id=record.id
+            ),
             diagnostic_unavailable_reason=None,
             proposal_group=None
             if group is None

@@ -3183,6 +3183,8 @@ export interface components {
         };
         /** PortfolioDiagnosticResponse */
         PortfolioDiagnosticResponse: {
+            /** Diagnostic Report Id */
+            diagnostic_report_id: string | null;
             /** Items */
             items: components["schemas"]["DiagnosticItemResponse"][];
             /**

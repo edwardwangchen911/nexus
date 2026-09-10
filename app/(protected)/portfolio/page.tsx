@@ -9,6 +9,8 @@ import { DataState, dataStateLabels, type DataStateKind } from "../../components
 import { AuthorityLedger } from "../../components/authority-ledger";
 import { IntelligenceHeader } from "../../components/intelligence-header";
 import { PortfolioDiagnostic } from "../../components/portfolio-diagnostic";
+import type { PortfolioDiagnosticReport } from "../../components/portfolio-diagnostic";
+import { PortfolioScenario } from "../../components/portfolio-scenario";
 import { PortfolioSummary, PortfolioValuationSummary } from "../../components/portfolio-summary";
 import type { components } from "../../lib/generated/schema";
 
@@ -38,6 +40,7 @@ export default function PortfolioPage(): React.ReactElement {
   const [selectedPortfolioId, setSelectedPortfolioId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [diagnosticVersion, setDiagnosticVersion] = useState(0);
+  const [diagnosticReport, setDiagnosticReport] = useState<PortfolioDiagnosticReport | null>(null);
   const loadVersion = useRef(0);
   const portfoliosRef = useRef<PortfolioItem[]>([]);
   const snapshotRef = useRef<PortfolioSnapshot | null>(null);
@@ -65,6 +68,7 @@ export default function PortfolioPage(): React.ReactElement {
     const version = loadVersion.current + 1;
     loadVersion.current = version;
     setNotice(null);
+    setDiagnosticReport(null);
     if (portfoliosRef.current.length === 0) setState("loading");
     try {
       const items: PortfolioItem[] = [];
@@ -128,7 +132,7 @@ export default function PortfolioPage(): React.ReactElement {
     const version = loadVersion.current + 1;
     loadVersion.current = version;
     selectedPortfolioIdRef.current = portfolioId; snapshotRef.current = null;
-    setSelectedPortfolioId(portfolioId); setSnapshot(null); setState("loading"); setNotice(null);
+    setSelectedPortfolioId(portfolioId); setSnapshot(null); setState("loading"); setNotice(null); setDiagnosticReport(null);
     try { await loadSnapshot(portfolioId, version); }
     catch { if (version === loadVersion.current) { setState("error"); setNotice({ kind: "error", text: "无法读取该组合的冻结快照。" }); } }
   }
@@ -139,6 +143,11 @@ export default function PortfolioPage(): React.ReactElement {
     {snapshot && ["ready", "partial", "stale"].includes(state) ? <PortfolioDiagnostic
       key={`${snapshot.portfolio_id}:${snapshot.portfolio_snapshot_id}:${diagnosticVersion}`}
       portfolioId={snapshot.portfolio_id} snapshotId={snapshot.portfolio_snapshot_id}
+      onReport={setDiagnosticReport}
+    /> : null}
+    {snapshot && ["ready", "partial", "stale"].includes(state) ? <PortfolioScenario
+      key={`${snapshot.portfolio_snapshot_id}:${diagnosticVersion}`}
+      snapshot={snapshot} report={diagnosticReport} stale={state === "stale"}
     /> : null}</>;
 }
 

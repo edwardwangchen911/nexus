@@ -5216,6 +5216,18 @@ export const runtimeContractSchemas = {
   "PortfolioDiagnosticResponse": {
     "additionalProperties": false,
     "properties": {
+      "diagnostic_report_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Diagnostic Report Id"
+      },
       "items": {
         "items": {
           "$ref": "#/components/schemas/DiagnosticItemResponse"
@@ -5262,6 +5274,7 @@ export const runtimeContractSchemas = {
       }
     },
     "required": [
+      "diagnostic_report_id",
       "portfolio_snapshot_id",
       "snapshot_as_of",
       "trading_day",

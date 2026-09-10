@@ -15,8 +15,11 @@ from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticReportRecord,
 )
 from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.persistence.models.optimization import OptimizationProposalGroupRecord
+from nexus.persistence.models.paper import PaperFillRecord, PaperOrderRecord
 from nexus.persistence.models.portfolio import PositionSnapshot
 from nexus.persistence.models.runtime import AuditEvent
+from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
 
@@ -178,7 +181,22 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
                 select(AuditEvent).where(AuditEvent.action == "portfolio_scenario_evaluated")
             )
         )
+        business_writes = {
+            model.__tablename__: await session.scalar(select(func.count()).select_from(model))
+            for model in (
+                OptimizationProposalGroupRecord,
+                ShadowGroupRecord,
+                PaperOrderRecord,
+                PaperFillRecord,
+            )
+        }
     assert len(audit) == 1
+    assert business_writes == {
+        "optimization_proposal_groups": 0,
+        "shadow_groups": 0,
+        "paper_orders": 0,
+        "paper_fills": 0,
+    }
     assert audit[0].payload == {
         "request_hash": data["request_hash"],
         "policy_version": "real_advisory_policy_v1",

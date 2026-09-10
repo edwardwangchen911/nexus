@@ -8,7 +8,7 @@ from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.diagnostics import PortfolioDiagnosticEnvelope, PortfolioDiagnosticResponse
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
-from nexus.diagnostics.repository import latest_report
+from nexus.diagnostics.repository import latest_report_with_id
 from nexus.diagnostics.service import preview_snapshot_diagnostic
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from sqlalchemy import select
@@ -34,7 +34,8 @@ async def get_latest_diagnostic(
 ) -> PortfolioDiagnosticEnvelope:
     """Return the current formal report or an explicitly preliminary read-only projection."""
     try:
-        report = await latest_report(session, portfolio_id=portfolio_id)
+        persisted = await latest_report_with_id(session, portfolio_id=portfolio_id)
+        diagnostic_report_id, report = persisted if persisted is not None else (None, None)
         snapshot_id = await session.scalar(
             select(PortfolioSnapshotRecord.id)
             .where(PortfolioSnapshotRecord.portfolio_id == portfolio_id)
@@ -47,6 +48,7 @@ async def get_latest_diagnostic(
             report = await preview_snapshot_diagnostic(
                 session, portfolio_id=portfolio_id, snapshot_id=snapshot_id
             )
+            diagnostic_report_id = None
     except ValueError as error:
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
@@ -69,6 +71,8 @@ async def get_latest_diagnostic(
             details={"portfolio_id": str(portfolio_id)},
         )
     return PortfolioDiagnosticEnvelope(
-        data=PortfolioDiagnosticResponse.from_report(report),
+        data=PortfolioDiagnosticResponse.from_report(
+            report, diagnostic_report_id=diagnostic_report_id
+        ),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=report.snapshot_as_of),
     )

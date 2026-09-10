@@ -45,7 +45,7 @@ async def test_latest_diagnostic_never_reuses_an_old_formal_report_for_a_new_sna
     run_id = UUID("0198d500-1000-7000-8000-000000000091")
     snapshot_id = UUID("0198d500-1000-7000-8000-000000000092")
     async with factory() as session, session.begin():
-        await _seed_diagnostic_graph(session)
+        report_id, _, _ = await _seed_diagnostic_graph(session)
         session.add(
             BrokerSyncRun(
                 id=run_id,
@@ -75,6 +75,7 @@ async def test_latest_diagnostic_never_reuses_an_old_formal_report_for_a_new_sna
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["portfolio_snapshot_id"] == str(snapshot_id)
+    assert data["diagnostic_report_id"] is None
     assert any(item["diagnostic_code"] == "PRELIMINARY_DIAGNOSTIC" for item in data["items"])
     async with factory() as session:
         assert (
@@ -140,7 +141,7 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
     assert diagnostics_router is not None
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
-        await _seed_diagnostic_graph(session)
+        report_id, _, _ = await _seed_diagnostic_graph(session)
     path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/diagnostics/latest"
     engine_app = app(migrated_database_url)
     operation = engine_app.openapi()["paths"][
@@ -177,6 +178,7 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
     assert item["evidence_refs"][0]["content_hash"] == "a" * 64
     assert item["evidence_refs"][0]["available_at"] == "2026-08-24T00:00:00Z"
     assert response.json()["data"]["policy_version"] == "real_advisory_policy_v1"
+    assert response.json()["data"]["diagnostic_report_id"] == str(report_id)
     assert response.json()["data"]["snapshot_as_of"] == "2026-08-24T03:59:00Z"
     assert response.json()["meta"] == {
         "request_id": request_headers["X-Request-Id"],

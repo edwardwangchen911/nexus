@@ -49,6 +49,7 @@ export function diagnosticReport(
   optimizationNeed: DiagnosticReport["optimization_need"] = "OPTIMIZATION_CANDIDATE",
 ): DiagnosticReport {
   return {
+    diagnostic_report_id: "0198d500-1000-7000-8000-000000001312",
     portfolio_snapshot_id: snapshotId,
     snapshot_as_of: "2026-08-24T00:00:00Z",
     trading_day: "2026-08-24",

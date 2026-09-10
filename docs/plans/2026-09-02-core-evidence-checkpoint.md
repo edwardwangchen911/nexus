@@ -3153,3 +3153,13 @@ FX 身份、单位、汇率、观察日、vintage、发布/接收时间、原件
 Engine import 不依赖 Gateway 包，而是从内嵌 v3 receipt 与原始 frames 独立核对文件集、哈希、长度、时间顺序、订阅回执、最后 quote 的代码/价格/`qtDate`/`qtTime`/接收时间，再与 handoff 比对。权限摘要、冻结 alias 或当前 authority 任一变化即拒绝。私有输入使用 `O_NOFOLLOW` 和有界读取；原件写入内容寻址对象后回读，然后幂等写入 `DataArtifact` 与 display-only `LatestQuote`。异时刻重放复用首次授权写入时点，内容冲突失败关闭。
 
 隔离 PostgreSQL 中 prepare/import 、时间窗拒绝、handoff 价格篡改拒绝、对象回读、两次幂等导入与 `MarketService` 展示读取通过；现有迁移/市场 API 相关 104 项通过，Gateway push 定向 186 项通过，Ruff、Mypy、CLI help 与 diff-check 通过。本切片没有新连接 Provider、没有调用模型或创建订单；`delivery_mode=unknown`、研究不可用与 `execution_locked=true` 不变。下一步只是用一次新 v3 有界真实 probe 执行该流程并核对实际 API/BFF/页面，不扩展到持续运行。
+
+### 确定性单候选调整情景页面（2026-09-10）
+
+在 `dc6d65b0` 已交付的只读情景 API/BFF 之上，组合页新增“降低证券集中度”情景区块。页面只允许填写最大单向换手率和最低现金占比，目标固定为降低证券集中度，范围固定为当前持仓且不允许新增标的；加载、刷新和切换组合均不自动 POST。只有正式持久诊断、当前 READY/DECISION_READY/PASS 冻结快照及永久交易锁全部匹配时，显式点击才提交一次意图与约束。请求不包含客户端权重、证券列表或订单字段。
+
+实现中发现原最新诊断响应没有返回情景请求所需的持久报告身份。最小合同修复只增加可空 `diagnostic_report_id`：正式报告返回数据库记录 ID，初步预览固定返回 null；不新增 GET、数据库表或迁移。前端仅在现有诊断组件完成 snapshot ID 与结构校验后接收报告，并再次核对报告 ID、快照 ID、估值时点和 `execution_locked=true`。候选只存在 React state；刷新、组合或快照变化、过期、输入修改及请求取消都会使旧结果失效，迟到响应不能复活。结果仅比较当前组合与一个候选，展示全部响应证券的“保持/降低”、集中度、现金、换手及成本未知，不提供接受、前向观察或下单动作。
+
+验证使用一次性 PostgreSQL 17 空库迁移到当前 head：49 项 scenario/diagnostic/what-if 单元与集成用例通过，其中明确确认 `optimization_proposal_groups`、`shadow_groups`、`paper_orders`、`paper_fills` 均为零，只新增既有脱敏审计摘要；临时容器随后停止并自动清理。前端聚焦单测、Playwright 显式点击/刷新副作用测试、TypeScript、ESLint、生成契约检查、Vinext build、Ruff 与 Mypy 均通过。没有 Provider、模型、券商同步、模拟盘或实盘调用。
+
+本切片没有把未合并工作树加载到当前本机真实服务，也没有为验收重启共享服务，因此尚未声称当前私人组合已在真实页面生成候选。合入并加载本切片后，下一次真实只读验收只允许读取已持久化快照和正式诊断并显式点击一次；若返回 `SCENARIO_BASELINE_NOT_READY` 或其他已定义阻塞，应保留真实阻塞，不用合成 fixture 代替。阶段 A 到此停止，不顺手增加 Mandate、Agent 工具、候选选择、Shadow 或通用求解器。
