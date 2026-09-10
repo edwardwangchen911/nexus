@@ -201,6 +201,26 @@ def test_projection_rejects_unknown_risk_or_unbounded_reason_text() -> None:
         AgentScenarioProjectionV1.model_validate(invalid_ratio)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("hard_constraint_reasons", ["POSITION_AAPL_BLOCKED"]),
+        ("estimated_cost_reason", "AAPL"),
+    ],
+)
+def test_projection_rejects_identity_material_disguised_as_reason_codes(
+    field: str, value: object
+) -> None:
+    payload = _projection_payload()
+    if field == "hard_constraint_reasons":
+        payload[field] = value
+    else:
+        payload["candidate"]["estimated_cost"] = _unknown(str(value))  # type: ignore[index]
+
+    with pytest.raises(ValidationError):
+        AgentScenarioProjectionV1.model_validate(payload)
+
+
 def test_model_context_diagnostic_requires_known_ratio() -> None:
     with pytest.raises(ValidationError):
         PortfolioDiagnosticSummaryV1.model_validate(

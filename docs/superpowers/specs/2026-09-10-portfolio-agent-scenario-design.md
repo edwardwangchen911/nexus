@@ -83,7 +83,7 @@ class PortfolioDecisionRunRecord(ImmutableCreatedAt, Base):
 - `(actor_id, idempotency_key)` 唯一；先按原始 POST bytes 的 `request_hash` 抢占或重放现有 `IdempotencyRecord`，相同 key 只在原始请求哈希不同时返回 409。
 - `frozen_input` 必须是 object，其规范哈希等于 `input_hash`。
 - `(portfolio_snapshot_id, portfolio_id)` 使用组合外键；`(diagnostic_report_id, portfolio_snapshot_id)` 使用组合外键，为此迁移向诊断表增加 `(id, portfolio_snapshot_id)` 唯一约束。
-- `schema_hash` 绑定 `PortfolioResearchIntentV1` 的规范 JSON schema；`tool_hash` 绑定工具输入 schema、投影 schema、`scenario_engine.py` 内容哈希和政策版本。
+- `schema_hash` 绑定 `PortfolioResearchIntentV1` 的规范 JSON schema；`tool_hash` 绑定工具输入 schema、投影 schema、工具/投影实现、情景 canonical 合同、`scenario_engine.py` 内容哈希和政策版本。任一权威语义变化都拒绝旧 run，不尝试在新代码下重放。
 - `evidence_manifest` 最多 100 条，必须在 `decision_time` 前可用且规范哈希等于 `evidence_hash`。
 - `tool_result_hash` 和 `tool_projection` 要么同时为 null，要么同时存在且投影内的 `result_hash` 与前者相等。
 - `request_hash` 只处理 HTTP 幂等；`input_hash` 在完成服务端权威冻结后生成，并用于 Job 唯一身份。权威后来变化不得将已存在的同 key 重放误判为冲突。

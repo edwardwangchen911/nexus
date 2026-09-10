@@ -28,13 +28,17 @@ from nexus.optimizer.scenario_contracts import AdjustmentScenarioConstraintsV1, 
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 ObjectiveStatus = Literal["met", "improved_not_met", "unchanged", "infeasible"]
+HardConstraintReason = Literal[
+    "TURNOVER_BUDGET_EXHAUSTED",
+    "STRUCTURAL_CONCENTRATION_FLOOR",
+    "SELLABLE_QUANTITY_EXHAUSTED",
+]
 CitationIds = Annotated[tuple[Hash64, ...], Field(min_length=1, max_length=100)]
 
 _UUID_TEXT = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
-_STABLE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
 _RATIO_TEXT = re.compile(r"^(?:0(?:\.\d{1,38})?|1(?:\.0{1,38})?)$")
 _UNSAFE_TEXT = re.compile(
     r"(?:https?://|file://|\.\.[/\\]|(?:^|\s)/(?:Users|home|tmp|etc)/|"
@@ -144,7 +148,6 @@ class PortfolioDecisionInputV1(_StrictPortfolioDecisionModel):
 
 
 class EvaluateAdjustmentScenarioToolInputV1(_StrictPortfolioDecisionModel):
-    schema_version: Literal["evaluate_adjustment_scenario_tool_input_v1"]
     objective: ScenarioObjective
 
 
@@ -165,7 +168,7 @@ class AgentScenarioProjectionV1(_StrictPortfolioDecisionModel):
     baseline: AgentScenarioMetricSetV1
     candidate: AgentScenarioMetricSetV1
     unknown_metrics: tuple[Literal["estimated_cost"], ...] = Field(max_length=1)
-    hard_constraint_reasons: tuple[str, ...] = Field(max_length=20)
+    hard_constraint_reasons: tuple[HardConstraintReason, ...] = Field(max_length=20)
     changed_position_count: int = Field(ge=0, le=100)
     result_hash: Hash64
     citation_ids: CitationIds
@@ -176,8 +179,6 @@ class AgentScenarioProjectionV1(_StrictPortfolioDecisionModel):
         _require_unique(self.unknown_metrics, label="unknown metrics")
         _require_unique(self.citation_ids, label="citation ids")
         _require_unique(self.hard_constraint_reasons, label="hard constraint reasons")
-        if any(_STABLE_CODE.fullmatch(reason) is None for reason in self.hard_constraint_reasons):
-            raise ValueError("hard constraint reasons must be stable codes")
         for metrics in (self.baseline, self.candidate):
             for name in (
                 "security_top1",
@@ -194,10 +195,8 @@ class AgentScenarioProjectionV1(_StrictPortfolioDecisionModel):
             cost = metrics.estimated_cost
             if cost.status == "known" and (cost.value is None or cost.value < 0):
                 raise ValueError("known estimated cost must be nonnegative")
-            if cost.status == "unknown" and (
-                cost.reason is None or _STABLE_CODE.fullmatch(cost.reason) is None
-            ):
-                raise ValueError("unknown estimated cost requires a stable reason code")
+            if cost.status == "unknown" and cost.reason != "COST_EVIDENCE_INCOMPLETE":
+                raise ValueError("unknown estimated cost requires the allowlisted reason")
         actual_unknowns = {
             name
             for name in ("estimated_cost",)
