@@ -318,6 +318,39 @@ async def test_sec_only_refresh_stops_without_fake_research(migrated_database_ur
 
 
 @pytest.mark.asyncio
+async def test_sec_issuer_mismatch_archives_raw_response_before_validation(
+    migrated_database_url,
+):
+    """Archival must precede identity validation so a rejected response remains diagnosable."""
+    from nexus.ops.sec_local import refresh_sec_research
+    from nexus.providers.sec import SecProviderError
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await seed_instrument(settings)
+    requests = []
+    store = InMemoryRawEvidenceStore()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(sec_responder(requests, wrong_submission=True))
+    ) as client:
+        with pytest.raises(SecProviderError, match="SEC request retry budget exhausted"):
+            await refresh_sec_research(
+                settings,
+                INSTRUMENT,
+                contact="test@example.invalid",
+                http_client=client,
+                store=store,
+            )
+
+    archived = [content for key, content in store.objects.items() if "/submissions/" in key]
+    assert len(archived) == 1
+    assert json.loads(archived[0])["tickers"] == ["MSFT"]
+    assert len(requests) == 3
+    async with session_factory(settings)() as session:
+        assert await session.scalar(select(func.count()).select_from(Filing)) == 0
+        assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("form", ["6-K", "497K", "8-K"])
 async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts(
     migrated_database_url,

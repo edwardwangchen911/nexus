@@ -61,13 +61,28 @@ class _BoundedBytes:
 
 
 class _IdentityTransport(SecHttpTransport):
-    def __init__(self, client: _BoundedBytes, identity: SecInstrumentIdentity):
+    def __init__(
+        self,
+        client: _BoundedBytes,
+        identity: SecInstrumentIdentity,
+        store: RawEvidenceStore,
+        received_on: date,
+    ):
         super().__init__(client)
         self.identity = identity
+        self.store = store
+        self.received_on = received_on
 
     async def get(self, path: str, headers: dict[str, str]) -> bytes:
         payload = await super().get(path, headers)
         if path.startswith("/submissions/"):
+            await self.store.put_if_absent(
+                key=(
+                    f"raw/sec/{self.received_on.isoformat()}/submissions/"
+                    f"{sha256(payload).hexdigest()}.json"
+                ),
+                content=payload,
+            )
             doc = json.loads(payload)
             tickers, exchanges = doc.get("tickers"), doc.get("exchanges")
             if (
@@ -238,7 +253,9 @@ async def refresh_sec_research(
             data_client = SecCompanyFactsClient(
                 SecHttpTransport(_BoundedBytes(client, "data.sec.gov", budget))
                 if fund_identity
-                else _IdentityTransport(_BoundedBytes(client, "data.sec.gov", budget), identity),
+                else _IdentityTransport(
+                    _BoundedBytes(client, "data.sec.gov", budget), identity, store, today
+                ),
                 contact=contact,
                 max_attempts=1,
             )
