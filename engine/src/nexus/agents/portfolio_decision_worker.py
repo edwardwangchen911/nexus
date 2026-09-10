@@ -137,6 +137,15 @@ async def run_portfolio_decision_worker_once(
         if run is None:
             raise ValueError("portfolio decision run is missing")
         authority = await load_portfolio_decision_execution_authority(target, run=run)
+        supports = getattr(responses_client, "supports_model_config", None)
+        try:
+            compatible = callable(supports) and supports(authority.model_config)
+        except Exception as error:
+            raise PortfolioDecisionExecutionError(
+                "PORTFOLIO_DECISION_AUTHORITY_INVALID"
+            ) from error
+        if not compatible:
+            raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_AUTHORITY_INVALID")
         await mark_first_requested(target, run_id=run_id)
 
     try:

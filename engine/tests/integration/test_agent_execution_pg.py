@@ -458,12 +458,17 @@ async def test_registering_staged_config_does_not_activate_it_for_default_admiss
 
 
 @pytest.mark.asyncio
-async def test_research_rejects_strategy_rnd_config_at_read_and_write_admission(
+@pytest.mark.parametrize(
+    "reserved_model_version",
+    ("codex-sdk-strategy-rnd-v1", "codex-sdk-portfolio-decision-v1"),
+)
+async def test_research_rejects_reserved_consumer_config_at_read_and_write_admission(
     migrated_database_url,
     monkeypatch,
+    reserved_model_version,
 ):
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await _seed_authority(factory, model_version="codex-sdk-strategy-rnd-v1")
+    await _seed_authority(factory, model_version=reserved_model_version)
     monkeypatch.setattr("nexus.api.routes.research.utc_now", lambda: _NOW)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url, now=_NOW)),

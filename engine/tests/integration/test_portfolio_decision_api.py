@@ -27,6 +27,7 @@ from nexus.diagnostics.models import PortfolioDiagnosticReport
 from nexus.diagnostics.policy import RealAdvisoryPolicy
 from nexus.main import create_engine_app
 from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
     PortfolioDecisionOutputRecord,
     PortfolioDecisionRunRecord,
 )
@@ -36,6 +37,8 @@ from nexus.persistence.models.runtime import Job
 from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.persistence.session import session_factory
 from nexus.providers.broker.base import PortfolioSnapshot
+from nexus.settings import AgentRuntimeMode
+from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from tests.integration.test_portfolio_decision_admission_pg import (
@@ -47,10 +50,26 @@ from tests.integration.test_portfolio_decision_admission_pg import (
 )
 
 RESULT_HASH = "e" * 64
+RESPONSES_MODEL_CONFIG_ID = UUID("0198d500-1000-7000-8000-000000002091")
+CODEX_MODEL_CONFIG_ID = UUID("0198d500-1000-7000-8000-000000002092")
 
 
 def _app(database_url: str):
     engine_app = create_engine_app(settings(database_url))
+    engine_app.state.utc_clock = lambda: NOW
+    return engine_app
+
+
+def _runtime_app(database_url: str, runtime_mode: AgentRuntimeMode):
+    configured = settings(database_url).model_copy(
+        update={
+            "agent_runtime_mode": runtime_mode,
+            "openai_api_key": SecretStr("fixture-key"),
+            "openai_extraction_model": "gpt-5.4-mini-2026-03-17",
+            "openai_reasoning_model": "gpt-5.4-mini-2026-03-17",
+        }
+    )
+    engine_app = create_engine_app(configured)
     engine_app.state.utc_clock = lambda: NOW
     return engine_app
 
@@ -123,6 +142,82 @@ def _install_admission_authority(monkeypatch: pytest.MonkeyPatch) -> None:
         "nexus.agents.portfolio_decision_persistence.evaluate_adjustment_scenario",
         lambda **_: type("Evaluation", (), {"result_hash": RESULT_HASH})(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime_mode", "expected_model_config_id"),
+    (
+        (AgentRuntimeMode.RESPONSES, RESPONSES_MODEL_CONFIG_ID),
+        (AgentRuntimeMode.CODEX_SDK, CODEX_MODEL_CONFIG_ID),
+    ),
+)
+async def test_post_selects_model_authority_for_the_active_runtime_before_admission(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_mode: AgentRuntimeMode,
+    expected_model_config_id: UUID,
+) -> None:
+    from nexus.agents.codex_sdk import MODEL_ID as CODEX_MODEL_ID
+    from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+    from nexus.ops.openai_local import MODEL_ID as RESPONSES_MODEL_ID
+
+    factory = session_factory(settings(migrated_database_url))
+    await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        session.add_all(
+            (
+                AgentModelConfigRecord(
+                    id=RESPONSES_MODEL_CONFIG_ID,
+                    model_id=RESPONSES_MODEL_ID,
+                    version="openai-standard-2026-09-02",
+                    config_hash="1" * 64,
+                    max_input_tokens=64_000,
+                    max_output_tokens=8_192,
+                    max_tool_calls=4,
+                    input_usd_per_million="0.75",
+                    output_usd_per_million="4.50",
+                    pricing_available_at=NOW - timedelta(days=1),
+                    pricing_expires_at=NOW + timedelta(days=1),
+                    created_at=NOW - timedelta(seconds=2),
+                ),
+                AgentModelConfigRecord(
+                    id=CODEX_MODEL_CONFIG_ID,
+                    model_id=CODEX_MODEL_ID,
+                    version=PORTFOLIO_DECISION_CONFIG_VERSION,
+                    config_hash="2" * 64,
+                    max_input_tokens=128_000,
+                    max_output_tokens=16_384,
+                    max_tool_calls=1,
+                    input_usd_per_million="0",
+                    output_usd_per_million="0",
+                    pricing_available_at=NOW - timedelta(days=1),
+                    pricing_expires_at=NOW + timedelta(days=1),
+                    created_at=NOW - timedelta(seconds=1),
+                ),
+            )
+        )
+    _install_admission_authority(monkeypatch)
+    path = "/internal/v1/portfolio-decision-runs"
+    body = _payload()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_runtime_app(migrated_database_url, runtime_mode)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            path,
+            content=body,
+            headers={
+                **headers("POST", path, body),
+                "Idempotency-Key": f"runtime-model-{runtime_mode.value}",
+            },
+        )
+
+    assert response.status_code == 202, response.text
+    async with factory() as session:
+        run = await session.scalar(select(PortfolioDecisionRunRecord))
+    assert run is not None
+    assert run.model_config_id == expected_model_config_id
 
 
 def test_openapi_exposes_only_create_and_owned_read_routes(

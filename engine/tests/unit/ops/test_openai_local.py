@@ -273,3 +273,79 @@ def test_explicit_research_admission_uses_normal_configuration(monkeypatch, tmp_
     assert openai_local.main() == 0
     admit.assert_awaited_once_with(settings, request)
     assert '"model_requests": 0' in capsys.readouterr().out
+
+
+def test_explicit_portfolio_run_once_dispatches_only_the_dedicated_worker(
+    monkeypatch, capsys
+) -> None:
+    from nexus.ops import openai_local
+    from nexus.settings import EngineSettings
+
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus",
+        environment="development",
+        agent_runtime_mode="codex_sdk",
+    )
+    run = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["nexus-openai-local", "run-portfolio-once", "--backend", "codex_sdk"],
+    )
+    monkeypatch.chdir(Path(__file__).resolve().parents[4])
+    monkeypatch.setattr(openai_local, "local_settings", lambda *args, **kwargs: settings)
+    monkeypatch.setattr(
+        openai_local,
+        "status",
+        lambda _settings: {"ready_for_model_requests": True, "execution_locked": True},
+    )
+    monkeypatch.setattr("nexus.worker.run_portfolio_decision_worker_once", run)
+
+    assert openai_local.main() == 0
+    run.assert_awaited_once_with(settings)
+    assert '"job_processed": true' in capsys.readouterr().out
+
+
+def test_paid_portfolio_transport_binds_the_complete_registered_configuration(
+    monkeypatch,
+) -> None:
+    from decimal import Decimal
+
+    from nexus.agents.responses import ResponsesModelConfig
+    from nexus.ops.openai_local import MODEL_ID
+    from nexus.settings import EngineSettings
+    from nexus.worker import _openai_portfolio_responses_client
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            self.max_retries = kwargs["max_retries"]
+            self.responses = object()
+
+    monkeypatch.setattr("nexus.worker.AsyncOpenAI", FakeAsyncOpenAI)
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus",
+        environment="development",
+        agent_runtime_mode="responses",
+        openai_api_key="fixture-key",
+        openai_extraction_model=MODEL_ID,
+        openai_reasoning_model=MODEL_ID,
+    )
+    client = _openai_portfolio_responses_client(settings)
+    expected = ResponsesModelConfig(
+        model_id=MODEL_ID,
+        pricing_version="openai-standard-2026-09-02",
+        max_input_tokens=64_000,
+        max_output_tokens=8_192,
+        max_tool_calls=1,
+        absolute_timeout_seconds=Decimal("45"),
+        input_usd_per_million=Decimal("0.75"),
+        output_usd_per_million=Decimal("4.50"),
+    )
+
+    assert client.supports_model_config(expected) is True
+    for update in (
+        {"pricing_version": "codex-sdk-portfolio-decision-v1"},
+        {"max_input_tokens": 128_000},
+        {"max_output_tokens": 16_384},
+        {"input_usd_per_million": Decimal("0")},
+    ):
+        assert client.supports_model_config(expected.model_copy(update=update)) is False

@@ -124,6 +124,74 @@ async def test_worker_completes_two_turn_decision_without_a_long_transaction(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client_type", ("incompatible", "raising"))
+async def test_worker_rejects_an_incompatible_transport_before_provider_call(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    client_type: str,
+) -> None:
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    await _seed_authority(factory)
+    await _admit(factory, monkeypatch)
+    async with factory() as session:
+        run = await session.scalar(select(PortfolioDecisionRunRecord))
+        assert run is not None
+        authority = await _authority(session, run)
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_worker.load_portfolio_decision_execution_authority",
+        AsyncMock(return_value=authority),
+    )
+    client = (
+        _IncompatibleClient(_intent(authority), factory)
+        if client_type == "incompatible"
+        else _RaisingCompatibilityClient(_intent(authority), factory)
+    )
+
+    assert await run_portfolio_decision_worker_once(settings, responses_client=client) is True
+
+    async with factory() as session:
+        stored = await session.get(PortfolioDecisionRunRecord, run.id)
+        reservation = await session.scalar(
+            select(PortfolioDecisionBudgetReservationRecord).where(
+                PortfolioDecisionBudgetReservationRecord.run_id == run.id
+            )
+        )
+    assert stored is not None
+    assert (stored.status, stored.provider_phase) == ("failed", "none")
+    assert reservation is not None and reservation.state == "released"
+    assert client.responses.calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_an_unbound_transport_before_provider_call(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    await _seed_authority(factory)
+    await _admit(factory, monkeypatch)
+    async with factory() as session:
+        run = await session.scalar(select(PortfolioDecisionRunRecord))
+        assert run is not None
+        authority = await _authority(session, run)
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_worker.load_portfolio_decision_execution_authority",
+        AsyncMock(return_value=authority),
+    )
+    client = _UnboundClient(_intent(authority), factory)
+
+    assert await run_portfolio_decision_worker_once(settings, responses_client=client) is True
+
+    async with factory() as session:
+        stored = await session.get(PortfolioDecisionRunRecord, run.id)
+    assert stored is not None
+    assert (stored.status, stored.provider_phase) == ("failed", "none")
+    assert client.responses.calls == []
+
+
+@pytest.mark.asyncio
 async def test_reconcile_after_output_checkpoint_crash_never_replays_provider(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -846,3 +914,26 @@ class _Client:
 
     def __init__(self, intent: dict[str, object], factory, *, mode: str = "success") -> None:
         self.responses = _Responses(intent, factory, mode=mode)
+
+    def supports_model_config(self, config: ResponsesModelConfig) -> bool:
+        del config
+        return True
+
+
+class _IncompatibleClient(_Client):
+    def supports_model_config(self, config: ResponsesModelConfig) -> bool:
+        del config
+        return False
+
+
+class _RaisingCompatibilityClient(_Client):
+    def supports_model_config(self, config: ResponsesModelConfig) -> bool:
+        del config
+        raise RuntimeError("injected compatibility failure")
+
+
+class _UnboundClient:
+    max_retries = 0
+
+    def __init__(self, intent: dict[str, object], factory) -> None:
+        self.responses = _Responses(intent, factory)

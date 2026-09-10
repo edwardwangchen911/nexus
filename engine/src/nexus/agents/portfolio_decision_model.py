@@ -5,13 +5,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from openai import pydantic_function_tool
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from nexus.agents.codex_versions import (
+    PORTFOLIO_DECISION_MAX_INPUT_TOKENS,
+    PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS,
+    PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN,
+    PORTFOLIO_DECISION_MAX_TOOL_CALLS,
+    PORTFOLIO_DECISION_MAX_WIRE_BYTES,
+)
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
     EvaluateAdjustmentScenarioToolInputV1,
@@ -26,6 +33,7 @@ from nexus.agents.responses import ResponsesClient, ResponsesModelConfig
 from nexus.agents.responses_budget import RunUsageAllowance, UsageSnapshot
 from nexus.agents.responses_transport import (
     NormalizedResponse,
+    NormalizedUsage,
     ResponseShapeError,
     normalize_response,
 )
@@ -56,6 +64,149 @@ class PortfolioDecisionFirstTurn:
 class PortfolioDecisionModelResult:
     intent: PortfolioResearchIntentV1
     usage: UsageSnapshot
+
+
+CodexInvoke = Callable[..., Awaitable[tuple[str, UsageSnapshot]]]
+
+
+class BoundPortfolioResponsesClient:
+    """Bind a provider transport to one complete frozen model authority."""
+
+    max_retries = 0
+
+    def __init__(self, *, client: object, config: ResponsesModelConfig) -> None:
+        if getattr(client, "max_retries", None) != 0:
+            raise ValueError("portfolio decision transport retries must be disabled")
+        responses = getattr(client, "responses", None)
+        if responses is None:
+            raise ValueError("portfolio decision Responses transport is required")
+        self.responses = responses
+        self._config = config
+
+    def supports_model_config(self, config: ResponsesModelConfig) -> bool:
+        return config == self._config
+
+
+class CodexPortfolioResponsesClient:
+    """Map two strict Codex SDK outputs onto the existing no-retry model protocol."""
+
+    max_retries = 0
+
+    def __init__(
+        self,
+        *,
+        model_id: str,
+        pricing_version: str,
+        invoke: CodexInvoke | None = None,
+    ) -> None:
+        if not model_id or not pricing_version:
+            raise ValueError("portfolio decision Codex model is required")
+        if invoke is None:
+            from nexus.agents.codex_sdk import invoke_codex
+
+            invoke = invoke_codex
+        self._model_id = model_id
+        self._pricing_version = pricing_version
+        self._invoke = invoke
+        self._stage = 0
+        self.responses = self
+
+    def supports_model_config(self, config: ResponsesModelConfig) -> bool:
+        return (
+            config.model_id == self._model_id
+            and config.pricing_version == self._pricing_version
+            and config.max_input_tokens == PORTFOLIO_DECISION_MAX_INPUT_TOKENS
+            and config.max_output_tokens == PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS
+            and config.max_tool_calls == PORTFOLIO_DECISION_MAX_TOOL_CALLS
+            and config.input_usd_per_million == 0
+            and config.output_usd_per_million == 0
+        )
+
+    async def create(self, **kwargs: object) -> Mapping[str, object]:
+        if kwargs.get("model") != self._model_id or kwargs.get("store") is not False:
+            raise ValueError("portfolio decision Codex authority is invalid")
+        model, stage = self._output_model(kwargs)
+        raw_input = kwargs.get("input")
+        if not isinstance(raw_input, list):
+            raise ValueError("portfolio decision Codex input is invalid")
+        raw, usage = await self._invoke(
+            {
+                "schema_version": "codex_portfolio_decision_transport_v1",
+                "stage": stage,
+                "instructions": (
+                    "Return only the objective allowed by the requested schema; the host will "
+                    "execute the deterministic scenario tool exactly once."
+                    if stage == "scenario_request"
+                    else "Return only the final read-only PortfolioResearchIntentV1 JSON using "
+                    "the supplied deterministic tool projection."
+                ),
+                "input": raw_input,
+            },
+            output_model=model,
+            max_wire_bytes=PORTFOLIO_DECISION_MAX_WIRE_BYTES,
+        )
+        if usage.output_tokens > PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN:
+            raise ResponseShapeError(
+                "portfolio decision Codex turn output exceeds limit",
+                usage=NormalizedUsage(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                ),
+            )
+        try:
+            parsed = model.model_validate_json(raw)
+        except ValidationError as error:
+            raise ResponseShapeError(
+                "portfolio decision Codex structured output is invalid",
+                usage=NormalizedUsage(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                ),
+            ) from error
+        canonical = parsed.model_dump_json()
+        response_usage = {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+        }
+        self._stage += 1
+        if stage == "scenario_request":
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "codex-portfolio-scenario-1",
+                        "name": TOOL_NAME,
+                        "arguments": canonical,
+                    }
+                ],
+                "usage": response_usage,
+            }
+        return {
+            "output": [{"type": "message"}],
+            "output_text": canonical,
+            "usage": response_usage,
+        }
+
+    def _output_model(
+        self, kwargs: Mapping[str, object]
+    ) -> tuple[type[BaseModel], str]:
+        tool_choice = kwargs.get("tool_choice")
+        tools = kwargs.get("tools")
+        if self._stage == 0:
+            definition = tools[0] if isinstance(tools, list) and len(tools) == 1 else None
+            function = definition.get("function") if isinstance(definition, Mapping) else None
+            if (
+                tool_choice != "required"
+                or not isinstance(function, Mapping)
+                or function.get("name") != TOOL_NAME
+            ):
+                raise ValueError("portfolio decision Codex tool request is invalid")
+            return EvaluateAdjustmentScenarioToolInputV1, "scenario_request"
+        if self._stage == 1:
+            if tool_choice != "none" or tools != []:
+                raise ValueError("portfolio decision Codex intent request is invalid")
+            return PortfolioResearchIntentV1, "research_intent"
+        raise ValueError("portfolio decision Codex turn limit exceeded")
 
 
 class ResponsesPortfolioDecisionModel:
@@ -240,6 +391,13 @@ class ResponsesPortfolioDecisionModel:
             allowance = self._allowance.authorize(payload)
         except ValueError as error:
             raise self._error("PORTFOLIO_DECISION_MODEL_FAILED") from error
+        allowance = replace(
+            allowance,
+            max_output_tokens=min(
+                allowance.max_output_tokens,
+                PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN,
+            ),
+        )
         kwargs = dict(payload)
         kwargs["timeout"] = remaining
         kwargs["max_output_tokens"] = allowance.max_output_tokens

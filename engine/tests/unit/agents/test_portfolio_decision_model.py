@@ -6,16 +6,20 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from nexus.agents import portfolio_decision_model
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
+    EvaluateAdjustmentScenarioToolInputV1,
     PortfolioDecisionInputV1,
     PortfolioDecisionModelContextV1,
+    PortfolioResearchIntentV1,
 )
 from nexus.agents.portfolio_decision_model import (
     PortfolioDecisionModelError,
     ResponsesPortfolioDecisionModel,
 )
 from nexus.agents.responses import ResponsesModelConfig
+from nexus.agents.responses_budget import UsageSnapshot
 
 NOW = datetime(2026, 9, 10, 1, 2, 3, tzinfo=UTC)
 RUN_ID = UUID("018f0000-0000-7000-8000-000000000001")
@@ -24,6 +28,162 @@ SNAPSHOT_ID = UUID("018f0000-0000-7000-8000-000000000003")
 REPORT_ID = UUID("018f0000-0000-7000-8000-000000000004")
 CID = "a" * 64
 RESULT_HASH = "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_codex_transport_maps_two_structured_turns_to_existing_protocol() -> None:
+    transport_type = getattr(portfolio_decision_model, "CodexPortfolioResponsesClient", None)
+    assert transport_type is not None
+    calls: list[tuple[dict[str, object], type[object], int]] = []
+
+    async def invoke(
+        payload: dict[str, object], *, output_model: type[object], max_wire_bytes: int
+    ) -> tuple[str, UsageSnapshot]:
+        calls.append((payload, output_model, max_wire_bytes))
+        body = (
+            {"objective": "reduce_security_concentration"}
+            if len(calls) == 1
+            else _intent()
+        )
+        return json.dumps(body), UsageSnapshot(input_tokens=50, output_tokens=25)
+
+    client = transport_type(
+        invoke=invoke,
+        model_id="configured-model",
+        pricing_version="pricing-v1",
+    )
+    model = ResponsesPortfolioDecisionModel(client=client, config=_config())
+    first = await model.request_scenario(
+        context=_context(), prompt="bounded prompt", tools=_tools()
+    )
+    result = await model.request_intent(
+        context=_context(), prompt="bounded prompt", frozen=_frozen(), first_turn=first
+    )
+
+    assert result.intent.scenario_result_hash == RESULT_HASH
+    assert [call[0]["stage"] for call in calls] == ["scenario_request", "research_intent"]
+    assert "execute the deterministic scenario tool exactly once" in str(
+        calls[0][0]["instructions"]
+    )
+    assert calls[0][1] is EvaluateAdjustmentScenarioToolInputV1
+    assert calls[1][1] is PortfolioResearchIntentV1
+    assert [call[2] for call in calls] == [64_000, 64_000]
+    assert result.usage == UsageSnapshot(
+        input_tokens=100,
+        output_tokens=50,
+        tool_calls=1,
+        provider_calls=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_transport_rejects_per_turn_output_over_8192_without_retry() -> None:
+    calls = 0
+
+    async def invoke(
+        payload: dict[str, object], **kwargs: object
+    ) -> tuple[str, UsageSnapshot]:
+        nonlocal calls
+        calls += 1
+        del payload
+        del kwargs
+        return json.dumps({"objective": "reduce_security_concentration"}), UsageSnapshot(
+            input_tokens=50,
+            output_tokens=8_193,
+        )
+
+    client = portfolio_decision_model.CodexPortfolioResponsesClient(
+        invoke=invoke,
+        model_id="configured-model",
+        pricing_version="pricing-v1",
+    )
+    config = _config().model_copy(update={"max_output_tokens": 16_384})
+    model = ResponsesPortfolioDecisionModel(client=client, config=config)
+
+    with pytest.raises(PortfolioDecisionModelError) as raised:
+        await model.request_scenario(
+            context=_context(), prompt="bounded prompt", tools=_tools()
+        )
+
+    assert raised.value.usage_known is True
+    assert raised.value.usage.output_tokens == 8_193
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_codex_transport_rejects_second_turn_output_over_8192_without_retry() -> None:
+    calls = 0
+
+    async def invoke(
+        payload: dict[str, object], **kwargs: object
+    ) -> tuple[str, UsageSnapshot]:
+        nonlocal calls
+        calls += 1
+        del payload
+        del kwargs
+        body = {"objective": "reduce_security_concentration"} if calls == 1 else _intent()
+        output_tokens = 25 if calls == 1 else 8_193
+        return json.dumps(body), UsageSnapshot(input_tokens=50, output_tokens=output_tokens)
+
+    client = portfolio_decision_model.CodexPortfolioResponsesClient(
+        invoke=invoke,
+        model_id="configured-model",
+        pricing_version="pricing-v1",
+    )
+    config = _config().model_copy(update={"max_output_tokens": 16_384})
+    model = ResponsesPortfolioDecisionModel(client=client, config=config)
+    first = await model.request_scenario(
+        context=_context(), prompt="bounded prompt", tools=_tools()
+    )
+
+    with pytest.raises(PortfolioDecisionModelError) as raised:
+        await model.request_intent(
+            context=_context(), prompt="bounded prompt", frozen=_frozen(), first_turn=first
+        )
+
+    assert raised.value.usage_known is True
+    assert raised.value.usage.output_tokens == 8_218
+    assert calls == 2
+
+
+def test_bound_transport_requires_the_exact_frozen_model_config() -> None:
+    transport_type = getattr(portfolio_decision_model, "BoundPortfolioResponsesClient", None)
+    assert transport_type is not None
+    expected = _config()
+    delegate = _Client(_intent())
+    client = transport_type(client=delegate, config=expected)
+
+    assert client.responses is delegate.responses
+    assert client.supports_model_config(expected) is True
+    assert client.supports_model_config(
+        expected.model_copy(update={"pricing_version": "another-pricing-version"})
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_codex_transport_preserves_known_usage_for_invalid_structured_output() -> None:
+    async def invoke(
+        payload: dict[str, object], **kwargs: object
+    ) -> tuple[str, UsageSnapshot]:
+        del payload
+        del kwargs
+        return "not-json", UsageSnapshot(input_tokens=50, output_tokens=25)
+
+    client = portfolio_decision_model.CodexPortfolioResponsesClient(
+        invoke=invoke,
+        model_id="configured-model",
+        pricing_version="pricing-v1",
+    )
+    model = ResponsesPortfolioDecisionModel(client=client, config=_config())
+
+    with pytest.raises(PortfolioDecisionModelError) as raised:
+        await model.request_scenario(
+            context=_context(), prompt="bounded prompt", tools=_tools()
+        )
+
+    assert raised.value.usage_known is True
+    assert raised.value.usage.input_tokens == 50
+    assert raised.value.usage.output_tokens == 25
 
 
 @pytest.mark.asyncio

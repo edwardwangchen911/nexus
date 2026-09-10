@@ -9,7 +9,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
-from nexus.agents.codex_versions import SDK_CONFIG_VERSIONS, STAGED_CONFIG_VERSIONS
+from nexus.agents.codex_versions import (
+    PORTFOLIO_DECISION_CONFIG_VERSION,
+    SDK_CONFIG_VERSIONS,
+    STAGED_CONFIG_VERSIONS,
+)
 from nexus.agents.committee import StageInputIdentity
 from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.execution_authority import load_frozen_evidence
@@ -107,7 +111,11 @@ async def get_research_admission(
                 AgentModelConfigRecord.pricing_available_at <= now,
                 AgentModelConfigRecord.pricing_expires_at > now,
                 AgentModelConfigRecord.version.not_in(
-                    (*STAGED_CONFIG_VERSIONS, "codex-sdk-strategy-rnd-v1")
+                    (
+                        *STAGED_CONFIG_VERSIONS,
+                        "codex-sdk-strategy-rnd-v1",
+                        PORTFOLIO_DECISION_CONFIG_VERSION,
+                    )
                 ),
             )
             .order_by(desc(AgentModelConfigRecord.created_at))

@@ -115,6 +115,8 @@ async def admit_portfolio_decision_run(
     model_config_id: UUID | None,
     daily_limit_usd: Decimal,
     now: datetime,
+    required_model_id: str | None = None,
+    required_model_version: str | None = None,
 ) -> PortfolioDecisionAdmission:
     """Claim first, then freeze authority, reserve budget, and enqueue no-retry work."""
     if now.tzinfo != UTC or request.as_of > now:
@@ -178,7 +180,13 @@ async def admit_portfolio_decision_run(
         raise ValueError("point-in-time portfolio authority is invalid")
 
     prompt = await _load_prompt(session, prompt_version_id=prompt_version_id, now=now)
-    model = await _load_model(session, model_config_id=model_config_id, now=now)
+    model = await _load_model(
+        session,
+        model_config_id=model_config_id,
+        required_model_id=required_model_id,
+        required_model_version=required_model_version,
+        now=now,
+    )
     snapshot = await load_frozen_snapshot(
         session, portfolio_id=snapshot_record.portfolio_id, snapshot_id=snapshot_record.id
     )
@@ -379,27 +387,42 @@ async def _load_prompt(
 
 
 async def _load_model(
-    session: AsyncSession, *, model_config_id: UUID | None, now: datetime
+    session: AsyncSession,
+    *,
+    model_config_id: UUID | None,
+    required_model_id: str | None,
+    required_model_version: str | None,
+    now: datetime,
 ) -> AgentModelConfigRecord:
-    model = (
-        await session.get(AgentModelConfigRecord, model_config_id)
-        if model_config_id is not None
-        else await session.scalar(
-            select(AgentModelConfigRecord)
-            .where(
-                AgentModelConfigRecord.pricing_available_at <= now,
-                AgentModelConfigRecord.pricing_expires_at > now,
-                AgentModelConfigRecord.max_tool_calls >= 1,
-                AgentModelConfigRecord.version != "codex-sdk-strategy-rnd-v1",
-            )
-            .order_by(AgentModelConfigRecord.created_at.desc(), AgentModelConfigRecord.id.desc())
-            .limit(1)
+    if (required_model_id is None) != (required_model_version is None):
+        raise ValueError("portfolio decision runtime model authority is incomplete")
+    if model_config_id is not None:
+        model = await session.get(AgentModelConfigRecord, model_config_id)
+    else:
+        query = select(AgentModelConfigRecord).where(
+            AgentModelConfigRecord.pricing_available_at <= now,
+            AgentModelConfigRecord.pricing_expires_at > now,
+            AgentModelConfigRecord.max_tool_calls >= 1,
+            AgentModelConfigRecord.version != "codex-sdk-strategy-rnd-v1",
         )
-    )
+        if required_model_id is not None and required_model_version is not None:
+            query = query.where(
+                AgentModelConfigRecord.model_id == required_model_id,
+                AgentModelConfigRecord.version == required_model_version,
+            )
+        model = await session.scalar(
+            query.order_by(
+                AgentModelConfigRecord.created_at.desc(), AgentModelConfigRecord.id.desc()
+            ).limit(1)
+        )
     if (
         model is None
         or model.max_tool_calls < 1
         or model.version == "codex-sdk-strategy-rnd-v1"
+        or required_model_id is not None
+        and model.model_id != required_model_id
+        or required_model_version is not None
+        and model.version != required_model_version
         or model.pricing_available_at > now
         or model.pricing_expires_at <= now
     ):

@@ -14,7 +14,11 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted
-from nexus.agents.codex_versions import SDK_CONFIG_VERSIONS, STAGED_CONFIG_VERSIONS
+from nexus.agents.codex_versions import (
+    PORTFOLIO_DECISION_CONFIG_VERSION,
+    SDK_CONFIG_VERSIONS,
+    STAGED_CONFIG_VERSIONS,
+)
 from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.agents.models import ResearchRequest
@@ -360,7 +364,11 @@ async def admit_research_run(
                 AgentModelConfigRecord.pricing_expires_at > now,
                 # Staged research is explicit; strategy generation is a separate consumer.
                 AgentModelConfigRecord.version.not_in(
-                    (*STAGED_CONFIG_VERSIONS, "codex-sdk-strategy-rnd-v1")
+                    (
+                        *STAGED_CONFIG_VERSIONS,
+                        "codex-sdk-strategy-rnd-v1",
+                        PORTFOLIO_DECISION_CONFIG_VERSION,
+                    )
                 ),
             )
             .order_by(AgentModelConfigRecord.created_at.desc())
@@ -402,6 +410,7 @@ async def admit_research_run(
         or not any(record.authority_kind == "research" for record in evidence_records)
         or model is None
         or model.version == "codex-sdk-strategy-rnd-v1"
+        or model.version == PORTFOLIO_DECISION_CONFIG_VERSION
         or model.pricing_available_at > now
         or model.pricing_expires_at <= now
     ):

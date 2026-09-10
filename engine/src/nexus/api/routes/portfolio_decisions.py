@@ -37,7 +37,7 @@ from nexus.persistence.models.agents import (
     PortfolioDecisionRunRecord,
 )
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,6 +118,7 @@ async def create_portfolio_decision_run(
     """Admit one immutable run without executing model work in the API process."""
     raw_body = await request.body()
     now = _utc_now(request)
+    required_model_id, required_model_version = _runtime_model_authority(settings)
     try:
         admission = await admit_portfolio_decision_run(
             session,
@@ -131,6 +132,8 @@ async def create_portfolio_decision_run(
             model_config_id=None,
             daily_limit_usd=settings.agent_daily_budget_usd,
             now=now,
+            required_model_id=required_model_id,
+            required_model_version=required_model_version,
         )
     except BudgetExhausted as error:
         raise NexusError(
@@ -174,6 +177,19 @@ async def create_portfolio_decision_run(
         content=envelope.model_dump(mode="json"),
         headers={"Location": f"/api/v1/portfolio-decision-runs/{run.id}"},
     )
+
+
+def _runtime_model_authority(settings: EngineSettings) -> tuple[str | None, str | None]:
+    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        from nexus.agents.codex_sdk import MODEL_ID
+        from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+
+        return MODEL_ID, PORTFOLIO_DECISION_CONFIG_VERSION
+    if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES:
+        from nexus.ops.openai_local import _CONFIG, MODEL_ID
+
+        return MODEL_ID, str(_CONFIG["version"])
+    return None, None
 
 
 @router.get(

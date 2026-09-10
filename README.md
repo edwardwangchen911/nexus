@@ -54,11 +54,16 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk
 uv run --package nexus-engine nexus-openai-local status --backend codex_sdk
 uv run --package nexus-engine nexus-openai-local run-once --backend codex_sdk
+uv run --package nexus-engine nexus-openai-local run-portfolio-once --backend codex_sdk
 ```
 
-`setup` 仅登记模型和既有提示词、检查登录，不做模型推理。`run-once` 处理一个已登记的研究任务：
+`setup` 仅登记普通研究模型、独立的两轮组合决策模型和既有提示词、检查登录，不做模型推理。
+`run-once` 处理一个已登记的单标研究任务：
 主程序从数据库读取冻结的财报及脱敏组合背景，交给一个临时、只读、无工具的 SDK 会话，
 一次生成既有 8 个角色的结果，沿用原有证据校验、数据库、BFF 和研究页面。
+`run-portfolio-once` 只处理一个已登记的组合决策任务：第一轮仅返回允许的研究目标，宿主执行
+一次确定性情景工具，第二轮只返回严格的研究意图；最多两个 SDK turn，不开放内置工具，
+不自动重试，也不创建方案、Shadow 或订单。
 关闭模型请求/流重试和任务自动重试；35 秒超时后关闭 SDK，不启动后台轮询。
 工具、插件、MCP、hooks 和账户写入均不开放，不向 SDK 继承数据库或券商环境变量。
 财报期间与来源保留，模型只能引用冻结证据；缺合格价格依据仍为 `partial / watch`。
@@ -77,7 +82,7 @@ uv run --package nexus-engine nexus-openai-local run-once --backend codex_sdk
 日常有界模型验收不再逐次征求批准；保留单案例、最多三次调用、既有 token 阈值、
 首错即停和无自动重试。扩大调用范围、增加付费或改变权限仍需确认。
 
-`nexus-openai-local setup --backend codex_sdk --staged` 只登记 `codex-sdk-chatgpt-v2`，
+`nexus-openai-local setup --backend codex_sdk --staged` 登记 `codex-sdk-chatgpt-v2` 及独立组合决策配置，
 不调用模型，也不改变默认研究入口。v2 已于 2026-09-02 20:36（北京时间）完成一次真实
 三阶段运行及数据库/API/页面核验；决策内容仍为 partial/watch，未完成总目标验收。仍以明确的模型配置 ID
 准入受控验证任务；普通准入排除 v2。既有任务仍绑定原配置，默认 `setup` 保留 v1。

@@ -13,6 +13,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
 from nexus.audit.canonical import canonical_json
 from nexus.backtest.authority_loader import (
     LoadedPointInTimeBacktest,
@@ -312,7 +313,9 @@ class DatabaseStrategyRNDAuthorityResolver:
             model_query = model_query.where(AgentModelConfigRecord.version == model_version)
         else:
             model_query = model_query.where(
-                AgentModelConfigRecord.version != CODEX_RND_CONFIG_VERSION
+                AgentModelConfigRecord.version.not_in(
+                    (CODEX_RND_CONFIG_VERSION, PORTFOLIO_DECISION_CONFIG_VERSION)
+                )
             )
         model = await session.scalar(
             model_query.order_by(

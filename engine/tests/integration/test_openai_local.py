@@ -39,12 +39,22 @@ async def test_prepare_is_idempotent_and_does_not_create_research_or_market_evid
         assert await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord)) == (
             10 if strategy_rnd else 9
         )
-        assert await session.scalar(select(func.count()).select_from(AgentModelConfigRecord)) == 1
+        expected_models = 2 if backend == "codex_sdk" else 1
+        assert (
+            await session.scalar(select(func.count()).select_from(AgentModelConfigRecord))
+            == expected_models
+        )
         assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
         assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0
         for model_type in (Job, StrategyRNDRunRecord, StrategyExperimentFamilyRecord):
             assert await session.scalar(select(func.count()).select_from(model_type)) == 0
-        model = await session.scalar(select(AgentModelConfigRecord))
+        from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+
+        model = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version != PORTFOLIO_DECISION_CONFIG_VERSION
+            )
+        )
         assert model.worst_case_cost_usd < 1
         assert "fixture" not in model.version
         if backend == "codex_sdk":
@@ -66,6 +76,29 @@ async def test_prepare_is_idempotent_and_does_not_create_research_or_market_evid
             )
             assert prompt is not None
             assert prompt.version == "strategy_rnd_v1"
+
+
+@pytest.mark.asyncio
+async def test_codex_setup_registers_a_separate_bounded_portfolio_model(
+    migrated_database_url: str,
+) -> None:
+    from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    await prepare_database(settings)
+
+    async with session_factory(settings)() as session:
+        models = {
+            model.version: model
+            for model in await session.scalars(select(AgentModelConfigRecord))
+        }
+    decision = models[PORTFOLIO_DECISION_CONFIG_VERSION]
+    assert decision.model_id == "gpt-5.6-terra"
+    assert decision.max_input_tokens == 128_000
+    assert decision.max_output_tokens == 16_384
+    assert decision.max_tool_calls == 1
+    assert decision.worst_case_cost_usd == 0
 
 
 @pytest.mark.asyncio
@@ -94,7 +127,7 @@ async def test_strategy_rnd_setup_preserves_existing_committee_model_versions(
             model.version: (model.id, model.config_hash)
             for model in await session.scalars(select(AgentModelConfigRecord))
         }
-        assert len(current) == 3
+        assert len(current) == len(previous) + 1
         assert {version: current[version] for version in previous} == previous
         assert "codex-sdk-strategy-rnd-v1" in current
         prompt_count = await session.scalar(
@@ -112,6 +145,7 @@ async def test_strategy_rnd_setup_preserves_existing_committee_model_versions(
 
 @pytest.mark.asyncio
 async def test_inline_setup_is_idempotent_and_preserves_old_config(migrated_database_url):
+    from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
     from nexus.ops.openai_local import prepare_database
 
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
@@ -119,19 +153,29 @@ async def test_inline_setup_is_idempotent_and_preserves_old_config(migrated_data
     await prepare_database(settings, **options)
     factory = session_factory(settings)
     async with factory() as session:
-        old = await session.scalar(select(AgentModelConfigRecord))
+        old = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version != PORTFOLIO_DECISION_CONFIG_VERSION
+            )
+        )
+        assert old is not None
         before = {column.name: getattr(old, column.name) for column in old.__table__.columns}
         prompts = await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord))
     await prepare_database(settings, **options, inline_citations=True)
     await prepare_database(settings, **options, inline_citations=True)
     async with factory() as session:
         models = list(await session.scalars(select(AgentModelConfigRecord)))
-        assert len(models) == 2
+        assert len(models) == 3
         original = next(row for row in models if row.id == before["id"])
         assert {
             column.name: getattr(original, column.name) for column in original.__table__.columns
         } == before
-        new = next(row for row in models if row.id != before["id"])
+        new = next(
+            row
+            for row in models
+            if row.id != before["id"]
+            and row.version != PORTFOLIO_DECISION_CONFIG_VERSION
+        )
         assert new.version == "codex-sdk-chatgpt-v3-input96k-wire64k-cite1"
         assert new.config_hash != before["config_hash"]
         assert new.max_input_tokens == original.max_input_tokens

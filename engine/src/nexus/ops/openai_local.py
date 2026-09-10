@@ -25,6 +25,11 @@ from sqlalchemy.engine import make_url
 from nexus.agents import codex_token_budget
 from nexus.agents.codex_versions import (
     INLINE_CITATION_CONFIG_VERSION,
+    PORTFOLIO_DECISION_CONFIG_VERSION,
+    PORTFOLIO_DECISION_MAX_INPUT_TOKENS,
+    PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS,
+    PORTFOLIO_DECISION_MAX_TOOL_CALLS,
+    PORTFOLIO_DECISION_MAX_WIRE_BYTES,
     STRUCTURED_96K_CONFIG_VERSION,
     STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
 )
@@ -257,7 +262,24 @@ async def prepare_database(
         config["max_wire_bytes"] = max_wire_bytes
     if inline_citations:
         config["inline_citations"] = True
-    config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+    configs = [config]
+    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        configs.append(
+            {
+                "model_id": SDK_MODEL,
+                "version": PORTFOLIO_DECISION_CONFIG_VERSION,
+                "max_input_tokens": PORTFOLIO_DECISION_MAX_INPUT_TOKENS,
+                "max_output_tokens": PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS,
+                "max_tool_calls": PORTFOLIO_DECISION_MAX_TOOL_CALLS,
+                "input_usd_per_million": "0",
+                "output_usd_per_million": "0",
+                "pricing_available_at": "2026-09-02T00:00:00+00:00",
+                "pricing_expires_at": "2027-09-02T00:00:00+00:00",
+                "billing_mode": "chatgpt_subscription",
+                "max_sdk_turns": 2,
+                "max_wire_bytes": PORTFOLIO_DECISION_MAX_WIRE_BYTES,
+            }
+        )
     prompts: list[tuple[str, str, str, str]] = [
         (prompt.role, "local-openai-v1", prompt.content, prompt.content_hash)
         for prompt in load_prompt_assets().values()
@@ -308,31 +330,41 @@ async def prepare_database(
                 )
             elif existing.content_hash != content_hash or existing.content != content:
                 raise ValueError("OPENAI_PROMPT_VERSION_CONFLICT")
-        existing_model = await session.scalar(
-            select(AgentModelConfigRecord).where(
-                AgentModelConfigRecord.model_id == config["model_id"],
-                AgentModelConfigRecord.version == config["version"],
-            )
-        )
-        if existing_model is None:
-            session.add(
-                AgentModelConfigRecord(
-                    model_id=str(config["model_id"]),
-                    version=str(config["version"]),
-                    config_hash=config_hash,
-                    max_input_tokens=int(config["max_input_tokens"]),
-                    max_output_tokens=int(config["max_output_tokens"]),
-                    max_tool_calls=int(config["max_tool_calls"]),
-                    input_usd_per_million=Decimal(str(config["input_usd_per_million"])),
-                    output_usd_per_million=Decimal(str(config["output_usd_per_million"])),
-                    pricing_available_at=datetime.fromisoformat(
-                        str(config["pricing_available_at"])
-                    ),
-                    pricing_expires_at=datetime.fromisoformat(str(config["pricing_expires_at"])),
+        for configured in configs:
+            config_hash = hashlib.sha256(
+                json.dumps(configured, sort_keys=True).encode()
+            ).hexdigest()
+            existing_model = await session.scalar(
+                select(AgentModelConfigRecord).where(
+                    AgentModelConfigRecord.model_id == configured["model_id"],
+                    AgentModelConfigRecord.version == configured["version"],
                 )
             )
-        elif existing_model.config_hash != config_hash:
-            raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
+            if existing_model is None:
+                session.add(
+                    AgentModelConfigRecord(
+                        model_id=str(configured["model_id"]),
+                        version=str(configured["version"]),
+                        config_hash=config_hash,
+                        max_input_tokens=int(configured["max_input_tokens"]),
+                        max_output_tokens=int(configured["max_output_tokens"]),
+                        max_tool_calls=int(configured["max_tool_calls"]),
+                        input_usd_per_million=Decimal(
+                            str(configured["input_usd_per_million"])
+                        ),
+                        output_usd_per_million=Decimal(
+                            str(configured["output_usd_per_million"])
+                        ),
+                        pricing_available_at=datetime.fromisoformat(
+                            str(configured["pricing_available_at"])
+                        ),
+                        pricing_expires_at=datetime.fromisoformat(
+                            str(configured["pricing_expires_at"])
+                        ),
+                    )
+                )
+            elif existing_model.config_hash != config_hash:
+                raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
 
 
 async def verify_connection(
@@ -445,6 +477,7 @@ def main() -> int:
             "import-sec-exhibit",
             "admit-research",
             "run-once",
+            "run-portfolio-once",
         ),
     )
     parser.add_argument("--research-request", type=Path)
@@ -651,7 +684,7 @@ def main() -> int:
             )
         elif args.action == "admit-research":
             result = asyncio.run(admit_local_research(settings, args.research_request))
-        elif args.action == "run-once":
+        elif args.action in {"run-once", "run-portfolio-once"}:
             if args.backend == "responses" and settings.openai_api_key is None:
                 raise ValueError("OPENAI_API_KEY_MISSING")
             if args.backend == "responses" and datetime.now(UTC) >= datetime.fromisoformat(
@@ -660,10 +693,14 @@ def main() -> int:
                 raise ValueError("OPENAI_PRICING_EXPIRED")
             if args.backend == "codex_sdk" and not status(settings)["ready_for_model_requests"]:
                 raise ValueError("CODEX_CHATGPT_LOGIN_REQUIRED")
-            from nexus.worker import run_agent_worker_once
+            from nexus.worker import run_agent_worker_once, run_portfolio_decision_worker_once
 
             result = {
-                "job_processed": asyncio.run(run_agent_worker_once(settings)),
+                "job_processed": asyncio.run(
+                    run_portfolio_decision_worker_once(settings)
+                    if args.action == "run-portfolio-once"
+                    else run_agent_worker_once(settings)
+                ),
                 "execution_locked": True,
             }
         else:

@@ -42,7 +42,63 @@ _SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000001502")
 _PROMPT_ID = UUID("0198d500-1000-7000-8000-000000001503")
 _MODEL_ID = UUID("0198d500-1000-7000-8000-000000001504")
 _EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001505")
+_PORTFOLIO_MODEL_ID = UUID("0198d500-1000-7000-8000-000000001599")
 _RUN_IDS = tuple(UUID(f"0198d500-1000-7000-8000-0000000015{index:02d}") for index in range(10, 20))
+
+
+@pytest.mark.asyncio
+async def test_single_security_admission_rejects_explicit_portfolio_model(
+    migrated_database_url: str,
+) -> None:
+    from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        session.add(
+            AgentModelConfigRecord(
+                id=_PORTFOLIO_MODEL_ID,
+                model_id="gpt-5.6-terra",
+                version=PORTFOLIO_DECISION_CONFIG_VERSION,
+                config_hash="9" * 64,
+                max_input_tokens=128_000,
+                max_tool_calls=1,
+                max_output_tokens=16_384,
+                input_usd_per_million=Decimal("0"),
+                output_usd_per_million=Decimal("0"),
+                pricing_available_at=_NOW - timedelta(days=1),
+                pricing_expires_at=_NOW + timedelta(days=1),
+            )
+        )
+    request = ResearchRequest(
+        instrument_id=_INSTRUMENT_ID,
+        data_snapshot_id=_SNAPSHOT_ID,
+        decision_time=_NOW,
+    )
+
+    with pytest.raises(ValueError, match="point-in-time data authority is invalid"):
+        async with factory() as session, session.begin():
+            await admit_research_run(
+                session,
+                actor_id="fixture-actor",
+                route="/internal/v1/research-runs",
+                idempotency_key="portfolio-model-not-single-security",
+                request_hash="8" * 64,
+                request=request,
+                prompt_version_id=_PROMPT_ID,
+                model_config_id=_PORTFOLIO_MODEL_ID,
+                daily_limit_usd=Decimal("3.00"),
+                now=_NOW,
+            )
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
+        assert await session.scalar(select(func.count()).select_from(Job)) == 0
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(AgentDailyBudgetReservationRecord)
+            )
+            == 0
+        )
 
 
 @pytest.mark.asyncio

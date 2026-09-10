@@ -29,6 +29,10 @@ from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import TERMINAL, execute_research_run
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.models import ResearchRequest
+from nexus.agents.portfolio_decision_model import (
+    BoundPortfolioResponsesClient,
+    CodexPortfolioResponsesClient,
+)
 from nexus.agents.portfolio_decision_worker import (
     run_portfolio_decision_worker_once as _run_portfolio_decision_worker_once,
 )
@@ -126,6 +130,39 @@ async def run_agent_worker_once(
     )
 
 
+def _openai_portfolio_responses_client(
+    settings: EngineSettings,
+) -> BoundPortfolioResponsesClient:
+    """Bind the paid Responses transport to the exact locally registered authority."""
+    from nexus.ops.openai_local import _CONFIG as OPENAI_LOCAL_CONFIG
+
+    if settings.openai_api_key is None:
+        raise ValueError("OPENAI_API_KEY_MISSING")
+    native_client = AsyncOpenAI(
+        api_key=settings.openai_api_key.get_secret_value(),
+        base_url="https://api.openai.com/v1",
+        max_retries=0,
+        timeout=45,
+    )
+    return BoundPortfolioResponsesClient(
+        client=native_client,
+        config=ResponsesModelConfig(
+            model_id=str(OPENAI_LOCAL_CONFIG["model_id"]),
+            pricing_version=str(OPENAI_LOCAL_CONFIG["version"]),
+            max_input_tokens=int(OPENAI_LOCAL_CONFIG["max_input_tokens"]),
+            max_output_tokens=int(OPENAI_LOCAL_CONFIG["max_output_tokens"]),
+            max_tool_calls=1,
+            absolute_timeout_seconds=Decimal("45"),
+            input_usd_per_million=Decimal(
+                str(OPENAI_LOCAL_CONFIG["input_usd_per_million"])
+            ),
+            output_usd_per_million=Decimal(
+                str(OPENAI_LOCAL_CONFIG["output_usd_per_million"])
+            ),
+        ),
+    )
+
+
 async def run_portfolio_decision_worker_once(
     settings: EngineSettings,
     *,
@@ -136,14 +173,18 @@ async def run_portfolio_decision_worker_once(
     runtime_mode = _require_worker_runtime(settings)
     client = responses_client
     if client is None:
-        if runtime_mode is not AgentRuntimeMode.RESPONSES or settings.openai_api_key is None:
+        if runtime_mode is AgentRuntimeMode.CODEX_SDK:
+            from nexus.agents.codex_sdk import MODEL_ID
+            from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+
+            client = CodexPortfolioResponsesClient(
+                model_id=MODEL_ID,
+                pricing_version=PORTFOLIO_DECISION_CONFIG_VERSION,
+            )
+        elif runtime_mode is AgentRuntimeMode.RESPONSES and settings.openai_api_key is not None:
+            client = _openai_portfolio_responses_client(settings)
+        else:
             return False
-        client = AsyncOpenAI(
-            api_key=settings.openai_api_key.get_secret_value(),
-            base_url="https://api.openai.com/v1",
-            max_retries=0,
-            timeout=45,
-        )
     return await _run_portfolio_decision_worker_once(
         session_factory(settings),
         responses_client=cast(ResponsesClient, client),
@@ -179,15 +220,7 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
         configured.agent_runtime_mode is AgentRuntimeMode.RESPONSES
         and configured.openai_api_key is not None
     ):
-        portfolio_client = cast(
-            ResponsesClient,
-            AsyncOpenAI(
-                api_key=configured.openai_api_key.get_secret_value(),
-                base_url="https://api.openai.com/v1",
-                max_retries=0,
-                timeout=45,
-            ),
-        )
+        portfolio_client = _openai_portfolio_responses_client(configured)
     while True:
         now = datetime.now(UTC)
         async with factory() as session, session.begin():

@@ -98,6 +98,7 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
     runtime_mode: str,
 ) -> None:
     from nexus.agents.codex_sdk import MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, MODEL_ID
+    from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
     from nexus.agents.responses_budget import UsageSnapshot
     from nexus.evolution import codex
     from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
@@ -170,10 +171,24 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
             )
         )
         if runtime_mode == "fixture":
-            # A newer configuration with the same model ID must not shadow the
-            # eligible non-Codex version in fixture or Responses resolution.
-            session.add(
-                AgentModelConfigRecord(
+            # Newer consumer-specific configurations must not shadow the eligible
+            # general version in fixture or Responses resolution.
+            session.add_all(
+                [
+                    AgentModelConfigRecord(
+                        id=uuid4(),
+                        model_id="fixture-strategy-rnd",
+                        version=PORTFOLIO_DECISION_CONFIG_VERSION,
+                        config_hash="5" * 64,
+                        max_input_tokens=128_000,
+                        max_tool_calls=1,
+                        max_output_tokens=16_384,
+                        input_usd_per_million=Decimal("0"),
+                        output_usd_per_million=Decimal("0"),
+                        pricing_available_at=generation_time - timedelta(seconds=20),
+                        pricing_expires_at=generation_time + timedelta(days=1),
+                    ),
+                    AgentModelConfigRecord(
                     id=uuid4(),
                     model_id="fixture-strategy-rnd",
                     version=CODEX_RND_CONFIG_VERSION,
@@ -185,7 +200,8 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
                     output_usd_per_million=Decimal("0"),
                     pricing_available_at=generation_time - timedelta(seconds=30),
                     pricing_expires_at=generation_time + timedelta(days=1),
-                )
+                    ),
+                ]
             )
         await session.flush()
         session.add(
