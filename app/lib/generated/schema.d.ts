@@ -2217,11 +2217,6 @@ export interface components {
             /** Thresholds */
             thresholds: string[];
         };
-        /** HTTPValidationError */
-        HTTPValidationError: {
-            /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
-        };
         /**
          * IntegrationConnectivityTestRequest
          * @description A deliberately empty non-trading fixture connectivity request.
@@ -5974,19 +5969,6 @@ export interface components {
             /** Value */
             value?: string | null;
         };
-        /** ValidationError */
-        ValidationError: {
-            /** Context */
-            ctx?: Record<string, never>;
-            /** Input */
-            input?: unknown;
-            /** Location */
-            loc: (string | number)[];
-            /** Message */
-            msg: string;
-            /** Error Type */
-            type: string;
-        };
         /** VetoExperimentRequest */
         VetoExperimentRequest: {
             /**
@@ -6766,13 +6748,22 @@ export interface operations {
                     "application/json": components["schemas"]["NewsEnvelope"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
                 };
             };
         };
