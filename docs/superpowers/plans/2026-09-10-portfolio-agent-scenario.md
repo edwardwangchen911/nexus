@@ -459,13 +459,13 @@ git commit -m "feat: expose portfolio decision runs"
 - Create: `tests/unit/portfolio/portfolio-agent-interpretation.test.tsx`
 - Create: `tests/e2e/portfolio-agent-interpretation.spec.ts`
 - Modify: `app/components/portfolio-scenario.tsx`
-- Modify: `app/styles/ui.css`
+- Modify: `app/styles/tokens.css`
 
 **Interfaces:**
 - Consumes: 阶段 A `PortfolioScenarioResponse` 和 Task 5 BFF。
 - Produces: explicit-trigger Agent interpretation panel.
 
-- [ ] **Step 1: 写组件失败测试**
+- [x] **Step 1: 写组件失败测试**
 
 覆盖：
 
@@ -478,7 +478,7 @@ git commit -m "feat: expose portfolio decision runs"
 - 页面不出现接受、执行、Shadow 文案；
 - unknown、citation、失效条件和锁定状态可见。
 
-- [ ] **Step 2: 实现组件**
+- [x] **Step 2: 实现组件**
 
 组件 props 必须包含完整作用域：
 
@@ -495,7 +495,7 @@ type PortfolioAgentInterpretationProps = {
 
 轮询最多 45 秒，退避间隔限制在 500ms 到 3000ms；超时只停止观察并保留 run ID，不把 run 标为失败。
 
-- [ ] **Step 3: 写 Playwright 副作用测试**
+- [x] **Step 3: 写 Playwright 副作用测试**
 
 拦截所有请求并断言：
 
@@ -504,14 +504,14 @@ type PortfolioAgentInterpretationProps = {
 - 没有 Provider、broker refresh、Shadow、paper order/fill 请求；
 - GET 返回旧 result hash 时页面不展示该输出。
 
-- [ ] **Step 4: 验证并提交 Task 6**
+- [x] **Step 4: 验证并提交 Task 6**
 
 ```bash
 npm test -- tests/unit/portfolio/portfolio-agent-interpretation.test.tsx tests/unit/portfolio/portfolio-scenario.test.tsx tests/unit/portfolio/page.test.tsx
 npm run typecheck
 npm run lint
 npm run test:e2e -- tests/e2e/portfolio-agent-interpretation.spec.ts --workers=1
-git add app/components/portfolio-agent-interpretation.tsx app/components/portfolio-scenario.tsx app/styles/ui.css tests/unit/portfolio/portfolio-agent-interpretation.test.tsx tests/e2e/portfolio-agent-interpretation.spec.ts
+git add app/components/portfolio-agent-interpretation.tsx app/components/portfolio-scenario.tsx app/styles/tokens.css tests/unit/portfolio/portfolio-agent-interpretation.test.tsx tests/e2e/portfolio-agent-interpretation.spec.ts
 git commit -m "feat: show locked portfolio agent interpretation"
 ```
 

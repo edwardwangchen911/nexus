@@ -61,6 +61,7 @@ it("stays idle until an explicit click and exposes only bounded scenario control
   expect(screen.getByRole("spinbutton", { name: "最大单向换手率" })).toHaveValue(0.15);
   expect(screen.getByRole("spinbutton", { name: "最低现金占比" })).toHaveValue(0.1);
   expect(screen.getByRole("button", { name: "生成调整情景" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "让 Agent 解读" })).not.toBeInTheDocument();
   expect(screen.getByText(/仅在本次页面内保留/)).toBeVisible();
   expect(send).not.toHaveBeenCalled();
 });
@@ -108,7 +109,8 @@ it("posts intent and constraints without client-authored weights, then compares 
   expect(within(comparison).getByText("55%")).toBeVisible();
   expect(screen.getByText(/交易成本尚未建模/)).toBeVisible();
   expect(screen.getByText(/Top1、Top3 与 HHI.*证券市值为分母，不含现金/)).toBeVisible();
-  expect(screen.getAllByText(/交易保持锁定/)).toHaveLength(2);
+  expect(screen.getAllByText(/交易保持锁定/).length).toBeGreaterThanOrEqual(2);
+  expect(screen.getByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
   expect(screen.getByText(/保持 · 20%/)).toBeVisible();
   expect(screen.getByText("分析不完整")).toBeVisible();
 

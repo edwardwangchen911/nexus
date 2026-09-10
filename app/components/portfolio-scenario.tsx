@@ -7,6 +7,7 @@ import type { PortfolioSnapshot } from "../(protected)/portfolio/page";
 import { reasonLabel } from "../lib/display-labels";
 import { formatMetric } from "../lib/display-format";
 import type { components } from "../lib/generated/schema";
+import { PortfolioAgentInterpretation } from "./portfolio-agent-interpretation";
 import type { PortfolioDiagnosticReport } from "./portfolio-diagnostic";
 
 type ScenarioResponse = components["schemas"]["PortfolioScenarioResponse"];
@@ -50,14 +51,18 @@ function PortfolioScenarioSession({ snapshot, report, stale }: {
   const [maxTurnover, setMaxTurnover] = useState("0.15");
   const [minimumCash, setMinimumCash] = useState("0.10");
   const [runningKey, setRunningKey] = useState<string | null>(null);
-  const [result, setResult] = useState<{ binding: string; data: ScenarioResponse } | null>(null);
+  const [result, setResult] = useState<{
+    binding: string;
+    data: ScenarioResponse;
+    request: components["schemas"]["PortfolioScenarioRequest"];
+  } | null>(null);
   const [error, setError] = useState<{ binding: string; text: string } | null>(null);
   const request = useRef<AbortController | null>(null);
   const reportId = report?.diagnostic_report_id ?? null;
   const snapshotAsOf = snapshot.as_of;
   const binding = `${snapshot.portfolio_snapshot_id}:${snapshotAsOf ?? "unknown"}:${reportId ?? "preliminary"}:${stale}:${maxTurnover}:${minimumCash}`;
   const running = runningKey === binding;
-  const visibleResult = result?.binding === binding ? result.data : null;
+  const visibleResult = result?.binding === binding ? result : null;
   const visibleError = error?.binding === binding ? error.text : null;
   const invalidInputs = !RATIO.test(maxTurnover) || !RATIO.test(minimumCash);
   const blocked = stale || snapshot.status !== "READY" || snapshot.decision_readiness !== "DECISION_READY"
@@ -119,7 +124,7 @@ function PortfolioScenarioSession({ snapshot, report, stale }: {
         setError({ binding, text: "调整情景与当前冻结快照不一致，已拒绝显示。" });
         return;
       }
-      setResult({ binding, data });
+      setResult({ binding, data, request: body });
     } catch (cause) {
       if (!(cause instanceof DOMException && cause.name === "AbortError")) {
         setError({ binding, text: "调整情景暂时无法生成；当前组合事实不受影响，也不会自动重试。" });
@@ -164,7 +169,17 @@ function PortfolioScenarioSession({ snapshot, report, stale }: {
     {invalidInputs ? <p className="inline-notice inline-notice--error" role="status">请输入 0 到 1 之间的小数。</p> : null}
     {blockedReason ? <p className="inline-notice" role="status">{blockedReason}</p> : null}
     {visibleError ? <p className="inline-notice inline-notice--error" role="status">{visibleError}</p> : null}
-    {visibleResult ? <ScenarioResult result={visibleResult} symbols={symbols} /> : null}
+    {visibleResult ? <>
+      <ScenarioResult result={visibleResult.data} symbols={symbols} />
+      <PortfolioAgentInterpretation
+        portfolioId={snapshot.portfolio_id}
+        snapshotId={snapshot.portfolio_snapshot_id}
+        diagnosticReportId={reportId!}
+        scenarioRequest={visibleResult.request}
+        scenarioResult={visibleResult.data}
+        stale={stale}
+      />
+    </> : null}
   </section>;
 }
 
