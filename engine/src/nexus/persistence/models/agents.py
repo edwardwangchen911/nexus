@@ -362,7 +362,7 @@ class PortfolioDecisionRunRecord(ImmutableCreatedAt, Base):
     evidence_hash: Mapped[str] = mapped_column(String(64))
     evidence_manifest: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
     tool_result_hash: Mapped[str | None] = mapped_column(String(64))
-    tool_projection: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    tool_projection: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
     provider_phase: Mapped[str] = mapped_column(String(24), default="none")
     reserved_cost_usd: Mapped[Decimal]
     settled_cost_usd: Mapped[Decimal | None]

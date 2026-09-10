@@ -37,7 +37,7 @@ async def test_prepare_is_idempotent_and_does_not_create_research_or_market_evid
     await prepare_database(settings, staged=staged, strategy_rnd=strategy_rnd)
     async with session_factory(settings)() as session:
         assert await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord)) == (
-            9 if strategy_rnd else 8
+            10 if strategy_rnd else 9
         )
         assert await session.scalar(select(func.count()).select_from(AgentModelConfigRecord)) == 1
         assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
@@ -97,7 +97,17 @@ async def test_strategy_rnd_setup_preserves_existing_committee_model_versions(
         assert len(current) == 3
         assert {version: current[version] for version in previous} == previous
         assert "codex-sdk-strategy-rnd-v1" in current
-        assert await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord)) == 9
+        prompt_count = await session.scalar(
+            select(func.count()).select_from(AgentPromptVersionRecord)
+        )
+        assert prompt_count == 10
+        portfolio_prompt = await session.scalar(
+            select(AgentPromptVersionRecord).where(
+                AgentPromptVersionRecord.role == "portfolio_decision"
+            )
+        )
+        assert portfolio_prompt is not None
+        assert portfolio_prompt.version == "portfolio-decision-v1"
 
 
 @pytest.mark.asyncio

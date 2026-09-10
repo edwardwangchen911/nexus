@@ -262,6 +262,18 @@ async def prepare_database(
         (prompt.role, "local-openai-v1", prompt.content, prompt.content_hash)
         for prompt in load_prompt_assets().values()
     ]
+    portfolio_decision_prompt_path = (
+        Path(__file__).resolve().parents[1] / "agents/prompts/portfolio-decision-v1.md"
+    )
+    portfolio_decision_prompt = portfolio_decision_prompt_path.read_text()
+    prompts.append(
+        (
+            "portfolio_decision",
+            "portfolio-decision-v1",
+            portfolio_decision_prompt,
+            hashlib.sha256(portfolio_decision_prompt.encode()).hexdigest(),
+        )
+    )
     if structured_synthesis:
         synthesis_prompt = load_portfolio_synthesis_prompt()
         prompts.append(
