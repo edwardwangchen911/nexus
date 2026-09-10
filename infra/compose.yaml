@@ -65,6 +65,7 @@ services:
       - NEXUS_ENGINE_HMAC_CURRENT_SECRET
       - NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID
       - NEXUS_ENGINE_HMAC_PREVIOUS_SECRET
+      - AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}
     depends_on:
       postgres:
         condition: service_healthy

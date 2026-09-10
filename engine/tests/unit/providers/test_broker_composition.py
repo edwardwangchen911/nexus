@@ -106,13 +106,14 @@ def test_compose_profiles_keep_broker_capability_out_of_the_app_profile() -> Non
     assert _service_profiles(compose, "fosun-gateway") == {"provider", "broker"}
 
 
-def test_compose_worker_defaults_to_offline_fixture_runtime_but_is_overridable() -> None:
+def test_compose_app_services_share_an_overridable_agent_runtime() -> None:
     compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
 
-    assert (
-        "- AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}"
-        in _service_block(compose, "worker")
-    )
+    for service in ("api", "worker"):
+        assert (
+            "- AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}"
+            in _service_block(compose, service)
+        )
 
 
 def test_compose_host_ports_are_loopback_only_and_overridable() -> None:
