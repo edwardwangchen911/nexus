@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
     INLINE_CITATION_CONFIG_VERSION,
+    PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
     STRUCTURED_CONFIG_VERSIONS,
@@ -152,7 +153,7 @@ def _openai_portfolio_responses_client(
             max_input_tokens=int(OPENAI_LOCAL_CONFIG["max_input_tokens"]),
             max_output_tokens=int(OPENAI_LOCAL_CONFIG["max_output_tokens"]),
             max_tool_calls=1,
-            absolute_timeout_seconds=Decimal("45"),
+            absolute_timeout_seconds=PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
             input_usd_per_million=Decimal(
                 str(OPENAI_LOCAL_CONFIG["input_usd_per_million"])
             ),

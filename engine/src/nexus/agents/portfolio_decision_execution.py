@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_versions import PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS
 from nexus.agents.persistence import (
     release_portfolio_decision_budget_if_reserved,
     settle_full_portfolio_decision_budget,
@@ -48,7 +49,6 @@ from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 
 _PROMPT_ROLE = "portfolio_decision"
 _PROMPT_VERSION = "portfolio-decision-v1"
-_MODEL_TIMEOUT_SECONDS = Decimal("45")
 _DIAGNOSTIC_CODES = (
     "CONCENTRATION_TOP1",
     "CONCENTRATION_TOP3",
@@ -216,7 +216,7 @@ async def load_portfolio_decision_execution_authority(
             max_input_tokens=model.max_input_tokens,
             max_output_tokens=model.max_output_tokens,
             max_tool_calls=1,
-            absolute_timeout_seconds=_MODEL_TIMEOUT_SECONDS,
+            absolute_timeout_seconds=PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
             input_usd_per_million=model.input_usd_per_million,
             output_usd_per_million=model.output_usd_per_million,
         )

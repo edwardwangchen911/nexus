@@ -1,5 +1,7 @@
 """Exact SDK runtime versions; a budget revision does not upgrade research semantics."""
 
+from decimal import Decimal
+
 CONFIG_VERSION = "codex-sdk-chatgpt-v1"
 STAGED_CONFIG_VERSION = "codex-sdk-chatgpt-v2"
 STRUCTURED_CONFIG_VERSION = "codex-sdk-chatgpt-v3"
@@ -13,6 +15,10 @@ PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS = 16_384
 PORTFOLIO_DECISION_MAX_OUTPUT_TOKENS_PER_TURN = 8_192
 PORTFOLIO_DECISION_MAX_TOOL_CALLS = 1
 PORTFOLIO_DECISION_MAX_WIRE_BYTES = 64_000
+# The portfolio flow has two provider turns. Codex SDK still caps each turn at
+# 35 seconds; this aggregate deadline leaves a bounded cleanup margin without
+# adding retries or increasing the two-call limit for either transport.
+PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS = Decimal("80")
 STRUCTURED_CONFIG_VERSIONS = frozenset(
     {
         STRUCTURED_CONFIG_VERSION,
