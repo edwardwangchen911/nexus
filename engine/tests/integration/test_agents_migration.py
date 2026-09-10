@@ -7,6 +7,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -52,7 +53,7 @@ def test_0020_automation_is_the_single_head_after_paper_execution() -> None:
     assert automation.down_revision == "0019_paper_performance_root"
     assert retry_allowance is not None
     assert retry_allowance.down_revision == "0020_resilient_automation_audit"
-    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     assert agents is not None
     assert agents.down_revision == "0010_research_data"
     assert backtests is not None

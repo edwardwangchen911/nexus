@@ -28,7 +28,7 @@ class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
         UniqueConstraint("role", "version", name="uq_agent_prompt_versions_role_version"),
         CheckConstraint(
             "role IN ('orchestrator','fundamental','market_state','macro_sector','bull','bear',"
-            "'evidence_audit','portfolio','strategy_rnd')",
+            "'evidence_audit','portfolio','strategy_rnd','portfolio_decision')",
             name="role_allowed",
         ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
@@ -267,6 +267,153 @@ class AgentDailyBudgetReservationRecord(ImmutableCreatedAt, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     business_date: Mapped[date]
     run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
+    pricing_version: Mapped[str] = mapped_column(String(100))
+    reserved_usd: Mapped[Decimal]
+    settled_usd: Mapped[Decimal | None]
+    state: Mapped[str] = mapped_column(String(16), default="reserved")
+
+
+class PortfolioDecisionRunRecord(ImmutableCreatedAt, Base):
+    """Durable authority for one explicitly requested portfolio interpretation."""
+
+    __tablename__ = "portfolio_decision_runs"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["portfolio_snapshot_id", "portfolio_id"],
+            ["portfolio_snapshots.id", "portfolio_snapshots.portfolio_id"],
+            name="fk_portfolio_decision_runs_snapshot_portfolio",
+        ),
+        ForeignKeyConstraint(
+            ["diagnostic_report_id", "portfolio_snapshot_id"],
+            [
+                "portfolio_diagnostic_reports.id",
+                "portfolio_diagnostic_reports.portfolio_snapshot_id",
+            ],
+            name="fk_portfolio_decision_runs_diagnostic_snapshot",
+        ),
+        UniqueConstraint(
+            "actor_id", "idempotency_key", name="uq_portfolio_decision_runs_actor_idempotency"
+        ),
+        CheckConstraint(
+            "status IN ('prepared','running','completed','abstained','failed')",
+            name="status_allowed",
+        ),
+        CheckConstraint("retry_count = 0", name="retry_count_zero"),
+        CheckConstraint(
+            "provider_phase IN ('none','first_requested','tool_recorded','second_requested')",
+            name="provider_phase_allowed",
+        ),
+        CheckConstraint("request_hash ~ '^[0-9a-f]{64}$'", name="request_hash_canonical"),
+        CheckConstraint("input_hash ~ '^[0-9a-f]{64}$'", name="input_hash_canonical"),
+        CheckConstraint("schema_hash ~ '^[0-9a-f]{64}$'", name="schema_hash_canonical"),
+        CheckConstraint("model_hash ~ '^[0-9a-f]{64}$'", name="model_hash_canonical"),
+        CheckConstraint("prompt_hash ~ '^[0-9a-f]{64}$'", name="prompt_hash_canonical"),
+        CheckConstraint("tool_hash ~ '^[0-9a-f]{64}$'", name="tool_hash_canonical"),
+        CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$'", name="evidence_hash_canonical"),
+        CheckConstraint(
+            "tool_result_hash IS NULL OR tool_result_hash ~ '^[0-9a-f]{64}$'",
+            name="tool_result_hash_canonical",
+        ),
+        CheckConstraint("jsonb_typeof(frozen_input) = 'object'", name="frozen_input_object"),
+        CheckConstraint(
+            "jsonb_typeof(evidence_manifest) = 'array' AND "
+            "jsonb_array_length(evidence_manifest) BETWEEN 1 AND 100",
+            name="evidence_manifest_bounded",
+        ),
+        CheckConstraint(
+            "tool_projection IS NULL OR jsonb_typeof(tool_projection) = 'object'",
+            name="tool_projection_object",
+        ),
+        CheckConstraint(
+            "(tool_result_hash IS NULL) = (tool_projection IS NULL)",
+            name="tool_result_projection_bound",
+        ),
+        CheckConstraint("reserved_cost_usd >= 0", name="reserved_cost_nonnegative"),
+        CheckConstraint(
+            "settled_cost_usd IS NULL OR settled_cost_usd BETWEEN 0 AND reserved_cost_usd",
+            name="settled_cost_bounded",
+        ),
+        CheckConstraint(
+            "input_tokens IS NULL OR input_tokens >= 0", name="input_tokens_nonnegative"
+        ),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens >= 0", name="output_tokens_nonnegative"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    portfolio_id: Mapped[UUID] = mapped_column(ForeignKey("portfolios.id"))
+    portfolio_snapshot_id: Mapped[UUID]
+    diagnostic_report_id: Mapped[UUID]
+    prompt_version_id: Mapped[UUID] = mapped_column(ForeignKey("agent_prompt_versions.id"))
+    model_config_id: Mapped[UUID] = mapped_column(ForeignKey("agent_model_configs.id"))
+    actor_id: Mapped[str] = mapped_column(String(100))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="prepared")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    input_hash: Mapped[str] = mapped_column(String(64))
+    schema_hash: Mapped[str] = mapped_column(String(64))
+    frozen_input: Mapped[dict[str, object]] = mapped_column(JSONB)
+    prompt_hash: Mapped[str] = mapped_column(String(64))
+    model_hash: Mapped[str] = mapped_column(String(64))
+    tool_hash: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    evidence_manifest: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    tool_result_hash: Mapped[str | None] = mapped_column(String(64))
+    tool_projection: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    provider_phase: Mapped[str] = mapped_column(String(24), default="none")
+    reserved_cost_usd: Mapped[Decimal]
+    settled_cost_usd: Mapped[Decimal | None]
+    pricing_version: Mapped[str] = mapped_column(String(100))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+
+
+class PortfolioDecisionOutputRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "portfolio_decision_outputs"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_portfolio_decision_outputs_run"),
+        CheckConstraint("status IN ('completed','abstained','failed')", name="status_allowed"),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        CheckConstraint(
+            "scenario_result_hash IS NULL OR scenario_result_hash ~ '^[0-9a-f]{64}$'",
+            name="scenario_result_hash_canonical",
+        ),
+        CheckConstraint("intent IS NULL OR jsonb_typeof(intent) = 'object'", name="intent_object"),
+        CheckConstraint("jsonb_typeof(details) = 'object'", name="details_object"),
+        CheckConstraint(
+            "(status = 'completed' AND intent IS NOT NULL AND scenario_result_hash IS NOT NULL) OR "
+            "(status IN ('abstained','failed') AND intent IS NULL)",
+            name="status_payload_bound",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_decision_runs.id"))
+    status: Mapped[str] = mapped_column(String(16))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    scenario_result_hash: Mapped[str | None] = mapped_column(String(64))
+    intent: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+
+
+class PortfolioDecisionBudgetReservationRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "portfolio_decision_budget_reservations"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_portfolio_decision_budget_reservations_run"),
+        CheckConstraint("reserved_usd >= 0", name="reserved_nonnegative"),
+        CheckConstraint(
+            "settled_usd IS NULL OR settled_usd BETWEEN 0 AND reserved_usd",
+            name="settled_bounded",
+        ),
+        CheckConstraint("state IN ('reserved','settled','released')", name="state_allowed"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    business_date: Mapped[date]
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_decision_runs.id"))
     pricing_version: Mapped[str] = mapped_column(String(100))
     reserved_usd: Mapped[Decimal]
     settled_usd: Mapped[Decimal | None]

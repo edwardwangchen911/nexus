@@ -45,6 +45,11 @@ class PortfolioDiagnosticReportRecord(ImmutableCreatedAt, Base):
             "policy_id",
             name="uq_diag_reports_snapshot_policy",
         ),
+        UniqueConstraint(
+            "id",
+            "portfolio_snapshot_id",
+            name="uq_diag_reports_id_snapshot",
+        ),
         ForeignKeyConstraint(
             ["portfolio_snapshot_id", "portfolio_id"],
             ["portfolio_snapshots.id", "portfolio_snapshots.portfolio_id"],

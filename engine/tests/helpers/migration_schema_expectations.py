@@ -61,6 +61,9 @@ EXPECTED_TABLES = {
     "agent_research_output_evidence",
     "agent_data_snapshot_evidence",
     "agent_daily_budget_reservations",
+    "portfolio_decision_runs",
+    "portfolio_decision_outputs",
+    "portfolio_decision_budget_reservations",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | {"price_bar_set_authorities"}
 EXPECTED_TABLES = EXPECTED_TABLES | {"fosun_daily_bar_staging"}
@@ -241,6 +244,13 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "agent_daily_budget_reservations",
             "price_bar_records",
             "price_bar_set_authorities",
+        }
+    ),
+    frozenset(
+        {
+            "portfolio_decision_runs",
+            "portfolio_decision_outputs",
+            "portfolio_decision_budget_reservations",
         }
     ),
     frozenset(
