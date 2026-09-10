@@ -556,9 +556,15 @@ npm run lint
 npm run build
 ```
 
-- [ ] **Step 4: 执行迁移预检与共享服务更新**
+- [x] **Step 4: 执行迁移预检与共享服务更新**
 
 先确认当前 head、活动 Worker 版本和无未终态组合 run，再 upgrade 到当前唯一 head（现为 `0049_pd_terminal_phases`）。只重建需要新 Engine 代码的 API/general Worker；不重启 Provider、Fosun Gateway 或 broker 服务，不触发数据刷新或模型调用。
+
+2026-09-10 实际执行时，`main` 快进到 `a2ff1e21`；共享库在受保护备份并验证可读后由
+`0047_alpaca_market_stream` 事务升级到 `0049_pd_terminal_phases`。只重建并替换 API，数据库和
+MinIO 未重启；当前 general Worker 原本未运行且配置为 `fixture`，因此没有为凑齐服务而启动它。
+新 API 已显示组合决策路由；带完整 scope 的 BFF GET 经 HMAC 到达 Engine 并对不存在资源返回稳定
+`404 NOT_FOUND`。三张新表及 Shadow、模拟订单、成交均为零写入。
 
 - [ ] **Step 5: 执行一个真实只读验收**
 

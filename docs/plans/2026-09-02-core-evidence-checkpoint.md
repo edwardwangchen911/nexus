@@ -3354,3 +3354,20 @@ loader/registry，实现两轮调用后再从 authenticated GET 读回完成结�
 Worker，现有业务 PostgreSQL 由其他工作线持有。因此本轮没有迁移、重启或替换共享服务，
 也没有发起真实模型、Provider、broker refresh、Shadow、订单或成交调用。真实页面验收的
 精确阻塞是“主线尚未集成且对应运行版本未启动”，不是组合数据或券商权限缺失。
+
+### 组合 Agent 主线、迁移与 API 运行更新（2026-09-10）
+
+功能分支经聚焦后端 130 项回归、前端 954 项单测、生成合同、TypeScript、ESLint、Vinext build
+和 2 项 Playwright 副作用回归后，快进合入 `main@a2ff1e21`。完整 Engine 套件因本地 PostgreSQL
+逐测试开销预计超过项目的 45 分钟边界，串行和隔离数据库分片均在无新失败时有界停止；
+未把部分运行表述为全量通过。
+
+迁移前完成受保护、Git 忽略且权限 `0600` 的 PostgreSQL custom-format 备份，并用 `pg_restore -l`
+验证可读。共享库从 `0047_alpaca_market_stream` 事务升级至唯一 head
+`0049_pd_terminal_phases`，三张新表全部为空。只重建和替换 Engine API；PostgreSQL 与 MinIO
+保持原进程，Provider、Gateway、broker refresh 与模型调用均未触发。
+
+更新后 `/health/live` 返回 200，readiness 的 database/migration/object_store 均为 ready；worker 为
+unavailable，因其原本未运行且当前配置为 `fixture`。带完整 scope 的组合决策 BFF GET 经 HMAC 到达
+Engine，对不存在的 UUIDv7 稳定返回 `404 NOT_FOUND`；验收后组合决策、Shadow、模拟订单和
+成交仍为零。下一步是明确触发一次受控 Codex SDK Worker 真实只读验收；不启动 fixture 常驻 Worker。

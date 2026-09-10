@@ -80,3 +80,8 @@ Important=0。当前剩余项不是设计或代码审查问题，而是功能分
 Task 7 定向复审确认上轮 authority seam 阻塞已关闭：正式 loader、registry、worker 和 GET 均在
 测试中真实执行，只有 Responses transport 被替换；隐私值断言和成本原因码回归有效。最终结果
 为 Critical=0、Important=0，可以提交，但不改变上述共享运行版本阻塞。
+
+共享运行版本阻塞随后已关闭到 API 层：`main@a2ff1e21`、数据库与 API 均为
+`0049_pd_terminal_phases`，新路由经现有 BFF/HMAC 实际到达。本次只进行不存在资源的 GET 探测，
+新表与 Shadow/订单/成交零写入。general Worker 仍为未运行的 `fixture` 配置；真实模型验收必须
+使用后续明确的单次 Codex SDK Worker，不应通过启动 fixture 常驻 Worker 伪造闭环。
