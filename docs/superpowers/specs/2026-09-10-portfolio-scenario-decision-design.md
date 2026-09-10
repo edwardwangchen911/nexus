@@ -1,78 +1,80 @@
-# NEXUS 组合情景决策闭环技术设计
+# NEXUS 组合调整情景技术设计
 
-**状态：** 经技术审查后可进入实施
+**状态：** 目标架构通过；仅阶段 A 进入实施
 
-**设计基线：** `main@0b1ce31f`
+**评审代码基线：** `873d380f`
 
-**目标：** 在不改变交易锁、不引入通用优化器、不扩大标的范围的前提下，让 NEXUS 根据真实只读组合、冻结诊断和用户明确约束，确定性地产生一个“当前持仓内降低集中度”的候选情景；Agent 只能评估该情景并输出研究意图，不能提交权重、生成订单或批准 Shadow。
+**目标：** 基于真实只读组合和冻结诊断，用确定性代码生成一个“当前持仓内降低单名集中度”的分析候选，并在页面展示调整前后差异。首轮不保存候选、不调用 Agent、不选择方案、不启动 Shadow，也不解除执行锁。
 
-## 1. 范围
+## 1. 决策与范围
 
-本设计交付以下最短闭环：
+完整能力按三个独立阶段交付：
 
-1. 保存版本化的 `PortfolioMandateV1`。
-2. 根据同一冻结组合和诊断生成一个确定性候选情景。
-3. 区分分析可用、决策就绪、Shadow 准入和执行锁。
-4. 将确定性情景评估暴露为 Agent 只读工具。
-5. 保存组合级 Agent 判断及其绑定的候选情景。
-6. 页面展示“当前组合 vs 一个候选情景”，允许用户选择进入后续验证，但不自动启动 Shadow。
+| 阶段 | 用户可见结果 | 是否立即实施 |
+|---|---|---|
+| A：确定性情景闭环 | 用户明确点击后，看到当前组合与一个合法候选的前后比较 | 是 |
+| B：Agent 可调用 | Agent 提出研究方向，调用同一确定性引擎并解释结果 | 否，阶段 A 真实验收后另行准入 |
+| C：冻结与观察 | 保存约束和候选，人工选择后进入独立 Shadow 准入 | 否，阶段 B 验收后另行设计 |
 
-首版明确不包含：
+阶段 A 明确包含：
 
-- 新增标的、买入、做空、杠杆或衍生品；
-- 通用数学求解器、cvxportfolio、LEAN、Qlib 或 OpenBB 依赖；
-- 自动调度、自动重试、自动 Shadow、券商模拟盘或实盘订单；
-- 税务推断、税损收割、收益预测或 Pareto 多候选；
-- 删除或重写现有三方案历史记录。
+1. 请求级调整约束合同；
+2. 纯确定性候选生成器；
+3. 一个 Engine POST 与一个同名 BFF；
+4. 组合页的显式“生成调整情景”操作；
+5. 单元、接口、前端和一个真实本地只读验收。
 
-## 2. 不变量
+阶段 A 明确不包含：
 
-### 2.1 权限与执行
+- 数据库迁移、Mandate 版本化或候选持久化；
+- Agent 工具、模型调用、Job、自动重试或运行恢复；
+- 人工选择、`decision_ready`、Shadow 适配、模拟盘或实盘；
+- 新增标的、买入、做空、杠杆、衍生品或税务推断；
+- 通用求解器、Pareto 多候选或新的第三方框架；
+- 删除、重写或回填现有固定三方案历史记录。
 
-- `execution_locked` 始终为 `true`。
-- Agent 输入和输出不得包含目标权重、数量、订单或券商凭据。
-- Agent 工具只读数据库并执行纯计算，不写方案、Mandate、订单或 Shadow 状态。
-- 只有应用服务可以在 Agent 结果通过确定性校验后保存候选情景。
-- 用户选择候选只创建本地、只读的选择记录；启动 Shadow 保留现有独立人工确认入口。
+## 2. 阶段 A 不变量
 
-### 2.2 时间与证据
+### 2.1 权限与副作用
 
-- Mandate、组合快照、诊断报告、市场数据、Agent 运行和情景结果都绑定明确 UTC 时间。
-- `diagnostic_input_hash`、`portfolio_snapshot_id`、`diagnostic_report_id` 和 `valuation_time` 必须一致。
-- 新证据不回填旧情景；过期情景只能重新生成新记录。
-- unknown 保持 unknown，不用零值、当前代码默认值或 Agent 文本替代。
+- `execution_locked` 恒为 `true`。
+- 请求不接受目标权重、数量、金额、订单或证券列表。
+- 标的集合只来自所选冻结快照的正持仓。
+- Engine 只读取业务事实，进行纯计算；持久化仅限现有安全边界要求的幂等声明和非敏感审计摘要。
+- 不写候选、持仓、订单、成交、Shadow 或外部账户。
+- 页面加载和普通刷新只读取既有持久化事实；只有用户明确点击“生成调整情景”才调用本地确定性 POST。
+- 该 POST 不调用券商、行情提供商、模型或其他外部服务。
 
-### 2.3 风控层次
+### 2.2 时间与绑定
 
-约束按以下顺序组合：
+- 请求必须显式提交 `portfolio_snapshot_id`、`diagnostic_report_id` 和 `as_of`。
+- Engine 必须确认诊断绑定同一快照，且 `as_of` 等于快照的有效估值时间。
+- 快照必须达到既有优化基线要求；展示可用但决策未就绪的快照返回稳定拒绝码。
+- 响应绑定 `diagnostic_input_hash`、快照、诊断和估值时间。
+- 新快照不会更新旧页面内存中的结果；用户必须基于新快照重新明确生成。
 
-1. 系统硬政策 `RealAdvisoryPolicy`：不可由用户或 Agent 放宽。
-2. 用户 Mandate：可增加限制，不可降低系统限制。
-3. 本次情景目标：只能在前两层允许的空间内求解。
+### 2.3 系统政策优先
 
-首版有效最低现金为：
+请求约束只能收紧系统政策：
 
 ```python
-effective_minimum_cash = max(policy.cash_minimum, mandate.minimum_cash)
+effective_minimum_cash = max(policy.cash_minimum, constraints.minimum_cash)
 ```
 
-首版集中度阈值直接使用现有系统政策的 `single_name_warning` 和 `top3_warning`。Mandate 不覆盖这两个阈值。
+首版集中度目标使用 `RealAdvisoryPolicy.single_name_warning`。`top3_warning` 只作为前后展示指标，不作为首版停止条件，避免一次开发同时实现多目标优化。
 
-## 3. 口径冻结
+## 3. 冻结计算口径
 
-### 3.1 集中度
+### 3.1 权重与集中度
 
-现有诊断的 `CONCENTRATION_TOP1`、`CONCENTRATION_TOP3` 和 HHI 使用证券仓位总额作为分母，不含现金。首版沿用该口径，并在 API 字段和页面文案中显式命名为：
+- 组合权重以快照的同一估值口径计算，现金与证券权重总和必须为 1。
+- `security_top1`、`security_top3` 和 `security_hhi` 的分母是证券市值总额，不含现金。
+- 页面必须写明“证券持仓内占比”，不得描述为含现金总资产占比。
+- 候选只允许证券权重保持或下降，差额进入现金。
 
-- `security_top1`
-- `security_top3`
-- `security_hhi`
+### 3.2 单边换手
 
-不得把这些指标描述为“占含现金总资产比例”。候选情景仍单独返回 `cash_weight`，用于解释出售后现金变化。
-
-### 3.2 换手
-
-首版使用标准单边组合换手，现金腿纳入 L1 差异：
+现金腿必须计入 L1 差异：
 
 ```python
 one_way_turnover = (
@@ -81,417 +83,229 @@ one_way_turnover = (
 ) / Decimal("2")
 ```
 
-对于只减仓并转为现金的情景，出售 5% 组合净值等于 5% 换手，而不是 2.5%。`max_turnover` 和成本估计都使用此口径。
+只减仓转现金时，出售 5% 组合净值等于 5% 单边换手。
 
 ### 3.3 精度
 
-- 所有权重使用 `Decimal`。
-- 情景调整步长固定为 `0.0001`，即一个基点。
-- API 仍以十进制字符串传输。
-- 权重总和必须精确为 1；舍入余数只进入现金。
+- 内部只使用 `Decimal`，拒绝二进制浮点输入。
+- 调整步长为 `Decimal("0.0001")`。
+- API 使用十进制字符串。
+- 权重总和必须精确等于 1，舍入余数只进入现金。
 
-## 4. 领域合同
+## 4. 阶段 A 领域合同
 
-新建 `engine/src/nexus/optimizer/scenario_contracts.py`，包含以下封闭模型。
+新建 `engine/src/nexus/optimizer/scenario_contracts.py`。
 
 ```python
 ScenarioObjective = Literal["reduce_security_concentration"]
-ScenarioAnalysisStatus = Literal["evaluable", "partial", "unavailable"]
 ScenarioObjectiveStatus = Literal[
     "met", "improved_not_met", "unchanged", "infeasible"
 ]
-ScenarioDecisionStatus = Literal["candidate_only", "decision_ready"]
 
-class PortfolioMandateV1(StrictModel):
-    schema_version: Literal["portfolio_mandate_v1"]
-    mandate_id: UUID
-    portfolio_id: UUID
-    version: int
+class AdjustmentScenarioConstraintsV1(StrictModel):
+    schema_version: Literal["adjustment_scenario_constraints_v1"]
     objective: ScenarioObjective
-    horizon: Literal["short_term", "medium_term", "long_term"]
     max_turnover: Decimal
     minimum_cash: Decimal
     universe_policy: Literal["current_holdings_only"]
     allow_new_positions: Literal[False]
-    effective_at: datetime
-    created_at: datetime
 
-class PortfolioScenarioRequest(StrictModel):
+class PortfolioScenarioRequestV1(StrictModel):
+    schema_version: Literal["portfolio_scenario_request_v1"]
     portfolio_snapshot_id: UUID
     diagnostic_report_id: UUID
-    mandate_id: UUID
-    objective: ScenarioObjective
     as_of: datetime
+    constraints: AdjustmentScenarioConstraintsV1
 
-class ScenarioPosition(StrictModel):
+class ScenarioPositionV1(StrictModel):
     instrument_id: UUID
     current_weight: Decimal
     target_weight: Decimal
     action: Literal["reduce", "maintain"]
-    reason_code: Literal[
-        "CONCENTRATION_REDUCTION", "BASELINE_WEIGHT"
-    ]
+    reason_code: Literal["CONCENTRATION_REDUCTION", "BASELINE_WEIGHT"]
 
-class ScenarioMetricSet(StrictModel):
+class ScenarioMetricSetV1(StrictModel):
     security_top1: TypedMetric
     security_top3: TypedMetric
     security_hhi: TypedMetric
     cash_weight: TypedMetric
-    sector_exposure: TypedMetric
-    currency_exposure: TypedMetric
-    volatility: TypedMetric
-    drawdown: TypedMetric
-    correlation: TypedMetric
-    liquidity: TypedMetric
     one_way_turnover: TypedMetric
     estimated_cost: TypedMetric
-    tax_impact: TypedMetric
 
-class PortfolioScenarioEvaluation(StrictModel):
-    schema_version: Literal["portfolio_scenario_v1"]
+class PortfolioScenarioEvaluationV1(StrictModel):
+    schema_version: Literal["portfolio_scenario_evaluation_v1"]
     request_hash: str
     result_hash: str
     portfolio_snapshot_id: UUID
     diagnostic_report_id: UUID
-    mandate_id: UUID
     diagnostic_input_hash: str
     valuation_time: datetime
     objective: ScenarioObjective
-    analysis_status: ScenarioAnalysisStatus
+    analysis_status: Literal["partial"]
     objective_status: ScenarioObjectiveStatus
-    baseline: ScenarioMetricSet
-    candidate: ScenarioMetricSet
-    positions: tuple[ScenarioPosition, ...]
+    baseline: ScenarioMetricSetV1
+    candidate: ScenarioMetricSetV1
+    positions: tuple[ScenarioPositionV1, ...]
     cash_current_weight: Decimal
     cash_target_weight: Decimal
     hard_constraint_reasons: tuple[str, ...]
     unknown_metrics: tuple[str, ...]
-    evidence_refs: tuple[EvidenceRef, ...]
     execution_locked: Literal[True]
-
-class FrozenPortfolioScenario(PortfolioScenarioEvaluation):
-    scenario_id: UUID
-    decision_status: ScenarioDecisionStatus
-    selection: Literal[
-        "unselected", "selected_for_validation", "rejected"
-    ]
 ```
 
 模型校验必须保证：
 
-- `version >= 1`；
 - `0 <= minimum_cash <= 1`，`0 <= max_turnover <= 1`；
-- `objective` 与 Mandate 一致；
+- `as_of` 为 UTC；
 - 每个目标权重不高于当前权重；
-- 标的集合与当前正持仓集合完全一致；
-- 证券目标权重加目标现金等于 1；
-- `FrozenPortfolioScenario.decision_ready` 必须同时满足第 8 节的条件；
+- 标的集合等于快照的正证券持仓集合；
+- 当前证券加当前现金、目标证券加目标现金分别精确等于 1；
+- `request_hash` 对规范化请求计算，`result_hash` 对不含自身哈希字段的规范化结果计算；
 - `execution_locked` 只能为 `true`。
 
-## 5. 确定性情景算法
+阶段 A 不定义 `scenario_id`、`mandate_id`、版本、选择状态、`decision_status` 或 `shadow_eligible`。
 
-新建 `scenario_engine.py`，公开唯一入口：
+## 5. 确定性引擎
+
+新建 `engine/src/nexus/optimizer/scenario_engine.py`，公开唯一领域入口：
 
 ```python
 def evaluate_adjustment_scenario(
     *,
     snapshot: PortfolioSnapshot,
     report: PortfolioDiagnosticReport,
-    mandate: PortfolioMandateV1,
+    constraints: AdjustmentScenarioConstraintsV1,
     policy: RealAdvisoryPolicy,
-    evidence: ScenarioEvidence | None,
-    cost: Decimal | None,
-) -> PortfolioScenarioEvaluation:
+    request_hash: str,
+) -> PortfolioScenarioEvaluationV1:
     ...
 ```
 
-算法步骤固定如下：
+算法固定如下：
 
-1. 验证快照为 `READY`，有正资产净值，且报告绑定同一快照和时间。
-2. 计算当前证券权重、现金权重和 security-only 集中度。
-3. 计算有效最低现金与最大单边换手预算。
-4. 按当前证券权重降序识别 Top1/Top3 贡献者。
-5. 每次只将一个基点从证券转到现金。
-6. 候选选择顺序固定为：
-   - 当前权重较高者优先；
-   - 诊断严重度较高者优先；
-   - 流动性评分较高者优先；
-   - UUID 字典序作为最终稳定 tie-breaker。
-7. 每次调整后重新计算 security-only Top1/Top3，不缓存旧排名。
-8. 满足系统集中度阈值和最低现金后停止。
-9. 达到最大换手预算仍未满足时停止并返回 `improved_not_met`；不得继续越过预算。
-10. 没有合法减仓空间或一个基点精度无法推进时返回 `infeasible`。
-11. 目标指标未严格改善时返回 `unchanged`；后置 readiness 必须把它判为 `candidate_only`。
+1. 校验快照状态、正净值、诊断绑定和时间一致性；失败返回领域错误，不生成候选。
+2. 从快照计算含现金组合权重，再计算 security-only Top1、Top3 和 HHI。
+3. 计算有效最低现金和最大单边换手预算。
+4. 若当前 `security_top1 <= policy.single_name_warning` 且现金满足要求，返回 `unchanged`。
+5. 每轮按当前 security-only 权重降序选择可减仓证券，权重相同时按 `instrument_id` 字典序稳定决胜。阶段 A 不从组合级诊断反推逐标的严重度，也不因缺少流动性数据改变排序。
+6. 将一个基点的组合总权重从该证券转入现金。
+7. 每轮重新计算 security-only 指标、现金和单边换手，不缓存旧排名。
+8. `security_top1` 达到阈值且现金达到有效最低值时返回 `met`。
+9. 预算耗尽但 Top1 严格下降时返回 `improved_not_met`，不得越过预算。
+10. 合法候选与基线相同或 Top1 未下降时返回 `unchanged`。
+11. 单证券组合、无法保留至少一个基点正证券仓位或不存在合法一步动作时返回 `infeasible`。
 
-状态判定：
+`estimated_cost` 的基线为已知零，候选在阶段 A 保持 `unknown/COST_MODEL_NOT_AVAILABLE`。因此所有成功的阶段 A 响应固定为 `analysis_status=partial`；unknown 不阻止分析显示，但响应不得声称可执行。无法计算目标指标时不伪造 `unavailable` 结果，而是由 API 返回稳定拒绝码。
 
-- `met`：集中度阈值与最低现金全部满足。
-- `improved_not_met`：目标指标严格下降，但预算不足以满足全部阈值。
-- `unchanged`：合法候选与基线相同，或目标指标没有下降。
-- `infeasible`：输入合法，但约束空间不存在可行的一个基点动作。
+## 6. API 与数据流
 
-情景生成不要求所有风险维度已知；但目标指标、现金和换手必须已知，否则 `analysis_status=unavailable`。
+只新增：
 
-## 6. 持久化
-
-新增迁移 `0048_portfolio_scenario_decisions.py`，只新增表，不修改历史三方案表。
-
-### 6.1 `portfolio_mandates`
-
-- `id UUID PRIMARY KEY`
-- `portfolio_id UUID NOT NULL REFERENCES portfolios(id)`
-- `version INTEGER NOT NULL CHECK (version >= 1)`
-- `schema_version VARCHAR(32) NOT NULL CHECK = 'portfolio_mandate_v1'`
-- `objective VARCHAR(64) NOT NULL CHECK = 'reduce_security_concentration'`
-- `horizon VARCHAR(20) NOT NULL`
-- `max_turnover NUMERIC(38,12) NOT NULL CHECK BETWEEN 0 AND 1`
-- `minimum_cash NUMERIC(38,12) NOT NULL CHECK BETWEEN 0 AND 1`
-- `universe_policy VARCHAR(32) NOT NULL CHECK = 'current_holdings_only'`
-- `allow_new_positions BOOLEAN NOT NULL CHECK = false`
-- `effective_at TIMESTAMPTZ NOT NULL`
-- `created_at TIMESTAMPTZ NOT NULL`
-- `UNIQUE(portfolio_id, version)`
-
-记录不可更新；新设置生成下一版本。删除不提供产品入口。
-
-### 6.2 `portfolio_scenarios`
-
-- 绑定 `portfolio_snapshot_id`、`diagnostic_report_id`、`mandate_id`。
-- 保存 `request_hash`、`result_hash`、`diagnostic_input_hash`、`valuation_time`。
-- 保存分析状态、目标状态、当前/目标现金、unknown 列表、硬约束原因、证据引用。
-- `execution_locked` 数据库约束恒为 true。
-- `UNIQUE(request_hash, result_hash)` 支持安全幂等落盘。
-
-### 6.3 `portfolio_scenario_positions`
-
-- 每个情景和标的一行。
-- 保存当前/目标权重、动作和原因码。
-- `UNIQUE(scenario_id, instrument_id)`。
-- 数据库约束禁止 `target_weight > current_weight`。
-
-### 6.4 `portfolio_decision_runs`
-
-不把现有 `AgentResearchRunRecord.instrument_id` 改成 nullable。新增组合级运行表，避免破坏逐标的研究合同：
-
-- 绑定 `scenario_id`、`portfolio_snapshot_id`、`diagnostic_report_id`、`mandate_id`。
-- 保存 prompt/model/tool/input/output/evidence hash。
-- 状态只允许 `prepared/running/completed/failed/abstained`。
-- 部分唯一索引保证同一 `(portfolio_snapshot_id, mandate_id)` 最多一个 `prepared/running` 运行。
-- `intent_payload JSONB` 保存经 schema 校验的 `PortfolioScenarioIntentV1`。
-- `execution_locked` 恒为 true。
-- 保留现有最多一次显式重试和用量结算约束。
-
-### 6.5 `portfolio_scenario_selections`
-
-- `id UUID PRIMARY KEY`
-- `scenario_id UUID NOT NULL UNIQUE REFERENCES portfolio_scenarios(id)`
-- `decision VARCHAR(32) NOT NULL`，只允许 `selected_for_validation/rejected`
-- `expected_version INTEGER NOT NULL CHECK = 0`
-- `created_at TIMESTAMPTZ NOT NULL`
-- 记录追加后不可更新或删除；未产生记录即为 `unselected`
-
-## 7. Agent 合同
-
-### 7.1 只读工具
-
-新增工具 `evaluate_adjustment_scenario`：
-
-```python
-class EvaluateAdjustmentScenarioInput(_ToolInput):
-    portfolio_snapshot_id: UUID
-    diagnostic_report_id: UUID
-    mandate_id: UUID
-    objective: Literal["reduce_security_concentration"]
-    as_of: datetime
+```text
+POST /internal/v1/portfolio-scenarios/evaluate
+POST /api/v1/portfolio-scenarios/evaluate
 ```
 
-工具执行器：
+处理顺序：
 
-1. 加载冻结快照、诊断、Mandate、政策和已有证据。
-2. 调用纯函数 `evaluate_adjustment_scenario`。
-3. 不落盘。
-4. 返回去敏后的结果：分析状态、目标状态、目标指标前后值、现金、换手、成本状态、unknown、原因码、`result_hash`。
-5. 不把逐标的目标权重传给模型。
-
-### 7.2 组合级研究意图
-
-新建 `PortfolioScenarioIntentV1`：
-
-```python
-class PortfolioScenarioIntentV1(_IntentModel):
-    schema_version: Literal["portfolio_scenario_intent_v1"]
-    decision_id: UUID
-    portfolio_snapshot_id: UUID
-    diagnostic_report_id: UUID
-    mandate_id: UUID
-    scenario_result_hash: str
-    decision_time: datetime
-    horizon: Literal["short_term", "medium_term", "long_term"]
-    assessment: Literal[
-        "advance_candidate_for_review", "observe", "do_not_advance"
-    ]
-    rationale: tuple[ResearchClaim, ...]
-    uncertainties: tuple[str, ...]
-    invalidation_conditions: tuple[ResearchCondition, ...]
-    valid_until: datetime
-    evidence_refs: tuple[EvidenceRef, ...]
-    execution_locked: Literal[True]
+```text
+用户明确点击
+  → BFF 校验封闭 JSON、Idempotency-Key 和身份
+  → Engine 校验 HMAC、请求大小和请求合同
+  → 数据库读取指定快照、诊断、当前系统政策
+  → 纯函数计算
+  → 追加不含持仓明细的审计摘要
+  → 返回临时结果
+  → 页面仅保存在组件内存中
 ```
 
-该模型沿用现有安全扫描，并把 `weight/quantity/amount/order` 等字段继续列入禁止项。
+Engine API 必须：
 
-### 7.3 运行与落盘顺序
+- 沿用现有 64 KiB 请求上限、严格 JSON media type、HMAC 和幂等声明校验；
+- 核对请求中的快照和诊断属于同一组合；
+- 不接受 `portfolio_id` 来替代明确快照；
+- 审计只保存请求哈希、政策版本、标的数量、分析状态和目标状态，不保存个人持仓权重；
+- 业务上的 `unchanged`、`improved_not_met` 和 `infeasible` 使用成功响应；
+- 绑定或基线错误使用稳定错误码。
 
-1. 应用读取 Mandate 和冻结输入。
-2. Agent 调用只读情景工具并得到 `result_hash`。
-3. Agent 输出 `PortfolioScenarioIntentV1`。
-4. 应用重新运行纯函数。
-5. 重新计算结果的 `result_hash` 必须与 Agent 引用一致。
-6. 应用验证 intent、工具调用记录和证据引用。
-7. 在一个数据库事务中保存情景、仓位和 decision run；持久化边界生成 `scenario_id`。
+稳定错误码：
 
-这样既保持 Agent 工具只读，又避免信任模型转述的权重。
-
-## 8. 状态与门禁
-
-### 8.1 `analysis_status`
-
-- `evaluable`：目标指标、现金、换手均已知，输入绑定有效。
-- `partial`：目标可评估，但至少一个非目标风险或成本维度 unknown。
-- `unavailable`：目标本身无法计算、基线不 READY、绑定错误或证据时间冲突。
-
-### 8.2 `decision_status`
-
-只有以下条件全部成立才是 `decision_ready`：
-
-- `analysis_status=evaluable`；
-- `objective_status=met`；
-- Mandate、快照、诊断和结果未过期；
-- 无系统硬约束违反；
-- 适用 FX、行业、历史风险、流动性和实际成本证据完整；
-- `tax_impact` 仍为 unknown 时，维持 `candidate_only`；
-- Agent assessment 为 `advance_candidate_for_review`；
-- 用户尚未选择不影响该状态，但选择记录必须另存。
-
-首版真实账户预计大多数结果是 `partial + candidate_only`；这仍是有效的分析交付，不得升级成推荐。
-
-### 8.3 Shadow 与执行
-
-- `shadow_eligible` 继续由现有 Shadow 权威检查计算，不存成可被前端篡改的布尔事实。
-- 新情景进入 Shadow 前需要一个显式适配步骤，把“保持现状 + 被选候选”冻结成现有 Shadow 可消费结构。
-- 首版不实现该适配；页面按钮只允许“选择进入后续验证”。
-- `execution_locked=true` 不受任何分析、选择或 Shadow 状态影响。
-
-## 9. API
-
-新增以下内部 API，并通过现有 BFF 暴露给本地页面：
-
-### 9.1 Mandate
-
-`POST /internal/v1/portfolio-mandates`
-
-- 新建下一不可变版本。
-- 要求 Idempotency-Key。
-- 同一请求哈希返回原记录；相同 key 不同请求返回冲突。
-
-`GET /internal/v1/portfolio-mandates/current?portfolio_id={id}`
-
-- 返回最高版本。
-- 不存在时返回 404，不生成默认 Mandate。
-
-### 9.2 情景
-
-`POST /internal/v1/portfolio-scenarios/evaluate`
-
-- 纯评估，不保存情景。
-- 请求不接受权重。
-- 返回完整候选给应用，不作为 Agent 工具的直接模型投影。
-
-`POST /internal/v1/portfolio-decisions/run`
-
-- 创建一个持久化组合级 Agent 运行和 `portfolio.decision` Job，返回 HTTP 202、`run_id`、`status=prepared` 及 Location。
-- Job 使用 `RetryPolicy.NEVER`、`max_attempts=1` 和 120 秒上限。
-- Worker 完成后重新计算并原子保存情景和 intent。
-- 相同 Idempotency-Key 和请求哈希返回原 `run_id`，不创建第二个 Job。
-
-`GET /internal/v1/portfolio-decisions/{run_id}`
-
-- 返回持久化运行状态；完成时包含 `scenario_id`，失败时只返回稳定错误码。
-- 运行未知或客户端断流时调用此接口恢复状态，不重放模型。
-
-`GET /internal/v1/portfolio-scenarios/{scenario_id}`
-
-- 返回冻结结果、状态、证据和用户选择状态。
-- 读取不得触发行情、模型或重新计算。
-
-`POST /internal/v1/portfolio-scenarios/{scenario_id}/select`
-
-- 只保存本地人工选择 `selected_for_validation` 或 `rejected`。
-- 不启动 Shadow，不创建订单。
-- 需要版本号做乐观并发控制。
-
-对应 Web BFF 必须增加同名 `/api/v1/...` 路由，包括 decision run 的 POST 和 GET，并同步更新 `app/lib/engine/client.ts` 的封闭路径模板、HMAC 规范化以及 `app/lib/engine/errors.ts` 的运行时响应校验；页面不得绕过 BFF 直连 Engine。
-
-### 9.3 稳定错误码
-
-- `MANDATE_NOT_FOUND`
-- `MANDATE_BINDING_INVALID`
 - `SCENARIO_BASELINE_NOT_READY`
 - `SCENARIO_DIAGNOSTIC_MISMATCH`
+- `SCENARIO_AS_OF_MISMATCH`
 - `SCENARIO_OBJECTIVE_UNSUPPORTED`
-- `SCENARIO_TURNOVER_BUDGET_EXHAUSTED`
-- `SCENARIO_INFEASIBLE`
-- `SCENARIO_RESULT_HASH_MISMATCH`
-- `SCENARIO_STALE`
-- `SCENARIO_VERSION_CONFLICT`
-- `PORTFOLIO_DECISION_ALREADY_RUNNING`
+- `SCENARIO_INPUT_INVALID`
 
-业务上的 `improved_not_met` 和 `infeasible` 是成功响应中的状态，不使用 500。
+## 7. 页面
 
-## 10. 页面
+在现有组合页新增独立的 `PortfolioScenario` 区块，不改写旧三方案页面。
 
-现有三方案 API 与页面保持可读，不删除。新增组合决策区：
+页面初始状态只显示约束输入和说明：
 
-1. 当前组合及冻结时间。
-2. 当前 Mandate：目标、期限、最大换手、最低现金。
-3. Agent 识别的问题及证据。
-4. 当前组合和一个候选情景的指标对比。
-5. unknown 指标和阻止决策/Shadow 的原因。
-6. `选择进入后续验证`、`拒绝`、`继续观察`。
+- 最大换手率；
+- 最低现金比例；
+- 固定目标“降低单名集中度”；
+- 固定范围“仅当前持仓、禁止新增标的”；
+- “生成调整情景”按钮。
 
-文案规则：
+点击成功后显示：
 
-- `candidate_only` 使用“候选情景”，不使用“推荐方案”。
-- `decision_ready` 可使用“建议进入人工评审”，仍不称“可执行”。
-- 不提供“接受并执行”按钮。
-- 数值最多显示三位小数，但底层字符串精度不改变。
-- security-only 集中度必须明确分母。
+- 当前组合与一个候选的 Top1、Top3、HHI、现金和换手；
+- 每个当前持仓的“保持/降低”与目标权重；
+- `met/improved_not_met/unchanged/infeasible` 的中文解释；
+- 成本未知与其他阻塞；
+- “仅分析，不保存，交易保持锁定”。
+
+页面不得出现“推荐”“接受”“执行”“进入 Shadow”按钮。数值最多显示三位小数，不把非零小数格式化为零。
+
+页面刷新、切换组合或快照变化时清除内存候选；不得用旧结果搭配新快照。
+
+## 8. 阶段 A 验收
+
+必须覆盖：
+
+1. 高集中、预算充足：`met`，只减仓、现金增加、换手不超限。
+2. 高集中、预算不足：`improved_not_met`，严格改善且不越过预算。
+3. 已满足 Top1 和现金目标：`unchanged`，不为了产生动作强制交易。
+4. 单一证券：`infeasible`，不清仓伪装降低 security-only 集中度。
+5. 请求最低现金低于系统值：采用系统最低现金。
+6. 成本未知：`partial` 可展示，`execution_locked=true`。
+7. 快照、诊断或时间不一致：稳定拒绝且纯引擎不运行。
+8. 请求包含权重、证券列表或额外字段：422。
+9. 同一规范化输入重复计算得到相同 `result_hash`。
+10. 页面加载和刷新没有 POST；只有明确点击产生一次本地确定性 POST。
+11. 页面不调用 Provider、模型、Shadow、订单或成交入口。
+12. 一个现有真实只读快照通过正常产品入口返回分析结果；若基线未达到要求，则准确返回基线拒绝，不伪造成功。
+
+## 9. 阶段 A 完成定义
+
+用户可以针对一个合格的真实冻结组合设置最大换手和最低现金，明确触发后获得一个确定性、可重复、只减仓的集中度候选，并看到真实 unknown；系统没有新增业务持久化，没有外部调用，没有选择或执行入口，`execution_locked=true`。
+
+## 10. 后续阶段边界
+
+### 10.1 阶段 B：Agent 可调用
+
+只有阶段 A 的真实案例验收通过后才设计实施：
+
+- Agent 只提交研究目标、期限、置信度、失效条件和证据引用，不提交权重；
+- 只读工具复用阶段 A 纯引擎，并对模型隐藏逐标的目标权重；
+- 引入模型调用时才建立组合级 durable run/Job、单次调用和断流恢复；
+- 请求级约束直接冻结在运行输入中，仍不要求独立 Mandate 表。
+
+### 10.2 阶段 C：冻结、选择与 Shadow
+
+只有用户确实需要保存和选择候选时才重新评审：
+
+- 是否需要 `portfolio_mandates`、`portfolio_scenarios`、positions 和 selection 表；
+- JSONB 与规范化明细表的实际查询需求；
+- `analysis_comparable`、`decision_ready` 和 Shadow 准入的权威派生；
+- 选中候选到现有 Shadow 合同的显式适配。
+
+阶段 C 仍不授权自动 Shadow、模拟盘或实盘。
 
 ## 11. 兼容与回滚
 
-- 迁移只新增表，`downgrade` 按依赖逆序删除新表，不触碰旧方案数据。
-- 旧三方案的模型、API、页面和 Shadow 流程在本阶段不改变。
-- 新页面读取不到 Mandate 或情景时显示明确空状态，不回退生成固定三方案。
-- 功能可通过不展示新入口回滚；新表中的不可变审计记录保留。
-- 不修改 `.openai/hosting.json`、券商配置或访问权限。
-
-## 12. 验收案例
-
-实现必须覆盖以下代表性案例：
-
-1. 高集中、预算充足：返回 `met`，只减仓、现金增加、换手未超限。
-2. 高集中、预算不足：返回 `improved_not_met`，不越过预算。
-3. 已满足目标：返回 `unchanged`，不为了产生方案强制交易。
-4. 单一证券且 security-only 阈值不可满足：返回 `infeasible`，不清仓伪装零风险。
-5. Mandate 最低现金低于系统值：有效最低现金仍取系统值。
-6. 缺行业或成本：可以 `partial` 展示，但不能 `decision_ready` 或 Shadow。
-7. 结果哈希不一致：不保存情景。
-8. Agent 输出权重字段：schema 校验失败。
-9. 快照刷新后读取旧情景：显示 stale，不重算、不回填。
-10. 页面刷新：只读已保存数据，不触发行情或模型。
-
-## 13. 完成定义
-
-本设计完成的用户可见结果是：用户能够设置一个明确的组合约束，平台根据真实冻结持仓生成一个确定性的降低集中度候选，Agent 能解释是否值得进入人工评审，页面能显示调整前后结果和真实阻塞；任何 unknown、选择或页面状态都不能解除执行锁。
-
-仅当实现计划的全部阶段验收通过，才允许讨论 Shadow 适配。实盘和券商模拟盘仍不在本设计范围内。
+- 阶段 A 没有迁移和新依赖。
+- 旧三方案模型、API、页面、历史记录和 Shadow 流程均不修改。
+- 回滚只需移除新页面区块、BFF 路由、Engine 路由和两个纯领域文件。
+- 不修改 `.openai/hosting.json`、券商配置、密钥、权限或外部数据套餐。
