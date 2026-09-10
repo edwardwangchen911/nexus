@@ -3329,4 +3329,4 @@ synthesized、completed；保存 8 个角色输出及综合/完成输出，实�
 
 修复后，真实组合、快照、正式诊断与情景 BFF/Engine 均返回 200；快照仍为 `READY / DECISION_READY / PASS`，正式诊断仍为 `RESEARCH_REQUIRED`。显式情景返回 12 个证券、`improved_not_met` 和 `analysis_status=partial`，交易成本保持 `estimated_cost` unknown，硬约束未被绕过，`execution_locked=true`。真实 Chrome 页面中的生成按钮可用，点击后显示候选、分析不完整、成本未知和交易锁。两次使用不同幂等键的有界验收只使脱敏审计事件从 2 增至 4；方案组保持 3，Shadow、模拟订单和成交均保持 0。未调用 Provider、模型、券商同步、模拟盘或实盘。
 
-阶段 A 到此停止，不顺手增加 Mandate、Agent 工具、候选选择、Shadow 或通用求解器。现有共享 58000 Engine 仍是旧镜像，因此 3302 前端会因新旧诊断合同不一致而拒绝该区块；本次未擅自重启共享服务。待按正常本地更新流程加载本次主线改动之后，再由常用 3302 页面使用同一能力。
+阶段 A 到此停止，不顺手增加 Mandate、Agent 工具、候选选择、Shadow 或通用求解器。随后按现有 Compose 项目只重建并替换 API 容器，没有启动 Worker、Provider 或 Gateway，也没有执行迁移或数据刷新。常用 58000 Engine 已加载本次主线代码，3302 页面重新验证正式诊断和情景请求均返回 200；真实 Chrome 页面按钮可用，点击后继续显示一个 partial 候选、成本未知和交易锁。最后一次不同幂等键的运行验收只使脱敏审计事件从 4 增至 5，方案组仍为 3，Shadow、模拟订单和成交仍为 0。旧镜像内容 ID 在构建完成时已被本地运行时清理，不能秒级切回；需要回滚时使用前一 Git 提交按同一 Compose 命令重建 API。
