@@ -47,6 +47,7 @@ test("Agent interpretation requires one click and reload recovers with GET only"
   await scenario.getByRole("button", { name: "生成调整情景" }).click();
   await expect(scenario.getByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
   expect(posts).toEqual(["/api/v1/portfolio-scenarios/evaluate"]);
+  expect(gets).toEqual(["/api/v1/portfolio-decision-runs/latest"]);
 
   await scenario.getByRole("button", { name: "让 Agent 解读" }).click();
   await expect(scenario.getByText("集中度有所下降，但交易成本仍未知。")).toBeVisible();
@@ -54,7 +55,10 @@ test("Agent interpretation requires one click and reload recovers with GET only"
     "/api/v1/portfolio-scenarios/evaluate",
     "/api/v1/portfolio-decision-runs",
   ]);
-  expect(gets).toEqual([`/api/v1/portfolio-decision-runs/${runId}`]);
+  expect(gets).toEqual([
+    "/api/v1/portfolio-decision-runs/latest",
+    `/api/v1/portfolio-decision-runs/${runId}`,
+  ]);
   await expect(scenario.getByText("研究解读，不是投资建议")).toBeVisible();
   await expect(scenario.getByText("缺少可核验的交易成本。")).toBeVisible();
   await expect(page.getByRole("button", { name: /接受|执行|Shadow|下单|启动前向观察/ })).toHaveCount(0);
@@ -68,6 +72,7 @@ test("Agent interpretation requires one click and reload recovers with GET only"
   await expect(scenario.getByText("集中度有所下降，但交易成本仍未知。")).toBeVisible();
   expect(posts.filter((path) => path === "/api/v1/portfolio-decision-runs")).toHaveLength(1);
   expect(gets).toEqual([
+    "/api/v1/portfolio-decision-runs/latest",
     `/api/v1/portfolio-decision-runs/${runId}`,
     `/api/v1/portfolio-decision-runs/${runId}`,
   ]);
@@ -94,6 +99,15 @@ async function installFixtures(page: Page, returnedResultHash = resultHash): Pro
   await page.route(`**/api/v1/portfolios/${portfolioId}/snapshots/latest`, (route) => route.fulfill(json({ data: snapshot, meta: meta() })));
   await page.route(`**/api/v1/portfolios/${portfolioId}/diagnostics/latest`, (route) => route.fulfill(json({ data: report, meta: meta() })));
   await page.route("**/api/v1/portfolio-scenarios/evaluate", (route) => route.fulfill(json({ data: scenarioResult(), meta: meta() })));
+  await page.route("**/api/v1/portfolio-decision-runs/latest?**", (route) => {
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("portfolio_snapshot_id")).toBe(snapshotId);
+    expect(url.searchParams.get("diagnostic_report_id")).toBe(reportId);
+    expect(url.searchParams.get("expected_scenario_result_hash")).toBe(resultHash);
+    return route.fulfill(json({
+      error: { code: "NOT_FOUND", message: "Not found.", request_id: meta().request_id, details: {} },
+    }, 404));
+  });
   await page.route("**/api/v1/portfolio-decision-runs", async (route) => {
     expect(route.request().headers()["idempotency-key"]).toBeTruthy();
     const body = route.request().postDataJSON();

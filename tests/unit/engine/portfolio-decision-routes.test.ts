@@ -76,6 +76,55 @@ function runEnvelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function completedRunEnvelope() {
+  const citationId = "d".repeat(64);
+  return runEnvelope({
+    status: "completed",
+    settled_cost_usd: "0.004",
+    input_tokens: 80,
+    output_tokens: 40,
+    output: {
+      status: "completed",
+      scenario_result_hash: expectedHash,
+      error_code: null,
+      intent: {
+        schema_version: "portfolio_research_intent_v1",
+        run_id: runId,
+        portfolio_id: portfolioId,
+        portfolio_snapshot_id: snapshotId,
+        diagnostic_report_id: reportId,
+        decision_time: "2026-09-10T08:00:00Z",
+        assessment: "explore_adjustment",
+        objective: "reduce_security_concentration",
+        horizon: "medium_term",
+        confidence: "medium",
+        rationale: [{ text: "Concentration improves.", citation_ids: [citationId] }],
+        invalidation_conditions: [{
+          signal: "portfolio.scenario_objective_status",
+          operator: "eq",
+          threshold: "unchanged",
+          unit: "state",
+          citation_ids: [citationId],
+        }],
+        limitations: [{ code: "estimated_cost", text: "Estimated cost remains unknown." }],
+        scenario_result_hash: expectedHash,
+        citation_ids: [citationId],
+        execution_locked: true,
+      },
+    },
+    citations: [{
+      citation_id: citationId,
+      evidence: {
+        source: "portfolio_diagnostic",
+        object_id: reportId,
+        content_hash: "e".repeat(64),
+        location: "memory://portfolio-diagnostic",
+        available_at: "2026-09-10T07:59:00Z",
+      },
+    }],
+  });
+}
+
 function createRequest(value: unknown) {
   return new Request("https://nexus.test/api/v1/portfolio-decision-runs", {
     method: "POST",
@@ -99,6 +148,19 @@ function readRequest(scope: Partial<Record<
     ...scope,
   });
   return new Request(`https://nexus.test/api/v1/portfolio-decision-runs/${runId}?${query}`);
+}
+
+function latestRequest(scope: Partial<Record<
+  "portfolio_snapshot_id" | "diagnostic_report_id" | "expected_scenario_result_hash",
+  string
+>> = {}) {
+  const query = new URLSearchParams({
+    portfolio_snapshot_id: snapshotId,
+    diagnostic_report_id: reportId,
+    expected_scenario_result_hash: expectedHash,
+    ...scope,
+  });
+  return new Request(`https://nexus.test/api/v1/portfolio-decision-runs/latest?${query}`);
 }
 
 describe("portfolio decision BFF routes", () => {
@@ -172,6 +234,47 @@ describe("portfolio decision BFF routes", () => {
     }
   });
 
+  it("discovers the latest persisted run through an exact read-only scope", async () => {
+    engineFetch.mockResolvedValueOnce(Response.json(runEnvelope()));
+    const { GET } = await import("../../../app/api/v1/portfolio-decision-runs/latest/route");
+    const result = await GET(latestRequest());
+
+    expect(result.status).toBe(200);
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/portfolio-decision-runs/latest",
+      path: "/internal/v1/portfolio-decision-runs/latest",
+      query: new URLSearchParams({
+        portfolio_snapshot_id: snapshotId,
+        diagnostic_report_id: reportId,
+        expected_scenario_result_hash: expectedHash,
+      }).toString(),
+    }, { method: "GET", actor });
+    expect(engineFetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+
+    engineFetch.mockReset();
+    engineFetch.mockResolvedValueOnce(Response.json(runEnvelope({
+      expected_scenario_result_hash: "c".repeat(64),
+    })));
+    expect((await GET(latestRequest())).status).toBe(500);
+
+    engineFetch.mockReset();
+    engineFetch.mockResolvedValueOnce(Response.json(runEnvelope({ status: "completed" })));
+    expect((await GET(latestRequest())).status).toBe(500);
+
+    for (const query of [
+      `portfolio_snapshot_id=${snapshotId}&diagnostic_report_id=${reportId}`,
+      `portfolio_snapshot_id=${snapshotId}&portfolio_snapshot_id=${snapshotId}&diagnostic_report_id=${reportId}&expected_scenario_result_hash=${expectedHash}`,
+      `portfolio_snapshot_id=${snapshotId}&diagnostic_report_id=${reportId}&expected_scenario_result_hash=${expectedHash}&extra=1`,
+    ]) {
+      engineFetch.mockClear();
+      const rejected = await GET(new Request(
+        `https://nexus.test/api/v1/portfolio-decision-runs/latest?${query}`,
+      ));
+      expect(rejected.status).toBe(400);
+      expect(engineFetch).not.toHaveBeenCalled();
+    }
+  });
+
   it("admits only the generated locked response and stable decision errors", async () => {
     expect(rebuildAllowedEngineResponse(
       202,
@@ -190,6 +293,40 @@ describe("portfolio decision BFF routes", () => {
       `/internal/v1/portfolio-decision-runs/${runId}`,
       "GET",
     )).toBeNull();
+
+    expect(rebuildAllowedEngineResponse(
+      200,
+      runEnvelope({ status: "completed" }),
+      new Headers(),
+      undefined,
+      "/internal/v1/portfolio-decision-runs/latest",
+      "GET",
+    )).toBeNull();
+
+    expect(rebuildAllowedEngineResponse(
+      200,
+      completedRunEnvelope(),
+      new Headers(),
+      undefined,
+      "/internal/v1/portfolio-decision-runs/latest",
+      "GET",
+    )).not.toBeNull();
+    expect(rebuildAllowedEngineResponse(
+      200,
+      runEnvelope({
+        status: "failed",
+        output: {
+          status: "failed",
+          scenario_result_hash: null,
+          intent: null,
+          error_code: "PORTFOLIO_DECISION_MODEL_FAILED",
+        },
+      }),
+      new Headers(),
+      undefined,
+      "/internal/v1/portfolio-decision-runs/latest",
+      "GET",
+    )).not.toBeNull();
 
     const error = {
       error: {

@@ -402,10 +402,16 @@ describe("engineFetch runtime boundary", () => {
       template: "/internal/v1/portfolio-decision-runs/{run_id}",
       path: "/internal/v1/portfolio-decision-runs/0198d500-1000-7000-8000-000000000241",
     }, { method: "GET", actor })).status).toBe(200);
+    expect((await engineFetch({
+      template: "/internal/v1/portfolio-decision-runs/latest",
+      path: "/internal/v1/portfolio-decision-runs/latest",
+      query: `portfolio_snapshot_id=0198d500-1000-7000-8000-000000000041&diagnostic_report_id=0198d500-1000-7000-8000-000000000141&expected_scenario_result_hash=${"b".repeat(64)}`,
+    }, { method: "GET", actor })).status).toBe(200);
 
     expect(calls.map((call) => call.input)).toEqual([
       "http://127.0.0.1:8000/internal/v1/portfolio-decision-runs",
       "http://127.0.0.1:8000/internal/v1/portfolio-decision-runs/0198d500-1000-7000-8000-000000000241",
+      `http://127.0.0.1:8000/internal/v1/portfolio-decision-runs/latest?diagnostic_report_id=0198d500-1000-7000-8000-000000000141&expected_scenario_result_hash=${"b".repeat(64)}&portfolio_snapshot_id=0198d500-1000-7000-8000-000000000041`,
     ]);
     for (const [index, call] of calls.entries()) {
       const sentHeaders = new Headers(call.init?.headers);
@@ -413,7 +419,7 @@ describe("engineFetch runtime boundary", () => {
         keyId: "test-current",
         secret: "nexus-test-hmac-key-32-bytes!!!!",
         method: index === 0 ? "POST" : "GET",
-        pathAndQuery: new URL(call.input).pathname,
+        pathAndQuery: `${new URL(call.input).pathname}${new URL(call.input).search}`,
         timestamp: 1_789_027_200,
         nonce: sentHeaders.get("x-nexus-nonce")!,
         actorId: actor.userId,
@@ -427,7 +433,12 @@ describe("engineFetch runtime boundary", () => {
       template: "/internal/v1/portfolio-decision-runs/{run_id}",
       path: "/internal/v1/portfolio-decision-runs/not-a-uuid",
     }, { method: "GET", actor }));
-    expect(calls).toHaveLength(2);
+    await expectSafeInternalError(await engineFetch({
+      template: "/internal/v1/portfolio-decision-runs/latest",
+      path: "/internal/v1/portfolio-decision-runs/latest",
+      query: `portfolio_snapshot_id=0198d500-1000-7000-8000-000000000041&diagnostic_report_id=0198d500-1000-7000-8000-000000000141`,
+    }, { method: "GET", actor }));
+    expect(calls).toHaveLength(3);
   });
 
   it("sends and signs one canonical allowlisted market query", async () => {

@@ -3398,3 +3398,20 @@ Shadow、订单或成交，`execution_locked=true`。
 
 已确认的下一个用户可见接线缺口是：当前页面只能通过同一浏览器保存的 run ID 恢复解读，尚不能按组合快照、诊断和情景结果
 的完整冻结范围发现最新已完成运行。下一切片只补这条 scope-bound 只读发现链；不因此增加列表平台、通用搜索、接受操作或 Shadow。
+
+### 组合 Agent 解读持久化恢复链路（2026-09-11）
+
+组合页不再仅依赖当前浏览器的 localStorage 定位 Agent 解读。在确定性情景已生成后，
+页面使用组合快照、诊断报告和情景结果哈希三项精确作用域，只读查找同一本地用户的
+最新持久化 run。已完成结果直接恢复；`prepared/running` 结果继续有界 GET 观察；失败或
+放弃结果仍按已有终态显示。只有明确 404 才恢复“让 Agent 解读”的显式创建动作；
+读取失败、异常 200 或作用域不匹配都只允许重试 GET，不会换新幂等键重复登记。
+
+Engine 静态 latest 路由放在 UUID 动态路由之前，按 actor 与完整冻结作用域过滤，并复用原有
+`_response` 的输入哈希、工具投影、输出哈希和引用权威校验。BFF 额外拒绝重复/缺失/多余查询参数、
+身份漂移以及 run status/output/hash 语义矛盾；HMAC 只签名规范化后的三参数查询。
+
+隔离 PostgreSQL 17 从空库迁移后，真实 API 路径验证了 `prepared` 和 `completed` 均可恢复，
+其他 actor 和错误情景哈希均为 404。前端聚焦回归、TypeScript、ESLint、生成合同检查和
+Playwright 显式创建/刷新恢复用例通过。本片无模型、Provider、券商、Shadow、订单或成交调用，
+`execution_locked=true` 不变；未新增表、迁移、通用列表接口或自动任务。

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.portfolio_decision_contracts import (
@@ -39,15 +39,16 @@ from nexus.persistence.models.agents import (
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.settings import AgentRuntimeMode, EngineSettings
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 _MAX_BODY_BYTES = 64 * 1024
 _IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=255)]
+_ResultHash = Annotated[str, Query(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")]
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     status: {"model": NexusErrorEnvelope, "description": "Stable NEXUS error envelope."}
-    for status in (401, 404, 409, 422)
+    for status in (401, 404, 409, 422, 500)
 }
 _CREATE_RESPONSES = {
     202: {
@@ -191,6 +192,66 @@ def _runtime_model_authority(settings: EngineSettings) -> tuple[str | None, str 
 
         return MODEL_ID, str(_CONFIG["version"])
     return None, None
+
+
+@router.get(
+    "/internal/v1/portfolio-decision-runs/latest",
+    response_model=PortfolioDecisionRunEnvelope,
+    operation_id="getLatestPortfolioDecisionRun",
+    responses=_ERROR_RESPONSES,
+)
+async def get_latest_portfolio_decision_run(
+    portfolio_snapshot_id: UUID,
+    diagnostic_report_id: UUID,
+    expected_scenario_result_hash: _ResultHash,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> PortfolioDecisionRunEnvelope:
+    """Return the newest persisted run for one exact frozen scenario scope."""
+    row = (
+        await session.execute(
+            select(PortfolioDecisionRunRecord, PortfolioDecisionOutputRecord)
+            .outerjoin(
+                PortfolioDecisionOutputRecord,
+                PortfolioDecisionOutputRecord.run_id == PortfolioDecisionRunRecord.id,
+            )
+            .where(
+                PortfolioDecisionRunRecord.actor_id == actor.actor_id,
+                PortfolioDecisionRunRecord.portfolio_snapshot_id == portfolio_snapshot_id,
+                PortfolioDecisionRunRecord.diagnostic_report_id == diagnostic_report_id,
+                PortfolioDecisionRunRecord.frozen_input[
+                    "expected_scenario_result_hash"
+                ].as_string()
+                == expected_scenario_result_hash,
+            )
+            .order_by(
+                func.coalesce(
+                    PortfolioDecisionOutputRecord.created_at,
+                    PortfolioDecisionRunRecord.created_at,
+                ).desc(),
+                PortfolioDecisionOutputRecord.id.desc().nullslast(),
+                PortfolioDecisionRunRecord.id.desc(),
+            )
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NexusError(
+            ErrorCode.NOT_FOUND, "Portfolio decision run was not found.", status_code=404
+        )
+    run, output = row
+    try:
+        data = _response(run, output)
+    except (TypeError, ValueError, ValidationError) as error:
+        raise NexusError(
+            ErrorCode.INTERNAL_ERROR,
+            "The request could not be completed.",
+            status_code=500,
+        ) from error
+    return PortfolioDecisionRunEnvelope(
+        data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
+    )
 
 
 @router.get(

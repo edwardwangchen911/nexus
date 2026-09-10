@@ -216,18 +216,35 @@ async def test_post_selects_model_authority_for_the_active_runtime_before_admiss
     assert run.model_config_id == expected_model_config_id
 
 
-def test_openapi_exposes_only_create_and_owned_read_routes(
+def test_openapi_exposes_only_create_and_scoped_read_routes(
     migrated_database_url: str,
 ) -> None:
     document = _app(migrated_database_url).openapi()
 
     create = document["paths"]["/internal/v1/portfolio-decision-runs"]["post"]
     read = document["paths"]["/internal/v1/portfolio-decision-runs/{run_id}"]["get"]
+    latest_path = document["paths"]["/internal/v1/portfolio-decision-runs/latest"]
+    latest = latest_path["get"]
 
     assert create["operationId"] == "createPortfolioDecisionRun"
     assert create["responses"]["202"]["headers"]["Location"]["schema"] == {"type": "string"}
     assert read["operationId"] == "getPortfolioDecisionRun"
     assert "post" not in document["paths"]["/internal/v1/portfolio-decision-runs/{run_id}"]
+    assert latest["operationId"] == "getLatestPortfolioDecisionRun"
+    assert "post" not in latest_path
+    assert {parameter["name"] for parameter in latest["parameters"]} == {
+        "portfolio_snapshot_id",
+        "diagnostic_report_id",
+        "expected_scenario_result_hash",
+    }
+    assert all(parameter["required"] is True for parameter in latest["parameters"])
+    result_hash = next(
+        parameter
+        for parameter in latest["parameters"]
+        if parameter["name"] == "expected_scenario_result_hash"
+    )
+    assert result_hash["schema"]["pattern"] == "^[0-9a-f]{64}$"
+    assert "500" in latest["responses"]
 
 
 @pytest.mark.asyncio
@@ -368,6 +385,12 @@ async def test_get_is_actor_scoped_and_resolves_only_intent_citations(
         lambda: "0" * 64,
     )
     create_path = "/internal/v1/portfolio-decision-runs"
+    latest_path = (
+        "/internal/v1/portfolio-decision-runs/latest"
+        f"?portfolio_snapshot_id={SNAPSHOT_ID}"
+        f"&diagnostic_report_id={REPORT_ID}"
+        f"&expected_scenario_result_hash={RESULT_HASH}"
+    )
     body = _payload()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(migrated_database_url)),
@@ -378,7 +401,29 @@ async def test_get_is_actor_scoped_and_resolves_only_intent_citations(
             content=body,
             headers={**headers("POST", create_path, body), "Idempotency-Key": "owned-run"},
         )
+        prepared_latest = await client.get(
+            latest_path,
+            headers=headers("GET", latest_path),
+        )
+        newer = await client.post(
+            create_path,
+            content=body,
+            headers={
+                **headers("POST", create_path, body),
+                "Idempotency-Key": "owned-run-newer",
+            },
+        )
+        newer_prepared_latest = await client.get(
+            latest_path,
+            headers=headers("GET", latest_path),
+        )
     assert created.status_code == 202
+    assert prepared_latest.status_code == 200
+    assert prepared_latest.json()["data"]["status"] == "prepared"
+    assert prepared_latest.json()["data"]["execution_locked"] is True
+    assert newer.status_code == 202
+    assert newer_prepared_latest.status_code == 200
+    assert newer_prepared_latest.json()["data"]["run_id"] == newer.json()["data"]["run_id"]
     run_id = UUID(created.json()["data"]["run_id"])
 
     async with factory() as session, session.begin():
@@ -481,6 +526,7 @@ async def test_get_is_actor_scoped_and_resolves_only_intent_citations(
         )
 
     read_path = f"/internal/v1/portfolio-decision-runs/{run_id}"
+    wrong_scope_path = latest_path.replace(RESULT_HASH, "f" * 64)
     owner_headers = headers("GET", read_path)
     other_headers = headers("GET", read_path, actor_id="different-local-user")
     tampered_headers = headers("GET", read_path)
@@ -497,6 +543,15 @@ async def test_get_is_actor_scoped_and_resolves_only_intent_citations(
             headers={**headers("POST", create_path, body), "Idempotency-Key": "owned-run"},
         )
         owned = await client.get(read_path, headers=owner_headers)
+        latest = await client.get(latest_path, headers=headers("GET", latest_path))
+        latest_hidden = await client.get(
+            latest_path,
+            headers=headers("GET", latest_path, actor_id="different-local-user"),
+        )
+        latest_wrong_scope = await client.get(
+            wrong_scope_path,
+            headers=headers("GET", wrong_scope_path),
+        )
         hidden = await client.get(read_path, headers=other_headers)
         unauthenticated = await client.get(read_path, headers=tampered_headers)
         request_unauthenticated = await client.get(
@@ -519,6 +574,13 @@ async def test_get_is_actor_scoped_and_resolves_only_intent_citations(
         }
     ]
     assert data["execution_locked"] is True
+    assert latest.status_code == 200
+    assert latest.json()["data"]["run_id"] == str(run_id)
+    assert latest.json()["data"]["execution_locked"] is True
+    assert latest_hidden.status_code == 404
+    assert latest_hidden.json()["error"]["code"] == "NOT_FOUND"
+    assert latest_wrong_scope.status_code == 404
+    assert latest_wrong_scope.json()["error"]["code"] == "NOT_FOUND"
     assert hidden.status_code == 404
     assert hidden.json()["error"]["code"] == "NOT_FOUND"
     assert unauthenticated.status_code == 401

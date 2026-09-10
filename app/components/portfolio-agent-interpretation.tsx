@@ -15,7 +15,7 @@ type InvalidationCondition = NonNullable<
 type ScenarioRequest = components["schemas"]["PortfolioScenarioRequest"];
 type ScenarioResponse = components["schemas"]["PortfolioScenarioResponse"];
 type StoredRun = { idempotencyKey: string; runId: string | null };
-type Activity = "idle" | "submitting" | "polling" | "paused";
+type Activity = "idle" | "discovering" | "submitting" | "polling" | "paused";
 
 const STORAGE_PREFIX = "nexus:portfolio-agent:";
 const MAX_POLL_MS = 45_000;
@@ -67,15 +67,16 @@ function PortfolioAgentSession({
     diagnosticReportId,
     scenarioResult.result_hash,
   );
-  const [activity, setActivity] = useState<Activity>("idle");
+  const [activity, setActivity] = useState<Activity>("discovering");
   const [run, setRun] = useState<DecisionRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hasStoredRun, setHasStoredRun] = useState(false);
+  const [discoveryUncertain, setDiscoveryUncertain] = useState(false);
   const timer = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
   const terminal = run?.status === "completed" || run?.status === "abstained" || run?.status === "failed";
-  const busy = activity === "submitting" || activity === "polling";
+  const busy = activity === "discovering" || activity === "submitting" || activity === "polling";
 
   const scopeQuery = useMemo(() => new URLSearchParams({
     portfolio_snapshot_id: snapshotId,
@@ -86,15 +87,16 @@ function PortfolioAgentSession({
   useEffect(() => {
     if (stale) return undefined;
     const stored = readStoredRun(storageKey);
-    let recoveryTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
-    if (stored?.runId) {
-      recoveryTimer = globalThis.setTimeout(() => {
+    const recoveryTimer = globalThis.setTimeout(() => {
+      if (stored?.runId) {
         setHasStoredRun(true);
-        void observe(stored.runId!);
-      }, 0);
-    }
+        void observe(stored.runId);
+      } else {
+        void discoverLatest();
+      }
+    }, 0);
     return () => {
-      if (recoveryTimer !== null) globalThis.clearTimeout(recoveryTimer);
+      globalThis.clearTimeout(recoveryTimer);
       stopActiveWork();
     };
     // The complete frozen scope is encoded by storageKey and scopeQuery.
@@ -118,6 +120,61 @@ function PortfolioAgentSession({
       && (expectedRunId === undefined || sameUuid(candidate.run_id, expectedRunId))
       && (candidate.output?.scenario_result_hash == null
         || candidate.output.scenario_result_hash === scenarioResult.result_hash);
+  }
+
+  async function discoverLatest(): Promise<void> {
+    stopActiveWork();
+    const token = generation.current;
+    const controller = new AbortController();
+    request.current = controller;
+    setActivity("discovering");
+    setError(null);
+    try {
+      const response = await fetch(`/api/v1/portfolio-decision-runs/latest?${scopeQuery}`, {
+        method: "GET",
+        signal: controller.signal,
+      });
+      if (generation.current !== token) return;
+      if (response.status === 404) {
+        setDiscoveryUncertain(false);
+        setActivity("idle");
+        return;
+      }
+      if (!response.ok) {
+        setDiscoveryUncertain(true);
+        setActivity("paused");
+        setError("暂时无法确认是否已有保存的研究解读；再次点击只会重新查找，不会新建运行。");
+        return;
+      }
+      const envelope = await response.json() as { data?: DecisionRun };
+      if (!envelope.data || !accepts(envelope.data)) {
+        setDiscoveryUncertain(true);
+        setActivity("paused");
+        setError("返回的研究解读与当前调整情景不一致，已拒绝显示；再次点击只会重新查找。");
+        return;
+      }
+      const discovered = envelope.data;
+      browserStorage()?.setItem(storageKey, JSON.stringify({
+        idempotencyKey: uuidv7(),
+        runId: discovered.run_id,
+      }));
+      setDiscoveryUncertain(false);
+      setHasStoredRun(true);
+      setRun(discovered);
+      if (["completed", "abstained", "failed"].includes(discovered.status)) {
+        setActivity("idle");
+      } else {
+        scheduleObservation(discovered.run_id);
+      }
+    } catch (cause) {
+      if (generation.current === token && !(cause instanceof DOMException && cause.name === "AbortError")) {
+        setDiscoveryUncertain(true);
+        setActivity("paused");
+        setError("暂时无法确认是否已有保存的研究解读；再次点击只会重新查找，不会新建运行。");
+      }
+    } finally {
+      if (request.current === controller) request.current = null;
+    }
   }
 
   async function readRun(runId: string, token: number, startedAt: number, attempt: number): Promise<void> {
@@ -189,6 +246,7 @@ function PortfolioAgentSession({
     stopActiveWork();
     const token = generation.current;
     setActivity("polling");
+    setDiscoveryUncertain(false);
     setError(null);
     await readRun(runId, token, Date.now(), 0);
   }
@@ -207,6 +265,10 @@ function PortfolioAgentSession({
 
   async function createOrContinue(): Promise<void> {
     if (stale || busy || terminal) return;
+    if (discoveryUncertain) {
+      await discoverLatest();
+      return;
+    }
     const stored = readStoredRun(storageKey);
     if (stored?.runId) {
       await observe(stored.runId);
@@ -219,6 +281,7 @@ function PortfolioAgentSession({
     const controller = new AbortController();
     request.current = controller;
     setActivity("submitting");
+    setDiscoveryUncertain(false);
     setError(null);
     try {
       const response = await fetch("/api/v1/portfolio-decision-runs", {
@@ -277,8 +340,10 @@ function PortfolioAgentSession({
     </section>;
   }
 
-  const buttonLabel = activity === "submitting" || activity === "polling"
-    ? "正在生成研究解读…"
+  const buttonLabel = activity === "discovering"
+    ? "正在查找已保存解读…"
+    : activity === "submitting" || activity === "polling"
+      ? "正在生成研究解读…"
     : activity === "paused" || hasStoredRun
       ? "继续查看 Agent 解读"
       : "让 Agent 解读";
@@ -294,7 +359,9 @@ function PortfolioAgentSession({
     </header>
     {!terminal ? <button className="button" type="button" disabled={busy}
       onClick={() => void createOrContinue()}>{buttonLabel}</button> : null}
-    {busy ? <p className="portfolio-agent__progress" role="status" aria-live="polite">研究运行已登记，正在读取持久化结果；离开页面不会取消后台运行。</p> : null}
+    {busy ? <p className="portfolio-agent__progress" role="status" aria-live="polite">{activity === "discovering"
+      ? "正在查找与当前情景完全匹配的已保存解读。"
+      : "研究运行已登记，正在读取持久化结果；离开页面不会取消后台运行。"}</p> : null}
     {error ? <p className="inline-notice inline-notice--error" role="status">{error}</p> : null}
     {run ? <DecisionResult run={run} /> : null}
   </section>;

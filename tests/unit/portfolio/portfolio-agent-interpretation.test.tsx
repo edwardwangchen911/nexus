@@ -133,19 +133,88 @@ afterEach(() => {
 });
 
 describe("portfolio Agent interpretation", () => {
-  it("stays idle until one explicit click and persists no model output", async () => {
-    const send = vi.fn().mockResolvedValue(Response.json({ data: decisionRun() }, { status: 202 }));
+  it("discovers a persisted matching run without localStorage and never creates work", async () => {
+    const send = vi.fn().mockResolvedValue(Response.json({ data: decisionRun() }));
     vi.stubGlobal("fetch", send);
-    render(view());
 
-    expect(screen.getByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
-    expect(send).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "让 Agent 解读" }));
-    fireEvent.click(screen.getByRole("button", { name: "正在生成研究解读…" }));
+    render(view());
 
     expect(await screen.findByText("集中度有所下降，但交易成本仍未知。")).toBeVisible();
     expect(send).toHaveBeenCalledTimes(1);
     const [url, init] = send.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/v1/portfolio-decision-runs/latest?");
+    expect(init).toMatchObject({ method: "GET" });
+    expect(send.mock.calls.some(([, requestInit]) => requestInit?.method === "POST")).toBe(false);
+    const saved = JSON.parse(window.localStorage.getItem(portfolioDecisionStorageKey(
+      portfolioId, snapshotId, reportId, resultHash,
+    ))!);
+    expect(saved).toEqual({ idempotencyKey: expect.any(String), runId });
+  });
+
+  it("resumes a discovered prepared run with GET only", async () => {
+    vi.useFakeTimers();
+    const send = vi.fn()
+      .mockResolvedValueOnce(Response.json({ data: decisionRun("prepared") }))
+      .mockResolvedValueOnce(Response.json({ data: decisionRun() }));
+    vi.stubGlobal("fetch", send);
+
+    render(view());
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByRole("button", { name: "正在生成研究解读…" })).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(screen.getByText("集中度有所下降，但交易成本仍未知。")).toBeVisible();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+
+  it("retries uncertain discovery without creating a duplicate run", async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", send);
+
+    render(view());
+
+    expect(await screen.findByText(/无法确认是否已有保存的研究解读/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "继续查看 Agent 解读" }));
+    expect(await screen.findByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+
+  it("treats a mismatched discovery response as uncertain and never posts", async () => {
+    const mismatched = decisionRun();
+    mismatched.expected_scenario_result_hash = "c".repeat(64);
+    const send = vi.fn()
+      .mockResolvedValueOnce(Response.json({ data: mismatched }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", send);
+
+    render(view());
+
+    expect(await screen.findByText(/与当前调整情景不一致/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "继续查看 Agent 解读" }));
+    expect(await screen.findByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
+    expect(send.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+
+  it("creates only after discovery finds no saved run and one explicit click", async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(Response.json({ data: decisionRun() }, { status: 202 }));
+    vi.stubGlobal("fetch", send);
+    render(view());
+
+    expect(await screen.findByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
+    expect(send.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "让 Agent 解读" }));
+    fireEvent.click(screen.getByRole("button", { name: "正在生成研究解读…" }));
+
+    expect(await screen.findByText("集中度有所下降，但交易成本仍未知。")).toBeVisible();
+    expect(send).toHaveBeenCalledTimes(2);
+    const [url, init] = send.mock.calls[1] as [string, RequestInit];
     expect(url).toBe("/api/v1/portfolio-decision-runs");
     expect(JSON.parse(String(init.body))).toEqual({
       schema_version: "portfolio_decision_create_v1",
@@ -187,52 +256,58 @@ describe("portfolio Agent interpretation", () => {
   it("polls a prepared run with bounded GET and prevents duplicate POST", async () => {
     vi.useFakeTimers();
     const send = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(Response.json({ data: decisionRun("prepared") }, { status: 202 }))
       .mockResolvedValueOnce(Response.json({ data: decisionRun() }));
     vi.stubGlobal("fetch", send);
     render(view());
 
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     fireEvent.click(screen.getByRole("button", { name: "让 Agent 解读" }));
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(screen.getByRole("button", { name: "正在生成研究解读…" })).toBeDisabled();
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
 
     expect(screen.getByText("集中度有所下降，但交易成本仍未知。")).toBeVisible();
     expect(send.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
-    expect(send.mock.calls.filter(([, init]) => init?.method === "GET")).toHaveLength(1);
+    expect(send.mock.calls.filter(([, init]) => init?.method === "GET")).toHaveLength(2);
   });
 
   it("stops observing after 45 seconds without changing the durable run", async () => {
     vi.useFakeTimers();
     const send = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(Response.json({ data: decisionRun("prepared") }, { status: 202 }))
       .mockReturnValueOnce(new Promise<Response>(() => undefined));
     vi.stubGlobal("fetch", send);
     render(view());
 
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     fireEvent.click(screen.getByRole("button", { name: "让 Agent 解读" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
 
     expect(screen.getByText(/本次查看已暂停；后台运行不受影响/)).toBeVisible();
     expect(screen.getByRole("button", { name: "继续查看 Agent 解读" })).toBeEnabled();
     expect(send.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
-    expect(send.mock.calls.filter(([, init]) => init?.method === "GET")).toHaveLength(1);
+    expect(send.mock.calls.filter(([, init]) => init?.method === "GET")).toHaveLength(2);
   });
 
   it("reuses the same idempotency key after an uncertain POST result", async () => {
     const send = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockRejectedValueOnce(new TypeError("connection closed"))
       .mockResolvedValueOnce(Response.json({ data: decisionRun() }, { status: 202 }));
     vi.stubGlobal("fetch", send);
     render(view());
 
+    await screen.findByRole("button", { name: "让 Agent 解读" });
     fireEvent.click(screen.getByRole("button", { name: "让 Agent 解读" }));
     expect(await screen.findByText(/登记结果尚未确认/)).toBeVisible();
-    const firstKey = (send.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    const firstKey = (send.mock.calls[1][1] as RequestInit).headers as Record<string, string>;
     fireEvent.click(screen.getByRole("button", { name: "让 Agent 解读" }));
 
     expect(await screen.findByText("集中度有所下降，但交易成本仍未知。")).toBeVisible();
-    const secondKey = (send.mock.calls[1][1] as RequestInit).headers as Record<string, string>;
+    const secondKey = (send.mock.calls[2][1] as RequestInit).headers as Record<string, string>;
     expect(secondKey["idempotency-key"]).toBe(firstKey["idempotency-key"]);
   });
 
@@ -241,11 +316,14 @@ describe("portfolio Agent interpretation", () => {
     window.localStorage.setItem(oldKey, JSON.stringify({ idempotencyKey: "old", runId }));
     const mismatched = decisionRun();
     mismatched.expected_scenario_result_hash = "c".repeat(64);
-    const send = vi.fn().mockResolvedValue(Response.json({ data: mismatched }, { status: 202 }));
+    const send = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(Response.json({ data: mismatched }, { status: 202 }));
     vi.stubGlobal("fetch", send);
     render(view());
 
     expect(window.localStorage.getItem(oldKey)).not.toBeNull();
+    await screen.findByRole("button", { name: "让 Agent 解读" });
     fireEvent.click(screen.getByRole("button", { name: "让 Agent 解读" }));
     expect(await screen.findByText(/与当前调整情景不一致/)).toBeVisible();
     expect(screen.queryByText("集中度有所下降，但交易成本仍未知。")).not.toBeInTheDocument();

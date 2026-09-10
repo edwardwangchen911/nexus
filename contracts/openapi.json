@@ -15859,9 +15859,122 @@
               }
             },
             "description": "Stable NEXUS error envelope."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
           }
         },
         "summary": "Create Portfolio Decision Run"
+      }
+    },
+    "/internal/v1/portfolio-decision-runs/latest": {
+      "get": {
+        "description": "Return the newest persisted run for one exact frozen scenario scope.",
+        "operationId": "getLatestPortfolioDecisionRun",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "portfolio_snapshot_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Portfolio Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "diagnostic_report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Diagnostic Report Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_scenario_result_hash",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Expected Scenario Result Hash",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioDecisionRunEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Latest Portfolio Decision Run"
       }
     },
     "/internal/v1/portfolio-decision-runs/{run_id}": {
@@ -15922,6 +16035,16 @@
             "description": "Stable NEXUS error envelope."
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "500": {
             "content": {
               "application/json": {
                 "schema": {

@@ -363,6 +363,15 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       ? data
       : INVALID_DATA;
   }
+  if (pathname === "/internal/v1/portfolio-decision-runs/latest") {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, portfolioDecisionRunRuntimeSchema)
+      && isPlain(data)
+      && data.execution_locked === true
+      && portfolioDecisionStateValid(data)
+      ? data
+      : INVALID_DATA;
+  }
   const portfolioDecision = /^\/(?:api|internal)\/v1\/portfolio-decision-runs(?:\/([^/]+))?$/.exec(pathname);
   if (portfolioDecision && (!portfolioDecision[1] || validateUuid(portfolioDecision[1]))) {
     const method = requestMethod?.toUpperCase();
@@ -371,7 +380,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || !matchesRuntimeSchema(data, portfolioDecisionRunRuntimeSchema)
       || !isPlain(data)
       || portfolioDecision[1] !== undefined && !sameUuid(data.run_id, portfolioDecision[1])
-      || data.execution_locked !== true) {
+      || data.execution_locked !== true
+      || !portfolioDecisionStateValid(data)) {
       return INVALID_DATA;
     }
     return data;
@@ -458,6 +468,18 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       : INVALID_DATA;
   }
   return schemaPath === undefined && isPlain(data) ? data : INVALID_DATA;
+}
+
+function portfolioDecisionStateValid(data: Record<string, unknown>): boolean {
+  if (data.status === "prepared" || data.status === "running") return data.output === null;
+  if (!isPlain(data.output) || data.output.status !== data.status) return false;
+  if (data.status === "completed") {
+    return data.output.scenario_result_hash === data.expected_scenario_result_hash
+      && isPlain(data.output.intent);
+  }
+  return (data.status === "abstained" || data.status === "failed")
+    && data.output.scenario_result_hash === null
+    && data.output.intent === null;
 }
 
 function scenarioSemanticsValid(data: Record<string, unknown>): boolean {
