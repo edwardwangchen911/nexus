@@ -4,17 +4,26 @@ import hashlib
 import json
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.persistence import (
+    release_portfolio_decision_budget_if_reserved,
+    settle_full_portfolio_decision_budget,
+    settle_portfolio_decision_budget,
+)
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
     PortfolioDecisionInputV1,
     PortfolioDecisionModelContextV1,
     PortfolioDiagnosticSummaryV1,
+    PortfolioResearchIntentV1,
     canonical_portfolio_decision_hash,
+    validate_portfolio_intent,
 )
 from nexus.agents.portfolio_decision_persistence import canonical_portfolio_intent_schema_hash
 from nexus.agents.portfolio_decision_tools import (
@@ -24,6 +33,7 @@ from nexus.agents.portfolio_decision_tools import (
 )
 from nexus.agents.responses import ResponsesModelConfig
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.synthesis import usage_cost
 from nexus.diagnostics.models import DiagnosticItem
 from nexus.diagnostics.repository import read_report
 from nexus.optimizer.compare import TypedMetric
@@ -31,6 +41,7 @@ from nexus.optimizer.scenario_contracts import AdjustmentScenarioConstraintsV1
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
+    PortfolioDecisionOutputRecord,
     PortfolioDecisionRunRecord,
 )
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
@@ -43,6 +54,15 @@ _DIAGNOSTIC_CODES = (
     "CONCENTRATION_TOP3",
     "CONCENTRATION_HHI",
 )
+_TERMINAL_ERROR_STATUS = {
+    "PORTFOLIO_DECISION_TOOL_REQUIRED": "abstained",
+    "PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH": "abstained",
+    "PORTFOLIO_DECISION_OUTPUT_INVALID": "abstained",
+    "PORTFOLIO_DECISION_TOOL_LIMIT_EXCEEDED": "failed",
+    "PORTFOLIO_DECISION_MODEL_FAILED": "failed",
+    "PORTFOLIO_DECISION_PERSISTENCE_UNCERTAIN": "failed",
+    "PORTFOLIO_DECISION_AUTHORITY_INVALID": "failed",
+}
 
 
 class PortfolioDecisionExecutionError(ValueError):
@@ -214,6 +234,240 @@ async def load_portfolio_decision_execution_authority(
         model_config=model_config,
         tools=tools,
     )
+
+
+async def persist_portfolio_decision_terminal(
+    session: AsyncSession,
+    *,
+    run_id: UUID,
+    status: Literal["completed", "abstained", "failed"],
+    error_code: str | None,
+    intent: PortfolioResearchIntentV1 | None,
+    usage: UsageSnapshot | None,
+    usage_known: bool,
+) -> PortfolioDecisionOutputRecord:
+    """Append one terminal output and account its budget in the caller's transaction."""
+    run = await _locked_run(session, run_id)
+    if not _valid_terminal_phase_state(run):
+        raise _terminal_error()
+    existing = await session.scalar(
+        select(PortfolioDecisionOutputRecord)
+        .where(PortfolioDecisionOutputRecord.run_id == run_id)
+        .with_for_update()
+    )
+    if existing is not None or run.retry_count != 0:
+        raise _terminal_error()
+    if status == "completed":
+        if (
+            error_code is not None
+            or intent is None
+            or run.provider_phase != "second_requested"
+            or not usage_known
+        ):
+            raise _terminal_error()
+    elif (
+        intent is not None
+        or error_code is None
+        or _TERMINAL_ERROR_STATUS.get(error_code) != status
+        or (run.status, run.provider_phase) == ("prepared", "none")
+        and status != "failed"
+    ):
+        raise _terminal_error()
+    if run.status not in {"prepared", "running"}:
+        raise _terminal_error()
+
+    scenario_result_hash = _validated_scenario_result_hash(run)
+    if intent is not None:
+        try:
+            frozen = PortfolioDecisionInputV1.model_validate(run.frozen_input)
+            projection = AgentScenarioProjectionV1.model_validate(run.tool_projection)
+            citations = PortfolioCitationAuthority.from_manifest(
+                run_id=run.id,
+                manifest=run.evidence_manifest,
+                evidence_hash=run.evidence_hash,
+                decision_time=run.decision_time,
+            )
+            if (
+                intent.run_id != run.id
+                or canonical_portfolio_decision_hash(frozen) != run.input_hash
+                or frozen.portfolio_id != run.portfolio_id
+                or frozen.portfolio_snapshot_id != run.portfolio_snapshot_id
+                or frozen.diagnostic_report_id != run.diagnostic_report_id
+                or frozen.decision_time != run.decision_time
+                or frozen.evidence_hash != run.evidence_hash
+                or scenario_result_hash is None
+            ):
+                raise ValueError("completed intent is not bound to this run")
+            validate_portfolio_intent(
+                intent,
+                frozen=frozen,
+                projection=projection,
+                allowed_citation_ids=frozenset(citations.citation_ids),
+            )
+        except (TypeError, ValueError, ValidationError) as error:
+            raise _terminal_error() from error
+
+    accounted_usage = _terminal_usage(run, usage=usage, usage_known=usage_known)
+    model: AgentModelConfigRecord | None = None
+    actual_usd: Decimal | None = None
+    if accounted_usage is not None:
+        model = await session.get(AgentModelConfigRecord, run.model_config_id)
+        if (
+            model is None
+            or model.config_hash != run.model_hash
+            or model.version != run.pricing_version
+        ):
+            raise _terminal_error()
+        try:
+            actual_usd = usage_cost(
+                model,
+                accounted_usage.input_tokens,
+                accounted_usage.output_tokens,
+            )
+        except (TypeError, ValueError) as error:
+            raise _terminal_error() from error
+        if actual_usd > run.reserved_cost_usd:
+            raise _terminal_error()
+
+    intent_payload = intent.model_dump(mode="json") if intent is not None else None
+    details: dict[str, object] = {"execution_locked": True}
+    if error_code is not None:
+        details["error_code"] = error_code
+    content = {
+        "status": status,
+        "scenario_result_hash": scenario_result_hash,
+        "intent": intent_payload,
+        "details": details,
+    }
+    output = PortfolioDecisionOutputRecord(
+        run_id=run.id,
+        status=status,
+        content_hash=canonical_portfolio_decision_hash(content),
+        scenario_result_hash=scenario_result_hash,
+        intent=intent_payload,
+        details=details,
+    )
+    session.add(output)
+
+    if not usage_known:
+        await settle_full_portfolio_decision_budget(session, run_id=run.id)
+    elif accounted_usage is None:
+        await release_portfolio_decision_budget_if_reserved(session, run_id=run.id)
+    else:
+        assert actual_usd is not None
+        await settle_portfolio_decision_budget(
+            session,
+            run_id=run.id,
+            actual_usd=actual_usd,
+            input_tokens=accounted_usage.input_tokens,
+            output_tokens=accounted_usage.output_tokens,
+        )
+        run.input_tokens = accounted_usage.input_tokens
+        run.output_tokens = accounted_usage.output_tokens
+    run.status = status
+    await session.flush()
+    return output
+
+
+def _validated_scenario_result_hash(run: PortfolioDecisionRunRecord) -> str | None:
+    if run.tool_result_hash is None and run.tool_projection is None:
+        return None
+    if run.tool_result_hash is None or run.tool_projection is None:
+        return None
+    try:
+        projection = AgentScenarioProjectionV1.model_validate(run.tool_projection)
+    except (TypeError, ValidationError):
+        return None
+    return run.tool_result_hash if projection.result_hash == run.tool_result_hash else None
+
+
+def _valid_terminal_phase_state(run: PortfolioDecisionRunRecord) -> bool:
+    phase = run.provider_phase
+    if phase == "none":
+        return (
+            run.status == "prepared"
+            and run.tool_result_hash is None
+            and run.tool_projection is None
+            and run.input_tokens is None
+            and run.output_tokens is None
+        )
+    if phase == "first_requested":
+        return (
+            run.status == "running"
+            and run.tool_result_hash is None
+            and run.tool_projection is None
+            and run.input_tokens is None
+            and run.output_tokens is None
+        )
+    if phase in {"tool_recorded", "second_requested"}:
+        return (
+            run.status == "running"
+            and run.input_tokens is not None
+            and run.output_tokens is not None
+            and _validated_scenario_result_hash(run) is not None
+        )
+    return False
+
+
+def _terminal_usage(
+    run: PortfolioDecisionRunRecord,
+    *,
+    usage: UsageSnapshot | None,
+    usage_known: bool,
+) -> UsageSnapshot | None:
+    phase = run.provider_phase
+    if not isinstance(usage_known, bool):
+        raise _terminal_error()
+    if not usage_known:
+        if usage is not None or phase not in {"first_requested", "second_requested"}:
+            raise _terminal_error()
+        return None
+    if phase == "none":
+        if usage not in {None, UsageSnapshot()}:
+            raise _terminal_error()
+        return None
+    if phase == "tool_recorded":
+        if run.input_tokens is None or run.output_tokens is None:
+            raise _terminal_error()
+        persisted = UsageSnapshot(
+            input_tokens=run.input_tokens,
+            output_tokens=run.output_tokens,
+            tool_calls=1,
+            provider_calls=1,
+        )
+        if usage is not None and usage != persisted:
+            raise _terminal_error()
+        return persisted
+    if usage is None or not _valid_usage_values(usage):
+        raise _terminal_error()
+    if phase == "first_requested":
+        if usage.provider_calls != 1 or usage.tool_calls not in {0, 1}:
+            raise _terminal_error()
+        return usage
+    if phase == "second_requested":
+        if (
+            usage.provider_calls != 2
+            or usage.tool_calls != 1
+            or run.input_tokens is None
+            or run.output_tokens is None
+            or usage.input_tokens < run.input_tokens
+            or usage.output_tokens < run.output_tokens
+        ):
+            raise _terminal_error()
+        return usage
+    raise _terminal_error()
+
+
+def _valid_usage_values(usage: UsageSnapshot) -> bool:
+    values = (usage.input_tokens, usage.output_tokens, usage.tool_calls, usage.provider_calls)
+    return all(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        for value in values
+    )
+
+
+def _terminal_error() -> PortfolioDecisionExecutionError:
+    return PortfolioDecisionExecutionError("PORTFOLIO_DECISION_TERMINAL_INVALID")
 
 
 async def mark_first_requested(

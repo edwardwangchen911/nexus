@@ -395,7 +395,7 @@ class PortfolioDecisionOutputRecord(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(16))
     content_hash: Mapped[str] = mapped_column(String(64))
     scenario_result_hash: Mapped[str | None] = mapped_column(String(64))
-    intent: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    intent: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
     details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
 
 

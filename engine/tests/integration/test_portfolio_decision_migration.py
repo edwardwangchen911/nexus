@@ -22,12 +22,15 @@ _TABLES = {
 }
 
 
-def test_0048_is_the_single_migration_head() -> None:
+def test_0049_is_the_single_migration_head() -> None:
     root = Path(__file__).resolve().parents[2]
     scripts = ScriptDirectory.from_config(Config(str(root / "alembic.ini")))
-    revision = scripts.get_revision("0048_portfolio_decision_runs")
-    assert revision is not None
-    assert revision.down_revision == "0047_alpaca_market_stream"
+    revision_0048 = scripts.get_revision("0048_portfolio_decision_runs")
+    revision_0049 = scripts.get_revision("0049_pd_terminal_phases")
+    assert revision_0048 is not None
+    assert revision_0048.down_revision == "0047_alpaca_market_stream"
+    assert revision_0049 is not None
+    assert revision_0049.down_revision == "0048_portfolio_decision_runs"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
 
 
@@ -66,6 +69,23 @@ def test_0048_schema_and_downgrade_guards(
     asyncio.run(_move_fixture_to_previous_budget_day(temporary_database_url, run_id))
     command.downgrade(config, "0047_alpaca_market_stream")
     assert asyncio.run(_table_names(temporary_database_url)).isdisjoint(_TABLES)
+
+
+def test_0049_downgrade_rejects_early_abstention(
+    temporary_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = Config(str(root / "alembic.ini"))
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    command.upgrade(config, "0049_pd_terminal_phases")
+
+    command.downgrade(config, "0048_portfolio_decision_runs")
+    command.upgrade(config, "0049_pd_terminal_phases")
+    run_id = asyncio.run(_insert_guard_fixture(temporary_database_url))
+    asyncio.run(_make_fixture_early_abstained(temporary_database_url, run_id))
+
+    with pytest.raises(RuntimeError, match="early portfolio decision abstentions"):
+        command.downgrade(config, "0048_portfolio_decision_runs")
 
 
 async def _inspect_schema(database_url: str) -> dict[str, set[str]]:
@@ -152,7 +172,23 @@ async def _insert_guard_fixture(database_url: str):
                     "hash": "b" * 64,
                 },
             )
-        return run_id
+    finally:
+        await engine.dispose()
+    return run_id
+
+
+async def _make_fixture_early_abstained(database_url: str, run_id) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("SET LOCAL session_replication_role = replica"))
+            await connection.execute(
+                text(
+                    "UPDATE portfolio_decision_runs "
+                    "SET status='abstained', provider_phase='first_requested' WHERE id=:id"
+                ),
+                {"id": run_id},
+            )
     finally:
         await engine.dispose()
 
