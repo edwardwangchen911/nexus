@@ -3325,4 +3325,8 @@ synthesized、completed；保存 8 个角色输出及综合/完成输出，实�
 
 验证使用一次性 PostgreSQL 17 空库迁移到当前 head：49 项 scenario/diagnostic/what-if 单元与集成用例通过，其中明确确认 `optimization_proposal_groups`、`shadow_groups`、`paper_orders`、`paper_fills` 均为零，只新增既有脱敏审计摘要；临时容器随后停止并自动清理。前端聚焦单测、Playwright 显式点击/刷新副作用测试、TypeScript、ESLint、生成契约检查、Vinext build、Ruff 与 Mypy 均通过。没有 Provider、模型、券商同步、模拟盘或实盘调用。
 
-本切片没有把未合并工作树加载到当前本机真实服务，也没有为验收重启共享服务，因此尚未声称当前私人组合已在真实页面生成候选。合入并加载本切片后，下一次真实只读验收只允许读取已持久化快照和正式诊断并显式点击一次；若返回 `SCENARIO_BASELINE_NOT_READY` 或其他已定义阻塞，应保留真实阻塞，不用合成 fixture 代替。阶段 A 到此停止，不顺手增加 Mandate、Agent 工具、候选选择、Shadow 或通用求解器。
+功能合入主线后，用不替换现有 3302/58000 服务的隔离 3303/58001 实例读取同一份本地真实持久化数据。首次真实请求暴露出范围合同仍只接受测试夹具旧值 `equity`，而当前 12 个非零 USD 持仓实际由普通股、兼容别名、股票 ETF 和交易所交易票据组成。最小修复仅将这四个已核验的上市证券类型加入封闭白名单；标准身份、USD、美国交易所、正数量、有效价格和可卖数量检查保持不变，其他类型继续拒绝。
+
+修复后，真实组合、快照、正式诊断与情景 BFF/Engine 均返回 200；快照仍为 `READY / DECISION_READY / PASS`，正式诊断仍为 `RESEARCH_REQUIRED`。显式情景返回 12 个证券、`improved_not_met` 和 `analysis_status=partial`，交易成本保持 `estimated_cost` unknown，硬约束未被绕过，`execution_locked=true`。真实 Chrome 页面中的生成按钮可用，点击后显示候选、分析不完整、成本未知和交易锁。两次使用不同幂等键的有界验收只使脱敏审计事件从 2 增至 4；方案组保持 3，Shadow、模拟订单和成交均保持 0。未调用 Provider、模型、券商同步、模拟盘或实盘。
+
+阶段 A 到此停止，不顺手增加 Mandate、Agent 工具、候选选择、Shadow 或通用求解器。现有共享 58000 Engine 仍是旧镜像，因此 3302 前端会因新旧诊断合同不一致而拒绝该区块；本次未擅自重启共享服务。待按正常本地更新流程加载本次主线改动之后，再由常用 3302 页面使用同一能力。

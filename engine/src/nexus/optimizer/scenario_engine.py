@@ -26,6 +26,9 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _ONE_BP = Decimal("0.0001")
 _WEIGHT_QUANTUM = Decimal("0.000000000001")
+_SUPPORTED_SCENARIO_ASSET_TYPES = frozenset(
+    {"common_stock", "equity", "equity_etf", "exchange_traded_note"}
+)
 
 
 def evaluate_adjustment_scenario(
@@ -196,7 +199,7 @@ def _usd_positions(
         if (
             identity is None
             or identity.restriction != "STANDARD"
-            or identity.asset_type != "equity"
+            or identity.asset_type not in _SUPPORTED_SCENARIO_ASSET_TYPES
             or identity.currency != "USD"
             or identity.exchange not in US_EQUITY_EXCHANGES
         ):

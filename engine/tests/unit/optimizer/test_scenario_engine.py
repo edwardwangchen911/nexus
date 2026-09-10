@@ -276,6 +276,28 @@ def test_non_usd_read_only_holding_and_cash_stay_outside_usd_scenario() -> None:
     assert result.cash_current_weight == Decimal("0")
 
 
+def test_real_usd_listed_security_asset_types_are_supported() -> None:
+    snapshot = _snapshot(("40", "30", "20", "10"))
+    identities = _identities(snapshot)
+    real_asset_types = (
+        ("common_stock", "XNYS"),
+        ("equity", "XNAS"),
+        ("equity_etf", "XNAS"),
+        ("exchange_traded_note", "ARCX"),
+    )
+    for position, (asset_type, exchange) in zip(
+        snapshot.positions, real_asset_types, strict=True
+    ):
+        identities[position.instrument_id] = identities[position.instrument_id].model_copy(
+            update={"asset_type": asset_type, "exchange": exchange}
+        )
+
+    result = _evaluate(snapshot, identities=identities)
+
+    assert len(result.positions) == 4
+    assert result.execution_locked is True
+
+
 def test_usd_holding_without_standard_us_equity_identity_fails_closed() -> None:
     snapshot = _snapshot(("30", "10", "10", "10", "10", "10", "10", "10"))
     identities = _identities(snapshot)
