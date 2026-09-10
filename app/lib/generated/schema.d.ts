@@ -534,6 +534,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/portfolio-scenarios/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluate Portfolio Scenario
+         * @description Generate one deterministic, ephemeral, permanently locked scenario.
+         */
+        post: operations["evaluate_portfolio_scenario_internal_v1_portfolio_scenarios_evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/portfolios": {
         parameters: {
             query?: never;
@@ -910,6 +930,33 @@ export interface components {
              * @enum {string}
              */
             state: "PROPOSED" | "REJECTED" | "ADMITTED" | "BACKTEST_RUNNING" | "BACKTEST_FAILED" | "BACKTEST_PASSED" | "SHADOW_RUNNING" | "SHADOW_FAILED" | "EXPIRED" | "VETOED" | "PROMOTION_ELIGIBLE" | "PROMOTED" | "STALE_CHAMPION_BASELINE";
+        };
+        /** AdjustmentScenarioConstraintsRequest */
+        AdjustmentScenarioConstraintsRequest: {
+            /**
+             * Allow New Positions
+             * @constant
+             */
+            allow_new_positions: false;
+            /** Max Turnover */
+            max_turnover: string;
+            /** Minimum Cash */
+            minimum_cash: string;
+            /**
+             * Objective
+             * @constant
+             */
+            objective: "reduce_security_concentration";
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "adjustment_scenario_constraints_v1";
+            /**
+             * Universe Policy
+             * @constant
+             */
+            universe_policy: "current_holdings_only";
         };
         /** @enum {string} */
         AgentRole: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";
@@ -1610,7 +1657,7 @@ export interface components {
          * @description Client-visible error codes defined by the API contract.
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "SIMULATION_WRITE_DISABLED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "INTERNAL_ERROR";
+        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "SIMULATION_WRITE_DISABLED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SCENARIO_BASELINE_NOT_READY" | "SCENARIO_DIAGNOSTIC_MISMATCH" | "SCENARIO_AS_OF_MISMATCH" | "SCENARIO_OBJECTIVE_UNSUPPORTED" | "SCENARIO_INPUT_INVALID" | "SCENARIO_US_EQUITY_SCOPE_INVALID" | "INTERNAL_ERROR";
         /** EvidenceCompletenessSummary */
         EvidenceCompletenessSummary: {
             /** Complete */
@@ -3269,6 +3316,101 @@ export interface components {
             /** Valuation Reason */
             valuation_reason: "INCOMPLETE_CURRENCY_VALUATION" | null;
         };
+        /** PortfolioScenarioEnvelope */
+        PortfolioScenarioEnvelope: {
+            data: components["schemas"]["PortfolioScenarioResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PortfolioScenarioRequest */
+        PortfolioScenarioRequest: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            constraints: components["schemas"]["AdjustmentScenarioConstraintsRequest"];
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "portfolio_scenario_request_v1";
+        };
+        /** PortfolioScenarioResponse */
+        PortfolioScenarioResponse: {
+            /**
+             * Analysis Status
+             * @constant
+             */
+            analysis_status: "partial";
+            baseline: components["schemas"]["ScenarioMetricSetResponse"];
+            candidate: components["schemas"]["ScenarioMetricSetResponse"];
+            /** Cash Current Weight */
+            cash_current_weight: string;
+            /** Cash Target Weight */
+            cash_target_weight: string;
+            /** Diagnostic Input Hash */
+            diagnostic_input_hash: string;
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /** Hard Constraint Reasons */
+            hard_constraint_reasons: string[];
+            /**
+             * Objective
+             * @constant
+             */
+            objective: "reduce_security_concentration";
+            /**
+             * Objective Status
+             * @enum {string}
+             */
+            objective_status: "met" | "improved_not_met" | "unchanged" | "infeasible";
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /** Positions */
+            positions: components["schemas"]["ScenarioPositionResponse"][];
+            /** Request Hash */
+            request_hash: string;
+            /** Result Hash */
+            result_hash: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "portfolio_scenario_evaluation_v1";
+            /** Unknown Metrics */
+            unknown_metrics: string[];
+            /**
+             * Valuation Scope
+             * @constant
+             */
+            valuation_scope: "currency:USD";
+            /**
+             * Valuation Time
+             * Format: date-time
+             */
+            valuation_time: string;
+        };
         /** PortfolioSnapshotEnvelope */
         PortfolioSnapshotEnvelope: {
             data: components["schemas"]["PortfolioSnapshotResponse"];
@@ -4889,6 +5031,49 @@ export interface components {
              * @enum {string}
              */
             reason: "USER_REQUESTED" | "PERFORMANCE_REGRESSION" | "DATA_QUALITY_CONCERN" | "OPERATIONAL_RISK";
+        };
+        /** ScenarioMetricResponse */
+        ScenarioMetricResponse: {
+            /** Reason */
+            reason: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "known" | "unknown";
+            /** Value */
+            value: string | null;
+        };
+        /** ScenarioMetricSetResponse */
+        ScenarioMetricSetResponse: {
+            cash_weight: components["schemas"]["ScenarioMetricResponse"];
+            estimated_cost: components["schemas"]["ScenarioMetricResponse"];
+            one_way_turnover: components["schemas"]["ScenarioMetricResponse"];
+            security_hhi: components["schemas"]["ScenarioMetricResponse"];
+            security_top1: components["schemas"]["ScenarioMetricResponse"];
+            security_top3: components["schemas"]["ScenarioMetricResponse"];
+        };
+        /** ScenarioPositionResponse */
+        ScenarioPositionResponse: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "reduce" | "maintain";
+            /** Current Weight */
+            current_weight: string;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /**
+             * Reason Code
+             * @enum {string}
+             */
+            reason_code: "CONCENTRATION_REDUCTION" | "BASELINE_WEIGHT";
+            /** Target Weight */
+            target_weight: string;
         };
         /** SearchAxisSummaryResponse */
         SearchAxisSummaryResponse: {
@@ -7259,6 +7444,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PaperPortfolioEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    evaluate_portfolio_scenario_internal_v1_portfolio_scenarios_evaluate_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PortfolioScenarioRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioScenarioEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */

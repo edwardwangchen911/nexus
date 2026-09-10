@@ -24,7 +24,7 @@ from nexus.api.routes.research import router as research_router
 from nexus.api.routes.risk_audit import router as risk_audit_router
 from nexus.api.routes.strategies import router as strategies_router
 from nexus.api.routes.system import router as system_router
-from nexus.api.schemas.optimization import WhatIfRequest
+from nexus.api.schemas.optimization import PortfolioScenarioRequest, WhatIfRequest
 from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.domain.ids import new_uuid7
 from nexus.market.object_store import S3ProviderEvidenceStore
@@ -120,12 +120,11 @@ def _install_what_if_request_schema(app: FastAPI) -> None:
         document = original_openapi()
         components = document.setdefault("components", {})
         schemas = components.setdefault("schemas", {})
-        request_schema = WhatIfRequest.model_json_schema(
-            ref_template="#/components/schemas/{model}"
-        )
-        definitions = request_schema.pop("$defs", {})
-        schemas.update(definitions)
-        schemas["WhatIfRequest"] = request_schema
+        for model in (WhatIfRequest, PortfolioScenarioRequest):
+            request_schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
+            definitions = request_schema.pop("$defs", {})
+            schemas.update(definitions)
+            schemas[model.__name__] = request_schema
         return document
 
     app.openapi = openapi  # type: ignore[method-assign]

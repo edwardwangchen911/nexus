@@ -116,6 +116,53 @@
         "title": "ActiveFamilyResponse",
         "type": "object"
       },
+      "AdjustmentScenarioConstraintsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_new_positions": {
+            "const": false,
+            "title": "Allow New Positions",
+            "type": "boolean"
+          },
+          "max_turnover": {
+            "maxLength": 40,
+            "pattern": "^(?:0(?:\\.\\d{1,38})?|1(?:\\.0{1,38})?)$",
+            "title": "Max Turnover",
+            "type": "string"
+          },
+          "minimum_cash": {
+            "maxLength": 40,
+            "pattern": "^(?:0(?:\\.\\d{1,38})?|1(?:\\.0{1,38})?)$",
+            "title": "Minimum Cash",
+            "type": "string"
+          },
+          "objective": {
+            "const": "reduce_security_concentration",
+            "title": "Objective",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "adjustment_scenario_constraints_v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "universe_policy": {
+            "const": "current_holdings_only",
+            "title": "Universe Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "objective",
+          "max_turnover",
+          "minimum_cash",
+          "universe_policy",
+          "allow_new_positions"
+        ],
+        "title": "AdjustmentScenarioConstraintsRequest",
+        "type": "object"
+      },
       "AgentRole": {
         "enum": [
           "orchestrator",
@@ -1982,6 +2029,12 @@
           "PROVIDER_UNAVAILABLE",
           "EVOLUTION_BLOCKED",
           "AUTHORITY_UNAVAILABLE",
+          "SCENARIO_BASELINE_NOT_READY",
+          "SCENARIO_DIAGNOSTIC_MISMATCH",
+          "SCENARIO_AS_OF_MISMATCH",
+          "SCENARIO_OBJECTIVE_UNSUPPORTED",
+          "SCENARIO_INPUT_INVALID",
+          "SCENARIO_US_EQUITY_SCOPE_INVALID",
           "INTERNAL_ERROR"
         ],
         "title": "ErrorCode",
@@ -6256,6 +6309,194 @@
         "title": "PortfolioResearchContext",
         "type": "object"
       },
+      "PortfolioScenarioEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PortfolioScenarioResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "PortfolioScenarioEnvelope",
+        "type": "object"
+      },
+      "PortfolioScenarioRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "title": "As Of",
+            "type": "string"
+          },
+          "constraints": {
+            "$ref": "#/components/schemas/AdjustmentScenarioConstraintsRequest"
+          },
+          "diagnostic_report_id": {
+            "format": "uuid",
+            "title": "Diagnostic Report Id",
+            "type": "string"
+          },
+          "portfolio_snapshot_id": {
+            "format": "uuid",
+            "title": "Portfolio Snapshot Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "portfolio_scenario_request_v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "portfolio_snapshot_id",
+          "diagnostic_report_id",
+          "as_of",
+          "constraints"
+        ],
+        "title": "PortfolioScenarioRequest",
+        "type": "object"
+      },
+      "PortfolioScenarioResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_status": {
+            "const": "partial",
+            "title": "Analysis Status",
+            "type": "string"
+          },
+          "baseline": {
+            "$ref": "#/components/schemas/ScenarioMetricSetResponse"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/ScenarioMetricSetResponse"
+          },
+          "cash_current_weight": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Cash Current Weight",
+            "type": "string"
+          },
+          "cash_target_weight": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Cash Target Weight",
+            "type": "string"
+          },
+          "diagnostic_input_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Diagnostic Input Hash",
+            "type": "string"
+          },
+          "diagnostic_report_id": {
+            "format": "uuid",
+            "title": "Diagnostic Report Id",
+            "type": "string"
+          },
+          "execution_locked": {
+            "const": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "hard_constraint_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hard Constraint Reasons",
+            "type": "array"
+          },
+          "objective": {
+            "const": "reduce_security_concentration",
+            "title": "Objective",
+            "type": "string"
+          },
+          "objective_status": {
+            "enum": [
+              "met",
+              "improved_not_met",
+              "unchanged",
+              "infeasible"
+            ],
+            "title": "Objective Status",
+            "type": "string"
+          },
+          "portfolio_snapshot_id": {
+            "format": "uuid",
+            "title": "Portfolio Snapshot Id",
+            "type": "string"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/ScenarioPositionResponse"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Positions",
+            "type": "array"
+          },
+          "request_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "result_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Result Hash",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "portfolio_scenario_evaluation_v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "unknown_metrics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Metrics",
+            "type": "array"
+          },
+          "valuation_scope": {
+            "const": "currency:USD",
+            "title": "Valuation Scope",
+            "type": "string"
+          },
+          "valuation_time": {
+            "format": "date-time",
+            "title": "Valuation Time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "request_hash",
+          "result_hash",
+          "portfolio_snapshot_id",
+          "diagnostic_report_id",
+          "diagnostic_input_hash",
+          "valuation_time",
+          "valuation_scope",
+          "objective",
+          "analysis_status",
+          "objective_status",
+          "baseline",
+          "candidate",
+          "positions",
+          "cash_current_weight",
+          "cash_target_weight",
+          "hard_constraint_reasons",
+          "unknown_metrics",
+          "execution_locked"
+        ],
+        "title": "PortfolioScenarioResponse",
+        "type": "object"
+      },
       "PortfolioSnapshotEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -10266,6 +10507,130 @@
           "reason"
         ],
         "title": "RollbackRequest",
+        "type": "object"
+      },
+      "ScenarioMetricResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "known",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "status",
+          "value",
+          "reason"
+        ],
+        "title": "ScenarioMetricResponse",
+        "type": "object"
+      },
+      "ScenarioMetricSetResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cash_weight": {
+            "$ref": "#/components/schemas/ScenarioMetricResponse"
+          },
+          "estimated_cost": {
+            "$ref": "#/components/schemas/ScenarioMetricResponse"
+          },
+          "one_way_turnover": {
+            "$ref": "#/components/schemas/ScenarioMetricResponse"
+          },
+          "security_hhi": {
+            "$ref": "#/components/schemas/ScenarioMetricResponse"
+          },
+          "security_top1": {
+            "$ref": "#/components/schemas/ScenarioMetricResponse"
+          },
+          "security_top3": {
+            "$ref": "#/components/schemas/ScenarioMetricResponse"
+          }
+        },
+        "required": [
+          "security_top1",
+          "security_top3",
+          "security_hhi",
+          "cash_weight",
+          "one_way_turnover",
+          "estimated_cost"
+        ],
+        "title": "ScenarioMetricSetResponse",
+        "type": "object"
+      },
+      "ScenarioPositionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "reduce",
+              "maintain"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "current_weight": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Current Weight",
+            "type": "string"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "CONCENTRATION_REDUCTION",
+              "BASELINE_WEIGHT"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "target_weight": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Target Weight",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "current_weight",
+          "target_weight",
+          "action",
+          "reason_code"
+        ],
+        "title": "ScenarioPositionResponse",
         "type": "object"
       },
       "SearchAxisSummaryResponse": {
@@ -14617,6 +14982,88 @@
           }
         },
         "summary": "Get Paper Portfolio"
+      }
+    },
+    "/internal/v1/portfolio-scenarios/evaluate": {
+      "post": {
+        "description": "Generate one deterministic, ephemeral, permanently locked scenario.",
+        "operationId": "evaluate_portfolio_scenario_internal_v1_portfolio_scenarios_evaluate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortfolioScenarioRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioScenarioEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Evaluate Portfolio Scenario"
       }
     },
     "/internal/v1/portfolios": {
