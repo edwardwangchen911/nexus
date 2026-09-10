@@ -300,7 +300,7 @@ git commit -m "feat: admit bounded portfolio decision runs"
 - Produces: `run_portfolio_decision_worker_once(factory, ...) -> bool`。
 - Produces: `reconcile_orphaned_portfolio_decisions(session, now) -> int`。
 
-- [ ] **Step 1: 写模型适配器失败测试**
+- [x] **Step 1: 写模型适配器失败测试**
 
 使用 injected transport 覆盖：
 
@@ -312,7 +312,7 @@ git commit -m "feat: admit bounded portfolio decision runs"
 - result hash、citation 与 unknown 语义无效时 abstained；
 - provider 超时不重试。
 
-- [ ] **Step 2: 实现模型适配器**
+- [x] **Step 2: 实现模型适配器**
 
 ```python
 @dataclass(frozen=True)
@@ -333,7 +333,7 @@ class PortfolioDecisionResponsesModel:
 
 provider transport 调用之间不得持有 `AsyncSession` 或数据库事务。
 
-- [ ] **Step 3: 写 checkpoint 与崩溃窗口失败测试**
+- [x] **Step 3: 写 checkpoint 与崩溃窗口失败测试**
 
 在以下注入点抛出异常并提交真实 PostgreSQL 状态：
 
@@ -345,7 +345,7 @@ provider transport 调用之间不得持有 `AsyncSession` 或数据库事务。
 
 每个用例先令 lease 过期并执行 reclaim/reconcile，再断言唯一 output、run/Job 终态、预算状态和 transport 调用次数不增加。
 
-- [ ] **Step 4: 实现 fenced checkpoint**
+- [x] **Step 4: 实现 fenced checkpoint**
 
 在 `jobs/repository.py` 新增：
 
@@ -368,9 +368,9 @@ async def checkpoint_job(
 
 `apply` 内统一按 `run -> output -> reservation` 顺序；由于 helper 已先锁 Job，总顺序保持一致。
 
-- [ ] **Step 5: 实现专用 Worker 与 reconcile**
+- [x] **Step 5: 实现专用 Worker 与 reconcile**
 
-`run_worker` 每轮先运行专用组合 worker；未 claim 组合 Job 时再运行现有 general registry。现有 registry 不注册新 Job type。
+`run_worker` 每轮让专用组合 worker 与现有 general registry 各处理至多一个 Job，避免任一 backlog 饿死另一类任务。现有 registry 不注册新 Job type。
 
 终结规则：
 
@@ -381,7 +381,7 @@ async def checkpoint_job(
 - `tool_recorded` settle 已知首轮 usage；
 - `first_requested|second_requested` settle full reservation。
 
-- [ ] **Step 6: 验证并提交 Task 4**
+- [x] **Step 6: 验证并提交 Task 4**
 
 ```bash
 cd engine

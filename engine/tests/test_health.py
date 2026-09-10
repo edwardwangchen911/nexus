@@ -1,9 +1,11 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi.testclient import TestClient
 from nexus.main import create_engine_app
-from nexus.settings import EngineSettings, Environment
+from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
 from nexus.worker import run_worker
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 
 def test_engine_liveness_is_minimal() -> None:
@@ -143,3 +145,36 @@ def test_engine_production_validation_hides_input_canary() -> None:
 @pytest.mark.asyncio
 async def test_worker_startup_is_fixture_safe() -> None:
     await run_worker(EngineSettings.for_test())
+
+
+@pytest.mark.asyncio
+async def test_long_running_worker_polls_general_after_portfolio_work(monkeypatch) -> None:
+    class StopLoop(RuntimeError):
+        pass
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def begin(self):
+            return self
+
+    settings = EngineSettings.for_test()
+    settings.agent_runtime_mode = AgentRuntimeMode.RESPONSES
+    settings.openai_api_key = SecretStr("fixture-openai-key")
+    portfolio = AsyncMock(side_effect=(True, StopLoop("stop after one full cycle")))
+    general = AsyncMock(return_value=False)
+    monkeypatch.setattr("nexus.worker.session_factory", lambda _: lambda: FakeSession())
+    monkeypatch.setattr("nexus.worker._general_registry", lambda *args, **kwargs: object())
+    monkeypatch.setattr("nexus.worker.AsyncOpenAI", lambda **kwargs: object())
+    monkeypatch.setattr("nexus.worker.schedule_due_daily_pipeline", AsyncMock())
+    monkeypatch.setattr("nexus.worker._run_portfolio_decision_worker_once", portfolio)
+    monkeypatch.setattr("nexus.worker.run_job_worker_once", general)
+
+    with pytest.raises(StopLoop, match="one full cycle"):
+        await run_worker(settings, run_forever=True)
+
+    assert general.await_count == 1

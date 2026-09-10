@@ -29,6 +29,9 @@ from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import TERMINAL, execute_research_run
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.models import ResearchRequest
+from nexus.agents.portfolio_decision_worker import (
+    run_portfolio_decision_worker_once as _run_portfolio_decision_worker_once,
+)
 from nexus.agents.price_authority import (
     FrozenPriceAuthorityStatus,
     revalidate_frozen_price_authority,
@@ -78,6 +81,8 @@ _PROCESS_VERSION = CURRENT_GENERAL_WORKER_PROCESS_VERSION
 _MIGRATION_HEAD = CURRENT_MIGRATION_HEAD
 _ONCE_WORKER_ID = f"agent-once-{new_uuid7()}"
 _ONCE_STARTED_AT = datetime.now(UTC)
+_PORTFOLIO_ONCE_WORKER_ID = f"portfolio-decision-once-{new_uuid7()}"
+_PORTFOLIO_ONCE_STARTED_AT = datetime.now(UTC)
 
 
 class _AgentResearchJobPayload(BaseModel):
@@ -121,6 +126,36 @@ async def run_agent_worker_once(
     )
 
 
+async def run_portfolio_decision_worker_once(
+    settings: EngineSettings,
+    *,
+    responses_client: object | None = None,
+    job_ids: tuple[UUID, ...] | None = None,
+) -> bool:
+    """Run the dedicated no-retry portfolio decision worker once."""
+    runtime_mode = _require_worker_runtime(settings)
+    client = responses_client
+    if client is None:
+        if runtime_mode is not AgentRuntimeMode.RESPONSES or settings.openai_api_key is None:
+            return False
+        client = AsyncOpenAI(
+            api_key=settings.openai_api_key.get_secret_value(),
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            timeout=45,
+        )
+    return await _run_portfolio_decision_worker_once(
+        session_factory(settings),
+        responses_client=cast(ResponsesClient, client),
+        worker_id=_PORTFOLIO_ONCE_WORKER_ID,
+        worker_started_at=_PORTFOLIO_ONCE_STARTED_AT,
+        process_version=_PROCESS_VERSION,
+        migration_head=_MIGRATION_HEAD,
+        clock=lambda: datetime.now(UTC),
+        job_ids=job_ids,
+    )
+
+
 async def run_worker(settings: EngineSettings | None = None, *, run_forever: bool = False) -> None:
     """Validate fixture startup in tests, or poll durable jobs in the worker process."""
     configured = settings or EngineSettings()
@@ -137,7 +172,22 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
         tools=None,
     )
     worker_id = f"agent-general-{new_uuid7()}"
+    portfolio_worker_id = f"portfolio-decision-{new_uuid7()}"
     started_at = datetime.now(UTC)
+    portfolio_client: ResponsesClient | None = None
+    if (
+        configured.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+        and configured.openai_api_key is not None
+    ):
+        portfolio_client = cast(
+            ResponsesClient,
+            AsyncOpenAI(
+                api_key=configured.openai_api_key.get_secret_value(),
+                base_url="https://api.openai.com/v1",
+                max_retries=0,
+                timeout=45,
+            ),
+        )
     while True:
         now = datetime.now(UTC)
         async with factory() as session, session.begin():
@@ -147,7 +197,18 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
                 profile_id=LOCAL_SAFE_DAILY_PROFILE,
                 market_source=configured.market_provider,
             )
-        worked = await run_job_worker_once(
+        portfolio_worked = False
+        if portfolio_client is not None:
+            portfolio_worked = await _run_portfolio_decision_worker_once(
+                factory,
+                responses_client=portfolio_client,
+                worker_id=portfolio_worker_id,
+                worker_started_at=started_at,
+                process_version=_PROCESS_VERSION,
+                migration_head=_MIGRATION_HEAD,
+                clock=lambda: datetime.now(UTC),
+            )
+        general_worked = await run_job_worker_once(
             factory,
             registry=registry,
             queue=QueueName.GENERAL,
@@ -159,7 +220,7 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
             claim_registered_only=True,
             preclaim_guard=assert_daily_pipeline_schema_ready,
         )
-        if not worked:
+        if not portfolio_worked and not general_worked:
             await asyncio.sleep(0.5)
 
 
