@@ -75,7 +75,8 @@ for (const viewport of [
     } else {
       await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
     }
-    await page.getByRole("link", { name: "打开组合诊断" }).click();
+    await expect(page.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
+    await page.goto("/optimize");
     await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "组合诊断" })).toHaveAttribute("aria-current", "step");
     await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
     await expect(page.getByRole("listitem", { name: /CONCENTRATION_TOP1/ })).toContainText("-5 个百分点");
@@ -83,7 +84,7 @@ for (const viewport of [
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: `test-results/optimize-${viewport.name}.png`, fullPage: true });
     }
-    await page.getByRole("link", { name: "打开已有三方案" }).click();
+    await page.getByRole("link", { name: "查看历史三方案记录" }).click();
     await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "组合诊断" })).toHaveAttribute("aria-current", "step");
     const proposalTable = page.getByRole("table", { name: "保持现状、最小调整与策略目标的确定性比较" });
     await expect(proposalTable.getByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveCount(3);

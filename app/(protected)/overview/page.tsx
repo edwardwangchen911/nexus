@@ -42,9 +42,6 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
   const factsOnly = overview?.overview_mode === "PORTFOLIO_FACTS_ONLY"
     && overview.portfolio_snapshot !== null
     && overview.provider !== null;
-  const optimizeHref = overview
-    ? `/optimize?portfolio_id=${encodeURIComponent(overview.portfolio_id)}${overview.trading_day ? `&session_date=${overview.trading_day}` : ""}`
-    : "/optimize";
   return (
     <section className="page-stack overview-page" aria-label="投资概览页面" data-state={state}>
       <IntelligenceHeader
@@ -60,7 +57,7 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
       </DataState> : factsOnly ? <PortfolioFactsOverview overview={overview} /> : overview.diagnostic_report ? <>
         <OptimizationNeedPanel report={overview.diagnostic_report} />
         <DiagnosticList report={overview.diagnostic_report} summary />
-        <nav className="overview-links" aria-label="概览后续动作"><a className="button button--primary" href={optimizeHref}>打开组合诊断<ArrowRight aria-hidden="true" size={17} /></a>{overview.proposal_group ? <a className="button button--quiet" href={`/optimize/${overview.proposal_group.proposal_group_id}`}>查看三方案比较</a> : null}</nav>
+        <nav className="overview-links" aria-label="概览后续动作"><a className="button button--primary" href="/portfolio">生成一个调整候选<ArrowRight aria-hidden="true" size={17} /></a>{overview.proposal_group ? <a className="button button--quiet" href={`/optimize/${overview.proposal_group.proposal_group_id}`}>查看历史三方案记录</a> : null}</nav>
         <details className="portfolio-disclosure portfolio-source"><summary>报告来源与版本 · {formatUtc(overview.snapshot_as_of)}</summary><dl className="overview-report-meta numeric-data"><div><dt>交易日</dt><dd>{overview.trading_day ?? "未知"}</dd></div><div><dt>诊断策略</dt><dd>{overview.diagnostic_report.policy_version}</dd></div><div><dt>组合 ID</dt><dd>{overview.portfolio_id}</dd></div></dl></details>
       </> : <DataState state="partial" title="证据不完整" detail="暂不采取动作；尚不能判断是否需要调整。" />}
     </section>

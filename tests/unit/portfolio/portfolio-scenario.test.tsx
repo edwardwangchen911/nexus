@@ -80,7 +80,12 @@ it("stays idle until an explicit click and exposes only bounded scenario control
 it("posts intent and constraints without client-authored weights, then compares one candidate", async () => {
   let complete: ((response: Response) => void) | undefined;
   const pending = new Promise<Response>((resolve) => { complete = resolve; });
-  const send = vi.fn().mockReturnValue(pending);
+  const send = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    void init;
+    return String(input).includes("/portfolio-decision-runs/latest?")
+      ? Promise.resolve(new Response(null, { status: 404 }))
+      : pending;
+  });
   vi.stubGlobal("fetch", send);
   render(<PortfolioScenario snapshot={snapshot} report={report()} stale={false} />);
 
@@ -94,7 +99,8 @@ it("posts intent and constraints without client-authored weights, then compares 
   complete?.(Response.json({ data: scenario() }));
 
   await screen.findByRole("heading", { name: "有所改善，尚未达到阈值" });
-  expect(send).toHaveBeenCalledTimes(1);
+  expect(await screen.findByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
+  expect(send).toHaveBeenCalledTimes(2);
   expect(send.mock.calls[0][0]).toBe("/api/v1/portfolio-scenarios/evaluate");
   const init = send.mock.calls[0][1] as RequestInit;
   const body = JSON.parse(String(init.body));
@@ -130,7 +136,6 @@ it("posts intent and constraints without client-authored weights, then compares 
   expect(screen.getByText(/成本证据未完成，不能进入执行或 Shadow/)).toBeVisible();
   expect(screen.getByText(/Top1、Top3 与 HHI.*证券市值为分母，不含现金/)).toBeVisible();
   expect(screen.getAllByText(/交易保持锁定/).length).toBeGreaterThanOrEqual(2);
-  expect(screen.getByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
   expect(screen.getByText(/保持 · 20%/)).toBeVisible();
   expect(screen.getByText("分析不完整")).toBeVisible();
 

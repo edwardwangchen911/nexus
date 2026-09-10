@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers3, RefreshCw } from "lucide-react";
+import { ArrowRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
@@ -10,17 +10,15 @@ import type { components } from "../../lib/generated/schema";
 
 type Overview = components["schemas"]["OverviewResponse"];
 type OverviewEnvelope = components["schemas"]["OverviewEnvelope"];
-type Admission = components["schemas"]["ProposalAdmissionResponse"];
-type JobEnvelope = components["schemas"]["OptimizationJobEnvelope"];
-type Notice = { kind: "success" | "error"; text: string } | null;
-type Props = { state: DataStateKind; overview: Overview | null; creating: boolean; notice: Notice; onCreate: (admission: Admission) => Promise<void>; onRefresh: () => void };
+type Props = {
+  state: DataStateKind;
+  overview: Overview | null;
+  onRefresh: () => void;
+};
 
 export default function OptimizePage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [notice, setNotice] = useState<Notice>(null);
-  const pendingRef = useRef<{ body: string; key: string } | null>(null);
   const overviewRef = useRef<Overview | null>(null);
   const refresh = useCallback(async () => {
     setState("loading");
@@ -36,58 +34,34 @@ export default function OptimizePage(): React.ReactElement {
   }, []);
   useEffect(() => { const timer = globalThis.setTimeout(() => void refresh(), 0); return () => globalThis.clearTimeout(timer); }, [refresh]);
 
-  async function create(admission: Admission): Promise<void> {
-    const body = JSON.stringify(admission);
-    const pending = pendingRef.current?.body === body ? pendingRef.current : { body, key: idempotencyKey("proposal") };
-    pendingRef.current = pending; setCreating(true); setNotice(null);
-    try {
-      const response = await fetch("/api/v1/optimization-proposals", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": pending.key }, body });
-      if (!response.ok) {
-        const code = await safeErrorCode(response);
-        if (response.status < 500) pendingRef.current = null;
-        throw new Error(code);
-      }
-      const envelope = await response.json() as JobEnvelope;
-      pendingRef.current = null;
-      setNotice({ kind: "success", text: `三方案任务已入队：${envelope.data.job_id}。未创建订单。` });
-    } catch (error) {
-      setNotice({ kind: "error", text: String(error).includes("IDEMPOTENCY_CONFLICT") ? "幂等键与请求不一致；未创建新任务。" : "提案结果尚未确定；重试将沿用同一幂等键。" });
-      throw error;
-    } finally { setCreating(false); }
-  }
-  return <OptimizePanel state={state} overview={overview} creating={creating} notice={notice} onCreate={create} onRefresh={() => void refresh()} />;
+  return <OptimizePanel state={state} overview={overview} onRefresh={() => void refresh()} />;
 }
 
-export function OptimizePanel({ state, overview, creating, notice, onCreate, onRefresh }: Props): React.ReactElement {
+export function OptimizePanel({ state, overview, onRefresh }: Props): React.ReactElement {
   const diagnosticOverview = overview?.diagnostic_report ? overview : null;
   const hasData = diagnosticOverview !== null && ["ready", "partial", "stale"].includes(state);
-  const admission = diagnosticOverview?.proposal_admission ?? null;
   const hasReduceOnlyFinding = diagnosticOverview?.diagnostic_report?.items.some(
     (item) => item.actionability === "reduce_only",
   ) ?? false;
   return (
     <section className="page-stack optimize-page" aria-label="组合优化页面" data-state={state}>
-      <header className="page-heading"><div><p className="eyebrow">组合决策诊断</p><h1>组合诊断与优化</h1><p>先确认问题和准入边界，再比较同口径三方案。风险和权重始终由后端确定性计算。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新诊断</button></div></header>
+      <header className="page-heading"><div><p className="eyebrow">组合决策诊断</p><h1>组合诊断与候选</h1><p>先确认最值得处理的问题，再由确定性代码生成一个只读候选。Agent 负责解释，不生成权重。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新诊断</button></div></header>
       <DecisionPath current="diagnose" />
       {!hasData || diagnosticOverview === null ? <DataState state={state} title={state === "loading" ? "正在读取诊断" : "诊断暂时不可用"} detail="诊断数据缺失或不可用，暂不能判断是否需要调整；请核查数据后刷新。" /> : <>
         <OptimizationNeedPanel report={diagnosticOverview.diagnostic_report!} />
-        <section className="proposal-admission" aria-labelledby="proposal-admission-title"><div><p className="eyebrow">服务器准入边界</p><h2 id="proposal-admission-title">三方案准入</h2><p>{admission ? "服务器已绑定快照、数据版本与成本策略，可以开始比较。"
-          : diagnosticOverview.proposal_admission_reason === "OPTIMIZATION_AUTHORITY_MISSING"
-            ? "当前不可创建：缺少有效的三方案准入记录，请先核验所需的快照、数据版本与成本策略。"
-            : "当前不可创建：服务器未提供可用准入信息，请核查准入状态后刷新。"}</p>
-          {!admission && diagnosticOverview.proposal_admission_reason ? <details><summary>查看原因代码</summary><code>{diagnosticOverview.proposal_admission_reason}</code></details> : null}</div>
-          {diagnosticOverview.proposal_group ? <a className="button button--quiet" href={`/optimize/${diagnosticOverview.proposal_group.proposal_group_id}`}>打开已有三方案</a> : admission && state === "ready" ? <button className="button button--primary" type="button" disabled={creating} onClick={() => void onCreate(admission).catch(() => undefined)}><Layers3 aria-hidden="true" size={17} />{creating ? "正在创建" : "创建三方案比较"}</button> : null}
+        <section className="proposal-admission" aria-labelledby="proposal-admission-title"><div><p className="eyebrow">当前决策路径</p><h2 id="proposal-admission-title">一个确定性候选</h2><p>前往组合页设置最大换手率和最低现金比例，生成一个当前持仓内的只读候选。Agent 负责解释，不生成权重。</p></div>
+          <div className="page-actions"><a className="button button--primary" href="/portfolio">生成一个调整候选<ArrowRight aria-hidden="true" size={17} /></a>
+            {diagnosticOverview.proposal_group ? <a className="button button--quiet" href={`/optimize/${diagnosticOverview.proposal_group.proposal_group_id}`}>查看历史三方案记录</a> : null}</div>
         </section>
-        {notice ? <p className={`inline-notice inline-notice--${notice.kind}`} role="status">{notice.text}</p> : null}
         {!diagnosticOverview.proposal_group ? (
-          <section className="proposal-admission" aria-label="已保存三方案状态">
+          <section className="proposal-admission" aria-label="历史方案状态">
             <div>
-              <p className="eyebrow">已保存结果</p>
-              <h2>当前没有已保存的三方案比较</h2>
+              <p className="eyebrow">历史只读记录</p>
+              <h2>当前没有历史三方案记录</h2>
               <p>{hasReduceOnlyFinding
-                ? "存在降低仓位候选条件，但服务器尚未形成完整方案，仍待估值、流动性、币种、证据与策略绑定核验。"
-                : "当前诊断未提供可直接用于确定性减仓的条目，最小调整候选尚未形成。"}</p>
-              <p>下方仅展示诊断基线事实，不是三方案 13 维比较。</p>
+                ? "诊断存在降低仓位条件；新的分析请使用上方单候选入口，成本未知仍会阻止执行。"
+                : "当前诊断未提供可直接用于确定性减仓的条目；未分析不构成任何保持判断。"}</p>
+              <p>旧三方案只作为历史记录保留，不再作为新决策的创建入口。</p>
             </div>
           </section>
         ) : null}
@@ -98,5 +72,3 @@ export function OptimizePanel({ state, overview, creating, notice, onCreate, onR
 }
 
 function readOverviewQuery(): string { if (typeof location === "undefined") return ""; const source = new URLSearchParams(location.search); const output = new URLSearchParams(); for (const key of ["portfolio_id", "session_date"]) { const value = source.get(key); if (value) output.set(key, value); } return output.toString(); }
-function idempotencyKey(prefix: string): string { return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)}`; }
-async function safeErrorCode(response: Response): Promise<string> { try { return ((await response.json()) as { error?: { code?: string } }).error?.code ?? "REQUEST_FAILED"; } catch { return "REQUEST_FAILED"; } }

@@ -37,7 +37,7 @@ test("desktop overview separates loaded results from stale sources and leads wit
   const assetBox = await assets.boundingBox();
   const highlightBox = await highlights.boundingBox();
   expect(assetBox!.y + assetBox!.height).toBeLessThan(highlightBox!.y);
-  await expect(page.getByRole("link", { name: "打开组合诊断" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
   await assertReleaseAccessibility(page);
   await page.screenshot({ path: "test-results/overview-focus-desktop.png", fullPage: true });
 });
@@ -61,7 +61,7 @@ test("facts-only overview leads with assets without hiding decision boundaries",
   await expect(page.getByRole("heading", { name: "尚无诊断，暂不采取动作" })).toBeVisible();
   await expect(page.getByRole("region", { name: "数据与决策权威边界" })).toContainText("当前不可执行");
   await expect(page.getByRole("link", { name: "查看组合事实" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "打开组合诊断" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "生成一个调整候选" })).toHaveCount(0);
   await assertReleaseAccessibility(page);
   await page.screenshot({ path: "test-results/asset-first-overview-mobile.png", fullPage: true });
 });
@@ -100,9 +100,10 @@ test("no data progresses through frozen research, diagnosis, three proposals, an
   await page.getByRole("link", { name: "概览", exact: true }).click();
   await expect(page.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible();
   await page.screenshot({ path: "test-results/decision-ledger-overview-diagnostic-desktop.png", fullPage: true });
-  await page.getByRole("link", { name: "打开组合诊断" }).click();
+  await expect(page.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
+  await page.goto("/optimize");
   await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
-  await page.getByRole("link", { name: "打开已有三方案" }).click();
+  await page.getByRole("link", { name: "查看历史三方案记录" }).click();
 
   const comparison = page.getByRole("table", { name: "保持现状、最小调整与策略目标的确定性比较" });
   await expect(comparison.getByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveCount(3);

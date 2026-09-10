@@ -34,8 +34,8 @@ describe("optimization pages", () => {
     render(<OverviewPanel state="ready" overview={overviewData()} onRefresh={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "打开组合诊断" })).toHaveAttribute("href", expect.stringContaining("/optimize"));
-    expect(screen.getByRole("link", { name: "查看三方案比较" })).toHaveAttribute("href", `/optimize/${groupId}`);
+    expect(screen.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
+    expect(screen.getByRole("link", { name: "查看历史三方案记录" })).toHaveAttribute("href", `/optimize/${groupId}`);
     expect(document.body).not.toHaveTextContent(/\d+\s*\/\s*100/);
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
   });
@@ -102,14 +102,21 @@ describe("optimization pages", () => {
     expect(screen.getByRole("link", { name: "查看资产组合" })).toHaveAttribute("href", "/portfolio");
   });
 
-  it("creates a comparison only from server-supplied admission authority", async () => {
-    const onCreate = vi.fn().mockResolvedValue(undefined);
-    render(<OptimizePanel state="ready" overview={overviewData({ proposal_group: null })} creating={false} notice={null} onCreate={onCreate} onRefresh={vi.fn()} />);
+  it("does not expose legacy three-way creation even when admission authority exists", () => {
+    render(<OptimizePanel state="ready" overview={overviewData({ proposal_group: null })} onRefresh={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "创建三方案比较" }));
-    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(overviewData().proposal_admission));
-    expect(screen.getByText("服务器准入边界")).toBeVisible();
+    expect(screen.getByRole("region", { name: "一个确定性候选" })).toHaveTextContent("Agent 负责解释，不生成权重");
+    expect(screen.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
+    expect(screen.queryByRole("button", { name: "创建三方案比较" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /下单|交易/ })).not.toBeInTheDocument();
+  });
+
+  it("routes new decisions to one read-only candidate while preserving legacy groups as history", () => {
+    render(<OptimizePanel state="ready" overview={overviewData()} onRefresh={vi.fn()} />);
+
+    expect(screen.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
+    expect(screen.getByRole("link", { name: "查看历史三方案记录" })).toHaveAttribute("href", `/optimize/${groupId}`);
+    expect(screen.queryByRole("button", { name: "创建三方案比较" })).not.toBeInTheDocument();
   });
 
   it.each(["NO_ACTION", "RESEARCH_REQUIRED", "BLOCKED"] as const)(
@@ -121,12 +128,12 @@ describe("optimization pages", () => {
         ...item,
         actionability: item.actionability === "reduce_only" ? "research" : item.actionability,
       }));
-      render(<OptimizePanel state="ready" overview={overview} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+      render(<OptimizePanel state="ready" overview={overview} onRefresh={vi.fn()} />);
 
-      const region = screen.getByRole("region", { name: "已保存三方案状态" });
-      expect(region).toHaveTextContent("当前没有已保存的三方案比较");
-      expect(region).toHaveTextContent("当前诊断未提供可直接用于确定性减仓的条目，最小调整候选尚未形成");
-      expect(region).toHaveTextContent("下方仅展示诊断基线事实，不是三方案 13 维比较");
+      const region = screen.getByRole("region", { name: "历史方案状态" });
+      expect(region).toHaveTextContent("当前没有历史三方案记录");
+      expect(region).toHaveTextContent("当前诊断未提供可直接用于确定性减仓的条目");
+      expect(region).toHaveTextContent("旧三方案只作为历史记录保留");
       expect(region).not.toHaveTextContent(/保持现状更优|建议保持|无需调整|DRAFT_NO_EVIDENCED_REDUCTION/);
     },
   );
@@ -137,68 +144,54 @@ describe("optimization pages", () => {
       proposal_admission: null,
       proposal_admission_reason: "OPTIMIZATION_AUTHORITY_MISSING",
     });
-    render(<OptimizePanel state="ready" overview={overview} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+    render(<OptimizePanel state="ready" overview={overview} onRefresh={vi.fn()} />);
 
-    const availability = screen.getByRole("region", { name: "已保存三方案状态" });
-    expect(availability).toHaveTextContent("存在降低仓位候选条件，但服务器尚未形成完整方案");
-    expect(availability).toHaveTextContent("仍待估值、流动性、币种、证据与策略绑定核验");
-    expect(screen.getByRole("region", { name: "三方案准入" })).toHaveTextContent("缺少有效的三方案准入记录");
+    const availability = screen.getByRole("region", { name: "历史方案状态" });
+    expect(availability).toHaveTextContent("诊断存在降低仓位条件");
+    expect(availability).toHaveTextContent("成本未知仍会阻止执行");
+    expect(screen.getByRole("region", { name: "一个确定性候选" })).toHaveTextContent("前往组合页");
     expect(screen.queryByRole("table", { name: /三方案/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/比较结果：|推荐/)).not.toBeInTheDocument();
   });
 
   it("已有方案组时只保留原链接，不显示 no-group 状态", () => {
-    render(<OptimizePanel state="ready" overview={overviewData()} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+    render(<OptimizePanel state="ready" overview={overviewData()} onRefresh={vi.fn()} />);
 
-    expect(screen.getByRole("link", { name: "打开已有三方案" })).toHaveAttribute("href", `/optimize/${groupId}`);
-    expect(screen.queryByRole("region", { name: "已保存三方案状态" })).not.toBeInTheDocument();
-    expect(screen.queryByText("当前没有已保存的三方案比较")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看历史三方案记录" })).toHaveAttribute("href", `/optimize/${groupId}`);
+    expect(screen.queryByRole("region", { name: "历史方案状态" })).not.toBeInTheDocument();
+    expect(screen.queryByText("当前没有历史三方案记录")).not.toBeInTheDocument();
   });
 
-  it.each(["OPTIMIZATION_AUTHORITY_MISSING", null] as const)("explains unavailable admission %s without enabling creation", (reason) => {
-    const onCreate = vi.fn();
+  it.each(["OPTIMIZATION_AUTHORITY_MISSING", null] as const)("keeps legacy admission %s out of the new decision path", (reason) => {
     render(<OptimizePanel state="ready" overview={overviewData({ proposal_group: null,
       proposal_admission: null, proposal_admission_reason: reason,
-    })} creating={false} notice={null} onCreate={onCreate} onRefresh={vi.fn()} />);
-    const region = screen.getByRole("region", { name: "三方案准入" });
-    expect(region).toHaveTextContent(reason ? "缺少有效的三方案准入记录" : "服务器未提供可用准入信息");
-    if (reason) {
-      expect(within(region).getByText(reason)).not.toBeVisible();
-      fireEvent.click(within(region).getByText("查看原因代码"));
-      expect(within(region).getByText(reason)).toBeVisible();
-    }
+    })} onRefresh={vi.fn()} />);
+    const region = screen.getByRole("region", { name: "一个确定性候选" });
+    expect(region).toHaveTextContent("前往组合页");
+    expect(region).not.toHaveTextContent("三方案准入");
+    expect(screen.queryByText("OPTIMIZATION_AUTHORITY_MISSING")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "创建三方案比较" })).not.toBeInTheDocument();
-    expect(onCreate).not.toHaveBeenCalled();
   });
 
   it("does not equate missing diagnosis with a recommendation to hold", () => {
-    render(<OptimizePanel state="empty" overview={null} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+    render(<OptimizePanel state="empty" overview={null} onRefresh={vi.fn()} />);
     expect(screen.getByText("诊断数据缺失或不可用，暂不能判断是否需要调整；请核查数据后刷新。")).toBeVisible();
     expect(screen.queryByText("数据缺失或过期时保持现状。")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "创建三方案比较" })).not.toBeInTheDocument();
   });
 
-  it("reuses the proposal idempotency key while an admission result is unknown", async () => {
-    const keys: Array<string | null> = [];
-    let proposalCalls = 0;
+  it("loads diagnostics without posting a legacy proposal task", async () => {
+    const writes: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method && !["GET", "HEAD"].includes(init.method)) writes.push(String(input));
       if (String(input).startsWith("/api/v1/overview")) return Response.json({ data: overviewData({ proposal_group: null }), meta: { request_id: "0198d500-1000-7000-8000-000000001399", schema_version: "1", as_of: "2026-08-24T00:00:00Z" } });
-      if (String(input) === "/api/v1/optimization-proposals") {
-        proposalCalls += 1; keys.push(new Headers(init?.headers).get("idempotency-key"));
-        if (proposalCalls === 1) return Response.json({ error: { code: "INTERNAL_ERROR", message: "safe", request_id: "0198d500-1000-7000-8000-000000001399", details: {} } }, { status: 500 });
-        return Response.json({ data: { job_id: "0198d500-1000-7000-8000-000000001398", status: "QUEUED" }, meta: { request_id: "0198d500-1000-7000-8000-000000001399", schema_version: "1", as_of: "2026-08-24T00:00:00Z" } }, { status: 202 });
-      }
       throw new Error(`unexpected request ${String(input)}`);
     }));
 
     render(<OptimizePage />);
-    fireEvent.click(await screen.findByRole("button", { name: "创建三方案比较" }));
-    expect(await screen.findByText(/结果尚未确定/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "创建三方案比较" }));
-    expect(await screen.findByText(/三方案任务已入队/)).toBeVisible();
-    expect(proposalCalls).toBe(2);
-    expect(keys[0]).toBeTruthy();
-    expect(new Set(keys).size).toBe(1);
+    expect(await screen.findByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
+    expect(screen.queryByRole("button", { name: "创建三方案比较" })).not.toBeInTheDocument();
+    expect(writes).toEqual([]);
   });
 
   it("keeps group lifecycle limited to shadow validation and rejection", () => {
