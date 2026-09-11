@@ -12,7 +12,7 @@ from uuid import UUID
 
 import pytest
 from nexus.market.intraday_ingestion import canonical_quote_observation
-from nexus.ops.alpaca_market_stream import ARCHIVE_SCHEMA, SCHEMA
+from nexus.ops.alpaca_market_stream import ARCHIVE_SCHEMA, BATCH_SCHEMA, SCHEMA
 from nexus.optimizer.compare import TypedMetric
 from nexus.optimizer.scenario_contracts import (
     PortfolioScenarioEvaluationV2,
@@ -47,8 +47,10 @@ _SECOND_ID = UUID("019d1000-0000-7000-8000-000000000005")
 @dataclass
 class Store:
     objects: dict[str, bytes] = field(default_factory=dict)
+    read_count: int = 0
 
     async def read_raw(self, key: str, *, uri: str) -> bytes:
+        self.read_count += 1
         if uri != f"memory://{key}":
             raise ValueError("object URI mismatch")
         return self.objects[key]
@@ -59,10 +61,35 @@ def _timestamp(value: datetime) -> str:
 
 
 def _archive_payload(
-    *, symbol: str, event_at: datetime, bid: str, ask: str
+    *, symbol: str, event_at: datetime, bid: str, ask: str, batch: bool = False
 ) -> tuple[bytes, datetime]:
     started_at = event_at - timedelta(seconds=1)
     completed_at = event_at + timedelta(seconds=1)
+    requested_symbols = [symbol, "MSFT"] if batch else [symbol]
+    quote_items = [
+        {
+            "T": "q",
+            "S": symbol,
+            "bx": "V",
+            "bp": bid,
+            "bs": 1,
+            "ax": "V",
+            "ap": ask,
+            "as": 1,
+            "c": ["R"],
+            "t": _timestamp(event_at),
+            "z": "C",
+        }
+    ]
+    if batch:
+        quote_items.append(
+            {
+                **quote_items[0],
+                "S": "MSFT",
+                "bp": "29.90",
+                "ap": "30.10",
+            }
+        )
     frames = [
         json.dumps([{"T": "success", "msg": "connected"}], separators=(",", ":")).encode(),
         json.dumps([{"T": "success", "msg": "authenticated"}], separators=(",", ":")).encode(),
@@ -70,47 +97,30 @@ def _archive_payload(
             [
                 {
                     "T": "subscription",
-                    "trades": [symbol],
-                    "quotes": [symbol],
+                    "trades": requested_symbols,
+                    "quotes": requested_symbols,
                     "bars": [],
                     "updatedBars": [],
                     "dailyBars": [],
                     "statuses": [],
                     "lulds": [],
-                    "corrections": [symbol],
-                    "cancelErrors": [symbol],
+                    "corrections": requested_symbols,
+                    "cancelErrors": requested_symbols,
                 }
             ],
             separators=(",", ":"),
         ).encode(),
-        json.dumps(
-            [
-                {
-                    "T": "q",
-                    "S": symbol,
-                    "bx": "V",
-                    "bp": bid,
-                    "bs": 1,
-                    "ax": "V",
-                    "ap": ask,
-                    "as": 1,
-                    "c": ["R"],
-                    "t": _timestamp(event_at),
-                    "z": "C",
-                }
-            ],
-            separators=(",", ":"),
-        ).encode(),
+        json.dumps(quote_items, separators=(",", ":")).encode(),
     ]
     received = (started_at, started_at, event_at, completed_at)
     receipt = {
-        "schema": SCHEMA,
+        "schema": BATCH_SCHEMA if batch else SCHEMA,
         "source": "alpaca",
         "transport": "websocket",
         "origin": "wss://stream.data.alpaca.markets/v2/iex",
         "feed": "iex",
         "delivery_mode": "real_time",
-        "symbol": symbol,
+        **({"symbols": requested_symbols} if batch else {"symbol": symbol}),
         "started_at": _timestamp(started_at),
         "ended_at": _timestamp(completed_at),
         "requested_duration_seconds": 60.0,
@@ -121,7 +131,7 @@ def _archive_payload(
         "status": "bounded_complete",
         "stop_reason": "FRAME_LIMIT",
         "trade_count": 0,
-        "quote_count": 1,
+        "quote_count": len(quote_items),
         "frame_count": 4,
         "frames": [
             {
@@ -293,6 +303,7 @@ async def _seed_quote(
     bid: str = "39.90",
     ask: str = "40.10",
     sequence: int = 1,
+    batch: bool = False,
 ) -> UUID:
     artifact, quote = _quote_records(
         store,
@@ -302,6 +313,7 @@ async def _seed_quote(
         bid=bid,
         ask=ask,
         sequence=sequence,
+        batch=batch,
     )
     factory = session_factory(EngineSettings(database_url=database_url))
     async with factory() as session, session.begin():
@@ -336,8 +348,15 @@ def _quote_records(
     bid: str = "39.90",
     ask: str = "40.10",
     sequence: int = 1,
+    batch: bool = False,
 ) -> tuple[DataArtifact, LatestQuote]:
-    payload, completed_at = _archive_payload(symbol=symbol, event_at=event_at, bid=bid, ask=ask)
+    payload, completed_at = _archive_payload(
+        symbol=symbol,
+        event_at=event_at,
+        bid=bid,
+        ask=ask,
+        batch=batch,
+    )
     digest = sha256(payload).hexdigest()
     key = f"raw/market/alpaca/stream/{completed_at:%Y/%m/%d}/{digest}.json"
     store.objects[key] = payload
@@ -428,6 +447,85 @@ async def test_selects_45_second_quote_and_exactly_replays_frozen_manifest(
             session, store, snapshot, base_result, manifest
         )
     assert replayed == evidence
+
+
+@pytest.mark.asyncio
+async def test_selects_quote_from_exact_batch_stream_artifact(
+    migrated_database_url: str,
+) -> None:
+    await _seed_identities(migrated_database_url)
+    store = Store()
+    event_at = _VALUATION_TIME - timedelta(seconds=30)
+    artifact, first_quote = _quote_records(
+        store,
+        event_at=event_at,
+        batch=True,
+    )
+    second_quote = LatestQuote(
+        id=UUID("019d1000-0000-7000-8200-000000000002"),
+        instrument_id=_SECOND_ID,
+        source="alpaca",
+        feed="iex",
+        delivery_mode="real_time",
+        bid=Decimal("29.90"),
+        ask=Decimal("30.10"),
+        last=None,
+        observed_at=event_at,
+        available_at=artifact.available_at,
+        received_at=artifact.received_at,
+        revision=artifact.sha256,
+        quality_flags=[],
+        event_kind="quote",
+        content_hash=sha256(
+            canonical_quote_observation(
+                instrument_id=_SECOND_ID,
+                source="alpaca",
+                feed="iex",
+                delivery_mode="real_time",
+                event_kind="quote",
+                bid=Decimal("29.90"),
+                ask=Decimal("30.10"),
+                last=None,
+                observed_at=event_at,
+                available_at=artifact.available_at,
+                received_at=artifact.received_at,
+                revision=artifact.sha256,
+                quality_flags=(),
+            )
+        ).hexdigest(),
+        evidence_status="verified",
+        data_artifact_id=artifact.id,
+    )
+    snapshot = _snapshot()
+    base_result = _base_result(reduce_second=True)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        session.add_all((artifact, first_quote, second_quote))
+
+    async with factory() as session:
+        evidence = await select_scenario_spread_evidence(
+            session, store, snapshot, base_result
+        )
+
+    assert tuple(item.latest_quote_id for item in evidence.input.selected_quotes) == (
+        first_quote.id,
+        second_quote.id,
+    )
+    assert evidence.quotes[0].bid == Decimal("39.90")
+    assert evidence.quotes[1].bid == Decimal("29.90")
+    assert store.read_count == 1
+    result = apply_scenario_spread_cost(
+        snapshot=snapshot, base_result=base_result, evidence=evidence
+    )
+    manifest = finalize_scenario_spread_manifest(
+        evidence.input, expected_result_hash=result.result_hash
+    )
+    async with factory() as session:
+        replayed = await replay_scenario_spread_evidence(
+            session, store, snapshot, base_result, manifest
+        )
+    assert replayed == evidence
+    assert store.read_count == 2
 
 
 @pytest.mark.asyncio

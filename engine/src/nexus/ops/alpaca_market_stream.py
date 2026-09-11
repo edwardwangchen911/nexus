@@ -35,6 +35,7 @@ from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
+from nexus.persistence.models.data import DataArtifact
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.session import session_factory
 from nexus.providers.market.snapshot_contracts import SnapshotQuote, SnapshotTrade
@@ -50,10 +51,16 @@ FEEDS = {
 }
 SCHEMA = "nexus_alpaca_market_stream_receipt_v1"
 ARCHIVE_SCHEMA = "alpaca_stock_stream_v1"
+BATCH_SCHEMA = "nexus_alpaca_market_stream_batch_receipt_v1"
+# The frozen object remains the existing generic stock-stream envelope. The receipt
+# schema distinguishes one-symbol and batch transcripts without widening source policy.
+BATCH_ARCHIVE_SCHEMA = ARCHIVE_SCHEMA
 MAX_BYTES = 8 * 1024 * 1024
 MAX_FRAME = 2 * 1024 * 1024
+MAX_ENVELOPE_BYTES = 2 * MAX_BYTES
 MAX_FRAMES = 100
 MAX_DURATION_SECONDS = 300
+MAX_SYMBOLS = 32
 CLOSE_TIMEOUT_SECONDS = 1
 
 
@@ -87,6 +94,30 @@ class MarketStreamArchive:
 class MarketStreamImportResult:
     raw_sha256: str
     created_observations: int
+
+
+@dataclass(frozen=True)
+class MarketStreamBatchItem:
+    symbol: str
+    trade: SnapshotTrade | None
+    quote: SnapshotQuote | None
+
+
+@dataclass(frozen=True)
+class MarketStreamBatchArchive:
+    symbols: tuple[str, ...]
+    feed: str
+    started_at: datetime
+    completed_at: datetime
+    items: tuple[MarketStreamBatchItem, ...]
+    raw_payload: bytes
+
+
+@dataclass(frozen=True)
+class MarketStreamBatchImportResult:
+    raw_sha256: str
+    created_observations: int
+    symbols_observed: int
 
 
 def _messages(raw: bytes) -> list[dict[str, Any]]:
@@ -180,12 +211,48 @@ def _subscription(item: dict[str, Any], symbol: str) -> bool:
     )
 
 
-def _parse_archive(
+def _symbols(values: object) -> tuple[str, ...]:
+    if not isinstance(values, list | tuple) or not 1 <= len(values) <= MAX_SYMBOLS:
+        raise MarketStreamError("ALPACA_MARKET_STREAM_SYMBOLS_INVALID")
+    try:
+        symbols = tuple(sorted(validate_symbol(value) for value in values))
+    except (TypeError, ValueError):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_SYMBOLS_INVALID") from None
+    if len(set(symbols)) != len(symbols):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_SYMBOLS_INVALID")
+    return symbols
+
+
+def _batch_subscription(item: dict[str, Any], symbols: tuple[str, ...]) -> bool:
+    if item.get("T") != "subscription":
+        return False
+    expected_empty = ("bars", "updatedBars", "dailyBars", "statuses", "lulds")
+    expected = set(symbols)
+
+    def exact(values: object) -> bool:
+        return (
+            isinstance(values, list)
+            and len(values) == len(symbols)
+            and all(isinstance(value, str) for value in values)
+            and set(values) == expected
+        )
+
+    return (
+        exact(item.get("trades"))
+        and exact(item.get("quotes"))
+        and all(item.get(field) in (None, []) for field in expected_empty)
+        and (item.get("corrections") is None or exact(item.get("corrections")))
+        and (item.get("cancelErrors") is None or exact(item.get("cancelErrors")))
+    )
+
+
+def _validate_stream_receipt(
     receipt: dict[str, Any],
     frames: list[bytes],
     *,
-    receipt_raw: bytes,
-) -> MarketStreamArchive:
+    schema: str,
+    identity_key: str,
+) -> tuple[datetime, datetime]:
     required = {
         "schema",
         "source",
@@ -193,7 +260,7 @@ def _parse_archive(
         "origin",
         "feed",
         "delivery_mode",
-        "symbol",
+        identity_key,
         "started_at",
         "ended_at",
         "requested_duration_seconds",
@@ -209,16 +276,12 @@ def _parse_archive(
         "frames",
     }
     if set(receipt) != required or (
-        receipt.get("schema") != SCHEMA
+        receipt.get("schema") != schema
         or receipt.get("source") != "alpaca"
         or receipt.get("transport") != "websocket"
         or not isinstance(receipt.get("feed"), str)
         or receipt["feed"] not in FEEDS
-        or (
-            receipt.get("origin"),
-            receipt.get("delivery_mode"),
-        )
-        != FEEDS[receipt["feed"]]
+        or (receipt.get("origin"), receipt.get("delivery_mode")) != FEEDS[receipt["feed"]]
         or receipt.get("status") != "bounded_complete"
         or receipt.get("stop_reason") not in {"DURATION_LIMIT", "FRAME_LIMIT"}
         or type(receipt.get("authenticated")) is not bool
@@ -232,7 +295,6 @@ def _parse_archive(
         or not isinstance(receipt.get("frames"), list)
     ):
         raise MarketStreamError("ALPACA_MARKET_STREAM_INCOMPLETE")
-    symbol = validate_symbol(receipt["symbol"])
     started = _utc(receipt["started_at"])
     ended = _utc(receipt["ended_at"])
     duration = receipt["requested_duration_seconds"]
@@ -253,9 +315,24 @@ def _parse_archive(
         or (receipt["stop_reason"] == "DURATION_LIMIT" and elapsed < duration)
     ):
         raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
+    return started, ended
+
+
+def _replay_stream_frames(
+    receipt: dict[str, Any],
+    frames: list[bytes],
+    *,
+    symbols: tuple[str, ...],
+    started: datetime,
+    ended: datetime,
+    batch: bool,
+) -> tuple[
+    dict[str, list[tuple[int, SnapshotTrade]]],
+    dict[str, list[tuple[int, SnapshotQuote]]],
+]:
     connected = authenticated = subscribed = False
-    trades: list[tuple[int, SnapshotTrade]] = []
-    quotes: list[tuple[int, SnapshotQuote]] = []
+    trades: dict[str, list[tuple[int, SnapshotTrade]]] = {symbol: [] for symbol in symbols}
+    quotes: dict[str, list[tuple[int, SnapshotQuote]]] = {symbol: [] for symbol in symbols}
     sequence = 0
     previous_received: datetime | None = None
     for index, (entry, raw) in enumerate(zip(receipt["frames"], frames, strict=True)):
@@ -283,32 +360,38 @@ def _parse_archive(
                     raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
                 authenticated = True
             elif kind == "subscription":
-                if not authenticated or subscribed or not _subscription(item, symbol):
+                valid_subscription = (
+                    _batch_subscription(item, symbols)
+                    if batch
+                    else _subscription(item, symbols[0])
+                )
+                if not authenticated or subscribed or not valid_subscription:
                     raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
                 subscribed = True
-            elif kind == "t":
-                if not subscribed:
+            elif kind in {"t", "q"}:
+                symbol = item.get("S")
+                if not subscribed or symbol not in trades:
                     raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
                 sequence += 1
-                trades.append((sequence, _trade(item, symbol)))
-            elif kind == "q":
-                if not subscribed:
-                    raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
-                sequence += 1
-                quotes.append((sequence, _quote(item, symbol)))
+                if kind == "t":
+                    trades[symbol].append((sequence, _trade(item, symbol)))
+                else:
+                    quotes[symbol].append((sequence, _quote(item, symbol)))
             else:
                 raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
     if (
         not connected
         or not authenticated
         or not subscribed
-        or len(trades) != receipt["trade_count"]
-        or len(quotes) != receipt["quote_count"]
+        or sum(map(len, trades.values())) != receipt["trade_count"]
+        or sum(map(len, quotes.values())) != receipt["quote_count"]
     ):
         raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
-    if not trades and not quotes:
-        raise MarketStreamError("ALPACA_MARKET_STREAM_EMPTY")
-    raw_payload = json.dumps(
+    return trades, quotes
+
+
+def _frozen_stream_payload(receipt_raw: bytes, frames: list[bytes]) -> bytes:
+    return json.dumps(
         {
             "schema": ARCHIVE_SCHEMA,
             "receipt_base64": base64.b64encode(receipt_raw).decode(),
@@ -317,8 +400,38 @@ def _parse_archive(
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    latest_trade = max(trades, key=lambda value: (value[1].observed_at, value[0]), default=None)
-    latest_quote = max(quotes, key=lambda value: (value[1].observed_at, value[0]), default=None)
+
+
+def _parse_archive(
+    receipt: dict[str, Any],
+    frames: list[bytes],
+    *,
+    receipt_raw: bytes,
+) -> MarketStreamArchive:
+    started, ended = _validate_stream_receipt(
+        receipt, frames, schema=SCHEMA, identity_key="symbol"
+    )
+    symbol = validate_symbol(receipt["symbol"])
+    trades, quotes = _replay_stream_frames(
+        receipt,
+        frames,
+        symbols=(symbol,),
+        started=started,
+        ended=ended,
+        batch=False,
+    )
+    if not trades[symbol] and not quotes[symbol]:
+        raise MarketStreamError("ALPACA_MARKET_STREAM_EMPTY")
+    latest_trade = max(
+        trades[symbol],
+        key=lambda value: (value[1].observed_at, value[0]),
+        default=None,
+    )
+    latest_quote = max(
+        quotes[symbol],
+        key=lambda value: (value[1].observed_at, value[0]),
+        default=None,
+    )
     return MarketStreamArchive(
         symbol=symbol,
         feed=receipt["feed"],
@@ -326,11 +439,66 @@ def _parse_archive(
         completed_at=ended,
         trade=None if latest_trade is None else latest_trade[1],
         quote=None if latest_quote is None else latest_quote[1],
-        raw_payload=raw_payload,
+        raw_payload=_frozen_stream_payload(receipt_raw, frames),
     )
 
 
-def load_market_stream_archive(directory: Path) -> MarketStreamArchive:
+def _parse_batch_archive(
+    receipt: dict[str, Any],
+    frames: list[bytes],
+    *,
+    receipt_raw: bytes,
+) -> MarketStreamBatchArchive:
+    started, ended = _validate_stream_receipt(
+        receipt, frames, schema=BATCH_SCHEMA, identity_key="symbols"
+    )
+    symbols = _symbols(receipt["symbols"])
+    if list(symbols) != receipt["symbols"]:
+        raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
+    trades, quotes = _replay_stream_frames(
+        receipt,
+        frames,
+        symbols=symbols,
+        started=started,
+        ended=ended,
+        batch=True,
+    )
+    items = tuple(
+        MarketStreamBatchItem(
+            symbol=symbol,
+            trade=(
+                None
+                if not trades[symbol]
+                else max(
+                    trades[symbol],
+                    key=lambda value: (value[1].observed_at, value[0]),
+                )[1]
+            ),
+            quote=(
+                None
+                if not quotes[symbol]
+                else max(
+                    quotes[symbol],
+                    key=lambda value: (value[1].observed_at, value[0]),
+                )[1]
+            ),
+        )
+        for symbol in symbols
+        if trades[symbol] or quotes[symbol]
+    )
+    if not items:
+        raise MarketStreamError("ALPACA_MARKET_STREAM_EMPTY")
+    return MarketStreamBatchArchive(
+        symbols=symbols,
+        feed=receipt["feed"],
+        started_at=started,
+        completed_at=ended,
+        items=items,
+        raw_payload=_frozen_stream_payload(receipt_raw, frames),
+    )
+
+
+def _load_stream_directory(directory: Path) -> tuple[dict[str, Any], bytes, list[bytes]]:
     try:
         directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         metadata = os.fstat(directory_fd)
@@ -359,33 +527,160 @@ def load_market_stream_archive(directory: Path) -> MarketStreamArchive:
     finally:
         if "directory_fd" in locals():
             os.close(directory_fd)
+    return receipt, receipt_raw, frames
+
+
+def load_market_stream_batch_archive(directory: Path) -> MarketStreamBatchArchive:
+    receipt, receipt_raw, frames = _load_stream_directory(directory)
+    return _parse_batch_archive(receipt, frames, receipt_raw=receipt_raw)
+
+
+def load_market_stream_archive(directory: Path) -> MarketStreamArchive:
+    receipt, receipt_raw, frames = _load_stream_directory(directory)
     return _parse_archive(receipt, frames, receipt_raw=receipt_raw)
 
 
 def parse_market_stream_raw_payload(raw: bytes) -> MarketStreamArchive:
     """Parse one exact frozen stream envelope without filesystem access."""
     try:
-        envelope = json.loads(raw, object_pairs_hook=_unique)
-        if (
-            not isinstance(envelope, dict)
-            or set(envelope) != {"schema", "receipt_base64", "frames_base64"}
-            or envelope["schema"] != ARCHIVE_SCHEMA
-            or not isinstance(envelope["receipt_base64"], str)
-            or not isinstance(envelope["frames_base64"], list)
-            or len(envelope["frames_base64"]) > MAX_FRAMES
-            or any(not isinstance(value, str) for value in envelope["frames_base64"])
-        ):
-            raise ValueError
-        receipt_raw = base64.b64decode(envelope["receipt_base64"], validate=True)
-        frames = [base64.b64decode(value, validate=True) for value in envelope["frames_base64"]]
-        receipt = json.loads(receipt_raw, object_pairs_hook=_unique)
-        if not isinstance(receipt, dict):
-            raise ValueError
+        receipt, receipt_raw, frames = _decode_stream_envelope(raw)
         return _parse_archive(receipt, frames, receipt_raw=receipt_raw)
     except MarketStreamError:
         raise
     except (binascii.Error, json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError):
         raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID") from None
+
+
+def parse_market_stream_batch_raw_payload(raw: bytes) -> MarketStreamBatchArchive:
+    """Parse one exact frozen batch stream envelope without filesystem access."""
+    try:
+        receipt, receipt_raw, frames = _decode_stream_envelope(raw)
+        return _parse_batch_archive(receipt, frames, receipt_raw=receipt_raw)
+    except MarketStreamError:
+        raise
+    except (binascii.Error, json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID") from None
+
+
+def _decode_stream_envelope(raw: bytes) -> tuple[dict[str, Any], bytes, list[bytes]]:
+    if not 0 < len(raw) <= MAX_ENVELOPE_BYTES:
+        raise ValueError
+    envelope = json.loads(raw, object_pairs_hook=_unique)
+    if (
+        not isinstance(envelope, dict)
+        or set(envelope) != {"schema", "receipt_base64", "frames_base64"}
+        or envelope["schema"] != ARCHIVE_SCHEMA
+        or not isinstance(envelope["receipt_base64"], str)
+        or not isinstance(envelope["frames_base64"], list)
+        or len(envelope["frames_base64"]) > MAX_FRAMES
+        or any(not isinstance(value, str) for value in envelope["frames_base64"])
+    ):
+        raise ValueError
+    receipt_raw = base64.b64decode(envelope["receipt_base64"], validate=True)
+    frames = [base64.b64decode(value, validate=True) for value in envelope["frames_base64"]]
+    if (
+        not 0 < len(receipt_raw) <= 256 * 1024
+        or any(not 0 < len(frame) <= MAX_FRAME for frame in frames)
+        or sum(map(len, frames)) > MAX_BYTES
+    ):
+        raise ValueError
+    receipt = json.loads(receipt_raw, object_pairs_hook=_unique)
+    if not isinstance(receipt, dict):
+        raise ValueError
+    return receipt, receipt_raw, frames
+
+
+async def _archive_stream_artifact(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    raw_payload: bytes,
+    completed_at: datetime,
+    observations: tuple[SnapshotTrade | SnapshotQuote, ...],
+) -> tuple[DataArtifact, str]:
+    raw_digest = sha256(raw_payload).hexdigest()
+    raw_key = f"raw/market/alpaca/stream/{completed_at:%Y/%m/%d}/{raw_digest}.json"
+    raw_uri = await store.archive_raw(raw_key, raw_payload)
+    if not object_uri_matches_key(raw_uri, raw_key):
+        raise RuntimeError("ALPACA_MARKET_STREAM_OBJECT_URI_MISMATCH")
+    if await store.read_raw(raw_key, uri=raw_uri) != raw_payload:
+        raise RuntimeError("ALPACA_MARKET_STREAM_OBJECT_READBACK_MISMATCH")
+    observed_at = max(value.observed_at for value in observations)
+    artifact, _ = await _get_or_create_artifact(
+        session,
+        uri=raw_uri,
+        digest=raw_digest,
+        byte_size=len(raw_payload),
+        mime_type="application/json",
+        schema_version=ARCHIVE_SCHEMA,
+        source="alpaca",
+        observed_at=observed_at,
+        available_at=completed_at,
+        received_at=completed_at,
+    )
+    if (
+        artifact.observed_at != observed_at
+        or artifact.available_at != completed_at
+        or artifact.received_at != completed_at
+    ):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_ARTIFACT_REPLAY_CONFLICT")
+    return artifact, raw_digest
+
+
+async def _insert_stream_observations(
+    session: AsyncSession,
+    *,
+    artifact: DataArtifact,
+    instrument_id: UUID,
+    trade: SnapshotTrade | None,
+    quote: SnapshotQuote | None,
+    completed_at: datetime,
+    revision: str,
+) -> int:
+    created = 0
+    if trade is not None:
+        created += int(
+            await _insert_observation(
+                session,
+                raw_artifact=artifact,
+                instrument_id=instrument_id,
+                source="alpaca",
+                feed="iex",
+                delivery_mode="real_time",
+                event_kind="trade",
+                bid=None,
+                ask=None,
+                last=trade.price,
+                observed_at=trade.observed_at,
+                available_at=completed_at,
+                received_at=completed_at,
+                revision=revision,
+                quality_flags=trade.quality_flags,
+                provider_binding=None,
+            )
+        )
+    if quote is not None:
+        created += int(
+            await _insert_observation(
+                session,
+                raw_artifact=artifact,
+                instrument_id=instrument_id,
+                source="alpaca",
+                feed="iex",
+                delivery_mode="real_time",
+                event_kind="quote",
+                bid=quote.bid,
+                ask=quote.ask,
+                last=None,
+                observed_at=quote.observed_at,
+                available_at=completed_at,
+                received_at=completed_at,
+                revision=revision,
+                quality_flags=(),
+                provider_binding=None,
+            )
+        )
+    return created
 
 
 async def import_market_stream(
@@ -429,77 +724,113 @@ async def import_market_stream(
     ).all()
     if len(identity_rows) != 1:
         raise MarketStreamError("ALPACA_MARKET_STREAM_IDENTITY_REQUIRED")
-    raw_digest = sha256(archive.raw_payload).hexdigest()
-    date_path = archive.completed_at.strftime("%Y/%m/%d")
-    raw_key = f"raw/market/alpaca/stream/{date_path}/{raw_digest}.json"
-    raw_uri = await store.archive_raw(raw_key, archive.raw_payload)
-    if not object_uri_matches_key(raw_uri, raw_key):
-        raise RuntimeError("ALPACA_MARKET_STREAM_OBJECT_URI_MISMATCH")
-    if await store.read_raw(raw_key, uri=raw_uri) != archive.raw_payload:
-        raise RuntimeError("ALPACA_MARKET_STREAM_OBJECT_READBACK_MISMATCH")
-    observed_at = max(value.observed_at for value in observations)
-    artifact, _ = await _get_or_create_artifact(
+    artifact, raw_digest = await _archive_stream_artifact(
         session,
-        uri=raw_uri,
-        digest=raw_digest,
-        byte_size=len(archive.raw_payload),
-        mime_type="application/json",
-        schema_version=ARCHIVE_SCHEMA,
-        source="alpaca",
-        observed_at=observed_at,
-        available_at=archive.completed_at,
-        received_at=archive.completed_at,
+        store,
+        raw_payload=archive.raw_payload,
+        completed_at=archive.completed_at,
+        observations=observations,
     )
-    if (
-        artifact.observed_at != observed_at
-        or artifact.available_at != archive.completed_at
-        or artifact.received_at != archive.completed_at
-    ):
-        raise MarketStreamError("ALPACA_MARKET_STREAM_ARTIFACT_REPLAY_CONFLICT")
-    created = 0
-    if archive.trade is not None:
-        created += int(
-            await _insert_observation(
-                session,
-                raw_artifact=artifact,
-                instrument_id=instrument_id,
-                source="alpaca",
-                feed="iex",
-                delivery_mode="real_time",
-                event_kind="trade",
-                bid=None,
-                ask=None,
-                last=archive.trade.price,
-                observed_at=archive.trade.observed_at,
-                available_at=archive.completed_at,
-                received_at=archive.completed_at,
-                revision=raw_digest,
-                quality_flags=archive.trade.quality_flags,
-                provider_binding=None,
-            )
-        )
-    if archive.quote is not None:
-        created += int(
-            await _insert_observation(
-                session,
-                raw_artifact=artifact,
-                instrument_id=instrument_id,
-                source="alpaca",
-                feed="iex",
-                delivery_mode="real_time",
-                event_kind="quote",
-                bid=archive.quote.bid,
-                ask=archive.quote.ask,
-                last=None,
-                observed_at=archive.quote.observed_at,
-                available_at=archive.completed_at,
-                received_at=archive.completed_at,
-                revision=raw_digest,
-                quality_flags=(),
-                provider_binding=None,
-            )
-        )
+    created = await _insert_stream_observations(
+        session,
+        artifact=artifact,
+        instrument_id=instrument_id,
+        trade=archive.trade,
+        quote=archive.quote,
+        completed_at=archive.completed_at,
+        revision=raw_digest,
+    )
     return MarketStreamImportResult(raw_sha256=raw_digest, created_observations=created)
+
+
+async def import_market_stream_batch(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    bindings: dict[str, UUID],
+    directory: Path,
+    imported_at: datetime,
+) -> MarketStreamBatchImportResult:
+    """Import available observations from one bounded multi-symbol IEX transcript."""
+    if imported_at.tzinfo is None or imported_at.utcoffset() != timedelta(0):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_IMPORT_TIME_INVALID")
+    archive = load_market_stream_batch_archive(directory)
+    if archive.feed != "iex":
+        raise MarketStreamError("ALPACA_MARKET_STREAM_IMPORT_FEED_UNSUPPORTED")
+    if (
+        set(bindings) != set(archive.symbols)
+        or any(type(value) is not UUID for value in bindings.values())
+        or len(set(bindings.values())) != len(bindings)
+    ):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_BINDINGS_INVALID")
+    observations = tuple(
+        observation
+        for item in archive.items
+        for observation in (item.trade, item.quote)
+        if observation is not None
+    )
+    if archive.completed_at > imported_at or any(
+        value.observed_at > archive.completed_at for value in observations
+    ):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_TIME_INVALID")
+
+    identity_rows = (
+        await session.execute(
+            select(InstrumentAlias, Instrument)
+            .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
+            .where(
+                InstrumentAlias.instrument_id.in_(tuple(bindings.values())),
+                InstrumentAlias.symbol.in_(archive.symbols),
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.created_at <= archive.completed_at,
+                Instrument.currency == "USD",
+                Instrument.exchange.in_(US_EQUITY_EXCHANGES),
+            )
+        )
+    ).all()
+    items = {item.symbol: item for item in archive.items}
+    for symbol, instrument_id in bindings.items():
+        item = items.get(symbol)
+        event_dates = {
+            value.observed_at.date()
+            for value in (() if item is None else (item.trade, item.quote))
+            if value is not None
+        } or {archive.completed_at.date()}
+        for event_date in event_dates:
+            matches = [
+                alias
+                for alias, _ in identity_rows
+                if alias.symbol == symbol
+                and alias.instrument_id == instrument_id
+                and alias.valid_from <= event_date
+                and (alias.valid_to is None or alias.valid_to >= event_date)
+            ]
+            if len(matches) != 1:
+                raise MarketStreamError("ALPACA_MARKET_STREAM_IDENTITY_REQUIRED")
+
+    artifact, raw_digest = await _archive_stream_artifact(
+        session,
+        store,
+        raw_payload=archive.raw_payload,
+        completed_at=archive.completed_at,
+        observations=observations,
+    )
+    created = 0
+    for item in archive.items:
+        created += await _insert_stream_observations(
+            session,
+            artifact=artifact,
+            instrument_id=bindings[item.symbol],
+            trade=item.trade,
+            quote=item.quote,
+            completed_at=archive.completed_at,
+            revision=raw_digest,
+        )
+    return MarketStreamBatchImportResult(
+        raw_sha256=raw_digest,
+        created_observations=created,
+        symbols_observed=len(archive.items),
+    )
 
 
 def _read_private(directory_fd: int, name: str, maximum: int) -> bytes:
@@ -524,18 +855,20 @@ def _read_private(directory_fd: int, name: str, maximum: int) -> bytes:
     return payload
 
 
-async def collect_market_stream(
+async def _collect_market_stream_symbols(
     *,
-    symbol: str,
+    symbols: tuple[str, ...],
     directory: Path,
     key: str,
     secret: str,
-    feed: str = "iex",
+    feed: str,
+    batch: bool,
     duration: float = 60,
     max_frames: int = MAX_FRAMES,
     connector: Any = _FixedConnect,
 ) -> dict[str, object]:
-    symbol = validate_symbol(symbol)
+    """Collect one exact bounded transcript using the shared socket safety loop."""
+    symbols = _symbols(symbols)
     try:
         url, delivery_mode = FEEDS[feed]
     except (KeyError, TypeError):
@@ -564,18 +897,19 @@ async def collect_market_stream(
         directory.mkdir(mode=0o700)
     except OSError:
         raise MarketStreamError("ALPACA_MARKET_STREAM_NEW_OUTPUT_REQUIRED") from None
+
     started = datetime.now(UTC)
     start_monotonic = monotonic()
     requested_duration = float(duration)
     deadline = start_monotonic + requested_duration
     receipt: dict[str, Any] = {
-        "schema": SCHEMA,
+        "schema": BATCH_SCHEMA if batch else SCHEMA,
         "source": "alpaca",
         "transport": "websocket",
         "origin": url,
         "feed": feed,
         "delivery_mode": delivery_mode,
-        "symbol": symbol,
+        **({"symbols": list(symbols)} if batch else {"symbol": symbols[0]}),
         "started_at": started.isoformat().replace("+00:00", "Z"),
         "authenticated": False,
         "subscription_confirmed": False,
@@ -587,6 +921,7 @@ async def collect_market_stream(
         "requested_duration_seconds": requested_duration,
         "requested_max_frames": max_frames,
     }
+    observed_symbols: set[str] = set()
     total_bytes = 0
     connected = False
     cancelled: asyncio.CancelledError | None = None
@@ -647,8 +982,8 @@ async def collect_market_stream(
                                 json.dumps(
                                     {
                                         "action": "subscribe",
-                                        "trades": [symbol],
-                                        "quotes": [symbol],
+                                        "trades": list(symbols),
+                                        "quotes": list(symbols),
                                     },
                                     separators=(",", ":"),
                                 )
@@ -657,20 +992,25 @@ async def collect_market_stream(
                             if (
                                 not receipt["authenticated"]
                                 or receipt["subscription_confirmed"]
-                                or not _subscription(item, symbol)
+                                or not (
+                                    _batch_subscription(item, symbols)
+                                    if batch
+                                    else _subscription(item, symbols[0])
+                                )
                             ):
                                 raise MarketStreamError("SUBSCRIPTION_INVALID")
                             receipt["subscription_confirmed"] = True
-                        elif kind == "t":
-                            if not receipt["subscription_confirmed"]:
-                                raise MarketStreamError("SUBSCRIPTION_INVALID")
-                            _trade(item, symbol)
-                            receipt["trade_count"] += 1
-                        elif kind == "q":
-                            if not receipt["subscription_confirmed"]:
-                                raise MarketStreamError("SUBSCRIPTION_INVALID")
-                            _quote(item, symbol)
-                            receipt["quote_count"] += 1
+                        elif kind in {"t", "q"}:
+                            symbol = item.get("S")
+                            if not receipt["subscription_confirmed"] or symbol not in symbols:
+                                raise MarketStreamError("PROTOCOL_INVALID")
+                            if kind == "t":
+                                _trade(item, symbol)
+                                receipt["trade_count"] += 1
+                            else:
+                                _quote(item, symbol)
+                                receipt["quote_count"] += 1
+                            observed_symbols.add(symbol)
                         elif kind == "error":
                             code = item.get("code")
                             allowed = {400, 401, 402, 403, 404, 405, 406, 407, 409, 410, 500}
@@ -692,7 +1032,6 @@ async def collect_market_stream(
             except Exception:
                 receipt["stop_reason"] = "DISCONNECTED"
             finally:
-                # The bounded receive window excludes websocket close cleanup.
                 receipt["ended_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
                 receipt["elapsed_monotonic_seconds"] = monotonic() - start_monotonic
     except asyncio.CancelledError as error:
@@ -715,18 +1054,68 @@ async def collect_market_stream(
     write_private(directory / "receipt.json", json.dumps(receipt, sort_keys=True).encode())
     if cancelled is not None:
         raise cancelled
-    return {
-        field: receipt[field]
-        for field in (
-            "status",
-            "stop_reason",
-            "authenticated",
-            "subscription_confirmed",
-            "trade_count",
-            "quote_count",
-            "frame_count",
-        )
+    result = {
+        "status": receipt["status"],
+        "stop_reason": receipt["stop_reason"],
+        "authenticated": receipt["authenticated"],
+        "subscription_confirmed": receipt["subscription_confirmed"],
+        "trade_count": receipt["trade_count"],
+        "quote_count": receipt["quote_count"],
+        "frame_count": receipt["frame_count"],
     }
+    if batch:
+        result.update(
+            symbols_requested=len(symbols),
+            symbols_observed=len(observed_symbols),
+        )
+    return result
+
+
+async def collect_market_stream(
+    *,
+    symbol: str,
+    directory: Path,
+    key: str,
+    secret: str,
+    feed: str = "iex",
+    duration: float = 60,
+    max_frames: int = MAX_FRAMES,
+    connector: Any = _FixedConnect,
+) -> dict[str, object]:
+    return await _collect_market_stream_symbols(
+        symbols=(validate_symbol(symbol),),
+        directory=directory,
+        key=key,
+        secret=secret,
+        feed=feed,
+        batch=False,
+        duration=duration,
+        max_frames=max_frames,
+        connector=connector,
+    )
+
+
+async def collect_market_stream_batch(
+    *,
+    symbols: tuple[str, ...],
+    directory: Path,
+    key: str,
+    secret: str,
+    duration: float = 60,
+    max_frames: int = MAX_FRAMES,
+    connector: Any = _FixedConnect,
+) -> dict[str, object]:
+    return await _collect_market_stream_symbols(
+        symbols=symbols,
+        directory=directory,
+        key=key,
+        secret=secret,
+        feed="iex",
+        batch=True,
+        duration=duration,
+        max_frames=max_frames,
+        connector=connector,
+    )
 
 
 def _require_local_services(settings: EngineSettings) -> None:
@@ -784,6 +1173,59 @@ async def import_market_stream_local(
             )
 
 
+async def import_market_stream_batch_local(
+    settings: EngineSettings,
+    *,
+    bindings: dict[str, UUID],
+    directory: Path,
+) -> MarketStreamBatchImportResult:
+    _require_local_services(settings)
+    store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+    factory = session_factory(settings)
+    async with asyncio.timeout(120):
+        async with factory.begin() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                {"key": SCHEMA_ADMISSION_LOCK_KEY},
+            )
+            head = await session.scalar(
+                text(
+                    "SELECT CASE WHEN COUNT(*) = 1 THEN MIN(version_num) END "
+                    "FROM public.alembic_version"
+                )
+            )
+            if head != CURRENT_MIGRATION_HEAD:
+                raise MarketStreamError("ALPACA_MARKET_STREAM_SCHEMA_NOT_READY")
+            imported_at = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(imported_at, datetime):
+                raise RuntimeError("ALPACA_MARKET_STREAM_DATABASE_CLOCK_INVALID")
+            return await import_market_stream_batch(
+                session,
+                store,
+                bindings=bindings,
+                directory=directory,
+                imported_at=imported_at,
+            )
+
+
+def _parse_bindings(values: list[str]) -> dict[str, UUID]:
+    bindings: dict[str, UUID] = {}
+    try:
+        for value in values:
+            symbol_raw, separator, instrument_raw = value.partition("=")
+            if not separator:
+                raise ValueError
+            symbol = validate_symbol(symbol_raw)
+            if symbol in bindings:
+                raise ValueError
+            bindings[symbol] = UUID(instrument_raw)
+    except (AttributeError, TypeError, ValueError):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_BINDINGS_INVALID") from None
+    if not bindings:
+        raise MarketStreamError("ALPACA_MARKET_STREAM_BINDINGS_INVALID")
+    return bindings
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -794,11 +1236,22 @@ def main(argv: list[str] | None = None) -> int:
     collect_parser.add_argument("--output-dir", type=Path, required=True)
     collect_parser.add_argument("--duration", type=float, default=60)
     collect_parser.add_argument("--max-frames", type=int, default=MAX_FRAMES)
+    collect_batch_parser = commands.add_parser("collect-batch")
+    collect_batch_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    collect_batch_parser.add_argument("--symbol", action="append", required=True)
+    collect_batch_parser.add_argument("--output-dir", type=Path, required=True)
+    collect_batch_parser.add_argument("--duration", type=float, default=60)
+    collect_batch_parser.add_argument("--max-frames", type=int, default=MAX_FRAMES)
     import_parser = commands.add_parser("import")
     import_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     import_parser.add_argument("--instrument-id", type=UUID, required=True)
     import_parser.add_argument("--stream-dir", type=Path, required=True)
     import_parser.add_argument("--output", type=Path, required=True)
+    import_batch_parser = commands.add_parser("import-batch")
+    import_batch_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    import_batch_parser.add_argument("--binding", action="append", required=True)
+    import_batch_parser.add_argument("--stream-dir", type=Path, required=True)
+    import_batch_parser.add_argument("--output", type=Path, required=True)
     import_started = False
     try:
         args = parser.parse_args(argv)
@@ -815,25 +1268,56 @@ def main(argv: list[str] | None = None) -> int:
                     max_frames=args.max_frames,
                 )
             )
+        elif args.command == "collect-batch":
+            result = asyncio.run(
+                collect_market_stream_batch(
+                    symbols=tuple(args.symbol),
+                    directory=args.output_dir,
+                    key=environment.get("ALPACA_API_KEY_ID", ""),
+                    secret=environment.get("ALPACA_API_SECRET_KEY", ""),
+                    duration=args.duration,
+                    max_frames=args.max_frames,
+                )
+            )
         else:
             settings = EngineSettings.model_validate(environment)
+            batch_bindings = (
+                _parse_bindings(args.binding) if args.command == "import-batch" else None
+            )
             descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w") as output:
                 json.dump({"status": "started"}, output)
                 output.flush()
                 os.fsync(output.fileno())
                 import_started = True
-                imported = asyncio.run(
-                    import_market_stream_local(
-                        settings,
-                        instrument_id=args.instrument_id,
-                        directory=args.stream_dir,
+                imported: MarketStreamImportResult | MarketStreamBatchImportResult
+                if args.command == "import":
+                    imported = asyncio.run(
+                        import_market_stream_local(
+                            settings,
+                            instrument_id=args.instrument_id,
+                            directory=args.stream_dir,
+                        )
                     )
-                )
+                else:
+                    if batch_bindings is None:
+                        raise MarketStreamError("ALPACA_MARKET_STREAM_BINDINGS_INVALID")
+                    imported = asyncio.run(
+                        import_market_stream_batch_local(
+                            settings,
+                            bindings=batch_bindings,
+                            directory=args.stream_dir,
+                        )
+                    )
                 result = {
                     "status": "stored_display_quote",
                     "raw_sha256": imported.raw_sha256,
                     "created_observations": imported.created_observations,
+                    **(
+                        {"symbols_observed": imported.symbols_observed}
+                        if isinstance(imported, MarketStreamBatchImportResult)
+                        else {}
+                    ),
                     "execution_locked": True,
                     "model_called": False,
                 }

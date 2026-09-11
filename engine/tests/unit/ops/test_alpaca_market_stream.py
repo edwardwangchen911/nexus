@@ -1,12 +1,19 @@
 import asyncio
+import base64
 import json
 from decimal import Decimal
+from hashlib import sha256
 
 import pytest
 from nexus.ops.alpaca_market_stream import (
+    MAX_FRAME,
     collect_market_stream,
+    collect_market_stream_batch,
     import_market_stream,
     load_market_stream_archive,
+    load_market_stream_batch_archive,
+    main,
+    parse_market_stream_batch_raw_payload,
     parse_market_stream_raw_payload,
 )
 
@@ -92,6 +99,164 @@ DATA = [
         "z": "C",
     },
 ]
+
+
+def _batch_subscription(*symbols: str) -> list[dict[str, object]]:
+    values = list(symbols)
+    return [
+        {
+            "T": "subscription",
+            "trades": values,
+            "quotes": values,
+            "bars": [],
+            "updatedBars": [],
+            "dailyBars": [],
+            "statuses": [],
+            "lulds": [],
+            "corrections": values,
+            "cancelErrors": values,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_stream_uses_one_sorted_subscription_and_keeps_partial_coverage(
+    tmp_path,
+) -> None:
+    socket = Socket(
+        [
+            CONNECTED,
+            AUTHENTICATED,
+            _batch_subscription("MSFT", "AAPL"),
+            DATA,
+        ]
+    )
+    calls = 0
+
+    def connector(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return socket
+
+    directory = tmp_path / "batch"
+    result = await collect_market_stream_batch(
+        symbols=("MSFT", "AAPL"),
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        max_frames=4,
+        connector=connector,
+    )
+
+    assert calls == 1
+    assert socket.sent == [
+        {"action": "subscribe", "trades": ["AAPL", "MSFT"], "quotes": ["AAPL", "MSFT"]}
+    ]
+    assert result["symbols_requested"] == 2
+    assert result["symbols_observed"] == 1
+    archive = load_market_stream_batch_archive(directory)
+    assert archive.symbols == ("AAPL", "MSFT")
+    assert tuple(item.symbol for item in archive.items) == ("AAPL",)
+    assert archive.items[0].quote is not None
+    assert archive.items[0].quote.bid == Decimal("227.14")
+
+
+@pytest.mark.asyncio
+async def test_batch_stream_rejects_an_unrequested_symbol(tmp_path) -> None:
+    unexpected = [dict(DATA[1], S="NVDA")]
+    directory = tmp_path / "batch"
+    result = await collect_market_stream_batch(
+        symbols=("AAPL", "MSFT"),
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        max_frames=4,
+        connector=lambda *args, **kwargs: Socket(
+            [CONNECTED, AUTHENTICATED, _batch_subscription("AAPL", "MSFT"), unexpected]
+        ),
+    )
+
+    assert result["status"] == "partial"
+    assert result["stop_reason"] == "PROTOCOL_INVALID"
+    with pytest.raises(ValueError, match="ALPACA_MARKET_STREAM_INCOMPLETE"):
+        load_market_stream_batch_archive(directory)
+
+
+def test_batch_raw_payload_rejects_a_frame_above_socket_limit() -> None:
+    frames = [
+        json.dumps(CONNECTED).encode(),
+        json.dumps(AUTHENTICATED).encode(),
+        json.dumps(_batch_subscription("AAPL")).encode(),
+        json.dumps(DATA).encode() + b" " * MAX_FRAME,
+    ]
+    receipt = {
+        "schema": "nexus_alpaca_market_stream_batch_receipt_v1",
+        "source": "alpaca",
+        "transport": "websocket",
+        "origin": "wss://stream.data.alpaca.markets/v2/iex",
+        "feed": "iex",
+        "delivery_mode": "real_time",
+        "symbols": ["AAPL"],
+        "started_at": "2026-09-09T14:30:00.000000Z",
+        "ended_at": "2026-09-09T14:30:02.000000Z",
+        "requested_duration_seconds": 60.0,
+        "requested_max_frames": 4,
+        "elapsed_monotonic_seconds": 1.0,
+        "authenticated": True,
+        "subscription_confirmed": True,
+        "status": "bounded_complete",
+        "stop_reason": "FRAME_LIMIT",
+        "trade_count": 1,
+        "quote_count": 1,
+        "frame_count": 4,
+        "frames": [
+            {
+                "file": f"frame-{index:05}.json",
+                "received_at": "2026-09-09T14:30:01.000000Z",
+                "raw_sha256": sha256(frame).hexdigest(),
+                "raw_byte_length": len(frame),
+            }
+            for index, frame in enumerate(frames)
+        ],
+    }
+    receipt_raw = json.dumps(receipt, sort_keys=True).encode()
+    raw = json.dumps(
+        {
+            "schema": "alpaca_stock_stream_v1",
+            "receipt_base64": base64.b64encode(receipt_raw).decode(),
+            "frames_base64": [base64.b64encode(frame).decode() for frame in frames],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    with pytest.raises(ValueError, match="ALPACA_MARKET_STREAM_ARCHIVE_INVALID"):
+        parse_market_stream_batch_raw_payload(raw)
+
+
+def test_invalid_batch_binding_fails_before_durable_started_file(tmp_path, capsys) -> None:
+    output = tmp_path / "result.json"
+    status = main(
+        [
+            "import-batch",
+            "--repo-root",
+            str(tmp_path),
+            "--binding",
+            "invalid",
+            "--stream-dir",
+            str(tmp_path / "missing"),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert status == 1
+    assert not output.exists()
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "failed",
+        "stop_reason": "ALPACA_MARKET_STREAM_BINDINGS_INVALID",
+    }
 
 
 @pytest.mark.asyncio

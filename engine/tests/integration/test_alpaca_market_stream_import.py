@@ -5,7 +5,12 @@ from uuid import UUID
 
 import pytest
 from nexus.market.database_series import load_intraday_series
-from nexus.ops.alpaca_market_stream import collect_market_stream, import_market_stream
+from nexus.ops.alpaca_market_stream import (
+    collect_market_stream,
+    collect_market_stream_batch,
+    import_market_stream,
+    import_market_stream_batch,
+)
 from nexus.persistence.models.data import DataArtifact
 from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQuote
 from nexus.persistence.session import session_factory
@@ -14,6 +19,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 INSTRUMENT_ID = UUID("019d0000-0000-7000-8000-0000000000a1")
+SECOND_INSTRUMENT_ID = UUID("019d0000-0000-7000-8000-0000000000a2")
 
 
 class Socket:
@@ -92,6 +98,175 @@ def _frames(symbol: str, event_at: datetime) -> list[object]:
             },
         ],
     ]
+
+
+def _batch_frames(event_at: datetime) -> list[object]:
+    timestamp = event_at.isoformat().replace("+00:00", "Z")
+    subscription = dict(_frames("AAPL", event_at)[2][0])
+    for field in ("trades", "quotes", "corrections", "cancelErrors"):
+        subscription[field] = ["AAPL", "MSFT"]
+    msft = [
+        dict(item, S="MSFT", i=18) if item["T"] == "t" else dict(item, S="MSFT")
+        for item in _frames("AAPL", event_at)[3]
+    ]
+    msft[0]["p"] = 410.25
+    msft[1]["bp"] = 410.20
+    msft[1]["ap"] = 410.30
+    for item in msft:
+        item["t"] = timestamp
+    return [
+        [{"T": "success", "msg": "connected"}],
+        [{"T": "success", "msg": "authenticated"}],
+        [subscription],
+        [*_frames("AAPL", event_at)[3], *msft],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_import_shares_one_artifact_and_is_idempotent(
+    migrated_database_url: str,
+    tmp_path,
+) -> None:
+    event_at = datetime.now(UTC) - timedelta(seconds=1)
+    directory = tmp_path / "batch-stream"
+    await collect_market_stream_batch(
+        symbols=("MSFT", "AAPL"),
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        max_frames=4,
+        connector=lambda *args, **kwargs: Socket(_batch_frames(event_at)),
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        for instrument_id, symbol in (
+            (INSTRUMENT_ID, "AAPL"),
+            (SECOND_INSTRUMENT_ID, "MSFT"),
+        ):
+            session.add(
+                Instrument(
+                    id=instrument_id,
+                    asset_type="equity",
+                    exchange="XNAS",
+                    currency="USD",
+                    tick_size=Decimal("0.01"),
+                    risk_bucket="us_equity",
+                    created_at=event_at - timedelta(days=1),
+                )
+            )
+            session.add(
+                InstrumentAlias(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    alias_type="ticker",
+                    valid_from=date(2020, 1, 1),
+                    valid_to=None,
+                    created_at=event_at - timedelta(days=1),
+                )
+            )
+
+    store = Store()
+    bindings = {"AAPL": INSTRUMENT_ID, "MSFT": SECOND_INSTRUMENT_ID}
+    for replay in range(2):
+        async with factory() as session, session.begin():
+            result = await import_market_stream_batch(
+                session,
+                store,
+                bindings=bindings,
+                directory=directory,
+                imported_at=datetime.now(UTC) + timedelta(seconds=replay),
+            )
+        assert result.created_observations == (4 if replay == 0 else 0)
+        assert result.symbols_observed == 2
+
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
+        assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 4
+
+
+@pytest.mark.asyncio
+async def test_batch_import_requires_exact_identity_bindings_before_archiving(
+    migrated_database_url: str,
+    tmp_path,
+) -> None:
+    event_at = datetime.now(UTC) - timedelta(seconds=1)
+    directory = tmp_path / "batch-stream"
+    await collect_market_stream_batch(
+        symbols=("AAPL", "MSFT"),
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        max_frames=4,
+        connector=lambda *args, **kwargs: Socket(_batch_frames(event_at)),
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    store = Store()
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="ALPACA_MARKET_STREAM_BINDINGS_INVALID"):
+            await import_market_stream_batch(
+                session,
+                store,
+                bindings={"AAPL": INSTRUMENT_ID},
+                directory=directory,
+                imported_at=datetime.now(UTC),
+            )
+    assert store.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_batch_import_checks_alias_validity_on_each_event_date(
+    migrated_database_url: str,
+    tmp_path,
+) -> None:
+    event_at = datetime.now(UTC) - timedelta(days=1)
+    directory = tmp_path / "batch-stream"
+    await collect_market_stream_batch(
+        symbols=("AAPL", "MSFT"),
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        max_frames=4,
+        connector=lambda *args, **kwargs: Socket(_batch_frames(event_at)),
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        for instrument_id, symbol in (
+            (INSTRUMENT_ID, "AAPL"),
+            (SECOND_INSTRUMENT_ID, "MSFT"),
+        ):
+            session.add(
+                Instrument(
+                    id=instrument_id,
+                    asset_type="equity",
+                    exchange="XNAS",
+                    currency="USD",
+                    tick_size=Decimal("0.01"),
+                    risk_bucket="us_equity",
+                    created_at=event_at - timedelta(days=1),
+                )
+            )
+            session.add(
+                InstrumentAlias(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    alias_type="ticker",
+                    valid_from=datetime.now(UTC).date(),
+                    valid_to=None,
+                    created_at=event_at - timedelta(days=1),
+                )
+            )
+
+    store = Store()
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="ALPACA_MARKET_STREAM_IDENTITY_REQUIRED"):
+            await import_market_stream_batch(
+                session,
+                store,
+                bindings={"AAPL": INSTRUMENT_ID, "MSFT": SECOND_INSTRUMENT_ID},
+                directory=directory,
+                imported_at=datetime.now(UTC),
+            )
+    assert store.objects == {}
 
 
 @pytest.mark.asyncio
