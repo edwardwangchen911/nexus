@@ -127,6 +127,7 @@ async def _run(
     client: httpx.AsyncClient | None = None,
     opener: Callable[[str], bool] = webbrowser.open,
     callback_reader: Callable[[str], str] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     if client is None:
         async with httpx.AsyncClient(follow_redirects=False, timeout=10) as transport:
@@ -135,6 +136,7 @@ async def _run(
                 client=transport,
                 opener=opener,
                 callback_reader=callback_reader,
+                now=now,
             )
     if arguments.source == "authorize":
         return await authorize_schwab(
@@ -143,8 +145,9 @@ async def _run(
             opener=opener,
             callback_reader=callback_reader or getpass.getpass,
             process_environment=os.environ,
+            now=now,
         )
-    return await run_schwab_stream(arguments, client)
+    return await run_schwab_stream(arguments, client, now=now)
 
 
 def main() -> None:

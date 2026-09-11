@@ -10,11 +10,13 @@ import nexus.ops.provider_market_stream as provider_market_stream
 import pytest
 from nexus.providers.market.schwab_oauth import SchwabOAuthToken
 
+NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
+EXPIRES = datetime(2026, 9, 11, 12, 30, tzinfo=UTC)
+CALLBACK = "https://127.0.0.1/?code=temporary%40code&session=fake-session"
 
-def test_schwab_app_config_loads_from_unified_local_file_without_secret_repr(
-    tmp_path: Path,
-) -> None:
-    infra = tmp_path / "infra"
+
+def _write_config(root: Path) -> None:
+    infra = root / "infra"
     infra.mkdir()
     infra.joinpath(".env.local").write_text(
         "NEXUS_SCHWAB_APP_KEY=fake-app-key\n"
@@ -22,9 +24,61 @@ def test_schwab_app_config_loads_from_unified_local_file_without_secret_repr(
         "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
     )
 
-    loader = getattr(provider_market_stream, "load_schwab_app_config", None)
-    assert callable(loader), "Schwab local app configuration loader is missing"
-    config = loader(tmp_path, {})
+
+def _token_payload() -> dict[str, object]:
+    return {
+        "expires_in": 1800,
+        "token_type": "Bearer",
+        "scope": "api",
+        "refresh_token": "fake-refresh-token",
+        "access_token": "fake-access-token",
+    }
+
+
+def _token(*, prefix: str = "fake") -> SchwabOAuthToken:
+    return SchwabOAuthToken(
+        access_token=f"{prefix}-access-token",
+        refresh_token=f"{prefix}-refresh-token",
+        obtained_at=NOW,
+        expires_at=EXPIRES,
+    )
+
+
+def _preference_payload(*, with_account: bool) -> dict[str, object]:
+    accounts: list[dict[str, object]] = []
+    if with_account:
+        accounts.append(
+            {
+                "accountNumber": "fake-account-number",
+                "primaryAccount": True,
+                "type": "BROKERAGE",
+                "nickName": "fake-name",
+                "displayAcctId": "fake-display-id",
+                "autoPositionEffect": False,
+                "lotSelectionMethod": "FIFO",
+            }
+        )
+    return {
+        "accounts": accounts,
+        "streamerInfo": [
+            {
+                "streamerSocketUrl": "wss://streamer-api.schwab.com/ws",
+                "schwabClientCustomerId": "fake-customer",
+                "schwabClientCorrelId": "fake-correlation",
+                "schwabClientChannel": "fake-channel",
+                "schwabClientFunctionId": "fake-function",
+            }
+        ],
+        "offers": [{"level2Permissions": True, "mktDataPermission": "NP"}],
+    }
+
+
+def test_schwab_app_config_loads_from_unified_local_file_without_secret_repr(
+    tmp_path: Path,
+) -> None:
+    _write_config(tmp_path)
+
+    config = provider_market_stream.load_schwab_app_config(tmp_path, {})
 
     assert config.app_key == "fake-app-key"
     assert config.app_secret == "fake-app-secret"
@@ -36,29 +90,15 @@ def test_schwab_app_config_loads_from_unified_local_file_without_secret_repr(
 def test_schwab_authorization_url_and_callback_are_bound_to_registered_loopback(
     tmp_path: Path,
 ) -> None:
-    infra = tmp_path / "infra"
-    infra.mkdir()
-    infra.joinpath(".env.local").write_text(
-        "NEXUS_SCHWAB_APP_KEY=fake-app-key\n"
-        "NEXUS_SCHWAB_APP_SECRET=fake-app-secret\n"
-        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
-    )
+    _write_config(tmp_path)
     config = provider_market_stream.load_schwab_app_config(tmp_path, {})
-    build = getattr(provider_market_stream, "build_schwab_authorization_url", None)
-    parse = getattr(provider_market_stream, "parse_schwab_callback", None)
 
-    assert callable(build), "Schwab authorization URL builder is missing"
-    assert callable(parse), "Schwab callback parser is missing"
-    assert build(config) == (
+    assert provider_market_stream.build_schwab_authorization_url(config) == (
         "https://api.schwabapi.com/v1/oauth/authorize?"
         "client_id=fake-app-key&redirect_uri=https%3A%2F%2F127.0.0.1"
     )
-    assert (
-        parse(
-            config,
-            "https://127.0.0.1/?code=temporary%40code&session=fake-session",
-        )
-        == "temporary@code"
+    assert provider_market_stream.parse_schwab_callback(config, CALLBACK) == (
+        "temporary@code"
     )
 
 
@@ -66,39 +106,17 @@ def test_schwab_authorization_url_and_callback_are_bound_to_registered_loopback(
 async def test_schwab_authorization_code_is_exchanged_once_without_secret_output(
     tmp_path: Path,
 ) -> None:
-    infra = tmp_path / "infra"
-    infra.mkdir()
-    infra.joinpath(".env.local").write_text(
-        "NEXUS_SCHWAB_APP_KEY=fake-app-key\n"
-        "NEXUS_SCHWAB_APP_SECRET=fake-app-secret\n"
-        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
-    )
+    _write_config(tmp_path)
     config = provider_market_stream.load_schwab_app_config(tmp_path, {})
     requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "expires_in": 1800,
-                "token_type": "Bearer",
-                "scope": "api",
-                "refresh_token": "fake-refresh-token",
-                "access_token": "fake-access-token",
-            },
-        )
+        return httpx.Response(200, json=_token_payload())
 
-    exchange = getattr(
-        provider_market_stream, "exchange_schwab_authorization_code", None
-    )
-    assert callable(exchange), "Schwab authorization-code exchange is missing"
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        token = await exchange(
-            config,
-            "temporary@code",
-            client,
-            now=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
+        token = await provider_market_stream.exchange_schwab_authorization_code(
+            config, "temporary@code", client, now=NOW
         )
 
     assert len(requests) == 1
@@ -114,65 +132,26 @@ async def test_schwab_authorization_code_is_exchanged_once_without_secret_output
     }
     assert token.access_token == "fake-access-token"
     assert token.refresh_token == "fake-refresh-token"
-    assert token.expires_at == datetime(2026, 9, 11, 12, 30, tzinfo=UTC)
+    assert token.expires_at == EXPIRES
     assert "fake-access-token" not in repr(token)
     assert "fake-refresh-token" not in repr(token)
 
 
-@pytest.mark.asyncio
-async def test_schwab_tokens_are_saved_and_loaded_only_from_private_secret_file(
+def test_schwab_tokens_are_saved_and_loaded_only_from_private_secret_file(
     tmp_path: Path,
 ) -> None:
-    infra = tmp_path / "infra"
-    infra.mkdir()
-    infra.joinpath(".env.local").write_text(
-        "NEXUS_SCHWAB_APP_KEY=fake-app-key\n"
-        "NEXUS_SCHWAB_APP_SECRET=fake-app-secret\n"
-        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
-    )
-    config = provider_market_stream.load_schwab_app_config(tmp_path, {})
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                json={
-                    "expires_in": 1800,
-                    "token_type": "Bearer",
-                    "scope": "api",
-                    "refresh_token": "fake-refresh-token",
-                    "access_token": "fake-access-token",
-                },
-            )
-        )
-    ) as client:
-        token = await provider_market_stream.exchange_schwab_authorization_code(
-            config,
-            "temporary@code",
-            client,
-            now=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
-        )
-    save = getattr(provider_market_stream, "save_schwab_token", None)
-    load = getattr(provider_market_stream, "load_schwab_token", None)
+    token = _token()
 
-    assert callable(save), "Schwab private token writer is missing"
-    assert callable(load), "Schwab private token loader is missing"
-    token_path = save(tmp_path, token)
-    loaded = load(tmp_path)
+    token_path = provider_market_stream.save_schwab_token(tmp_path, token)
 
     assert token_path == tmp_path / ".secrets" / "nexus-schwab-local" / "tokens.json"
-    assert loaded == token
+    assert provider_market_stream.load_schwab_token(tmp_path) == token
     assert stat.S_IMODE(token_path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
 
 
 def test_stale_token_temp_file_does_not_block_next_atomic_save(tmp_path: Path) -> None:
-    first = SchwabOAuthToken(
-        access_token="first-access-token",
-        refresh_token="first-refresh-token",
-        obtained_at=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
-        expires_at=datetime(2026, 9, 11, 12, 30, tzinfo=UTC),
-    )
-    provider_market_stream.save_schwab_token(tmp_path, first)
+    provider_market_stream.save_schwab_token(tmp_path, _token(prefix="first"))
     directory = tmp_path / ".secrets" / "nexus-schwab-local"
     directory.joinpath(f".tokens-{os.getpid()}.tmp").write_text("interrupted")
     second = SchwabOAuthToken(
@@ -193,48 +172,15 @@ async def test_user_preference_yields_only_stream_connection_fields_once() -> No
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "accounts": [
-                    {
-                        "accountNumber": "fake-account-number",
-                        "primaryAccount": True,
-                        "type": "BROKERAGE",
-                        "nickName": "fake-name",
-                        "displayAcctId": "fake-display-id",
-                        "autoPositionEffect": False,
-                        "lotSelectionMethod": "FIFO",
-                    }
-                ],
-                "streamerInfo": [
-                    {
-                        "streamerSocketUrl": "wss://streamer-api.schwab.com/ws",
-                        "schwabClientCustomerId": "fake-customer",
-                        "schwabClientCorrelId": "fake-correlation",
-                        "schwabClientChannel": "fake-channel",
-                        "schwabClientFunctionId": "fake-function",
-                    }
-                ],
-                "offers": [
-                    {"level2Permissions": True, "mktDataPermission": "NP"}
-                ],
-            },
-        )
+        return httpx.Response(200, json=_preference_payload(with_account=True))
 
-    fetch = getattr(provider_market_stream, "fetch_schwab_stream_preferences", None)
-    assert callable(fetch), "Schwab user-preference fetch is missing"
-    token = SchwabOAuthToken(
-        access_token="fake-access-token",
-        refresh_token="fake-refresh-token",
-        obtained_at=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
-        expires_at=datetime(2026, 9, 11, 12, 30, tzinfo=UTC),
-    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        streamer_url, credentials = await fetch(
-            token,
-            client,
-            now=datetime(2026, 9, 11, 12, 10, tzinfo=UTC),
+        streamer_url, credentials = (
+            await provider_market_stream.fetch_schwab_stream_preferences(
+                _token(),
+                client,
+                now=datetime(2026, 9, 11, 12, 10, tzinfo=UTC),
+            )
         )
 
     assert len(requests) == 1
@@ -284,42 +230,28 @@ def test_market_stream_cli_exposes_authorize_and_repo_bound_stream_without_secre
 async def test_authorize_flow_opens_browser_reads_callback_and_returns_safe_summary(
     tmp_path: Path,
 ) -> None:
-    infra = tmp_path / "infra"
-    infra.mkdir()
-    infra.joinpath(".env.local").write_text(
-        "NEXUS_SCHWAB_APP_KEY=fake-app-key\n"
-        "NEXUS_SCHWAB_APP_SECRET=fake-app-secret\n"
-        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
+    _write_config(tmp_path)
+    arguments = provider_market_stream.build_parser().parse_args(
+        ["authorize", "--repo-root", str(tmp_path)]
     )
     opened: list[str] = []
     prompts: list[str] = []
 
     def read_callback(prompt: str) -> str:
         prompts.append(prompt)
-        return "https://127.0.0.1/?code=temporary%40code&session=fake-session"
+        return CALLBACK
 
-    authorize = getattr(provider_market_stream, "authorize_schwab", None)
-    assert callable(authorize), "Schwab authorization orchestration is missing"
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                json={
-                    "expires_in": 1800,
-                    "token_type": "Bearer",
-                    "scope": "api",
-                    "refresh_token": "fake-refresh-token",
-                    "access_token": "fake-access-token",
-                },
-            )
+            lambda _request: httpx.Response(200, json=_token_payload())
         )
     ) as client:
-        result = await authorize(
-            tmp_path,
-            client,
+        result = await provider_market_stream._run(
+            arguments,
+            client=client,
             opener=lambda url: opened.append(url) or True,
             callback_reader=read_callback,
-            now=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
+            now=NOW,
         )
 
     assert opened == [
@@ -335,31 +267,19 @@ async def test_authorize_flow_opens_browser_reads_callback_and_returns_safe_summ
         "expires_at": "2026-09-11T12:30:00+00:00",
         "secrets_printed": False,
     }
-    assert "fake-access-token" not in repr(result)
-    assert "fake-refresh-token" not in repr(result)
 
 
 @pytest.mark.asyncio
 async def test_stream_command_resolves_private_token_and_user_preference_before_capture(
     tmp_path: Path,
 ) -> None:
-    provider_market_stream.save_schwab_token(
-        tmp_path,
-        SchwabOAuthToken(
-            access_token="fake-access-token",
-            refresh_token="fake-refresh-token",
-            obtained_at=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
-            expires_at=datetime(2026, 9, 11, 12, 30, tzinfo=UTC),
-        ),
-    )
+    provider_market_stream.save_schwab_token(tmp_path, _token())
     capture_calls: list[dict[str, object]] = []
 
     async def capture(**kwargs: object) -> dict[str, object]:
         capture_calls.append(kwargs)
         return {"status": "bounded_complete"}
 
-    stream = getattr(provider_market_stream, "run_schwab_stream", None)
-    assert callable(stream), "Schwab token-to-stream orchestration is missing"
     arguments = provider_market_stream.build_parser().parse_args(
         [
             "schwab",
@@ -378,24 +298,11 @@ async def test_stream_command_resolves_private_token_and_user_preference_before_
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
-                200,
-                json={
-                    "accounts": [],
-                    "streamerInfo": [
-                        {
-                            "streamerSocketUrl": "wss://streamer-api.schwab.com/ws",
-                            "schwabClientCustomerId": "fake-customer",
-                            "schwabClientCorrelId": "fake-correlation",
-                            "schwabClientChannel": "fake-channel",
-                            "schwabClientFunctionId": "fake-function",
-                        }
-                    ],
-                    "offers": [],
-                },
+                200, json=_preference_payload(with_account=False)
             )
         )
     ) as client:
-        result = await stream(
+        result = await provider_market_stream.run_schwab_stream(
             arguments,
             client,
             collector=capture,
@@ -411,42 +318,3 @@ async def test_stream_command_resolves_private_token_and_user_preference_before_
     assert call["duration"] == 5.0
     assert call["max_frames"] == 3
     assert call["credentials"].access_token == "fake-access-token"
-
-
-@pytest.mark.asyncio
-async def test_cli_dispatches_authorize_without_command_line_secrets(tmp_path: Path) -> None:
-    infra = tmp_path / "infra"
-    infra.mkdir()
-    infra.joinpath(".env.local").write_text(
-        "NEXUS_SCHWAB_APP_KEY=fake-app-key\n"
-        "NEXUS_SCHWAB_APP_SECRET=fake-app-secret\n"
-        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
-    )
-    arguments = provider_market_stream.build_parser().parse_args(
-        ["authorize", "--repo-root", str(tmp_path)]
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                json={
-                    "expires_in": 1800,
-                    "token_type": "Bearer",
-                    "scope": "api",
-                    "refresh_token": "fake-refresh-token",
-                    "access_token": "fake-access-token",
-                },
-            )
-        )
-    ) as client:
-        result = await provider_market_stream._run(
-            arguments,
-            client=client,
-            opener=lambda _url: True,
-            callback_reader=lambda _prompt: (
-                "https://127.0.0.1/?code=temporary%40code&session=fake-session"
-            ),
-        )
-
-    assert result["status"] == "authorized"
-    assert "fake-access-token" not in repr(result)
