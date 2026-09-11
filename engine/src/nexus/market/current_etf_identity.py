@@ -46,8 +46,10 @@ def require_outside_fixed_etf_definition(symbol: str) -> None:
     """Fail closed unless the fixed definition loads and the symbol is absent from it."""
 
     definition = load_us_liquid_v1_definition(date(2026, 1, 1))
-    if symbol != symbol.strip().upper() or not symbol or any(
-        member.symbol == symbol for member in definition.members
+    if (
+        symbol != symbol.strip().upper()
+        or not symbol
+        or any(member.symbol == symbol for member in definition.members)
     ):
         raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
 
@@ -110,8 +112,10 @@ class CurrentNasdaqEtfIdentity(CurrentEtfShareClassIdentity):
 
 
 class CurrentHeldNasdaqEtfIdentity(CurrentEtfIdentity):
-    exchange: Literal["XNAS"] = "XNAS"
+    exchange: Literal["ARCX", "XNAS"]
     filing_index_class_name: str
+    fmp_name: str | None = None
+    fmp_name_matches_sec: bool | None = None
     fmp_cik: str | None
     fmp_cik_matches_sec: bool | None
     strategy_statement: str
@@ -368,79 +372,100 @@ def _current_held_nasdaq_identity(
     series: str,
     share_class: str,
     fmp_name: str,
+    fmp_description: str | None,
     fmp_exchange: str,
+    exchange: Literal["ARCX", "XNAS"],
     fmp_cik: str | None,
     stored_at: datetime,
     now: datetime,
 ) -> CurrentHeldNasdaqEtfIdentity:
-    class_name, index_ticker = _bound_nasdaq_class(
-        index=index, symbol=symbol, series=series, share_class=share_class
-    )
-    cover = text[:1600]
-    dates = set(
-        re.findall(
-            r"(?:January|February|March|April|May|June|July|August|September|October|"
-            r"November|December) [0-9]{1,2}, [0-9]{4}",
-            cover,
+    try:
+        class_name, index_ticker = _bound_nasdaq_class(
+            index=index, symbol=symbol, series=series, share_class=share_class
         )
-    )
-    objective = re.search(r"Investment Objective (.+?) Fund Fees and Expenses", text)
-    strategy = re.search(
-        r"Principal Investment Strategy (.+?) Principal Investment Risks", text
-    )
-    purchase = re.search(r"Purchase and Sale of Fund Shares (.+?) Tax Information", text)
-    if (
-        index_ticker != symbol
-        or class_name.casefold() != fmp_name.casefold()
-        or cover.casefold().count(fmp_name.casefold()) != 1
-        or len(re.findall(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", cover)) != 1
-        or cover.count("The Nasdaq Stock Market LLC") != 1
-        or len(dates) != 1
-        or datetime.strptime(next(iter(dates)), "%B %d, %Y").date() > now.date()
-        or text.count("Investment Objective") != 1
-        or text.count("Fund Fees and Expenses") != 1
-        or text.count("Principal Investment Strategy") != 1
-        or text.count("Principal Investment Risks") != 1
-        or text.count("Purchase and Sale of Fund Shares") != 1
-        or text.count("Tax Information") != 1
-        or not objective
-        or not strategy
-        or not purchase
-    ):
-        raise ValueError
-    strategy_text = strategy[1].casefold()
-    purchase_text = purchase[1]
-    if (
-        "swap agreement" not in strategy_text
-        or "underlying security" not in strategy_text
-        or "securities" not in strategy_text
-        or (
-            "Publicly issued equity securities, including common stocks, are subject to market "
-            "risks that may cause their prices to fluctuate over time. Fluctuations in the value "
-            "of equity securities in which the Fund invests, and/or has exposure to"
+    except ValueError:
+        visible = _VisibleText()
+        visible.feed(index.decode("utf-8-sig"))
+        index_text = " ".join(" ".join(visible.parts).split())
+        bound = re.search(
+            rf"Series {series}(?: (.+?))? Class/Contract {share_class} "
+            rf"(?:ETF Shares )?{symbol}\b",
+            index_text,
         )
-        not in text
-        or "Unlike most ETFs, the Fund currently intends to effect creations and redemptions"
-        not in text
-        or "secondary market" not in purchase_text
-        or "broker-dealer" not in purchase_text
-        or "Authorized Participants" not in purchase_text
-    ):
+        if not bound or (bound[1] is not None and len(bound[1]) >= 200):
+            raise ValueError from None
+        class_name, index_ticker = bound[1] or fmp_name, symbol
+    symbols = list(re.finditer(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", text))
+    if index_ticker != symbol or len(symbols) != 1:
         raise ValueError
+    tail = text[symbols[0].start() :]
+
+    def section(start: str, ends: tuple[str, ...], limit: int) -> str:
+        heading = re.search(start, tail, re.IGNORECASE)
+        if not heading:
+            raise ValueError
+        body = tail[heading.end() : heading.end() + limit]
+        boundaries = [m.start() for end in ends if (m := re.search(end, body, re.IGNORECASE))]
+        value = " ".join(body[: min(boundaries)].split()) if boundaries else ""
+        if not 20 <= len(value) <= limit:
+            raise ValueError
+        return value
+
+    objective = section(
+        r"Investment Objective\b",
+        (r"Fund Fees and Expenses\b", r"Fees and Expenses\b"),
+        3000,
+    )
+    strategy_heading = r"Principal Investment Strateg(?:y|ies)\b"
+    strategy = (
+        section(
+            strategy_heading,
+            (r"Principal Investment Risks\b", r"Principal Risks\b", r"Investment Risks\b"),
+            7000,
+        )
+        if re.search(strategy_heading, tail, re.IGNORECASE)
+        else objective
+    )
+    equity_text = (objective + " " + strategy).casefold()
+    provider_text = (fmp_description or "").casefold()
+    sec_equity = re.search(r"\b(?:equity|common stocks?|shares of)\b", equity_text) is not None
+    derivative_equity = (
+        "swap agreement" in equity_text
+        and "underlying security" in equity_text
+        and re.search(r"\b(?:equity|stocks?|shares)\b", provider_text) is not None
+    )
+    excluded = re.search(
+        r"\b(?:bitcoin|ether|gold bullion|fixed income|treasury bonds)\b",
+        equity_text + " " + provider_text,
+    )
+    if not (sec_equity or derivative_equity) or excluded:
+        raise ValueError
+    legal_matches = list(
+        re.finditer(r"(?:exchange-traded fund|Unlike most ETFs)", text, re.IGNORECASE)
+    )
+    if not legal_matches or (exchange == "XNAS" and "nasdaq" not in text.casefold()):
+        raise ValueError
+    legal = legal_matches[0]
+    legal_excerpt = " ".join(
+        text[max(0, legal.start() - 180) : min(len(text), legal.end() + 180)].split()
+    )
     return CurrentHeldNasdaqEtfIdentity(
         symbol=symbol,
         cik=identifier,
         series_id=series,
         class_id=share_class,
         legal_name=class_name,
+        exchange=exchange,
+        fmp_name=fmp_name,
+        fmp_name_matches_sec=fmp_name.casefold() == class_name.casefold(),
         fmp_exchange=fmp_exchange,
         fmp_cik=fmp_cik,
         fmp_cik_matches_sec=None if fmp_cik is None else fmp_cik == identifier,
-        objective=objective[1],
-        legal_type_statement=purchase[1],
+        objective=objective,
+        legal_type_statement=legal_excerpt,
         mapping_stored_at=stored_at,
         filing_index_class_name=class_name,
-        strategy_statement=strategy[1],
+        strategy_statement=strategy,
     )
 
 
@@ -787,7 +812,25 @@ async def _validate_etf_originals(
             | CurrentTreasuryEtfIdentity
             | CurrentGoldTrustIdentity
         )
-        if asset_type == "non_equity_etf":
+        if current_holding_only:
+            identity = _current_held_nasdaq_identity(
+                text=text,
+                index=index,
+                symbol=symbol,
+                identifier=identifier,
+                series=series,
+                share_class=share_class,
+                fmp_name=name,
+                fmp_description=(
+                    row.get("description") if isinstance(row.get("description"), str) else None
+                ),
+                fmp_exchange=row["exchange"],
+                exchange="XNAS" if row["exchange"] in {"NASDAQ", "XNAS"} else "ARCX",
+                fmp_cik=fmp_cik,
+                stored_at=stored_at,
+                now=cutoff,
+            )
+        elif asset_type == "non_equity_etf":
             identity = _treasury_identity(
                 text=text,
                 index=index,
@@ -801,34 +844,19 @@ async def _validate_etf_originals(
                 now=cutoff,
             )
         elif row["exchange"] in {"NASDAQ", "XNAS"}:
-            if current_holding_only:
-                identity = _current_held_nasdaq_identity(
-                    text=text,
-                    index=index,
-                    symbol=symbol,
-                    identifier=identifier,
-                    series=series,
-                    share_class=share_class,
-                    fmp_name=name,
-                    fmp_exchange=row["exchange"],
-                    fmp_cik=fmp_cik,
-                    stored_at=stored_at,
-                    now=cutoff,
-                )
-            else:
-                identity = _nasdaq_identity(
-                    text=text,
-                    index=index,
-                    submissions=submissions,
-                    symbol=symbol,
-                    identifier=identifier,
-                    series=series,
-                    share_class=share_class,
-                    fmp_name=name,
-                    fmp_exchange=row["exchange"],
-                    stored_at=stored_at,
-                    now=cutoff,
-                )
+            identity = _nasdaq_identity(
+                text=text,
+                index=index,
+                submissions=submissions,
+                symbol=symbol,
+                identifier=identifier,
+                series=series,
+                share_class=share_class,
+                fmp_name=name,
+                fmp_exchange=row["exchange"],
+                stored_at=stored_at,
+                now=cutoff,
+            )
         else:
             cover = re.search(
                 rf"FORM 497K {re.escape(name)} {re.escape(symbol)} "

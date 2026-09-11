@@ -23,6 +23,8 @@ from nexus.market.current_identity_storage import (
     CurrentIdentityImportResult,
     IdentityStore,
     import_current_common_stock,
+    import_current_held_common_stock,
+    read_current_held_common_stock,
     read_current_identity,
 )
 from nexus.market.current_listing_revision import import_listing_revision, read_listing_revision
@@ -32,6 +34,9 @@ from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.ops.sec_local import _BoundedBytes, _Budget
 from nexus.persistence.session import session_factory
+from nexus.providers.broker.fosun_contracts import AccountItem
+from nexus.providers.broker.gateway_client import FosunGatewayClient
+from nexus.providers.broker.settings import BrokerWorkerSettings
 from nexus.providers.http import HttpPolicyError
 from nexus.settings import EngineSettings
 
@@ -177,6 +182,59 @@ async def import_identity(
         await factory.kw["bind"].dispose()
 
 
+async def import_held_identity(
+    settings: EngineSettings,
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    store: IdentityStore | None = None,
+    broker_settings: BrokerWorkerSettings | None = None,
+    broker: FosunGatewayClient | None = None,
+) -> CurrentIdentityImportResult:
+    """Persist one source-proven current holding without widening research scope."""
+
+    _local(settings)
+    storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+    if broker is None and broker_settings is None:
+        raise ValueError("CURRENT_HELD_COMMON_STOCK_GATEWAY_REQUIRED")
+    if broker is None:
+        assert broker_settings is not None
+        gateway = FosunGatewayClient(broker_settings)
+    else:
+        gateway = broker
+    owns_gateway = broker is None
+    try:
+        accounts_page = await gateway.read_accounts()
+        accounts = tuple(AccountItem.model_validate(item) for item in accounts_page.items)
+        if len(accounts) != 1 or accounts_page.quality != "PASS" or accounts_page.has_more:
+            raise ValueError("CURRENT_HELD_COMMON_STOCK_HOLDING_INVALID")
+        holdings_page = await gateway.read_holdings(
+            accounts[0].external_account_id, cursor=None, limit=100
+        )
+    finally:
+        if owns_gateway:
+            await gateway.aclose()
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            result = await import_current_held_common_stock(
+                session,
+                storage,
+                symbol=symbol,
+                fmp_archive=fmp_archive,
+                sec_archive=sec_archive,
+                accounts_page=accounts_page,
+                holdings_page=holdings_page,
+            )
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            await read_current_held_common_stock(session, storage, snapshot_id=result.snapshot_id)
+        return result
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 async def read_identity(settings: EngineSettings, *, snapshot_id: UUID) -> None:
     _local(settings)
     storage = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
@@ -185,6 +243,18 @@ async def read_identity(settings: EngineSettings, *, snapshot_id: UUID) -> None:
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
             await read_current_identity(session, storage, snapshot_id=snapshot_id)
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+async def read_held_identity(settings: EngineSettings, *, snapshot_id: UUID) -> None:
+    _local(settings)
+    storage = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            await read_current_held_common_stock(session, storage, snapshot_id=snapshot_id)
     finally:
         await factory.kw["bind"].dispose()
 
@@ -269,12 +339,14 @@ def main() -> None:
     for name in ("schema", "definition", "label"):
         taxonomy.add_argument("--" + name, type=Path, required=True)
         taxonomy.add_argument("--" + name + "-receipt", type=Path, required=True)
-    importer = commands.add_parser("import")
-    importer.add_argument("--symbol", required=True)
-    importer.add_argument("--fmp-archive", type=Path, required=True)
-    importer.add_argument("--sec-archive", type=Path, required=True)
-    importer.add_argument("--taxonomy-archive", type=Path)
-    importer.add_argument("--output", type=Path, required=True)
+    for action in ("import", "import-held"):
+        importer = commands.add_parser(action)
+        importer.add_argument("--symbol", required=True)
+        importer.add_argument("--fmp-archive", type=Path, required=True)
+        importer.add_argument("--sec-archive", type=Path, required=True)
+        importer.add_argument("--output", type=Path, required=True)
+        if action == "import":
+            importer.add_argument("--taxonomy-archive", type=Path)
     revision = commands.add_parser("revise-listing")
     revision.add_argument("--symbol", required=True)
     revision.add_argument("--fmp-archive", required=True, type=Path)
@@ -289,6 +361,8 @@ def main() -> None:
     prepare.add_argument("--output", required=True, type=Path)
     reader = commands.add_parser("read")
     reader.add_argument("--snapshot-id", type=UUID, required=True)
+    held_reader = commands.add_parser("read-held")
+    held_reader.add_argument("--snapshot-id", type=UUID, required=True)
     try:
         args = parser.parse_args()
         environment = load_local_environment(args.repo_root, os.environ)
@@ -329,32 +403,50 @@ def main() -> None:
                 )
                 write_private(args.output, json.dumps(prepared, sort_keys=True).encode())
                 status = str(prepared["status"])
-            elif args.action in {"import", "revise-listing"}:
+            elif args.action in {"import", "import-held", "revise-listing"}:
                 if args.output.exists() or args.output.is_symlink():
                     raise ValueError("CURRENT_IDENTITY_NEW_OUTPUT_REQUIRED")
-                result = asyncio.run(
-                    (revise_listing if args.action == "revise-listing" else import_identity)(
-                        settings,
-                        symbol=args.symbol,
-                        fmp_archive=args.fmp_archive,
-                        sec_archive=args.sec_archive,
-                        **(
-                            {"taxonomy_archive": args.taxonomy_archive}
-                            if args.action == "import"
-                            else {}
-                        ),
+                if args.action == "revise-listing":
+                    result = asyncio.run(
+                        revise_listing(
+                            settings,
+                            symbol=args.symbol,
+                            fmp_archive=args.fmp_archive,
+                            sec_archive=args.sec_archive,
+                        )
                     )
-                )
+                elif args.action == "import-held":
+                    result = asyncio.run(
+                        import_held_identity(
+                            settings,
+                            symbol=args.symbol,
+                            fmp_archive=args.fmp_archive,
+                            sec_archive=args.sec_archive,
+                            broker_settings=BrokerWorkerSettings.model_validate(environment),
+                        )
+                    )
+                else:
+                    result = asyncio.run(
+                        import_identity(
+                            settings,
+                            symbol=args.symbol,
+                            fmp_archive=args.fmp_archive,
+                            sec_archive=args.sec_archive,
+                            taxonomy_archive=args.taxonomy_archive,
+                        )
+                    )
                 write_private(
                     args.output, json.dumps(asdict(result), default=str, sort_keys=True).encode()
                 )
                 status = result.status
+            elif args.action == "read-listing-revision":
+                asyncio.run(read_listing(settings, snapshot_id=args.snapshot_id))
+                status = "verified"
+            elif args.action == "read":
+                asyncio.run(read_identity(settings, snapshot_id=args.snapshot_id))
+                status = "verified"
             else:
-                asyncio.run(
-                    (read_listing if args.action == "read-listing-revision" else read_identity)(
-                        settings, snapshot_id=args.snapshot_id
-                    )
-                )
+                asyncio.run(read_held_identity(settings, snapshot_id=args.snapshot_id))
                 status = "verified"
         print(
             json.dumps(

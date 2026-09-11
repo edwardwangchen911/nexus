@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -35,8 +35,11 @@ from nexus.market.custom_identity import (
     validate_custom_identity_originals,
 )
 from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.providers.broker.fosun_contracts import AccountItem, PositionItem
+from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 
 
 class IdentityStore(Protocol):
@@ -84,6 +87,42 @@ class CustomMemberIdentityProof(CurrentIdentityProof):
         ArtifactBinding,
         ArtifactBinding,
     ]
+
+
+HELD_SOURCE = "current_held_common_stock_identity"
+HELD_SCHEMA = "current_held_common_stock_v1"
+HELD_BINDING_MAX_AGE = timedelta(minutes=5)
+
+
+class CurrentHeldCommonStockBinding(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    account_source_request_id: str
+    holdings_source_request_id: str
+    accounts_as_of: AwareDatetime
+    holdings_as_of: AwareDatetime
+    provider_code: str
+    account_quality: Literal["PASS"] = "PASS"
+    holdings_quality: Literal["PARTIAL"] = "PARTIAL"
+    currency: Literal["USD"] = "USD"
+    position_nonzero: Literal[True] = True
+    sha256: str
+
+
+class CurrentHeldCommonStockProof(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    identity: CurrentCommonStockIdentity
+    instrument_id: UUID
+    alias_id: UUID
+    alias_valid_from: date
+    checked_at: AwareDatetime
+    scope: Literal["fosun_current_holding"] = "fosun_current_holding"
+    holding: CurrentHeldCommonStockBinding
+    sec_url: str
+    artifacts: tuple[ArtifactBinding, ArtifactBinding, ArtifactBinding, ArtifactBinding]
+    universe_published: Literal[False] = False
+    new_position_eligible: Literal[False] = False
+    historical_backtest_eligible: Literal[False] = False
+    execution_locked: Literal[True] = True
 
 
 TAXONOMY_SCHEMAS = tuple(
@@ -196,6 +235,314 @@ async def _archive(
             raise ValueError("CURRENT_IDENTITY_ARTIFACT_INVALID")
         result.append(binding)
     return result[0], result[1], result[2], result[3]
+
+
+def _held_binding_payload(
+    *,
+    account_source_request_id: str,
+    holdings_source_request_id: str,
+    accounts_as_of: datetime,
+    holdings_as_of: datetime,
+    provider_code: str,
+) -> dict[str, object]:
+    return {
+        "account_source_request_id": account_source_request_id,
+        "holdings_source_request_id": holdings_source_request_id,
+        "accounts_as_of": accounts_as_of.isoformat(),
+        "holdings_as_of": holdings_as_of.isoformat(),
+        "provider_code": provider_code,
+        "account_quality": "PASS",
+        "holdings_quality": "PARTIAL",
+        "currency": "USD",
+        "position_nonzero": True,
+    }
+
+
+def _held_binding_digest(payload: dict[str, object]) -> str:
+    import json
+
+    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def current_held_common_stock_binding(
+    *,
+    symbol: str,
+    accounts_page: GatewayResponsePage,
+    holdings_page: GatewayResponsePage,
+    now: datetime,
+) -> CurrentHeldCommonStockBinding:
+    try:
+        if (
+            symbol != symbol.strip().upper()
+            or not symbol
+            or accounts_page.quality != "PASS"
+            or holdings_page.quality != "PARTIAL"
+            or accounts_page.has_more
+            or holdings_page.has_more
+            or not accounts_page.as_of <= holdings_page.as_of <= now
+            or now - accounts_page.as_of > HELD_BINDING_MAX_AGE
+            or now - holdings_page.as_of > HELD_BINDING_MAX_AGE
+        ):
+            raise ValueError
+        accounts = tuple(AccountItem.model_validate(item) for item in accounts_page.items)
+        holdings = tuple(PositionItem.model_validate(item) for item in holdings_page.items)
+        if len(accounts) != 1:
+            raise ValueError
+        account_id = accounts[0].external_account_id
+        if any(item.external_account_id != account_id for item in holdings):
+            raise ValueError
+        provider_code = "us" + symbol
+        matches = [item for item in holdings if item.instrument_code == provider_code]
+        if len(matches) != 1 or matches[0].currency != "USD" or matches[0].quantity == 0:
+            raise ValueError
+        payload = _held_binding_payload(
+            account_source_request_id=accounts_page.source_request_id,
+            holdings_source_request_id=holdings_page.source_request_id,
+            accounts_as_of=accounts_page.as_of,
+            holdings_as_of=holdings_page.as_of,
+            provider_code=provider_code,
+        )
+        return CurrentHeldCommonStockBinding.model_validate(
+            {**payload, "sha256": _held_binding_digest(payload)}
+        )
+    except (ValueError, TypeError, KeyError):
+        raise ValueError("CURRENT_HELD_COMMON_STOCK_HOLDING_INVALID") from None
+
+
+def _validate_held_common_stock_binding(
+    binding: CurrentHeldCommonStockBinding, *, symbol: str, now: datetime
+) -> None:
+    payload = _held_binding_payload(
+        account_source_request_id=binding.account_source_request_id,
+        holdings_source_request_id=binding.holdings_source_request_id,
+        accounts_as_of=binding.accounts_as_of,
+        holdings_as_of=binding.holdings_as_of,
+        provider_code=binding.provider_code,
+    )
+    if (
+        binding.provider_code != "us" + symbol
+        or binding.sha256 != _held_binding_digest(payload)
+        or not binding.accounts_as_of <= binding.holdings_as_of <= now
+        or now - binding.accounts_as_of > HELD_BINDING_MAX_AGE
+        or now - binding.holdings_as_of > HELD_BINDING_MAX_AGE
+    ):
+        raise ValueError("CURRENT_HELD_COMMON_STOCK_HOLDING_INVALID")
+
+
+async def _current_held_aliases(
+    session: AsyncSession, symbol: str, instrument_id: UUID, now: datetime
+) -> tuple[InstrumentAlias, ...]:
+    return tuple(
+        await session.scalars(
+            select(InstrumentAlias).where(
+                InstrumentAlias.alias_type == "ticker",
+                or_(
+                    InstrumentAlias.symbol == symbol,
+                    InstrumentAlias.instrument_id == instrument_id,
+                ),
+                InstrumentAlias.valid_from <= now.date(),
+                or_(InstrumentAlias.valid_to.is_(None), InstrumentAlias.valid_to >= now.date()),
+            )
+        )
+    )
+
+
+def _held_revision(inputs: IdentityInputs, holding: CurrentHeldCommonStockBinding) -> str:
+    return sha256(
+        (
+            HELD_SCHEMA
+            + inputs.identity.symbol
+            + holding.sha256
+            + ":".join(sha256(raw).hexdigest() for raw in inputs.contents)
+        ).encode()
+    ).hexdigest()
+
+
+async def import_current_held_common_stock(
+    session: AsyncSession,
+    store: IdentityStore,
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    accounts_page: GatewayResponsePage,
+    holdings_page: GatewayResponsePage,
+) -> CurrentIdentityImportResult:
+    """Persist a source-proven current holding without publishing a research universe."""
+
+    try:
+        async with session.begin_nested():
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:symbol, 0))"),
+                {"symbol": f"current_identity:{symbol}"},
+            )
+            now = await session.scalar(select(func.clock_timestamp()))
+            assert isinstance(now, datetime)
+            instrument_id = UUID(str(stable_instrument_id(symbol)))
+            holding = current_held_common_stock_binding(
+                symbol=symbol,
+                accounts_page=accounts_page,
+                holdings_page=holdings_page,
+                now=now,
+            )
+            inputs = load_identity_archives(
+                symbol=symbol,
+                fmp_archive=fmp_archive,
+                sec_archive=sec_archive,
+                now=now,
+                _instrument_id=instrument_id,
+                _allow_outside_definition=True,
+            )
+            revision = _held_revision(inputs, holding)
+            existing = await session.scalar(
+                select(DataSnapshot).where(
+                    DataSnapshot.source == HELD_SOURCE,
+                    DataSnapshot.provider_object_id == f"identity:{symbol}",
+                    DataSnapshot.revision == revision,
+                )
+            )
+            if existing is not None:
+                proof = await read_current_held_common_stock(
+                    session, store, snapshot_id=existing.id
+                )
+                return CurrentIdentityImportResult("existing", proof.instrument_id, existing.id)
+
+            instrument = await session.get(Instrument, instrument_id)
+            aliases = await _current_held_aliases(session, symbol, instrument_id, now)
+            if instrument is not None or aliases:
+                if (
+                    instrument is None
+                    or instrument.asset_type != "common_stock"
+                    or instrument.exchange != inputs.identity.exchange
+                    or instrument.currency != "USD"
+                    or instrument.risk_bucket != "EQUITY"
+                    or instrument.tick_size is not None
+                    or len(aliases) != 1
+                    or aliases[0].instrument_id != instrument_id
+                    or aliases[0].symbol != symbol
+                ):
+                    raise ValueError("CURRENT_HELD_COMMON_STOCK_MASTER_CONFLICT")
+                alias = aliases[0]
+            else:
+                instrument = Instrument(
+                    id=instrument_id,
+                    asset_type="common_stock",
+                    exchange=inputs.identity.exchange,
+                    currency="USD",
+                    tick_size=None,
+                    risk_bucket="EQUITY",
+                )
+                session.add(instrument)
+                await session.flush()
+                alias = InstrumentAlias(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    alias_type="ticker",
+                    valid_from=now.date(),
+                    valid_to=None,
+                )
+                session.add(alias)
+                await session.flush()
+
+            artifacts = await _archive(session, store, inputs)
+            checked = await session.scalar(select(func.clock_timestamp()))
+            assert isinstance(checked, datetime)
+            proof = CurrentHeldCommonStockProof(
+                identity=inputs.identity,
+                instrument_id=instrument_id,
+                alias_id=alias.id,
+                alias_valid_from=alias.valid_from,
+                checked_at=checked,
+                holding=holding,
+                sec_url=inputs.sec_url,
+                artifacts=artifacts,
+            )
+            snapshot = DataSnapshot(
+                source=HELD_SOURCE,
+                provider_object_id=f"identity:{symbol}",
+                revision=revision,
+                schema_version=HELD_SCHEMA,
+                observed_at=checked,
+                received_at=checked,
+                available_at=checked,
+                payload=proof.model_dump(mode="json"),
+            )
+            session.add(snapshot)
+            await session.flush()
+            await read_current_held_common_stock(session, store, snapshot_id=snapshot.id)
+            return CurrentIdentityImportResult("created", instrument_id, snapshot.id)
+    except IntegrityError as error:
+        raise ValueError("CURRENT_HELD_COMMON_STOCK_CONCURRENT_CONFLICT") from error
+
+
+async def read_current_held_common_stock(
+    session: AsyncSession, store: IdentityStore, *, snapshot_id: UUID
+) -> CurrentHeldCommonStockProof:
+    try:
+        snapshot = await session.get(DataSnapshot, snapshot_id)
+        now = await session.scalar(select(func.clock_timestamp()))
+        assert isinstance(now, datetime)
+        if (
+            snapshot is None
+            or snapshot.source != HELD_SOURCE
+            or snapshot.schema_version != HELD_SCHEMA
+        ):
+            raise ValueError
+        proof = CurrentHeldCommonStockProof.model_validate(snapshot.payload)
+        _validate_held_common_stock_binding(
+            proof.holding, symbol=proof.identity.symbol, now=proof.checked_at
+        )
+        if (
+            (snapshot.observed_at, snapshot.received_at, snapshot.available_at)
+            != (proof.checked_at,) * 3
+            or proof.checked_at > now
+            or len(proof.artifacts) != 4
+        ):
+            raise ValueError
+        contents = []
+        for binding in proof.artifacts:
+            artifact = await session.scalar(
+                select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
+            )
+            if artifact is None or _binding(artifact) != binding:
+                raise ValueError
+            contents.append(await _read_artifact(store, binding))
+        inputs = validate_identity_originals(
+            symbol=proof.identity.symbol,
+            contents=(contents[0], contents[1], contents[2], contents[3]),
+            now=proof.checked_at,
+            _allow_outside_definition=True,
+        )
+        if (
+            inputs.identity != proof.identity
+            or inputs.sec_url != proof.sec_url
+            or _held_revision(inputs, proof.holding) != snapshot.revision
+            or proof.instrument_id != stable_instrument_id(proof.identity.symbol)
+            or snapshot.provider_object_id != f"identity:{proof.identity.symbol}"
+        ):
+            raise ValueError
+        instrument = await session.get(Instrument, proof.instrument_id)
+        aliases = await _current_held_aliases(
+            session, proof.identity.symbol, proof.instrument_id, now
+        )
+        if (
+            instrument is None
+            or instrument.asset_type != "common_stock"
+            or instrument.exchange != proof.identity.exchange
+            or instrument.currency != "USD"
+            or instrument.risk_bucket != "EQUITY"
+            or instrument.tick_size is not None
+            or len(aliases) != 1
+            or aliases[0].id != proof.alias_id
+            or aliases[0].symbol != proof.identity.symbol
+            or aliases[0].instrument_id != proof.instrument_id
+            or aliases[0].valid_from != proof.alias_valid_from
+            or proof.alias_valid_from > proof.checked_at.date()
+        ):
+            raise ValueError
+        return proof
+    except (ValueError, TypeError, KeyError) as error:
+        raise ValueError("CURRENT_HELD_COMMON_STOCK_READBACK_INVALID") from error
 
 
 def _compatible(instrument: Instrument, identity: CurrentCommonStockIdentity) -> bool:

@@ -86,7 +86,9 @@ def _evaluate(
     minimum = _minimum_weights(positions, total, current)
     target = dict(current)
     target_cash = current_cash
-    baseline_top1, _, _ = _security_metrics(current)
+    # Diagnostics are computed from raw security values. Validate against that same
+    # authority before display weights are quantized and assigned their cash residue.
+    baseline_top1, _, _ = _security_metrics(values)
     _validate_concentration_authority(report, baseline_top1, policy, snapshot.as_of)
     effective_cash = max(policy.cash_minimum, constraints.minimum_cash)
     reason: str | None = None

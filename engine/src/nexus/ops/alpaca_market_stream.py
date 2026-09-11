@@ -361,9 +361,7 @@ def _replay_stream_frames(
                 authenticated = True
             elif kind == "subscription":
                 valid_subscription = (
-                    _batch_subscription(item, symbols)
-                    if batch
-                    else _subscription(item, symbols[0])
+                    _batch_subscription(item, symbols) if batch else _subscription(item, symbols[0])
                 )
                 if not authenticated or subscribed or not valid_subscription:
                     raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID")
@@ -408,9 +406,7 @@ def _parse_archive(
     *,
     receipt_raw: bytes,
 ) -> MarketStreamArchive:
-    started, ended = _validate_stream_receipt(
-        receipt, frames, schema=SCHEMA, identity_key="symbol"
-    )
+    started, ended = _validate_stream_receipt(receipt, frames, schema=SCHEMA, identity_key="symbol")
     symbol = validate_symbol(receipt["symbol"])
     trades, quotes = _replay_stream_frames(
         receipt,
@@ -922,6 +918,7 @@ async def _collect_market_stream_symbols(
         "requested_max_frames": max_frames,
     }
     observed_symbols: set[str] = set()
+    latest_observed_at = started
     total_bytes = 0
     connected = False
     cancelled: asyncio.CancelledError | None = None
@@ -1004,11 +1001,13 @@ async def _collect_market_stream_symbols(
                             symbol = item.get("S")
                             if not receipt["subscription_confirmed"] or symbol not in symbols:
                                 raise MarketStreamError("PROTOCOL_INVALID")
+                            observation = (
+                                _trade(item, symbol) if kind == "t" else _quote(item, symbol)
+                            )
+                            latest_observed_at = max(latest_observed_at, observation.observed_at)
                             if kind == "t":
-                                _trade(item, symbol)
                                 receipt["trade_count"] += 1
                             else:
-                                _quote(item, symbol)
                                 receipt["quote_count"] += 1
                             observed_symbols.add(symbol)
                         elif kind == "error":
@@ -1032,7 +1031,11 @@ async def _collect_market_stream_symbols(
             except Exception:
                 receipt["stop_reason"] = "DISCONNECTED"
             finally:
-                receipt["ended_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                ended = datetime.now(UTC)
+                if latest_observed_at > ended + timedelta(seconds=1):
+                    receipt["stop_reason"] = "PROTOCOL_INVALID"
+                ended = max(ended, latest_observed_at)
+                receipt["ended_at"] = ended.isoformat().replace("+00:00", "Z")
                 receipt["elapsed_monotonic_seconds"] = monotonic() - start_monotonic
     except asyncio.CancelledError as error:
         receipt["stop_reason"] = "CANCELLED"

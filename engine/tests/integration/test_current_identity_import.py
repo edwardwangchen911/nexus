@@ -14,8 +14,109 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias, UniverseSnapshot
 from nexus.persistence.models.paper import PaperOrderRecord
 from nexus.persistence.session import session_factory
+from nexus.providers.broker.fosun_contracts import PositionItem
+from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
+
+
+def held_pages(symbol: str):
+    as_of = datetime.now(UTC)
+    account = {
+        "kind": "account",
+        "external_account_id": "synthetic-account",
+        "status": "active",
+        "base_currency": "USD",
+    }
+    holding = PositionItem(
+        kind="position",
+        external_account_id="synthetic-account",
+        instrument_code="us" + symbol,
+        currency="USD",
+        quantity="1",
+        available_quantity="1",
+        frozen_quantity="0",
+        average_cost="10",
+        diluted_cost=None,
+        current_price="11",
+        provider_as_of=as_of,
+    )
+    return (
+        GatewayResponsePage(
+            items=(account,),
+            source_request_id="synthetic-accounts-request",
+            has_more=False,
+            next_cursor=None,
+            as_of=as_of,
+            quality="PASS",
+        ),
+        GatewayResponsePage(
+            items=(holding.model_dump(mode="json"),),
+            source_request_id="synthetic-holdings-request",
+            has_more=False,
+            next_cursor=None,
+            as_of=as_of,
+            quality="PARTIAL",
+        ),
+        holding,
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_held_common_stock_import_stays_outside_universe_and_execution(
+    migrated_database_url, tmp_path
+):
+    module = importlib.import_module("nexus.market.current_identity_storage")
+    symbol = "SYNX"
+    fm, sc = archives(tmp_path, symbol=symbol)
+    accounts_page, holdings_page, holding = held_pages(symbol)
+    store = MemoryStore()
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={"object_store_endpoint": "http://127.0.0.1:9000"}
+    )
+    factory = session_factory(settings)
+
+    class HeldBroker:
+        async def read_accounts(self):
+            return accounts_page
+
+        async def read_holdings(self, external_account_id, *, cursor, limit):
+            assert external_account_id == "synthetic-account"
+            assert cursor is None and limit == 100
+            return holdings_page
+
+    try:
+        ops = importlib.import_module("nexus.ops.instrument_identity_local")
+        result = await ops.import_held_identity(
+            settings,
+            symbol=symbol,
+            fmp_archive=fm,
+            sec_archive=sc,
+            store=store,
+            broker=HeldBroker(),
+        )
+        assert result.status == "created"
+        assert result.instrument_id == stable_instrument_id(symbol)
+        async with factory() as session:
+            proof = await module.read_current_held_common_stock(
+                session, store, snapshot_id=result.snapshot_id
+            )
+            assert proof.scope == "fosun_current_holding"
+            assert proof.execution_locked
+            assert not proof.universe_published
+            assert not proof.new_position_eligible
+            assert not proof.historical_backtest_eligible
+            instrument = await session.get(Instrument, result.instrument_id)
+            assert instrument.asset_type == "common_stock"
+            assert instrument.risk_bucket == "EQUITY"
+            from nexus.ops.fosun_local_refresh import _load_local_broker_identity
+
+            identity = await _load_local_broker_identity(session, holdings=(holding,))
+            assert identity.instrument_ids["us" + symbol] == result.instrument_id
+            for model in (UniverseSnapshot, AgentResearchRunRecord, PaperOrderRecord):
+                assert await session.scalar(select(func.count()).select_from(model)) == 0
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio

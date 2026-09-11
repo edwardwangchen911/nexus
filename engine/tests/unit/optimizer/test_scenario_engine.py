@@ -281,6 +281,17 @@ def test_sub_basis_point_equalization_stops_without_oscillating() -> None:
     assert result.hard_constraint_reasons == ("STRUCTURAL_CONCENTRATION_FLOOR",)
 
 
+def test_diagnostic_baseline_uses_raw_values_before_weight_rounding() -> None:
+    snapshot = _snapshot(
+        ("23758", "31677", "39596", "47515", "55434"),
+        usd_cash="12345",
+    )
+
+    result = _evaluate(snapshot)
+
+    assert result.objective_status in {"met", "improved_not_met"}
+
+
 def test_unavailable_top_holding_is_not_bypassed_by_selling_other_names() -> None:
     snapshot = _snapshot(("30", "10", "10", "10", "10", "10", "10", "10"))
     frozen_top = _position(1, "30", available="0")

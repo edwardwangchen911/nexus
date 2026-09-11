@@ -84,9 +84,7 @@ Performance information.
 Purchase and Sale of Fund Shares Individual shares trade in the secondary market through a
 broker-dealer. Only Authorized Participants may transact directly with the Fund.
 Tax Information Taxes apply.</body></html>""".encode()
-    values = list(
-        originals(symbol=symbol, exchange="NASDAQ", company_name=name, document=document)
-    )
+    values = list(originals(symbol=symbol, exchange="NASDAQ", company_name=name, document=document))
     values[4] = f"""<html><body><div id="seriesDiv"><table>
 <tr><td>Series S000000001</td><td></td><td>{name}</td></tr>
 <tr><td>Class/Contract C000000002</td><td></td><td>{name}</td><td>{symbol}</td></tr>
@@ -103,6 +101,43 @@ Tax Information Taxes apply.</body></html>""".encode()
     assert result.identity.exchange == "XNAS"
     assert result.identity.asset_type == "equity_etf"
     assert result.identity.symbol == symbol
+
+
+@pytest.mark.asyncio
+async def test_current_held_nasdaq_identity_accepts_bound_equity_wording_without_product_template():
+    import json
+    from hashlib import sha256
+
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    name = "Synthetic Select Equity Fund"
+    document = f"""<html><body>Summary Prospectus February 27, 2026
+{symbol} {name} is an exchange-traded fund listed on The Nasdaq Stock Market LLC.
+Important information for investors.
+Investment Objective The Fund seeks daily results linked to shares of a United States company.
+Fund Fees and Expenses Expenses apply.
+Principal Investment Strategies The Fund obtains equity exposure through securities and swaps.
+Principal Risks Investing in equity securities involves market risk.
+</body></html>""".encode()
+    values = list(originals(symbol=symbol, exchange="NASDAQ", company_name=name, document=document))
+    values[4] = f"""<html><body><div id="seriesDiv"><table>
+<tr><td>Series S000000001</td><td></td><td>{name}</td></tr>
+<tr><td>Class/Contract C000000002</td><td></td><td>{name}</td><td>{symbol}</td></tr>
+</table></div><a href="https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/sample.htm">497K</a>
+</body></html>""".encode()
+    receipts = json.loads(values[6])
+    for receipt, raw in zip(receipts, values[3:6], strict=True):
+        receipt["sha256"] = sha256(raw).hexdigest()
+    values[6] = json.dumps(receipts).encode()
+
+    result = await validate_current_held_etf_originals(
+        symbol=symbol, contents=tuple(values), now=datetime.now(UTC)
+    )
+
+    assert result.identity.exchange == "XNAS"
+    assert result.identity.asset_type == "equity_etf"
+    assert "equity exposure" in result.identity.strategy_statement
 
 
 def test_current_held_etf_proof_has_fail_closed_scope_flags():

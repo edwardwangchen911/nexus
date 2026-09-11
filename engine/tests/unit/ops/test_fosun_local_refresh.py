@@ -10,6 +10,7 @@ import nexus.ops.fosun_local_refresh as refresh_module
 import pytest
 from nexus.ops.fosun_local import safe_failure
 from nexus.ops.fosun_local_refresh import (
+    _active_holdings,
     _daily_window,
     _freeze_broker_facts,
     _read_market_snapshot,
@@ -442,6 +443,19 @@ def test_us_holding_codes_exclude_hk_and_non_us_positions() -> None:
     assert _us_holding_codes(holdings) == ("usAAPL",)
 
 
+def test_closed_zero_rows_are_not_current_holdings() -> None:
+    active = _position("usAAPL")
+    closed = _position("usOLD").model_copy(
+        update={
+            "quantity": Decimal("0"),
+            "available_quantity": Decimal("0"),
+            "frozen_quantity": Decimal("0"),
+        }
+    )
+
+    assert _active_holdings((closed, active)) == (active,)
+
+
 def test_more_than_twenty_us_holding_codes_fails_closed() -> None:
     holdings = tuple(_position(f"usT{index:02d}") for index in range(21))
 
@@ -646,9 +660,7 @@ async def test_provider_failure_after_identity_preflight_never_persists_snapshot
     monkeypatch.setattr(refresh_module, "S3ProviderEvidenceStore", _persistence_must_not_start)
 
     with pytest.raises(RuntimeError, match="LOCAL_TEST_READ_FAILED"):
-        await refresh_local_fosun(
-            SimpleNamespace(database_url="synthetic"), now=instant
-        )  # type: ignore[arg-type]
+        await refresh_local_fosun(SimpleNamespace(database_url="synthetic"), now=instant)  # type: ignore[arg-type]
 
     assert database_opened is True
     assert database_closed is True

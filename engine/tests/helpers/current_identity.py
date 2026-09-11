@@ -108,10 +108,10 @@ def dual_listing_filing():
     return raw
 
 
-def archives(root: Path, *, fmp=None, sec=None, received=None):
+def archives(root: Path, *, symbol="AAPL", fmp=None, sec=None, received=None):
     received = received or datetime.now(UTC).isoformat()
-    fmp = fmp or profile()
-    sec = sec or filing()
+    fmp = fmp or profile(symbol=symbol)
+    sec = sec or filing().replace(b"AAPL", symbol.encode())
     fm, sc = root / "fmp", root / "sec"
     fm.mkdir(mode=0o700, parents=True)
     sc.mkdir(mode=0o700)
@@ -123,7 +123,7 @@ def archives(root: Path, *, fmp=None, sec=None, received=None):
                 source="fmp",
                 origin="https://financialmodelingprep.com",
                 path="/stable/profile",
-                symbol="AAPL",
+                symbol=symbol,
                 raw_sha256=sha256(fmp).hexdigest(),
                 raw_byte_length=len(fmp),
                 received_at=received,

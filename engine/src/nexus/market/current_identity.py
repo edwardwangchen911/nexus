@@ -11,12 +11,13 @@ from hashlib import sha256
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
 from nexus.backtest.universe import UniverseDefinitionMember, load_us_liquid_v1_definition
 from nexus.domain.time import require_utc
-from nexus.providers.fmp_profile import _invalid_constant, _unique, parse_profile
+from nexus.providers.fmp_profile import _invalid_constant, _unique, parse_profile, validate_symbol
 from nexus.research.fmp_profile import RECEIPT_SCHEMA
 from nexus.research.fmp_profile_archive import _read, load_profile_archive
 
@@ -1095,9 +1096,13 @@ def parse_current_common_stock(
     fmp_raw: bytes,
     sec_raw: bytes,
     _member_definition: dict[str, Any] | None = None,
+    _allow_outside_definition: bool = False,
 ) -> CurrentCommonStockIdentity:
     try:
-        member_for(symbol)
+        if _allow_outside_definition:
+            validate_symbol(symbol)
+        else:
+            member_for(symbol)
         row = parse_profile(fmp_raw, symbol)
         identifier = cik(row.get("cik"))
         if row.get("currency") != "USD" or any(
@@ -1303,11 +1308,16 @@ def validate_identity_originals(
     contents: tuple[bytes, bytes, bytes, bytes],
     now: datetime,
     _member_definition: dict[str, Any] | None = None,
+    _allow_outside_definition: bool = False,
 ) -> IdentityInputs:
     try:
         fmp, fm_receipt, sec, sec_receipt = contents
         identity = parse_current_common_stock(
-            symbol=symbol, fmp_raw=fmp, sec_raw=sec, _member_definition=_member_definition
+            symbol=symbol,
+            fmp_raw=fmp,
+            sec_raw=sec,
+            _member_definition=_member_definition,
+            _allow_outside_definition=_allow_outside_definition,
         )
         receipts = [
             json.loads(
@@ -1359,25 +1369,42 @@ def validate_identity_originals(
 
 
 def load_identity_archives(
-    *, symbol: str, fmp_archive: Path, sec_archive: Path, now: datetime | None = None
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    now: datetime | None = None,
+    _instrument_id: UUID | None = None,
+    _allow_outside_definition: bool = False,
 ) -> IdentityInputs:
     cutoff = require_utc(now or datetime.now(UTC))
     return validate_identity_originals(
         symbol=symbol,
         contents=read_identity_archive_contents(
-            symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive, now=cutoff
+            symbol=symbol,
+            fmp_archive=fmp_archive,
+            sec_archive=sec_archive,
+            now=cutoff,
+            _instrument_id=_instrument_id,
         ),
         now=cutoff,
+        _allow_outside_definition=_allow_outside_definition,
     )
 
 
 def read_identity_archive_contents(
-    *, symbol: str, fmp_archive: Path, sec_archive: Path, now: datetime
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    now: datetime,
+    _instrument_id: UUID | None = None,
 ) -> tuple[bytes, bytes, bytes, bytes]:
     try:
         cutoff = require_utc(now)
+        instrument_id = _instrument_id or member_for(symbol).instrument_id
         fmp = load_profile_archive(
-            fmp_archive, instrument_id=member_for(symbol).instrument_id, symbol=symbol, now=cutoff
+            fmp_archive, instrument_id=instrument_id, symbol=symbol, now=cutoff
         )
         fd = os.open(sec_archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:

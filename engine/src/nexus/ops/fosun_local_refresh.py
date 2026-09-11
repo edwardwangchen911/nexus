@@ -147,12 +147,19 @@ class _SinglePageBrokerGateway:
         cursor: str | None,
         limit: int,
     ) -> GatewayResponsePage:
-        return self._require_single_page(
+        page = self._require_single_page(
             await self._inner.read_holdings(
                 external_account_id,
                 cursor=cursor,
                 limit=limit,
             )
+        )
+        return page.model_copy(
+            update={
+                "items": [
+                    item for item in page.items if PositionItem.model_validate(item).quantity != 0
+                ]
+            }
         )
 
     async def read_orders(
@@ -337,6 +344,7 @@ async def refresh_local_fosun(
             raise ValueError("LOCAL_HOLDINGS_BUDGET_EXCEEDED")
         if any(item.external_account_id != external_account_id for item in holdings):
             raise ValueError("LOCAL_ACCOUNT_SCOPE_MISMATCH")
+        holdings = _active_holdings(holdings)
         engine = create_async_engine(settings.database_url, pool_pre_ping=True)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         async with sessions() as session:
@@ -473,6 +481,7 @@ async def refresh_local_fosun_broker(
             raise ValueError("LOCAL_HOLDINGS_BUDGET_EXCEEDED")
         if any(item.external_account_id != external_account_id for item in holdings):
             raise ValueError("LOCAL_ACCOUNT_SCOPE_MISMATCH")
+        holdings = _active_holdings(holdings)
 
         engine = create_async_engine(settings.database_url, pool_pre_ping=True)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -601,6 +610,12 @@ def _us_holding_codes(holdings: Sequence[PositionItem]) -> tuple[str, ...]:
     if len(codes) > _MAX_US_HOLDING_SYMBOLS:
         raise ValueError("LOCAL_US_HOLDING_BUDGET_EXCEEDED")
     return codes
+
+
+def _active_holdings(holdings: Sequence[PositionItem]) -> tuple[PositionItem, ...]:
+    """Broker zero rows are closed positions, not current identity requirements."""
+
+    return tuple(item for item in holdings if item.quantity != 0)
 
 
 async def _freeze_broker_facts(

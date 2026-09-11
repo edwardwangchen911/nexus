@@ -1,10 +1,12 @@
 import asyncio
 import base64
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 
 import pytest
+from nexus.ops import alpaca_market_stream as stream_module
 from nexus.ops.alpaca_market_stream import (
     MAX_FRAME,
     collect_market_stream,
@@ -160,6 +162,31 @@ async def test_batch_stream_uses_one_sorted_subscription_and_keeps_partial_cover
     assert tuple(item.symbol for item in archive.items) == ("AAPL",)
     assert archive.items[0].quote is not None
     assert archive.items[0].quote.bid == Decimal("227.14")
+
+
+@pytest.mark.asyncio
+async def test_batch_receipt_covers_small_provider_clock_lead(tmp_path, monkeypatch) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 9, 14, 30, 1, 200000, tzinfo=tz or UTC)
+
+    monkeypatch.setattr(stream_module, "datetime", Clock)
+    directory = tmp_path / "batch"
+
+    await collect_market_stream_batch(
+        symbols=("AAPL",),
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        max_frames=4,
+        connector=lambda *args, **kwargs: Socket(
+            [CONNECTED, AUTHENTICATED, _batch_subscription("AAPL"), DATA]
+        ),
+    )
+
+    archive = load_market_stream_batch_archive(directory)
+    assert archive.completed_at == datetime(2026, 9, 9, 14, 30, 1, 223456, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
