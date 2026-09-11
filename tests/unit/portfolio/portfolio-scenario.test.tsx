@@ -127,7 +127,7 @@ it("posts intent and constraints without client-authored weights, then compares 
   const costs = screen.getByRole("table", { name: "调整情景成本证据" });
   expect(within(costs).getByText("券商佣金")).toBeVisible();
   expect(within(costs).getByText("缺少适用的券商佣金费率依据")).toBeVisible();
-  expect(within(costs).getByText("缺少冻结时点的买卖报价依据")).toBeVisible();
+  expect(within(costs).getByText("缺少可用于情景成本分析的冻结买卖报价依据；现有盘中行情仅用于展示")).toBeVisible();
   expect(within(costs).getByText("税务资料不可用")).toBeVisible();
   expect(screen.getByText(/公开监管费率参考已记录/)).toHaveTextContent(
     "us_regulatory_fee_reference_2026_verified_20260911_v1",

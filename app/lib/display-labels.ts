@@ -66,7 +66,7 @@ const reasons: Record<string, string> = {
   COST_MODEL_NOT_AVAILABLE: "交易成本模型尚未提供",
   COST_EVIDENCE_INCOMPLETE: "成本证据不完整",
   BROKER_COMMISSION_SCHEDULE_UNAVAILABLE: "缺少适用的券商佣金费率依据",
-  BID_ASK_EVIDENCE_UNAVAILABLE: "缺少冻结时点的买卖报价依据",
+  BID_ASK_EVIDENCE_UNAVAILABLE: "缺少可用于情景成本分析的冻结买卖报价依据；现有盘中行情仅用于展示",
   SLIPPAGE_MODEL_UNAVAILABLE: "缺少适用的滑点模型依据",
   REGULATORY_FEE_SCHEDULE_UNAVAILABLE: "缺少适用的监管费率依据",
   BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE: "公开监管费率已核验，但缺少券商向账户转嫁、聚合与舍入依据",
