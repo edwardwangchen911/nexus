@@ -64,13 +64,26 @@ from nexus.providers.market.fosun import (
 from nexus.providers.market.fosun_gateway import (
     FosunMarketGatewayClient,
     FosunMarketGatewayIdentity,
+    FosunQuoteItem,
     RawGatewayResponse,
+    classify_fosun_security_family,
     parse_bar_page,
     parse_quote_page,
 )
 from nexus.reconciliation.broker_snapshot import freeze_broker_snapshot
 from nexus.reconciliation.cash_flows import CashFlowSyncResult, fetch_cash_flows
 from nexus.reconciliation.snapshot_persistence import finalize_broker_sync
+from nexus.research.fosun_security_classification import (
+    FosunClassificationLevels,
+    FosunFundAssetType,
+    FosunRawQuoteBinding,
+    FosunSecurityClassificationDocument,
+)
+from nexus.research.fosun_security_classification_storage import (
+    persist_security_classification,
+    read_security_classifications,
+    save_classification_artifact,
+)
 
 _LOCAL_CONTRACT_HASH = hashlib.sha256(b"nexus.mac-local-fosun-read-only.v2").hexdigest()
 _INSTRUMENT_NAMESPACE = UUID("639bd8e1-d250-4f58-a88c-370b6bbc621b")
@@ -932,6 +945,59 @@ async def _read_market_snapshot(
     )
 
 
+async def _persist_quote_classifications(
+    session: AsyncSession,
+    store: S3ProviderEvidenceStore,
+    *,
+    quote_items: tuple[FosunQuoteItem, ...],
+    instrument_ids: dict[str, UUID],
+    quote_raw: RawGatewayResponse,
+    quote_artifact: DataArtifact,
+) -> None:
+    """Persist routing hints from an already completed full quote read."""
+    for item in quote_items:
+        source = item.provider_classification
+        if source is None:
+            continue
+        document = FosunSecurityClassificationDocument(
+            instrument_id=instrument_ids[item.instrument_code],
+            provider_code=item.instrument_code,
+            provider_name=item.provider_name,
+            levels=FosunClassificationLevels(
+                first=source.level_1,
+                second=source.level_2,
+                third=source.level_3,
+            ),
+            equity_profile_fields_complete=source.equity_profile_fields_complete,
+            net_asset_profile_fields_complete=source.net_asset_profile_fields_complete,
+            fund_asset_type=FosunFundAssetType(
+                chs=source.fund_asset_type_chs,
+                cht=source.fund_asset_type_cht,
+                eng=source.fund_asset_type_eng,
+            ),
+            routing_family=classify_fosun_security_family(source),
+            received_at=quote_raw.received_at,
+            available_at=quote_raw.received_at,
+            raw_quote=FosunRawQuoteBinding(
+                artifact_sha256=quote_artifact.sha256,
+                artifact_byte_length=quote_artifact.byte_size,
+                artifact_uri=quote_artifact.uri,
+                gateway_request_id=quote_raw.gateway_request_id,
+                request_body_sha256=quote_raw.request_body_sha256,
+            ),
+        )
+        location = await save_classification_artifact(session, store, document)
+        evidence = await persist_security_classification(session, document, location=location)
+        readback = await read_security_classifications(
+            session,
+            instrument_id=document.instrument_id,
+            as_of=datetime.now(UTC),
+            evidence_ids=(evidence.id,),
+        )
+        if readback != {evidence.id: document}:
+            raise ValueError("FOSUN_CLASSIFICATION_READBACK_FAILED")
+
+
 async def _persist_market_snapshot(
     session: AsyncSession,
     store: S3ProviderEvidenceStore,
@@ -1000,6 +1066,14 @@ async def _persist_market_snapshot(
     )
     session.add(quote_artifact)
     await session.flush()
+    await _persist_quote_classifications(
+        session,
+        store,
+        quote_items=quote_page.items,
+        instrument_ids=instrument_ids,
+        quote_raw=quote_raw,
+        quote_artifact=quote_artifact,
+    )
     for quote_item in quote_page.items:
         if quote_item.price is None:
             continue

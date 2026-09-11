@@ -19,6 +19,9 @@ from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.research.alpaca_actions_storage import read_action_observations
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
+from nexus.research.fosun_security_classification_storage import (
+    read_security_classifications,
+)
 from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
 from nexus.research.news_evidence import read_news_evidence
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
@@ -184,6 +187,27 @@ async def prepare_research_snapshot(
         if news_ref is None:
             raise ValueError("OPENAI_NEWS_EVIDENCE_UNAVAILABLE")
         evidence.append(news_ref)
+    classifications = await read_security_classifications(
+        session, instrument_id=instrument_id, as_of=as_of
+    )
+    if classifications:
+        classification_id = next(iter(classifications))
+        classification_ref = await session.get(ResearchEvidenceRef, classification_id)
+        if classification_ref is not None:
+            research_capacity = MAX_FROZEN_EVIDENCE - 2
+            if len(evidence) >= research_capacity:
+                oldest_sec = next(
+                    (
+                        index
+                        for index in range(len(evidence) - 1, -1, -1)
+                        if evidence[index].source == "sec"
+                    ),
+                    None,
+                )
+                if oldest_sec is not None:
+                    evidence.pop(oldest_sec)
+            if len(evidence) < research_capacity:
+                evidence.append(classification_ref)
     context = await freeze_portfolio_context(
         session,
         instrument_id,
@@ -204,7 +228,14 @@ async def prepare_research_snapshot(
         payload["scope"] = "persisted_sec_filings_and_issuer_observations"
     if nav:
         payload["scope"] = "persisted_sec_filings_and_issuer_nav_history"
-    if actions or profiles or macro_ids or trends or news_evidence_id is not None:
+    if (
+        actions
+        or profiles
+        or macro_ids
+        or trends
+        or classifications
+        or news_evidence_id is not None
+    ):
         payload["scope"] = "persisted_research_observations"
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")
