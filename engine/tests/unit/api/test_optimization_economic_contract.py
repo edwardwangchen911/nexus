@@ -1,6 +1,7 @@
 """An economic explanation cannot turn an incomplete comparison into a recommendation."""
 
 import pytest
+from nexus.api.errors import ErrorCode
 from nexus.api.schemas import optimization
 from pydantic import ValidationError
 
@@ -34,3 +35,11 @@ def test_old_group_responses_do_not_default_to_a_hold_recommendation():
     field = optimization.OptimizationProposalGroupResponse.model_fields["economic_comparison"]
     assert not field.is_required()
     assert field.default is None
+
+
+def test_scenario_spread_replay_has_a_stable_error_without_expanding_public_models():
+    assert (
+        ErrorCode.SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID.value
+        == "SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID"
+    )
+    assert "spread_evidence_manifest" not in optimization.PortfolioScenarioResponse.model_fields

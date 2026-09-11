@@ -29,6 +29,7 @@ from nexus.api.schemas.optimization import PortfolioScenarioRequest, WhatIfReque
 from nexus.api.schemas.portfolio_decisions import PortfolioDecisionCreateRequest
 from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.domain.ids import new_uuid7
+from nexus.market.ingestion import MarketObjectStore
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.persistence.session import session_factory
 from nexus.readiness import ReadinessObjectStore, S3ReadinessObjectStore
@@ -40,6 +41,7 @@ def create_engine_app(
     *,
     readiness_object_store: ReadinessObjectStore | None = None,
     diagnostic_artifact_reader: ArtifactByteReader | None = None,
+    scenario_evidence_store: MarketObjectStore | None = None,
 ) -> FastAPI:
     """Create the stateless API application without probing dependencies."""
     app = FastAPI(title="NEXUS Engine", version="0.1.0")
@@ -51,6 +53,9 @@ def create_engine_app(
         else S3ProviderEvidenceStore(app.state.settings).read_normalized
     )
     app.state.readiness_object_store = readiness_object_store or S3ReadinessObjectStore(
+        app.state.settings
+    )
+    app.state.scenario_evidence_store = scenario_evidence_store or S3ProviderEvidenceStore(
         app.state.settings
     )
 

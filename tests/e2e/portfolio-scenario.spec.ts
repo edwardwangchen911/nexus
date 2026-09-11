@@ -42,6 +42,8 @@ test("one explicit click evaluates one ephemeral scenario and refresh clears it"
   await expect(scenario.getByRole("heading", { name: "有所改善，尚未达到阈值" })).toBeVisible();
   await expect(scenario.getByText("可用于分析比较")).toBeVisible();
   await expect(scenario.getByText("不可执行")).toBeVisible();
+  await expect(scenario.getByText(/情景成本证据束已记录/)).toContainText("scenario_cost_evidence_bundle_v1");
+  await expect(scenario.getByText(/点差依据已冻结，监管费转嫁仍未证明/)).toBeVisible();
   await expect(scenario.getByRole("table", { name: "当前组合与调整情景比较" })).toContainText("65%");
   expect(posts).toEqual(["/api/v1/portfolio-scenarios/evaluate"]);
   await expect(page.getByRole("button", { name: /接受|下单|启动前向观察/ })).toHaveCount(0);
@@ -81,9 +83,10 @@ function result() {
     positions: [{ instrument_id: snapshot.positions[0].instrument_id, current_weight: "0.8", target_weight: "0.65", action: "reduce", reason_code: "CONCENTRATION_REDUCTION" }],
     cash_current_weight: "0.2", cash_target_weight: "0.35", hard_constraint_reasons: [], unknown_metrics: ["estimated_cost"],
     cost_breakdown: {
-      currency: "USD", valuation_time: asOf, basis: "portfolio_value_ratio", evidence_version: null, evidence_hash: null, available_at: null,
+      currency: "USD", valuation_time: asOf, basis: "portfolio_value_ratio",
+      evidence_version: "scenario_cost_evidence_bundle_v1", evidence_hash: "e".repeat(64), available_at: "2026-08-23T07:59:30Z",
       commission: { status: "unknown", value: null, reason: "BROKER_COMMISSION_SCHEDULE_UNAVAILABLE" },
-      spread: { status: "unknown", value: null, reason: "BID_ASK_EVIDENCE_UNAVAILABLE" },
+      spread: known("0.00025"),
       slippage: { status: "unknown", value: null, reason: "SLIPPAGE_MODEL_UNAVAILABLE" },
       regulatory_fees: { status: "unknown", value: null, reason: "REGULATORY_FEE_SCHEDULE_UNAVAILABLE" },
       tax_impact: { status: "unknown", value: null, reason: "TAX_DATA_UNAVAILABLE" },

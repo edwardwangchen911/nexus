@@ -20,7 +20,9 @@ from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
     EvaluateAdjustmentScenarioToolInputV1,
     PortfolioDecisionInputV1,
+    PortfolioDecisionInputV2,
     canonical_portfolio_decision_hash,
+    parse_portfolio_decision_input,
 )
 from nexus.agents.tools import ToolInputError
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_VERSION, load_real_advisory_policy_v1
@@ -30,6 +32,7 @@ from nexus.diagnostics.repository import (
     read_report,
 )
 from nexus.domain.evidence import EvidenceRef
+from nexus.market.ingestion import MarketObjectStore
 from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
     PortfolioScenarioEvaluationV2,
@@ -37,9 +40,17 @@ from nexus.optimizer.scenario_contracts import (
     canonical_scenario_hash,
 )
 from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
+from nexus.optimizer.scenario_spread_cost import (
+    ScenarioSpreadEvidenceManifestV1,
+    apply_scenario_spread_cost,
+    canonical_scenario_spread_manifest_hash,
+    replay_scenario_spread_evidence,
+)
 from nexus.persistence.models.agents import PortfolioDecisionRunRecord
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.persistence.models.runtime import IdempotencyRecord
+from nexus.providers.broker.base import PortfolioSnapshot
 
 TOOL_NAME: Final = "evaluate_adjustment_scenario"
 _MAX_EVIDENCE = 100
@@ -200,10 +211,12 @@ class PortfolioDecisionTools:
 async def build_portfolio_decision_tools(
     session: AsyncSession,
     run: PortfolioDecisionRunRecord,
+    *,
+    scenario_evidence_store: MarketObjectStore,
 ) -> PortfolioDecisionToolRegistry:
     """Load all authority from one durable run; caller payload contributes no identity."""
     try:
-        frozen = PortfolioDecisionInputV1.model_validate(run.frozen_input)
+        frozen = parse_portfolio_decision_input(run.frozen_input)
     except (TypeError, ValidationError) as error:
         raise ToolInputError("frozen portfolio decision input is invalid") from error
     if run.tool_hash != canonical_portfolio_tool_hash():
@@ -223,6 +236,108 @@ async def build_portfolio_decision_tools(
         evidence_hash=run.evidence_hash,
         decision_time=run.decision_time,
     )
+    evaluation = await load_exact_scenario_evaluation(
+        session,
+        scenario_evidence_store,
+        run=run,
+        frozen=frozen,
+    )
+    return PortfolioDecisionTools(
+        objective=frozen.objective,
+        expected_result_hash=frozen.expected_scenario_result_hash,
+        citation_ids=citations.citation_ids,
+        executor=lambda: evaluation,
+    )
+
+
+async def load_exact_scenario_evaluation(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    run: PortfolioDecisionRunRecord,
+    frozen: PortfolioDecisionInputV1 | PortfolioDecisionInputV2,
+) -> PortfolioScenarioEvaluationV2:
+    """Rebuild V1 or replay the exact claim frozen into a V2 Agent run."""
+    snapshot, base_result = await _load_base_scenario_evaluation(
+        session,
+        run=run,
+        frozen=frozen,
+    )
+    if isinstance(frozen, PortfolioDecisionInputV1):
+        if base_result.result_hash != frozen.expected_scenario_result_hash:
+            raise ToolInputError("portfolio scenario result authority changed")
+        return base_result
+    claim = await session.get(IdempotencyRecord, frozen.scenario_claim_id)
+    if claim is None:
+        raise ToolInputError("frozen portfolio scenario claim is missing")
+    _, result = await replay_valid_scenario_claim(
+        session,
+        store,
+        actor_id=run.actor_id,
+        claim=claim,
+        expected_result_hash=frozen.expected_scenario_result_hash,
+        expected_manifest_hash=frozen.scenario_evidence_manifest_hash,
+        snapshot=snapshot,
+        base_result=base_result,
+    )
+    return result
+
+
+async def replay_valid_scenario_claim(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    actor_id: str,
+    claim: IdempotencyRecord,
+    expected_result_hash: str,
+    expected_manifest_hash: str | None,
+    snapshot: PortfolioSnapshot,
+    base_result: PortfolioScenarioEvaluationV2,
+) -> tuple[ScenarioSpreadEvidenceManifestV1, PortfolioScenarioEvaluationV2]:
+    """Validate and replay one exact v3 scenario claim without selecting latest quotes."""
+    try:
+        if (
+            claim.actor_id != actor_id
+            or claim.route
+            != "/internal/v1/portfolio-scenarios/evaluate:portfolio_scenario_evaluation_v3"
+            or claim.schema_version != "portfolio_scenario_v3"
+            or len(claim.request_hash) != 64
+            or any(character not in "0123456789abcdef" for character in claim.request_hash)
+        ):
+            raise ValueError
+        manifest = ScenarioSpreadEvidenceManifestV1.model_validate(claim.response_payload)
+        manifest_hash = canonical_scenario_spread_manifest_hash(manifest)
+        if (
+            manifest.expected_result_hash != expected_result_hash
+            or expected_manifest_hash is not None
+            and manifest_hash != expected_manifest_hash
+        ):
+            raise ValueError
+        evidence = await replay_scenario_spread_evidence(
+            session,
+            store,
+            snapshot=snapshot,
+            base_result=base_result,
+            manifest=manifest,
+        )
+        result = apply_scenario_spread_cost(
+            snapshot=snapshot,
+            base_result=base_result,
+            evidence=evidence,
+        )
+        if result.result_hash != expected_result_hash:
+            raise ValueError
+        return manifest, result
+    except (TypeError, ValueError, ValidationError) as error:
+        raise ToolInputError("frozen portfolio scenario claim is invalid") from error
+
+
+async def _load_base_scenario_evaluation(
+    session: AsyncSession,
+    *,
+    run: PortfolioDecisionRunRecord,
+    frozen: PortfolioDecisionInputV1 | PortfolioDecisionInputV2,
+) -> tuple[PortfolioSnapshot, PortfolioScenarioEvaluationV2]:
     snapshot_record = await session.get(PortfolioSnapshotRecord, run.portfolio_snapshot_id)
     diagnostic_record = await session.get(PortfolioDiagnosticReportRecord, run.diagnostic_report_id)
     if (
@@ -264,23 +379,15 @@ async def build_portfolio_decision_tools(
         allow_new_positions=frozen.allow_new_positions,
     )
 
-    def execute_scenario() -> PortfolioScenarioEvaluationV2:
-        return evaluate_adjustment_scenario(
-            snapshot=snapshot,
-            report=report,
-            identities=identities,
-            constraints=constraints,
-            policy=policy,
-            diagnostic_report_id=run.diagnostic_report_id,
-            diagnostic_input_hash=frozen.diagnostic_input_hash,
-            request_hash=frozen.scenario_request_hash,
-        )
-
-    return PortfolioDecisionTools(
-        objective=frozen.objective,
-        expected_result_hash=frozen.expected_scenario_result_hash,
-        citation_ids=citations.citation_ids,
-        executor=execute_scenario,
+    return snapshot, evaluate_adjustment_scenario(
+        snapshot=snapshot,
+        report=report,
+        identities=identities,
+        constraints=constraints,
+        policy=policy,
+        diagnostic_report_id=run.diagnostic_report_id,
+        diagnostic_input_hash=frozen.diagnostic_input_hash,
+        request_hash=frozen.scenario_request_hash,
     )
 
 
@@ -370,6 +477,7 @@ def canonical_portfolio_tool_hash() -> str:
         module_root / "optimizer/scenario_contracts.py",
         module_root / "optimizer/scenario_cost_evidence.py",
         module_root / "optimizer/scenario_engine.py",
+        module_root / "optimizer/scenario_spread_cost.py",
     )
     authority = {
         "tool_name": TOOL_NAME,

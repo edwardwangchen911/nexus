@@ -19,7 +19,10 @@ function report() {
   };
 }
 
-function scenario(objectiveStatus: ScenarioResponse["objective_status"] = "improved_not_met"): ScenarioResponse {
+function scenario(
+  objectiveStatus: ScenarioResponse["objective_status"] = "improved_not_met",
+  costOverrides: Partial<ScenarioResponse["cost_breakdown"]> = {},
+): ScenarioResponse {
   const known = (value: string) => ({ status: "known" as const, value, reason: null });
   const unknown = (reason: string) => ({ status: "unknown" as const, value: null, reason });
   return {
@@ -56,6 +59,7 @@ function scenario(objectiveStatus: ScenarioResponse["objective_status"] = "impro
       regulatory_fees: unknown("BROKER_REGULATORY_FEE_PASS_THROUGH_UNAVAILABLE"),
       tax_impact: unknown("TAX_DATA_UNAVAILABLE"),
       total_estimated_cost_ex_tax: unknown("COST_EVIDENCE_INCOMPLETE"),
+      ...costOverrides,
     },
   };
 }
@@ -142,6 +146,46 @@ it("posts intent and constraints without client-authored weights, then compares 
 
   fireEvent.change(screen.getByRole("spinbutton", { name: "最低现金占比" }), { target: { value: "0.2" } });
   expect(screen.queryByRole("heading", { name: "有所改善，尚未达到阈值" })).not.toBeInTheDocument();
+});
+
+it("labels a spread bundle without claiming regulatory pass-through evidence", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ data: scenario(
+    "improved_not_met",
+    {
+      evidence_version: "scenario_cost_evidence_bundle_v1",
+      evidence_hash: "f".repeat(64),
+      available_at: "2026-09-10T14:59:31Z",
+      spread: { status: "known", value: "0.00025", reason: null },
+    },
+  ) })));
+  render(<PortfolioScenario snapshot={snapshot} report={report()} stale={false} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "生成调整情景" }));
+
+  expect(await screen.findByText(/情景成本证据束已记录/)).toBeVisible();
+  expect(screen.getByText(/点差依据已冻结/)).toBeVisible();
+  expect(screen.getByText(/监管费转嫁仍未证明/)).toBeVisible();
+  expect(screen.queryByText(/公开监管费率参考已记录/)).not.toBeInTheDocument();
+});
+
+it("fails closed for an unrecognized cost evidence version", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ data: scenario(
+    "improved_not_met",
+    {
+      evidence_version: "unexpected_cost_authority_v9",
+      evidence_hash: "f".repeat(64),
+      available_at: "2026-09-10T14:59:31Z",
+    },
+  ) })));
+  render(<PortfolioScenario snapshot={snapshot} report={report()} stale={false} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "生成调整情景" }));
+
+  expect(await screen.findByText(/成本证据版本未识别/)).toHaveTextContent(
+    "unexpected_cost_authority_v9",
+  );
+  expect(screen.queryByText(/依据已冻结/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/公开监管费率参考已记录/)).not.toBeInTheDocument();
 });
 
 it("clears an in-memory result when the frozen snapshot becomes stale", async () => {

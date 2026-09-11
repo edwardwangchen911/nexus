@@ -11,6 +11,7 @@ from helpers.portfolio_api import headers, settings
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
+    PortfolioDecisionInputV1,
     PortfolioResearchIntentV1,
     canonical_portfolio_decision_hash,
 )
@@ -46,6 +47,7 @@ from tests.integration.test_portfolio_decision_admission_pg import (
     REPORT_ID,
     SNAPSHOT_ID,
     _seed_authority,
+    _select_scenario_claim,
 )
 
 RESULT_HASH = "e" * 64
@@ -137,6 +139,10 @@ def _install_admission_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "nexus.agents.portfolio_decision_persistence.evaluate_adjustment_scenario",
         lambda **_: type("Evaluation", (), {"result_hash": RESULT_HASH})(),
+    )
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_persistence._select_scenario_claim",
+        AsyncMock(side_effect=_select_scenario_claim),
     )
 
 
@@ -600,6 +606,21 @@ async def test_get_is_actor_scoped_and_resolves_only_intent_citations(
         session.expunge(output)
 
     original_input_hash = run.input_hash
+    original_frozen_input = dict(run.frozen_input)
+    v1_frozen_input = {
+        key: value
+        for key, value in original_frozen_input.items()
+        if key not in {"scenario_claim_id", "scenario_evidence_manifest_hash"}
+    }
+    v1_frozen_input["schema_version"] = "portfolio_decision_input_v1"
+    run.frozen_input = v1_frozen_input
+    run.input_hash = canonical_portfolio_decision_hash(
+        PortfolioDecisionInputV1.model_validate(v1_frozen_input)
+    )
+    assert _response(run, output).expected_scenario_result_hash == RESULT_HASH
+
+    run.frozen_input = original_frozen_input
+    run.input_hash = original_input_hash
     run.input_hash = "f" * 64
     with pytest.raises(ValueError, match="authority"):
         _response(run, output)

@@ -17,6 +17,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -132,8 +133,7 @@ def _canonical_value(value: object) -> Any:
     raise TypeError(f"unsupported portfolio decision value: {type(value).__name__}")
 
 
-class PortfolioDecisionInputV1(_StrictPortfolioDecisionModel):
-    schema_version: Literal["portfolio_decision_input_v1"]
+class _PortfolioDecisionInputBase(_StrictPortfolioDecisionModel):
     portfolio_id: UUID
     portfolio_snapshot_id: UUID
     diagnostic_report_id: UUID
@@ -153,6 +153,30 @@ class PortfolioDecisionInputV1(_StrictPortfolioDecisionModel):
     @classmethod
     def _canonical_utc(cls, value: datetime) -> datetime:
         return require_utc(value)
+
+
+class PortfolioDecisionInputV1(_PortfolioDecisionInputBase):
+    schema_version: Literal["portfolio_decision_input_v1"]
+
+
+class PortfolioDecisionInputV2(_PortfolioDecisionInputBase):
+    schema_version: Literal["portfolio_decision_input_v2"]
+    scenario_claim_id: UUID
+    scenario_evidence_manifest_hash: Hash64
+
+
+PortfolioDecisionInput = Annotated[
+    PortfolioDecisionInputV1 | PortfolioDecisionInputV2,
+    Field(discriminator="schema_version"),
+]
+_PORTFOLIO_DECISION_INPUT_ADAPTER: TypeAdapter[PortfolioDecisionInput] = TypeAdapter(
+    PortfolioDecisionInput
+)
+
+
+def parse_portfolio_decision_input(value: object) -> PortfolioDecisionInput:
+    """Parse either durable input version without silently coercing between them."""
+    return _PORTFOLIO_DECISION_INPUT_ADAPTER.validate_python(value)
 
 
 class EvaluateAdjustmentScenarioToolInputV1(_StrictPortfolioDecisionModel):
@@ -393,7 +417,7 @@ class PortfolioResearchIntentV1(_StrictPortfolioDecisionModel):
 def validate_portfolio_intent(
     intent: PortfolioResearchIntentV1,
     *,
-    frozen: PortfolioDecisionInputV1,
+    frozen: PortfolioDecisionInputV1 | PortfolioDecisionInputV2,
     projection: AgentScenarioProjectionV1,
     allowed_citation_ids: frozenset[str],
 ) -> PortfolioResearchIntentV1:

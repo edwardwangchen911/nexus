@@ -97,6 +97,14 @@ from nexus.optimizer.scenario_contracts import (
     canonical_scenario_hash,
 )
 from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
+from nexus.optimizer.scenario_spread_cost import (
+    ScenarioSpreadEvidenceManifestV1,
+    ScenarioSpreadEvidenceReplayInvalid,
+    apply_scenario_spread_cost,
+    finalize_scenario_spread_manifest,
+    replay_scenario_spread_evidence,
+    select_scenario_spread_evidence,
+)
 from nexus.optimizer.what_if import evaluate_what_if as evaluate_what_if_weights
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
@@ -113,6 +121,7 @@ from nexus.persistence.models.portfolio import (
     Portfolio,
     PortfolioSnapshotRecord,
 )
+from nexus.persistence.models.runtime import IdempotencyRecord
 from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.reconciliation.admission_claim import claim_or_lock, validate_request_identity
 from nexus.reconciliation.persistence_errors import (
@@ -333,31 +342,48 @@ async def evaluate_portfolio_scenario(
         )
     idempotency_request_hash = hashlib.sha256(raw_body).hexdigest()
     route = "/internal/v1/portfolio-scenarios/evaluate"
-    idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v2"
+    legacy_idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v2"
+    idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v3"
     _validate_claim(
         actor.actor_id,
         idempotency_namespace,
         idempotency_key,
         idempotency_request_hash,
     )
-    try:
-        claim, owner = await claim_or_lock(
-            session,
-            actor.actor_id,
-            idempotency_namespace,
-            idempotency_key,
-            idempotency_request_hash,
-            "portfolio_scenario_v2",
+    legacy_claim = await session.scalar(
+        select(IdempotencyRecord)
+        .where(
+            IdempotencyRecord.actor_id == actor.actor_id,
+            IdempotencyRecord.route == legacy_idempotency_namespace,
+            IdempotencyRecord.idempotency_key == idempotency_key,
         )
-    except IdempotencyConflict as error:
-        raise NexusError(
-            ErrorCode.IDEMPOTENCY_CONFLICT,
-            "Idempotency key has a different request body.",
-            status_code=409,
-        ) from error
+        .with_for_update()
+    )
+    legacy_replay = legacy_claim is not None
+    if legacy_claim is not None:
+        claim = legacy_claim
+        owner = False
+        expected_schema_version = "portfolio_scenario_v2"
+    else:
+        try:
+            claim, owner = await claim_or_lock(
+                session,
+                actor.actor_id,
+                idempotency_namespace,
+                idempotency_key,
+                idempotency_request_hash,
+                "portfolio_scenario_v3",
+            )
+        except IdempotencyConflict as error:
+            raise NexusError(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "Idempotency key has a different request body.",
+                status_code=409,
+            ) from error
+        expected_schema_version = "portfolio_scenario_v3"
     if not owner and (
         claim.request_hash != idempotency_request_hash
-        or claim.schema_version != "portfolio_scenario_v2"
+        or claim.schema_version != expected_schema_version
     ):
         raise NexusError(
             ErrorCode.IDEMPOTENCY_CONFLICT,
@@ -388,7 +414,7 @@ async def evaluate_portfolio_scenario(
             as_of=payload.as_of,
             constraints=constraints,
         )
-        result = evaluate_adjustment_scenario(
+        base_result = evaluate_adjustment_scenario(
             snapshot=snapshot,
             report=report,
             identities=identities,
@@ -398,6 +424,51 @@ async def evaluate_portfolio_scenario(
             diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
             request_hash=canonical_scenario_hash(scenario_request),
         )
+        if legacy_replay:
+            result = base_result
+        elif owner:
+            evidence = await select_scenario_spread_evidence(
+                session,
+                request.app.state.scenario_evidence_store,
+                snapshot=snapshot,
+                base_result=base_result,
+            )
+            result = apply_scenario_spread_cost(
+                snapshot=snapshot,
+                base_result=base_result,
+                evidence=evidence,
+            )
+            claim.response_payload = finalize_scenario_spread_manifest(
+                evidence.input,
+                expected_result_hash=result.result_hash,
+            ).model_dump(mode="json")
+        else:
+            try:
+                manifest = ScenarioSpreadEvidenceManifestV1.model_validate(claim.response_payload)
+            except (TypeError, ValidationError) as error:
+                raise ScenarioSpreadEvidenceReplayInvalid(
+                    "SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID"
+                ) from error
+            evidence = await replay_scenario_spread_evidence(
+                session,
+                request.app.state.scenario_evidence_store,
+                snapshot=snapshot,
+                base_result=base_result,
+                manifest=manifest,
+            )
+            result = apply_scenario_spread_cost(
+                snapshot=snapshot,
+                base_result=base_result,
+                evidence=evidence,
+            )
+            if result.result_hash != manifest.expected_result_hash:
+                raise ScenarioSpreadEvidenceReplayInvalid("SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID")
+    except ScenarioSpreadEvidenceReplayInvalid as error:
+        raise NexusError(
+            ErrorCode.SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID,
+            "Frozen scenario spread evidence could not be replayed.",
+            status_code=409,
+        ) from error
     except ValueError as error:
         reason = str(error)
         try:
@@ -421,6 +492,8 @@ async def evaluate_portfolio_scenario(
                 "instrument_count": len(result.positions),
                 "analysis_status": result.analysis_status,
                 "objective_status": result.objective_status,
+                "spread_status": result.cost_breakdown.spread.status,
+                "spread_policy_version": evidence.input.source_policy_version,
             },
             occurred_at=_utc_now(request),
         )

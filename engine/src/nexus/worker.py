@@ -194,6 +194,7 @@ async def run_portfolio_decision_worker_once(
         process_version=_PROCESS_VERSION,
         migration_head=_MIGRATION_HEAD,
         clock=lambda: datetime.now(UTC),
+        scenario_evidence_store=S3ProviderEvidenceStore(settings),
         job_ids=job_ids,
     )
 
@@ -217,6 +218,7 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
     portfolio_worker_id = f"portfolio-decision-{new_uuid7()}"
     started_at = datetime.now(UTC)
     portfolio_client: ResponsesClient | None = None
+    scenario_evidence_store = S3ProviderEvidenceStore(configured)
     if (
         configured.agent_runtime_mode is AgentRuntimeMode.RESPONSES
         and configured.openai_api_key is not None
@@ -241,6 +243,7 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
                 process_version=_PROCESS_VERSION,
                 migration_head=_MIGRATION_HEAD,
                 clock=lambda: datetime.now(UTC),
+                scenario_evidence_store=scenario_evidence_store,
             )
         general_worked = await run_job_worker_once(
             factory,

@@ -4,6 +4,7 @@ from uuid import UUID
 
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
 from nexus.main import create_engine_app
+from nexus.market.ingestion import MarketObjectStore
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.portfolio import (
     Account,
@@ -48,8 +49,15 @@ def settings(database_url: str) -> EngineSettings:
     )
 
 
-def app(database_url: str, *, now: datetime = CLOCK):
-    engine_app = create_engine_app(settings(database_url))
+def app(
+    database_url: str,
+    *,
+    now: datetime = CLOCK,
+    scenario_evidence_store: MarketObjectStore | None = None,
+):
+    engine_app = create_engine_app(
+        settings(database_url), scenario_evidence_store=scenario_evidence_store
+    )
     engine_app.state.utc_clock = lambda: now
     return engine_app
 
@@ -73,7 +81,13 @@ def headers(
     return signed
 
 
-async def seed_portfolio_list(database_url: str, *, ready_cash_flow_quality: str = "PASS") -> None:
+async def seed_portfolio_list(
+    database_url: str,
+    *,
+    ready_cash_flow_quality: str = "PASS",
+    ready_usd_cash: Decimal = Decimal("1000"),
+    ready_snapshot_as_of: datetime | None = None,
+) -> None:
     factory = session_factory(settings(database_url))
     async with factory() as session, session.begin():
         session.add(
@@ -123,6 +137,11 @@ async def seed_portfolio_list(database_url: str, *, ready_cash_flow_quality: str
         for index, (portfolio_id, account_id, status) in enumerate(
             ((PORTFOLIOS[0], ACCOUNTS[0], "READY"), (PORTFOLIOS[2], ACCOUNTS[2], "PARTIAL"))
         ):
+            snapshot_as_of = (
+                ready_snapshot_as_of
+                if index == 0 and ready_snapshot_as_of is not None
+                else CLOCK - timedelta(minutes=1)
+            )
             run = BrokerSyncRun(
                 id=UUID(f"0198d500-1000-7000-8000-00000000003{index + 1}"),
                 account_id=account_id,
@@ -134,7 +153,7 @@ async def seed_portfolio_list(database_url: str, *, ready_cash_flow_quality: str
                 request_hash=str(index + 1) * 64,
                 status=status,
                 accepted_at=CLOCK - timedelta(minutes=2),
-                completed_at=CLOCK - timedelta(minutes=1),
+                completed_at=snapshot_as_of,
                 attempt_count=1,
                 failure_reason=None,
                 cash_flow_quality=ready_cash_flow_quality if status == "READY" else "NOT_RUN",
@@ -145,7 +164,7 @@ async def seed_portfolio_list(database_url: str, *, ready_cash_flow_quality: str
                 sync_run_id=run.id,
                 stale_from_snapshot_id=None,
                 status=status,
-                as_of=CLOCK - timedelta(minutes=1),
+                as_of=snapshot_as_of,
                 position_hash_version="broker_position_hash_v1",
                 position_hash="a" * 64,
                 order_hash_version="broker_order_hash_v1",
@@ -159,8 +178,8 @@ async def seed_portfolio_list(database_url: str, *, ready_cash_flow_quality: str
                 CashSnapshot(
                     portfolio_snapshot_id=snapshot.id,
                     currency="USD" if index == 0 else "HKD",
-                    cash_balance=Decimal("1000"),
-                    available_cash=Decimal("900"),
+                    cash_balance=ready_usd_cash if index == 0 else Decimal("1000"),
+                    available_cash=ready_usd_cash if index == 0 else Decimal("900"),
                     provider_as_of=snapshot.as_of,
                 )
             )

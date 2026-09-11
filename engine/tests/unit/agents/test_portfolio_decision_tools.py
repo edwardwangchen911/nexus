@@ -6,11 +6,14 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 from nexus.agents.portfolio_decision_contracts import (
     PortfolioDecisionInputV1,
+    PortfolioDecisionInputV2,
     canonical_portfolio_decision_hash,
 )
 from nexus.agents.portfolio_decision_tools import (
@@ -19,7 +22,9 @@ from nexus.agents.portfolio_decision_tools import (
     build_portfolio_decision_tools,
     canonical_portfolio_evidence_manifest_hash,
     canonical_portfolio_tool_hash,
+    load_exact_scenario_evaluation,
     project_scenario_for_agent,
+    replay_valid_scenario_claim,
 )
 from nexus.agents.tools import ToolInputError
 from nexus.diagnostics.policy import RealAdvisoryPolicy
@@ -32,9 +37,14 @@ from nexus.optimizer.scenario_contracts import (
     ScenarioPositionV1,
     canonical_scenario_hash,
 )
+from nexus.optimizer.scenario_spread_cost import (
+    ScenarioSpreadEvidenceManifestV1,
+    canonical_scenario_spread_manifest_hash,
+)
 from nexus.persistence.models.agents import PortfolioDecisionRunRecord
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.persistence.models.runtime import IdempotencyRecord
 
 _RUN_ID = UUID("018f0000-0000-7000-8000-000000000001")
 _SNAPSHOT_ID = UUID("018f0000-0000-7000-8000-000000000002")
@@ -356,9 +366,15 @@ async def test_builder_validates_tool_hash_and_accepts_frozen_valuation_before_d
     monkeypatch.setattr(
         "nexus.agents.portfolio_decision_tools.load_real_advisory_policy_v1", policy
     )
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_tools.evaluate_adjustment_scenario",
+        lambda **_: _evaluation().model_copy(update={"result_hash": "b" * 64}),
+    )
 
     with pytest.raises(ToolInputError, match="tool authority does not match"):
-        await build_portfolio_decision_tools(ReadOnlySession(), run)  # type: ignore[arg-type]
+        await build_portfolio_decision_tools(
+            ReadOnlySession(), run, scenario_evidence_store=object()  # type: ignore[arg-type]
+        )
 
     run.tool_hash = canonical_portfolio_tool_hash()
     original_read_bytes = Path.read_bytes
@@ -372,7 +388,9 @@ async def test_builder_validates_tool_hash_and_accepts_frozen_valuation_before_d
     with monkeypatch.context() as implementation_drift:
         implementation_drift.setattr(Path, "read_bytes", drift_projection_implementation)
         with pytest.raises(ToolInputError, match="tool authority does not match"):
-            await build_portfolio_decision_tools(ReadOnlySession(), run)  # type: ignore[arg-type]
+            await build_portfolio_decision_tools(
+                ReadOnlySession(), run, scenario_evidence_store=object()  # type: ignore[arg-type]
+            )
 
     def drift_cost_reference(path: Path) -> bytes:
         content = original_read_bytes(path)
@@ -383,7 +401,132 @@ async def test_builder_validates_tool_hash_and_accepts_frozen_valuation_before_d
     with monkeypatch.context() as implementation_drift:
         implementation_drift.setattr(Path, "read_bytes", drift_cost_reference)
         with pytest.raises(ToolInputError, match="tool authority does not match"):
-            await build_portfolio_decision_tools(ReadOnlySession(), run)  # type: ignore[arg-type]
+            await build_portfolio_decision_tools(
+                ReadOnlySession(), run, scenario_evidence_store=object()  # type: ignore[arg-type]
+            )
 
-    tools = await build_portfolio_decision_tools(ReadOnlySession(), run)  # type: ignore[arg-type]
+    tools = await build_portfolio_decision_tools(
+        ReadOnlySession(), run, scenario_evidence_store=object()  # type: ignore[arg-type]
+    )
     assert tools.names == ("evaluate_adjustment_scenario",)
+
+
+@pytest.mark.asyncio
+async def test_v2_loader_uses_only_the_exact_frozen_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluation = _evaluation()
+    frozen = _frozen_v2(expected_result_hash=evaluation.result_hash)
+    claim = SimpleNamespace(id=frozen.scenario_claim_id)
+    session = SimpleNamespace(get=AsyncMock(return_value=claim))
+    replay = AsyncMock(return_value=(_scenario_manifest(evaluation.result_hash), evaluation))
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_tools._load_base_scenario_evaluation",
+        AsyncMock(return_value=(object(), evaluation)),
+    )
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_tools.replay_valid_scenario_claim",
+        replay,
+    )
+
+    result = await load_exact_scenario_evaluation(
+        session,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        run=SimpleNamespace(actor_id="fixture-actor"),  # type: ignore[arg-type]
+        frozen=frozen,
+    )
+
+    assert result == evaluation
+    assert session.get.await_args.args == (IdempotencyRecord, frozen.scenario_claim_id)
+    assert replay.await_args.kwargs["claim"] is claim
+    assert replay.await_args.kwargs["expected_manifest_hash"] == (
+        frozen.scenario_evidence_manifest_hash
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_loader_rejects_a_missing_exact_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluation = _evaluation()
+    frozen = _frozen_v2(expected_result_hash=evaluation.result_hash)
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_tools._load_base_scenario_evaluation",
+        AsyncMock(return_value=(object(), evaluation)),
+    )
+
+    with pytest.raises(ToolInputError, match="claim is missing"):
+        await load_exact_scenario_evaluation(
+            SimpleNamespace(get=AsyncMock(return_value=None)),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            run=SimpleNamespace(actor_id="fixture-actor"),  # type: ignore[arg-type]
+            frozen=frozen,
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_claim_rejects_changed_stored_manifest_before_evidence_read() -> None:
+    evaluation = _evaluation()
+    manifest = _scenario_manifest(evaluation.result_hash)
+    claim = SimpleNamespace(
+        actor_id="fixture-actor",
+        route="/internal/v1/portfolio-scenarios/evaluate:portfolio_scenario_evaluation_v3",
+        schema_version="portfolio_scenario_v3",
+        request_hash="a" * 64,
+        response_payload=manifest.model_dump(mode="json"),
+    )
+    store = SimpleNamespace(get_bytes=AsyncMock())
+
+    with pytest.raises(ToolInputError, match="claim is invalid"):
+        await replay_valid_scenario_claim(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            store,  # type: ignore[arg-type]
+            actor_id="fixture-actor",
+            claim=claim,  # type: ignore[arg-type]
+            expected_result_hash=evaluation.result_hash,
+            expected_manifest_hash="f" * 64,
+            snapshot=object(),  # type: ignore[arg-type]
+            base_result=evaluation,
+        )
+    store.get_bytes.assert_not_awaited()
+
+
+def _scenario_manifest(expected_result_hash: str) -> ScenarioSpreadEvidenceManifestV1:
+    return ScenarioSpreadEvidenceManifestV1(
+        manifest_schema="scenario_spread_evidence_manifest_v1",
+        evidence_selected_at=_NOW,
+        policy_status="unavailable",
+        source_policy_id=None,
+        source_policy_version=None,
+        source_policy_payload_hash=None,
+        calendar_authority=None,
+        calculation_version="scenario_spread_cost_v1",
+        no_cost_candidate_hash="1" * 64,
+        scenario_cost_basis_hash="2" * 64,
+        regulatory_reference_hash=None,
+        selected_quotes=(),
+        expected_result_hash=expected_result_hash,
+    )
+
+
+def _frozen_v2(*, expected_result_hash: str) -> PortfolioDecisionInputV2:
+    manifest = _scenario_manifest(expected_result_hash)
+    return PortfolioDecisionInputV2(
+        schema_version="portfolio_decision_input_v2",
+        portfolio_id=UUID("018f0000-0000-7000-8000-000000000010"),
+        portfolio_snapshot_id=_SNAPSHOT_ID,
+        diagnostic_report_id=_REPORT_ID,
+        decision_time=_NOW,
+        objective="reduce_security_concentration",
+        max_turnover="0.05",
+        minimum_cash="0.1",
+        universe_policy="current_holdings_only",
+        allow_new_positions=False,
+        scenario_request_hash="a" * 64,
+        expected_scenario_result_hash=expected_result_hash,
+        diagnostic_input_hash="c" * 64,
+        policy_version="real_advisory_policy_v1",
+        evidence_hash="d" * 64,
+        scenario_claim_id=UUID("018f0000-0000-7000-8000-000000000011"),
+        scenario_evidence_manifest_hash=canonical_scenario_spread_manifest_hash(manifest),
+    )

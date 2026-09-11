@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -186,10 +187,26 @@ def _parse_archive(
     receipt_raw: bytes,
 ) -> MarketStreamArchive:
     required = {
-        "schema", "source", "transport", "origin", "feed", "delivery_mode", "symbol",
-        "started_at", "ended_at", "requested_duration_seconds", "requested_max_frames",
-        "elapsed_monotonic_seconds", "authenticated", "subscription_confirmed", "status",
-        "stop_reason", "trade_count", "quote_count", "frame_count", "frames",
+        "schema",
+        "source",
+        "transport",
+        "origin",
+        "feed",
+        "delivery_mode",
+        "symbol",
+        "started_at",
+        "ended_at",
+        "requested_duration_seconds",
+        "requested_max_frames",
+        "elapsed_monotonic_seconds",
+        "authenticated",
+        "subscription_confirmed",
+        "status",
+        "stop_reason",
+        "trade_count",
+        "quote_count",
+        "frame_count",
+        "frames",
     }
     if set(receipt) != required or (
         receipt.get("schema") != SCHEMA
@@ -345,6 +362,32 @@ def load_market_stream_archive(directory: Path) -> MarketStreamArchive:
     return _parse_archive(receipt, frames, receipt_raw=receipt_raw)
 
 
+def parse_market_stream_raw_payload(raw: bytes) -> MarketStreamArchive:
+    """Parse one exact frozen stream envelope without filesystem access."""
+    try:
+        envelope = json.loads(raw, object_pairs_hook=_unique)
+        if (
+            not isinstance(envelope, dict)
+            or set(envelope) != {"schema", "receipt_base64", "frames_base64"}
+            or envelope["schema"] != ARCHIVE_SCHEMA
+            or not isinstance(envelope["receipt_base64"], str)
+            or not isinstance(envelope["frames_base64"], list)
+            or len(envelope["frames_base64"]) > MAX_FRAMES
+            or any(not isinstance(value, str) for value in envelope["frames_base64"])
+        ):
+            raise ValueError
+        receipt_raw = base64.b64decode(envelope["receipt_base64"], validate=True)
+        frames = [base64.b64decode(value, validate=True) for value in envelope["frames_base64"]]
+        receipt = json.loads(receipt_raw, object_pairs_hook=_unique)
+        if not isinstance(receipt, dict):
+            raise ValueError
+        return _parse_archive(receipt, frames, receipt_raw=receipt_raw)
+    except MarketStreamError:
+        raise
+    except (binascii.Error, json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError):
+        raise MarketStreamError("ALPACA_MARKET_STREAM_ARCHIVE_INVALID") from None
+
+
 async def import_market_stream(
     session: AsyncSession,
     store: MarketObjectStore,
@@ -360,9 +403,8 @@ async def import_market_stream(
     if archive.feed != "iex":
         raise MarketStreamError("ALPACA_MARKET_STREAM_IMPORT_FEED_UNSUPPORTED")
     observations = tuple(value for value in (archive.trade, archive.quote) if value is not None)
-    if (
-        archive.completed_at > imported_at
-        or any(value.observed_at > archive.completed_at for value in observations)
+    if archive.completed_at > imported_at or any(
+        value.observed_at > archive.completed_at for value in observations
     ):
         raise MarketStreamError("ALPACA_MARKET_STREAM_TIME_INVALID")
     identity_rows = (
@@ -676,8 +718,13 @@ async def collect_market_stream(
     return {
         field: receipt[field]
         for field in (
-            "status", "stop_reason", "authenticated", "subscription_confirmed",
-            "trade_count", "quote_count", "frame_count",
+            "status",
+            "stop_reason",
+            "authenticated",
+            "subscription_confirmed",
+            "trade_count",
+            "quote_count",
+            "frame_count",
         )
     }
 

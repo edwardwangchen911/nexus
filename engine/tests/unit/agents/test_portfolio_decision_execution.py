@@ -178,6 +178,7 @@ async def test_execution_authority_builds_only_the_frozen_aggregate_context(
     authority = await load_portfolio_decision_execution_authority(
         _AuthoritySession(prompt, model, report_record),
         run=run,
+        scenario_evidence_store=object(),  # type: ignore[arg-type]
     )
 
     assert isinstance(authority, PortfolioDecisionExecutionAuthority)
@@ -217,6 +218,7 @@ async def test_execution_authority_rejects_drift_before_building_tools(
         await load_portfolio_decision_execution_authority(
             _AuthoritySession(prompt, model, report_record),
             run=run,
+            scenario_evidence_store=object(),  # type: ignore[arg-type]
         )
     build_tools.assert_not_awaited()
 
@@ -226,6 +228,7 @@ async def test_execution_authority_rejects_drift_before_building_tools(
         await load_portfolio_decision_execution_authority(
             _AuthoritySession(prompt, model, report_record),
             run=run,
+            scenario_evidence_store=object(),  # type: ignore[arg-type]
         )
     build_tools.assert_not_awaited()
 
