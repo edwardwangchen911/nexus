@@ -1,6 +1,7 @@
 import base64
 import os
 import stat
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -99,6 +100,62 @@ def test_schwab_authorization_url_and_callback_are_bound_to_registered_loopback(
     )
     assert provider_market_stream.parse_schwab_callback(config, CALLBACK) == (
         "temporary@code"
+    )
+
+
+def test_native_dialog_returns_callback_without_putting_it_in_process_arguments() -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout=f"{CALLBACK}\n", stderr="")
+
+    reader = getattr(provider_market_stream, "read_schwab_callback_dialog", None)
+    assert callable(reader), "native Schwab callback dialog is missing"
+
+    assert reader("ignored", runner=run) == CALLBACK
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert command[0] == "/usr/bin/osascript"
+    assert CALLBACK not in repr(command)
+    assert options["capture_output"] is True
+    assert options["text"] is True
+
+
+@pytest.mark.asyncio
+async def test_macos_authorize_command_uses_native_dialog_by_default(
+    tmp_path: Path,
+) -> None:
+    _write_config(tmp_path)
+    arguments = provider_market_stream.build_parser().parse_args(
+        ["authorize", "--repo-root", str(tmp_path)]
+    )
+    dialog_calls = 0
+
+    def run_dialog(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal dialog_calls
+        dialog_calls += 1
+        return subprocess.CompletedProcess(command, 0, stdout=f"{CALLBACK}\n", stderr="")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json=_token_payload())
+        )
+    ) as client:
+        result = await provider_market_stream._run(
+            arguments,
+            client=client,
+            opener=lambda _url: True,
+            dialog_runner=run_dialog,
+            now=NOW,
+        )
+
+    assert dialog_calls == 1
+    assert result["status"] == "authorized"
+    assert provider_market_stream.load_schwab_token(tmp_path).access_token == (
+        "fake-access-token"
     )
 
 

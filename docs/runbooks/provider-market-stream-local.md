@@ -19,7 +19,7 @@ uv run --package nexus-engine nexus-engine-provider-market-stream authorize \
   --repo-root /Users/wangchen/Documents/ChatGPT/投资
 ```
 
-命令会打开嘉信授权页。完成登录和授权后，浏览器跳到 `https://127.0.0.1` 时出现无法连接是预期现象；复制地址栏中的完整 URL，粘贴回终端的隐藏输入。授权码不会进入 shell history。命令只交换一次授权码，不自动重试；成功后把动态 token 写到主仓库 `.secrets/nexus-schwab-local/tokens.json`，目录和文件权限分别为 `0700`、`0600`。
+命令会打开嘉信授权页，并显示本机 macOS 引导弹窗。先在浏览器完成登录和授权；浏览器跳到 `https://127.0.0.1` 时出现无法连接是预期现象。回到弹窗，粘贴地址栏中的完整 URL 并点击“继续”。回调仅由本地弹窗传入当前进程，不进入命令参数、shell history 或日志。命令只交换一次授权码，不自动重试；成功后把动态 token 写到主仓库 `.secrets/nexus-schwab-local/tokens.json`，目录和文件权限分别为 `0700`、`0600`。非 macOS 环境才回退为终端隐藏输入。
 
 随后立即运行短时采集：
 

@@ -8,6 +8,8 @@ import getpass
 import json
 import logging
 import os
+import subprocess
+import sys
 import webbrowser
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -71,6 +73,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def read_schwab_callback_dialog(
+    prompt: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str:
+    """Collect the OAuth callback in a local macOS dialog without echoing it."""
+    del prompt
+    command = [
+        "/usr/bin/osascript",
+        "-e",
+        'display dialog "请先在浏览器完成嘉信登录和授权。完成后回到这里。" '
+        'buttons {"取消", "我已完成授权"} default button "我已完成授权" '
+        'cancel button "取消" with title "NEXUS 嘉信授权"',
+        "-e",
+        'set callbackResult to display dialog "请粘贴浏览器地址栏中的完整 '
+        'https://127.0.0.1 回调 URL。" default answer "" '
+        'buttons {"取消", "继续"} default button "继续" cancel button "取消" '
+        'with title "NEXUS 嘉信授权"',
+        "-e",
+        "return text returned of callbackResult",
+    ]
+    try:
+        result = runner(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ProviderMarketStreamError("SCHWAB_OAUTH_DIALOG_FAILED") from None
+    callback = result.stdout.strip()
+    if result.returncode != 0 or not callback or len(callback.encode()) > 16_384:
+        raise ProviderMarketStreamError("SCHWAB_OAUTH_DIALOG_CANCELLED")
+    return callback
+
+
 async def authorize_schwab(
     repo_root: Path,
     client: httpx.AsyncClient,
@@ -127,6 +166,7 @@ async def _run(
     client: httpx.AsyncClient | None = None,
     opener: Callable[[str], bool] = webbrowser.open,
     callback_reader: Callable[[str], str] | None = None,
+    dialog_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     if client is None:
@@ -136,14 +176,26 @@ async def _run(
                 client=transport,
                 opener=opener,
                 callback_reader=callback_reader,
+                dialog_runner=dialog_runner,
                 now=now,
             )
     if arguments.source == "authorize":
+        reader = callback_reader
+        if reader is None:
+            if sys.platform == "darwin":
+                runner = dialog_runner or subprocess.run
+
+                def native_dialog(prompt: str) -> str:
+                    return read_schwab_callback_dialog(prompt, runner=runner)
+
+                reader = native_dialog
+            else:
+                reader = getpass.getpass
         return await authorize_schwab(
             arguments.repo_root,
             client,
             opener=opener,
-            callback_reader=callback_reader or getpass.getpass,
+            callback_reader=reader,
             process_environment=os.environ,
             now=now,
         )
