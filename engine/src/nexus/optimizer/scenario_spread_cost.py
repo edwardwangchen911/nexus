@@ -22,6 +22,10 @@ from nexus.market.ingestion import MarketObjectStore, object_uri_matches_key
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.ops.alpaca_market_stream import (
     ARCHIVE_SCHEMA,
+    MarketStreamArchive,
+    MarketStreamBatchArchive,
+    MarketStreamError,
+    parse_market_stream_batch_raw_payload,
     parse_market_stream_raw_payload,
 )
 from nexus.optimizer.compare import TypedMetric
@@ -64,6 +68,9 @@ _POLICY_PAYLOAD = {
         "event_kind": "quote",
     },
 }
+_ArchiveCache = dict[
+    tuple[UUID, str], tuple[bytes, MarketStreamArchive | MarketStreamBatchArchive]
+]
 
 
 class ScenarioSpreadEvidenceReplayInvalid(ValueError):
@@ -292,6 +299,7 @@ async def select_scenario_spread_evidence(
 
     selected: list[SelectedSpreadQuoteV1] = []
     quotes: list[VerifiedSpreadQuoteV1] = []
+    archive_cache: _ArchiveCache = {}
     available_times = [require_utc(rows[0]["policy_created_at"])]
     regulatory_available_at = _regulatory_reference_available_at(base_result)
     if regulatory_available_at is not None:
@@ -299,7 +307,9 @@ async def select_scenario_spread_evidence(
     for row in rows:
         if row["quote_id"] is None:
             continue
-        identity, quote, row_available_times = await _verify_quote_row(store, row)
+        identity, quote, row_available_times = await _verify_quote_row(
+            store, row, archive_cache=archive_cache
+        )
         selected.append(identity)
         quotes.append(quote)
         available_times.extend(row_available_times)
@@ -424,6 +434,7 @@ async def _replay_available_evidence(
     expected_by_id = {quote.latest_quote_id: quote for quote in manifest.selected_quotes}
     selected: list[SelectedSpreadQuoteV1] = []
     quotes: list[VerifiedSpreadQuoteV1] = []
+    archive_cache: _ArchiveCache = {}
     available_times = [require_utc(rows[0]["policy_created_at"])]
     regulatory_available_at = _regulatory_reference_available_at(base_result)
     if regulatory_available_at is not None:
@@ -433,6 +444,7 @@ async def _replay_available_evidence(
             store,
             row,
             expected=expected_by_id[row["quote_id"]],
+            archive_cache=archive_cache,
         )
         selected.append(identity)
         quotes.append(quote)
@@ -455,6 +467,7 @@ async def _verify_quote_row(
     row: RowMapping,
     *,
     expected: SelectedSpreadQuoteV1 | None = None,
+    archive_cache: _ArchiveCache | None = None,
 ) -> tuple[SelectedSpreadQuoteV1, VerifiedSpreadQuoteV1, tuple[datetime, ...]]:
     try:
         instrument_id = _uuid(row["quote_instrument_id"])
@@ -504,20 +517,57 @@ async def _verify_quote_row(
         uri = _string(row["uri"])
         if not object_uri_matches_key(uri, raw_key):
             raise ValueError
-        raw = await store.read_raw(raw_key, uri=uri)
+        cache_key = (artifact_id, artifact_hash)
+        cached = None if archive_cache is None else archive_cache.get(cache_key)
+        if cached is None:
+            raw = await store.read_raw(raw_key, uri=uri)
+            try:
+                parsed: MarketStreamArchive | MarketStreamBatchArchive = (
+                    parse_market_stream_raw_payload(raw)
+                )
+            except MarketStreamError:
+                parsed = parse_market_stream_batch_raw_payload(raw)
+            if archive_cache is not None:
+                archive_cache[cache_key] = (raw, parsed)
+        else:
+            raw, parsed = cached
         if len(raw) != row["byte_size"] or sha256(raw).hexdigest() != artifact_hash:
             raise ValueError
-        archive = parse_market_stream_raw_payload(raw)
-        events = tuple(value for value in (archive.trade, archive.quote) if value is not None)
+        if isinstance(parsed, MarketStreamArchive):
+            archive = parsed
+            archive_symbol = archive.symbol
+            archive_quote = archive.quote
+            events = tuple(
+                value for value in (archive.trade, archive.quote) if value is not None
+            )
+            archive_feed = archive.feed
+            archive_completed_at = archive.completed_at
+            archive_raw_payload = archive.raw_payload
+        else:
+            batch = parsed
+            matching = tuple(item for item in batch.items if item.symbol == row["symbol"])
+            if len(matching) != 1:
+                raise ValueError
+            archive_symbol = matching[0].symbol
+            archive_quote = matching[0].quote
+            events = tuple(
+                value
+                for item in batch.items
+                for value in (item.trade, item.quote)
+                if value is not None
+            )
+            archive_feed = batch.feed
+            archive_completed_at = batch.completed_at
+            archive_raw_payload = batch.raw_payload
         if (
-            archive.raw_payload != raw
-            or archive.feed != "iex"
-            or archive.symbol != row["symbol"]
-            or archive.quote is None
-            or archive.quote.bid != bid
-            or archive.quote.ask != ask
-            or archive.quote.observed_at != observed_at
-            or archive.completed_at != artifact_available_at
+            archive_raw_payload != raw
+            or archive_feed != "iex"
+            or archive_symbol != row["symbol"]
+            or archive_quote is None
+            or archive_quote.bid != bid
+            or archive_quote.ask != ask
+            or archive_quote.observed_at != observed_at
+            or archive_completed_at != artifact_available_at
             or artifact_available_at != artifact_received_at
             or max(value.observed_at for value in events) != artifact_observed_at
         ):
@@ -529,8 +579,8 @@ async def _verify_quote_row(
                 feed="iex",
                 delivery_mode="real_time",
                 event_kind="quote",
-                bid=archive.quote.bid,
-                ask=archive.quote.ask,
+                bid=archive_quote.bid,
+                ask=archive_quote.ask,
                 last=None,
                 observed_at=observed_at,
                 available_at=available_at,
