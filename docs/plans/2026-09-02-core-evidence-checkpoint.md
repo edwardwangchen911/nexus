@@ -3473,3 +3473,44 @@ Shadow、模拟订单与成交保持 0。
 `analysis_status=partial`、`execution_eligible=false`、`execution_locked=true` 均不变。下一步若
 继续点差成本，需要先单独设计并审查 `portfolio_scenario_cost_analysis` 用途政策、45 秒新鲜度、
 质量标记 fail-closed 与首次请求知识截止；这属于独立技术切片，不在本次临时扩边。
+
+### 情景点差成本权威（2026-09-11）
+
+本切片只完成既定的点差成本确定性接线，没有扩大到佣金、滑点、税务、Shadow、订单、Provider
+采集或通用优化器。新增 `portfolio_scenario_cost_analysis` v1 用途政策，限定 Alpaca IEX
+WebSocket 已验证 quote、XNYS 常规交易时段、估值截止前最新一条、最大 45 秒、空质量标记及已绑定
+原始归档；不允许复星 last-only L1、展示用途行情、跨时段报价或任何回退。确定性代码冻结引用、
+日历权威、选择结果和计算版本，以卖出金额乘半点差占快照 mark 的比例计算；缺失、过期、归档不符、
+哈希不符或重放漂移均 fail closed。结果进入情景哈希、v3 幂等重放及 Agent 工具权威，但不改变
+永久 `execution_locked=true`。
+
+2026-09-11T05:16:08Z 使用本分支镜像在隔离的 58001 Engine 和 3303 Web 上，通过正常本地
+BFF/HMAC 页面入口显式生成一次真实只读情景；既有 58000/3302 服务未替换。真实数据库先按正常
+Alembic 路径从 `0049_pd_terminal_phases` 升至 `0050_scenario_spread_cost_policy`，政策记录为
+`scenario_spread_cost_policy_v1`。当前冻结组合含 12 个证券，返回
+`improved_not_met / partial`、`analysis_comparable=true`、`execution_eligible=false`、
+`execution_locked=true`，结果哈希为
+`006cb741f5abef880d6be6ed99c10e094cfb5ee5fa86a4ac7901a33563bed450`。页面实际显示“可用于
+分析比较”“不可执行”和“交易保持锁定”。
+
+当前真实数据没有任何满足该用途政策的 Alpaca IEX 已验证 quote，当前冻结组合持仓覆盖仍为 0/12，因此 spread
+如实返回 `unknown / BID_ASK_EVIDENCE_UNAVAILABLE`，没有伪造点差证据版本。成本区现有
+`us_regulatory_fee_reference_2026_verified_20260911_v1` 仅是监管费参考权威，不代表点差权威；
+commission、slippage、regulatory fees、tax impact 和不含税成本合计分别继续保持既有 unknown
+原因。数据库中的复星 L1 已验证 snapshot 为 205 条，但其用途与字段均不满足点差准入，未被采用。
+
+验收前后安全计数均为：Shadow 组 0、模拟订单 0、模拟成交 0、Alp IEX 已验证 quote 0；复星 L1
+已验证 snapshot 205 条，未发生变化。没有启动 Worker、Provider 或 Gateway，没有调用模型、
+券商刷新、模拟盘或实盘。后端聚焦测试 146 项、前端聚焦测试 23 项、Ruff、14 个本次变更 Python
+源文件的 Mypy、TypeScript、生成客户端检查和 ESLint 均通过。全量 `mypy engine/src` 仍被本分支
+之前已有的 `current_price_trends.py:158` 与 `sec_exhibits.py:68` 两条 `no-any-return` 阻断；两文件
+不在本功能分支的改动范围，本切片不以无关修复扩大边界。
+
+最终独立复核首次以 87/100 拒绝集成，指出三个 Important，均按原边界最小收口：公开端点在
+建立 v3 claim 前先锁定并检查同 actor/key 的历史 v2 claim，同请求只重放旧确定性结果且不读取
+新报价、不建 v3 claim，不同请求返回 409；PG 准入矩阵补齐质量标记、未来时点、artifact
+schema/URI/byte size 及 policy/calendar/calculation/regulatory/result hash 漂移；另以直接落库的
+真实 `portfolio_decision_input_v1` 验证新 Worker 不读取 v3 claim/store、只执行一次旧工具投影，
+结果哈希与交易锁保持不变且无方案、Shadow、订单或成交副作用。两组补强只修改测试，兼容修复
+只触及既有情景 POST 路由；未新增表、迁移、外部调用或新产品能力。修复后的最终独立复核为
+99/100，Critical、Important、Minor 均为 0，结论为可集成且不存在明显过度设计。
