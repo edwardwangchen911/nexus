@@ -19,4 +19,13 @@
 dist
 node_modules
 test-results
+coverage
+playwright-report
+.nexus-pytest
+.hypothesis
+.superpowers
+.worktrees
+outputs
+work
+.DS_Store
 tsconfig.tsbuildinfo
