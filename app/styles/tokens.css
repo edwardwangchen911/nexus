@@ -267,6 +267,7 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .market-table tbody tr[data-active="true"] { background: var(--color-canvas); }
 .market-table .research-fund-label { min-inline-size: 8rem; max-inline-size: 22rem; white-space: normal; overflow-wrap: anywhere; text-align: start; }
 .portfolio-page__actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
+.portfolio-page > [role="status"]:empty { display: none; }
 .portfolio-workspace { display: grid; grid-template-columns: minmax(14rem, 19rem) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 .portfolio-workspace[data-single="true"] { grid-template-columns: minmax(0, 1fr); }
 .portfolio-workspace[data-single="true"] .portfolio-rail { position: static; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-2); }
@@ -755,7 +756,7 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .risk-summary article[data-tone="attention"] > svg { color: var(--color-warning); }
 .risk-summary article h2 { margin: var(--space-1) 0; overflow-wrap: anywhere; font-size: 1.35rem; }
 .risk-summary article h2 code, .risk-summary .eyebrow code { color: currentColor; font-size: 0.6875rem; font-weight: 500; }
-.risk-summary article p { margin: var(--space-1) 0; color: var(--color-text-muted); }
+.risk-summary article p { margin: var(--space-1) 0; overflow-wrap: anywhere; color: var(--color-text-muted); }
 .risk-summary article .button { margin-block-start: var(--space-3); }
 .risk-summary .retryable-job { border-block-start-color: var(--color-danger); }
 .risk-summary .retryable-job > svg { color: var(--color-danger); }
