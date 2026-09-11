@@ -194,6 +194,27 @@ async def test_schwab_authorization_code_is_exchanged_once_without_secret_output
     assert "fake-refresh-token" not in repr(token)
 
 
+@pytest.mark.asyncio
+async def test_token_rejection_reports_only_safe_http_status(tmp_path: Path) -> None:
+    _write_config(tmp_path)
+    config = provider_market_stream.load_schwab_app_config(tmp_path, {})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                401, content=b"provider body with fake-app-secret"
+            )
+        )
+    ) as client:
+        with pytest.raises(
+            ValueError, match="^SCHWAB_OAUTH_TOKEN_HTTP_401$"
+        ) as captured:
+            await provider_market_stream.exchange_schwab_authorization_code(
+                config, "temporary@code", client, now=NOW
+            )
+
+    assert "fake-app-secret" not in str(captured.value)
+
+
 def test_schwab_tokens_are_saved_and_loaded_only_from_private_secret_file(
     tmp_path: Path,
 ) -> None:
