@@ -266,6 +266,34 @@ describe("portfolio scenario BFF route", () => {
     )).toBeNull();
   });
 
+  it("preserves a redacted stable 409 for broken frozen spread evidence", async () => {
+    const accepted = rebuildAllowedEngineResponse(
+      409,
+      {
+        error: {
+          code: "SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID",
+          message: "upstream evidence detail must not escape",
+          request_id: "0198f7a0-1111-7777-8111-111111111111",
+          details: { quote_id: "must-not-escape" },
+        },
+      },
+      new Headers(),
+      undefined,
+      "/internal/v1/portfolio-scenarios/evaluate",
+      "POST",
+    );
+
+    expect(accepted?.status).toBe(409);
+    expect(await accepted?.json()).toEqual({
+      error: {
+        code: "SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID",
+        message: "Frozen scenario cost evidence could not be verified.",
+        request_id: "0198f7a0-1111-7777-8111-111111111111",
+        details: {},
+      },
+    });
+  });
+
   it("fails closed when cost evidence semantics are tampered", () => {
     const cases = [
       () => {

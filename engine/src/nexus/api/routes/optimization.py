@@ -97,6 +97,14 @@ from nexus.optimizer.scenario_contracts import (
     canonical_scenario_hash,
 )
 from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
+from nexus.optimizer.scenario_spread_cost import (
+    ScenarioSpreadEvidenceManifestV1,
+    ScenarioSpreadEvidenceReplayInvalid,
+    apply_scenario_spread_cost,
+    finalize_scenario_spread_manifest,
+    replay_scenario_spread_evidence,
+    select_scenario_spread_evidence,
+)
 from nexus.optimizer.what_if import evaluate_what_if as evaluate_what_if_weights
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
@@ -333,7 +341,7 @@ async def evaluate_portfolio_scenario(
         )
     idempotency_request_hash = hashlib.sha256(raw_body).hexdigest()
     route = "/internal/v1/portfolio-scenarios/evaluate"
-    idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v2"
+    idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v3"
     _validate_claim(
         actor.actor_id,
         idempotency_namespace,
@@ -347,7 +355,7 @@ async def evaluate_portfolio_scenario(
             idempotency_namespace,
             idempotency_key,
             idempotency_request_hash,
-            "portfolio_scenario_v2",
+            "portfolio_scenario_v3",
         )
     except IdempotencyConflict as error:
         raise NexusError(
@@ -357,7 +365,7 @@ async def evaluate_portfolio_scenario(
         ) from error
     if not owner and (
         claim.request_hash != idempotency_request_hash
-        or claim.schema_version != "portfolio_scenario_v2"
+        or claim.schema_version != "portfolio_scenario_v3"
     ):
         raise NexusError(
             ErrorCode.IDEMPOTENCY_CONFLICT,
@@ -388,7 +396,7 @@ async def evaluate_portfolio_scenario(
             as_of=payload.as_of,
             constraints=constraints,
         )
-        result = evaluate_adjustment_scenario(
+        base_result = evaluate_adjustment_scenario(
             snapshot=snapshot,
             report=report,
             identities=identities,
@@ -398,6 +406,49 @@ async def evaluate_portfolio_scenario(
             diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
             request_hash=canonical_scenario_hash(scenario_request),
         )
+        if owner:
+            evidence = await select_scenario_spread_evidence(
+                session,
+                request.app.state.scenario_evidence_store,
+                snapshot=snapshot,
+                base_result=base_result,
+            )
+            result = apply_scenario_spread_cost(
+                snapshot=snapshot,
+                base_result=base_result,
+                evidence=evidence,
+            )
+            claim.response_payload = finalize_scenario_spread_manifest(
+                evidence.input,
+                expected_result_hash=result.result_hash,
+            ).model_dump(mode="json")
+        else:
+            try:
+                manifest = ScenarioSpreadEvidenceManifestV1.model_validate(claim.response_payload)
+            except (TypeError, ValidationError) as error:
+                raise ScenarioSpreadEvidenceReplayInvalid(
+                    "SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID"
+                ) from error
+            evidence = await replay_scenario_spread_evidence(
+                session,
+                request.app.state.scenario_evidence_store,
+                snapshot=snapshot,
+                base_result=base_result,
+                manifest=manifest,
+            )
+            result = apply_scenario_spread_cost(
+                snapshot=snapshot,
+                base_result=base_result,
+                evidence=evidence,
+            )
+            if result.result_hash != manifest.expected_result_hash:
+                raise ScenarioSpreadEvidenceReplayInvalid("SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID")
+    except ScenarioSpreadEvidenceReplayInvalid as error:
+        raise NexusError(
+            ErrorCode.SCENARIO_SPREAD_EVIDENCE_REPLAY_INVALID,
+            "Frozen scenario spread evidence could not be replayed.",
+            status_code=409,
+        ) from error
     except ValueError as error:
         reason = str(error)
         try:
@@ -421,6 +472,8 @@ async def evaluate_portfolio_scenario(
                 "instrument_count": len(result.positions),
                 "analysis_status": result.analysis_status,
                 "objective_status": result.objective_status,
+                "spread_status": result.cost_breakdown.spread.status,
+                "spread_policy_version": evidence.input.source_policy_version,
             },
             occurred_at=_utc_now(request),
         )
