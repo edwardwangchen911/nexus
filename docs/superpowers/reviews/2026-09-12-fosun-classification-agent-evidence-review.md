@@ -1,6 +1,6 @@
 # Fosun Classification Agent Evidence Design Review
 
-Review date: 2026-09-12  
+Review date: 2026-09-12
 Method: existing-code fit review and 100-point implementation-readiness rubric
 
 ## Gate result
