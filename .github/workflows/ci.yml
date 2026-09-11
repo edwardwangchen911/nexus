@@ -2,6 +2,8 @@ name: NEXUS CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -9,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: nexus-ci-${{ github.ref }}
+  group: nexus-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -97,14 +99,14 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
       - run: uv sync --frozen --all-packages
+      - run: uv run ruff check engine
+      - run: uv run mypy engine/src
       - run: uv run alembic -c engine/alembic.ini upgrade head
       - run: uv run pytest engine/tests -q --import-mode=importlib
       - name: Run isolated PostgreSQL and MinIO recovery drill
         env:
           NEXUS_ENV: test
         run: uv run --package nexus-engine nexus-engine-backup-restore-drill
-      - run: uv run ruff check engine
-      - run: uv run mypy engine/src
 
   e2e:
     runs-on: ubuntu-24.04

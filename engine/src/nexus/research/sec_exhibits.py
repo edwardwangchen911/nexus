@@ -5,7 +5,7 @@ import re
 from collections.abc import Sequence
 from datetime import date, datetime
 from hashlib import sha256
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urljoin, urlsplit
 from uuid import UUID
 
@@ -62,7 +62,7 @@ class SecExhibitDisclosure(SecDisclosure):
 
     @model_serializer(mode="wrap")
     def serialize_disclosure(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        result = handler(self)
+        result = cast(dict[str, Any], handler(self))
         if self.quarter_metrics is None:
             result.pop("quarter_metrics", None)
         return result

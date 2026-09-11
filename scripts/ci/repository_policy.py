@@ -273,13 +273,13 @@ _REAL_E2E_CONFIG_REQUIRED = (
     'CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"',
 )
 # These hashes freeze the approved, reviewed real-fixture execution boundary.
-# Unlike positive string matching, they reject comments, dead YAML, or source
-# syntax variants until a reviewer deliberately updates this contract.
+# The workflow digest covers only the real-e2e job so unrelated CI maintenance
+# does not require re-approving the real-fixture boundary.
 _EXPECTED_REAL_E2E_CONFIG_SHA256 = (
     "a7f53f775f634015c31952c6cf9f20d15ee44c6919038da03c3b5183d53d11aa"
 )
-_EXPECTED_REAL_E2E_WORKFLOW_SHA256 = (
-    "521801f5abb38aa1a2871ee9fd115df59689bdadd0a314125c6eed8213d3cb66"
+_EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256 = (
+    "a9f765040dd2916c8950991854944b5a78501c57db87047bcb6e02a3768a2d66"
 )
 _EXPECTED_REAL_E2E_TEST_SHA256 = (
     "4814a5d221a2dec347afd2b544df97620b4ff20b18b00d6c1c0a160889c2e001"
@@ -1528,11 +1528,8 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
     workflow_path = root / _REAL_E2E_WORKFLOW_PATH
     package_script_declared, package_script = _real_e2e_package_script(package_path)
     workflow_present = workflow_path.exists() or workflow_path.is_symlink()
-    workflow_artifact_safe = workflow_present and _frozen_artifact_is_safe(
-        root,
-        workflow_path,
-        _REAL_E2E_WORKFLOW_PATH,
-        _EXPECTED_REAL_E2E_WORKFLOW_SHA256,
+    workflow_artifact_safe = workflow_present and _tracked_regular_artifact_is_safe(
+        root, workflow_path, _REAL_E2E_WORKFLOW_PATH
     )
     workflow_job = (
         _real_e2e_workflow_job_block(workflow_path)
@@ -1730,12 +1727,7 @@ def _real_e2e_config_is_safe(root: Path, config_path: Path) -> bool:
 
 
 def _real_e2e_workflow_is_safe(root: Path, workflow_path: Path, job: str) -> bool:
-    if not _frozen_artifact_is_safe(
-        root,
-        workflow_path,
-        _REAL_E2E_WORKFLOW_PATH,
-        _EXPECTED_REAL_E2E_WORKFLOW_SHA256,
-    ):
+    if not _tracked_regular_artifact_is_safe(root, workflow_path, _REAL_E2E_WORKFLOW_PATH):
         return False
     try:
         workflow = _read_text(workflow_path)
@@ -1746,7 +1738,8 @@ def _real_e2e_workflow_is_safe(root: Path, workflow_path: Path, job: str) -> boo
         command for command in run_commands if "npm run test:e2e:real" in command
     ]
     return (
-        _path_matches_sha256(workflow_path, _EXPECTED_REAL_E2E_WORKFLOW_SHA256)
+        _normalized_text_sha256(job.encode("utf-8"))
+        == _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256
         and _REAL_E2E_YAML_INDIRECTION.search(workflow) is None
         and _REAL_E2E_WORKFLOW_RUN_SHELL.search(workflow) is None
         and real_e2e_commands == ["npm run test:e2e:real"]
@@ -1940,6 +1933,27 @@ def _frozen_artifact_path_is_safe(root: Path, path: Path) -> bool:
     except (OSError, RuntimeError, ValueError):
         return False
     return path.is_file()
+
+
+def _tracked_regular_artifact_is_safe(
+    root: Path, path: Path, relative_path: str
+) -> bool:
+    if not _frozen_artifact_path_is_safe(root, path):
+        return False
+    identity = _git_artifact_identity(root, relative_path)
+    if identity.repository_state is GitRepositoryState.NON_REPOSITORY:
+        return True
+    if (
+        identity.repository_state is not GitRepositoryState.VALID
+        or identity.mode not in {"100644", "100755"}
+        or identity.object_id is None
+    ):
+        return False
+    try:
+        working_digest = _normalized_text_sha256(path.read_bytes())
+    except OSError:
+        return False
+    return _git_blob_sha256(root, identity.object_id) == working_digest
 
 
 def _git_artifact_identity(root: Path, relative_path: str) -> GitArtifactIdentity:

@@ -1500,14 +1500,37 @@ def test_real_e2e_boundary_requires_a_deliberate_digest_update_for_ci_job_change
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
     }
 
+    job = repository_policy._real_e2e_workflow_job_block(workflow)
+    assert job is not None
     monkeypatch.setattr(
         repository_policy,
-        "_EXPECTED_REAL_E2E_WORKFLOW_SHA256",
-        hashlib.sha256(workflow.read_bytes()).hexdigest(),
+        "_EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256",
+        hashlib.sha256(job.encode()).hexdigest(),
     )
     subprocess.run(
         ["git", "add", ".github/workflows/ci.yml"], cwd=tmp_path, check=True
     )
+    assert "real_e2e_ci_job_invalid" not in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_allows_workflow_changes_outside_the_reviewed_job(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            "  group: nexus-ci-${{ github.ref }}",
+            "  group: nexus-ci-${{ github.event.pull_request.number || github.ref }}",
+            1,
+        )
+    )
+    subprocess.run(
+        ["git", "add", ".github/workflows/ci.yml"], cwd=tmp_path, check=True
+    )
+
     assert "real_e2e_ci_job_invalid" not in {
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
     }

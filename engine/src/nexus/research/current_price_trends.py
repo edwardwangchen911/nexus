@@ -6,7 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from importlib.metadata import version
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 from uuid import UUID
 
 import exchange_calendars  # type: ignore[import-untyped]
@@ -152,7 +152,7 @@ class CurrentPriceTrend(_FrozenModel):
 
     @model_serializer(mode="wrap")
     def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        value = handler(self)
+        value = cast(dict[str, Any], handler(self))
         if self.liquidity_observation is None:
             value.pop("liquidity_observation", None)
         return value
