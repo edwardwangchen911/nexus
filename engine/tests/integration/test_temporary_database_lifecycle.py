@@ -4,8 +4,10 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 try:
     from engine.tests.integration import conftest as integration_conftest
@@ -52,6 +54,24 @@ class _RecordingEngine:
 
     async def dispose(self) -> None:
         self.dispose_count += 1
+
+
+async def _create_template_marker(database_url: str) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("CREATE TABLE template_marker (id integer PRIMARY KEY)"))
+    finally:
+        await engine.dispose()
+
+
+async def _template_marker_exists(database_url: str) -> bool:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return bool(await connection.scalar(text("SELECT to_regclass('template_marker')")))
+    finally:
+        await engine.dispose()
 
 
 def test_drop_database_delegates_backend_cleanup_to_force_drop(
@@ -228,6 +248,22 @@ def test_temporary_database_is_dropped_when_post_create_setup_fails(
     finally:
         if created is not None:
             temporary_database_factory.drop(created)
+
+
+def test_provision_clones_an_isolated_template_database(
+    temporary_database_factory: TemporaryDatabaseFactory,
+) -> None:
+    with temporary_database_factory.provision() as template_database:
+        asyncio.run(_create_template_marker(template_database.url))
+
+        with temporary_database_factory.provision(
+            template=template_database
+        ) as cloned_database:
+            assert cloned_database.name != template_database.name
+            assert asyncio.run(_template_marker_exists(cloned_database.url)) is True
+
+        assert temporary_database_factory.exists(cloned_database.name) is False
+        assert temporary_database_factory.exists(template_database.name) is True
 
 
 @pytest.mark.parametrize(

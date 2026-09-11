@@ -41,8 +41,12 @@ class TemporaryDatabaseFactory:
     def provision(
         self,
         after_create: Callable[[TemporaryDatabase], None] | None = None,
+        *,
+        template: TemporaryDatabase | None = None,
     ) -> Generator[TemporaryDatabase]:
         """Create, expose, and remove an isolated database."""
+        if template is not None and not isinstance(template, TemporaryDatabase):
+            raise TypeError("template must be a TemporaryDatabase")
         database_name = f"nexus_test_{uuid4().hex}"
         database_url = self.admin_url.set(database=database_name)
         temporary_database = TemporaryDatabase(
@@ -50,7 +54,13 @@ class TemporaryDatabaseFactory:
             url=database_url.render_as_string(hide_password=False),
         )
         try:
-            asyncio.run(_create_database(self.admin_url, database_name))
+            asyncio.run(
+                _create_database(
+                    self.admin_url,
+                    database_name,
+                    template.name if template is not None else None,
+                )
+            )
             if after_create is not None:
                 after_create(temporary_database)
             yield temporary_database
@@ -68,7 +78,7 @@ class TemporaryDatabaseFactory:
         asyncio.run(_drop_database(self.admin_url, temporary_database.name))
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def temporary_database_factory() -> TemporaryDatabaseFactory:
     """Create an isolated-database factory from the process environment only."""
     configured_url = os.environ.get("DATABASE_URL")
@@ -87,14 +97,34 @@ def temporary_database_url(temporary_database_factory: TemporaryDatabaseFactory)
 @pytest.fixture
 def migrated_database_url(
     monkeypatch: pytest.MonkeyPatch,
-    temporary_database_url: str,
+    temporary_database_factory: TemporaryDatabaseFactory,
+    migrated_database_template: TemporaryDatabase,
 ) -> Generator[str]:
-    """Provide an isolated database upgraded to the current Alembic head."""
-    engine_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
-    command.upgrade(Config(os.path.join(engine_root, "alembic.ini")), "head")
-    _freeze_post_migration_created_at_defaults(temporary_database_url)
-    yield temporary_database_url
+    """Clone an isolated database already upgraded to the current Alembic head."""
+    with temporary_database_factory.provision(
+        template=migrated_database_template
+    ) as temporary_database:
+        monkeypatch.setenv("DATABASE_URL", temporary_database.url)
+        yield temporary_database.url
+
+
+@pytest.fixture(scope="session")
+def migrated_database_template(
+    temporary_database_factory: TemporaryDatabaseFactory,
+) -> Generator[TemporaryDatabase]:
+    """Migrate and freeze one template database for fast per-test clones."""
+
+    def prepare_template(temporary_database: TemporaryDatabase) -> None:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setenv("DATABASE_URL", temporary_database.url)
+            engine_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            command.upgrade(Config(os.path.join(engine_root, "alembic.ini")), "head")
+        _freeze_post_migration_created_at_defaults(temporary_database.url)
+
+    with temporary_database_factory.provision(
+        after_create=prepare_template
+    ) as temporary_database:
+        yield temporary_database
 
 
 def _freeze_post_migration_created_at_defaults(database_url: str) -> None:
@@ -136,12 +166,21 @@ async def _freeze_post_migration_created_at_defaults_async(database_url: str) ->
         await engine.dispose()
 
 
-async def _create_database(admin_url: URL, database_name: str) -> None:
+async def _create_database(
+    admin_url: URL,
+    database_name: str,
+    template_database_name: str | None = None,
+) -> None:
     _require_temporary_database_name(database_name)
+    if template_database_name is not None:
+        _require_temporary_database_name(template_database_name)
     engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
     try:
         async with engine.connect() as connection:
-            await connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+            statement = f'CREATE DATABASE "{database_name}"'
+            if template_database_name is not None:
+                statement += f' TEMPLATE "{template_database_name}"'
+            await connection.execute(text(statement))
     finally:
         await engine.dispose()
 
