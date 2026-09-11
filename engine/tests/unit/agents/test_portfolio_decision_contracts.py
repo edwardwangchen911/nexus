@@ -10,10 +10,12 @@ from jsonschema import validate as validate_json_schema
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
     PortfolioDecisionInputV1,
+    PortfolioDecisionInputV2,
     PortfolioDiagnosticSummaryV1,
     PortfolioInvalidationConditionV1,
     PortfolioResearchIntentV1,
     canonical_portfolio_decision_hash,
+    parse_portfolio_decision_input,
     validate_portfolio_intent,
 )
 from pydantic import ValidationError
@@ -26,6 +28,8 @@ NOW = datetime(2026, 9, 10, 1, 2, 3, tzinfo=UTC)
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 HASH_C = "c" * 64
+SCENARIO_CLAIM_ID = UUID("018f0000-0000-7000-8000-000000000005")
+OTHER_CLAIM_ID = UUID("018f0000-0000-7000-8000-000000000006")
 
 
 def _known(value: str) -> dict[str, object]:
@@ -65,6 +69,47 @@ def _frozen_payload() -> dict[str, object]:
         "policy_version": "real-advisory-v1",
         "evidence_hash": "d" * 64,
     }
+
+
+def _frozen_v2_payload() -> dict[str, object]:
+    return {
+        **_frozen_payload(),
+        "schema_version": "portfolio_decision_input_v2",
+        "scenario_claim_id": str(SCENARIO_CLAIM_ID),
+        "scenario_evidence_manifest_hash": "e" * 64,
+    }
+
+
+def test_parse_portfolio_decision_input_keeps_v1_and_accepts_strict_v2() -> None:
+    assert isinstance(parse_portfolio_decision_input(_frozen_payload()), PortfolioDecisionInputV1)
+    parsed = parse_portfolio_decision_input(_frozen_v2_payload())
+    assert isinstance(parsed, PortfolioDecisionInputV2)
+    assert parsed.scenario_claim_id == SCENARIO_CLAIM_ID
+
+    for field in ("scenario_claim_id", "scenario_evidence_manifest_hash"):
+        missing = _frozen_v2_payload()
+        missing.pop(field)
+        with pytest.raises(ValidationError):
+            parse_portfolio_decision_input(missing)
+
+    extra_v1 = {**_frozen_payload(), "scenario_claim_id": str(SCENARIO_CLAIM_ID)}
+    with pytest.raises(ValidationError):
+        parse_portfolio_decision_input(extra_v1)
+
+
+def test_v2_hash_changes_with_scenario_claim_identity_and_manifest() -> None:
+    first = PortfolioDecisionInputV2.model_validate(_frozen_v2_payload())
+    changed_claim = first.model_copy(update={"scenario_claim_id": OTHER_CLAIM_ID})
+    changed_manifest = first.model_copy(
+        update={"scenario_evidence_manifest_hash": "f" * 64}
+    )
+
+    assert canonical_portfolio_decision_hash(first) != canonical_portfolio_decision_hash(
+        changed_claim
+    )
+    assert canonical_portfolio_decision_hash(first) != canonical_portfolio_decision_hash(
+        changed_manifest
+    )
 
 
 def _projection_payload() -> dict[str, object]:

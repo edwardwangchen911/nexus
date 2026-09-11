@@ -23,7 +23,7 @@ from nexus.agents.codex_versions import (
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
     EvaluateAdjustmentScenarioToolInputV1,
-    PortfolioDecisionInputV1,
+    PortfolioDecisionInput,
     PortfolioDecisionModelContextV1,
     PortfolioResearchIntentV1,
     canonical_portfolio_decision_hash,
@@ -324,7 +324,7 @@ class ResponsesPortfolioDecisionModel:
         *,
         context: PortfolioDecisionModelContextV1,
         prompt: str,
-        frozen: PortfolioDecisionInputV1,
+        frozen: PortfolioDecisionInput,
         first_turn: PortfolioDecisionFirstTurn,
     ) -> PortfolioDecisionModelResult:
         if self._deadline is None or self._second_started or self._finished:
@@ -462,7 +462,7 @@ def _initial_input(
 
 
 def _validate_context(
-    context: PortfolioDecisionModelContextV1, frozen: PortfolioDecisionInputV1
+    context: PortfolioDecisionModelContextV1, frozen: PortfolioDecisionInput
 ) -> None:
     if (
         context.portfolio_id != frozen.portfolio_id

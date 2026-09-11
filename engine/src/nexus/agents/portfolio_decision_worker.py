@@ -37,6 +37,7 @@ from nexus.jobs.repository import (
     reclaim_expired_jobs,
     upsert_worker_heartbeat,
 )
+from nexus.market.ingestion import MarketObjectStore
 from nexus.persistence.models.agents import PortfolioDecisionRunRecord
 from nexus.persistence.models.runtime import Job
 
@@ -53,6 +54,7 @@ async def run_portfolio_decision_worker_once(
     process_version: str,
     migration_head: str,
     clock: Clock,
+    scenario_evidence_store: MarketObjectStore,
     job_ids: tuple[UUID, ...] | None = None,
 ) -> bool:
     """Claim and complete at most one portfolio decision with no provider transaction."""
@@ -136,7 +138,11 @@ async def run_portfolio_decision_worker_once(
         run = await target.get(PortfolioDecisionRunRecord, run_id, with_for_update=True)
         if run is None:
             raise ValueError("portfolio decision run is missing")
-        authority = await load_portfolio_decision_execution_authority(target, run=run)
+        authority = await load_portfolio_decision_execution_authority(
+            target,
+            run=run,
+            scenario_evidence_store=scenario_evidence_store,
+        )
         supports = getattr(responses_client, "supports_model_config", None)
         try:
             compatible = callable(supports) and supports(authority.model_config)

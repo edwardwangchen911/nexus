@@ -3,13 +3,14 @@
 import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.portfolio_decision_contracts import (
-    PortfolioDecisionInputV1,
+    PortfolioDecisionInputV2,
     canonical_portfolio_decision_hash,
 )
 from nexus.agents.portfolio_decision_persistence import (
@@ -30,6 +31,7 @@ from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
     PortfolioScenarioRequestV1,
 )
+from nexus.optimizer.scenario_spread_cost import ScenarioSpreadEvidenceManifestV1
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -103,6 +105,10 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
         "nexus.agents.portfolio_decision_persistence.evaluate_adjustment_scenario",
         lambda **_: type("Evaluation", (), {"result_hash": "e" * 64})(),
     )
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_persistence._select_scenario_claim",
+        AsyncMock(side_effect=_select_scenario_claim),
+    )
     request = PortfolioScenarioRequestV1(
         schema_version="portfolio_scenario_request_v1",
         portfolio_snapshot_id=SNAPSHOT_ID,
@@ -131,6 +137,7 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
             model_config_id=MODEL_ID,
             daily_limit_usd=Decimal("1"),
             now=NOW,
+            scenario_evidence_store=object(),  # type: ignore[arg-type]
         )
     async with factory() as session, session.begin():
         replay = await admit_portfolio_decision_run(
@@ -145,6 +152,7 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
             model_config_id=MODEL_ID,
             daily_limit_usd=Decimal("1"),
             now=NOW + timedelta(seconds=1),
+            scenario_evidence_store=object(),  # type: ignore[arg-type]
         )
     assert replay.run_id == first.run_id
     assert (first.replayed, replay.replayed) == (False, True)
@@ -162,6 +170,7 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
             model_config_id=MODEL_ID,
             daily_limit_usd=Decimal("1"),
             now=NOW,
+            scenario_evidence_store=object(),  # type: ignore[arg-type]
         )
     assert other_actor.run_id != first.run_id
     assert other_actor.replayed is False
@@ -180,6 +189,7 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
                 model_config_id=MODEL_ID,
                 daily_limit_usd=Decimal("1"),
                 now=NOW,
+                scenario_evidence_store=object(),  # type: ignore[arg-type]
             )
 
     with pytest.raises(BudgetExhausted, match="daily research budget exhausted"):
@@ -196,6 +206,7 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
                 model_config_id=MODEL_ID,
                 daily_limit_usd=Decimal("0.0001"),
                 now=NOW + timedelta(seconds=2),
+                scenario_evidence_store=object(),  # type: ignore[arg-type]
             )
 
     with pytest.raises(ValueError, match="scenario result authority changed"):
@@ -212,6 +223,7 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
                 model_config_id=MODEL_ID,
                 daily_limit_usd=Decimal("1"),
                 now=NOW + timedelta(seconds=3),
+                scenario_evidence_store=object(),  # type: ignore[arg-type]
             )
 
     async with factory() as session:
@@ -240,7 +252,7 @@ async def test_admission_is_idempotent_and_persists_one_locked_no_retry_job(
         1,
     )
     assert reservation.run_id == run.id and reservation.state == "reserved"
-    frozen = PortfolioDecisionInputV1.model_validate(run.frozen_input)
+    frozen = PortfolioDecisionInputV2.model_validate(run.frozen_input)
     assert canonical_portfolio_decision_hash(frozen) == run.input_hash
     assert canonical_portfolio_intent_schema_hash() == run.schema_hash
     assert canonical_portfolio_tool_hash() == run.tool_hash
@@ -281,6 +293,7 @@ async def test_admission_rejects_non_ready_sync_before_loading_authority(
                 model_config_id=MODEL_ID,
                 daily_limit_usd=Decimal("1"),
                 now=NOW,
+                scenario_evidence_store=object(),  # type: ignore[arg-type]
             )
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 0
@@ -289,6 +302,31 @@ async def test_admission_rejects_non_ready_sync_before_loading_authority(
         )
         assert run_count == 0
         assert await session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+def _scenario_claim_selection():
+    manifest = ScenarioSpreadEvidenceManifestV1(
+        manifest_schema="scenario_spread_evidence_manifest_v1",
+        evidence_selected_at=NOW - timedelta(seconds=1),
+        policy_status="unavailable",
+        source_policy_id=None,
+        source_policy_version=None,
+        source_policy_payload_hash=None,
+        calendar_authority=None,
+        calculation_version="scenario_spread_cost_v1",
+        no_cost_candidate_hash="1" * 64,
+        scenario_cost_basis_hash="2" * 64,
+        regulatory_reference_hash=None,
+        selected_quotes=(),
+        expected_result_hash="e" * 64,
+    )
+    return SimpleNamespace(id=UUID("0198d500-1000-7000-8000-000000002099")), manifest
+
+
+async def _select_scenario_claim(*args, expected_result_hash: str, **kwargs):
+    if expected_result_hash != "e" * 64:
+        raise ValueError("portfolio scenario result authority changed")
+    return _scenario_claim_selection()
 
 
 async def _seed_authority(factory, *, sync_status: str = "READY") -> None:

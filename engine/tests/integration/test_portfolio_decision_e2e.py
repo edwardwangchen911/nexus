@@ -12,8 +12,9 @@ import httpx
 import pytest
 from helpers.portfolio_api import app, headers, settings
 from nexus.agents.portfolio_decision_contracts import (
-    PortfolioDecisionInputV1,
+    PortfolioDecisionInputV2,
     canonical_portfolio_decision_hash,
+    parse_portfolio_decision_input,
 )
 from nexus.agents.portfolio_decision_execution import load_portfolio_decision_execution_authority
 from nexus.agents.portfolio_decision_tools import (
@@ -34,6 +35,7 @@ from nexus.persistence.models.diagnostics import (
 )
 from nexus.persistence.models.optimization import OptimizationProposalGroupRecord
 from nexus.persistence.models.paper import PaperFillRecord, PaperOrderRecord
+from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
@@ -41,8 +43,11 @@ from sqlalchemy import func, select
 from tests.integration.test_portfolio_decision_worker_pg import _Client, _intent
 from tests.integration.test_portfolio_scenario_api import (
     AS_OF,
+    KNOWN_AS_OF,
     SNAPSHOT_ID,
     US_INSTRUMENT_ID,
+    ScenarioStore,
+    _quote_records,
     _seed_scenario_authority,
 )
 from tests.integration.test_portfolio_scenario_api import (
@@ -53,7 +58,7 @@ PROMPT_ID = UUID("0198d500-1000-7000-8000-000000002104")
 MODEL_ID = UUID("0198d500-1000-7000-8000-000000002105")
 TOP3_ITEM_ID = UUID("0198d500-1000-7000-8000-000000002106")
 HHI_ITEM_ID = UUID("0198d500-1000-7000-8000-000000002107")
-NOW = AS_OF + timedelta(minutes=1)
+NOW = KNOWN_AS_OF + timedelta(minutes=1)
 
 
 @pytest.mark.asyncio
@@ -63,10 +68,24 @@ async def test_explicit_admission_reaches_locked_readable_decision_without_trade
 ) -> None:
     report_id = await _seed_production_authority(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
+    scenario_store = ScenarioStore()
+    original_artifact, original_quote = _quote_records(
+        scenario_store,
+        event_at=KNOWN_AS_OF - timedelta(seconds=30),
+        sequence=31,
+    )
+    async with factory() as session, session.begin():
+        session.add_all((original_artifact, original_quote))
     scenario_path = "/internal/v1/portfolio-scenarios/evaluate"
-    scenario_body = scenario_payload(report_id)
+    scenario_body = scenario_payload(report_id, as_of=KNOWN_AS_OF)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app(migrated_database_url, now=NOW)),
+        transport=httpx.ASGITransport(
+            app=app(
+                migrated_database_url,
+                now=NOW,
+                scenario_evidence_store=scenario_store,
+            )
+        ),
         base_url="http://testserver",
     ) as client:
         scenario_response = await client.post(
@@ -80,7 +99,12 @@ async def test_explicit_admission_reaches_locked_readable_decision_without_trade
     assert scenario_response.status_code == 200, scenario_response.text
     scenario = scenario_response.json()["data"]
     result_hash = scenario["result_hash"]
-    assert len(scenario["positions"]) == 1
+    assert scenario["cost_breakdown"]["spread"] == {
+        "status": "known",
+        "value": "0.000250000000",
+        "reason": None,
+    }
+    assert len(scenario["positions"]) == 2
     private_position = scenario["positions"][0]
 
     create_path = "/internal/v1/portfolio-decision-runs"
@@ -95,7 +119,13 @@ async def test_explicit_admission_reaches_locked_readable_decision_without_trade
         separators=(",", ":"),
     ).encode()
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app(migrated_database_url, now=NOW)),
+        transport=httpx.ASGITransport(
+            app=app(
+                migrated_database_url,
+                now=NOW,
+                scenario_evidence_store=scenario_store,
+            )
+        ),
         base_url="http://testserver",
     ) as client:
         created = await client.post(
@@ -105,10 +135,33 @@ async def test_explicit_admission_reaches_locked_readable_decision_without_trade
         )
     assert created.status_code == 202, created.text
     run_id = UUID(created.json()["data"]["run_id"])
+    newer_artifact, newer_quote = _quote_records(
+        scenario_store,
+        event_at=KNOWN_AS_OF - timedelta(seconds=5),
+        bid="39.80",
+        ask="40.20",
+        sequence=32,
+    )
+    async with factory() as session, session.begin():
+        session.add_all((newer_artifact, newer_quote))
     async with factory() as session:
         run = await session.get(PortfolioDecisionRunRecord, run_id)
         assert run is not None
-        authority = await load_portfolio_decision_execution_authority(session, run=run)
+        frozen = parse_portfolio_decision_input(run.frozen_input)
+        assert isinstance(frozen, PortfolioDecisionInputV2)
+        scenario_claim = await session.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.actor_id == run.actor_id,
+                IdempotencyRecord.route.endswith(":portfolio_scenario_evaluation_v3"),
+            )
+        )
+        assert scenario_claim is not None
+        assert frozen.scenario_claim_id == scenario_claim.id
+        authority = await load_portfolio_decision_execution_authority(
+            session,
+            run=run,
+            scenario_evidence_store=scenario_store,
+        )
     intent = _intent(authority)
     intent["assessment"] = "observe"
     intent["rationale"] = [
@@ -146,11 +199,18 @@ async def test_explicit_admission_reaches_locked_readable_decision_without_trade
         process_version="test-worker-v1",
         migration_head="0049_pd_terminal_phases",
         clock=lambda: NOW,
+        scenario_evidence_store=scenario_store,
     )
 
     read_path = f"/internal/v1/portfolio-decision-runs/{run_id}"
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app(migrated_database_url, now=NOW)),
+        transport=httpx.ASGITransport(
+            app=app(
+                migrated_database_url,
+                now=NOW,
+                scenario_evidence_store=scenario_store,
+            )
+        ),
         base_url="http://testserver",
     ) as client:
         loaded = await client.get(read_path, headers=headers("GET", read_path))
@@ -210,7 +270,7 @@ async def test_explicit_admission_reaches_locked_readable_decision_without_trade
     assert stored_run is not None and output is not None and reservation is not None
     assert stored_run.request_hash == hashlib.sha256(body).hexdigest()
     assert stored_run.input_hash == canonical_portfolio_decision_hash(
-        PortfolioDecisionInputV1.model_validate(stored_run.frozen_input)
+        PortfolioDecisionInputV2.model_validate(stored_run.frozen_input)
     )
     assert stored_run.evidence_hash == canonical_portfolio_evidence_manifest_hash(
         stored_run.evidence_manifest
@@ -235,8 +295,210 @@ async def test_explicit_admission_reaches_locked_readable_decision_without_trade
     }
 
 
-async def _seed_production_authority(database_url: str) -> UUID:
-    report_id = await _seed_scenario_authority(database_url)
+@pytest.mark.asyncio
+async def test_admission_selects_first_valid_real_claim_for_same_unknown_result(
+    migrated_database_url: str,
+) -> None:
+    decision_now = AS_OF + timedelta(minutes=1)
+    report_id = await _seed_production_authority(
+        migrated_database_url,
+        as_of=AS_OF,
+        known_spread_case=False,
+    )
+    factory = session_factory(settings(migrated_database_url))
+    scenario_store = ScenarioStore()
+    scenario_path = "/internal/v1/portfolio-scenarios/evaluate"
+    scenario_body = scenario_payload(report_id, as_of=AS_OF)
+    scenario_app = app(
+        migrated_database_url,
+        now=decision_now,
+        scenario_evidence_store=scenario_store,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=scenario_app),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(
+            scenario_path,
+            content=scenario_body,
+            headers={
+                **headers("POST", scenario_path, scenario_body),
+                "Idempotency-Key": "decision-e2e-unknown-first",
+            },
+        )
+        second = await client.post(
+            scenario_path,
+            content=scenario_body,
+            headers={
+                **headers("POST", scenario_path, scenario_body),
+                "Idempotency-Key": "decision-e2e-unknown-second",
+            },
+        )
+    assert first.status_code == second.status_code == 200
+    result_hash = first.json()["data"]["result_hash"]
+    assert second.json()["data"]["result_hash"] == result_hash
+
+    create_path = "/internal/v1/portfolio-decision-runs"
+    body = json.dumps(
+        {
+            "schema_version": "portfolio_decision_create_v1",
+            "portfolio_snapshot_id": str(SNAPSHOT_ID),
+            "diagnostic_report_id": str(report_id),
+            "expected_scenario_result_hash": result_hash,
+            "scenario_request": json.loads(scenario_body),
+        },
+        separators=(",", ":"),
+    ).encode()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(
+                migrated_database_url,
+                now=decision_now,
+                scenario_evidence_store=scenario_store,
+            )
+        ),
+        base_url="http://testserver",
+    ) as client:
+        created = await client.post(
+            create_path,
+            content=body,
+            headers={
+                **headers("POST", create_path, body),
+                "Idempotency-Key": "decision-e2e-unknown-admission",
+            },
+        )
+    assert created.status_code == 202, created.text
+
+    async with factory() as session:
+        run = await session.get(
+            PortfolioDecisionRunRecord,
+            UUID(created.json()["data"]["run_id"]),
+        )
+        assert run is not None
+        claims = tuple(
+            await session.scalars(
+                select(IdempotencyRecord)
+                .where(
+                    IdempotencyRecord.actor_id == run.actor_id,
+                    IdempotencyRecord.route.endswith(
+                        ":portfolio_scenario_evaluation_v3"
+                    ),
+                    IdempotencyRecord.response_payload["expected_result_hash"].as_string()
+                    == result_hash,
+                )
+                .order_by(IdempotencyRecord.created_at, IdempotencyRecord.id)
+            )
+        )
+    frozen = PortfolioDecisionInputV2.model_validate(run.frozen_input)
+    assert len(claims) == 2
+    assert claims[0].response_payload != claims[1].response_payload
+    assert frozen.scenario_claim_id == claims[0].id
+
+
+@pytest.mark.asyncio
+async def test_admission_rejects_corrupt_frozen_quote_before_budget_or_job(
+    migrated_database_url: str,
+) -> None:
+    report_id = await _seed_production_authority(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    scenario_store = ScenarioStore()
+    artifact, quote = _quote_records(
+        scenario_store,
+        event_at=KNOWN_AS_OF - timedelta(seconds=30),
+        sequence=41,
+    )
+    async with factory() as session, session.begin():
+        session.add_all((artifact, quote))
+
+    scenario_path = "/internal/v1/portfolio-scenarios/evaluate"
+    scenario_body = scenario_payload(report_id, as_of=KNOWN_AS_OF)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(
+                migrated_database_url,
+                now=NOW,
+                scenario_evidence_store=scenario_store,
+            )
+        ),
+        base_url="http://testserver",
+    ) as client:
+        scenario_response = await client.post(
+            scenario_path,
+            content=scenario_body,
+            headers={
+                **headers("POST", scenario_path, scenario_body),
+                "Idempotency-Key": "decision-e2e-corrupt-scenario",
+            },
+        )
+    assert scenario_response.status_code == 200, scenario_response.text
+    result_hash = scenario_response.json()["data"]["result_hash"]
+    object_key = next(iter(scenario_store.objects))
+    scenario_store.objects[object_key] += b"tampered"
+
+    create_path = "/internal/v1/portfolio-decision-runs"
+    body = json.dumps(
+        {
+            "schema_version": "portfolio_decision_create_v1",
+            "portfolio_snapshot_id": str(SNAPSHOT_ID),
+            "diagnostic_report_id": str(report_id),
+            "expected_scenario_result_hash": result_hash,
+            "scenario_request": json.loads(scenario_body),
+        },
+        separators=(",", ":"),
+    ).encode()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(
+                migrated_database_url,
+                now=NOW,
+                scenario_evidence_store=scenario_store,
+            )
+        ),
+        base_url="http://testserver",
+    ) as client:
+        rejected = await client.post(
+            create_path,
+            content=body,
+            headers={
+                **headers("POST", create_path, body),
+                "Idempotency-Key": "decision-e2e-corrupt-admission",
+            },
+        )
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "PORTFOLIO_DECISION_AUTHORITY_MISMATCH"
+
+    async with factory() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(PortfolioDecisionRunRecord))
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(PortfolioDecisionBudgetReservationRecord)
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Job)
+                .where(Job.job_type == "agent.portfolio_decision")
+            )
+            == 0
+        )
+
+
+async def _seed_production_authority(
+    database_url: str,
+    *,
+    as_of=KNOWN_AS_OF,
+    known_spread_case: bool = True,
+) -> UUID:
+    report_id = await _seed_scenario_authority(
+        database_url,
+        as_of=as_of,
+        known_spread_case=known_spread_case,
+    )
     factory = session_factory(settings(database_url))
     prompt = "bounded portfolio decision prompt"
     async with factory() as session, session.begin():
@@ -248,7 +510,7 @@ async def _seed_production_authority(database_url: str) -> UUID:
                     version="portfolio-decision-v1",
                     content_hash=hashlib.sha256(prompt.encode()).hexdigest(),
                     content=prompt,
-                    created_at=AS_OF - timedelta(seconds=30),
+                    created_at=as_of - timedelta(seconds=30),
                 ),
                 AgentModelConfigRecord(
                     id=MODEL_ID,
@@ -260,9 +522,9 @@ async def _seed_production_authority(database_url: str) -> UUID:
                     max_tool_calls=1,
                     input_usd_per_million=Decimal("1"),
                     output_usd_per_million=Decimal("1"),
-                    pricing_available_at=NOW - timedelta(days=1),
-                    pricing_expires_at=NOW + timedelta(days=1),
-                    created_at=AS_OF - timedelta(seconds=30),
+                    pricing_available_at=as_of - timedelta(days=1),
+                    pricing_expires_at=as_of + timedelta(days=1),
+                    created_at=as_of - timedelta(seconds=30),
                 ),
                 PortfolioDiagnosticItemRecord(
                     id=TOP3_ITEM_ID,
@@ -275,7 +537,7 @@ async def _seed_production_authority(database_url: str) -> UUID:
                     severity="critical",
                     actionability="reduce_only",
                     unknown_reason=None,
-                    created_at=AS_OF,
+                    created_at=as_of,
                 ),
                 PortfolioDiagnosticItemRecord(
                     id=HHI_ITEM_ID,
@@ -288,7 +550,7 @@ async def _seed_production_authority(database_url: str) -> UUID:
                     severity="critical",
                     actionability="reduce_only",
                     unknown_reason=None,
-                    created_at=AS_OF,
+                    created_at=as_of,
                 ),
             )
         )
@@ -299,19 +561,19 @@ async def _seed_production_authority(database_url: str) -> UUID:
                     item_id=TOP3_ITEM_ID,
                     source="fixture",
                     object_id="scenario-top3",
-                    available_at=AS_OF,
+                    available_at=as_of,
                     location="fixture://scenario-top3",
                     content_hash="3" * 64,
-                    created_at=AS_OF,
+                    created_at=as_of,
                 ),
                 PortfolioDiagnosticEvidenceRefRecord(
                     item_id=HHI_ITEM_ID,
                     source="fixture",
                     object_id="scenario-hhi",
-                    available_at=AS_OF,
+                    available_at=as_of,
                     location="fixture://scenario-hhi",
                     content_hash="4" * 64,
-                    created_at=AS_OF,
+                    created_at=as_of,
                 ),
             )
         )

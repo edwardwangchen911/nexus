@@ -10,9 +10,9 @@ from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
-    PortfolioDecisionInputV1,
     PortfolioResearchIntentV1,
     canonical_portfolio_decision_hash,
+    parse_portfolio_decision_input,
     validate_portfolio_intent,
 )
 from nexus.agents.portfolio_decision_persistence import admit_portfolio_decision_run
@@ -133,6 +133,7 @@ async def create_portfolio_decision_run(
             model_config_id=None,
             daily_limit_usd=settings.agent_daily_budget_usd,
             now=now,
+            scenario_evidence_store=request.app.state.scenario_evidence_store,
             required_model_id=required_model_id,
             required_model_version=required_model_version,
         )
@@ -302,7 +303,7 @@ def _response(
     run: PortfolioDecisionRunRecord,
     output: PortfolioDecisionOutputRecord | None,
 ) -> PortfolioDecisionRunResponse:
-    frozen = PortfolioDecisionInputV1.model_validate(run.frozen_input)
+    frozen = parse_portfolio_decision_input(run.frozen_input)
     if (
         canonical_portfolio_decision_hash(frozen) != run.input_hash
         or frozen.portfolio_id != run.portfolio_id

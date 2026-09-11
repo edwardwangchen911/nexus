@@ -19,11 +19,12 @@ from nexus.agents.persistence import (
 )
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
-    PortfolioDecisionInputV1,
+    PortfolioDecisionInput,
     PortfolioDecisionModelContextV1,
     PortfolioDiagnosticSummaryV1,
     PortfolioResearchIntentV1,
     canonical_portfolio_decision_hash,
+    parse_portfolio_decision_input,
     validate_portfolio_intent,
 )
 from nexus.agents.portfolio_decision_persistence import canonical_portfolio_intent_schema_hash
@@ -37,6 +38,7 @@ from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.synthesis import usage_cost
 from nexus.diagnostics.models import DiagnosticItem
 from nexus.diagnostics.repository import read_report
+from nexus.market.ingestion import MarketObjectStore
 from nexus.optimizer.compare import TypedMetric
 from nexus.optimizer.scenario_contracts import AdjustmentScenarioConstraintsV1
 from nexus.persistence.models.agents import (
@@ -77,7 +79,7 @@ class PortfolioDecisionExecutionError(ValueError):
 class PortfolioDecisionExecutionAuthority:
     """Validated inputs retained while provider calls run outside transactions."""
 
-    frozen: PortfolioDecisionInputV1
+    frozen: PortfolioDecisionInput
     context: PortfolioDecisionModelContextV1
     prompt: str
     model: AgentModelConfigRecord
@@ -89,10 +91,11 @@ async def load_portfolio_decision_execution_authority(
     session: AsyncSession,
     *,
     run: PortfolioDecisionRunRecord,
+    scenario_evidence_store: MarketObjectStore,
 ) -> PortfolioDecisionExecutionAuthority:
     """Rebuild the aggregate model context from one immutable admitted run."""
     try:
-        frozen = PortfolioDecisionInputV1.model_validate(run.frozen_input)
+        frozen = parse_portfolio_decision_input(run.frozen_input)
     except (TypeError, ValidationError) as error:
         raise _authority_error() from error
     if (
@@ -223,7 +226,11 @@ async def load_portfolio_decision_execution_authority(
     except (TypeError, ValueError, ValidationError) as error:
         raise _authority_error() from error
     try:
-        tools = await build_portfolio_decision_tools(session, run)
+        tools = await build_portfolio_decision_tools(
+            session,
+            run,
+            scenario_evidence_store=scenario_evidence_store,
+        )
     except (TypeError, ValueError, ValidationError) as error:
         raise _authority_error() from error
     return PortfolioDecisionExecutionAuthority(
@@ -279,7 +286,7 @@ async def persist_portfolio_decision_terminal(
     scenario_result_hash = _validated_scenario_result_hash(run)
     if intent is not None:
         try:
-            frozen = PortfolioDecisionInputV1.model_validate(run.frozen_input)
+            frozen = parse_portfolio_decision_input(run.frozen_input)
             projection = AgentScenarioProjectionV1.model_validate(run.tool_projection)
             citations = PortfolioCitationAuthority.from_manifest(
                 run_id=run.id,
@@ -512,7 +519,7 @@ async def record_tool_result(
         raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_PHASE_INVALID")
 
     try:
-        frozen = PortfolioDecisionInputV1.model_validate(run.frozen_input)
+        frozen = parse_portfolio_decision_input(run.frozen_input)
     except (TypeError, ValidationError) as error:
         raise PortfolioDecisionExecutionError(
             "PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH"

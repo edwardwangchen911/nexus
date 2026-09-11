@@ -15,14 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.persistence import reserve_portfolio_decision_budget
 from nexus.agents.portfolio_decision_contracts import (
-    PortfolioDecisionInputV1,
+    PortfolioDecisionInputV2,
     PortfolioResearchIntentV1,
     canonical_portfolio_decision_hash,
 )
 from nexus.agents.portfolio_decision_tools import (
     canonical_portfolio_evidence_manifest_hash,
     canonical_portfolio_tool_hash,
+    replay_valid_scenario_claim,
 )
+from nexus.agents.tools import ToolInputError
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
 from nexus.diagnostics.repository import (
     load_frozen_snapshot,
@@ -40,8 +42,17 @@ from nexus.jobs.models import (
     job_input_hash,
 )
 from nexus.jobs.repository import enqueue_job
-from nexus.optimizer.scenario_contracts import PortfolioScenarioRequestV1, canonical_scenario_hash
+from nexus.market.ingestion import MarketObjectStore
+from nexus.optimizer.scenario_contracts import (
+    PortfolioScenarioEvaluationV2,
+    PortfolioScenarioRequestV1,
+    canonical_scenario_hash,
+)
 from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
+from nexus.optimizer.scenario_spread_cost import (
+    ScenarioSpreadEvidenceManifestV1,
+    canonical_scenario_spread_manifest_hash,
+)
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -54,7 +65,8 @@ from nexus.persistence.models.portfolio import (
     Portfolio,
     PortfolioSnapshotRecord,
 )
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import IdempotencyRecord, Job
+from nexus.providers.broker.base import PortfolioSnapshot
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 
@@ -102,6 +114,49 @@ def build_portfolio_evidence_manifest(
     return manifest, canonical_portfolio_evidence_manifest_hash(manifest)
 
 
+async def _select_scenario_claim(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    actor_id: str,
+    expected_result_hash: str,
+    snapshot: PortfolioSnapshot,
+    base_result: PortfolioScenarioEvaluationV2,
+    now: datetime,
+) -> tuple[IdempotencyRecord, ScenarioSpreadEvidenceManifestV1]:
+    claims = tuple(
+        await session.scalars(
+            select(IdempotencyRecord)
+            .where(
+                IdempotencyRecord.actor_id == actor_id,
+                IdempotencyRecord.route
+                == "/internal/v1/portfolio-scenarios/evaluate:portfolio_scenario_evaluation_v3",
+                IdempotencyRecord.schema_version == "portfolio_scenario_v3",
+                IdempotencyRecord.created_at <= now,
+                IdempotencyRecord.response_payload["expected_result_hash"].as_string()
+                == expected_result_hash,
+            )
+            .order_by(IdempotencyRecord.created_at, IdempotencyRecord.id)
+        )
+    )
+    for claim in claims:
+        try:
+            manifest, _ = await replay_valid_scenario_claim(
+                session,
+                store,
+                actor_id=actor_id,
+                claim=claim,
+                expected_result_hash=expected_result_hash,
+                expected_manifest_hash=None,
+                snapshot=snapshot,
+                base_result=base_result,
+            )
+        except ToolInputError:
+            continue
+        return claim, manifest
+    raise ValueError("portfolio scenario result authority changed")
+
+
 async def admit_portfolio_decision_run(
     session: AsyncSession,
     *,
@@ -115,6 +170,7 @@ async def admit_portfolio_decision_run(
     model_config_id: UUID | None,
     daily_limit_usd: Decimal,
     now: datetime,
+    scenario_evidence_store: MarketObjectStore,
     required_model_id: str | None = None,
     required_model_version: str | None = None,
 ) -> PortfolioDecisionAdmission:
@@ -208,8 +264,15 @@ async def admit_portfolio_decision_run(
         diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
         request_hash=scenario_request_hash,
     )
-    if evaluation.result_hash != expected_scenario_result_hash:
-        raise ValueError("portfolio scenario result authority changed")
+    scenario_claim, scenario_manifest = await _select_scenario_claim(
+        session,
+        scenario_evidence_store,
+        actor_id=actor_id,
+        expected_result_hash=expected_scenario_result_hash,
+        snapshot=snapshot,
+        base_result=evaluation,
+        now=now,
+    )
     evidence_manifest, evidence_hash = build_portfolio_evidence_manifest(
         (
             EvidenceRef(
@@ -237,8 +300,8 @@ async def admit_portfolio_decision_run(
         ),
         decision_time=now,
     )
-    frozen = PortfolioDecisionInputV1(
-        schema_version="portfolio_decision_input_v1",
+    frozen = PortfolioDecisionInputV2(
+        schema_version="portfolio_decision_input_v2",
         portfolio_id=snapshot_record.portfolio_id,
         portfolio_snapshot_id=snapshot_record.id,
         diagnostic_report_id=diagnostic_record.id,
@@ -249,10 +312,14 @@ async def admit_portfolio_decision_run(
         universe_policy=request.constraints.universe_policy,
         allow_new_positions=request.constraints.allow_new_positions,
         scenario_request_hash=scenario_request_hash,
-        expected_scenario_result_hash=evaluation.result_hash,
+        expected_scenario_result_hash=expected_scenario_result_hash,
         diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
         policy_version=policy.version,
         evidence_hash=evidence_hash,
+        scenario_claim_id=scenario_claim.id,
+        scenario_evidence_manifest_hash=canonical_scenario_spread_manifest_hash(
+            scenario_manifest
+        ),
     )
     input_hash = canonical_portfolio_decision_hash(frozen)
     schema_hash = canonical_portfolio_intent_schema_hash()

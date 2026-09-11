@@ -12,8 +12,8 @@ from uuid import UUID
 import pytest
 from nexus.agents.portfolio_decision_contracts import (
     AgentScenarioProjectionV1,
-    PortfolioDecisionInputV1,
     PortfolioDecisionModelContextV1,
+    parse_portfolio_decision_input,
 )
 from nexus.agents.portfolio_decision_execution import (
     PortfolioDecisionExecutionAuthority,
@@ -38,6 +38,7 @@ from nexus.optimizer.scenario_contracts import (
     AdjustmentScenarioConstraintsV1,
     PortfolioScenarioRequestV1,
 )
+from nexus.optimizer.scenario_spread_cost import ScenarioSpreadEvidenceManifestV1
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -222,6 +223,7 @@ async def test_reconcile_after_output_checkpoint_crash_never_replays_provider(
             process_version="test-worker-v1",
             migration_head="0049_pd_terminal_phases",
             clock=lambda: NOW,
+            scenario_evidence_store=object(),  # type: ignore[arg-type]
         )
     assert len(client.responses.calls) == 2
 
@@ -295,6 +297,7 @@ async def test_worker_abstains_immediately_when_first_turn_omits_tool(
         process_version="test-worker-v1",
         migration_head="0049_pd_terminal_phases",
         clock=lambda: NOW,
+        scenario_evidence_store=object(),  # type: ignore[arg-type]
     )
 
     async with factory() as session:
@@ -346,6 +349,7 @@ async def test_worker_fails_once_and_settles_full_when_transport_usage_is_unknow
         process_version="test-worker-v1",
         migration_head="0049_pd_terminal_phases",
         clock=lambda: NOW,
+        scenario_evidence_store=object(),  # type: ignore[arg-type]
     )
 
     async with factory() as session:
@@ -391,6 +395,7 @@ async def test_worker_terminalizes_invalid_authority_without_calling_provider(
         process_version="test-worker-v1",
         migration_head="0049_pd_terminal_phases",
         clock=lambda: NOW,
+        scenario_evidence_store=object(),  # type: ignore[arg-type]
     )
 
     async with factory() as session:
@@ -432,6 +437,7 @@ async def test_worker_terminalizes_a_pre_upgrade_active_run_without_provider_cal
         process_version="test-worker-v2",
         migration_head="0049_pd_terminal_phases",
         clock=lambda: NOW,
+        scenario_evidence_store=object(),  # type: ignore[arg-type]
     )
 
     async with factory() as session:
@@ -510,6 +516,7 @@ async def test_worker_skips_failed_dependency_without_calling_provider(
         process_version="test-worker-v1",
         migration_head="0049_pd_terminal_phases",
         clock=lambda: NOW,
+        scenario_evidence_store=object(),  # type: ignore[arg-type]
     )
 
     async with factory() as session:
@@ -747,6 +754,10 @@ async def _admit(
         "nexus.agents.portfolio_decision_persistence.evaluate_adjustment_scenario",
         lambda **_: type("Evaluation", (), {"result_hash": RESULT_HASH})(),
     )
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_persistence._select_scenario_claim",
+        AsyncMock(return_value=_scenario_claim_selection()),
+    )
     request = PortfolioScenarioRequestV1(
         schema_version="portfolio_scenario_request_v1",
         portfolio_snapshot_id=SNAPSHOT_ID,
@@ -774,7 +785,32 @@ async def _admit(
             model_config_id=MODEL_ID,
             daily_limit_usd=Decimal("1"),
             now=now,
+            scenario_evidence_store=object(),  # type: ignore[arg-type]
         )
+
+
+def _scenario_claim_selection():
+    manifest = ScenarioSpreadEvidenceManifestV1(
+        manifest_schema="scenario_spread_evidence_manifest_v1",
+        evidence_selected_at=NOW - timedelta(seconds=1),
+        policy_status="unavailable",
+        source_policy_id=None,
+        source_policy_version=None,
+        source_policy_payload_hash=None,
+        calendar_authority=None,
+        calculation_version="scenario_spread_cost_v1",
+        no_cost_candidate_hash="1" * 64,
+        scenario_cost_basis_hash="2" * 64,
+        regulatory_reference_hash=None,
+        selected_quotes=(),
+        expected_result_hash=RESULT_HASH,
+    )
+    claim = type(
+        "ScenarioClaim",
+        (),
+        {"id": UUID("0198d500-2000-7000-8000-000000002099")},
+    )()
+    return claim, manifest
 
 
 async def _authority(
@@ -828,7 +864,7 @@ async def _authority(
     prompt = await session.get(AgentPromptVersionRecord, run.prompt_version_id)
     assert model is not None and prompt is not None
     return PortfolioDecisionExecutionAuthority(
-        frozen=PortfolioDecisionInputV1.model_validate(frozen),
+        frozen=parse_portfolio_decision_input(frozen),
         context=context,
         prompt=prompt.content,
         model=model,
