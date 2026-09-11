@@ -7,6 +7,7 @@ from nexus.ops.alpaca_market_stream import (
     collect_market_stream,
     import_market_stream,
     load_market_stream_archive,
+    parse_market_stream_raw_payload,
 )
 
 
@@ -141,6 +142,34 @@ async def test_bounded_iex_stream_roundtrips_latest_trade_and_quote(tmp_path) ->
     assert archive.quote.ask == Decimal("227.18")
     assert archive.raw_payload
     assert b"example-secret" not in archive.raw_payload
+    assert parse_market_stream_raw_payload(archive.raw_payload) == archive
+
+
+def test_raw_payload_parser_rejects_duplicate_envelope_keys() -> None:
+    with pytest.raises(ValueError, match="ALPACA_MARKET_STREAM_ARCHIVE_INVALID"):
+        parse_market_stream_raw_payload(
+            b'{"schema":"alpaca_stock_stream_v1","schema":"alpaca_stock_stream_v1",'
+            b'"receipt_base64":"e30=","frames_base64":[]}'
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b'{"schema":"wrong","receipt_base64":"e30=","frames_base64":[]}',
+        b'{"schema":"alpaca_stock_stream_v1","receipt_base64":"!","frames_base64":[]}',
+        json.dumps(
+            {
+                "schema": "alpaca_stock_stream_v1",
+                "receipt_base64": "e30=",
+                "frames_base64": [""] * 101,
+            }
+        ).encode(),
+    ),
+)
+def test_raw_payload_parser_rejects_untrusted_envelope_shapes(payload: bytes) -> None:
+    with pytest.raises(ValueError, match="ALPACA_MARKET_STREAM_ARCHIVE_INVALID"):
+        parse_market_stream_raw_payload(payload)
 
 
 @pytest.mark.asyncio
@@ -263,9 +292,7 @@ async def test_market_stream_rejects_tampered_raw_frame(tmp_path) -> None:
         key="example-key",
         secret="example-secret",
         max_frames=4,
-        connector=lambda *args, **kwargs: Socket(
-            [CONNECTED, AUTHENTICATED, SUBSCRIBED, DATA]
-        ),
+        connector=lambda *args, **kwargs: Socket([CONNECTED, AUTHENTICATED, SUBSCRIBED, DATA]),
     )
     (directory / "frame-00003.json").write_text("[]")
 
