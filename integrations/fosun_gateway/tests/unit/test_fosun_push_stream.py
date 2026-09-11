@@ -786,7 +786,7 @@ async def test_secret_reflection_is_not_persisted(tmp_path):
     reflected = json.dumps({"topic": "qt", "items": [{"code": "usAAPL", "msg": nested}]})
     socket = Socket([SUB_REPLY, reflected.encode()])
 
-    result = await _collect(socket=socket, directory=tmp_path / "run")
+    result = await _collect(socket=socket, directory=tmp_path / "run", duration=1)
 
     assert result["status"] == "partial"
     assert result["stop_reason"] == "SECRET_REFLECTION"
@@ -818,7 +818,9 @@ async def test_malformed_nested_json_cannot_archive_unicode_escaped_session(
 async def test_nested_message_must_parse_as_object_before_archiving(tmp_path, nested):
     frame = {"topic": "qt", "items": [{"code": "usAAPL", "msg": nested}]}
 
-    result = await _collect(socket=Socket([SUB_REPLY, frame]), directory=tmp_path / "run")
+    result = await _collect(
+        socket=Socket([SUB_REPLY, frame]), directory=tmp_path / "run", duration=1
+    )
 
     assert result["stop_reason"] == "QUOTE_INVALID"
     assert result["frame_count"] == 1
@@ -871,7 +873,7 @@ async def test_valid_quote_is_preserved_without_timezone_or_normalization(tmp_pa
     quote = _quote_frame(qtTime=1_704_067_200_123, price=price, power=power)
     socket = Socket([SUB_REPLY, quote])
 
-    await _collect(socket=socket, directory=tmp_path / "run", max_frames=2)
+    await _collect(socket=socket, directory=tmp_path / "run", duration=1, max_frames=2)
 
     archive = load_push_archive(tmp_path / "run")
     assert archive["receipt"]["quote_message_count"] == 1
@@ -885,6 +887,7 @@ async def test_each_required_quote_field_must_be_a_non_bool_integer(tmp_path, fi
     result = await _collect(
         socket=Socket([SUB_REPLY, _quote_frame(**{field: invalid})]),
         directory=tmp_path / "run",
+        duration=1,
         max_frames=2,
     )
 
@@ -916,7 +919,10 @@ async def test_optional_s2c_metadata_rejects_wrong_types(tmp_path, kind, field, 
     frames.append({**frame, field: value})
 
     result = await _collect(
-        socket=Socket(frames), directory=tmp_path / "run", max_frames=len(frames)
+        socket=Socket(frames),
+        directory=tmp_path / "run",
+        duration=1,
+        max_frames=len(frames),
     )
 
     assert result["status"] in {"partial", "failed"}
@@ -959,7 +965,10 @@ async def test_consecutive_quote_ids_must_increase_only_when_both_are_known(tmp_
         frames.append(_quote_frame() if value is None else {**_quote_frame(), "id": value})
 
     result = await _collect(
-        socket=Socket(frames), directory=tmp_path / "run", max_frames=len(frames)
+        socket=Socket(frames),
+        directory=tmp_path / "run",
+        duration=1,
+        max_frames=len(frames),
     )
 
     if valid:
