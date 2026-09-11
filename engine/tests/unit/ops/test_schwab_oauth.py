@@ -36,6 +36,18 @@ def _token_payload() -> dict[str, object]:
     }
 
 
+def _refresh_payload(*, rotate: bool = True) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "expires_in": 1800,
+        "token_type": "Bearer",
+        "scope": "api",
+        "access_token": "refreshed-access-token",
+    }
+    if rotate:
+        payload["refresh_token"] = "rotated-refresh-token"
+    return payload
+
+
 def _token(*, prefix: str = "fake") -> SchwabOAuthToken:
     return SchwabOAuthToken(
         access_token=f"{prefix}-access-token",
@@ -195,6 +207,47 @@ async def test_schwab_authorization_code_is_exchanged_once_without_secret_output
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rotate", "expected_refresh_token"),
+    [(True, "rotated-refresh-token"), (False, "fake-refresh-token")],
+)
+async def test_schwab_refresh_is_one_shot_and_preserves_or_rotates_refresh_token(
+    tmp_path: Path, rotate: bool, expected_refresh_token: str
+) -> None:
+    _write_config(tmp_path)
+    config = provider_market_stream.load_schwab_app_config(tmp_path, {})
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_refresh_payload(rotate=rotate))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        refreshed = await provider_market_stream.refresh_schwab_access_token(
+            config,
+            _token(),
+            client,
+            now=datetime(2026, 9, 11, 12, 20, tzinfo=UTC),
+        )
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == "https://api.schwabapi.com/v1/oauth/token"
+    assert request.headers["Authorization"] == "Basic " + base64.b64encode(
+        b"fake-app-key:fake-app-secret"
+    ).decode()
+    assert parse_qs(request.content.decode()) == {
+        "grant_type": ["refresh_token"],
+        "refresh_token": ["fake-refresh-token"],
+    }
+    assert refreshed.access_token == "refreshed-access-token"
+    assert refreshed.refresh_token == expected_refresh_token
+    assert refreshed.expires_at == datetime(2026, 9, 11, 12, 50, tzinfo=UTC)
+    assert "refreshed-access-token" not in repr(refreshed)
+    assert expected_refresh_token not in repr(refreshed)
+
+
+@pytest.mark.asyncio
 async def test_token_rejection_reports_only_safe_http_status(tmp_path: Path) -> None:
     _write_config(tmp_path)
     config = provider_market_stream.load_schwab_app_config(tmp_path, {})
@@ -302,6 +355,9 @@ def test_market_stream_cli_exposes_authorize_and_repo_bound_stream_without_secre
     authorize = provider_market_stream.build_parser().parse_args(
         ["authorize", "--repo-root", str(tmp_path)]
     )
+    refresh = provider_market_stream.build_parser().parse_args(
+        ["refresh", "--repo-root", str(tmp_path)]
+    )
     stream = provider_market_stream.build_parser().parse_args(
         [
             "schwab",
@@ -316,13 +372,75 @@ def test_market_stream_cli_exposes_authorize_and_repo_bound_stream_without_secre
 
     assert authorize.source == "authorize"
     assert authorize.repo_root == tmp_path
+    assert refresh.source == "refresh"
+    assert refresh.repo_root == tmp_path
     assert stream.source == "schwab"
     assert stream.repo_root == tmp_path
     assert all(
         "token" not in key and "secret" not in key
-        for parsed in (authorize, stream)
+        for parsed in (authorize, refresh, stream)
         for key in vars(parsed)
     )
+
+
+@pytest.mark.asyncio
+async def test_refresh_command_atomically_replaces_token_and_returns_safe_summary(
+    tmp_path: Path,
+) -> None:
+    _write_config(tmp_path)
+    original = _token()
+    provider_market_stream.save_schwab_token(tmp_path, original)
+    arguments = provider_market_stream.build_parser().parse_args(
+        ["refresh", "--repo-root", str(tmp_path)]
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json=_refresh_payload())
+        )
+    ) as client:
+        result = await provider_market_stream._run(
+            arguments,
+            client=client,
+            now=datetime(2026, 9, 11, 12, 20, tzinfo=UTC),
+        )
+
+    saved = provider_market_stream.load_schwab_token(tmp_path)
+    assert saved.access_token == "refreshed-access-token"
+    assert saved.refresh_token == "rotated-refresh-token"
+    assert result == {
+        "status": "refreshed",
+        "token_path": str(
+            tmp_path / ".secrets" / "nexus-schwab-local" / "tokens.json"
+        ),
+        "expires_at": "2026-09-11T12:50:00+00:00",
+        "secrets_printed": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_keeps_previous_private_token(tmp_path: Path) -> None:
+    _write_config(tmp_path)
+    original = _token()
+    provider_market_stream.save_schwab_token(tmp_path, original)
+    arguments = provider_market_stream.build_parser().parse_args(
+        ["refresh", "--repo-root", str(tmp_path)]
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                401, content=b"provider body with fake-refresh-token"
+            )
+        )
+    ) as client:
+        with pytest.raises(
+            ValueError, match="^SCHWAB_OAUTH_REFRESH_HTTP_401$"
+        ) as captured:
+            await provider_market_stream._run(arguments, client=client, now=NOW)
+
+    assert provider_market_stream.load_schwab_token(tmp_path) == original
+    assert "fake-refresh-token" not in str(captured.value)
 
 
 @pytest.mark.asyncio
@@ -417,3 +535,53 @@ async def test_stream_command_resolves_private_token_and_user_preference_before_
     assert call["duration"] == 5.0
     assert call["max_frames"] == 3
     assert call["credentials"].access_token == "fake-access-token"
+
+
+@pytest.mark.asyncio
+async def test_stream_command_auto_refreshes_access_token_near_expiry(
+    tmp_path: Path,
+) -> None:
+    _write_config(tmp_path)
+    provider_market_stream.save_schwab_token(tmp_path, _token())
+    requests: list[httpx.Request] = []
+    captured_access_tokens: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if str(request.url) == "https://api.schwabapi.com/v1/oauth/token":
+            return httpx.Response(200, json=_refresh_payload())
+        return httpx.Response(200, json=_preference_payload(with_account=False))
+
+    async def capture(**kwargs: object) -> dict[str, object]:
+        credentials = kwargs["credentials"]
+        captured_access_tokens.append(credentials.access_token)
+        return {"status": "bounded_complete"}
+
+    arguments = provider_market_stream.build_parser().parse_args(
+        [
+            "schwab",
+            "--repo-root",
+            str(tmp_path),
+            "--symbol",
+            "AAPL",
+            "--output-dir",
+            str(tmp_path / "archive"),
+        ]
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await provider_market_stream.run_schwab_stream(
+            arguments,
+            client,
+            collector=capture,
+            now=datetime(2026, 9, 11, 12, 27, tzinfo=UTC),
+        )
+
+    assert result == {"status": "bounded_complete"}
+    assert [str(request.url) for request in requests] == [
+        "https://api.schwabapi.com/v1/oauth/token",
+        "https://api.schwabapi.com/trader/v1/userPreference",
+    ]
+    assert captured_access_tokens == ["refreshed-access-token"]
+    assert provider_market_stream.load_schwab_token(tmp_path).refresh_token == (
+        "rotated-refresh-token"
+    )

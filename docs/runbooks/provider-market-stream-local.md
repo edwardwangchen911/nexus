@@ -21,6 +21,13 @@ uv run --package nexus-engine nexus-engine-provider-market-stream authorize \
 
 命令会打开嘉信授权页，并显示本机 macOS 引导弹窗。先在浏览器完成登录和授权；浏览器跳到 `https://127.0.0.1` 时出现无法连接是预期现象。回到弹窗，粘贴地址栏中的完整 URL 并点击“继续”。回调仅由本地弹窗传入当前进程，不进入命令参数、shell history 或日志。命令只交换一次授权码，不自动重试；成功后把动态 token 写到主仓库 `.secrets/nexus-schwab-local/tokens.json`，目录和文件权限分别为 `0700`、`0600`。非 macOS 环境才回退为终端隐藏输入。
 
+可显式执行一次 refresh 验证当前 refresh token；命令只调用一次 token 端点，成功后原子替换同一私密文件，不输出 token。若嘉信轮换 refresh token 则保存新值，否则保留原值；失败时不覆盖现有文件：
+
+```sh
+uv run --package nexus-engine nexus-engine-provider-market-stream refresh \
+  --repo-root /Users/wangchen/Documents/ChatGPT/投资
+```
+
 随后立即运行短时采集：
 
 ```sh
@@ -31,9 +38,7 @@ uv run --package nexus-engine nexus-engine-provider-market-stream schwab \
   --duration 60
 ```
 
-实现固定只接受 `wss://streamer-api.schwab.com/ws`，先 LOGIN，成功后只订阅 `LEVELONE_EQUITIES`；支持服务端心跳与 change-frame 状态合并。单次最多 500 个不重复美股代码、300 秒、100 帧和 8 MiB，任何断线都只留 partial/failed，不重连。`delayed` 只保存嘉信帧明确给出的值；字段缺失保持未知。
-
-当前切片负责首次浏览器授权和授权码换 token，但不自动刷新过期 token。若出现 `SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED`，需要重新运行 `authorize`；自动 refresh 留待真实首轮验收确认 token 响应后再实现。首轮验证还必须确认实际 user-preference 字段、账户行情权限，以及目标股票帧中的 `delayed=false`；仅 LOGIN/SUBS 成功不代表实时权限。
+实现固定只接受 `wss://streamer-api.schwab.com/ws`，先 LOGIN，成功后只订阅 `LEVELONE_EQUITIES`；支持服务端心跳与 change-frame 状态合并。启动采集前若 access token 已过期或将在 5 分钟内到期，会自动 refresh 一次并原子保存；刷新不重试，失败时停止采集并保留旧文件，需要重新运行 `authorize` 才能恢复已失效的 refresh token。单次最多 500 个不重复美股代码、300 秒、100 帧和 8 MiB，任何断线都只留 partial/failed，不重连。`delayed` 只保存嘉信帧明确给出的值；字段缺失保持未知。
 
 ## 归档与判定
 

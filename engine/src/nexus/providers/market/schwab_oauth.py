@@ -165,6 +165,62 @@ async def exchange_schwab_authorization_code(
     )
 
 
+async def refresh_schwab_access_token(
+    config: SchwabAppConfig,
+    token: SchwabOAuthToken,
+    client: httpx.AsyncClient,
+    *,
+    now: datetime | None = None,
+) -> SchwabOAuthToken:
+    """Refresh an access token once and retain an unrotated refresh token."""
+    obtained_at = now or datetime.now(UTC)
+    if obtained_at.tzinfo is None or obtained_at.utcoffset() is None:
+        raise SchwabOAuthError("SCHWAB_OAUTH_TIME_INVALID")
+    try:
+        response = await client.post(
+            _TOKEN_URL,
+            auth=httpx.BasicAuth(config.app_key, config.app_secret),
+            headers={"Accept": "application/json"},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": token.refresh_token,
+            },
+            follow_redirects=False,
+            timeout=10,
+        )
+    except httpx.HTTPError:
+        raise SchwabOAuthError("SCHWAB_OAUTH_REFRESH_REQUEST_FAILED") from None
+    if response.status_code != 200:
+        raise SchwabOAuthError(f"SCHWAB_OAUTH_REFRESH_HTTP_{response.status_code}")
+    if len(response.content) > _MAX_TOKEN_RESPONSE_BYTES:
+        raise SchwabOAuthError("SCHWAB_OAUTH_REFRESH_RESPONSE_INVALID")
+    try:
+        payload = json.loads(response.content, object_pairs_hook=_unique_json)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        raise SchwabOAuthError("SCHWAB_OAUTH_REFRESH_RESPONSE_INVALID") from None
+    if not isinstance(payload, dict):
+        raise SchwabOAuthError("SCHWAB_OAUTH_REFRESH_RESPONSE_INVALID")
+    access_token = payload.get("access_token")
+    refresh_token = payload.get("refresh_token", token.refresh_token)
+    expires_in = payload.get("expires_in")
+    if (
+        not isinstance(access_token, str)
+        or not _printable(access_token, 8192)
+        or not isinstance(refresh_token, str)
+        or not _printable(refresh_token, 8192)
+        or type(expires_in) is not int
+        or not 1 <= expires_in <= 86_400
+        or payload.get("token_type") != "Bearer"
+    ):
+        raise SchwabOAuthError("SCHWAB_OAUTH_REFRESH_RESPONSE_INVALID")
+    return SchwabOAuthToken(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        obtained_at=obtained_at,
+        expires_at=obtained_at + timedelta(seconds=expires_in),
+    )
+
+
 def save_schwab_token(repo_root: Path, token: SchwabOAuthToken) -> Path:
     directory = repo_root.resolve() / ".secrets" / "nexus-schwab-local"
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)

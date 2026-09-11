@@ -31,6 +31,7 @@ from nexus.providers.market.schwab_oauth import (
     load_schwab_app_config,
     load_schwab_token,
     parse_schwab_callback,
+    refresh_schwab_access_token,
     save_schwab_token,
 )
 from nexus.providers.market.schwab_stream import (
@@ -48,6 +49,7 @@ MAX_FRAME = 2 * 1024 * 1024
 MAX_FRAMES = 100
 MAX_DURATION_SECONDS = 300
 CLOSE_TIMEOUT_SECONDS = 1
+TOKEN_REFRESH_WINDOW = timedelta(minutes=5)
 
 
 class ProviderMarketStreamError(ValueError):
@@ -64,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="source", required=True)
     authorize = subparsers.add_parser("authorize")
     authorize.add_argument("--repo-root", type=Path, required=True)
+    refresh = subparsers.add_parser("refresh")
+    refresh.add_argument("--repo-root", type=Path, required=True)
     child = subparsers.add_parser("schwab")
     child.add_argument("--repo-root", type=Path, required=True)
     child.add_argument("--symbol", action="append", required=True)
@@ -146,8 +150,17 @@ async def run_schwab_stream(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     token = load_schwab_token(arguments.repo_root)
+    checked_at = now or datetime.now(UTC)
+    if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+        raise SchwabOAuthError("SCHWAB_OAUTH_TIME_INVALID")
+    if token.expires_at - checked_at <= TOKEN_REFRESH_WINDOW:
+        config = load_schwab_app_config(arguments.repo_root, {})
+        token = await refresh_schwab_access_token(
+            config, token, client, now=checked_at
+        )
+        save_schwab_token(arguments.repo_root, token)
     streamer_url, credentials = await fetch_schwab_stream_preferences(
-        token, client, now=now
+        token, client, now=checked_at
     )
     collect = collector or collect_schwab_stream
     return await collect(
@@ -158,6 +171,25 @@ async def run_schwab_stream(
         duration=arguments.duration,
         max_frames=arguments.max_frames,
     )
+
+
+async def refresh_schwab(
+    repo_root: Path,
+    client: httpx.AsyncClient,
+    *,
+    process_environment: Mapping[str, str] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    config = load_schwab_app_config(repo_root, process_environment or {})
+    token = load_schwab_token(repo_root)
+    refreshed = await refresh_schwab_access_token(config, token, client, now=now)
+    token_path = save_schwab_token(repo_root, refreshed)
+    return {
+        "status": "refreshed",
+        "token_path": str(token_path),
+        "expires_at": refreshed.expires_at.isoformat(),
+        "secrets_printed": False,
+    }
 
 
 async def _run(
@@ -196,6 +228,13 @@ async def _run(
             client,
             opener=opener,
             callback_reader=reader,
+            process_environment=os.environ,
+            now=now,
+        )
+    if arguments.source == "refresh":
+        return await refresh_schwab(
+            arguments.repo_root,
+            client,
             process_environment=os.environ,
             now=now,
         )
