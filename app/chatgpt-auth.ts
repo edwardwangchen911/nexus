@@ -44,7 +44,11 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
 export function localDevelopmentUser(
   env: NodeJS.ProcessEnv,
 ): ChatGPTUser | null {
-  if (env.NEXUS_AUTH_MODE !== "dev" || env.NEXUS_ENV === "production") {
+  if (
+    env.NEXUS_AUTH_MODE !== "dev" ||
+    env.NEXUS_ENV === "production" ||
+    env.NODE_ENV === "production"
+  ) {
     return null;
   }
 

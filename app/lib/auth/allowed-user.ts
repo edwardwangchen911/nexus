@@ -1,18 +1,8 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-
 export type NexusAuthMode = "sites" | "dev";
-
-function hashUserId(value: string): Buffer {
-  return createHash("sha256").update(value, "utf8").digest();
-}
-
-export function isAllowedUser(userId: string, allowedUserId: string): boolean {
-  return timingSafeEqual(hashUserId(userId), hashUserId(allowedUserId));
-}
 
 export function assertAllowedUser(userId: string | null, env: NodeJS.ProcessEnv): void {
   const mode = env.NEXUS_AUTH_MODE ?? "sites";
-  const isProduction = env.NEXUS_ENV === "production";
+  const isProduction = env.NEXUS_ENV === "production" || env.NODE_ENV === "production";
 
   if (mode !== "sites" && mode !== "dev") {
     throw new Error("NEXUS_AUTH_MODE must be sites or dev");
@@ -24,11 +14,7 @@ export function assertAllowedUser(userId: string | null, env: NodeJS.ProcessEnv)
     return;
   }
 
-  const allowedUserId = env.NEXUS_ALLOWED_USER_ID;
-  if (!allowedUserId) {
-    throw new Error("NEXUS_ALLOWED_USER_ID must be configured for Sites authentication");
-  }
-  if (!userId || !isAllowedUser(userId, allowedUserId)) {
-    throw new Error("NEXUS user is not allowed");
+  if (!userId) {
+    throw new Error("Sites authentication requires an authenticated Sites user ID");
   }
 }

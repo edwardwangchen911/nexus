@@ -20,13 +20,6 @@ export async function requireNexusApiActor(request: Request): Promise<NexusActor
   void request;
   const user = await getChatGPTUser();
   if (!user) throw new NexusApiAuthError(401, "Authentication is required.");
-  try {
-    assertAllowedUser(user.userId, process.env);
-  } catch (error) {
-    if (error instanceof Error && error.message === "NEXUS user is not allowed") {
-      throw new NexusApiAuthError(403, "NEXUS access is not permitted.");
-    }
-    throw error;
-  }
+  assertAllowedUser(user.userId, process.env);
   return { userId: user.userId, requestId: uuidv7() };
 }
