@@ -34,6 +34,7 @@ from nexus.persistence.session import session_factory
 from nexus.providers.broker.base import BrokerPosition, CashBalance, PortfolioSnapshot
 from nexus.settings import EngineSettings
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _VALUATION_TIME = datetime(2026, 9, 10, 15, 0, tzinfo=UTC)
 _SNAPSHOT_ID = UUID("019d1000-0000-7000-8000-000000000001")
@@ -306,6 +307,24 @@ async def _seed_quote(
     async with factory() as session, session.begin():
         session.add_all((artifact, quote))
     return quote.id
+
+
+async def _mutate_seeded_quote(
+    session: AsyncSession,
+    *,
+    quote_id: UUID,
+    artifact_id: UUID,
+    statement: str,
+) -> None:
+    await session.execute(text("SET LOCAL session_replication_role = 'replica'"))
+    await session.execute(
+        text(statement),
+        {
+            "quote_id": quote_id,
+            "artifact_id": artifact_id,
+            "future": _VALUATION_TIME + timedelta(seconds=1),
+        },
+    )
 
 
 def _quote_records(
@@ -642,6 +661,166 @@ async def test_replay_rejects_tampered_artifact_bytes(
     async with factory() as session:
         with pytest.raises(ScenarioSpreadEvidenceReplayInvalid):
             await replay_scenario_spread_evidence(session, store, snapshot, base_result, manifest)
+
+
+@pytest.mark.asyncio
+async def test_selection_fails_closed_for_unqualified_quote_and_artifact_metadata(
+    migrated_database_url: str,
+) -> None:
+    await _seed_identities(migrated_database_url)
+    snapshot = _snapshot()
+    base_result = _base_result()
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    cases = (
+        (
+            "non-empty quality flags",
+            "UPDATE latest_quotes SET quality_flags = '[\"SIP_DELAYED\"]'::jsonb "
+            "WHERE id = :quote_id",
+            False,
+        ),
+        (
+            "future quote available_at",
+            "UPDATE latest_quotes SET available_at = :future, received_at = :future "
+            "WHERE id = :quote_id",
+            False,
+        ),
+        (
+            "future quote received_at",
+            "UPDATE latest_quotes SET received_at = :future WHERE id = :quote_id",
+            False,
+        ),
+        (
+            "future artifact available_at",
+            "UPDATE data_artifacts SET available_at = :future, received_at = :future "
+            "WHERE id = :artifact_id",
+            False,
+        ),
+        (
+            "future artifact received_at",
+            "UPDATE data_artifacts SET received_at = :future WHERE id = :artifact_id",
+            False,
+        ),
+        (
+            "wrong artifact schema",
+            "UPDATE data_artifacts SET schema_version = 'wrong_schema' WHERE id = :artifact_id",
+            False,
+        ),
+        (
+            "wrong artifact URI",
+            "UPDATE data_artifacts SET uri = 'memory://wrong/key.json' WHERE id = :artifact_id",
+            True,
+        ),
+        (
+            "wrong artifact byte size",
+            "UPDATE data_artifacts SET byte_size = byte_size + 1 WHERE id = :artifact_id",
+            True,
+        ),
+    )
+
+    async with factory() as session, session.begin():
+        for sequence, (case, statement, rejects) in enumerate(cases, start=20):
+            store = Store()
+            artifact, quote = _quote_records(
+                store,
+                event_at=_VALUATION_TIME - timedelta(seconds=10),
+                sequence=sequence,
+            )
+            savepoint = await session.begin_nested()
+            try:
+                session.add_all((artifact, quote))
+                await session.flush()
+                await _mutate_seeded_quote(
+                    session,
+                    quote_id=quote.id,
+                    artifact_id=artifact.id,
+                    statement=statement,
+                )
+                if rejects:
+                    try:
+                        await select_scenario_spread_evidence(
+                            session, store, snapshot, base_result
+                        )
+                    except ScenarioSpreadEvidenceReplayInvalid:
+                        pass
+                    else:
+                        pytest.fail(f"{case} was admitted")
+                else:
+                    evidence = await select_scenario_spread_evidence(
+                        session, store, snapshot, base_result
+                    )
+                    result = apply_scenario_spread_cost(
+                        snapshot=snapshot, base_result=base_result, evidence=evidence
+                    )
+                    assert evidence.input.selected_quotes == (), case
+                    assert result.cost_breakdown.spread == TypedMetric.unknown(
+                        "BID_ASK_EVIDENCE_UNAVAILABLE"
+                    ), case
+            finally:
+                await savepoint.rollback()
+
+
+@pytest.mark.asyncio
+async def test_replay_rejects_authority_and_expected_hash_drift(
+    migrated_database_url: str,
+) -> None:
+    await _seed_identities(migrated_database_url)
+    store = Store()
+    await _seed_quote(
+        migrated_database_url,
+        store,
+        event_at=_VALUATION_TIME - timedelta(seconds=10),
+    )
+    snapshot = _snapshot()
+    base_result = _base_result()
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        evidence = await select_scenario_spread_evidence(session, store, snapshot, base_result)
+    result = apply_scenario_spread_cost(
+        snapshot=snapshot, base_result=base_result, evidence=evidence
+    )
+    manifest = finalize_scenario_spread_manifest(
+        evidence.input, expected_result_hash=result.result_hash
+    )
+    assert manifest.calendar_authority is not None
+    cases = (
+        (
+            "policy payload hash",
+            manifest.model_copy(update={"source_policy_payload_hash": "f" * 64}),
+        ),
+        (
+            "calendar authority hash",
+            manifest.model_copy(
+                update={
+                    "calendar_authority": manifest.calendar_authority.model_copy(
+                        update={"authority_hash": "f" * 64}
+                    )
+                }
+            ),
+        ),
+        (
+            "calculation version",
+            manifest.model_copy(update={"calculation_version": "scenario_spread_cost_v2"}),
+        ),
+        (
+            "regulatory reference hash",
+            manifest.model_copy(update={"regulatory_reference_hash": "f" * 64}),
+        ),
+        (
+            "expected result hash",
+            manifest.model_copy(update={"expected_result_hash": "f" * 64}),
+        ),
+    )
+
+    async with factory() as session:
+        for case, changed_manifest in cases:
+            try:
+                await replay_scenario_spread_evidence(
+                    session, store, snapshot, base_result, changed_manifest
+                )
+            except ScenarioSpreadEvidenceReplayInvalid:
+                pass
+            else:
+                pytest.fail(f"{case} drift was admitted")
 
 
 @pytest.mark.asyncio
