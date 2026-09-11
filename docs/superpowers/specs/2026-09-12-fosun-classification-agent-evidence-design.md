@@ -1,230 +1,259 @@
 # Fosun Classification Agent Evidence Design
 
-## Goal
+Status: reviewed and implementation-ready
+Decision date: 2026-09-12
 
-Expose Fosun security-classification evidence through the existing
-`get_security_snapshot` Agent tool while preserving point-in-time authority,
-raw-source traceability, and fail-closed identity semantics.
+## 1. Outcome and boundaries
 
-The feature helps an Agent decide which research route to inspect. It does not
-assign a canonical asset type, decide ETF versus ETN, or change execution
-eligibility.
+Persist the classification fields already returned by a normal full Fosun quote
+refresh, freeze one point-in-time observation into a research snapshot, and expose
+it through the existing `get_security_snapshot` Agent tool.
 
-## Current state and problem
+This is routing evidence only. It must never assign canonical
+`Instrument.asset_type`, claim ETF versus ETN, satisfy price/spread/tradability/
+entitlement/execution authority, trigger a provider call from a page or Agent tool,
+or backfill an existing Run. `execution_locked=true` remains invariant.
 
-The Fosun gateway now preserves source fields from two different fact classes:
+The Engine classifier continues to return only `company_equity_like`,
+`fund_or_structured_like`, or `unknown`. Valid partial/unrecognized evidence maps to
+`unknown`; malformed source types still fail at the existing provider boundary.
 
-- Holdings `name`, `symbol`, and `productType` fields.
-- Quote `first`, `second`, and `third` classification levels.
-- Quote company-fundamental and net-asset field-presence profiles.
-- Quote fund-type text, provider name, and delay flag.
+## 2. Persistence and freshness policy
 
-These fields must not share one persistence or freshness policy merely because
-they arrive in the same API response.
+Acquisition freshness and durable storage are separate: current facts are persisted
+after acquisition so decisions can be reproduced.
 
-## Acquisition and persistence policy
+| Fact class | Acquisition | Persistence and consumer |
+| --- | --- | --- |
+| Provider identity hints | first discovery, normal full refresh, explicit future identity refresh | Immutable normalized evidence; research routing only |
+| Portfolio facts | portfolio refresh/decision workflow | Existing portfolio snapshot and current-decision gates |
+| Market state | explicit market collection | Existing quote/bar authority and age/session/feed gates |
+| Runtime capability | future executable preparation and final validation | Proposal/order audit; old value cannot authorize |
+| Research facts | source cadence or missing period | Existing versioned evidence and availability clocks |
 
-NEXUS separates source acquisition from durable evidence. A fact that must be
-fresh is still persisted after acquisition so the decision can be reproduced;
-"real time" never means "memory only".
+Only the first row changes. Price, bid/ask, `provider_reported_delay`, session state,
+and tradability remain outside the classification document.
 
-| Fact class | Examples | Acquisition rule | Persistence and consumer rule |
-| --- | --- | --- | --- |
-| Slow-changing provider identity hints | Holdings `name`, `symbol`, `productType`; Quote `first/second/third`, fund-type text, company/net-asset profile shape | Fetch on first discovery of a holding, each normal full Fosun refresh, and an explicit identity refresh | Persist immutable observations. Use only for research routing. Unknown or stale evidence never becomes a canonical asset type. |
-| Current portfolio authority | quantity, available/frozen quantity, cost, cash | Read from the broker at the start of a portfolio refresh or decision workflow | Persist the reconciled portfolio snapshot. A stale snapshot may be displayed as stale but cannot satisfy a current decision gate. |
-| Live market state | last, bid, ask, quote/trade timestamps, `tradeStatus`, session state, provider delay | Fetch for the requested decision bucket or an explicit market refresh job | Persist every admitted market snapshot with its receipt and source times. Page browsing only reads persisted results. Consumers apply the existing age, session, delivery-mode, and coverage gates. Never copy these fields into identity observations. |
-| Runtime product/account capability | `buyable`, `sellable`, margin, fractional, DCA eligibility | Re-read when preparing a future executable action and again at final order validation | Persist the checked result with the proposal/order audit. Never infer security identity from these flags and never reuse an old value as current permission. |
-| Periodic research facts | NAV, asset size, market cap, shares, PE/PB and filings | Refresh according to the source's publication cadence or when a research Run requests a missing/current period | Persist with source period, availability time, revision, and evidence reference. The classification record stores only profile-field presence, not these changing values. |
-| Derived facts | routing family, features, diagnostics, scenario outputs | Compute deterministically from frozen inputs | Persist the result and input hashes. Recompute for a new Run; never silently rewrite an old Run. |
-| Provider session and entitlement | login/subscription state, delayed/real-time entitlement | Verify on connection and for the active collection session | Persist a receipt for audit, but an old receipt cannot authorize a new session. |
+## 3. Selected architecture
 
-For this feature, only the first row is added to the Agent security tool. Live
-market state remains in the existing price/snapshot tools and portfolio facts
-remain in portfolio tools. This prevents the Agent from treating a persisted
-classification observation as a current quote or trading permission.
-
-The Engine can deterministically derive one of three routing families from a
-Quote item:
-
-- `company_equity_like`
-- `fund_or_structured_like`
-- `unknown`
-
-However, this evidence currently ends at the archived market response. The
-database-backed Agent tools only expose evidence frozen into the research Run.
-Reading the newest Quote at tool-call time would introduce a time-of-check
-change and would bypass the Run's evidence manifest.
-
-## Selected architecture
-
-Use an immutable normalized identity-hint observation backed by the
-content-addressed Fosun Quote artifact produced by a normal full Fosun refresh.
-Freeze its `ResearchEvidenceRef` into the research snapshot, then project the
-observation through `get_security_snapshot`.
-
-The data flow is:
+No new SQL table is added. Reuse the established immutable evidence chain:
 
 ```text
-Fosun Quote response
-  -> content-addressed DataArtifact
-  -> ResearchEvidenceRef + FosunSecurityClassificationObservation
+normal full Fosun Quote response
+  -> existing raw DataArtifact (fosun_gateway_market_snapshot_v1)
+  -> normalized per-instrument DataArtifact (fosun_security_classification_v1)
+  -> DataSnapshot + ResearchEvidenceRef
   -> AgentDataSnapshotEvidenceRecord
-  -> frozen Agent Run evidence manifest
+  -> frozen Run manifest
   -> get_security_snapshot
 ```
 
-This reuses the existing tool name and authorization scope. No Agent receives a
-gateway client, broker credentials, object-store access, or a caller-supplied
-classification.
+This matches current research observations and leaves `LatestQuote`,
+`PositionSnapshot`, the tool catalogue, risk, and execution policy unchanged.
 
-## Persistence contract
+## 4. Canonical document contract
 
-Add an append-only `fosun_security_classification_observations` table with:
+Create `engine/src/nexus/research/fosun_security_classification.py` with:
 
-- Immutable row identity and `instrument_id`.
-- A composite ownership relationship to one `ResearchEvidenceRef`.
-- `source`, `provider_object_id`, `revision`, availability time, and receipt time.
-- Provider name and optional `first`, `second`, `third` integer levels.
-- Boolean field-presence facts for the company-equity and net-asset profiles.
-- Optional Simplified Chinese, Traditional Chinese, and English fund-type text.
-- The deterministic routing family.
+```python
+SOURCE = "fosun_security_classification"
+SCHEMA = "fosun_security_classification_v1"
+RAW_SCHEMA = "fosun_gateway_market_snapshot_v1"
+MAX_CANONICAL_BYTES = 16_384
 
-The routing family is stored so the persisted projection is inspectable, but it
-must equal a database check-compatible combination:
+class FosunClassificationLevels(BaseModel):
+    first: int | None
+    second: int | None
+    third: int | None
 
-- `company_equity_like` requires exact levels `1/101/10105`, complete company
-  profile fields, and an incomplete net-asset profile.
-- `fund_or_structured_like` requires exact levels `2/202/20202`, complete
-  net-asset profile fields, and an incomplete company profile.
-- Every partial, conflicting, or unrecognized combination is `unknown`.
+class FosunFundAssetType(BaseModel):
+    chs: str | None  # max 128; retain empty source strings
+    cht: str | None
+    eng: str | None
 
-The row never contains a canonical `asset_type` column. Holdings `productType`
-is retained in the broker reconciliation archive but is not copied into this
-Quote-backed research observation because the live sample showed one constant
-value across multiple security kinds and the broker archive is not the same
-source artifact.
+class FosunRawQuoteBinding(BaseModel):
+    artifact_sha256: str       # 64 lowercase hex
+    artifact_byte_length: int  # 1..1 MiB
+    artifact_uri: str
+    gateway_request_id: UUID
+    request_body_sha256: str   # 64 lowercase hex
 
-One full-refresh Quote batch may back multiple instrument observations. The
-evidence reference owns the exact raw batch bytes; an observation is unique by
-`instrument_id + evidence_ref_id`. Replaying identical bytes is idempotent.
-Conflicting normalized content for the same owner is rejected.
-
-The 15-second intraday collector does not create classification observations.
-Its Quote artifacts remain market-state evidence governed by market freshness.
-This avoids duplicating unchanged identity hints at quote frequency.
-
-The migration downgrade removes only the new normalized observation table. It
-does not delete shared artifacts or evidence references.
-
-## Ingestion behavior
-
-During the existing full Fosun local refresh transaction:
-
-1. Archive the exact Quote evidence as today.
-2. Create or reuse one content-addressed `ResearchEvidenceRef` for that artifact.
-3. For every returned Quote item carrying provider classification evidence,
-   persist one normalized observation.
-4. Validate the stored row by reading it back through the production reader.
-5. Commit it atomically with the existing Quote observations.
-
-The full refresh already performs the required external read, so classification
-capture adds no provider request. A newly discovered holding is included in
-that bounded Quote request and can acquire its first observation immediately.
-If this read is absent or malformed, the holding remains visible with unknown
-classification; the system does not replay the request from an Agent tool.
-
-A requested symbol with no provider row, or a provider row with all three
-classification levels absent, creates no classification observation. This is
-reported later as unavailable; absence is not rewritten as an affirmative
-`unknown` observation.
-
-Malformed field types still reject the provider response at the gateway
-contract. Valid but partial fields persist and classify as `unknown`, so a new
-security cannot fail the whole refresh merely because its enum is unfamiliar.
-
-## Snapshot freezing
-
-`prepare_research_snapshot` selects at most one Fosun classification observation
-for the requested instrument where all source and database clocks are no later
-than `as_of`.
-
-Selection order is deterministic: newest availability, newest receipt, then
-stable evidence identity. If equally ranked rows disagree on normalized
-classification facts, no classification evidence is admitted.
-
-The selected evidence reference is included in the same bounded evidence set as
-other research observations. Existing maximum-evidence and decision-time rules
-still apply. The research snapshot revision therefore changes when the selected
-classification authority changes.
-
-Older snapshots and Runs are never backfilled. They continue to return no Fosun
-classification evidence.
-
-Classification is supplemental rather than a decision-readiness gate. Its age
-is returned to the consumer through `available_at`; the normal full refresh is
-the refresh trigger. The Agent tool never performs an external read. If a
-workflow later requires a stricter maximum age, that policy must be introduced
-as an explicit versioned rule rather than hidden in the tool.
-
-## Agent tool projection
-
-For a frozen Fosun classification evidence item, `get_security_snapshot`
-includes:
-
-```json
-{
-  "provider_security_classification": {
-    "provider": "fosun",
-    "provider_name": "source value or null",
-    "levels": {"first": 2, "second": 202, "third": 20202},
-    "equity_profile_fields_complete": false,
-    "net_asset_profile_fields_complete": true,
-    "fund_asset_type": {"chs": "", "cht": "", "eng": ""},
-    "routing_family": "fund_or_structured_like",
-    "canonical_asset_type": null,
-    "identity_authoritative": false
-  }
-}
+class FosunSecurityClassificationDocument(BaseModel):
+    schema_version: Literal["fosun_security_classification_v1"]
+    source: Literal["fosun_security_classification"]
+    instrument_id: UUID
+    provider_code: str
+    provider_name: str | None
+    levels: FosunClassificationLevels
+    equity_profile_fields_complete: bool
+    net_asset_profile_fields_complete: bool
+    fund_asset_type: FosunFundAssetType
+    routing_family: FosunSecurityFamily
+    received_at: AwareDatetime
+    available_at: AwareDatetime
+    raw_quote: FosunRawQuoteBinding
+    revision_semantics: Literal["local_content_hash"]
+    canonical_asset_type: None
+    identity_authoritative: Literal[False]
+    price_authority_eligible: Literal[False]
+    historical_backtest_eligible: Literal[False]
+    execution_locked: Literal[True]
 ```
 
-The wrapper retains the existing `evidence_ref_id`, source, revision,
-availability time, and content hash. Citation extraction therefore continues to
-bind the claim to the Run's frozen evidence index.
+All models are frozen, strict, `extra="forbid"`, and hide input in errors.
+`received_at == available_at` because the provider classification has no separately
+qualified source timestamp. `routing_family` must equal
+`classify_fosun_security_family()` over stored fields. `provider_code` uses the
+existing Engine Fosun validator. `provider_object_id` is exactly
+`classification:{instrument_id}:{provider_code}`.
 
-If a frozen reference claims to be Fosun classification evidence but its owner
-row is missing, duplicated, outside the instrument/time scope, or inconsistent
-with the deterministic classifier, `get_security_snapshot` returns the existing
-invalid-frozen-authority outcome. It does not silently omit or recompute the
-record from current market state.
+`canonical_bytes()` is deterministic UTF-8 JSON with sorted keys, compact separators,
+and `ensure_ascii=False`. Its SHA-256 is the normalized artifact, snapshot, and
+evidence revision/content hash. The payload binds the already archived raw quote
+artifact; raw bytes are not copied into JSONB.
 
-## Safety and non-goals
+## 5. Storage API and transaction
 
-- No live provider request occurs during snapshot preparation or Agent tool use.
-- Realtime price, delay, session, and tradability facts stay outside this tool
-  projection and keep their existing market-snapshot freshness rules.
-- No new Agent tool name or permission is added.
-- Provider names are supporting routing evidence, not legal identity.
-- `fund_or_structured_like` does not mean ETF and may include ETF, ETN, or an
-  unresolved product.
-- The feature does not create instruments, rewrite existing identity records,
-  alter risk policy, or change `execution_locked`.
-- Existing quote, price-bar, and broker reconciliation authorities remain
-  separate.
+Create `engine/src/nexus/research/fosun_security_classification_storage.py`:
 
-## Verification
+```python
+async def save_classification_artifact(
+    session: AsyncSession,
+    store: S3ProviderEvidenceStore,
+    document: FosunSecurityClassificationDocument,
+) -> str: ...
 
-Tests must prove:
+async def persist_security_classification(
+    session: AsyncSession,
+    document: FosunSecurityClassificationDocument,
+    *, location: str,
+) -> ResearchEvidenceRef: ...
 
-1. Ingestion stores complete, partial, and conflicting-valid provider evidence
-   with the correct fail-closed routing family.
-2. Identical replay is idempotent and an owner conflict is rejected.
-3. Snapshot preparation freezes only an eligible point-in-time observation and
-   changes the snapshot revision when authority changes.
-4. The Agent tool returns the exact frozen projection with its evidence ID.
-5. Mutating or deleting the owner row after freezing produces invalid frozen
-   authority, not fallback to a newer Quote.
-6. Old Runs without this evidence remain compatible.
-7. Migration upgrade and downgrade preserve existing shared data.
+async def read_security_classifications(
+    session: AsyncSession,
+    *, instrument_id: UUID, as_of: datetime,
+    evidence_ids: tuple[UUID, ...] | None = None,
+) -> dict[UUID, FosunSecurityClassificationDocument]: ...
+```
 
-Run focused unit and PostgreSQL integration tests, Ruff, Mypy, and migration
-upgrade/downgrade checks for the affected Engine paths.
+`save_classification_artifact` writes
+`evidence/fosun/security-classification/{sha256}.json` with `put_if_absent`, reads
+it back byte-for-byte, and inserts/reuses `DataArtifact`. Persistence uses
+`begin_nested()` and PostgreSQL `ON CONFLICT DO NOTHING`, then strictly reads back
+`ResearchEvidenceRef` and `DataSnapshot`. It never commits; the full refresh owns
+commit/rollback. A database rollback may leave an unreferenced content-addressed
+object, which is safe and reusable.
+
+Unique keys are `DataArtifact.sha256` and each
+`(source, provider_object_id, revision)`. Identical replay reuses evidence. A match
+with different URI, hash, size, clocks, schema, or payload raises a stable
+`FOSUN_CLASSIFICATION_*_CONFLICT` error.
+
+The reader joins snapshot and evidence on full source/object/revision identity and
+validates normalized and raw artifacts, instrument/code binding, hashes, sizes,
+locations, clocks, flags, and recomputed routing family. All relevant `created_at`,
+`received_at`, and `available_at` values must be `<= as_of`.
+
+Without `evidence_ids`, choose the newest rank `(available_at, received_at)`. If
+same-rank rows differ in canonical classification facts, return empty. If equivalent,
+choose the smallest evidence UUID. With `evidence_ids`, return only validated frozen
+members.
+
+## 6. Full-refresh producer
+
+Modify `_persist_market_reads()` in `engine/src/nexus/ops/fosun_local_refresh.py`
+after the existing raw quote artifact is flushed:
+
+1. Reuse the already parsed quote page.
+2. For each item with `provider_classification is not None`, construct the canonical
+   document from the validated item and raw request/artifact binding.
+3. Save the canonical artifact, then persist snapshot/evidence.
+4. Re-read through the production reader and require exact ID/document equality.
+5. Continue the existing transaction.
+
+There are no extra provider calls. The push/15-second intraday collectors are not
+producers. No classification object means no evidence and the refresh continues.
+Price remains owned by existing quote records.
+
+## 7. Snapshot freezing
+
+Modify `prepare_research_snapshot()`:
+
+- Keep the existing early `if not evidence: return None`; classification cannot
+  create the base research snapshot.
+- Read at most one eligible classification at `as_of`.
+- Reserve one existing research evidence slot by evicting only the oldest SEC
+  reference if required; never evict another supplemental observation.
+- Append the reference and use `persisted_research_observations` scope.
+- Let the existing payload hash change naturally with the evidence ID.
+
+Old snapshots and Runs remain untouched.
+
+## 8. Agent projection and fail-closed rule
+
+`security_snapshot()` reads only frozen evidence IDs. The set of frozen IDs whose
+source is `fosun_security_classification` must equal the validated reader keys.
+Otherwise return existing invalid-frozen-authority output; never omit, recompute, or
+fall back to latest data.
+
+The matching evidence entry gains:
+
+```json
+{"provider_security_classification": {
+  "provider": "fosun", "provider_name": null, "provider_code": "usXYZ",
+  "levels": {"first": 2, "second": 202, "third": 20202},
+  "equity_profile_fields_complete": false,
+  "net_asset_profile_fields_complete": true,
+  "fund_asset_type": {"chs": "", "cht": "", "eng": ""},
+  "routing_family": "fund_or_structured_like",
+  "canonical_asset_type": null, "identity_authoritative": false
+}}
+```
+
+The outer evidence/citation fields remain unchanged.
+
+## 9. Migration
+
+Add `0052_fosun_security_classification.py`, revising `0051`. It creates no table;
+it adds one branch to `nexus_validate_agent_snapshot_evidence()` requiring:
+
+- canonical snapshot and normalized artifact ownership;
+- bound raw quote artifact hash/URI/size/schema/source;
+- exact source/schema/instrument/object/hash/size/location/clocks;
+- exact JSON safety flags and one of the three routing literals;
+- existence of all rows by the research snapshot time.
+
+Python validates classifier semantics; SQL prevents malformed/unowned evidence from
+being frozen. Downgrade refuses while any frozen classification owner exists,
+otherwise removes only this branch. Generic persisted artifacts/snapshots/evidence
+are not deleted and remain reusable after re-upgrade.
+
+## 10. Failure semantics
+
+| Condition | Result |
+| --- | --- |
+| No classification object | No evidence; refresh continues |
+| Valid partial/unrecognized | Persist `unknown` |
+| Malformed source type | Existing provider rejection |
+| Artifact/owner mismatch | Roll back refresh with stable classification error |
+| No base research evidence | No snapshot, unchanged |
+| Equal-time conflict | No classification admitted |
+| Frozen owner missing/corrupt | Invalid frozen authority |
+| Newer evidence after Run cutoff | Ignored; no fallback |
+
+## 11. Files, acceptance, and rollback
+
+Create the two research modules, migration `0052`, and focused tests. Modify only
+`fosun_local_refresh.py`, `agents/snapshots.py`, `agents/database_tools.py`, and
+necessary focused fixtures. No Web/BFF/client/Gateway/dependency/table change.
+
+Acceptance requires: full refresh persists raw-bound evidence without increasing
+request count; routing variants and replays behave exactly; corruption fails closed;
+one PIT observation freezes; later data cannot change an old Run; exact Agent
+projection/citation is returned; old Runs work; migration guards pass; focused tests,
+Ruff, and Mypy pass without real external calls.
+
+Roll out migration before Engine. Until a full refresh, behavior is unchanged. Roll
+back Engine before migration. If frozen evidence exists, keep migration installed;
+the older Engine safely ignores the supplemental source. Never delete evidence merely
+to force downgrade.
