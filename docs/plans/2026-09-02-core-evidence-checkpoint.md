@@ -3514,3 +3514,31 @@ schema/URI/byte size 及 policy/calendar/calculation/regulatory/result hash 漂�
 结果哈希与交易锁保持不变且无方案、Shadow、订单或成交副作用。两组补强只修改测试，兼容修复
 只触及既有情景 POST 路由；未新增表、迁移、外部调用或新产品能力。修复后的最终独立复核为
 99/100，Critical、Important、Minor 均为 0，结论为可集成且不存在明显过度设计。
+
+### Alpaca IEX 单连接多标的有界采集（2026-09-11）
+
+本切片仅扩展现有 `nexus-engine-alpaca-market-stream` 正常入口：`collect-batch` 在一个
+WebSocket 连接内订阅最多 32 个明确标的，`import-batch` 使用完整的
+`symbol=instrument_id` 绑定导入同一冻结原件。订阅回执按无重复集合核验，未请求、缺失或重复
+标的均 fail closed；部分收到数据时只写入实际观察项，未观察标的不补零、不借用 last，也不宣称
+完整覆盖。单标的 v1 CLI、receipt 和原件 schema 保持兼容。本切片未新增表、迁移、服务、调度、
+页面或常驻 Provider 进程，也未发起真实行情调用。
+
+目录读取、原件 envelope、逐帧协议重放、socket 限额/取消处理以及 artifact/observation 写入已
+收敛到单标的与批次共用的安全 helper；单标的和批次仍使用各自严格的 receipt shape 与订阅校验。
+批次导入在对象归档前要求绑定完整且一一对应，并按每条 trade/quote 的事件日期核验 ticker alias；
+同一原件只生成一个不可变 artifact，重放幂等。原件重放同时限制外层 envelope、receipt、单帧
+2 MiB、累计 8 MiB 和 100 帧，不能接受受控 collector 不可能产生的超限对象。
+
+现有情景点差权威可从共享批次原件选择 Alpaca IEX quote，并按
+`(artifact_id, artifact_hash)` 在一次选择或 exact replay 内只读取、解析一次；两个减仓标的共享
+同一原件的选择与重放已由真实 PostgreSQL 集成测试覆盖。来源政策、45 秒新鲜度、XNYS 常规时段、
+空质量标记、`analysis_status=partial` 与永久 `execution_locked=true` 均未放宽。
+
+首次独立审查发现 3 个 Important（单帧上限遗漏、alias 日期错用完成日、共享原件重复解析）和
+2 个 Minor（无效 binding 过早写 started、回执顺序依赖）；全部修复，并通过撤销修复的 mutation
+check 证明对应回归测试会失败。最终独立复核为 Critical 0、Important 0、可操作 Minor 0；规模
+复核确认共享路径已收敛，不再因过度设计阻止本地合入。合入后聚焦套件 59 项通过，Ruff、两个生产
+模块的 Mypy 与 `git diff --check` 通过。测试 PostgreSQL 已停止；Shadow、订单、成交、模型和真实
+Provider 均未触发。代码以本地主线合并提交 `1b60b440` 落地，真实 IEX quote 覆盖仍需在美股常规
+交易时段另行执行一次经明确授权的有界采集后才能变化。
