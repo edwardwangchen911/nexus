@@ -156,7 +156,7 @@ async def test_provider_worker_checks_legacy_intraday_queue_even_when_monitor_is
 
     assert gates == 1
     assert migration_checks == 1
-    assert startup_order == ["role", "head", "gate"]
+    assert startup_order == ["head", "gate"]
 
 
 @pytest.mark.asyncio
@@ -362,7 +362,6 @@ async def test_provider_worker_runs_the_schema_guard_inside_the_claim_transactio
         )
 
     assert events == [
-        "role",
         "head",
         "queue",
         "schema-lock",

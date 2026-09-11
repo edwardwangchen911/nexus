@@ -28,28 +28,27 @@ def test_app_worker_has_no_provider_capability_or_secrets() -> None:
     assert "NEXUS_MARKET_PROVIDER=${NEXUS_MARKET_PROVIDER:-fosun}" in worker
 
 
-def test_provider_worker_is_a_separate_explicit_profile_and_secret_domain() -> None:
+def test_provider_worker_reuses_storage_by_default_without_loading_app_capabilities() -> None:
     compose = (ROOT / "infra/compose.yaml").read_text()
     provider = _service_block(compose, "provider-worker")
 
     assert 'profiles: ["provider"]' in provider
     assert 'command: ["nexus-engine-provider-worker"]' in provider
     assert "NEXUS_PROVIDER_RUNTIME_MODE=production" in provider
-    assert "- PROVIDER_DATABASE_URL" in provider
-    assert "- DATABASE_URL" not in provider
+    assert "- PROVIDER_DATABASE_URL=${PROVIDER_DATABASE_URL:-${DATABASE_URL}}" in provider
     assert "AGENT_RUNTIME_MODE" not in provider
     assert "OPENAI_" not in provider
     assert "NEXUS_ENGINE_HMAC" not in provider
     assert "NEXUS_MARKET_PROVIDER=fosun" in provider
     assert "NEXUS_ALPACA_MARKET_MODE=disabled" in provider
-    for name in (
-        "PROVIDER_OBJECT_STORE_ENDPOINT",
-        "PROVIDER_OBJECT_STORE_REGION",
-        "PROVIDER_OBJECT_STORE_BUCKET",
-        "PROVIDER_OBJECT_STORE_ACCESS_KEY_ID",
-        "PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY",
+    for provider_name, shared_name in (
+        ("PROVIDER_OBJECT_STORE_ENDPOINT", "OBJECT_STORE_ENDPOINT"),
+        ("PROVIDER_OBJECT_STORE_REGION", "OBJECT_STORE_REGION"),
+        ("PROVIDER_OBJECT_STORE_BUCKET", "OBJECT_STORE_BUCKET"),
+        ("PROVIDER_OBJECT_STORE_ACCESS_KEY_ID", "OBJECT_STORE_ACCESS_KEY_ID"),
+        ("PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY", "OBJECT_STORE_SECRET_ACCESS_KEY"),
     ):
-        assert f"- {name}" in provider
+        assert f"- {provider_name}=${{{provider_name}:-${{{shared_name}}}}}" in provider
     assert "- PROVIDER_OBJECT_STORE_PREFIX=provider/market" in provider
     assert not re.search(r"(?m)^      - OBJECT_STORE_", provider)
     assert "object-store-init:" not in provider
@@ -81,7 +80,7 @@ def test_provider_worker_is_a_separate_explicit_profile_and_secret_domain() -> N
         assert f"- {name}" in provider
 
 
-def test_alpaca_provider_is_an_explicit_mutually_exclusive_secret_domain() -> None:
+def test_alpaca_provider_reuses_storage_by_default_and_keeps_a_fixed_prefix() -> None:
     compose = (ROOT / "infra/compose.yaml").read_text()
     provider = _service_block(compose, "provider-worker-alpaca")
 
@@ -90,14 +89,15 @@ def test_alpaca_provider_is_an_explicit_mutually_exclusive_secret_domain() -> No
     assert "NEXUS_PROVIDER_RUNTIME_MODE=production" in provider
     assert "NEXUS_MARKET_PROVIDER=alpaca" in provider
     assert "NEXUS_ALPACA_MARKET_MODE=enabled" in provider
-    for name in (
-        "PROVIDER_OBJECT_STORE_ENDPOINT",
-        "PROVIDER_OBJECT_STORE_REGION",
-        "PROVIDER_OBJECT_STORE_BUCKET",
-        "PROVIDER_OBJECT_STORE_ACCESS_KEY_ID",
-        "PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY",
+    assert "- PROVIDER_DATABASE_URL=${PROVIDER_DATABASE_URL:-${DATABASE_URL}}" in provider
+    for provider_name, shared_name in (
+        ("PROVIDER_OBJECT_STORE_ENDPOINT", "OBJECT_STORE_ENDPOINT"),
+        ("PROVIDER_OBJECT_STORE_REGION", "OBJECT_STORE_REGION"),
+        ("PROVIDER_OBJECT_STORE_BUCKET", "OBJECT_STORE_BUCKET"),
+        ("PROVIDER_OBJECT_STORE_ACCESS_KEY_ID", "OBJECT_STORE_ACCESS_KEY_ID"),
+        ("PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY", "OBJECT_STORE_SECRET_ACCESS_KEY"),
     ):
-        assert f"- {name}" in provider
+        assert f"- {provider_name}=${{{provider_name}:-${{{shared_name}}}}}" in provider
     assert "- PROVIDER_OBJECT_STORE_PREFIX=provider/market" in provider
     assert not re.search(r"(?m)^      - OBJECT_STORE_", provider)
     assert "object-store-init:" not in provider

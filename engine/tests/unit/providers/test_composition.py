@@ -259,6 +259,14 @@ def test_intraday_settings_keep_fixed_operational_bounds(field: str, value: int)
         ProviderSettings(**{field: value})
 
 
+def test_intraday_poll_seconds_accepts_the_compose_environment_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEXUS_INTRADAY_POLL_SECONDS", "15")
+
+    assert ProviderSettings().intraday_poll_seconds == 15
+
+
 @pytest.mark.asyncio
 async def test_intraday_snapshot_factory_binds_exact_authority() -> None:
     instrument_id = InstrumentId(UUID("019d0000-0000-7000-8000-0000000000a1"))

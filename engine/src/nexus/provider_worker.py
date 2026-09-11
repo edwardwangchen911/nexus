@@ -834,7 +834,6 @@ async def run_provider_worker(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session:
-            await _assert_provider_database_role(session)
             await _assert_provider_migration_head(session)
             await _assert_intraday_job_queue_drained(session)
         if not run_forever:

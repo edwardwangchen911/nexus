@@ -152,8 +152,10 @@ class ProviderSettings(BaseSettings):
         default=IntradayMonitorMode.DISABLED,
         validation_alias="NEXUS_INTRADAY_MONITOR_MODE",
     )
-    intraday_poll_seconds: Literal[15] = Field(
+    intraday_poll_seconds: int = Field(
         default=15,
+        ge=15,
+        le=15,
         validation_alias="NEXUS_INTRADAY_POLL_SECONDS",
     )
     intraday_max_symbols: int = Field(
