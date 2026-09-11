@@ -23,6 +23,7 @@ from nexus.jobs.repository import ClaimedJob
 from nexus.jobs.worker import UnsafeJobError
 from nexus.market.object_store import ProviderObjectIOUnavailable
 from nexus.providers.base import InstrumentId, MarketDataProvenance, PriceBar
+from nexus.providers.http import HttpPolicyError
 from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.fosun import (
     FosunSnapshotReadAborted,
@@ -177,6 +178,19 @@ class _AlpacaProvider:
             received_at=envelope.received_at,
             provenance=envelope.provenance,
         )
+
+
+@dataclass
+class _UnavailableAlpacaProvider(_AlpacaProvider):
+    error_code: str = "RETRY_BUDGET_EXHAUSTED"
+
+    async def fetch_raw_snapshots(
+        self,
+        request: IntradaySnapshotRequest,
+    ) -> RawSnapshotEnvelope:
+        del request
+        self.calls += 1
+        raise HttpPolicyError(self.error_code)
 
 
 async def _archive_raw(*_: object, **__: object) -> object:
@@ -1084,6 +1098,40 @@ async def test_expired_bucket_stops_before_provider_construction() -> None:
     assert result.outcome == "skipped"
     assert result.result_code == "INTRADAY_BUCKET_EXPIRED"
     assert constructions == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_code", "job_code"),
+    (
+        ("DEADLINE_EXCEEDED", "INTRADAY_PROVIDER_UNAVAILABLE"),
+        ("RETRY_BUDGET_EXHAUSTED", "INTRADAY_PROVIDER_UNAVAILABLE"),
+        ("STATUS_REJECTED", "INTRADAY_PROVIDER_STATUS_REJECTED"),
+        ("RESPONSE_TOO_LARGE", "INTRADAY_PROVIDER_POLICY_REJECTED"),
+    ),
+)
+async def test_alpaca_transport_failure_maps_to_a_safe_actionable_code(
+    provider_code: str,
+    job_code: str,
+) -> None:
+    """Sanitized provider failures must not collapse into generic HANDLER_FAILED."""
+
+    provider = _UnavailableAlpacaProvider(error_code=provider_code)
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_alpaca_settings(),
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    with pytest.raises(UnsafeJobError, match=job_code):
+        await spec.handler(_context(_alpaca_payload()))
+
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio

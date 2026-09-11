@@ -164,8 +164,9 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app u
 
 `object-store-init` 只服务普通 `app` profile 并操作其配置的单一 bucket；development/test
 缺失时创建，随后启用并复核对象版本控制，production 则要求 bucket 与版本控制均已预置。
-重复执行应返回 `existing`。Provider profile 不依赖也不运行这个通用初始化器；它的独立
-bucket/principal/policy 必须在单独批准的权限流程中预置。
+重复执行应返回 `existing`。Provider profile 不单独运行这个初始化器；普通 Mac 本地模式
+复用 app bucket，但仍固定写入 `provider/market` 前缀。只有启用可选部署加固时，才需在
+单独的权限变更流程中预置 Provider bucket/principal/policy。
 
 ## 已取得的发行商分红原件导入
 
@@ -220,10 +221,10 @@ schema 不兼容。实际就绪检查仍分别判断数据库、迁移、对象�
 
 真实美股行情、SEC 财报与 FRED/ALFRED 宏观数据属于独立的 Provider
 profile，不属于默认本地启动流程。首选市场源固定为复星：
-`NEXUS_MARKET_PROVIDER=fosun`、`NEXUS_ALPACA_MARKET_MODE=disabled`。启用前需要在批准的
-密钥域注入 market-only 的复星网关 mTLS/HMAC 身份、`FRED_API_KEY` 与带联系方式的
+`NEXUS_MARKET_PROVIDER=fosun`、`NEXUS_ALPACA_MARKET_MODE=disabled`。首次配置或轮换时，在
+受保护密钥域注入 market-only 的复星网关 mTLS/HMAC 身份、`FRED_API_KEY` 与带联系方式的
 `SEC_CONTACT`；网关自身是唯一接收 `FSOPENAPI_*` 的进程。不要把任何值写入仓库、
-命令历史或日志。Alpaca 只作为另行批准的备选/交叉验证源；没有完成其 entitlement、
+命令历史或日志。Alpaca 只作为已核验的备选/交叉验证源；没有完成其 entitlement、
 费用、留存和数据合同核验时，不得改为 `NEXUS_MARKET_PROVIDER=alpaca` 或启用
 `NEXUS_ALPACA_MARKET_MODE=enabled`。
 
@@ -233,35 +234,18 @@ Alpaca 密钥域；两者不得同时启动。切源时必须先停止旧 Provid
 `NEXUS_MARKET_PROVIDER`。当前队列没有 source-bound claim，因此本拆分不声称支持并发
 双源交叉验证；该能力需要未来独立的 Job/queue 协议。
 
-先确保数据库迁移已完成，并为 Provider 创建独立的非
-superuser、非 `BYPASSRLS` 数据库角色。`infra/postgres/provider-runtime-grants.sql`
-是待审批的授权模板：它不创建角色或凭据，只授予固定表/列权限，并对共享 Job 表启用
-强制 RLS。受控 policy 函数把父 daily root 的只读可见性与 Provider 子任务的写权限分开，
-startup probe 会校验 policy 的实际 `USING/WITH CHECK` 谓词及函数定义，而不只检查名称。
-Provider 对 integration status、capability、既有 artifact/manifest 等 authority 输入保持
-`SELECT`-only；校验函数与输入变更 trigger 使用相同的 transaction advisory lock，而不是要求
-Provider 取得 `UPDATE` 行锁权限。模板还撤销 Provider/`PUBLIC` 对两个最小 trigger-only
-`SECURITY DEFINER` 的直接执行权；publication 函数只能由两个受控 `AFTER INSERT` trigger
-追加回测发布标记，price-bar guard 只能由一个受控 `BEFORE INSERT` trigger 在不授予
-Provider 回测表读权的前提下守住冻结事实。模板和 startup probe 还拒绝 Provider/`PUBLIC`
-的意外 relation/column/sequence ACL；startup probe 会逐项校验精确函数集合、源码、owner、
-ACL、精确 `search_path`，以及 Provider 可写表上 60 个非内部应用 trigger 的完整 topology
-与函数体摘要。
-执行该模板、创建角色及注入 `PROVIDER_DATABASE_URL` 都属于权限变更，不能
-在普通本地启动中自动执行。
+普通 Mac 本地启动默认复用已有 `DATABASE_URL` 和 `OBJECT_STORE_*`，Compose 会将它们
+映射到 Provider 进程需要的变量名。Provider 仍使用独立进程、队列、供应商凭据域和
+`provider/market` 前缀，不因共享本地存储身份而获得 Broker/Agent 能力。
 
-Provider 对象存储同样是独立权限域：`PROVIDER_OBJECT_STORE_*` 不能复用 app/general
-worker 的 `OBJECT_STORE_*` principal。bucket 必须预先启用版本控制；运行时固定
-`PROVIDER_OBJECT_STORE_PREFIX=provider/market`，IAM 必须拒绝 bucket 根/List 和其他前缀，
-只允许该前缀内 PutObject、条件创建冲突复核用的 key-scoped GetObject 和冻结证据
-重放用的 GetObjectVersion，不授予 ListBucket 或 DeleteObject。两个 Provider
-profile 都不会自动运行通用 `object-store-init`；缺少上述权限证据时不得启动真实 Provider。
+`infra/postgres/provider-runtime-grants.sql` 和 `PROVIDER_*` 覆盖项是可选部署加固：需要多用户隔离时
+再创建最小权限数据库/MinIO 身份并运行对应审计。这些不是个人本地读链路的启动前置。
 
 生产数据模式仍只保留一个由通用 worker 管理的 `daily.pipeline` 根。激活时，通用
 worker 使用原 `DATABASE_URL` 并显式设置 `NEXUS_PROVIDER_JOBS_ENABLED=true`，只负责将
-两个 Provider 子任务写入 `provider` 队列；Provider-only worker 使用独立
-`PROVIDER_DATABASE_URL` 领取这些子任务。不能停止通用 worker，也不能让 Provider
-worker创建第二个日任务根。以下仅是批准后的启动形态，不是本地默认命令：
+两个 Provider 子任务写入 `provider` 队列；Provider-only worker 优先使用
+`PROVIDER_DATABASE_URL`，未设置时复用本地 `DATABASE_URL` 领取这些子任务。不能停止通用
+worker，也不能让 Provider worker 创建第二个日任务根。以下是显式启用形态，不是本地默认命令：
 
 ```bash
 NEXUS_MARKET_PROVIDER=fosun NEXUS_PROVIDER_JOBS_ENABLED=true \
@@ -269,7 +253,7 @@ NEXUS_MARKET_PROVIDER=fosun NEXUS_PROVIDER_JOBS_ENABLED=true \
   -f infra/compose.yaml --profile app --profile provider up -d worker fosun-gateway provider-worker
 ```
 
-经单独批准的 Alpaca 替代形态不启动复星 Gateway，且只能在先停止
+Alpaca 替代形态不启动复星 Gateway，且只能在先停止
 `provider-worker` 后使用：
 
 ```bash
@@ -285,7 +269,8 @@ FRED/ALFRED 的 8 个白名单序列继续使用各自固定 HTTPS origin。Prov
 broker 网关身份、账户 ID 加密密钥或交易写能力，也不会构造或读取 Alpaca client；复星
 Gateway 同时属于显式 `provider`/`broker` profile，但由不同的 HMAC principal 派生固定操作
 权限。生产 Gateway 使用外部命名卷 `nexus-fosun-gateway-replay-v1` 保存 nonce journal
-并持有 singleton lease；不得在普通 `down -v` 或清理脚本中删除该卷。在 Job 域，Provider 数据库角色只能读写
+并持有 singleton lease；不得在普通 `down -v` 或清理脚本中删除该卷。启用可选部署加固时，
+Provider 数据库角色只能读写
 `provider` 队列及只读查看其 `daily.pipeline` 父任务；在 market 数据域，它仅能 INSERT
 批准的 evidence、manifest、bar/quote、authority、filing/fact、corporate-action 与宏观事实表，
 不能 UPDATE/DELETE authority 输入或直接写 publication mark。进程启动时会复核精确权限、
@@ -296,10 +281,10 @@ Gateway 同时属于显式 `provider`/`broker` profile，但由不同的 HMAC pr
 分钟级 Snapshot 是这个独立 profile 中另一项默认关闭的能力。跟踪模板固定为
 `NEXUS_INTRADAY_MONITOR_MODE=disabled`、15 秒 bucket 和复星最多 10 个标的。页面把复星
 delivery `unknown` 明确显示为“实时性未获证明”，缺失 bid/ask 时显示“盘口未提供”，不会
-合成价差或交易信号。不要在普通本地开发中把 mode 改为 `production`。任何复星真实数据
-激活、凭据注入或有界探测都先按[复星只读激活手册](fosun-read-only-activation.md)冻结证据并
-获得精确批准；可选 Alpaca Snapshot 仍需另按[分钟级盘中市场监控激活手册](intraday-market-monitor.md)
-完成独立 admission，且不会被自动 fallback 触发。
+合成价差或交易信号。已有受保护配置和只读权限下可按正常本地入口启用；首次接入新账户、
+新增凭据、扩大权限或付费升级时，分别按[复星只读激活手册](fosun-read-only-activation.md)和
+[分钟级盘中市场监控激活手册](intraday-market-monitor.md)完成接入核对。Alpaca 不会被自动
+fallback 触发。
 
 ## 验证
 

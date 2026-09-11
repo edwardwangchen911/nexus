@@ -38,6 +38,7 @@ from nexus.market.intraday_ingestion import (
 from nexus.market.object_store import ProviderObjectIOUnavailable
 from nexus.persistence.models.data import DataArtifact
 from nexus.providers.base import InstrumentId
+from nexus.providers.http import HttpPolicyError
 from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.fosun import (
     FosunSnapshotReadAborted,
@@ -332,13 +333,14 @@ def build_intraday_collection_registry(
                         request,
                         read_guard=read_guard,
                     )
+        except HttpPolicyError as exc:
+            raise UnsafeJobError(_provider_request_error_code(str(exc))) from None
         except FosunSnapshotReadAborted as exc:
             if (
                 exc.result_code == "INTRADAY_SNAPSHOT_READ_CANCELLED"
                 and fetch_timeout is not None
                 and (
-                    not fetch_timeout.expired()
-                    or handler_task.cancelling() > cancellation_baseline
+                    not fetch_timeout.expired() or handler_task.cancelling() > cancellation_baseline
                 )
             ):
                 # Operator shutdown and the worker's outer timeout are not an
@@ -357,9 +359,7 @@ def build_intraday_collection_registry(
                 except TimeoutError:
                     if handler_task.cancelling() > cancellation_baseline:
                         raise asyncio.CancelledError from None
-                    raise UnsafeJobError(
-                        "INTRADAY_RAW_ARCHIVE_DEADLINE_EXCEEDED"
-                    ) from None
+                    raise UnsafeJobError("INTRADAY_RAW_ARCHIVE_DEADLINE_EXCEEDED") from None
             return JobHandlerResult(
                 outcome="skipped",
                 result_code=exc.result_code,
@@ -461,9 +461,7 @@ def build_intraday_collection_registry(
                         store,
                         batch,
                         raw_artifact=archived.raw_artifact,
-                        quote_binding=(
-                            None if read_guard is None else read_guard.quote_binding
-                        ),
+                        quote_binding=(None if read_guard is None else read_guard.quote_binding),
                         bar_bindings=(
                             None
                             if read_guard is None or not payload.include_minute_bars
@@ -518,6 +516,14 @@ def build_intraday_collection_registry(
             ),
         )
     )
+
+
+def _provider_request_error_code(code: str) -> str:
+    if code in {"DEADLINE_EXCEEDED", "RETRY_BUDGET_EXHAUSTED"}:
+        return "INTRADAY_PROVIDER_UNAVAILABLE"
+    if code == "STATUS_REJECTED":
+        return "INTRADAY_PROVIDER_STATUS_REJECTED"
+    return "INTRADAY_PROVIDER_POLICY_REJECTED"
 
 
 async def _archive_snapshot_raw(

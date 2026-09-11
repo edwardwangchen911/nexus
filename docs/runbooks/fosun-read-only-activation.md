@@ -347,9 +347,11 @@ completed response follows the same archive path with
 shutdown or worker-owned outer cancellation is propagated as cancellation and is not mislabeled as
 the internally owned acquisition deadline.
 
-The tracked environment template contains names and safe-disabled defaults only. Populating those
-names, mounting certificates, changing permissions, starting the gateway against the real provider,
-or executing a probe remains approval-gated. There is no automatic fallback to Alpaca or fixture.
+The tracked environment template contains names and safe-disabled defaults only. Reusing an existing
+protected configuration for ordinary local read-only startup and GET operations does not require
+per-run approval. Creating or replacing credentials, mounting a new certificate identity, changing
+permissions, expanding probe scope, or incurring new cost remains approval-gated. There is no
+automatic fallback to Alpaca or fixture.
 
 ## Closed operation set and request budget
 

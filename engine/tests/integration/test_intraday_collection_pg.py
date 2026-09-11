@@ -25,7 +25,7 @@ from nexus.jobs.intraday_schedule import (
 from nexus.jobs.market_authority import FrozenFosunMarketAuthority
 from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy, job_input_hash
 from nexus.jobs.registry import JobHandlerContext
-from nexus.jobs.repository import claim_next_job, enqueue_job
+from nexus.jobs.repository import claim_next_job, dead_letter_job, enqueue_job
 from nexus.jobs.worker import run_job_worker_once
 from nexus.market.object_store import ProviderObjectIOUnavailable
 from nexus.persistence.models.backtest import (
@@ -830,6 +830,68 @@ async def test_schedule_selects_latest_complete_overlapping_calendar_authority(
 
     assert job is not None
     assert job.payload["calendar_authority_id"] == str(LATEST_CALENDAR_ID)
+
+
+@pytest.mark.asyncio
+async def test_schedule_fails_clearly_when_calendar_authority_does_not_cover_today(
+    migrated_database_url: str,
+) -> None:
+    """A live worker must not look healthy while silently lacking today's calendar."""
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        with pytest.raises(RuntimeError, match="INTRADAY_CALENDAR_AUTHORITY_MISSING"):
+            await schedule_due_intraday_snapshot(session, now=NOW, settings=_settings())
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_cools_down_new_buckets_for_sixty_seconds(
+    migrated_database_url: str,
+) -> None:
+    """A provider outage must not create a new dead letter every 15 seconds."""
+
+    await _seed_schedule(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        first = await schedule_due_intraday_snapshot(
+            session,
+            now=NOW,
+            settings=_alpaca_settings(),
+        )
+    assert first is not None
+
+    failed_at = NOW + timedelta(seconds=1)
+    async with factory() as session, session.begin():
+        claim = await claim_next_job(
+            session,
+            queue=QueueName.PROVIDER,
+            worker_id="provider-cooldown-test",
+            now=NOW,
+        )
+    assert claim is not None
+    async with factory() as session, session.begin():
+        await dead_letter_job(
+            session,
+            claim=claim,
+            now=failed_at,
+            error_code="INTRADAY_PROVIDER_UNAVAILABLE",
+        )
+
+    async with factory() as session, session.begin():
+        suppressed = await schedule_due_intraday_snapshot(
+            session,
+            now=NOW + timedelta(seconds=16),
+            settings=_alpaca_settings(),
+        )
+    assert suppressed is None
+
+    async with factory() as session, session.begin():
+        resumed = await schedule_due_intraday_snapshot(
+            session,
+            now=failed_at + timedelta(seconds=60),
+            settings=_alpaca_settings(),
+        )
+    assert resumed is not None
 
 
 @pytest.mark.asyncio

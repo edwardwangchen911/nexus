@@ -220,6 +220,32 @@ def test_default_production_bundle_constructs_only_three_exact_origins() -> None
     assert [call["policy"].max_attempts for call in calls] == [1, 3, 3]
 
 
+def test_alpaca_intraday_snapshot_uses_a_single_attempt_transport() -> None:
+    """A Snapshot outage must not multiply one bucket into hidden HTTP retries."""
+
+    calls: list[dict[str, object]] = []
+
+    def http_factory(**kwargs: object) -> RecordingFixedOriginClient:
+        calls.append(kwargs)
+        return RecordingFixedOriginClient(payload=b"{}")
+
+    build_provider_bundle(
+        _production_settings(
+            intraday_monitor_mode="production",
+            alpaca_intraday_feed="iex",
+            alpaca_intraday_delivery_mode="real_time",
+        ),
+        http_client_factory=http_factory,
+    )
+
+    assert [(call["provider_name"], call["policy"].max_attempts) for call in calls] == [
+        ("sec", 1),
+        ("fred", 3),
+        ("alpaca", 3),
+        ("alpaca_intraday", 1),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_alpaca_factory_uses_configured_feed_and_delivery_authority() -> None:
     """Hard-coded SIP/delayed provenance would misstate the purchased data authority."""

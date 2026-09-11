@@ -20,6 +20,7 @@ from nexus.jobs.market_authority import (
 )
 from nexus.jobs.models import (
     JobKeyV1,
+    JobStatus,
     JobType,
     QueueName,
     RetryPolicy,
@@ -44,6 +45,14 @@ _SCHEMA = "intraday_snapshot_job_v2"
 _DEFAULT_WATCHLIST_ID = UUID("8c7cc45f-9420-5ea5-a75e-7df8a8a63b58")
 _DEFAULT_WATCHLIST_NAME = "default_private"
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
+_PROVIDER_FAILURE_COOLDOWN = timedelta(seconds=60)
+_PROVIDER_FAILURE_CODES = frozenset(
+    {
+        "INTRADAY_PROVIDER_UNAVAILABLE",
+        "INTRADAY_PROVIDER_STATUS_REJECTED",
+        "INTRADAY_PROVIDER_POLICY_REJECTED",
+    }
+)
 _CONTRACT_DOCUMENT = {
     "schema": _SCHEMA,
     "bucket_seconds": 15,
@@ -285,10 +294,7 @@ async def schedule_due_intraday_snapshot(
         return None
     bucket = bucket_for(scheduled_at)
     await session.execute(
-        text(
-            "SELECT pg_catalog.pg_advisory_xact_lock("
-            "pg_catalog.hashtextextended(:identity, 0))"
-        ),
+        text("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:identity, 0))"),
         {"identity": f"nexus:intraday-bucket:{_utc_text(bucket.start)}"},
     )
     existing_jobs = tuple(
@@ -331,7 +337,22 @@ async def schedule_due_intraday_snapshot(
     )
     if authority is None:
         return None
-    scope_id: str
+    scope_id = f"{settings.market_provider.value}-intraday"
+    cooling_down = await session.scalar(
+        select(Job.id)
+        .where(
+            Job.job_type == JobType.COLLECT_INTRADAY_SNAPSHOT.value,
+            Job.scope_kind == "provider",
+            Job.scope_id == scope_id,
+            Job.status.in_((JobStatus.FAILED.value, JobStatus.DEAD_LETTER.value)),
+            Job.finished_at > scheduled_at - _PROVIDER_FAILURE_COOLDOWN,
+            Job.last_error_code.in_(_PROVIDER_FAILURE_CODES),
+        )
+        .order_by(Job.finished_at.desc(), Job.id.desc())
+        .limit(1)
+    )
+    if cooling_down is not None:
+        return None
     try:
         if settings.market_provider is MarketProvider.FOSUN:
             quote_authority = await load_frozen_fosun_market_authority(
@@ -489,6 +510,23 @@ async def _load_current_intraday_authority(
         )
     ).all()
     if not calendar_row:
+        covered_calendar = await session.scalar(
+            select(ExchangeCalendarAuthorityRecord.id)
+            .where(
+                ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+                ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+                ExchangeCalendarAuthorityRecord.published_at <= authority_at,
+                ExchangeCalendarAuthorityRecord.range_start <= authority_at.date(),
+                ExchangeCalendarAuthorityRecord.range_end >= authority_at.date(),
+            )
+            .order_by(
+                ExchangeCalendarAuthorityRecord.published_at.desc(),
+                ExchangeCalendarAuthorityRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        if covered_calendar is None:
+            raise RuntimeError("INTRADAY_CALENDAR_AUTHORITY_MISSING")
         return None
     calendar_authority_id, session_date = calendar_row[0]
     watchlist = await session.get(Watchlist, _DEFAULT_WATCHLIST_ID)

@@ -2,9 +2,11 @@
 
 ## 当前裁决
 
-`Intraday Monitor offline_ready / external_data_activation_blocked`
+`Intraday Monitor local_read_only / default_disabled`
 
-本状态表示本地 schema、只读采集链、确定性指标、API 和页面可以在 fixture/数据库证据上工作；不表示真实 Alpaca 行情权限已验证，也不授权启动 Provider。默认 `NEXUS_INTRADAY_MONITOR_MODE=disabled`，普通 `app` profile 不接收盘中配置或 Provider 凭据。
+本地 schema、只读采集链、确定性指标、API 和页面已可用。默认
+`NEXUS_INTRADAY_MONITOR_MODE=disabled`；使用已有配置和已有只读权限启动本地 Provider
+不需要逐次批准。新增凭据、扩大数据权限、付费升级或对外写入仍须先确认。
 
 用户已声明先前在对话中暴露的旧 Key 已吊销。仓库无法独立证明券商侧状态，因此未来激活仍须使用全新凭据并完成下述 admission；不得恢复、测试或引用旧值。
 
@@ -13,9 +15,12 @@
 - 唯一外部操作：`GET https://data.alpaca.markets/v2/stocks/snapshots`。
 - 固定查询键：`symbols`、`feed`、`currency=USD`；每批 1–30 个由数据库 authority 解析的美股 ticker。
 - 固定调度：15 秒 bucket；超过 bucket 结束 45 秒的任务跳过，不补发。
+- Alpaca Snapshot 每个 Job 只发起一次 HTTP 尝试；供应商失败后 60 秒内不创建新 bucket，
+  不在传输层或跨 bucket 隐式放大请求。
 - 页面只轮询 NEXUS 数据库，浏览器不直连 Alpaca，也不创建采集 Job。
 - 采集只由 `nexus-engine-provider-worker` 从独立 `provider` 队列执行；通用 Agent worker 不加载 Provider handler、配置或凭据。
-- Provider worker 必须使用独立 `PROVIDER_DATABASE_URL`；启动时拒绝 superuser、`BYPASSRLS`、任何角色继承、过宽表/列权限、缺失强制 RLS，或队列 policy 完整集合、角色、命令、`USING/WITH CHECK` 谓词及受控函数签名、源码、owner、ACL 不精确的角色。
+- Provider worker 保留独立进程、队列、凭据变量和 `provider/market` 对象前缀。
+  Mac 本地默认复用已有数据库与 MinIO 身份；独立最小权限角色只是可选的部署加固。
 - Provider 对 authority 输入保持 `SELECT`-only，且不读回测成员表；输入变更与事实提交由配对 transaction advisory lock 串行。两个最小 trigger-only `SECURITY DEFINER` 分别服务两个 publication `AFTER INSERT` trigger 和一个 frozen-bar `BEFORE INSERT` trigger；Provider/`PUBLIC` 不可直接执行或写发布标记，函数或 trigger topology 漂移即启动失败。
 - 全平台只有通用 worker 创建 `daily.pipeline` 根；启用日线 Provider 子任务时，由它显式设置 `NEXUS_PROVIDER_JOBS_ENABLED=true` 后跨队列物化，Provider worker 不创建第二个根。
 - `iex` 或 `sip` 必须标记为 `real_time`；`delayed_sip` 必须标记为 `delayed`。
@@ -23,23 +28,11 @@
 - 分钟 authority 是 `display_only_intraday_monitor`，不得进入 Agent、回测、策略晋级、硬风控、订单 sizing、模拟成交或券商命令。
 - 本手册不激活复星读取、复星模拟盘或实盘。任何真实订单仍须逐笔人工确认。
 
-## 激活前 admission 证据
+## 接入前核对
 
-必须把以下脱敏事实冻结到一次新的 admission package；任一缺失都保持 blocked：
-
-1. Alpaca 账户的数据订阅与目标 feed entitlement，包含确认时间、套餐/成本和适用市场；不保存账户号或凭据。
-2. 全新 Key 的创建时间、独立密钥域、只读数据权限和轮换/吊销负责人；Key 值只进入批准的 secret manager。
-3. 目标 source/feed/delivery 组合及界面标签审查结果。
-4. 数据保留依据：raw payload、内容寻址对象、quote/trade observation 和分钟 authority 的保存期限及容量预算。
-5. 精确 watchlist authority 快照，必须为 1–30 个 USD 美股 ticker；不接受临时前端列表。
-6. 固定出口、TLS、代理和 DNS 策略验证；实际响应正文与 header 不进入日志。
-7. 一个 UTC 激活窗口、调用上限、预算/费用上限、操作人、观察人和立即停止负责人。
-8. 通过离线 socket guard、Compose 隔离、全量测试、密钥扫描和恢复演练的当前提交 SHA。
-9. 独立 Provider 数据库角色已由授权管理员按
-   `infra/postgres/provider-runtime-grants.sql` 审核配置，且 startup probe 证明其不是
-   superuser/`BYPASSRLS`，不能读取 Agent、Broker、账户或审批表。
-
-外部数据激活窗口必须逐次批准。批准内容必须精确写明：账户/订阅范围、feed、UTC 起止、最多标的数、最大请求数、费用上限、允许的唯一 GET operation 和回滚负责人。不能用“继续”“试一下”或历史批准替代。
+首次接入新账户/feed，或变更套餐、权限、凭据和数据保留范围时，先核对
+entitlement、费用、source/feed/delivery 标签、watchlist 上限和回滚方式。日常使用已有
+只读配置时复用这些结论，不按请求、分页或启动次数重复批准。
 
 ## 有界探测模板
 
@@ -84,12 +77,13 @@ docker compose --env-file infra/env.example -f infra/compose.yaml --profile prov
   `provider` 队列；复星最多 10 个标的，Alpaca 最多 30 个标的；
 - 复星 worker 不接收任何 `ALPACA_*` 配置，Alpaca worker 不接收任何
   `FOSUN_MARKET_*` 网关身份；两者的默认盘中配置均为 `disabled/15`；
-- `provider-worker` 只接收 `PROVIDER_DATABASE_URL`，不接收通用 `DATABASE_URL`；模板
-  `NEXUS_PROVIDER_JOBS_ENABLED=false`，普通启动不会物化 Provider 日任务；
+- `provider-worker` 优先使用 `PROVIDER_DATABASE_URL`/`PROVIDER_OBJECT_STORE_*`；未设置时
+  复用通用本地数据库与对象存储配置。模板 `NEXUS_PROVIDER_JOBS_ENABLED=false`；
 - broker、broker-simulation 和 Fosun Gateway 不含盘中配置；
 - 当前提交与批准 package 的提交一致，工作树没有未审查差异。
 
-真实凭据注入、将 mode 改为 `production`、启动 provider-worker 或发起首次 GET 都属于本手册的停止边界；在获得上述精确批准前不要执行。
+已有受保护配置和只读权限下，启动 provider-worker 和常规 GET 是正常本地操作。
+新增凭据、扩大账户/数据权限、付费升级或外部写入仍是停止边界。
 
 ## 运行观察与停止条件
 
@@ -104,6 +98,11 @@ docker compose --env-file infra/env.example -f infra/compose.yaml --profile prov
 - 日志、响应或页面出现凭据、账户数据或未脱敏 Provider 错误。
 
 停止后不自动切回 fixture，不补发过期 bucket，不删除或改写已落库事实，也不扩大 source policy。
+
+供应商传输失败分别落为 `INTRADAY_PROVIDER_UNAVAILABLE`、
+`INTRADAY_PROVIDER_STATUS_REJECTED` 或 `INTRADAY_PROVIDER_POLICY_REJECTED`，不再折叠为
+`HANDLER_FAILED`。若数据库没有覆盖当天的完整 XNYS 日历 authority，调度器以
+`INTRADAY_CALENDAR_AUTHORITY_MISSING` 明确失败；已有完整覆盖但当天休市或尚未开盘时仍正常空操作。
 
 ## 回滚与保留影响
 

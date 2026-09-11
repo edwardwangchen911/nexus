@@ -209,6 +209,15 @@ def _production_bundle(
             origin=AllowedOrigin(scheme="https", host="data.alpaca.markets"),
             policy=HttpRequestPolicy(max_attempts=3),
         )
+        alpaca_snapshot_client = (
+            http_client_factory(
+                provider_name="alpaca_intraday",
+                origin=AllowedOrigin(scheme="https", host="data.alpaca.markets"),
+                policy=HttpRequestPolicy(max_attempts=1),
+            )
+            if settings.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION
+            else alpaca_client
+        )
 
         def market_provider(session: object) -> MarketDataProvider:
             return build_alpaca_market_provider(
@@ -220,7 +229,7 @@ def _production_bundle(
         def snapshot_provider(session: object) -> object:
             return build_alpaca_snapshot_provider(
                 settings,
-                client=alpaca_client,
+                client=alpaca_snapshot_client,
                 symbol_resolver=resolver(session),
             )
 
