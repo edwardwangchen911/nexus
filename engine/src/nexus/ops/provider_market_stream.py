@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import logging
 import os
+import webbrowser
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -14,9 +17,20 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+import httpx
 from websockets.asyncio.client import connect
 
 from nexus.ops.local_recovery import write_private
+from nexus.providers.market.schwab_oauth import (
+    SchwabOAuthError,
+    build_schwab_authorization_url,
+    exchange_schwab_authorization_code,
+    fetch_schwab_stream_preferences,
+    load_schwab_app_config,
+    load_schwab_token,
+    parse_schwab_callback,
+    save_schwab_token,
+)
 from nexus.providers.market.schwab_stream import (
     SchwabLevelOneState,
     SchwabStreamCredentials,
@@ -46,7 +60,10 @@ class _FixedConnect(connect):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="source", required=True)
+    authorize = subparsers.add_parser("authorize")
+    authorize.add_argument("--repo-root", type=Path, required=True)
     child = subparsers.add_parser("schwab")
+    child.add_argument("--repo-root", type=Path, required=True)
     child.add_argument("--symbol", action="append", required=True)
     child.add_argument("--output-dir", type=Path, required=True)
     child.add_argument("--duration", type=float, default=60)
@@ -54,38 +71,87 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _run(arguments: argparse.Namespace) -> dict[str, Any]:
-    common = {
-        "symbols": tuple(arguments.symbol),
-        "directory": arguments.output_dir,
-        "duration": arguments.duration,
-        "max_frames": arguments.max_frames,
-    }
-    values = {
-        name: os.environ.get(environment, "")
-        for name, environment in (
-            ("access_token", "NEXUS_SCHWAB_STREAM_ACCESS_TOKEN"),
-            ("customer_id", "NEXUS_SCHWAB_STREAM_CUSTOMER_ID"),
-            ("correlation_id", "NEXUS_SCHWAB_STREAM_CORRELATION_ID"),
-            ("channel", "NEXUS_SCHWAB_STREAM_CHANNEL"),
-            ("function_id", "NEXUS_SCHWAB_STREAM_FUNCTION_ID"),
-        )
-    }
-    streamer_url = os.environ.get("NEXUS_SCHWAB_STREAM_URL", "")
-    if not streamer_url or any(not value for value in values.values()):
-        raise ProviderMarketStreamError("SCHWAB_STREAM_ENVIRONMENT_REQUIRED")
-    return await collect_schwab_stream(
-        streamer_url=streamer_url,
-        credentials=SchwabStreamCredentials(**values),
-        **common,
+async def authorize_schwab(
+    repo_root: Path,
+    client: httpx.AsyncClient,
+    *,
+    opener: Callable[[str], bool] = webbrowser.open,
+    callback_reader: Callable[[str], str],
+    process_environment: Mapping[str, str] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    config = load_schwab_app_config(repo_root, process_environment or {})
+    if not opener(build_schwab_authorization_url(config)):
+        raise ProviderMarketStreamError("SCHWAB_OAUTH_BROWSER_OPEN_FAILED")
+    callback = callback_reader(
+        "完成嘉信授权后，粘贴浏览器地址栏中的完整回调 URL："
     )
+    code = parse_schwab_callback(config, callback)
+    token = await exchange_schwab_authorization_code(
+        config, code, client, now=now
+    )
+    token_path = save_schwab_token(repo_root, token)
+    return {
+        "status": "authorized",
+        "token_path": str(token_path),
+        "expires_at": token.expires_at.isoformat(),
+        "secrets_printed": False,
+    }
+
+
+async def run_schwab_stream(
+    arguments: argparse.Namespace,
+    client: httpx.AsyncClient,
+    *,
+    collector: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    token = load_schwab_token(arguments.repo_root)
+    streamer_url, credentials = await fetch_schwab_stream_preferences(
+        token, client, now=now
+    )
+    collect = collector or collect_schwab_stream
+    return await collect(
+        symbols=tuple(arguments.symbol),
+        directory=arguments.output_dir,
+        streamer_url=streamer_url,
+        credentials=credentials,
+        duration=arguments.duration,
+        max_frames=arguments.max_frames,
+    )
+
+
+async def _run(
+    arguments: argparse.Namespace,
+    *,
+    client: httpx.AsyncClient | None = None,
+    opener: Callable[[str], bool] = webbrowser.open,
+    callback_reader: Callable[[str], str] | None = None,
+) -> dict[str, Any]:
+    if client is None:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=10) as transport:
+            return await _run(
+                arguments,
+                client=transport,
+                opener=opener,
+                callback_reader=callback_reader,
+            )
+    if arguments.source == "authorize":
+        return await authorize_schwab(
+            arguments.repo_root,
+            client,
+            opener=opener,
+            callback_reader=callback_reader or getpass.getpass,
+            process_environment=os.environ,
+        )
+    return await run_schwab_stream(arguments, client)
 
 
 def main() -> None:
     parser = build_parser()
     try:
         result = asyncio.run(_run(parser.parse_args()))
-    except (ProviderMarketStreamError, SchwabStreamError) as error:
+    except (ProviderMarketStreamError, SchwabOAuthError, SchwabStreamError) as error:
         parser.error(str(error))
     print(json.dumps(result, sort_keys=True))
 

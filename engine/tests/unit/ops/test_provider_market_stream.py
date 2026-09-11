@@ -86,9 +86,32 @@ SCHWAB_DATA = {
 }
 
 
+def test_schwab_stream_credentials_repr_hides_every_private_value() -> None:
+    rendered = repr(SCHWAB_CREDENTIALS)
+
+    assert all(
+        value not in rendered
+        for value in (
+            "access-token",
+            "customer",
+            "correlation",
+            "channel",
+            "function",
+        )
+    )
+
+
 def test_market_stream_cli_supports_only_schwab_without_command_line_credentials() -> None:
     parsed = build_parser().parse_args(
-        ["schwab", "--symbol", "AAPL", "--output-dir", "/tmp/archive"]
+        [
+            "schwab",
+            "--repo-root",
+            "/tmp/repo",
+            "--symbol",
+            "AAPL",
+            "--output-dir",
+            "/tmp/archive",
+        ]
     )
     assert parsed.source == "schwab"
     assert parsed.symbol == ["AAPL"]

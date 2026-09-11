@@ -24,10 +24,10 @@ class SchwabStreamError(ValueError):
 @dataclass(frozen=True)
 class SchwabStreamCredentials:
     access_token: str = field(repr=False)
-    customer_id: str
-    correlation_id: str
-    channel: str
-    function_id: str
+    customer_id: str = field(repr=False)
+    correlation_id: str = field(repr=False)
+    channel: str = field(repr=False)
+    function_id: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if any(not _printable(value, 4096) for value in vars(self).values()):
