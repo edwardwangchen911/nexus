@@ -88,6 +88,8 @@ function scenarioEnvelope() {
       valuation_scope: "currency:USD",
       objective: "reduce_security_concentration",
       analysis_status: "partial",
+      analysis_comparable: true,
+      execution_eligible: false,
       objective_status: "infeasible",
       baseline: metrics,
       candidate: metrics,
@@ -207,6 +209,28 @@ describe("portfolio scenario BFF route", () => {
     expect(rebuildAllowedEngineResponse(
       200,
       unlocked,
+      new Headers(),
+      undefined,
+      "/internal/v1/portfolio-scenarios/evaluate",
+      "POST",
+    )).toBeNull();
+
+    const notComparable = scenarioEnvelope();
+    notComparable.data.analysis_comparable = false;
+    expect(rebuildAllowedEngineResponse(
+      200,
+      notComparable,
+      new Headers(),
+      undefined,
+      "/internal/v1/portfolio-scenarios/evaluate",
+      "POST",
+    )).toBeNull();
+
+    const executionEligible = scenarioEnvelope();
+    executionEligible.data.execution_eligible = true;
+    expect(rebuildAllowedEngineResponse(
+      200,
+      executionEligible,
       new Headers(),
       undefined,
       "/internal/v1/portfolio-scenarios/evaluate",

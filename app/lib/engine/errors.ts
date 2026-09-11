@@ -358,6 +358,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     return matchesRuntimeSchema(data, portfolioScenarioRuntimeSchema) && isPlain(data)
       && data.execution_locked === true
       && data.analysis_status === "partial"
+      && data.analysis_comparable === true
+      && data.execution_eligible === false
       && data.valuation_scope === "currency:USD"
       && scenarioSemanticsValid(data)
       ? data

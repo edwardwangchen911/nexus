@@ -194,7 +194,10 @@ function PortfolioScenarioSession({ snapshot, report, stale }: {
 function ScenarioResult({ result, symbols }: { result: ScenarioResponse; symbols: Map<string, string | null> }): React.ReactElement {
   return <div className="portfolio-scenario__result" data-status={result.objective_status} role="status" aria-live="polite">
     <header><div><p className="eyebrow">CURRENT <ArrowRight aria-hidden="true" size={13} /> CANDIDATE</p>
-      <h3>{STATUS_LABELS[result.objective_status]}</h3></div><span className="state-chip" data-state="partial">分析不完整</span></header>
+      <h3>{STATUS_LABELS[result.objective_status]}</h3></div><div className="portfolio-scenario__badges">
+        <span className="state-chip" data-state="ready">可用于分析比较</span>
+        <span className="state-chip" data-state="locked">不可执行</span>
+      </div></header>
     <p className="portfolio-scenario__scope">Top1、Top3 与 HHI 以 USD 估值域内的证券市值为分母，不含现金；现金占比按 USD 证券与现金总值计算。</p>
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- keyboard users need to scroll wide metric tables */}
     <div className="table-scroll" role="region" aria-label="情景指标可横向滚动" tabIndex={0}>

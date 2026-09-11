@@ -459,6 +459,8 @@ def _scenario_response(result: PortfolioScenarioEvaluationV2) -> PortfolioScenar
         valuation_scope=result.valuation_scope,
         objective=result.objective,
         analysis_status=result.analysis_status,
+        analysis_comparable=True,
+        execution_eligible=False,
         objective_status=result.objective_status,
         baseline=metric_set(result.baseline),
         candidate=metric_set(result.candidate),

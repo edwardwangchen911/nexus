@@ -163,6 +163,8 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
     assert data["diagnostic_report_id"] == str(report_id)
     assert data["valuation_scope"] == "currency:USD"
     assert data["analysis_status"] == "partial"
+    assert data["analysis_comparable"] is True
+    assert data["execution_eligible"] is False
     assert data["execution_locked"] is True
     assert data["unknown_metrics"] == ["estimated_cost"]
     assert data["cost_breakdown"] == {

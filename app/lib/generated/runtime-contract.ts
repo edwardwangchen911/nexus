@@ -6152,6 +6152,11 @@ export const runtimeContractSchemas = {
   "PortfolioScenarioResponse": {
     "additionalProperties": false,
     "properties": {
+      "analysis_comparable": {
+        "const": true,
+        "title": "Analysis Comparable",
+        "type": "boolean"
+      },
       "analysis_status": {
         "const": "partial",
         "title": "Analysis Status",
@@ -6187,6 +6192,11 @@ export const runtimeContractSchemas = {
         "format": "uuid",
         "title": "Diagnostic Report Id",
         "type": "string"
+      },
+      "execution_eligible": {
+        "const": false,
+        "title": "Execution Eligible",
+        "type": "boolean"
       },
       "execution_locked": {
         "const": true,
@@ -6273,6 +6283,8 @@ export const runtimeContractSchemas = {
       "valuation_scope",
       "objective",
       "analysis_status",
+      "analysis_comparable",
+      "execution_eligible",
       "objective_status",
       "baseline",
       "candidate",

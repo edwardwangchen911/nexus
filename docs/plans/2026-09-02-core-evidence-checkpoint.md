@@ -3436,3 +3436,25 @@ TypeScript、ESLint 和 vinext build 通过。自动 Playwright 因 3302 已有�
 启动，未计为通过，也未终止现有服务；随后直接复用该服务完成真实 Chrome 验收，概览与优化
 页均显示单候选入口且没有旧创建按钮，历史三方案详情仍可打开，控制台无错误。验收后决策
 run/output 保持 6/6、方案组保持 3，Shadow、模拟订单和成交保持 0。
+
+### 分析可比与执行资格显式拆分（2026-09-11）
+
+单候选情景公开响应现显式返回 `analysis_comparable=true` 和
+`execution_eligible=false`：当前集中度、现金与换手指标可用于分析比较，但成本和税务
+证据仍未完成，因此不具备执行资格。两个字段只在 API response adapter 派生，
+没有进入 `PortfolioScenarioEvaluationV2`、情景哈希或 Agent 投影；旧的持久化 Agent
+恢复键因此不变。BFF 对字段缺失或取值漂移 fail closed，页面同时显示“可用于
+分析比较”与“不可执行”，`analysis_status=partial`、成本 unknown 和
+`execution_locked=true` 均保持。本片没有新建表、迁移、Shadow、订单或通用求解框架。
+
+独立技术审查初评 97/100，修复后复核 99/100，无 Critical、Important 或 Minor 问题；初评发现的两份旧
+Playwright mock 已同步两个新字段并补界面断言。生成合同检查、TypeScript、定向
+ESLint、Vinext build、32 项情景/Agent Python 单测与 961 项前端单测通过。
+PostgreSQL 集成用例因当前 shell 未配置专用 `DATABASE_URL` 而跳过，未计为通过；
+全仓 ESLint 仍被既有 `outputs/acceptance` 归档脚本的 1,720 个错误阻断，本次改动文件
+的定向 ESLint 通过。
+
+只重建并替换了现有 Engine API 容器，未启动 Worker、Provider 或 Gateway，也未执行迁移。
+真实 3302 组合页显式点击后同时显示两个新状态、成本证据缺口和交易锁，控制台无错误；
+页面恢复既有 Agent 结果，未登记新运行。验收后决策 run/output 保持 6/6、方案组保持 3，
+Shadow、模拟订单与成交保持 0。

@@ -28,7 +28,7 @@ function scenario(objectiveStatus: ScenarioResponse["objective_status"] = "impro
     portfolio_snapshot_id: snapshotId, diagnostic_report_id: reportId,
     valuation_time: snapshot.as_of!, valuation_scope: "currency:USD",
     objective: "reduce_security_concentration", objective_status: objectiveStatus,
-    analysis_status: "partial", execution_locked: true,
+    analysis_status: "partial", analysis_comparable: true, execution_eligible: false, execution_locked: true,
     baseline: {
       security_top1: known("0.7"), security_top3: known("0.9"), security_hhi: known("0.55"),
       cash_weight: known("0.1"), one_way_turnover: known("0"), estimated_cost: unknown("COST_EVIDENCE_INCOMPLETE"),
@@ -137,7 +137,8 @@ it("posts intent and constraints without client-authored weights, then compares 
   expect(screen.getByText(/Top1、Top3 与 HHI.*证券市值为分母，不含现金/)).toBeVisible();
   expect(screen.getAllByText(/交易保持锁定/).length).toBeGreaterThanOrEqual(2);
   expect(screen.getByText(/保持 · 20%/)).toBeVisible();
-  expect(screen.getByText("分析不完整")).toBeVisible();
+  expect(screen.getByText("可用于分析比较")).toBeVisible();
+  expect(screen.getByText("不可执行")).toBeVisible();
 
   fireEvent.change(screen.getByRole("spinbutton", { name: "最低现金占比" }), { target: { value: "0.2" } });
   expect(screen.queryByRole("heading", { name: "有所改善，尚未达到阈值" })).not.toBeInTheDocument();

@@ -40,6 +40,8 @@ test("one explicit click evaluates one ephemeral scenario and refresh clears it"
 
   await scenario.getByRole("button", { name: "生成调整情景" }).click();
   await expect(scenario.getByRole("heading", { name: "有所改善，尚未达到阈值" })).toBeVisible();
+  await expect(scenario.getByText("可用于分析比较")).toBeVisible();
+  await expect(scenario.getByText("不可执行")).toBeVisible();
   await expect(scenario.getByRole("table", { name: "当前组合与调整情景比较" })).toContainText("65%");
   expect(posts).toEqual(["/api/v1/portfolio-scenarios/evaluate"]);
   await expect(page.getByRole("button", { name: /接受|下单|启动前向观察/ })).toHaveCount(0);
@@ -72,7 +74,8 @@ function result() {
     result_hash: "b".repeat(64), diagnostic_input_hash: "c".repeat(64),
     portfolio_snapshot_id: snapshotId, diagnostic_report_id: reportId, valuation_time: asOf,
     valuation_scope: "currency:USD", objective: "reduce_security_concentration",
-    objective_status: "improved_not_met", analysis_status: "partial", execution_locked: true,
+    objective_status: "improved_not_met", analysis_status: "partial",
+    analysis_comparable: true, execution_eligible: false, execution_locked: true,
     baseline: { security_top1: known("0.8"), security_top3: known("0.8"), security_hhi: known("0.64"), cash_weight: known("0.2"), one_way_turnover: known("0"), estimated_cost: unknown },
     candidate: { security_top1: known("0.65"), security_top3: known("0.65"), security_hhi: known("0.4225"), cash_weight: known("0.35"), one_way_turnover: known("0.15"), estimated_cost: unknown },
     positions: [{ instrument_id: snapshot.positions[0].instrument_id, current_weight: "0.8", target_weight: "0.65", action: "reduce", reason_code: "CONCENTRATION_REDUCTION" }],

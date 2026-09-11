@@ -601,6 +601,8 @@ class PortfolioScenarioResponse(_StrictOptimizationSchema):
     valuation_scope: Literal["currency:USD"]
     objective: ScenarioObjective
     analysis_status: Literal["partial"]
+    analysis_comparable: Literal[True]
+    execution_eligible: Literal[False]
     objective_status: ScenarioObjectiveStatus
     baseline: ScenarioMetricSetResponse
     candidate: ScenarioMetricSetResponse

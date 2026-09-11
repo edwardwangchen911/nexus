@@ -3698,6 +3698,11 @@ export interface components {
         /** PortfolioScenarioResponse */
         PortfolioScenarioResponse: {
             /**
+             * Analysis Comparable
+             * @constant
+             */
+            analysis_comparable: true;
+            /**
              * Analysis Status
              * @constant
              */
@@ -3716,6 +3721,11 @@ export interface components {
              * Format: uuid
              */
             diagnostic_report_id: string;
+            /**
+             * Execution Eligible
+             * @constant
+             */
+            execution_eligible: false;
             /**
              * Execution Locked
              * @constant
