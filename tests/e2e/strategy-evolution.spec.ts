@@ -102,13 +102,13 @@ test("pending promotion and rollback boundaries remain explicit", async ({ page 
   await installEvolutionFixtures(page, { overviewValue: value });
   await page.goto("/strategies");
 
-  await expect(page.getByText("PROMOTE · 2026-08-28")).toBeVisible();
-  await expect(page.getByText("PROMOTE · challenger_liquidity_v1")).toBeVisible();
+  await expect(page.getByText("晋级 · 2026-08-28")).toBeVisible();
+  await expect(page.getByText("晋级 · challenger_liquidity_v1")).toBeVisible();
 
   value.champion.pending_transition = "ROLLBACK";
   value.champion.pending_effective_session = null;
   await page.getByRole("button", { name: "刷新策略进化证据" }).click();
-  await expect(page.getByText("ROLLBACK · 等待边界")).toBeVisible();
+  await expect(page.getByText("回滚 · 等待生效交易日")).toBeVisible();
 });
 
 test("pause, resume, veto and rollback submit only fixed commands", async ({ page }) => {

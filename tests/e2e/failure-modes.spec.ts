@@ -31,7 +31,7 @@ test("Agent abstention preserves evidence but cannot create a strategy target", 
   await page.goto(`/research/${instrumentId}?as_of=${encodeURIComponent(decisionTime)}`);
 
   await expect(page.getByText(/EVIDENCE_INSUFFICIENT/)).toBeVisible();
-  await expect(page.getByText("委员会没有输出可消费的研究意图；系统保持观望。")).toBeVisible();
+  await expect(page.getByText("尚未形成可供后续分析的研究结论；系统保持观望。")).toBeVisible();
   await expect(page.getByRole("button", { name: /运行冻结研究|重新运行冻结研究/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: writeAction })).toHaveCount(0);
 });

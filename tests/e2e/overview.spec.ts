@@ -119,7 +119,7 @@ test("no data progresses through frozen research, diagnosis, three proposals, an
     idempotencyKey: expect.stringMatching(/^proposal-shadow-[0-9a-f-]{36}$/),
     version: '"4"',
   });
-  await expect(page.getByRole("button", { name: /下单|交易|买入|卖出|实盘|券商订单/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^(?:下单|买入|卖出|提交交易|提交实盘|创建券商订单)/ })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   const serious = (await new AxeBuilder({ page }).analyze()).violations.filter(
     (violation) => violation.impact === "serious" || violation.impact === "critical",

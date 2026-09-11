@@ -77,7 +77,7 @@ for (const viewport of [{ width: 375, height: 812 }, { width: 1440, height: 900 
     await page.waitForLoadState("networkidle");
     const availability = page.getByRole("region", { name: "历史方案状态" });
     await expect(availability).toContainText("当前没有历史三方案记录");
-    await expect(availability).toContainText("存在降低仓位候选条件");
+    await expect(availability).toContainText("诊断存在降低仓位条件");
     await expect(availability).toContainText("旧三方案只作为历史记录保留");
     await expect(page.getByText(/比较结果：|推荐/)).toHaveCount(0);
     await expect(page.getByRole("button", { name: /启动影子验证|下单|交易|买入|卖出/ })).toHaveCount(0);

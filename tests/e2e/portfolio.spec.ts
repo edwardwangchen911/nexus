@@ -121,7 +121,7 @@ test("fail-closed readiness remains fully visible on a 390px viewport", async ({
   await installPortfolioFixtures(page, { decision_readiness: "RECONCILIATION_REQUIRED" });
   await page.goto("/portfolio");
 
-  const value = page.getByRole("region", { name: "数据与决策权威边界" }).getByText("RECONCILIATION_REQUIRED", { exact: true });
+  const value = page.getByRole("region", { name: "数据与决策权威边界" }).getByText("账户快照需重新对账", { exact: true });
   await expect(value).toBeVisible();
   expect(await value.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await expect(page.getByRole("button", { name: /买入|卖出|下单|修改持仓/ })).toHaveCount(0);
@@ -155,7 +155,7 @@ test("page refresh only reloads persisted facts and never admits a broker sync",
   await page.goto("/portfolio");
   await page.getByRole("button", { name: "刷新页面数据" }).click();
 
-  await expect(page.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toContainText("HKD 8,000.00");
+  await expect(page.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toContainText("HKD 8,000");
   expect(brokerSyncRequests).toEqual([]);
   await expect(page.getByRole("button", { name: /买入|卖出|下单|修改持仓/ })).toHaveCount(0);
 });

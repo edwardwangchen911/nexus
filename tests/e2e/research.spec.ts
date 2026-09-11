@@ -25,7 +25,7 @@ test("saved boolean research conditions remain unverified through page and evide
   await page.route(`**/api/v1/research-runs/${runId}`, (route) => route.fulfill({ json: researchEnvelope(data) }));
   await page.goto(`/research/${instrumentId}?run_id=${runId}`);
   const section = page.getByRole("heading", { name: "失效条件", exact: true }).locator("..");
-  await expect(section).toContainText("研究提出的待核验条件");
+  await expect(section).toContainText("以下是已保存的研究表达式（待核验）");
   await expect(section).toContainText("这些失效条件尚无系统求值结果");
   await expect(section).toContainText("运算符 is_false · 阈值 true");
   const opener = section.getByRole("button", { name: "查看证据定位" });
