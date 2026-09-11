@@ -341,6 +341,30 @@ def _payload(report_id: UUID, *, snapshot_id: UUID = SNAPSHOT_ID, as_of: datetim
     ).encode()
 
 
+async def _seed_legacy_scenario_claim(
+    database_url: str,
+    *,
+    body: bytes,
+    idempotency_key: str,
+    request_hash: str | None = None,
+) -> None:
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        session.add(
+            IdempotencyRecord(
+                actor_id="nexus-test-user",
+                route=(
+                    "/internal/v1/portfolio-scenarios/evaluate:"
+                    "portfolio_scenario_evaluation_v2"
+                ),
+                idempotency_key=idempotency_key,
+                request_hash=request_hash or sha256(body).hexdigest(),
+                schema_version="portfolio_scenario_v2",
+                response_payload={},
+            )
+        )
+
+
 @pytest.mark.asyncio
 async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
     migrated_database_url: str,
@@ -497,6 +521,115 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
         "spread_status": "unknown",
         "spread_policy_version": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_scenario_upgrade_replays_matching_v2_claim_without_v3_claim_or_quote_selection(
+    migrated_database_url: str,
+) -> None:
+    report_id = await _seed_scenario_authority(
+        migrated_database_url, as_of=KNOWN_AS_OF, known_spread_case=True
+    )
+    store = ScenarioStore()
+    artifact, quote = _quote_records(
+        store, event_at=KNOWN_AS_OF - timedelta(seconds=30), sequence=31
+    )
+    body = _payload(report_id, as_of=KNOWN_AS_OF)
+    idempotency_key = "scenario-upgrade-v2-replay"
+    await _seed_legacy_scenario_claim(
+        migrated_database_url,
+        body=body,
+        idempotency_key=idempotency_key,
+    )
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        session.add_all((artifact, quote))
+
+    path = "/internal/v1/portfolio-scenarios/evaluate"
+    request_headers = headers("POST", path, body)
+    request_headers["Idempotency-Key"] = idempotency_key
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(
+                migrated_database_url,
+                now=KNOWN_AS_OF + timedelta(minutes=1),
+                scenario_evidence_store=store,
+            )
+        ),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(path, content=body, headers=request_headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["cost_breakdown"]["spread"] == {
+        "status": "unknown",
+        "value": None,
+        "reason": "BID_ASK_EVIDENCE_UNAVAILABLE",
+    }
+    async with factory() as session:
+        claims = list(
+            await session.scalars(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.actor_id == "nexus-test-user",
+                    IdempotencyRecord.idempotency_key == idempotency_key,
+                )
+            )
+        )
+        audit_count = await session.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(AuditEvent.action == "portfolio_scenario_evaluated")
+        )
+    assert [(claim.route, claim.schema_version) for claim in claims] == [
+        (
+            "/internal/v1/portfolio-scenarios/evaluate:portfolio_scenario_evaluation_v2",
+            "portfolio_scenario_v2",
+        )
+    ]
+    assert audit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scenario_upgrade_rejects_changed_body_against_v2_claim_without_v3_claim(
+    migrated_database_url: str,
+) -> None:
+    report_id = await _seed_scenario_authority(migrated_database_url)
+    body = _payload(report_id)
+    idempotency_key = "scenario-upgrade-v2-conflict"
+    await _seed_legacy_scenario_claim(
+        migrated_database_url,
+        body=body,
+        idempotency_key=idempotency_key,
+        request_hash="0" * 64,
+    )
+
+    path = "/internal/v1/portfolio-scenarios/evaluate"
+    request_headers = headers("POST", path, body)
+    request_headers["Idempotency-Key"] = idempotency_key
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(path, content=body, headers=request_headers)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session:
+        claims = list(
+            await session.scalars(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.actor_id == "nexus-test-user",
+                    IdempotencyRecord.idempotency_key == idempotency_key,
+                )
+            )
+        )
+    assert [(claim.route, claim.schema_version) for claim in claims] == [
+        (
+            "/internal/v1/portfolio-scenarios/evaluate:portfolio_scenario_evaluation_v2",
+            "portfolio_scenario_v2",
+        )
+    ]
 
 
 @pytest.mark.asyncio

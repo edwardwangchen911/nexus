@@ -121,6 +121,7 @@ from nexus.persistence.models.portfolio import (
     Portfolio,
     PortfolioSnapshotRecord,
 )
+from nexus.persistence.models.runtime import IdempotencyRecord
 from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.reconciliation.admission_claim import claim_or_lock, validate_request_identity
 from nexus.reconciliation.persistence_errors import (
@@ -341,6 +342,7 @@ async def evaluate_portfolio_scenario(
         )
     idempotency_request_hash = hashlib.sha256(raw_body).hexdigest()
     route = "/internal/v1/portfolio-scenarios/evaluate"
+    legacy_idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v2"
     idempotency_namespace = f"{route}:portfolio_scenario_evaluation_v3"
     _validate_claim(
         actor.actor_id,
@@ -348,24 +350,40 @@ async def evaluate_portfolio_scenario(
         idempotency_key,
         idempotency_request_hash,
     )
-    try:
-        claim, owner = await claim_or_lock(
-            session,
-            actor.actor_id,
-            idempotency_namespace,
-            idempotency_key,
-            idempotency_request_hash,
-            "portfolio_scenario_v3",
+    legacy_claim = await session.scalar(
+        select(IdempotencyRecord)
+        .where(
+            IdempotencyRecord.actor_id == actor.actor_id,
+            IdempotencyRecord.route == legacy_idempotency_namespace,
+            IdempotencyRecord.idempotency_key == idempotency_key,
         )
-    except IdempotencyConflict as error:
-        raise NexusError(
-            ErrorCode.IDEMPOTENCY_CONFLICT,
-            "Idempotency key has a different request body.",
-            status_code=409,
-        ) from error
+        .with_for_update()
+    )
+    legacy_replay = legacy_claim is not None
+    if legacy_claim is not None:
+        claim = legacy_claim
+        owner = False
+        expected_schema_version = "portfolio_scenario_v2"
+    else:
+        try:
+            claim, owner = await claim_or_lock(
+                session,
+                actor.actor_id,
+                idempotency_namespace,
+                idempotency_key,
+                idempotency_request_hash,
+                "portfolio_scenario_v3",
+            )
+        except IdempotencyConflict as error:
+            raise NexusError(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "Idempotency key has a different request body.",
+                status_code=409,
+            ) from error
+        expected_schema_version = "portfolio_scenario_v3"
     if not owner and (
         claim.request_hash != idempotency_request_hash
-        or claim.schema_version != "portfolio_scenario_v3"
+        or claim.schema_version != expected_schema_version
     ):
         raise NexusError(
             ErrorCode.IDEMPOTENCY_CONFLICT,
@@ -406,7 +424,9 @@ async def evaluate_portfolio_scenario(
             diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
             request_hash=canonical_scenario_hash(scenario_request),
         )
-        if owner:
+        if legacy_replay:
+            result = base_result
+        elif owner:
             evidence = await select_scenario_spread_evidence(
                 session,
                 request.app.state.scenario_evidence_store,
