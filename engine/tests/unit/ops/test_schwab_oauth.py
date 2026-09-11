@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 import httpx
-import nexus.ops.provider_market_stream as provider_market_stream
+import nexus.ops.schwab_market_stream as provider_market_stream
 import pytest
 from nexus.providers.market.schwab_oauth import SchwabOAuthToken
 
