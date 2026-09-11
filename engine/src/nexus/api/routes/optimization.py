@@ -7,8 +7,13 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Header, Request
+from fastapi import APIRouter, Body, Depends, Header, Path, Request
 from fastapi.responses import JSONResponse
+from nexus.agents.portfolio_scenario_selection import (
+    PortfolioScenarioSelection,
+    get_portfolio_scenario_selection,
+    put_portfolio_scenario_selection,
+)
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
@@ -28,6 +33,9 @@ from nexus.api.schemas.optimization import (
     PortfolioScenarioEnvelope,
     PortfolioScenarioRequest,
     PortfolioScenarioResponse,
+    PortfolioScenarioSelectionEnvelope,
+    PortfolioScenarioSelectionRequest,
+    PortfolioScenarioSelectionResponse,
     ProposalAdmissionRequest,
     ProposalComparisonAuthorityResponse,
     ProposalComparisonDimensionsResponse,
@@ -152,6 +160,7 @@ _CREATE_RESPONSES = {
 
 _IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=255)]
 _IfMatch = Annotated[str, Header(alias="If-Match", min_length=1, max_length=64)]
+_ResultHash = Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")]
 
 _WHAT_IF_REQUEST_BODY = {
     "requestBody": {
@@ -165,6 +174,34 @@ _SCENARIO_REQUEST_BODY = {
         "content": {
             "application/json": {
                 "schema": {"$ref": "#/components/schemas/PortfolioScenarioRequest"}
+            }
+        },
+    }
+}
+_SCENARIO_SELECTION_REQUEST_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["schema_version", "scenario_request", "choice", "version"],
+                    "properties": {
+                        "schema_version": {
+                            "type": "string",
+                            "const": "portfolio_scenario_selection_v1",
+                        },
+                        "scenario_request": {
+                            "$ref": "#/components/schemas/PortfolioScenarioRequest"
+                        },
+                        "choice": {
+                            "type": "string",
+                            "enum": ["accepted_for_analysis", "rejected", "watch"],
+                        },
+                        "version": {"type": "integer", "minimum": 0},
+                    },
+                }
             }
         },
     }
@@ -255,6 +292,37 @@ async def _bounded_scenario_request(request: Request) -> PortfolioScenarioReques
         raise NexusError(
             ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422
         ) from error
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422
+        ) from error
+
+
+async def _bounded_scenario_selection_request(
+    request: Request,
+) -> PortfolioScenarioSelectionRequest:
+    """Apply the same exact 64 KiB boundary to a scenario selection request."""
+    if not _is_json_media_type(request.headers.get("Content-Type")):
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Content-Type must be application/json.", status_code=422
+        )
+    content_length = request.headers.get("Content-Length")
+    if content_length is not None:
+        if not _is_canonical_content_length(content_length):
+            raise NexusError(
+                ErrorCode.VALIDATION_ERROR, "Content-Length is invalid.", status_code=422
+            )
+        if int(content_length) > _MAX_WHAT_IF_BYTES:
+            raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > _MAX_WHAT_IF_BYTES - len(body):
+            raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
+        body.extend(chunk)
+    raw_body = bytes(body)
+    setattr(request, "_body", raw_body)
+    try:
+        return PortfolioScenarioSelectionRequest.model_validate_json(raw_body)
     except ValueError as error:
         raise NexusError(
             ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422
@@ -568,6 +636,126 @@ def _scenario_response(result: PortfolioScenarioEvaluationV2) -> PortfolioScenar
             ),
         ),
         execution_locked=result.execution_locked,
+    )
+
+
+@router.put(
+    "/internal/v1/portfolio-scenarios/{scenario_result_hash}/selection",
+    response_model=PortfolioScenarioSelectionEnvelope,
+    responses=_ERROR_RESPONSES,
+    openapi_extra=_SCENARIO_SELECTION_REQUEST_BODY,
+)
+async def put_scenario_selection(
+    scenario_result_hash: _ResultHash,
+    request: Request,
+    idempotency_key: _IdempotencyKey,
+    if_match: _IfMatch,
+    payload: PortfolioScenarioSelectionRequest = Depends(
+        _bounded_scenario_selection_request
+    ),
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> PortfolioScenarioSelectionEnvelope:
+    """Persist a research-only user choice without changing execution state."""
+    _validate_if_match(if_match, payload.version)
+    raw_body = await request.body()
+    request_hash = hashlib.sha256(b"scenario-selection\0" + raw_body).hexdigest()
+    _validate_claim(
+        actor.actor_id,
+        f"portfolio-scenario-selection:{scenario_result_hash}",
+        idempotency_key,
+        request_hash,
+    )
+    scenario_request = PortfolioScenarioRequestV1(
+        schema_version=payload.scenario_request.schema_version,
+        portfolio_snapshot_id=payload.scenario_request.portfolio_snapshot_id,
+        diagnostic_report_id=payload.scenario_request.diagnostic_report_id,
+        as_of=payload.scenario_request.as_of,
+        constraints=AdjustmentScenarioConstraintsV1(
+            schema_version=payload.scenario_request.constraints.schema_version,
+            objective=payload.scenario_request.constraints.objective,
+            max_turnover=Decimal(payload.scenario_request.constraints.max_turnover),
+            minimum_cash=Decimal(payload.scenario_request.constraints.minimum_cash),
+            universe_policy=payload.scenario_request.constraints.universe_policy,
+            allow_new_positions=payload.scenario_request.constraints.allow_new_positions,
+        ),
+    )
+    try:
+        selection = await put_portfolio_scenario_selection(
+            session,
+            request.app.state.scenario_evidence_store,
+            actor_id=actor.actor_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            request=scenario_request,
+            scenario_result_hash=scenario_result_hash,
+            choice=payload.choice,
+            expected_version=payload.version,
+            now=_utc_now(request),
+        )
+    except IdempotencyConflict as error:
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Scenario selection key conflicts with a prior request.",
+            status_code=409,
+        ) from error
+    except ValueError as error:
+        code = (
+            ErrorCode.VERSION_CONFLICT
+            if str(error) == "VERSION_CONFLICT"
+            else ErrorCode.SCENARIO_BASELINE_NOT_READY
+        )
+        raise NexusError(
+            code,
+            "Scenario selection authority is incomplete.",
+            status_code=409,
+        ) from error
+    return _scenario_selection_envelope(selection, actor.request_id)
+
+
+@router.get(
+    "/internal/v1/portfolio-scenarios/{scenario_result_hash}/selection",
+    response_model=PortfolioScenarioSelectionEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_scenario_selection(
+    scenario_result_hash: _ResultHash,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> PortfolioScenarioSelectionEnvelope:
+    record = await get_portfolio_scenario_selection(
+        session,
+        actor_id=actor.actor_id,
+        scenario_result_hash=scenario_result_hash,
+    )
+    if record is None:
+        raise NexusError(
+            ErrorCode.NOT_FOUND,
+            "Scenario selection was not found.",
+            status_code=404,
+        )
+    return _scenario_selection_envelope(record, actor.request_id)
+
+
+def _scenario_selection_envelope(
+    record: PortfolioScenarioSelection, request_id: UUID
+) -> PortfolioScenarioSelectionEnvelope:
+    return PortfolioScenarioSelectionEnvelope(
+        data=PortfolioScenarioSelectionResponse(
+            schema_version="portfolio_scenario_selection_v1",
+            portfolio_snapshot_id=record.portfolio_snapshot_id,
+            diagnostic_report_id=record.diagnostic_report_id,
+            scenario_result_hash=record.scenario_result_hash,
+            choice=cast(
+                Literal["accepted_for_analysis", "rejected", "watch"], record.choice
+            ),
+            version=record.version,
+            selected_at=record.selected_at,
+            execution_eligible=False,
+            execution_locked=True,
+            execution_authorized=False,
+        ),
+        meta=SuccessMetaResponse(request_id=request_id, as_of=record.selected_at),
     )
 
 

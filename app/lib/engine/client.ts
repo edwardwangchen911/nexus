@@ -219,6 +219,10 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
 }
 
 function matchesTemplate(template: InternalPath, path: string): boolean {
+  const scenarioSelection = /^\/internal\/v1\/portfolio-scenarios\/([0-9a-f]{64})\/selection$/.exec(path);
+  if (scenarioSelection) {
+    return template === "/internal/v1/portfolio-scenarios/{scenario_result_hash}/selection";
+  }
   const news = /^\/internal\/v1\/instruments\/([^/]+)\/news$/.exec(path);
   if (news && validateUuid(news[1])) return template === "/internal/v1/instruments/{instrument_id}/news";
   if (template === "/internal/v1/optimization-proposal-drafts") return path === template;

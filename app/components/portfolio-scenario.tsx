@@ -12,6 +12,8 @@ import type { PortfolioDiagnosticReport } from "./portfolio-diagnostic";
 
 type ScenarioResponse = components["schemas"]["PortfolioScenarioResponse"];
 type ScenarioMetric = components["schemas"]["ScenarioMetricResponse"];
+type ScenarioSelection = components["schemas"]["PortfolioScenarioSelectionResponse"];
+type ScenarioChoice = ScenarioSelection["choice"];
 
 const RATIO = /^(?:0(?:\.\d{1,38})?|1(?:\.0{1,38})?)$/;
 const METRICS = [
@@ -187,8 +189,120 @@ function PortfolioScenarioSession({ snapshot, report, stale }: {
         scenarioResult={visibleResult.data}
         stale={stale}
       />
+      <ScenarioSelectionPanel
+        key={visibleResult.data.result_hash}
+        request={visibleResult.request}
+        result={visibleResult.data}
+      />
     </> : null}
   </section>;
+}
+
+function ScenarioSelectionPanel({ request, result }: {
+  request: components["schemas"]["PortfolioScenarioRequest"];
+  result: ScenarioResponse;
+}): React.ReactElement {
+  const [selection, setSelection] = useState<ScenarioSelection | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [pending, setPending] = useState<ScenarioChoice | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const path = `/api/v1/portfolio-scenarios/${result.result_hash}/selection`;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch(path, { signal: controller.signal });
+        if (response.status === 404) return;
+        if (!response.ok) throw new Error("selection read failed");
+        const envelope = await response.json() as { data?: unknown };
+        if (!validSelection(envelope.data, result)) throw new Error("selection drift");
+        setSelection(envelope.data);
+      } catch (cause) {
+        if (!(cause instanceof DOMException && cause.name === "AbortError")) {
+          setError("历史选择暂时无法读取；不会自动创建或覆盖选择。");
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [path, result]);
+
+  async function choose(choice: ScenarioChoice): Promise<void> {
+    if (pending !== null) return;
+    const version = selection?.version ?? 0;
+    setPending(choice);
+    setError(null);
+    try {
+      const response = await fetch(path, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `scenario-selection-${crypto.randomUUID()}`,
+          "if-match": `"${version}"`,
+        },
+        body: JSON.stringify({
+          schema_version: "portfolio_scenario_selection_v1",
+          scenario_request: request,
+          choice,
+          version,
+        }),
+      });
+      if (!response.ok) {
+        setError(response.status === 409
+          ? "候选或选择版本已经变化，请重新生成当前情景后再选择。"
+          : "当前选择未保存；不会自动重试，也不会改变组合。");
+        return;
+      }
+      const envelope = await response.json() as { data?: unknown };
+      if (!validSelection(envelope.data, result)) {
+        setError("保存结果与当前候选不一致，已拒绝显示。");
+        return;
+      }
+      setSelection(envelope.data);
+    } catch {
+      setError("当前选择未保存；不会自动重试，也不会改变组合。");
+    } finally {
+      setPending(null);
+    }
+  }
+
+  return <section className="portfolio-scenario__costs" aria-label="候选选择">
+    <h3>你的选择</h3>
+    <p className="portfolio-scenario__scope">这里只保存对当前精确候选的研究选择；不会启动 Shadow、生成订单或解除交易锁。</p>
+    <div className="portfolio-scenario__controls">
+      <button className="button" type="button" disabled={loading || pending !== null}
+        onClick={() => void choose("accepted_for_analysis")}>选择为研究候选</button>
+      <button className="button button--secondary" type="button" disabled={loading || pending !== null}
+        onClick={() => void choose("rejected")}>拒绝这个候选</button>
+      <button className="button button--secondary" type="button" disabled={loading || pending !== null}
+        onClick={() => void choose("watch")}>继续观察当前组合</button>
+    </div>
+    {selection ? <p className="inline-notice" role="status">{selectionCopy(selection.choice)}</p> : null}
+    {error ? <p className="inline-notice inline-notice--error" role="status">{error}</p> : null}
+  </section>;
+}
+
+function validSelection(value: unknown, result: ScenarioResponse): value is ScenarioSelection {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return item.schema_version === "portfolio_scenario_selection_v1"
+    && sameUuid(String(item.portfolio_snapshot_id), result.portfolio_snapshot_id)
+    && sameUuid(String(item.diagnostic_report_id), result.diagnostic_report_id)
+    && item.scenario_result_hash === result.result_hash
+    && ["accepted_for_analysis", "rejected", "watch"].includes(String(item.choice))
+    && Number.isSafeInteger(item.version) && Number(item.version) >= 1
+    && typeof item.selected_at === "string" && Number.isFinite(Date.parse(item.selected_at))
+    && item.execution_eligible === false
+    && item.execution_locked === true
+    && item.execution_authorized === false;
+}
+
+function selectionCopy(choice: ScenarioChoice): string {
+  if (choice === "accepted_for_analysis") return "已选择为研究候选；不会启动 Shadow 或交易。";
+  if (choice === "rejected") return "已拒绝这个候选；当前组合不会改变。";
+  return "已选择继续观察当前组合；不会自动刷新或运行研究。";
 }
 
 function ScenarioResult({ result, symbols }: { result: ScenarioResponse; symbols: Map<string, string | null> }): React.ReactElement {

@@ -351,3 +351,107 @@ describe("portfolio scenario BFF route", () => {
     }
   });
 });
+
+describe("portfolio scenario selection BFF route", () => {
+  it("forwards one exact locked selection and restores it by result hash", async () => {
+    const resultHash = "b".repeat(64);
+    const value = {
+      schema_version: "portfolio_scenario_selection_v1",
+      scenario_request: payload(),
+      choice: "accepted_for_analysis",
+      version: 0,
+    };
+    const envelope = {
+      data: {
+        schema_version: "portfolio_scenario_selection_v1",
+        portfolio_snapshot_id: snapshotId,
+        diagnostic_report_id: reportId,
+        scenario_result_hash: resultHash,
+        choice: "accepted_for_analysis",
+        version: 1,
+        selected_at: "2026-09-11T08:00:00Z",
+        execution_eligible: false,
+        execution_locked: true,
+        execution_authorized: false,
+      },
+    };
+    engineFetch.mockReset();
+    engineFetch.mockResolvedValue(Response.json(envelope));
+    const route = await import("../../../app/api/v1/portfolio-scenarios/[resultHash]/selection/route");
+    const url = `https://nexus.test/api/v1/portfolio-scenarios/${resultHash}/selection`;
+    const putRequest = new Request(url, {
+      method: "PUT",
+      headers: {
+        origin: "https://nexus.test",
+        "content-type": "application/json",
+        "idempotency-key": "selection-once",
+        "if-match": '"0"',
+      },
+      body: JSON.stringify(value),
+    });
+
+    expect((await route.PUT(putRequest)).status).toBe(200);
+    expect(engineFetch.mock.calls[0][0]).toEqual({
+      template: "/internal/v1/portfolio-scenarios/{scenario_result_hash}/selection",
+      path: `/internal/v1/portfolio-scenarios/${resultHash}/selection`,
+    });
+    expect(new TextDecoder().decode(engineFetch.mock.calls[0][1].body)).toBe(JSON.stringify(value));
+    expect(engineFetch.mock.calls[0][1].headers).toEqual({
+      "content-type": "application/json",
+      "idempotency-key": "selection-once",
+      "if-match": '"0"',
+    });
+
+    engineFetch.mockClear();
+    engineFetch.mockResolvedValueOnce(Response.json(envelope));
+    expect((await route.GET(new Request(url))).status).toBe(200);
+    expect(engineFetch.mock.calls[0][0]).toEqual({
+      template: "/internal/v1/portfolio-scenarios/{scenario_result_hash}/selection",
+      path: `/internal/v1/portfolio-scenarios/${resultHash}/selection`,
+    });
+  });
+
+  it("admits only a locked upstream selection", async () => {
+    const resultHash = "b".repeat(64);
+    const data = {
+      schema_version: "portfolio_scenario_selection_v1",
+      portfolio_snapshot_id: snapshotId,
+      diagnostic_report_id: reportId,
+      scenario_result_hash: resultHash,
+      choice: "accepted_for_analysis",
+      version: 1,
+      selected_at: "2026-09-11T08:00:00Z",
+      execution_eligible: false,
+      execution_locked: true,
+      execution_authorized: true,
+    };
+
+    const accepted = rebuildAllowedEngineResponse(
+      200,
+      { data: { ...data, execution_authorized: false }, meta: {
+        request_id: "0198d500-1000-7000-8000-000000000099",
+        schema_version: "1",
+        as_of: "2026-09-11T08:00:00Z",
+      } },
+      new Headers(),
+      undefined,
+      `/internal/v1/portfolio-scenarios/${resultHash}/selection`,
+      "GET",
+    );
+    expect(accepted).not.toBeNull();
+    expect((await accepted!.json()).data.execution_locked).toBe(true);
+
+    expect(rebuildAllowedEngineResponse(
+      200,
+      { data, meta: {
+        request_id: "0198d500-1000-7000-8000-000000000099",
+        schema_version: "1",
+        as_of: "2026-09-11T08:00:00Z",
+      } },
+      new Headers(),
+      undefined,
+      `/internal/v1/portfolio-scenarios/${resultHash}/selection`,
+      "GET",
+    )).toBeNull();
+  });
+});

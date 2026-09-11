@@ -594,6 +594,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/portfolio-scenarios/{scenario_result_hash}/selection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Scenario Selection */
+        get: operations["get_scenario_selection_internal_v1_portfolio_scenarios__scenario_result_hash__selection_get"];
+        /**
+         * Put Scenario Selection
+         * @description Persist a research-only user choice without changing execution state.
+         */
+        put: operations["put_scenario_selection_internal_v1_portfolio_scenarios__scenario_result_hash__selection_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/portfolio-scenarios/evaluate": {
         parameters: {
             query?: never;
@@ -3771,6 +3792,58 @@ export interface components {
              * Format: date-time
              */
             valuation_time: string;
+        };
+        /** PortfolioScenarioSelectionEnvelope */
+        PortfolioScenarioSelectionEnvelope: {
+            data: components["schemas"]["PortfolioScenarioSelectionResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PortfolioScenarioSelectionResponse */
+        PortfolioScenarioSelectionResponse: {
+            /**
+             * Choice
+             * @enum {string}
+             */
+            choice: "accepted_for_analysis" | "rejected" | "watch";
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Execution Authorized
+             * @constant
+             */
+            execution_authorized: false;
+            /**
+             * Execution Eligible
+             * @constant
+             */
+            execution_eligible: false;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /** Scenario Result Hash */
+            scenario_result_hash: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "portfolio_scenario_selection_v1";
+            /**
+             * Selected At
+             * Format: date-time
+             */
+            selected_at: string;
+            /** Version */
+            version: number;
         };
         /** PortfolioScenarioStatusInvalidationConditionV1 */
         PortfolioScenarioStatusInvalidationConditionV1: {
@@ -8095,6 +8168,136 @@ export interface operations {
             };
             /** @description Stable NEXUS error envelope. */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_scenario_selection_internal_v1_portfolio_scenarios__scenario_result_hash__selection_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scenario_result_hash: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioScenarioSelectionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put_scenario_selection_internal_v1_portfolio_scenarios__scenario_result_hash__selection_put: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                scenario_result_hash: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    choice: "accepted_for_analysis" | "rejected" | "watch";
+                    scenario_request: components["schemas"]["PortfolioScenarioRequest"];
+                    /** @constant */
+                    schema_version: "portfolio_scenario_selection_v1";
+                    version: number;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioScenarioSelectionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -7193,6 +7193,96 @@
         "title": "PortfolioScenarioResponse",
         "type": "object"
       },
+      "PortfolioScenarioSelectionEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PortfolioScenarioSelectionResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "PortfolioScenarioSelectionEnvelope",
+        "type": "object"
+      },
+      "PortfolioScenarioSelectionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "choice": {
+            "enum": [
+              "accepted_for_analysis",
+              "rejected",
+              "watch"
+            ],
+            "title": "Choice",
+            "type": "string"
+          },
+          "diagnostic_report_id": {
+            "format": "uuid",
+            "title": "Diagnostic Report Id",
+            "type": "string"
+          },
+          "execution_authorized": {
+            "const": false,
+            "title": "Execution Authorized",
+            "type": "boolean"
+          },
+          "execution_eligible": {
+            "const": false,
+            "title": "Execution Eligible",
+            "type": "boolean"
+          },
+          "execution_locked": {
+            "const": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "portfolio_snapshot_id": {
+            "format": "uuid",
+            "title": "Portfolio Snapshot Id",
+            "type": "string"
+          },
+          "scenario_result_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Scenario Result Hash",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "portfolio_scenario_selection_v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "selected_at": {
+            "format": "date-time",
+            "title": "Selected At",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "portfolio_snapshot_id",
+          "diagnostic_report_id",
+          "scenario_result_hash",
+          "choice",
+          "version",
+          "selected_at",
+          "execution_eligible",
+          "execution_locked",
+          "execution_authorized"
+        ],
+        "title": "PortfolioScenarioSelectionResponse",
+        "type": "object"
+      },
       "PortfolioScenarioStatusInvalidationConditionV1": {
         "additionalProperties": false,
         "properties": {
@@ -16151,6 +16241,205 @@
           }
         },
         "summary": "Evaluate Portfolio Scenario"
+      }
+    },
+    "/internal/v1/portfolio-scenarios/{scenario_result_hash}/selection": {
+      "get": {
+        "operationId": "get_scenario_selection_internal_v1_portfolio_scenarios__scenario_result_hash__selection_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scenario_result_hash",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Scenario Result Hash",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioScenarioSelectionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Scenario Selection"
+      },
+      "put": {
+        "description": "Persist a research-only user choice without changing execution state.",
+        "operationId": "put_scenario_selection_internal_v1_portfolio_scenarios__scenario_result_hash__selection_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scenario_result_hash",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Scenario Result Hash",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "If-Match",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "choice": {
+                    "enum": [
+                      "accepted_for_analysis",
+                      "rejected",
+                      "watch"
+                    ],
+                    "type": "string"
+                  },
+                  "scenario_request": {
+                    "$ref": "#/components/schemas/PortfolioScenarioRequest"
+                  },
+                  "schema_version": {
+                    "const": "portfolio_scenario_selection_v1",
+                    "type": "string"
+                  },
+                  "version": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "schema_version",
+                  "scenario_request",
+                  "choice",
+                  "version"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioScenarioSelectionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Put Scenario Selection"
       }
     },
     "/internal/v1/portfolios": {

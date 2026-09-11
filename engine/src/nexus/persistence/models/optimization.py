@@ -251,3 +251,43 @@ class ProposalComparisonRecord(ImmutableCreatedAt, Base):
     requires_fx: Mapped[bool] = mapped_column(Boolean, default=False)
     non_executable: Mapped[bool] = mapped_column(Boolean, default=True)
     cost_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class PortfolioScenarioSelectionRecord(ImmutableCreatedAt, Base):
+    """The user's current, non-executable choice for one frozen scenario result."""
+
+    __tablename__ = "portfolio_scenario_selections"
+    __table_args__ = (
+        UniqueConstraint(
+            "actor_id", "scenario_result_hash", name="uq_scenario_selections_actor_result"
+        ),
+        UniqueConstraint(
+            "selection_claim_id", name="uq_scenario_selections_selection_claim"
+        ),
+        ForeignKeyConstraint(
+            ["diagnostic_report_id", "portfolio_snapshot_id"],
+            [
+                "portfolio_diagnostic_reports.id",
+                "portfolio_diagnostic_reports.portfolio_snapshot_id",
+            ],
+            name="fk_scenario_selections_diagnostic_snapshot",
+        ),
+        CheckConstraint(
+            "choice IN ('accepted_for_analysis','rejected','watch')",
+            name="choice_allowed",
+        ),
+        CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint(
+            "scenario_result_hash ~ '^[0-9a-f]{64}$'", name="result_hash_canonical"
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    actor_id: Mapped[str] = mapped_column(String(255))
+    scenario_claim_id: Mapped[UUID] = mapped_column(ForeignKey("idempotency_records.id"))
+    selection_claim_id: Mapped[UUID] = mapped_column(ForeignKey("idempotency_records.id"))
+    portfolio_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_snapshots.id"))
+    diagnostic_report_id: Mapped[UUID]
+    scenario_result_hash: Mapped[str] = mapped_column(String(64))
+    choice: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer)
+    selected_at: Mapped[datetime] = mapped_column(UTCDateTime())

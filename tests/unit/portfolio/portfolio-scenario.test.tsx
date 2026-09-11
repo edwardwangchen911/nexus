@@ -104,7 +104,8 @@ it("posts intent and constraints without client-authored weights, then compares 
 
   await screen.findByRole("heading", { name: "有所改善，尚未达到阈值" });
   expect(await screen.findByRole("button", { name: "让 Agent 解读" })).toBeEnabled();
-  expect(send).toHaveBeenCalledTimes(2);
+  expect(send).toHaveBeenCalledTimes(3);
+  expect(send.mock.calls.filter((call) => call[1]?.method === "PUT")).toHaveLength(0);
   expect(send.mock.calls[0][0]).toBe("/api/v1/portfolio-scenarios/evaluate");
   const init = send.mock.calls[0][1] as RequestInit;
   const body = JSON.parse(String(init.body));
@@ -146,6 +147,91 @@ it("posts intent and constraints without client-authored weights, then compares 
 
   fireEvent.change(screen.getByRole("spinbutton", { name: "最低现金占比" }), { target: { value: "0.2" } });
   expect(screen.queryByRole("heading", { name: "有所改善，尚未达到阈值" })).not.toBeInTheDocument();
+});
+
+it("persists a research-only choice and keeps execution locked", async () => {
+  const selectedAt = "2026-09-11T08:00:00Z";
+  const send = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === "/api/v1/portfolio-scenarios/evaluate") {
+      return Response.json({ data: scenario() });
+    }
+    if (path.includes(`/portfolio-scenarios/${"b".repeat(64)}/selection`)) {
+      if (init?.method === "PUT") {
+        return Response.json({ data: {
+          schema_version: "portfolio_scenario_selection_v1",
+          portfolio_snapshot_id: snapshotId,
+          diagnostic_report_id: reportId,
+          scenario_result_hash: "b".repeat(64),
+          choice: "accepted_for_analysis",
+          version: 1,
+          selected_at: selectedAt,
+          execution_eligible: false,
+          execution_locked: true,
+          execution_authorized: false,
+        } });
+      }
+      return new Response(null, { status: 404 });
+    }
+    return new Response(null, { status: 404 });
+  });
+  vi.stubGlobal("fetch", send);
+  render(<PortfolioScenario snapshot={snapshot} report={report()} stale={false} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "生成调整情景" }));
+  await waitFor(() => expect(
+    screen.getByRole("button", { name: "选择为研究候选" }),
+  ).toBeEnabled());
+  expect(screen.getByRole("button", { name: "拒绝这个候选" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "继续观察当前组合" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "选择为研究候选" }));
+
+  expect(await screen.findByText("已选择为研究候选；不会启动 Shadow 或交易。")).toBeVisible();
+  const put = send.mock.calls.find((call) => call[1]?.method === "PUT");
+  expect(put?.[0]).toBe(`/api/v1/portfolio-scenarios/${"b".repeat(64)}/selection`);
+  expect(put?.[1]?.headers).toEqual({
+    "content-type": "application/json",
+    "idempotency-key": expect.stringMatching(
+      /^scenario-selection-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    ),
+    "if-match": '"0"',
+  });
+  expect(JSON.parse(String(put?.[1]?.body))).toEqual({
+    schema_version: "portfolio_scenario_selection_v1",
+    scenario_request: expect.objectContaining({
+      portfolio_snapshot_id: snapshotId,
+      diagnostic_report_id: reportId,
+    }),
+    choice: "accepted_for_analysis",
+    version: 0,
+  });
+  expect(screen.getAllByText(/交易保持锁定/).length).toBeGreaterThanOrEqual(2);
+});
+
+it("restores the saved choice for the exact generated candidate", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path === "/api/v1/portfolio-scenarios/evaluate") {
+      return Response.json({ data: scenario() });
+    }
+    return Response.json({ data: {
+      schema_version: "portfolio_scenario_selection_v1",
+      portfolio_snapshot_id: snapshotId,
+      diagnostic_report_id: reportId,
+      scenario_result_hash: "b".repeat(64),
+      choice: "watch",
+      version: 2,
+      selected_at: "2026-09-11T08:00:00Z",
+      execution_eligible: false,
+      execution_locked: true,
+      execution_authorized: false,
+    } });
+  }));
+  render(<PortfolioScenario snapshot={snapshot} report={report()} stale={false} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "生成调整情景" }));
+
+  expect(await screen.findByText("已选择继续观察当前组合；不会自动刷新或运行研究。")).toBeVisible();
 });
 
 it("labels a spread bundle without claiming regulatory pass-through evidence", async () => {

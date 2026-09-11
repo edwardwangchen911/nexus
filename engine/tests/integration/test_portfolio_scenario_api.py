@@ -21,10 +21,13 @@ from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticReportRecord,
 )
 from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQuote
-from nexus.persistence.models.optimization import OptimizationProposalGroupRecord
+from nexus.persistence.models.optimization import (
+    OptimizationProposalGroupRecord,
+    PortfolioScenarioSelectionRecord,
+)
 from nexus.persistence.models.paper import PaperFillRecord, PaperOrderRecord
 from nexus.persistence.models.portfolio import PositionSnapshot
-from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord
+from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, Job, OutboxEvent
 from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select, text
@@ -524,6 +527,130 @@ async def test_scenario_evaluation_returns_one_ephemeral_locked_candidate(
 
 
 @pytest.mark.asyncio
+async def test_user_can_persist_and_restore_a_locked_scenario_selection(
+    migrated_database_url: str,
+) -> None:
+    report_id = await _seed_scenario_authority(migrated_database_url)
+    scenario_body = _payload(report_id)
+    scenario_path = "/internal/v1/portfolio-scenarios/evaluate"
+    scenario_headers = headers("POST", scenario_path, scenario_body)
+    scenario_headers["Idempotency-Key"] = "scenario-selection-source-1"
+    store = ScenarioStore()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(migrated_database_url, scenario_evidence_store=store)
+        ),
+        base_url="http://testserver",
+    ) as client:
+        scenario = await client.post(
+            scenario_path,
+            content=scenario_body,
+            headers=scenario_headers,
+        )
+        result_hash = scenario.json()["data"]["result_hash"]
+        selection_path = f"/internal/v1/portfolio-scenarios/{result_hash}/selection"
+        selection_body = json.dumps(
+            {
+                "schema_version": "portfolio_scenario_selection_v1",
+                "scenario_request": json.loads(scenario_body),
+                "choice": "accepted_for_analysis",
+                "version": 0,
+            },
+            separators=(",", ":"),
+        ).encode()
+        selection_headers = headers("PUT", selection_path, selection_body)
+        selection_headers["Idempotency-Key"] = "scenario-selection-1"
+        selection_headers["If-Match"] = '"0"'
+        selected = await client.put(
+            selection_path,
+            content=selection_body,
+            headers=selection_headers,
+        )
+        changed_body = json.dumps(
+            {
+                "schema_version": "portfolio_scenario_selection_v1",
+                "scenario_request": json.loads(scenario_body),
+                "choice": "watch",
+                "version": 1,
+            },
+            separators=(",", ":"),
+        ).encode()
+        changed_headers = headers("PUT", selection_path, changed_body)
+        changed_headers["Idempotency-Key"] = "scenario-selection-2"
+        changed_headers["If-Match"] = '"1"'
+        changed = await client.put(
+            selection_path,
+            content=changed_body,
+            headers=changed_headers,
+        )
+        replay_headers = headers("PUT", selection_path, selection_body)
+        replay_headers["Idempotency-Key"] = "scenario-selection-1"
+        replay_headers["If-Match"] = '"0"'
+        replayed = await client.put(
+            selection_path,
+            content=selection_body,
+            headers=replay_headers,
+        )
+        restored = await client.get(
+            selection_path,
+            headers=headers("GET", selection_path),
+        )
+        foreign = await client.get(
+            selection_path,
+            headers=headers("GET", selection_path, actor_id="another-local-user"),
+        )
+        stale_headers = headers("PUT", selection_path, changed_body)
+        stale_headers["Idempotency-Key"] = "scenario-selection-stale"
+        stale_headers["If-Match"] = '"1"'
+        stale = await client.put(
+            selection_path,
+            content=changed_body,
+            headers=stale_headers,
+        )
+
+    assert scenario.status_code == 200
+    assert selected.status_code == 200
+    assert selected.json()["data"] == {
+        "schema_version": "portfolio_scenario_selection_v1",
+        "portfolio_snapshot_id": str(SNAPSHOT_ID),
+        "diagnostic_report_id": str(report_id),
+        "scenario_result_hash": result_hash,
+        "choice": "accepted_for_analysis",
+        "version": 1,
+        "execution_eligible": False,
+        "execution_locked": True,
+        "execution_authorized": False,
+        "selected_at": selected.json()["data"]["selected_at"],
+    }
+    assert changed.status_code == 200
+    assert changed.json()["data"]["choice"] == "watch"
+    assert changed.json()["data"]["version"] == 2
+    assert replayed.status_code == 200
+    assert replayed.json()["data"] == selected.json()["data"]
+    assert restored.status_code == 200
+    assert restored.json()["data"] == changed.json()["data"]
+    assert foreign.status_code == 404
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "VERSION_CONFLICT"
+
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session:
+        assert await session.scalar(select(func.count(PortfolioScenarioSelectionRecord.id))) == 1
+        assert await session.scalar(select(func.count(OptimizationProposalGroupRecord.id))) == 0
+        assert await session.scalar(select(func.count(ShadowGroupRecord.id))) == 0
+        assert await session.scalar(select(func.count(PaperOrderRecord.id))) == 0
+        assert await session.scalar(select(func.count(PaperFillRecord.id))) == 0
+        assert await session.scalar(select(func.count(Job.id))) == 0
+        assert await session.scalar(select(func.count(OutboxEvent.id))) == 0
+        assert await session.scalar(
+            select(func.count(AuditEvent.id)).where(
+                AuditEvent.action == "portfolio_scenario_selection_changed"
+            )
+        ) == 2
+
+
+@pytest.mark.asyncio
 async def test_scenario_upgrade_replays_matching_v2_claim_without_v3_claim_or_quote_selection(
     migrated_database_url: str,
 ) -> None:
@@ -559,8 +686,30 @@ async def test_scenario_upgrade_replays_matching_v2_claim_without_v3_claim_or_qu
         base_url="http://testserver",
     ) as client:
         response = await client.post(path, content=body, headers=request_headers)
+        result_hash = response.json()["data"]["result_hash"]
+        selection_path = f"/internal/v1/portfolio-scenarios/{result_hash}/selection"
+        selection_body = json.dumps(
+            {
+                "schema_version": "portfolio_scenario_selection_v1",
+                "scenario_request": json.loads(body),
+                "choice": "accepted_for_analysis",
+                "version": 0,
+            },
+            separators=(",", ":"),
+        ).encode()
+        selection_headers = headers("PUT", selection_path, selection_body)
+        selection_headers["Idempotency-Key"] = "legacy-scenario-selection"
+        selection_headers["If-Match"] = '"0"'
+        selected = await client.put(
+            selection_path,
+            content=selection_body,
+            headers=selection_headers,
+        )
 
     assert response.status_code == 200, response.text
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["data"]["scenario_result_hash"] == result_hash
+    assert selected.json()["data"]["execution_locked"] is True
     assert response.json()["data"]["cost_breakdown"]["spread"] == {
         "status": "unknown",
         "value": None,

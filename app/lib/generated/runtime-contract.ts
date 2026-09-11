@@ -6299,6 +6299,79 @@ export const runtimeContractSchemas = {
     "title": "PortfolioScenarioResponse",
     "type": "object"
   },
+  "PortfolioScenarioSelectionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "choice": {
+        "enum": [
+          "accepted_for_analysis",
+          "rejected",
+          "watch"
+        ],
+        "title": "Choice",
+        "type": "string"
+      },
+      "diagnostic_report_id": {
+        "format": "uuid",
+        "title": "Diagnostic Report Id",
+        "type": "string"
+      },
+      "execution_authorized": {
+        "const": false,
+        "title": "Execution Authorized",
+        "type": "boolean"
+      },
+      "execution_eligible": {
+        "const": false,
+        "title": "Execution Eligible",
+        "type": "boolean"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "portfolio_snapshot_id": {
+        "format": "uuid",
+        "title": "Portfolio Snapshot Id",
+        "type": "string"
+      },
+      "scenario_result_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Scenario Result Hash",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "portfolio_scenario_selection_v1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "selected_at": {
+        "format": "date-time",
+        "title": "Selected At",
+        "type": "string"
+      },
+      "version": {
+        "minimum": 1,
+        "title": "Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "schema_version",
+      "portfolio_snapshot_id",
+      "diagnostic_report_id",
+      "scenario_result_hash",
+      "choice",
+      "version",
+      "selected_at",
+      "execution_eligible",
+      "execution_locked",
+      "execution_authorized"
+    ],
+    "title": "PortfolioScenarioSelectionResponse",
+    "type": "object"
+  },
   "PortfolioScenarioStatusInvalidationConditionV1": {
     "additionalProperties": false,
     "properties": {
@@ -12059,6 +12132,8 @@ export const optimizationLifecycleRuntimeSchema = runtimeContractSchemas.Optimiz
 export const optimizationProposalGroupRuntimeSchema = runtimeContractSchemas.OptimizationProposalGroupResponse;
 
 export const portfolioScenarioRuntimeSchema = runtimeContractSchemas.PortfolioScenarioResponse;
+
+export const portfolioScenarioSelectionRuntimeSchema = runtimeContractSchemas.PortfolioScenarioSelectionResponse;
 
 export const portfolioDecisionRunRuntimeSchema = runtimeContractSchemas.PortfolioDecisionRunResponse;
 

@@ -109,6 +109,58 @@ export function requirePortfolioScenarioRequest(value: Record<string, unknown>):
   }
 }
 
+export function requirePortfolioScenarioSelection(
+  request: Request,
+  value: Record<string, unknown>,
+): { portfolioSnapshotId: string; diagnosticReportId: string; version: number } {
+  requireExactKeys(value, ["schema_version", "scenario_request", "choice", "version"]);
+  if (value.schema_version !== "portfolio_scenario_selection_v1"
+    || !isPlain(value.scenario_request)
+    || !["accepted_for_analysis", "rejected", "watch"].includes(String(value.choice))
+    || !Number.isSafeInteger(value.version) || (value.version as number) < 0) {
+    throw invalid("The portfolio scenario selection is invalid.");
+  }
+  requirePortfolioScenarioRequest(value.scenario_request);
+  if (request.headers.get("if-match") !== `"${value.version}"`) {
+    throw invalid("If-Match must match the scenario selection version.");
+  }
+  return {
+    portfolioSnapshotId: value.scenario_request.portfolio_snapshot_id as string,
+    diagnosticReportId: value.scenario_request.diagnostic_report_id as string,
+    version: value.version as number,
+  };
+}
+
+export function scenarioResultHash(request: Request): string {
+  const match = /^\/api\/v1\/portfolio-scenarios\/([0-9a-f]{64})\/selection$/.exec(
+    new URL(request.url).pathname,
+  );
+  if (!match) throw invalid("The portfolio scenario result is invalid.");
+  return match[1];
+}
+
+export function requirePortfolioScenarioSelectionResponse(
+  envelope: unknown,
+  expected: { resultHash: string; portfolioSnapshotId?: string; diagnosticReportId?: string },
+): void {
+  if (!isPlain(envelope) || !isPlain(envelope.data)) throw invalidResponse();
+  const data = envelope.data;
+  if (data.schema_version !== "portfolio_scenario_selection_v1"
+    || data.scenario_result_hash !== expected.resultHash
+    || expected.portfolioSnapshotId !== undefined
+      && data.portfolio_snapshot_id !== expected.portfolioSnapshotId
+    || expected.diagnosticReportId !== undefined
+      && data.diagnostic_report_id !== expected.diagnosticReportId
+    || !["accepted_for_analysis", "rejected", "watch"].includes(String(data.choice))
+    || !Number.isSafeInteger(data.version) || (data.version as number) < 1
+    || typeof data.selected_at !== "string" || !isUtcIso(data.selected_at)
+    || data.execution_eligible !== false
+    || data.execution_locked !== true
+    || data.execution_authorized !== false) {
+    throw invalidResponse();
+  }
+}
+
 export function proposalGroupId(request: Request, action?: "shadow" | "reject"): string {
   const suffix = action ? `/${action}` : "";
   const match = new RegExp(`^/api/v1/optimization-proposals/([^/]+)${suffix}$`).exec(new URL(request.url).pathname);
@@ -125,6 +177,10 @@ function requireExactKeys(value: Record<string, unknown>, keys: string[]): void 
 
 function invalid(message: string): NexusBffError {
   return new NexusBffError(400, "VALIDATION_ERROR", message);
+}
+
+function invalidResponse(): NexusBffError {
+  return new NexusBffError(500, "INTERNAL_ERROR", "The request could not be completed.");
 }
 
 function isPlain(value: unknown): value is Record<string, unknown> {

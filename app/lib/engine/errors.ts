@@ -21,6 +21,7 @@ import {
   portfolioDiagnosticRuntimeSchema,
   portfolioDecisionRunRuntimeSchema,
   portfolioScenarioRuntimeSchema,
+  portfolioScenarioSelectionRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
   readinessRuntimeSchema,
   researchAdmissionRuntimeSchema,
@@ -363,6 +364,18 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       && data.execution_eligible === false
       && data.valuation_scope === "currency:USD"
       && scenarioSemanticsValid(data)
+      ? data
+      : INVALID_DATA;
+  }
+  const scenarioSelection = /^\/internal\/v1\/portfolio-scenarios\/([0-9a-f]{64})\/selection$/.exec(pathname);
+  if (scenarioSelection) {
+    return ["GET", "PUT"].includes(requestMethod?.toUpperCase() ?? "")
+      && matchesRuntimeSchema(data, portfolioScenarioSelectionRuntimeSchema)
+      && isPlain(data)
+      && data.scenario_result_hash === scenarioSelection[1]
+      && data.execution_eligible === false
+      && data.execution_locked === true
+      && data.execution_authorized === false
       ? data
       : INVALID_DATA;
   }

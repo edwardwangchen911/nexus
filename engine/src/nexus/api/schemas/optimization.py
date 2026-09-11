@@ -618,3 +618,28 @@ class PortfolioScenarioResponse(_StrictOptimizationSchema):
 class PortfolioScenarioEnvelope(_StrictOptimizationSchema):
     data: PortfolioScenarioResponse
     meta: SuccessMetaResponse
+
+
+class PortfolioScenarioSelectionRequest(_StrictOptimizationSchema):
+    schema_version: Literal["portfolio_scenario_selection_v1"]
+    scenario_request: PortfolioScenarioRequest
+    choice: Literal["accepted_for_analysis", "rejected", "watch"]
+    version: int = Field(ge=0)
+
+
+class PortfolioScenarioSelectionResponse(_StrictOptimizationSchema):
+    schema_version: Literal["portfolio_scenario_selection_v1"]
+    portfolio_snapshot_id: UUID
+    diagnostic_report_id: UUID
+    scenario_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    choice: Literal["accepted_for_analysis", "rejected", "watch"]
+    version: int = Field(ge=1)
+    selected_at: datetime
+    execution_eligible: Literal[False]
+    execution_locked: Literal[True]
+    execution_authorized: Literal[False]
+
+
+class PortfolioScenarioSelectionEnvelope(_StrictOptimizationSchema):
+    data: PortfolioScenarioSelectionResponse
+    meta: SuccessMetaResponse
