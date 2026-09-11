@@ -128,12 +128,18 @@ _EXPECTED_GATEWAY_OPERATIONS = frozenset(
 )
 _EXPECTED_BROKER_OPERATIONS = frozenset(
     {
+        "fosun_capabilities",
+        "fosun_sync_accounts",
         "fosun_sync_portfolio",
+        "fosun_sync_portfolio:cash",
+        "fosun_sync_portfolio:holdings",
         "fosun_list_orders",
         "fosun_list_cash_flows",
     }
 )
-_EXPECTED_MARKET_OPERATIONS = frozenset({"fosun_get_quotes", "fosun_get_bars"})
+_EXPECTED_MARKET_OPERATIONS = frozenset(
+    {"fosun_capabilities", "fosun_get_quotes", "fosun_get_bars"}
+)
 _EXPECTED_GATEWAY_ROUTES = frozenset(
     (f"/{operation}", operation, ("POST",))
     for operation in _EXPECTED_GATEWAY_OPERATIONS
@@ -155,16 +161,16 @@ _EXPECTED_SDK_READ_METHODS = frozenset(
 # and Provider-call surface.  Any byte-level change must update this reviewed
 # contract in the same diff instead of relying on an incomplete AST blacklist.
 _EXPECTED_GATEWAY_SOURCE_SHA256 = {
-    "policy/operations.py": "35c9786b7dfd7a53b5eb7d2f690e4149cc5a1a6925c5b24b9a727cbb69b0b85e",
-    "routes/read_only.py": "587e96dc12a06a8f393f071f4761868719130e167feb70d7fd35f0b2d69d5b44",
-    "adapter/sdk.py": "d64817f81a73480ad29cd7b0fa6e32cbd3cefcdffdd9b689055fe751a0f2808e",
-    "main.py": "afa5c173c7f3f6de27e36634725cf3ea65b6b22372156ba1bbc2c1e37ed277b0",
+    "policy/operations.py": "0c91bb7741d51103e6c109f06ae11433b0f80f8ff4eb8e8ed49099b1325e77be",
+    "routes/read_only.py": "b989b806f6fcb29cf7cb6cc0f686f2aef89eb933759af3b9fda1bce0d471e995",
+    "adapter/sdk.py": "c55898547c29e4e0a4489c17b87b4f10d9c3584d23f99c2660b221c147fa05b7",
+    "main.py": "dcab8e8167b7a866b1fe5b6bd1d36c4c69f75723c338bec68d5052cbc6c8ae65",
 }
 _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256 = (
-    "6219a8981cacce77ca340932329610c311adf41e9ff2b974cfc5971c7e63a14a"
+    "91d50039df5d0fef73fd9edb9944e2dfc28bbce80491ff43dd2787d5ae7ebfc9"
 )
 _EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256 = (
-    "45219579669dcad16afa35eae91913c180dd295141fae8679b15cc0c39468026"
+    "af648cc96932885d58dca6acb6b5d18f5f0da21ad35e9e37db3eda9b9177c6ea"
 )
 _EXPECTED_FOSUN_GATEWAY_PROJECT = {
     "name": "nexus-fosun-gateway",
@@ -179,6 +185,7 @@ _EXPECTED_FOSUN_GATEWAY_PROJECT = {
         "limits>=5.4,<6",
         "pydantic-settings>=2.10,<3",
         "uvicorn>=0.35,<1",
+        "websockets==17.1",
     ],
     "scripts": {
         "nexus-fosun-gateway": "nexus_fosun_gateway.main:run",
@@ -188,6 +195,7 @@ _EXPECTED_FOSUN_GATEWAY_PROJECT = {
         "nexus-fosun-capture-read-only-probe": (
             "nexus_fosun_gateway.probe_capture:run"
         ),
+        "nexus-fosun-push-probe": "nexus_fosun_gateway.push_probe_cli:run",
         "nexus-fosun-probe-publisher-key-preflight": (
             "nexus_fosun_gateway.probe_capture:key_preflight_run"
         ),
@@ -219,13 +227,13 @@ _EXPECTED_FOSUN_GATEWAY_TOOL = {
     },
 }
 _EXPECTED_COMPOSE_SHA256 = (
-    "9a4a462f8eb0588c399427908f88144bc9213023f18764c5a808b00ce698420c"
+    "876598b213f5dea23371ee885617808cc27d818d4137ae2c3b9b845e46797853"
 )
 _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256 = (
     "f22c88598929e7cab2282fab240b0d19791e12a7af4c6ca051df99d7eda9d6f1"
 )
 _EXPECTED_FOSUN_GATEWAY_DOCKERFILE_SHA256 = (
-    "a072e4e4898ea191b807be3f8fdcd7fa4c6c08b4b4e9e4c3ded61897dd37174b"
+    "0f04089c2c5285b8e46af2d76a8ff0f9a5991fca94a7cec96b2506dc06efaf1f"
 )
 _REAL_E2E_CONFIG_PATH = "playwright.real.config.ts"
 _REAL_E2E_TEST_DIRECTORY = "tests/e2e-real"

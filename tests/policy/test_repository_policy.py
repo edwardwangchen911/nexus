@@ -352,11 +352,19 @@ def test_gateway_read_surface_is_an_exact_operation_route_and_sdk_allowlist(
         "fosun_get_bars",
     )
     broker_operations = {
+        "fosun_capabilities",
+        "fosun_sync_accounts",
         "fosun_sync_portfolio",
+        "fosun_sync_portfolio:cash",
+        "fosun_sync_portfolio:holdings",
         "fosun_list_orders",
         "fosun_list_cash_flows",
     }
-    market_operations = {"fosun_get_quotes", "fosun_get_bars"}
+    market_operations = {
+        "fosun_capabilities",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    }
     read_line = "READ_ONLY_OPERATIONS = frozenset(" + repr(set(operations)) + ")"
     operation_source = (
         "GatewayOperation = Literal["
