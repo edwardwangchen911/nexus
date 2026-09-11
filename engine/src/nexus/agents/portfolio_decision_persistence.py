@@ -114,7 +114,7 @@ def build_portfolio_evidence_manifest(
     return manifest, canonical_portfolio_evidence_manifest_hash(manifest)
 
 
-async def select_valid_scenario_claim(
+async def _select_scenario_claim(
     session: AsyncSession,
     store: MarketObjectStore,
     *,
@@ -155,6 +155,11 @@ async def select_valid_scenario_claim(
             continue
         return claim, manifest
     raise ValueError("portfolio scenario result authority changed")
+
+
+# Public reuse point for scenario selection while preserving the established
+# private patch point used by portfolio-decision admission tests.
+select_valid_scenario_claim = _select_scenario_claim
 
 
 async def admit_portfolio_decision_run(
@@ -264,7 +269,7 @@ async def admit_portfolio_decision_run(
         diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
         request_hash=scenario_request_hash,
     )
-    scenario_claim, scenario_manifest = await select_valid_scenario_claim(
+    scenario_claim, scenario_manifest = await _select_scenario_claim(
         session,
         scenario_evidence_store,
         actor_id=actor_id,
