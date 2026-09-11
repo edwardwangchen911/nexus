@@ -10,6 +10,7 @@ from nexus_fosun_gateway.domain import (
     BarItem,
     CashFlowItem,
     CashItem,
+    FosunSecurityClassification,
     GatewayBarPage,
     GatewayError,
     GatewayItem,
@@ -217,6 +218,9 @@ def _position(item: Mapping[str, object], account_id: str) -> PositionItem:
         diluted_cost=Decimal(str(diluted_cost)) if diluted_cost is not None else None,
         current_price=Decimal(str(current_price)) if current_price is not None else None,
         provider_as_of=None,
+        provider_name=_optional_str(item, "name"),
+        provider_symbol=_optional_str(item, "symbol"),
+        provider_product_type=cast("int | None", item.get("productType")),
     )
 
 
@@ -298,8 +302,52 @@ def _quotes(
             price = None
         else:
             price = _scaled_optional(quote.get("price"), quote.get("power"))
-        items.append(QuoteItem(instrument_code=code, price=price, as_of=received_at))
+        items.append(
+            QuoteItem(
+                instrument_code=code,
+                price=price,
+                as_of=received_at,
+                provider_name=_optional_str(quote, "name") if quote is not None else None,
+                provider_classification=(
+                    _security_classification(quote) if quote is not None else None
+                ),
+                provider_reported_delay=(
+                    cast("bool | None", quote.get("delay")) if quote is not None else None
+                ),
+            )
+        )
     return tuple(items)
+
+
+def _security_classification(
+    item: Mapping[str, object],
+) -> FosunSecurityClassification | None:
+    levels = (item.get("first"), item.get("second"), item.get("third"))
+    if levels == (None, None, None):
+        return None
+    return FosunSecurityClassification(
+        level_1=cast("int | None", levels[0]),
+        level_2=cast("int | None", levels[1]),
+        level_3=cast("int | None", levels[2]),
+        equity_profile_fields_complete=_all_present(
+            item,
+            "mktCap",
+            "floatMktCap",
+            "totalShares",
+            "floatShares",
+            "pb",
+            "peStatic",
+            "peTTM",
+        ),
+        net_asset_profile_fields_complete=_all_present(item, "nav", "assetSize", "issueVol"),
+        fund_asset_type_chs=_optional_str(item, "fundAssetTypeChs", allow_empty=True),
+        fund_asset_type_cht=_optional_str(item, "fundAssetTypeCht", allow_empty=True),
+        fund_asset_type_eng=_optional_str(item, "fundAssetTypeEng", allow_empty=True),
+    )
+
+
+def _all_present(item: Mapping[str, object], *names: str) -> bool:
+    return all(name in item and item[name] is not None for name in names)
 
 
 def _bars(
@@ -494,6 +542,17 @@ def _required_value(item: Mapping[str, object], name: str) -> object:
 def _required_str(item: Mapping[str, object], name: str) -> str:
     value = _required_value(item, name)
     if not isinstance(value, str) or not value:
+        raise ValueError
+    return value
+
+
+def _optional_str(
+    item: Mapping[str, object], name: str, *, allow_empty: bool = False
+) -> str | None:
+    value = item.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or (not allow_empty and not value):
         raise ValueError
     return value
 

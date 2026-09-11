@@ -9,10 +9,17 @@ from uuid import UUID
 import httpx
 import pytest
 from nexus.providers.base import BarsRequest, InstrumentId
-from nexus.providers.market.fosun import FosunMarketDataProvider, FosunSnapshotProvider
+from nexus.providers.market.fosun import (
+    FosunMarketDataProvider,
+    FosunSnapshotProvider,
+    decode_fosun_snapshot_evidence,
+)
 from nexus.providers.market.fosun_gateway import (
     FosunMarketGatewayClient,
     FosunMarketGatewayIdentity,
+    FosunSecurityClassification,
+    classify_fosun_security_family,
+    parse_quote_page,
 )
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
@@ -29,6 +36,37 @@ class _Resolver:
     async def resolve(self, instrument_id: InstrumentId, as_of: date) -> str:
         del instrument_id, as_of
         return "AAPL"
+
+
+@pytest.mark.parametrize(
+    ("levels", "equity_complete", "net_asset_complete", "expected"),
+    [
+        ((1, 101, 10105), True, False, "company_equity_like"),
+        ((2, 202, 20202), False, True, "fund_or_structured_like"),
+        ((2, 202, 20202), True, True, "unknown"),
+        ((2, 202, 20202), False, False, "unknown"),
+        ((9, 9, 9), False, True, "unknown"),
+        ((2, None, None), False, True, "unknown"),
+    ],
+)
+def test_fosun_security_family_classifier_fails_closed(
+    levels: tuple[int | None, int | None, int | None],
+    equity_complete: bool,
+    net_asset_complete: bool,
+    expected: str,
+) -> None:
+    evidence = FosunSecurityClassification(
+        level_1=levels[0],
+        level_2=levels[1],
+        level_3=levels[2],
+        equity_profile_fields_complete=equity_complete,
+        net_asset_profile_fields_complete=net_asset_complete,
+        fund_asset_type_chs="",
+        fund_asset_type_cht="",
+        fund_asset_type_eng="",
+    )
+
+    assert classify_fosun_security_family(evidence) == expected
 
 
 class _QuoteTransport:
@@ -48,6 +86,15 @@ class _QuoteTransport:
                     instrument_code="usAAPL",
                     price=Decimal("227.1600"),
                     as_of=received_at,
+                    provider_name="Apple Inc.",
+                    provider_classification={
+                        "level_1": 1,
+                        "level_2": 101,
+                        "level_3": 10105,
+                        "equity_profile_fields_complete": True,
+                        "net_asset_profile_fields_complete": False,
+                    },
+                    provider_reported_delay=True,
                 ),
             ),
             source_request_id="synthetic-provider-request",
@@ -191,3 +238,16 @@ async def test_engine_snapshot_round_trips_through_signed_gateway_without_socket
     assert batch.snapshots[0].trade.price == Decimal("227.1600")
     assert batch.snapshots[0].quote is None
     assert batch.provenance.source == "fosun"
+    responses = decode_fosun_snapshot_evidence(
+        envelope.raw_payload,
+        expected_codes=("usAAPL",),
+        include_minute_bars=False,
+        bucket_start=bucket_start,
+    )
+    quote_page = parse_quote_page(responses[0][1], expected_codes=("usAAPL",))
+    assert quote_page.items[0].provider_name == "Apple Inc."
+    assert quote_page.items[0].provider_reported_delay is True
+    assert (
+        classify_fosun_security_family(quote_page.items[0].provider_classification)
+        == "company_equity_like"
+    )

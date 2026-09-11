@@ -71,6 +71,13 @@ class PositionItem(GatewayModel):
     diluted_cost: Decimal | None = None
     current_price: Decimal | None = None
     provider_as_of: datetime | None = None
+    provider_name: (
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)] | None
+    ) = None
+    provider_symbol: (
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=128)] | None
+    ) = None
+    provider_product_type: Annotated[int, Field(strict=True)] | None = None
 
     @field_validator("provider_as_of")
     @classmethod
@@ -122,11 +129,35 @@ class CashFlowItem(GatewayModel):
         return self
 
 
+class FosunSecurityClassification(GatewayModel):
+    """Provider classification evidence without a canonical asset-type claim."""
+
+    level_1: Annotated[int, Field(strict=True)] | None = None
+    level_2: Annotated[int, Field(strict=True)] | None = None
+    level_3: Annotated[int, Field(strict=True)] | None = None
+    equity_profile_fields_complete: StrictBool
+    net_asset_profile_fields_complete: StrictBool
+    fund_asset_type_chs: Annotated[str, StringConstraints(strict=True, max_length=128)] | None = (
+        None
+    )
+    fund_asset_type_cht: Annotated[str, StringConstraints(strict=True, max_length=128)] | None = (
+        None
+    )
+    fund_asset_type_eng: Annotated[str, StringConstraints(strict=True, max_length=128)] | None = (
+        None
+    )
+
+
 class QuoteItem(GatewayModel):
     kind: Literal["quote"] = "quote"
     instrument_code: str
     price: Decimal | None
     as_of: datetime
+    provider_name: (
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)] | None
+    ) = None
+    provider_classification: FosunSecurityClassification | None = None
+    provider_reported_delay: StrictBool | None = None
 
     @field_validator("as_of")
     @classmethod
@@ -164,6 +195,7 @@ GatewayItem = Annotated[
     | BarItem,
     Field(discriminator="kind"),
 ]
+
 
 class GatewayPage[ItemT: BaseModel](GatewayModel):
     items: tuple[ItemT, ...]

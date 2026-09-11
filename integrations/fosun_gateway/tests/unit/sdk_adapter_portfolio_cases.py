@@ -1,4 +1,5 @@
 """SDK adapter account composition and Provider pagination cases."""
+
 from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -18,6 +19,7 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Changing an SDK method or its typed arguments breaks the reviewed seam."""
+
     class FixedDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -76,6 +78,9 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     assert holdings.items[0].diluted_cost == Decimal("98.50")
     assert holdings.items[0].current_price == Decimal("123.45")
     assert holdings.items[0].provider_as_of is None
+    assert holdings.items[0].provider_name == "Apple Inc."
+    assert holdings.items[0].provider_symbol == "usAAPL"
+    assert holdings.items[0].provider_product_type == 6
     assert holdings.quality == "PARTIAL"
     assert orders.items[0].external_order_id == "synthetic-order-001"
     assert orders.items[0].submitted_at == datetime(2026, 8, 22, 4, 0, tzinfo=UTC)
@@ -139,6 +144,96 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     ]
 
 
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"productType": "6"},
+        {"productType": True},
+    ],
+)
+@pytest.mark.asyncio
+async def test_holdings_reject_malformed_provider_identity(
+    updates: dict[str, object],
+) -> None:
+    row = {
+        "marketCode": "us",
+        "stockCode": "AAPL",
+        "currency": "USD",
+        "quantity": "10",
+        "quantityAvail": "10",
+        "qtyOnHold": "0",
+        "symbol": "usAAPL",
+        "productType": 6,
+        **updates,
+    }
+    adapter = SdkFosunTransport(
+        SimpleNamespace(
+            portfolio=SimpleNamespace(
+                get_holdings=RecordingMethod(
+                    _raw(
+                        {"count": 1, "list": [row], "start": 0, "total": 1},
+                        "synthetic-malformed-holding",
+                    )
+                )
+            )
+        ),
+        rate_limiter=NoopRateLimiter(),
+    )
+
+    with pytest.raises(GatewayError) as error:
+        await adapter.execute(
+            "fosun_sync_portfolio",
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": None,
+                "limit": 100,
+            },
+        )
+
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_holdings_preserve_provider_symbol_conflict_without_failing_page() -> None:
+    row = {
+        "marketCode": "us",
+        "stockCode": "AAPL",
+        "symbol": "usMSFT",
+        "currency": "USD",
+        "quantity": "10",
+        "quantityAvail": "10",
+        "qtyOnHold": "0",
+        "productType": 6,
+    }
+    adapter = SdkFosunTransport(
+        SimpleNamespace(
+            portfolio=SimpleNamespace(
+                get_holdings=RecordingMethod(
+                    _raw(
+                        {"count": 1, "list": [row], "start": 0, "total": 1},
+                        "synthetic-conflicting-holding",
+                    )
+                )
+            )
+        ),
+        rate_limiter=NoopRateLimiter(),
+    )
+
+    page = await adapter.execute(
+        "fosun_sync_portfolio",
+        {
+            "account_id": "synthetic-account-001",
+            "read_kind": "holdings",
+            "cursor": None,
+            "limit": 100,
+        },
+    )
+
+    assert page.items[0].instrument_code == "usAAPL"
+    assert page.items[0].provider_symbol == "usMSFT"
+
+
 @pytest.mark.asyncio
 async def test_holdings_accepts_provider_count_as_requested_page_capacity() -> None:
     response = _raw(
@@ -180,6 +275,8 @@ async def test_holdings_accepts_provider_count_as_requested_page_capacity() -> N
     assert len(page.items) == 1
     assert page.has_more is False
     assert page.next_cursor is None
+
+
 @pytest.mark.asyncio
 async def test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request(
     client: SimpleNamespace,

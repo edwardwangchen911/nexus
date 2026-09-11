@@ -1,4 +1,5 @@
 """Shared SDK adapter fixtures and deterministic test doubles."""
+
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +69,9 @@ def client() -> SimpleNamespace:
                             {
                                 "marketCode": "us",
                                 "stockCode": "AAPL",
+                                "name": "Apple Inc.",
+                                "symbol": "usAAPL",
+                                "productType": 6,
                                 "currency": "USD",
                                 "quantity": "10",
                                 "quantityAvail": "10",
@@ -167,6 +171,7 @@ def client() -> SimpleNamespace:
             ),
         ),
     )
+
 
 class NoopRateLimiter:
     async def acquire(self) -> None:

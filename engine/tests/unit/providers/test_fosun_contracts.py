@@ -32,6 +32,38 @@ def test_position_contract_preserves_distinct_cost_and_price_fields() -> None:
             "diluted_cost": "99",
             "current_price": "120",
             "provider_as_of": None,
+            "provider_name": "Apple Inc.",
+            "provider_symbol": "usAAPL",
+            "provider_product_type": 6,
         }
     )
     assert (item.average_cost, item.diluted_cost, item.current_price) == (100, 99, 120)
+    assert (item.provider_name, item.provider_symbol, item.provider_product_type) == (
+        "Apple Inc.",
+        "usAAPL",
+        6,
+    )
+
+
+def test_position_contract_preserves_provider_symbol_conflict_for_review() -> None:
+    item = PositionItem.model_validate(
+        {
+            "kind": "position",
+            "external_account_id": "synthetic-account",
+            "instrument_code": "usAAPL",
+            "currency": "USD",
+            "quantity": "10",
+            "available_quantity": "9",
+            "frozen_quantity": "1",
+            "average_cost": None,
+            "diluted_cost": None,
+            "current_price": None,
+            "provider_as_of": None,
+            "provider_name": None,
+            "provider_symbol": "usMSFT",
+            "provider_product_type": 6,
+        }
+    )
+
+    assert item.instrument_code == "usAAPL"
+    assert item.provider_symbol == "usMSFT"

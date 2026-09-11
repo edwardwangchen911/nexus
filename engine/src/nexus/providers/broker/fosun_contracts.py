@@ -2,9 +2,9 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from nexus.providers.broker.base import CashFlowBusinessType, CashFlowProductCode
 
@@ -55,6 +55,13 @@ class PositionItem(GatewayFact):
     diluted_cost: Decimal | None
     current_price: Decimal | None
     provider_as_of: datetime | None
+    provider_name: (
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)] | None
+    ) = None
+    provider_symbol: (
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=128)] | None
+    ) = None
+    provider_product_type: Annotated[int, Field(strict=True)] | None = None
 
 
 class OrderItem(GatewayFact):

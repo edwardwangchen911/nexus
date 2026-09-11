@@ -19,6 +19,12 @@ from sdk_adapter_portfolio_cases import (
     test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request as test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request,  # noqa: E501
 )
 from sdk_adapter_portfolio_cases import (
+    test_holdings_preserve_provider_symbol_conflict_without_failing_page as test_holdings_preserve_provider_symbol_conflict_without_failing_page,  # noqa: E501
+)
+from sdk_adapter_portfolio_cases import (
+    test_holdings_reject_malformed_provider_identity as test_holdings_reject_malformed_provider_identity,  # noqa: E501
+)
+from sdk_adapter_portfolio_cases import (
     test_sdk_adapter_normalizes_provider_epoch_seconds_and_milliseconds_to_utc as test_sdk_adapter_normalizes_provider_epoch_seconds_and_milliseconds_to_utc,  # noqa: E501
 )
 from sdk_adapter_portfolio_cases import (

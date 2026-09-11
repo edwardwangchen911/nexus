@@ -110,6 +110,129 @@ def test_quotes_preserve_request_order_and_materialize_missing_price() -> None:
     assert page.quality == "PARTIAL"
 
 
+@pytest.mark.parametrize(
+    ("classification", "expected_equity", "expected_net_asset"),
+    [
+        (
+            {
+                "first": 1,
+                "second": 101,
+                "third": 10105,
+                "mktCap": 1,
+                "floatMktCap": 1,
+                "totalShares": 1,
+                "floatShares": 1,
+                "pb": 1,
+                "peStatic": 1,
+                "peTTM": 1,
+            },
+            True,
+            False,
+        ),
+        (
+            {
+                "first": 2,
+                "second": 202,
+                "third": 20202,
+                "nav": 1,
+                "assetSize": 1,
+                "issueVol": 1,
+                "fundAssetTypeChs": "",
+                "fundAssetTypeCht": "",
+                "fundAssetTypeEng": "",
+            },
+            False,
+            True,
+        ),
+    ],
+)
+def test_quotes_preserve_provider_classification_evidence(
+    classification: dict[str, object],
+    expected_equity: bool,
+    expected_net_asset: bool,
+) -> None:
+    row = {
+        "mkt": "us",
+        "rawSymbol": "AAPL",
+        "name": "Provider security name",
+        "price": 12345,
+        "power": 2,
+        "delay": True,
+        **classification,
+    }
+
+    page = normalize_provider_response(
+        "fosun_get_quotes",
+        _raw([row]),
+        received_at=RECEIVED_AT,
+        context={"codes": ("usAAPL",)},
+    )
+
+    quote = page.items[0]
+    assert quote.provider_name == "Provider security name"
+    assert quote.provider_reported_delay is True
+    assert quote.provider_classification is not None
+    assert (
+        quote.provider_classification.level_1,
+        quote.provider_classification.level_2,
+        quote.provider_classification.level_3,
+    ) == (classification["first"], classification["second"], classification["third"])
+    assert quote.provider_classification.equity_profile_fields_complete is expected_equity
+    assert quote.provider_classification.net_asset_profile_fields_complete is expected_net_asset
+
+
+def test_quotes_without_provider_classification_remain_compatible() -> None:
+    page = normalize_provider_response(
+        "fosun_get_quotes",
+        _raw([{"mkt": "us", "rawSymbol": "AAPL", "price": 12345, "power": 2}]),
+        received_at=RECEIVED_AT,
+        context={"codes": ("usAAPL",)},
+    )
+
+    assert page.items[0].provider_classification is None
+    assert page.items[0].provider_name is None
+    assert page.items[0].provider_reported_delay is None
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"first": 1, "second": 101, "third": "10105"},
+        {"first": True, "second": 101, "third": 10105},
+        {"first": 1, "second": 101, "third": 10105, "delay": 1},
+    ],
+)
+def test_quotes_reject_partial_or_malformed_provider_classification(
+    updates: dict[str, object],
+) -> None:
+    with pytest.raises(GatewayError) as error:
+        normalize_provider_response(
+            "fosun_get_quotes",
+            _raw([{"mkt": "us", "rawSymbol": "AAPL", "price": 12345, "power": 2, **updates}]),
+            received_at=RECEIVED_AT,
+            context={"codes": ("usAAPL",)},
+        )
+
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+
+def test_quotes_preserve_partial_classification_as_unknown_evidence() -> None:
+    page = normalize_provider_response(
+        "fosun_get_quotes",
+        _raw([{"mkt": "us", "rawSymbol": "AAPL", "first": 2}]),
+        received_at=RECEIVED_AT,
+        context={"codes": ("usAAPL",)},
+    )
+
+    classification = page.items[0].provider_classification
+    assert classification is not None
+    assert (classification.level_1, classification.level_2, classification.level_3) == (
+        2,
+        None,
+        None,
+    )
+
+
 def test_quotes_reject_unrequested_provider_code() -> None:
     with pytest.raises(GatewayError) as error:
         normalize_provider_response(

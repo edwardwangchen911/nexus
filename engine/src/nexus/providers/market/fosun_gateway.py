@@ -25,6 +25,7 @@ from pydantic import (
     Field,
     SecretStr,
     StrictBool,
+    StringConstraints,
     ValidationError,
     field_validator,
     model_validator,
@@ -102,6 +103,61 @@ class RawGatewayResponse(BaseModel):
         return self
 
 
+class FosunSecurityClassification(BaseModel):
+    """Provider evidence used for routing, never canonical instrument identity."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    level_1: Annotated[int, Field(strict=True)] | None = None
+    level_2: Annotated[int, Field(strict=True)] | None = None
+    level_3: Annotated[int, Field(strict=True)] | None = None
+    equity_profile_fields_complete: StrictBool
+    net_asset_profile_fields_complete: StrictBool
+    fund_asset_type_chs: Annotated[str, StringConstraints(strict=True, max_length=128)] | None = (
+        None
+    )
+    fund_asset_type_cht: Annotated[str, StringConstraints(strict=True, max_length=128)] | None = (
+        None
+    )
+    fund_asset_type_eng: Annotated[str, StringConstraints(strict=True, max_length=128)] | None = (
+        None
+    )
+
+    @field_validator("level_1", "level_2", "level_3", mode="before")
+    @classmethod
+    def _source_levels_are_integers(cls, value: object) -> object:
+        return _source_integer(value)
+
+
+FosunSecurityFamily = Literal[
+    "company_equity_like",
+    "fund_or_structured_like",
+    "unknown",
+]
+
+
+def classify_fosun_security_family(
+    evidence: FosunSecurityClassification | None,
+) -> FosunSecurityFamily:
+    """Classify provider routing evidence while failing closed on conflicts."""
+    if evidence is None:
+        return "unknown"
+    levels = (evidence.level_1, evidence.level_2, evidence.level_3)
+    if (
+        levels == (1, 101, 10105)
+        and evidence.equity_profile_fields_complete
+        and not evidence.net_asset_profile_fields_complete
+    ):
+        return "company_equity_like"
+    if (
+        levels == (2, 202, 20202)
+        and evidence.net_asset_profile_fields_complete
+        and not evidence.equity_profile_fields_complete
+    ):
+        return "fund_or_structured_like"
+    return "unknown"
+
+
 class FosunQuoteItem(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -109,6 +165,11 @@ class FosunQuoteItem(BaseModel):
     instrument_code: str
     price: Decimal | None
     as_of: datetime
+    provider_name: (
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)] | None
+    ) = None
+    provider_classification: FosunSecurityClassification | None = None
+    provider_reported_delay: StrictBool | None = None
 
     @field_validator("instrument_code")
     @classmethod
