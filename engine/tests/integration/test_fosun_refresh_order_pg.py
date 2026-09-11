@@ -3,7 +3,7 @@
 import hashlib
 import json
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -15,11 +15,162 @@ from nexus.domain.ids import new_uuid7
 from nexus.ops import fosun_local_refresh as module
 from nexus.persistence.models.data import DataArtifact, PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticItemRecord
-from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQuote
+from nexus.persistence.models.portfolio import BrokerSyncRun, PortfolioSnapshotRecord
 from nexus.persistence.session import session_factory
 from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 from nexus.providers.market.fosun_gateway import RawGatewayResponse
 from sqlalchemy import func, select
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broker_failure", (False, True))
+async def test_broker_only_refresh_uses_real_reconciliation_and_persistence_without_market(
+    migrated_database_url,
+    monkeypatch,
+    broker_failure,
+):
+    checked_at = datetime(2026, 9, 10, 20, tzinfo=UTC)
+    instrument_id = uuid4()
+    factory = session_factory(settings(migrated_database_url))
+    calls = Counter()
+    position = {
+        "kind": "position",
+        "external_account_id": "synthetic",
+        "instrument_code": "usALPHA",
+        "currency": "USD",
+        "quantity": "1",
+        "available_quantity": "1",
+        "frozen_quantity": "0",
+        "average_cost": "100",
+        "diluted_cost": None,
+        "current_price": "100",
+        "provider_as_of": None,
+    }
+
+    def page(items):
+        return GatewayResponsePage(
+            items=tuple(items),
+            source_request_id=str(uuid4()),
+            has_more=False,
+            next_cursor=None,
+            as_of=datetime.now(UTC),
+            quality="PASS",
+        )
+
+    class Broker:
+        async def read_accounts(self):
+            calls["accounts"] += 1
+            return page(
+                [
+                    {
+                        "kind": "account",
+                        "external_account_id": "synthetic",
+                        "status": "ACTIVE",
+                        "base_currency": "USD",
+                    }
+                ]
+            )
+
+        async def read_holdings(self, *_args, **_kwargs):
+            calls["holdings"] += 1
+            return page([position])
+
+        async def read_cash(self, *_args, **_kwargs):
+            calls["cash"] += 1
+            if broker_failure:
+                raise RuntimeError("synthetic broker failure")
+            return page(
+                [
+                    {
+                        "kind": "cash",
+                        "external_account_id": "synthetic",
+                        "currency": "USD",
+                        "cash_balance": "1000",
+                        "available_cash": "1000",
+                        "provider_as_of": None,
+                    }
+                ]
+            )
+
+        async def read_orders(self, *_args, **_kwargs):
+            calls["orders"] += 1
+            return page([])
+
+        async def read_cash_flows(self, *_args, **kwargs):
+            calls["cash_flows"] += 1
+            assert kwargs["date_to"] == date(2026, 9, 11)
+            return page([])
+
+        async def aclose(self):
+            return None
+
+    class Store:
+        async def read_normalized(self, _uri):
+            raise OSError("synthetic evidence unavailable")
+
+    async with factory() as session, session.begin():
+        session.add(
+            Instrument(
+                id=instrument_id,
+                asset_type="equity",
+                exchange="XNYS",
+                currency="USD",
+                tick_size=None,
+                risk_bucket="EQUITY",
+            )
+        )
+        session.add(
+            InstrumentAlias(
+                instrument_id=instrument_id,
+                symbol="ALPHA",
+                alias_type="ticker",
+                valid_from=date(2026, 1, 1),
+                valid_to=None,
+            )
+        )
+
+    def market_must_not_be_constructed(*_args, **_kwargs):
+        raise AssertionError("broker-only refresh constructed the market gateway")
+
+    monkeypatch.setattr(module, "_broker_settings", lambda _: None)
+    monkeypatch.setattr(module, "FosunGatewayClient", lambda _: Broker())
+    monkeypatch.setattr(module, "FosunMarketGatewayClient", market_must_not_be_constructed)
+    monkeypatch.setattr(module, "S3ProviderEvidenceStore", lambda _: Store())
+    configured = SimpleNamespace(database_url=migrated_database_url)
+
+    try:
+        if broker_failure:
+            with pytest.raises(RuntimeError, match="synthetic broker failure"):
+                await module.refresh_local_fosun_broker(configured, now=checked_at)
+        else:
+            result = await module.refresh_local_fosun_broker(configured, now=checked_at)
+            assert result["snapshot_status"] == "READY"
+            assert result["mode"] == "broker_only"
+            assert result["provider_requests"] == {
+                "accounts": 1,
+                "cash": 2,
+                "holdings": 3,
+                "orders": 2,
+                "cash_flows": 1,
+                "quotes": 0,
+                "bars": 0,
+                "total": 9,
+            }
+        async with factory() as session:
+            snapshots = await session.scalar(
+                select(func.count()).select_from(PortfolioSnapshotRecord)
+            )
+            runs = tuple(await session.scalars(select(BrokerSyncRun)))
+            quotes = await session.scalar(select(func.count()).select_from(LatestQuote))
+            assert snapshots == (0 if broker_failure else 1)
+            assert len(runs) == (0 if broker_failure else 1)
+            if runs:
+                assert runs[0].route == "local-fosun-broker-refresh"
+                assert runs[0].status == "READY"
+            assert quotes == 0
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio

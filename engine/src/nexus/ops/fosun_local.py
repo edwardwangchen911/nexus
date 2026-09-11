@@ -23,11 +23,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from nexus.api.schemas.portfolio import derive_snapshot_readiness, snapshot_time_basis
 from nexus.ops.fosun_local_refresh import (
+    LocalFosunBrokerRefreshSettings,
     LocalFosunRefreshSettings,
     LocalOrderReadError,
     _gateway_failure_category,
     _safe_failure_code,
     refresh_local_fosun,
+    refresh_local_fosun_broker,
 )
 from nexus.ops.price_evidence_status import read_price_evidence_status
 from nexus.persistence.models.portfolio import (
@@ -346,7 +348,9 @@ def safe_failure(error: Exception) -> dict[str, str]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexus-fosun-local")
-    parser.add_argument("command", choices=("init", "doctor", "status", "refresh"))
+    parser.add_argument(
+        "command", choices=("init", "doctor", "status", "refresh", "refresh-broker")
+    )
     return parser
 
 
@@ -361,9 +365,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         elif command == "status":
             status_settings = _LocalStatusSettings.model_validate(local_environment)
             result = asyncio.run(read_local_status_safely(status_settings.database_url))
+        elif command == "refresh-broker":
+            broker_refresh_settings = LocalFosunBrokerRefreshSettings.model_validate(
+                local_environment
+            )
+            result = asyncio.run(refresh_local_fosun_broker(broker_refresh_settings))
         else:
-            refresh_settings = LocalFosunRefreshSettings.model_validate(local_environment)
-            result = asyncio.run(refresh_local_fosun(refresh_settings))
+            full_refresh_settings = LocalFosunRefreshSettings.model_validate(local_environment)
+            result = asyncio.run(refresh_local_fosun(full_refresh_settings))
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as error:

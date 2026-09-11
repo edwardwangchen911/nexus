@@ -183,3 +183,131 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
     assert state["broker"] is (failure is None)
     assert state["broker_read"] is (failure not in {"identity_preflight", "market"})
     assert state["closed"] == {"broker", "market", "engine"}
+
+
+@pytest.mark.asyncio
+async def test_broker_only_refresh_never_constructs_or_calls_market_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 9, 10, 20, tzinfo=UTC)
+    state = {"broker_read": False, "broker_persisted": False, "closed": set()}
+    instrument_id = uuid4()
+    holding = {
+        "kind": "position",
+        "external_account_id": "synthetic",
+        "instrument_code": "usAAPL",
+        "currency": "USD",
+        "quantity": "1",
+        "available_quantity": "1",
+        "frozen_quantity": "0",
+        "average_cost": "1",
+        "diluted_cost": None,
+        "current_price": "1",
+        "provider_as_of": None,
+    }
+
+    def page(items):
+        return GatewayResponsePage(
+            items=tuple(items),
+            source_request_id="synthetic",
+            has_more=False,
+            next_cursor=None,
+            as_of=now,
+            quality="PASS",
+        )
+
+    class Broker:
+        async def read_accounts(self):
+            return page(
+                [
+                    {
+                        "kind": "account",
+                        "external_account_id": "synthetic",
+                        "status": "ACTIVE",
+                        "base_currency": "USD",
+                    }
+                ]
+            )
+
+        async def read_holdings(self, *_args, **_kwargs):
+            return page([holding])
+
+        async def aclose(self):
+            state["closed"].add("broker")
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @asynccontextmanager
+        async def begin(self):
+            yield
+
+    class Engine:
+        async def dispose(self):
+            state["closed"].add("engine")
+
+    async def identity(*_args, **_kwargs):
+        return SimpleNamespace(
+            account_id=uuid4(),
+            portfolio_id=uuid4(),
+            sync_run_id=uuid4(),
+            instrument_ids={"usAAPL": instrument_id},
+            identity_date=now.date(),
+            previous_cash_flow_watermark=None,
+        )
+
+    async def broker_reads(*_args, **_kwargs):
+        assert _kwargs["cash_flow_end"].isoformat() == "2026-09-11"
+        state["broker_read"] = True
+        snapshot = SimpleNamespace(cash=(), positions=(), open_orders=(), as_of=now)
+        return SimpleNamespace(status="READY", portfolio_snapshot=snapshot), SimpleNamespace(
+            quality="PASS", facts=()
+        )
+
+    async def persist_broker(*_args, **_kwargs):
+        assert state["broker_read"]
+        assert _kwargs["route"] == "local-fosun-broker-refresh"
+        state["broker_persisted"] = True
+        return SimpleNamespace(status="READY", as_of=now)
+
+    async def diagnose(*_args, **_kwargs):
+        raise AssertionError("diagnosis started without an object-store reader")
+
+    def market_must_not_be_constructed(*_args, **_kwargs):
+        raise AssertionError("broker-only refresh constructed the market gateway")
+
+    def object_store_unavailable(*_args, **_kwargs):
+        assert state["broker_persisted"]
+        raise ValueError("synthetic invalid object-store configuration")
+
+    monkeypatch.setattr(module, "_broker_settings", lambda _: None)
+    monkeypatch.setattr(module, "FosunGatewayClient", lambda _: Broker())
+    monkeypatch.setattr(module, "FosunMarketGatewayClient", market_must_not_be_constructed)
+    monkeypatch.setattr(module, "create_async_engine", lambda *_a, **_k: Engine())
+    monkeypatch.setattr(module, "async_sessionmaker", lambda *_a, **_k: Session)
+    monkeypatch.setattr(module, "S3ProviderEvidenceStore", object_store_unavailable)
+    monkeypatch.setattr(module, "_load_local_broker_identity", identity)
+    monkeypatch.setattr(module, "_read_broker_facts", broker_reads)
+    monkeypatch.setattr(module, "_persist_ready_broker_snapshot", persist_broker)
+    monkeypatch.setattr(module, "_diagnose_local_snapshot", diagnose)
+    monkeypatch.setattr(
+        module, "_broker_request_counts", lambda _: {"cash": 2, "holdings": 2, "orders": 2}
+    )
+
+    result = await module.refresh_local_fosun_broker(
+        SimpleNamespace(database_url="synthetic"), now=now
+    )
+
+    assert result["snapshot_status"] == "READY"
+    assert result["provider_requests"]["quotes"] == 0
+    assert result["provider_requests"]["bars"] == 0
+    assert result["diagnostic"] == {"status": "failed", "code": "LOCAL_DIAGNOSTIC_FAILED"}
+    assert state == {
+        "broker_read": True,
+        "broker_persisted": True,
+        "closed": {"broker", "engine"},
+    }

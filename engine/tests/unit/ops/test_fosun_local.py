@@ -1,5 +1,6 @@
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import nexus.ops.fosun_local as fosun_local
 import pytest
@@ -136,6 +137,29 @@ def test_init_command_output_never_contains_generated_values(
     assert '"status":"created"' in output
     assert values["FOSUN_GATEWAY_HMAC_CURRENT_SECRET"] not in output
     assert values["FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET"] not in output
+
+
+def test_refresh_broker_command_uses_the_narrow_broker_only_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = object()
+
+    async def refresh(received: object) -> dict[str, object]:
+        assert received is settings
+        return {"status": "ok", "mode": "broker_only"}
+
+    monkeypatch.setattr(fosun_local, "load_local_environment", lambda *_args: {})
+    monkeypatch.setattr(
+        fosun_local,
+        "LocalFosunBrokerRefreshSettings",
+        SimpleNamespace(model_validate=lambda _environment: settings),
+    )
+    monkeypatch.setattr(fosun_local, "refresh_local_fosun_broker", refresh)
+
+    fosun_local.main(["refresh-broker"])
+
+    assert capsys.readouterr().out == '{"mode":"broker_only","status":"ok"}\n'
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol, Self
 from uuid import UUID, uuid5
+from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals  # type: ignore[import-untyped]
 from pydantic import Field, SecretStr, model_validator
@@ -78,6 +79,7 @@ _LOCAL_CAPABILITY_DAYS = 365
 _MAX_US_HOLDING_SYMBOLS = 20
 _MAX_PROVIDER_REQUESTS = 30
 _US_PROVIDER_CODE = re.compile(r"^us[A-Z][A-Z0-9.-]{0,14}$")
+_BROKER_TIMEZONE = ZoneInfo("Asia/Hong_Kong")
 
 
 class _MarketReader(Protocol):
@@ -197,6 +199,43 @@ class _SinglePageBrokerGateway:
         if page.has_more:
             raise GatewayClientError("gateway pagination rejected")
         return page
+
+
+class LocalFosunBrokerRefreshSettings(BaseSettings):
+    """Only the stores and broker Gateway identity enter a broker-only refresh."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        env_ignore_empty=True,
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    database_url: str = Field(validation_alias="DATABASE_URL")
+    object_store_endpoint: str = Field(validation_alias="OBJECT_STORE_ENDPOINT")
+    object_store_region: str = Field(validation_alias="OBJECT_STORE_REGION")
+    object_store_bucket: str = Field(validation_alias="OBJECT_STORE_BUCKET")
+    object_store_access_key_id: SecretStr = Field(validation_alias="OBJECT_STORE_ACCESS_KEY_ID")
+    object_store_secret_access_key: SecretStr = Field(
+        validation_alias="OBJECT_STORE_SECRET_ACCESS_KEY"
+    )
+    object_store_prefix: Literal["provider/market"] = "provider/market"
+    broker_gateway_origin: str = Field(validation_alias="FOSUN_GATEWAY_BASE_URL")
+    broker_gateway_key_id: str = Field(validation_alias="FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID")
+    broker_gateway_secret: SecretStr = Field(validation_alias="FOSUN_GATEWAY_HMAC_CURRENT_SECRET")
+    broker_client_cert: Path = Field(validation_alias="FOSUN_GATEWAY_CLIENT_CERT")
+    broker_client_key: Path = Field(validation_alias="FOSUN_GATEWAY_CLIENT_KEY")
+    broker_client_ca: Path = Field(validation_alias="FOSUN_GATEWAY_CLIENT_CA")
+
+    @model_validator(mode="after")
+    def _broker_identity_is_local(self) -> Self:
+        for path in (self.broker_client_cert, self.broker_client_key, self.broker_client_ca):
+            if not path.is_absolute() or not path.is_file():
+                raise ValueError("local Gateway TLS identity is unavailable")
+        return self
+
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        return []
 
 
 class LocalFosunRefreshSettings(BaseSettings):
@@ -398,6 +437,117 @@ async def refresh_local_fosun(
     finally:
         await broker.aclose()
         await market.aclose()
+        if engine is not None:
+            await engine.dispose()
+
+
+async def refresh_local_fosun_broker(
+    settings: LocalFosunBrokerRefreshSettings,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Persist one reconciled broker snapshot without constructing a market client."""
+    checked_at = (now or datetime.now(UTC)).astimezone(UTC)
+    cash_flow_end = checked_at.astimezone(_BROKER_TIMEZONE).date()
+    engine = None
+    broker = FosunGatewayClient(_broker_settings(settings))
+    try:
+        accounts_page = await broker.read_accounts()
+        try:
+            accounts = tuple(AccountItem.model_validate(item) for item in accounts_page.items)
+        except Exception:
+            raise RuntimeError("LOCAL_ACCOUNT_CONTRACT_INVALID") from None
+        if not accounts or accounts_page.has_more:
+            raise ValueError("LOCAL_ACCOUNT_SCOPE_AMBIGUOUS")
+        external_account_id = accounts[0].external_account_id
+        holdings_page = await broker.read_holdings(
+            external_account_id,
+            cursor=None,
+            limit=100,
+        )
+        try:
+            holdings = tuple(PositionItem.model_validate(item) for item in holdings_page.items)
+        except Exception:
+            raise RuntimeError("LOCAL_HOLDINGS_CONTRACT_INVALID") from None
+        if holdings_page.has_more:
+            raise ValueError("LOCAL_HOLDINGS_BUDGET_EXCEEDED")
+        if any(item.external_account_id != external_account_id for item in holdings):
+            raise ValueError("LOCAL_ACCOUNT_SCOPE_MISMATCH")
+
+        engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions() as session:
+            identity = await _load_local_broker_identity(session, holdings=holdings)
+        frozen, cash_flow_result = await _read_broker_facts(
+            broker,
+            account_id=identity.account_id,
+            portfolio_id=identity.portfolio_id,
+            sync_run_id=identity.sync_run_id,
+            external_account_id=external_account_id,
+            instrument_ids=identity.instrument_ids,
+            cash_flow_end=cash_flow_end,
+            previous_cash_flow_watermark=identity.previous_cash_flow_watermark,
+        )
+        try:
+            async with sessions() as session, session.begin():
+                snapshot = await _persist_ready_broker_snapshot(
+                    session,
+                    account_id=identity.account_id,
+                    portfolio_id=identity.portfolio_id,
+                    frozen=frozen,
+                    holdings=holdings,
+                    instrument_ids=identity.instrument_ids,
+                    valid_from=identity.identity_date,
+                    completed_at=datetime.now(UTC),
+                    cash_flow_result=cash_flow_result,
+                    route="local-fosun-broker-refresh",
+                )
+        except Exception as error:
+            if isinstance(error, GatewayClientError) or (
+                isinstance(error, ValueError)
+                and str(error) == "LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"
+            ):
+                raise
+            raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
+
+        broker_requests = _broker_request_counts(frozen)
+        provider_requests = {
+            "accounts": 1,
+            "cash": broker_requests["cash"],
+            "holdings": 1 + broker_requests["holdings"],
+            "orders": broker_requests["orders"],
+            "cash_flows": 1,
+            "quotes": 0,
+            "bars": 0,
+        }
+        provider_requests["total"] = sum(provider_requests.values())
+        result: dict[str, object] = {
+            "status": "ok",
+            "source": "fosun",
+            "mode": "broker_only",
+            "snapshot_status": snapshot.status,
+            "cash_currencies": len(frozen.portfolio_snapshot.cash),
+            "positions": len(frozen.portfolio_snapshot.positions),
+            "open_orders": len(frozen.portfolio_snapshot.open_orders),
+            "cash_flow_quality": cash_flow_result.quality,
+            "cash_flows": len(cash_flow_result.facts),
+            "provider_requests": provider_requests,
+            "portfolio_as_of": snapshot.as_of.isoformat() if snapshot.as_of else None,
+        }
+        try:
+            store = S3ProviderEvidenceStore(settings)
+        except Exception:
+            result["diagnostic"] = {"status": "failed", "code": "LOCAL_DIAGNOSTIC_FAILED"}
+        else:
+            result["diagnostic"] = await _diagnose_local_snapshot(
+                sessions,
+                frozen=frozen,
+                cash_flow_quality=cash_flow_result.quality,
+                artifact_reader=store.read_normalized,
+            )
+        return result
+    finally:
+        await broker.aclose()
         if engine is not None:
             await engine.dispose()
 
@@ -607,6 +757,7 @@ async def _persist_ready_broker_snapshot(
     valid_from: date,
     completed_at: datetime,
     cash_flow_result: CashFlowSyncResult,
+    route: Literal["local-fosun-refresh", "local-fosun-broker-refresh"] = "local-fosun-refresh",
 ) -> PortfolioSnapshotRecord:
     """Persist one already-frozen local broker snapshot in a single transaction."""
     if frozen.status != "READY" or frozen.portfolio_snapshot.portfolio_id != portfolio_id:
@@ -672,7 +823,7 @@ async def _persist_ready_broker_snapshot(
         portfolio_id=portfolio_id,
         trigger_kind="MANUAL",
         actor_id="nexus-mac-local-read-only",
-        route="local-fosun-refresh",
+        route=route,
         idempotency_key=str(frozen.sync_run_id),
         request_hash=hashlib.sha256(str(frozen.sync_run_id).encode()).hexdigest(),
         status="ACTIVE",
@@ -1298,7 +1449,9 @@ def _raw_key(response: RawGatewayResponse, digest: str) -> str:
     return f"raw/market/fosun/{date_path}/{response.gateway_request_id}/{digest}.json"
 
 
-def _broker_settings(settings: LocalFosunRefreshSettings) -> BrokerWorkerSettings:
+def _broker_settings(
+    settings: LocalFosunRefreshSettings | LocalFosunBrokerRefreshSettings,
+) -> BrokerWorkerSettings:
     return BrokerWorkerSettings.model_validate(
         {
             "NEXUS_ENV": "development",
