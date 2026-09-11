@@ -1076,6 +1076,7 @@ def test_engine_code_hash_covers_shared_simulation_kernel() -> None:
     assert _engine_code_hash("nexus_backtest_engine_v1") == digest.hexdigest()
 
 
+@pytest.mark.performance
 def test_seven_year_fifty_instrument_backtest_uses_shared_weekly_feature_indexes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

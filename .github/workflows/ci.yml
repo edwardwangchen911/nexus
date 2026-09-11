@@ -105,7 +105,7 @@ jobs:
       - name: Run merge-gate Engine tests
         if: github.event_name != 'workflow_dispatch'
         run: |
-          uv run pytest -q --import-mode=importlib \
+          uv run pytest -q --import-mode=importlib -m "not performance" \
             engine/tests/unit \
             engine/tests/contract \
             engine/tests/evals \

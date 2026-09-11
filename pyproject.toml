@@ -31,6 +31,9 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [tool.pytest.ini_options]
+markers = [
+    "performance: wall-clock performance checks that run in the manual full regression",
+]
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.:starlette.exceptions.StarletteDeprecationWarning",
 ]
