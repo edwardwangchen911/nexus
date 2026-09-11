@@ -72,5 +72,11 @@ def test_unknown_cost_is_never_ranked_as_zero(cost: Decimal) -> None:
             ComparableProposal("strategy_target", _dimensions(0, None)),
         )
     )
-    assert result.recommendation == "hold_current"
+    assert result.recommendation is None
+    assert result.ranked_variants == ("hold_current",)
     assert result.excluded_variants == ("minimum_change", "strategy_target")
+    assert result.status == "incomparable"
+    assert result.reasons == (
+        "COST_EVIDENCE_INCOMPLETE",
+        "COMPARISON_EVIDENCE_INCOMPLETE",
+    )

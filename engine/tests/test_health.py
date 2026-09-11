@@ -162,6 +162,11 @@ async def test_long_running_worker_polls_general_after_portfolio_work(monkeypatc
         def begin(self):
             return self
 
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.max_retries = kwargs["max_retries"]
+            self.responses = object()
+
     settings = EngineSettings.for_test()
     settings.agent_runtime_mode = AgentRuntimeMode.RESPONSES
     settings.openai_api_key = SecretStr("fixture-openai-key")
@@ -169,7 +174,7 @@ async def test_long_running_worker_polls_general_after_portfolio_work(monkeypatc
     general = AsyncMock(return_value=False)
     monkeypatch.setattr("nexus.worker.session_factory", lambda _: lambda: FakeSession())
     monkeypatch.setattr("nexus.worker._general_registry", lambda *args, **kwargs: object())
-    monkeypatch.setattr("nexus.worker.AsyncOpenAI", lambda **kwargs: object())
+    monkeypatch.setattr("nexus.worker.AsyncOpenAI", FakeOpenAI)
     monkeypatch.setattr("nexus.worker.schedule_due_daily_pipeline", AsyncMock())
     monkeypatch.setattr("nexus.worker._run_portfolio_decision_worker_once", portfolio)
     monkeypatch.setattr("nexus.worker.run_job_worker_once", general)

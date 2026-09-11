@@ -102,8 +102,36 @@ jobs:
       - run: uv run ruff check engine
       - run: uv run mypy engine/src
       - run: uv run alembic -c engine/alembic.ini upgrade head
-      - run: uv run pytest engine/tests -q --import-mode=importlib
+      - name: Run merge-gate Engine tests
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          uv run pytest -q --import-mode=importlib \
+            engine/tests/unit \
+            engine/tests/contract \
+            engine/tests/evals \
+            engine/tests/property \
+            engine/tests/test_health.py \
+            engine/tests/integration/test_temporary_database_lifecycle.py \
+            engine/tests/integration/test_job_checkpoint.py \
+            engine/tests/integration/test_portfolio_api.py \
+            engine/tests/integration/test_optimization_writer.py \
+            engine/tests/integration/test_formal_optimization_producer.py \
+            engine/tests/integration/test_scenario_spread_cost_authority_pg.py \
+            engine/tests/integration/test_scenario_selection_migration.py \
+            engine/tests/integration/test_fosun_push_local.py \
+            engine/tests/integration/test_market_database_series_pg.py \
+            engine/tests/integration/test_real_fixture_db_guard.py \
+            engine/tests/integration/test_risk_authority_pg.py \
+            engine/tests/integration/test_paper_idempotency_pg.py \
+            engine/tests/integration/test_paper_db_guards.py \
+            engine/tests/integration/test_broker_simulation_reconciliation.py \
+            engine/tests/integration/test_portfolio_decision_e2e.py \
+            engine/tests/integration/test_portfolio_decision_admission_pg.py
+      - name: Run full Engine regression manually
+        if: github.event_name == 'workflow_dispatch'
+        run: uv run pytest engine/tests -q --import-mode=importlib
       - name: Run isolated PostgreSQL and MinIO recovery drill
+        if: github.event_name == 'workflow_dispatch'
         env:
           NEXUS_ENV: test
         run: uv run --package nexus-engine nexus-engine-backup-restore-drill
