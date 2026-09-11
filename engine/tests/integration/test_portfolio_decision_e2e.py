@@ -4,24 +4,46 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 import httpx
 import pytest
 from helpers.portfolio_api import app, headers, settings
+from nexus.agents.persistence import reserve_portfolio_decision_budget
 from nexus.agents.portfolio_decision_contracts import (
+    PortfolioDecisionInputV1,
     PortfolioDecisionInputV2,
     canonical_portfolio_decision_hash,
     parse_portfolio_decision_input,
 )
 from nexus.agents.portfolio_decision_execution import load_portfolio_decision_execution_authority
+from nexus.agents.portfolio_decision_persistence import (
+    build_portfolio_evidence_manifest,
+    canonical_portfolio_intent_schema_hash,
+)
 from nexus.agents.portfolio_decision_tools import (
     PortfolioDecisionTools,
     canonical_portfolio_evidence_manifest_hash,
+    canonical_portfolio_tool_hash,
 )
 from nexus.agents.portfolio_decision_worker import run_portfolio_decision_worker_once
+from nexus.diagnostics.policy import load_real_advisory_policy_v1
+from nexus.diagnostics.repository import (
+    load_frozen_snapshot,
+    load_instrument_identities,
+    read_report,
+)
+from nexus.domain.decimal import decimal_to_string
+from nexus.domain.evidence import EvidenceRef
+from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy
+from nexus.jobs.repository import enqueue_job
+from nexus.optimizer.scenario_contracts import (
+    PortfolioScenarioRequestV1,
+    canonical_scenario_hash,
+)
+from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -32,9 +54,11 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticEvidenceRefRecord,
     PortfolioDiagnosticItemRecord,
+    PortfolioDiagnosticReportRecord,
 )
 from nexus.persistence.models.optimization import OptimizationProposalGroupRecord
 from nexus.persistence.models.paper import PaperFillRecord, PaperOrderRecord
+from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.persistence.session import session_factory
@@ -59,6 +83,104 @@ MODEL_ID = UUID("0198d500-1000-7000-8000-000000002105")
 TOP3_ITEM_ID = UUID("0198d500-1000-7000-8000-000000002106")
 HHI_ITEM_ID = UUID("0198d500-1000-7000-8000-000000002107")
 NOW = KNOWN_AS_OF + timedelta(minutes=1)
+
+
+class _ForbiddenScenarioStore:
+    def __init__(self) -> None:
+        self.read_count = 0
+
+    async def read_raw(self, object_key: str, *, uri: str) -> bytes:
+        self.read_count += 1
+        raise AssertionError(f"V1 replay must not read scenario object {object_key} at {uri}")
+
+    async def archive_raw(self, object_key: str, payload: bytes) -> str:
+        raise AssertionError(f"V1 replay must not archive scenario object {object_key}")
+
+    async def put_normalized(self, object_key: str, payload: bytes) -> str:
+        raise AssertionError(f"V1 replay must not write scenario object {object_key}")
+
+
+@pytest.mark.asyncio
+async def test_worker_replays_historical_v1_without_v3_scenario_authority(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id, legacy_result_hash = await _seed_historical_v1_run(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    forbidden_store = _ForbiddenScenarioStore()
+
+    async with factory() as session:
+        run = await session.get(PortfolioDecisionRunRecord, run_id)
+        assert run is not None
+        frozen = parse_portfolio_decision_input(run.frozen_input)
+        assert isinstance(frozen, PortfolioDecisionInputV1)
+        assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 0
+        authority = await load_portfolio_decision_execution_authority(
+            session,
+            run=run,
+            scenario_evidence_store=forbidden_store,
+        )
+
+    intent = _intent(authority)
+    intent["scenario_result_hash"] = legacy_result_hash
+    responses = _Client(intent, factory)
+    tool_results: list[dict[str, object]] = []
+    production_execute = PortfolioDecisionTools.execute
+
+    async def count_production_tool(
+        tool: PortfolioDecisionTools, name: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        result = dict(await production_execute(tool, name, payload))
+        tool_results.append(result)
+        return result
+
+    monkeypatch.setattr(PortfolioDecisionTools, "execute", count_production_tool)
+    worked = await run_portfolio_decision_worker_once(
+        factory,
+        responses_client=responses,
+        worker_id="portfolio-decision-v1-pg",
+        worker_started_at=NOW,
+        process_version="test-worker-v1",
+        migration_head="0049_pd_terminal_phases",
+        clock=lambda: NOW,
+        scenario_evidence_store=forbidden_store,
+    )
+
+    async with factory() as session:
+        stored_run = await session.get(PortfolioDecisionRunRecord, run_id)
+        output = await session.scalar(
+            select(PortfolioDecisionOutputRecord).where(
+                PortfolioDecisionOutputRecord.run_id == run_id
+            )
+        )
+        claim_count = await session.scalar(select(func.count()).select_from(IdempotencyRecord))
+        side_effects = {
+            model.__tablename__: await session.scalar(select(func.count()).select_from(model))
+            for model in (
+                OptimizationProposalGroupRecord,
+                ShadowGroupRecord,
+                PaperOrderRecord,
+                PaperFillRecord,
+            )
+        }
+
+    assert worked is True
+    assert len(tool_results) == 1
+    assert tool_results[0]["result_hash"] == legacy_result_hash
+    assert forbidden_store.read_count == 0
+    assert claim_count == 0
+    assert stored_run is not None and output is not None
+    assert stored_run.tool_result_hash == legacy_result_hash
+    assert stored_run.tool_projection is not None
+    assert stored_run.tool_projection["result_hash"] == legacy_result_hash
+    assert output.scenario_result_hash == legacy_result_hash
+    assert output.intent["execution_locked"] is True
+    assert side_effects == {
+        "optimization_proposal_groups": 0,
+        "shadow_groups": 0,
+        "paper_orders": 0,
+        "paper_fills": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -380,9 +502,7 @@ async def test_admission_selects_first_valid_real_claim_for_same_unknown_result(
                 select(IdempotencyRecord)
                 .where(
                     IdempotencyRecord.actor_id == run.actor_id,
-                    IdempotencyRecord.route.endswith(
-                        ":portfolio_scenario_evaluation_v3"
-                    ),
+                    IdempotencyRecord.route.endswith(":portfolio_scenario_evaluation_v3"),
                     IdempotencyRecord.response_payload["expected_result_hash"].as_string()
                     == result_hash,
                 )
@@ -469,8 +589,7 @@ async def test_admission_rejects_corrupt_frozen_quote_before_budget_or_job(
 
     async with factory() as session:
         assert (
-            await session.scalar(select(func.count()).select_from(PortfolioDecisionRunRecord))
-            == 0
+            await session.scalar(select(func.count()).select_from(PortfolioDecisionRunRecord)) == 0
         )
         assert (
             await session.scalar(
@@ -491,10 +610,10 @@ async def test_admission_rejects_corrupt_frozen_quote_before_budget_or_job(
 async def _seed_production_authority(
     database_url: str,
     *,
-    as_of=KNOWN_AS_OF,
+    as_of: datetime = KNOWN_AS_OF,
     known_spread_case: bool = True,
 ) -> UUID:
-    report_id = await _seed_scenario_authority(
+    report_id: UUID = await _seed_scenario_authority(
         database_url,
         as_of=as_of,
         known_spread_case=known_spread_case,
@@ -578,6 +697,152 @@ async def _seed_production_authority(
             )
         )
     return report_id
+
+
+async def _seed_historical_v1_run(database_url: str) -> tuple[UUID, str]:
+    report_id = await _seed_production_authority(database_url)
+    factory = session_factory(settings(database_url))
+    request = PortfolioScenarioRequestV1.model_validate_json(
+        scenario_payload(report_id, as_of=KNOWN_AS_OF)
+    )
+    async with factory() as session, session.begin():
+        snapshot_record = await session.get(PortfolioSnapshotRecord, SNAPSHOT_ID)
+        diagnostic_record = await session.get(PortfolioDiagnosticReportRecord, report_id)
+        prompt = await session.get(AgentPromptVersionRecord, PROMPT_ID)
+        model = await session.get(AgentModelConfigRecord, MODEL_ID)
+        assert snapshot_record is not None
+        assert diagnostic_record is not None
+        assert prompt is not None
+        assert model is not None
+
+        snapshot = await load_frozen_snapshot(
+            session,
+            portfolio_id=snapshot_record.portfolio_id,
+            snapshot_id=snapshot_record.id,
+        )
+        report = await read_report(session, diagnostic_record)
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+        policy = await load_real_advisory_policy_v1(session)
+        scenario_request_hash = canonical_scenario_hash(request)
+        legacy_result = evaluate_adjustment_scenario(
+            snapshot=snapshot,
+            report=report,
+            identities=identities,
+            constraints=request.constraints,
+            policy=policy,
+            diagnostic_report_id=diagnostic_record.id,
+            diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
+            request_hash=scenario_request_hash,
+        )
+        evidence_manifest, evidence_hash = build_portfolio_evidence_manifest(
+            (
+                EvidenceRef(
+                    source="nexus.portfolio_snapshot",
+                    object_id=str(snapshot_record.id),
+                    available_at=snapshot_record.created_at,
+                    location=f"postgresql:portfolio_snapshots/{snapshot_record.id}",
+                    content_hash=_model_hash(snapshot),
+                ),
+                EvidenceRef(
+                    source="nexus.portfolio_diagnostic",
+                    object_id=str(diagnostic_record.id),
+                    available_at=diagnostic_record.created_at,
+                    location=f"postgresql:portfolio_diagnostic_reports/{diagnostic_record.id}",
+                    content_hash=_model_hash(report),
+                ),
+                EvidenceRef(
+                    source="nexus.portfolio_scenario_request",
+                    object_id=scenario_request_hash,
+                    available_at=NOW,
+                    location="memory:portfolio_scenario_request_v1",
+                    content_hash=scenario_request_hash,
+                ),
+                *policy.authority_refs,
+            ),
+            decision_time=NOW,
+        )
+        frozen = PortfolioDecisionInputV1(
+            schema_version="portfolio_decision_input_v1",
+            portfolio_id=snapshot_record.portfolio_id,
+            portfolio_snapshot_id=snapshot_record.id,
+            diagnostic_report_id=diagnostic_record.id,
+            decision_time=NOW,
+            objective=request.constraints.objective,
+            max_turnover=decimal_to_string(request.constraints.max_turnover),
+            minimum_cash=decimal_to_string(request.constraints.minimum_cash),
+            universe_policy=request.constraints.universe_policy,
+            allow_new_positions=request.constraints.allow_new_positions,
+            scenario_request_hash=scenario_request_hash,
+            expected_scenario_result_hash=legacy_result.result_hash,
+            diagnostic_input_hash=diagnostic_record.diagnostic_input_hash,
+            policy_version=policy.version,
+            evidence_hash=evidence_hash,
+        )
+        input_hash = canonical_portfolio_decision_hash(frozen)
+        run = PortfolioDecisionRunRecord(
+            portfolio_id=snapshot_record.portfolio_id,
+            portfolio_snapshot_id=snapshot_record.id,
+            diagnostic_report_id=diagnostic_record.id,
+            prompt_version_id=prompt.id,
+            model_config_id=model.id,
+            actor_id="nexus-test-user",
+            idempotency_key="historical-v1-fixture",
+            request_hash="8" * 64,
+            status="prepared",
+            retry_count=0,
+            decision_time=NOW,
+            input_hash=input_hash,
+            schema_hash=canonical_portfolio_intent_schema_hash(),
+            frozen_input=frozen.model_dump(mode="json"),
+            prompt_hash=prompt.content_hash,
+            model_hash=model.config_hash,
+            tool_hash=canonical_portfolio_tool_hash(),
+            evidence_hash=evidence_hash,
+            evidence_manifest=evidence_manifest,
+            tool_result_hash=None,
+            tool_projection=None,
+            provider_phase="none",
+            reserved_cost_usd=model.worst_case_cost_usd,
+            settled_cost_usd=None,
+            pricing_version=model.version,
+            input_tokens=None,
+            output_tokens=None,
+        )
+        session.add(run)
+        await session.flush()
+        await reserve_portfolio_decision_budget(
+            session,
+            run_id=run.id,
+            now=NOW,
+            daily_limit_usd=Decimal("1"),
+            worst_case_usd=model.worst_case_cost_usd,
+            pricing_version=model.version,
+            pricing_fresh=True,
+        )
+        await enqueue_job(
+            session,
+            key=JobKeyV1(
+                job_type=JobType.AGENT_PORTFOLIO_DECISION,
+                scope_kind="portfolio",
+                scope_id=str(snapshot_record.portfolio_id),
+                effective_at=NOW,
+                input_hash=input_hash,
+            ),
+            schema_version="portfolio_decision_job_v1",
+            payload={"run_id": str(run.id)},
+            queue=QueueName.GENERAL,
+            retry_policy=RetryPolicy.NEVER,
+            max_attempts=1,
+            available_at=NOW,
+        )
+        run_id = run.id
+    return run_id, legacy_result.result_hash
+
+
+def _model_hash(value: object) -> str:
+    payload = value.model_dump(mode="json")  # type: ignore[attr-defined]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _wire_keys(value: object) -> set[str]:
