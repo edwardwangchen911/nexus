@@ -9,7 +9,10 @@ from nexus.diagnostics.models import DiagnosticItem, InstrumentIdentity, Portfol
 from nexus.diagnostics.policy import RealAdvisoryPolicy
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.evidence import EvidenceRef
-from nexus.optimizer.scenario_contracts import AdjustmentScenarioConstraintsV1
+from nexus.optimizer.scenario_contracts import (
+    AdjustmentScenarioConstraintsV1,
+    canonical_scenario_hash,
+)
 from nexus.optimizer.scenario_engine import evaluate_adjustment_scenario
 from nexus.providers.broker.base import BrokerPosition, CashBalance, PortfolioSnapshot
 
@@ -183,6 +186,7 @@ def test_budget_sufficient_meets_top1_with_cash_leg_turnover() -> None:
 def test_unknown_real_costs_are_split_without_claiming_a_total() -> None:
     result = _evaluate(_snapshot(("30", "10", "10", "10", "10", "10", "10", "10")))
 
+    assert result.result_hash == canonical_scenario_hash(result)
     assert result.cost_breakdown.currency == "USD"
     assert result.cost_breakdown.valuation_time == _AS_OF
     assert result.cost_breakdown.basis == "portfolio_value_ratio"
