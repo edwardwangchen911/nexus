@@ -275,6 +275,27 @@ async def test_user_preference_yields_only_stream_connection_fields_once() -> No
     assert "fake-account-number" not in repr((streamer_url, credentials))
 
 
+@pytest.mark.asyncio
+async def test_user_preference_rejection_reports_only_safe_http_status() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                403, content=b"provider body with fake-access-token"
+            )
+        )
+    ) as client:
+        with pytest.raises(
+            ValueError, match="^SCHWAB_USER_PREFERENCE_HTTP_403$"
+        ) as captured:
+            await provider_market_stream.fetch_schwab_stream_preferences(
+                _token(),
+                client,
+                now=datetime(2026, 9, 11, 12, 10, tzinfo=UTC),
+            )
+
+    assert "fake-access-token" not in str(captured.value)
+
+
 def test_market_stream_cli_exposes_authorize_and_repo_bound_stream_without_secrets(
     tmp_path: Path,
 ) -> None:

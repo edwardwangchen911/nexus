@@ -287,8 +287,12 @@ async def fetch_schwab_stream_preferences(
         )
     except httpx.HTTPError:
         raise SchwabOAuthError("SCHWAB_USER_PREFERENCE_REQUEST_FAILED") from None
-    if response.status_code != 200 or len(response.content) > _MAX_TOKEN_RESPONSE_BYTES:
-        raise SchwabOAuthError("SCHWAB_USER_PREFERENCE_REQUEST_FAILED")
+    if response.status_code != 200:
+        raise SchwabOAuthError(
+            f"SCHWAB_USER_PREFERENCE_HTTP_{response.status_code}"
+        )
+    if len(response.content) > _MAX_TOKEN_RESPONSE_BYTES:
+        raise SchwabOAuthError("SCHWAB_USER_PREFERENCE_RESPONSE_INVALID")
     try:
         payload = json.loads(response.content, object_pairs_hook=_unique_json)
         streamer_info = payload["streamerInfo"]
