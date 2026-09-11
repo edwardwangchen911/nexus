@@ -211,7 +211,7 @@ function ScenarioResult({ result, symbols }: { result: ScenarioResponse; symbols
       <h4>调整情景成本证据</h4>
       <p className="portfolio-scenario__scope">口径：{result.cost_breakdown.currency} 组合价值比例 · 冻结估值时点 {new Date(result.cost_breakdown.valuation_time).toLocaleString("zh-CN")}</p>
       {result.cost_breakdown.evidence_version && result.cost_breakdown.available_at ? <p className="portfolio-scenario__scope">
-        公开监管费率参考已记录：{result.cost_breakdown.evidence_version} · 参考可用时点 {new Date(result.cost_breakdown.available_at).toLocaleString("zh-CN")}。当前仅绑定规范化摘要哈希，不代表官方原件已归档，也不等于复星账户实际收费依据。
+        {costEvidenceCopy(result.cost_breakdown.evidence_version)} 证据版本：{result.cost_breakdown.evidence_version} · 证据可用时点 {new Date(result.cost_breakdown.available_at).toLocaleString("zh-CN")}。
       </p> : null}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- keyboard users need to scroll wide cost tables */}
       <div className="table-scroll" role="region" aria-label="成本证据可横向滚动" tabIndex={0}>
@@ -236,6 +236,16 @@ function ScenarioResult({ result, symbols }: { result: ScenarioResponse; symbols
 function metricValue(metric: ScenarioMetric, unit: string): string {
   if (metric.status === "unknown" || metric.value === null) return metric.reason ? reasonLabel(metric.reason) : "未知";
   return formatMetric(metric.value, unit);
+}
+
+function costEvidenceCopy(version: string): string {
+  if (version.startsWith("us_regulatory_fee_reference_")) {
+    return "公开监管费率参考已记录；当前仅绑定规范化摘要哈希，不代表官方原件已归档，也不等于复星账户实际收费依据。";
+  }
+  if (version === "scenario_cost_evidence_bundle_v1") {
+    return "情景成本证据束已记录；点差依据已冻结，监管费转嫁仍未证明。";
+  }
+  return "成本证据版本未识别；当前不能据此确认任何成本权威。";
 }
 
 function sameUuid(left: string | undefined, right: string): boolean {
