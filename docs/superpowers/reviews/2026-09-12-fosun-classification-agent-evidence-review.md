@@ -31,12 +31,28 @@ existing generic evidence path. That duplication was removed before scoring.
 6. Made downgrade refuse frozen owners and forbid evidence deletion.
 7. Ensured new/unknown securities do not fail refresh unless source types are malformed.
 
-## Remaining implementation risks
+## Post-implementation verification
+
+- Main integration: feature merged at `97ab417a`; the verification follow-up updates
+  the runtime migration-head constant and CI coverage list.
+- Engine merge-gate: 3,586 passed, 6 skipped, 1 performance test deselected.
+- Gateway offline suite: 972 passed with the socket guard enabled.
+- Classification-specific PostgreSQL coverage proves canonical replay, PIT cutoff,
+  raw-binding tamper rejection, same-clock conflict rejection, full-refresh producer,
+  research freezing, exact Agent projection, migration roundtrip, no extra table, and
+  downgrade refusal with a frozen owner.
+- One full-suite attempt exposed a cold-start Hypothesis deadline flake (325 ms once,
+  then 55 ms); the isolated property test passed three consecutive reruns and the
+  complete merge-gate rerun passed.
+- Final Ruff passed for Engine; Mypy passed for all 429 Engine source files.
+
+## Residual architectural risks
 
 - The database ownership function is already large; add one bounded branch only.
 - Wire request identifiers using the exact existing `RawGatewayResponse` names without
   weakening the binding if nomenclature differs.
-- Main is dirty from another task; implementation and testing stay isolated.
+- The production local database and services are not migrated/restarted by this code
+  verification. Runtime rollout remains a separate operational action.
 
 The three unawarded points require runtime evidence, not more abstraction. The
 documents are detailed enough for direct task-by-task coding.

@@ -331,6 +331,46 @@ async def test_reader_rejects_tampered_raw_binding(migrated_database_url: str) -
 
 
 @pytest.mark.asyncio
+async def test_reader_rejects_conflicting_observations_at_same_source_clock(
+    migrated_database_url: str,
+) -> None:
+    settings = _settings(migrated_database_url)
+    factory = session_factory(settings)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    raw_uri = await store.archive_raw(f"raw/fosun/quote/{RAW_HASH}.json", RAW)
+    async with factory.begin() as session:
+        session.add(
+            DataArtifact(
+                uri=raw_uri,
+                sha256=RAW_HASH,
+                byte_size=len(RAW),
+                mime_type="application/json",
+                schema_version=RAW_SCHEMA,
+                source="fosun",
+                observed_at=NOW,
+                available_at=NOW,
+                received_at=NOW,
+            )
+        )
+    first = _document(raw_uri)
+    second = FosunSecurityClassificationDocument.model_validate(
+        {**first.model_dump(mode="json"), "provider_name": "Conflicting name"}
+    )
+    async with factory.begin() as session:
+        for document in (first, second):
+            location = await save_classification_artifact(session, store, document)
+            await persist_security_classification(session, document, location=location)
+    async with factory() as session:
+        assert (
+            await read_security_classifications(
+                session, instrument_id=INSTRUMENT, as_of=datetime.now(UTC)
+            )
+            == {}
+        )
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 async def test_full_refresh_producer_uses_already_read_quote(
     migrated_database_url: str,
 ) -> None:
