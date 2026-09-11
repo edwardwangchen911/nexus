@@ -55,6 +55,10 @@ from nexus.quality.source_policy import (
 from nexus.research.alpaca_actions_storage import action_tool_payload, read_action_observations
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
+from nexus.research.fosun_security_classification import SOURCE as FOSUN_CLASSIFICATION_SOURCE
+from nexus.research.fosun_security_classification_storage import (
+    read_security_classifications,
+)
 from nexus.research.fred_observations import SCHEMA as FRED_SCHEMA
 from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
 from nexus.research.news_evidence import news_tool_payload, read_news_evidence
@@ -184,6 +188,17 @@ class _BoundDatabaseExecutors:
             as_of=self._decision_time,
             evidence_ids=self._evidence_ids,
         )
+        classifications = await read_security_classifications(
+            self._session,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+            evidence_ids=self._evidence_ids,
+        )
+        frozen_classification_ids = {
+            record.id for record in self._evidence if record.source == FOSUN_CLASSIFICATION_SOURCE
+        }
+        if frozen_classification_ids != classifications.keys():
+            return self._invalid_frozen_evidence_authority("get_security_snapshot")
         news = await read_news_evidence(
             self._session,
             instrument_id=self._instrument_id,
@@ -223,6 +238,15 @@ class _BoundDatabaseExecutors:
                     **(
                         {"company_profile": profiles[record.id].model_dump(mode="json")}
                         if record.id in profiles
+                        else {}
+                    ),
+                    **(
+                        {
+                            "provider_security_classification": classifications[
+                                record.id
+                            ].tool_payload()
+                        }
+                        if record.id in classifications
                         else {}
                     ),
                     **(

@@ -76,7 +76,9 @@
 
 ### Task 6: Ownership migration
 
-**Files:** create `engine/alembic/versions/0052_fosun_security_classification.py` and `engine/tests/integration/test_fosun_security_classification_migration.py`.
+**Files:** create `engine/alembic/versions/0052_fosun_security_classification.py`
+(revision ID `0052_fosun_classification`) and
+`engine/tests/integration/test_fosun_security_classification_migration.py`.
 
 - [ ] Test 0051->0052; valid freeze; invalid schema/source/object/instrument/hash/
   length/location/clocks/raw binding/flags; safe downgrade; refused downgrade with

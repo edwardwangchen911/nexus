@@ -40,3 +40,8 @@ existing generic evidence path. That duplication was removed before scoring.
 
 The three unawarded points require runtime evidence, not more abstraction. The
 documents are detailed enough for direct task-by-task coding.
+
+Implementation review note: the first migration run exposed the repository's
+32-character Alembic version-column limit. The revision ID was shortened to
+`0052_fosun_classification`; the transaction rolled back and the contract did not
+change. Score remains 97/100.

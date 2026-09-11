@@ -214,7 +214,9 @@ The outer evidence/citation fields remain unchanged.
 
 ## 9. Migration
 
-Add `0052_fosun_security_classification.py`, revising `0051`. It creates no table;
+Add `0052_fosun_security_classification.py` with revision ID
+`0052_fosun_classification` (bounded by the existing 32-character version column),
+revising `0051`. It creates no table;
 it adds one branch to `nexus_validate_agent_snapshot_evidence()` requiring:
 
 - canonical snapshot and normalized artifact ownership;

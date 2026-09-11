@@ -24,8 +24,8 @@ from nexus.providers.market.fosun_gateway import (
     classify_fosun_security_family,
 )
 
-SOURCE = "fosun_security_classification"
-SCHEMA = "fosun_security_classification_v1"
+SOURCE: Literal["fosun_security_classification"] = "fosun_security_classification"
+SCHEMA: Literal["fosun_security_classification_v1"] = "fosun_security_classification_v1"
 RAW_SCHEMA = "fosun_gateway_market_snapshot_v1"
 MAX_CANONICAL_BYTES = 16_384
 _HASH_PATTERN = r"^[0-9a-f]{64}$"
