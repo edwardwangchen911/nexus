@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol, cast
 
 import httpx
@@ -38,14 +39,17 @@ from nexus.providers.composition import (
 )
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.fosun_gateway import FosunMarketGatewayClient
+from nexus.providers.market.schwab_snapshot import SchwabSnapshotProvider
 from nexus.providers.settings import (
     IntradayMonitorMode,
+    IntradayProvider,
     ProviderRuntimeMode,
     ProviderSettings,
     ProviderWorkerSettings,
 )
 
 _PROCESS_VERSION = "nexus-provider-phase3-intraday"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CURRENT_INTRADAY_JOB_SCHEMA = "intraday_snapshot_job_v3"
 _PROVIDER_INTRADAY_BUCKET_INDEX_DEFINITION = (
     "CREATE UNIQUE INDEX uq_jobs_intraday_v3_bucket ON public.jobs USING btree "
@@ -747,6 +751,7 @@ async def _provider_registry(
     store: ProviderStore,
     raw_archive_session_factory: async_sessionmaker[AsyncSession] | None = None,
     fosun_gateway_factory: FosunGatewayFactory = FosunMarketGatewayClient,
+    repo_root: Path = _REPO_ROOT,
 ) -> AsyncIterator[JobRegistry]:
     """Compose only provider jobs; construction performs no external request."""
 
@@ -781,6 +786,11 @@ async def _provider_registry(
         if provider_settings.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
 
             def snapshot_provider(session: object) -> IntradaySnapshotProvider:
+                if provider_settings.selected_intraday_provider is IntradayProvider.SCHWAB:
+                    return cast(
+                        IntradaySnapshotProvider,
+                        SchwabSnapshotProvider(repo_root, provider_http_client),
+                    )
                 return cast(
                     IntradaySnapshotProvider,
                     bundle.snapshot_provider(session),

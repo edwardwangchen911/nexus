@@ -45,6 +45,7 @@ from nexus.providers.market.fosun import (
     FosunSnapshotReadGuard,
 )
 from nexus.providers.market.fosun_gateway import RawGatewayResponse
+from nexus.providers.market.schwab_snapshot import SchwabSnapshotFetchError
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     RawSnapshotEnvelope,
@@ -335,6 +336,8 @@ def build_intraday_collection_registry(
                     )
         except HttpPolicyError as exc:
             raise UnsafeJobError(_provider_request_error_code(str(exc))) from None
+        except SchwabSnapshotFetchError as exc:
+            raise UnsafeJobError(exc.result_code) from None
         except FosunSnapshotReadAborted as exc:
             if (
                 exc.result_code == "INTRADAY_SNAPSHOT_READ_CANCELLED"
@@ -386,7 +389,15 @@ def build_intraday_collection_registry(
             raise UnsafeJobError("INTRADAY_RAW_ARCHIVE_DEADLINE_EXCEEDED") from None
         try:
             batch = provider.normalize_raw_snapshots(envelope, request)
-        except MarketProviderPayloadError:
+        except MarketProviderPayloadError as error:
+            if payload.source == "schwab":
+                result_code = _schwab_payload_error_code(str(error))
+                if result_code != "INTRADAY_CONTRACT_MISMATCH":
+                    raise UnsafeJobError(result_code) from None
+                return JobHandlerResult(
+                    outcome="skipped",
+                    result_code=result_code,
+                )
             return JobHandlerResult(
                 outcome="skipped",
                 result_code="INTRADAY_SNAPSHOT_PAYLOAD_INVALID",
@@ -524,6 +535,17 @@ def _provider_request_error_code(code: str) -> str:
     if code == "STATUS_REJECTED":
         return "INTRADAY_PROVIDER_STATUS_REJECTED"
     return "INTRADAY_PROVIDER_POLICY_REJECTED"
+
+
+def _schwab_payload_error_code(code: str) -> str:
+    if code in {
+        "PROVIDER_MARKET_STREAM_INCOMPLETE",
+        "SCHWAB_MARKET_STREAM_EMPTY",
+    }:
+        return "INTRADAY_PROVIDER_UNAVAILABLE"
+    if code == "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID":
+        return "INTRADAY_PROVIDER_POLICY_REJECTED"
+    return "INTRADAY_CONTRACT_MISMATCH"
 
 
 async def _archive_snapshot_raw(

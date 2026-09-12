@@ -12,12 +12,15 @@ from typing import Any
 import httpx
 
 from nexus.ops.schwab_market_stream import (
+    ProviderMarketStreamError,
     pack_provider_market_stream_archive,
     parse_schwab_snapshot_batch,
     run_schwab_stream,
 )
 from nexus.providers.base import MarketDataProvenance
 from nexus.providers.market.alpaca import MarketProviderPayloadError
+from nexus.providers.market.schwab_oauth import SchwabOAuthError
+from nexus.providers.market.schwab_stream import SchwabStreamError
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     RawSnapshotEnvelope,
@@ -25,6 +28,14 @@ from nexus.providers.market.snapshot_contracts import (
 )
 
 Capture = Callable[..., Awaitable[dict[str, Any]]]
+
+
+class SchwabSnapshotFetchError(RuntimeError):
+    """Stable worker-facing acquisition failure without provider details."""
+
+    def __init__(self, result_code: str) -> None:
+        super().__init__(result_code)
+        self.result_code = result_code
 
 
 class SchwabSnapshotProvider:
@@ -58,8 +69,24 @@ class SchwabSnapshotProvider:
                 duration=15.0,
                 max_frames=100,
             )
-            await self._capture(arguments, self._client, now=checked_at)
-            raw_payload = pack_provider_market_stream_archive(directory)
+            try:
+                await self._capture(arguments, self._client, now=checked_at)
+                raw_payload = pack_provider_market_stream_archive(directory)
+            except SchwabOAuthError as error:
+                code = str(error)
+                result_code = (
+                    "INTRADAY_PROVIDER_UNAVAILABLE"
+                    if code.startswith("SCHWAB_USER_PREFERENCE_")
+                    else "INTRADAY_PROVIDER_AUTH_REQUIRED"
+                )
+                raise SchwabSnapshotFetchError(result_code) from None
+            except (ProviderMarketStreamError, SchwabStreamError) as error:
+                result_code = (
+                    "INTRADAY_CONTRACT_MISMATCH"
+                    if str(error) == "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID"
+                    else "INTRADAY_PROVIDER_UNAVAILABLE"
+                )
+                raise SchwabSnapshotFetchError(result_code) from None
         received_at = self._now()
         return RawSnapshotEnvelope(
             raw_payload=raw_payload,

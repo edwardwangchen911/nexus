@@ -143,7 +143,7 @@ uv run ruff check src/nexus/ops/schwab_market_stream.py src/nexus/providers/mark
 uv run mypy src/nexus/ops/schwab_market_stream.py src/nexus/providers/market/schwab_snapshot.py src/nexus/providers/market/snapshot_contracts.py src/nexus/jobs/intraday_collection.py src/nexus/ops/schwab_snapshot_import.py
 ```
 
-- [ ] Commit this adapter slice:
+- [x] Commit this adapter slice:
 
 ```bash
 git add engine/src/nexus/ops/schwab_market_stream.py engine/src/nexus/providers/market/schwab_snapshot.py engine/src/nexus/providers/market/snapshot_contracts.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/ops/schwab_snapshot_import.py engine/tests/unit/test_schwab_market_stream.py engine/tests/unit/test_schwab_snapshot_provider.py engine/tests/unit/test_intraday_collection.py engine/tests/unit/test_schwab_snapshot_import.py
@@ -158,9 +158,13 @@ git commit -m "feat: adapt Schwab intraday snapshots"
 
 - Modify: `engine/src/nexus/provider_worker.py`
 - Modify: `engine/src/nexus/jobs/intraday_collection.py`
-- Modify: `engine/tests/unit/test_provider_worker.py`
-- Modify: `engine/tests/unit/test_intraday_collection.py`
+- Modify: `engine/src/nexus/jobs/intraday_schedule.py`
+- Modify: `engine/src/nexus/providers/market/schwab_snapshot.py`
+- Modify: `engine/tests/unit/providers/test_provider_worker.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_collection.py`
+- Modify: `engine/tests/unit/providers/test_schwab_snapshot.py`
 - Create: `engine/tests/integration/test_schwab_intraday_automatic_job.py`
+- Modify: `engine/tests/integration/test_intraday_collection_pg.py`
 
 ### Contract to implement
 
@@ -177,17 +181,17 @@ Do not retry inside the adapter. The existing one-attempt Job policy and cross-b
 
 ### Steps
 
-- [ ] Add failing registry tests proving Fosun daily plus Schwab intraday coexist in one worker and proving Fosun/Alpaca configurations remain unchanged.
+- [x] Add failing registry tests proving Fosun daily plus Schwab intraday coexist in one worker and proving Fosun/Alpaca configurations remain unchanged.
 
-- [ ] Add failing handler tests proving the exact stable error mapping, raw artifact persistence before parse rejection, valid subset publication with `INTRADAY_SNAPSHOT_PARTIAL`, and no `LatestQuote` publication for incomplete, delayed, or one-sided quote evidence.
+- [x] Add failing handler tests proving the exact stable error mapping, raw artifact persistence before parse rejection, valid subset publication with `INTRADAY_SNAPSHOT_PARTIAL`, and no `LatestQuote` publication for incomplete, delayed, or one-sided quote evidence.
 
-- [ ] Implement snapshot-only selection and stable error mapping. Add `INTRADAY_PROVIDER_AUTH_REQUIRED` to the existing provider-failure cooldown set; do not change daily bundle construction, handler deadline, attempts, or the 60-second duration.
+- [x] Implement snapshot-only selection and stable error mapping. Add `INTRADAY_PROVIDER_AUTH_REQUIRED` to the existing provider-failure cooldown set; do not change daily bundle construction, handler deadline, attempts, or the 60-second duration.
 
-- [ ] Add a PostgreSQL integration test that seeds an eligible calendar row and watchlist, schedules a real v3 Schwab Job, executes `run_job_worker_once`, and asserts the persisted `Job`, `JobAttempt`, `DataArtifact`, normalized quote observations, `LatestQuote`, and query view. Replace only the external WebSocket/preferences boundary with a deterministic transcript.
+- [x] Add a PostgreSQL integration test that seeds an eligible calendar row and watchlist, schedules a real v3 Schwab Job, executes `run_job_worker_once`, and asserts the persisted `Job`, `JobAttempt`, `DataArtifact`, normalized quote observations, `LatestQuote`, and query view. Replace only the external WebSocket/preferences boundary with a deterministic transcript.
 
-- [ ] Add a second integration case where the bounded capture is incomplete: the raw artifact exists, the Job ends with the expected stable code, and neither normalized quote observations nor `LatestQuote` are written.
+- [x] Add a second integration case where the bounded capture is incomplete: the raw artifact exists, the Job ends with the expected stable code, and neither normalized quote observations nor `LatestQuote` are written.
 
-- [ ] Run focused verification:
+- [x] Run focused verification using the actual paths listed above.
 
 ```bash
 cd engine
@@ -196,7 +200,7 @@ uv run ruff check src/nexus/provider_worker.py src/nexus/jobs/intraday_collectio
 uv run mypy src/nexus/provider_worker.py src/nexus/jobs/intraday_collection.py
 ```
 
-- [ ] Commit the worker slice:
+- [x] Commit the worker slice:
 
 ```bash
 git add engine/src/nexus/provider_worker.py engine/src/nexus/jobs/intraday_collection.py engine/tests/unit/test_provider_worker.py engine/tests/unit/test_intraday_collection.py engine/tests/integration/test_schwab_intraday_automatic_job.py

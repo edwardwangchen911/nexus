@@ -6,7 +6,8 @@ from uuid import UUID
 import httpx
 import pytest
 from nexus.providers.base import InstrumentId
-from nexus.providers.market.schwab_snapshot import SchwabSnapshotProvider
+from nexus.providers.market.schwab_oauth import SchwabOAuthError
+from nexus.providers.market.schwab_snapshot import SchwabSnapshotFetchError, SchwabSnapshotProvider
 from nexus.providers.market.snapshot_contracts import IntradaySnapshotRequest, SnapshotInstrument
 
 NOW = datetime(2026, 8, 28, 14, 30, 12, tzinfo=UTC)
@@ -95,6 +96,27 @@ async def test_schwab_provider_does_not_retry_collector_failure(tmp_path) -> Non
     async with httpx.AsyncClient() as client:
         provider = SchwabSnapshotProvider(tmp_path, client, capture=capture)
         with pytest.raises(RuntimeError, match="private"):
+            await provider.fetch_raw_snapshots(_request())
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_schwab_provider_maps_expired_token_without_retry(tmp_path) -> None:
+    calls = 0
+
+    async def capture(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise SchwabOAuthError("SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED")
+
+    async with httpx.AsyncClient() as client:
+        provider = SchwabSnapshotProvider(tmp_path, client, capture=capture)
+        with pytest.raises(
+            SchwabSnapshotFetchError,
+            match="INTRADAY_PROVIDER_AUTH_REQUIRED",
+        ):
             await provider.fetch_raw_snapshots(_request())
 
     assert calls == 1

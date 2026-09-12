@@ -894,8 +894,13 @@ async def test_schedule_fails_clearly_when_calendar_authority_does_not_cover_tod
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_code",
+    ("INTRADAY_PROVIDER_UNAVAILABLE", "INTRADAY_PROVIDER_AUTH_REQUIRED"),
+)
 async def test_provider_failure_cools_down_new_buckets_for_sixty_seconds(
     migrated_database_url: str,
+    failure_code: str,
 ) -> None:
     """A provider outage must not create a new dead letter every 15 seconds."""
 
@@ -923,7 +928,7 @@ async def test_provider_failure_cools_down_new_buckets_for_sixty_seconds(
             session,
             claim=claim,
             now=failed_at,
-            error_code="INTRADAY_PROVIDER_UNAVAILABLE",
+            error_code=failure_code,
         )
 
     async with factory() as session, session.begin():

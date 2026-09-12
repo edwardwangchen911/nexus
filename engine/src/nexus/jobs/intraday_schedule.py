@@ -49,6 +49,7 @@ _PROVIDER_FAILURE_COOLDOWN = timedelta(seconds=60)
 _PROVIDER_FAILURE_CODES = frozenset(
     {
         "INTRADAY_PROVIDER_UNAVAILABLE",
+        "INTRADAY_PROVIDER_AUTH_REQUIRED",
         "INTRADAY_PROVIDER_STATUS_REJECTED",
         "INTRADAY_PROVIDER_POLICY_REJECTED",
     }
@@ -623,7 +624,7 @@ async def revalidate_intraday_payload_authority(
             )
             if bars_authority != payload.bars_authority:
                 return False
-    elif (
+    elif payload.source == "alpaca" and (
         settings.alpaca_intraday_feed != payload.feed
         or settings.alpaca_intraday_delivery_mode != payload.delivery_mode
     ):

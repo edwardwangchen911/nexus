@@ -37,10 +37,12 @@ from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql
 
 
-def _settings(*, intraday: bool) -> ProviderSettings:
+def _settings(*, intraday: bool, intraday_provider: str | None = None) -> ProviderSettings:
     return ProviderSettings(
         runtime_mode="production",
         intraday_monitor_mode="production" if intraday else "disabled",
+        intraday_provider=intraday_provider,
+        intraday_max_symbols=30 if intraday_provider == "schwab" else 10,
         fosun_market_gateway_origin="https://fosun-gateway.internal:8443",
         fosun_market_gateway_key_id="synthetic-market-current",
         fosun_market_gateway_secret="synthetic-market-secret",
@@ -472,6 +474,55 @@ async def test_provider_registry_contains_only_provider_capabilities_without_htt
             assert gateway.close_calls == 0
 
     assert requests == 0
+    assert gateway.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_registry_keeps_fosun_daily_and_selects_schwab_only_for_intraday(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    gateway = _NoopGateway()
+
+    class _SchwabProvider:
+        def __init__(self, repo_root: Path, client: httpx.AsyncClient) -> None:
+            captured["schwab_args"] = (repo_root, client)
+
+    def provider_registry(bundle, *_args, **_kwargs):
+        captured["daily_source"] = bundle.market_source
+        return SimpleNamespace(specs=())
+
+    def intraday_registry(factory, *_args, **_kwargs):
+        captured["snapshot_factory"] = factory
+        return SimpleNamespace(specs=())
+
+    monkeypatch.setattr(
+        "nexus.provider_worker.SchwabSnapshotProvider",
+        _SchwabProvider,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker.build_provider_collection_registry",
+        provider_registry,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker.build_intraday_collection_registry",
+        intraday_registry,
+    )
+    async with httpx.AsyncClient() as client:
+        async with _provider_registry(
+            provider_settings=_settings(intraday=True, intraday_provider="schwab"),
+            provider_http_client=client,
+            store=SimpleNamespace(),
+            repo_root=tmp_path,
+            fosun_gateway_factory=lambda _identity: gateway,
+        ):
+            factory = captured["snapshot_factory"]
+            provider = factory(object())  # type: ignore[operator]
+            assert isinstance(provider, _SchwabProvider)
+            assert captured["daily_source"] == "fosun"
+            assert captured["schwab_args"] == (tmp_path, client)
+
     assert gateway.close_calls == 1
 
 
