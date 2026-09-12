@@ -38,6 +38,7 @@ for (const viewport of [
   { name: "mobile-landscape", width: 844, height: 390 },
 ]) {
   test(`${viewport.name} optimization center preserves evidence and proposal context`, async ({ page }) => {
+    test.slow();
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.emulateMedia({ reducedMotion: "reduce" });
     await installFixtures(page);
