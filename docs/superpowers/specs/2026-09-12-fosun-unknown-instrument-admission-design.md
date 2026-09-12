@@ -46,11 +46,15 @@ holding. One normal full refresh must:
    snapshot as the current decision snapshot;
 6. return `status="identity_pending"` with bounded, non-account output;
 7. keep `DECISION_READY=false` for the attempted refresh and
-   `execution_locked=true`.
+   `execution_locked=true`;
+8. when the explicit terminal `nexus-fosun-local refresh` receives that pending
+   result, run the bounded persisted-identity resolver once and, only when at least
+   one identity was admitted, perform exactly one follow-up refresh.
 
-On a later refresh, after an existing authoritative identity importer has created the
-instrument and current ticker alias, the same holding follows the unchanged full
-READY path. No historical discovery or snapshot is rewritten.
+The resolver uses existing authoritative identity importers. A successfully admitted
+holding follows the unchanged full READY path in the one bounded follow-up refresh.
+No historical discovery or snapshot is rewritten. Manual or ambiguous routes remain
+pending and do not cause another refresh or a retry loop.
 
 ## 3. Non-goals and safety invariants
 
@@ -59,8 +63,10 @@ READY path. No historical discovery or snapshot is rewritten.
   display name, or the presence of NAV fields.
 - Do not create an `Instrument`, `InstrumentAlias`, portfolio position, order, or
   execution authority for an unresolved provider code.
-- Do not call SEC, FMP, Alpaca, Schwab, a model, or another source automatically from
-  portfolio page reads or this refresh.
+- Do not call SEC, FMP, Alpaca, Schwab, a model, or another source from portfolio page
+  reads, background schedules, or ordinary persisted-data GET requests. The explicit
+  terminal `nexus-fosun-local refresh` may call the bounded SEC/FMP identity resolver
+  once after it has persisted `identity_pending`; it never retries in the same run.
 - Do not continue broker cash/order/cash-flow reconciliation once the current holding
   set is known to be unresolved; a partial subset is not a truthful portfolio.
 - Do not expose account identifiers, quantities, costs, raw payloads, or credentials

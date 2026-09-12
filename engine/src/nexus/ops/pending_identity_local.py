@@ -464,6 +464,13 @@ async def bind_fund_mapping(
 MAX_PENDING_PER_RUN = 3
 
 
+def _pending_identity_item_output(output_dir: Path, provider_code: str) -> tuple[Path, bool]:
+    """Keep resumable evidence bound to one opaque provider identity."""
+    digest = sha256(provider_code.encode("ascii")).hexdigest()[:16]
+    item_dir = output_dir / f"item-{digest}"
+    return item_dir, item_dir.exists()
+
+
 async def resolve_pending_identities(
     settings: EngineSettings,
     broker_settings: BrokerWorkerSettings,
@@ -505,8 +512,7 @@ async def resolve_pending_identities(
                 "broker_requests": 0,
                 "execution_locked": True,
             }
-        resume = output_dir.exists()
-        if resume:
+        if output_dir.exists():
             if (
                 output_dir.is_symlink()
                 or not output_dir.is_dir()
@@ -518,15 +524,17 @@ async def resolve_pending_identities(
         collected: list[tuple[str, str, CollectedIdentityEvidence]] = []
         public_requests = 0
         manual_required = 0
-        for number, document in enumerate(documents, start=1):
+        for document in documents:
             symbol = document.provider_code.removeprefix("us")
-            item_dir = output_dir / f"item-{number:02d}"
+            item_dir, resume_item = _pending_identity_item_output(
+                output_dir, document.provider_code
+            )
             route = document.recommended_identity_route
             if route == "current_held_common_stock":
                 kind = "common_stock"
                 evidence = (
                     _load_existing_evidence(item_dir, symbol=symbol, kind=kind)
-                    if resume
+                    if resume_item
                     else await collect_common_stock_evidence(
                         symbol=symbol,
                         fmp_key=fmp_key,
@@ -540,7 +548,7 @@ async def resolve_pending_identities(
                 try:
                     evidence = (
                         _load_existing_evidence(item_dir, symbol=symbol, kind=kind)
-                        if resume
+                        if resume_item
                         else await collect_fund_evidence(
                             symbol=symbol,
                             fmp_key=fmp_key,

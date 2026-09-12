@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -522,6 +523,24 @@ class _FakeBroker:
         assert limit == 100
         self.holdings_calls += 1
         return SimpleNamespace()
+
+
+def test_pending_archive_reuses_only_the_same_identity(tmp_path: Path) -> None:
+    root = tmp_path / "pending"
+    root.mkdir(mode=0o700)
+
+    first, first_resume = resolver_module._pending_identity_item_output(root, "usAAA")
+    first.mkdir(mode=0o700)
+    same, same_resume = resolver_module._pending_identity_item_output(root, "usAAA")
+    different, different_resume = resolver_module._pending_identity_item_output(root, "usBBB")
+
+    assert first_resume is False
+    assert same == first
+    assert same_resume is True
+    assert different != first
+    assert different_resume is False
+    assert "AAA" not in first.name
+    assert "BBB" not in different.name
 
 
 @pytest.mark.asyncio

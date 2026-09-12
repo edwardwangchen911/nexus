@@ -34,12 +34,8 @@ def test_local_environment_loads_ignored_env_and_derives_loopback_tls(tmp_path: 
     assert environment["FOSUN_GATEWAY_CLIENT_CERT"] == str(secret_root / "broker-client.pem")
     assert environment["FOSUN_GATEWAY_CLIENT_KEY"] == str(secret_root / "broker-client.key")
     assert environment["FOSUN_GATEWAY_CLIENT_CA"] == str(secret_root / "server-ca.pem")
-    assert environment["FOSUN_MARKET_GATEWAY_CLIENT_CERT"] == str(
-        secret_root / "market-client.pem"
-    )
-    assert environment["FOSUN_MARKET_GATEWAY_CLIENT_KEY"] == str(
-        secret_root / "market-client.key"
-    )
+    assert environment["FOSUN_MARKET_GATEWAY_CLIENT_CERT"] == str(secret_root / "market-client.pem")
+    assert environment["FOSUN_MARKET_GATEWAY_CLIENT_KEY"] == str(secret_root / "market-client.key")
     assert environment["FOSUN_MARKET_GATEWAY_CLIENT_CA"] == str(secret_root / "server-ca.pem")
 
 
@@ -163,6 +159,171 @@ def test_refresh_broker_command_uses_the_narrow_broker_only_entry(
 
 
 @pytest.mark.asyncio
+async def test_refresh_resolves_pending_identity_then_refreshes_exactly_once(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    refresh_results = iter(
+        (
+            {"status": "identity_pending", "snapshot_status": "PARTIAL"},
+            {"status": "ok", "snapshot_status": "READY", "positions": 17},
+        )
+    )
+
+    async def refresh(_settings: object) -> dict[str, object]:
+        calls.append("refresh")
+        return next(refresh_results)
+
+    async def resolve(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append("resolve")
+        assert kwargs["output_dir"] == tmp_path / "pending"
+        return {
+            "status": "resolved",
+            "resolved": 2,
+            "remaining": 0,
+            "portfolio_refresh_required": True,
+            "execution_locked": True,
+        }
+
+    result = await fosun_local.refresh_local_fosun_resolving_pending(
+        object(),
+        {"FMP_API_KEY": "synthetic", "SEC_CONTACT": "nexus@example.com"},
+        output_dir=tmp_path / "pending",
+        identity_settings=object(),
+        broker_settings=object(),
+        refresh=refresh,
+        resolve=resolve,
+    )
+
+    assert calls == ["refresh", "resolve", "refresh"]
+    assert result == {
+        "status": "ok",
+        "snapshot_status": "READY",
+        "positions": 17,
+        "refresh_attempts": 2,
+        "identity_resolution": {
+            "status": "resolved",
+            "resolved": 2,
+            "remaining": 0,
+            "portfolio_refresh_required": True,
+            "execution_locked": True,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_stops_after_manual_identity_review_without_looping(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    async def refresh(_settings: object) -> dict[str, object]:
+        calls.append("refresh")
+        return {"status": "identity_pending", "snapshot_status": "PARTIAL"}
+
+    async def resolve(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append("resolve")
+        return {
+            "status": "manual_review_required",
+            "resolved": 0,
+            "remaining": 1,
+            "portfolio_refresh_required": False,
+            "execution_locked": True,
+        }
+
+    result = await fosun_local.refresh_local_fosun_resolving_pending(
+        object(),
+        {"FMP_API_KEY": "synthetic", "SEC_CONTACT": "nexus@example.com"},
+        output_dir=tmp_path / "pending",
+        identity_settings=object(),
+        broker_settings=object(),
+        refresh=refresh,
+        resolve=resolve,
+    )
+
+    assert calls == ["refresh", "resolve"]
+    assert result["status"] == "identity_pending"
+    assert result["snapshot_status"] == "PARTIAL"
+    assert result["refresh_attempts"] == 1
+    assert result["identity_resolution"] == {
+        "status": "manual_review_required",
+        "resolved": 0,
+        "remaining": 1,
+        "portfolio_refresh_required": False,
+        "execution_locked": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_pending_identity_does_not_start_resolver(tmp_path: Path) -> None:
+    resolver_called = False
+
+    async def refresh(_settings: object) -> dict[str, object]:
+        return {"status": "ok", "snapshot_status": "READY"}
+
+    async def resolve(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal resolver_called
+        resolver_called = True
+        return {}
+
+    result = await fosun_local.refresh_local_fosun_resolving_pending(
+        object(),
+        {},
+        output_dir=tmp_path / "pending",
+        identity_settings=object(),
+        broker_settings=object(),
+        refresh=refresh,
+        resolve=resolve,
+    )
+
+    assert result == {"status": "ok", "snapshot_status": "READY"}
+    assert resolver_called is False
+    assert not (tmp_path / "pending").exists()
+
+
+def test_refresh_command_uses_bounded_identity_orchestration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    refresh_settings = object()
+    received: dict[str, object] = {}
+
+    async def orchestrate(*args: object, **kwargs: object) -> dict[str, object]:
+        received["args"] = args
+        received["kwargs"] = kwargs
+        return {"status": "ok", "snapshot_status": "READY"}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        fosun_local,
+        "load_local_environment",
+        lambda *_args: {"FMP_API_KEY": "fmp-canary", "SEC_CONTACT": "nexus@example.com"},
+    )
+    monkeypatch.setattr(
+        fosun_local,
+        "LocalFosunRefreshSettings",
+        SimpleNamespace(model_validate=lambda _environment: refresh_settings),
+    )
+    monkeypatch.setattr(
+        fosun_local,
+        "refresh_local_fosun_resolving_pending",
+        orchestrate,
+    )
+
+    fosun_local.main(["refresh"])
+
+    assert received["args"] == (
+        refresh_settings,
+        {"FMP_API_KEY": "fmp-canary", "SEC_CONTACT": "nexus@example.com"},
+    )
+    kwargs = received["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["output_dir"].parent == (
+        tmp_path / ".secrets" / "nexus-fosun-local" / "pending-identity"
+    )
+    assert capsys.readouterr().out == '{"snapshot_status":"READY","status":"ok"}\n'
+
+
+@pytest.mark.asyncio
 async def test_status_database_boundary_returns_a_stable_redacted_failure() -> None:
     async def unavailable_reader(_database_url: str) -> dict[str, object]:
         raise OSError("database-location-canary")
@@ -221,6 +382,8 @@ def test_doctor_can_confirm_complete_configuration_without_network_or_database()
             "FOSUN_MARKET_GATEWAY_CLIENT_CERT",
             "FOSUN_MARKET_GATEWAY_CLIENT_KEY",
             "FOSUN_MARKET_GATEWAY_CLIENT_CA",
+            "FMP_API_KEY",
+            "SEC_CONTACT",
         )
     }
 
@@ -228,7 +391,7 @@ def test_doctor_can_confirm_complete_configuration_without_network_or_database()
 
     assert result == {
         "status": "ready",
-        "configured_environment_count": 18,
+        "configured_environment_count": 20,
         "missing_environment": (),
         "tls_files": {
             "FOSUN_GATEWAY_CLIENT_CA": "present",
