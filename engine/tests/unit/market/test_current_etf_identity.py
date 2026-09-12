@@ -35,6 +35,58 @@ Tax Information</body></html>"""
 
 
 @pytest.mark.asyncio
+async def test_current_held_equity_etf_accepts_company_index_497k_wording():
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    document = b"""<html><body>497K Summary Prospectus May 1, 2026
+SYNX Synthetic Held Equity ETF Summary Prospectus Principal U.S. Listing Exchange: NYSE Arca.
+Investment Objective The Fund seeks to replicate the performance of an index of companies
+involved in synthetic materials production. Fees and Expenses Costs apply.
+Principal Investment Strategies The Fund normally invests at least 80% of its total assets in
+securities that comprise the index. The index tracks the performance of companies involved in
+synthetic materials production. Principal Investment Risks Market risks apply.
+Purchase and Sale of Fund Shares Shares trade on an exchange. Tax Information.</body></html>"""
+
+    result = await validate_current_held_etf_originals(
+        symbol=symbol,
+        contents=originals(
+            symbol=symbol,
+            company_name="Synthetic Held Equity Fund",
+            document=document,
+        ),
+        now=datetime.now(UTC),
+    )
+
+    assert result.identity.symbol == symbol
+    assert result.identity.asset_type == "equity_etf"
+
+
+@pytest.mark.asyncio
+async def test_current_held_equity_etf_rejects_company_debt_index_wording():
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    document = b"""<html><body>497K Summary Prospectus May 1, 2026
+SYNX Synthetic Debt ETF Summary Prospectus Principal U.S. Listing Exchange: NYSE Arca.
+Investment Objective The Fund seeks to track a fixed income index of companies.
+Fees and Expenses Costs apply. Principal Investment Strategies The Fund invests in debt
+securities issued by companies in the index. Principal Investment Risks Credit risks apply.
+Purchase and Sale of Fund Shares Shares trade on an exchange. Tax Information.</body></html>"""
+
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_current_held_etf_originals(
+            symbol=symbol,
+            contents=originals(
+                symbol=symbol,
+                company_name="Synthetic Debt Fund",
+                document=document,
+            ),
+            now=datetime.now(UTC),
+        )
+
+
+@pytest.mark.asyncio
 async def test_current_held_validation_fails_closed_when_fixed_definition_is_unavailable(
     monkeypatch,
 ):

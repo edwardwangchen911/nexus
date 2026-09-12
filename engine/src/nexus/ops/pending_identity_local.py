@@ -87,6 +87,75 @@ class CollectedIdentityEvidence:
     mapping_file: Path | None = None
 
 
+def _load_existing_evidence(item_dir: Path, *, symbol: str, kind: str) -> CollectedIdentityEvidence:
+    """Reuse only a complete protected archive from an interrupted resolver run."""
+
+    directories = (item_dir, item_dir / "fmp", item_dir / "sec", item_dir / "selectors")
+    if any(
+        path.is_symlink() or not path.is_dir() or path.stat().st_mode & 0o077
+        for path in directories
+    ):
+        raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
+    selection_path = item_dir / "selectors/selection.json"
+    if selection_path.is_symlink() or not selection_path.is_file():
+        raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
+    selection = _json_object(selection_path.read_bytes(), "PENDING_IDENTITY_RESUME_INVALID")
+    expected_schema = (
+        "pending_common_stock_selection_v1"
+        if kind == "common_stock"
+        else "pending_fund_selection_v1"
+    )
+    if selection.get("schema") != expected_schema or selection.get("symbol") != symbol:
+        raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
+    common_files = (
+        item_dir / "fmp/profile.json",
+        item_dir / "fmp/receipt.json",
+        selection_path,
+        item_dir / "selectors/submissions.json",
+    )
+    required: tuple[Path, ...]
+    if kind == "common_stock":
+        primary_document = selection.get("primary_document")
+        if (
+            not isinstance(primary_document, str)
+            or _PRIMARY_DOCUMENT.fullmatch(primary_document) is None
+        ):
+            raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
+        required = common_files + (
+            item_dir / "selectors/company_tickers_exchange.json",
+            item_dir / "sec/receipt.json",
+            item_dir / "sec" / primary_document,
+        )
+        mapping_file = None
+    elif kind == "equity_etf":
+        required = common_files + (
+            item_dir / "selectors/company_tickers_mf.json",
+            item_dir / "selectors/class-search.html",
+            item_dir / "sec/submissions.raw",
+            item_dir / "sec/filing-index.raw",
+            item_dir / "sec/disclosure.raw",
+            item_dir / "sec/receipts.json",
+            item_dir / "sec/mapping-binding.json",
+        )
+        mapping_file = item_dir / "selectors/company_tickers_mf.json"
+    else:
+        raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
+    if any(
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_mode & 0o077
+        or path.stat().st_size == 0
+        for path in required
+    ):
+        raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
+    return CollectedIdentityEvidence(
+        item_dir / "fmp",
+        item_dir / "sec",
+        0,
+        mapping_file,
+    )
+
+
 class _MappingVersionClient(Protocol):
     def list_object_versions(self, **kwargs: object) -> Mapping[str, object]: ...
 
@@ -436,7 +505,16 @@ async def resolve_pending_identities(
                 "broker_requests": 0,
                 "execution_locked": True,
             }
-        output_dir.mkdir(mode=0o700, exist_ok=False)
+        resume = output_dir.exists()
+        if resume:
+            if (
+                output_dir.is_symlink()
+                or not output_dir.is_dir()
+                or output_dir.stat().st_mode & 0o077
+            ):
+                raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
+        else:
+            output_dir.mkdir(mode=0o700, exist_ok=False)
         collected: list[tuple[str, str, CollectedIdentityEvidence]] = []
         public_requests = 0
         manual_required = 0
@@ -445,29 +523,37 @@ async def resolve_pending_identities(
             item_dir = output_dir / f"item-{number:02d}"
             route = document.recommended_identity_route
             if route == "current_held_common_stock":
-                evidence = await collect_common_stock_evidence(
-                    symbol=symbol,
-                    fmp_key=fmp_key,
-                    sec_contact=sec_contact,
-                    output_dir=item_dir,
-                    client=http_client,
-                )
                 kind = "common_stock"
-            elif route == "current_held_fund_or_structured":
-                try:
-                    evidence = await collect_fund_evidence(
+                evidence = (
+                    _load_existing_evidence(item_dir, symbol=symbol, kind=kind)
+                    if resume
+                    else await collect_common_stock_evidence(
                         symbol=symbol,
                         fmp_key=fmp_key,
                         sec_contact=sec_contact,
                         output_dir=item_dir,
                         client=http_client,
                     )
+                )
+            elif route == "current_held_fund_or_structured":
+                kind = "equity_etf"
+                try:
+                    evidence = (
+                        _load_existing_evidence(item_dir, symbol=symbol, kind=kind)
+                        if resume
+                        else await collect_fund_evidence(
+                            symbol=symbol,
+                            fmp_key=fmp_key,
+                            sec_contact=sec_contact,
+                            output_dir=item_dir,
+                            client=http_client,
+                        )
+                    )
                 except ValueError as error:
                     if str(error) != "PENDING_IDENTITY_FUND_MAPPING_UNAVAILABLE":
                         raise
                     manual_required += 1
                     continue
-                kind = "equity_etf"
             else:
                 manual_required += 1
                 continue
@@ -507,12 +593,13 @@ async def resolve_pending_identities(
         for kind, symbol, evidence in collected:
             if kind == "equity_etf":
                 assert evidence.mapping_file is not None
-                await bind_fund_mapping(
-                    evidence_store,
-                    mapping_file=evidence.mapping_file,
-                    sec_archive=evidence.sec_archive,
-                    session_date=datetime.now(UTC).date(),
-                )
+                if not (evidence.sec_archive / "mapping-binding.json").exists():
+                    await bind_fund_mapping(
+                        evidence_store,
+                        mapping_file=evidence.mapping_file,
+                        sec_archive=evidence.sec_archive,
+                        session_date=datetime.now(UTC).date(),
+                    )
             async with factory() as session, session.begin():
                 if kind == "common_stock":
                     result = await import_current_held_common_stock(
