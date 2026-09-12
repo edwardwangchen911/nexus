@@ -1005,9 +1005,17 @@ async def test_other_market_code_forms_are_rejected(tmp_path, code):
 @pytest.mark.parametrize(
     ("field", "value"), [("quote_message_count", 2), ("heartbeat_sent_count", 999)]
 )
-async def test_loader_recomputes_receipt_counters_to_reject_tampering(tmp_path, field, value):
+async def test_loader_recomputes_receipt_counters_to_reject_tampering(
+    tmp_path, monkeypatch, field, value
+):
     directory = tmp_path / "run"
-    await _collect(socket=Socket([SUB_REPLY, _quote_frame()]), directory=directory, max_frames=2)
+    socket = Socket([SUB_REPLY, _quote_frame()])
+    await _controlled_collect(
+        socket=socket,
+        directory=directory,
+        max_frames=2,
+        monkeypatch=monkeypatch,
+    )
     receipt = json.loads((directory / "receipt.json").read_text())
 
     assert receipt["quote_message_count"] == 1
