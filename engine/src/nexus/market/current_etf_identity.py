@@ -429,19 +429,26 @@ def _current_held_nasdaq_identity(
     equity_text = (objective + " " + strategy).casefold()
     provider_text = (fmp_description or "").casefold()
     sec_equity = re.search(r"\b(?:equity|common stocks?|shares of)\b", equity_text) is not None
+    company_index_equity = bool(
+        re.search(r"\bsecurities\b", equity_text) and re.search(r"\bcompan(?:y|ies)\b", equity_text)
+    )
     derivative_equity = (
         "swap agreement" in equity_text
         and "underlying security" in equity_text
         and re.search(r"\b(?:equity|stocks?|shares)\b", provider_text) is not None
     )
     excluded = re.search(
-        r"\b(?:bitcoin|ether|gold bullion|fixed income|treasury bonds)\b",
+        r"\b(?:bitcoin|ether|bullion|commodit(?:y|ies)|futures?|fixed income|bonds?|debt)\b",
         equity_text + " " + provider_text,
     )
-    if not (sec_equity or derivative_equity) or excluded:
+    if not (sec_equity or company_index_equity or derivative_equity) or excluded:
         raise ValueError
     legal_matches = list(
-        re.finditer(r"(?:exchange-traded fund|Unlike most ETFs)", text, re.IGNORECASE)
+        re.finditer(
+            r"(?:exchange-traded fund|Unlike most ETFs|\bETF Summary Prospectus\b)",
+            text,
+            re.IGNORECASE,
+        )
     )
     if not legal_matches or (exchange == "XNAS" and "nasdaq" not in text.casefold()):
         raise ValueError

@@ -8,6 +8,7 @@ import nexus.ops.pending_identity_local as resolver_module
 import pytest
 from nexus.ops.pending_identity_local import (
     CollectedIdentityEvidence,
+    _load_existing_evidence,
     bind_fund_mapping,
     collect_common_stock_evidence,
     collect_fund_evidence,
@@ -18,6 +19,36 @@ from nexus.ops.pending_identity_local import (
 from pydantic import SecretStr
 
 NOW = datetime(2026, 9, 12, 6, tzinfo=UTC)
+
+
+def test_load_existing_evidence_reuses_complete_protected_archive(tmp_path) -> None:
+    item = tmp_path / "item-01"
+    for directory in (item, item / "fmp", item / "sec", item / "selectors"):
+        directory.mkdir(mode=0o700)
+    files = {
+        "fmp/profile.json": b"profile",
+        "fmp/receipt.json": b"receipt",
+        "sec/submissions.raw": b"submissions",
+        "sec/filing-index.raw": b"index",
+        "sec/disclosure.raw": b"disclosure",
+        "sec/receipts.json": b"receipts",
+        "sec/mapping-binding.json": b"binding",
+        "selectors/company_tickers_mf.json": b"mapping",
+        "selectors/submissions.json": b"submissions",
+        "selectors/class-search.html": b"search",
+        "selectors/selection.json": json.dumps(
+            {"schema": "pending_fund_selection_v1", "symbol": "FUND"}
+        ).encode(),
+    }
+    for relative, content in files.items():
+        path = item / relative
+        path.write_bytes(content)
+        path.chmod(0o600)
+
+    result = _load_existing_evidence(item, symbol="FUND", kind="equity_etf")
+
+    assert result.request_count == 0
+    assert result.mapping_file == item / "selectors/company_tickers_mf.json"
 
 
 def _submissions(cik: int, *rows: tuple[str, str, str, str, str]) -> bytes:
