@@ -17,6 +17,8 @@ from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import (
     INTRADAY_SOURCE_POLICY_ID,
     INTRADAY_SOURCE_POLICY_V2_ID,
+    INTRADAY_SOURCE_POLICY_V3_ID,
+    INTRADAY_SOURCE_POLICY_V4_ID,
     QUOTE_SOURCE_POLICY_ID,
     QUOTE_SOURCE_POLICY_V2_ID,
     QUOTE_SOURCE_POLICY_V3_ID,
@@ -497,12 +499,18 @@ async def test_canonical_source_policies_are_loadable_and_database_immutable(
         assert records == {
             ("intraday_monitor", INTRADAY_SOURCE_POLICY_ID),
             ("intraday_monitor", INTRADAY_SOURCE_POLICY_V2_ID),
+            ("intraday_monitor", INTRADAY_SOURCE_POLICY_V3_ID),
+            ("intraday_monitor", INTRADAY_SOURCE_POLICY_V4_ID),
             ("market_price", SOURCE_POLICY_ID),
             ("market_price", SOURCE_POLICY_V2_ID),
             ("market_price", SOURCE_POLICY_V3_ID),
             ("market_quote", QUOTE_SOURCE_POLICY_ID),
             ("market_quote", QUOTE_SOURCE_POLICY_V2_ID),
             ("market_quote", QUOTE_SOURCE_POLICY_V3_ID),
+            (
+                "portfolio_scenario_cost_analysis",
+                UUID("7733d99e-1594-5f1e-87ea-e5cc23575159"),
+            ),
         }
         for _, policy_id in records:
             for statement in (

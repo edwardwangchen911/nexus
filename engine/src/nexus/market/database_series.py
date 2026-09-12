@@ -53,6 +53,7 @@ from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.providers.base import InstrumentId, PriceBar, PriceSeries
 from nexus.quality.source_policy import (
     IntradaySourcePolicyV3,
+    IntradaySourcePolicyV4,
     load_intraday_source_policy,
 )
 
@@ -397,7 +398,8 @@ async def load_intraday_series(
             (authority.available_at, authority.id, _price_bar(record)) for record in records
         )
 
-    allow_alpaca = isinstance(policy, IntradaySourcePolicyV3)
+    allow_alpaca = isinstance(policy, IntradaySourcePolicyV3 | IntradaySourcePolicyV4)
+    allow_alpaca_snapshots = isinstance(policy, IntradaySourcePolicyV4)
     candidates = tuple(
         _intraday_candidate(key, rows)
         for key, rows in grouped.items()
@@ -408,6 +410,7 @@ async def load_intraday_series(
         instrument_id=instrument_id,
         decision_time=decision,
         allow_alpaca=allow_alpaca,
+        allow_alpaca_snapshots=allow_alpaca_snapshots,
     )
     selected_key = _select_intraday_key(candidates, observations)
     if selected_key is None:
@@ -627,6 +630,7 @@ async def _latest_intraday_observations(
     instrument_id: UUID,
     decision_time: datetime,
     allow_alpaca: bool,
+    allow_alpaca_snapshots: bool,
 ) -> tuple[LatestQuote, ...]:
     ranked = (
         select(
@@ -663,7 +667,14 @@ async def _latest_intraday_observations(
             LatestQuote.data_artifact_id.is_not(None),
             DataArtifact.available_at <= decision_time,
             DataArtifact.received_at <= decision_time,
-            LatestQuote.revision == DataArtifact.sha256,
+            or_(
+                LatestQuote.revision == DataArtifact.sha256,
+                and_(
+                    LatestQuote.source == "alpaca",
+                    LatestQuote.event_kind == "trade",
+                    LatestQuote.revision.like(func.concat("%:", DataArtifact.sha256)),
+                ),
+            ),
             or_(
                 and_(
                     LatestQuote.event_kind == "snapshot",
@@ -701,7 +712,11 @@ async def _latest_intraday_observations(
                     LatestQuote.provider_contract_hash.is_(None),
                     LatestQuote.provider_authorized_at.is_(None),
                     DataArtifact.source == "alpaca",
-                    DataArtifact.schema_version == "alpaca_stock_stream_v1",
+                    DataArtifact.schema_version.in_(
+                        ("alpaca_stock_stream_v1", "alpaca_stock_snapshots_v1")
+                        if allow_alpaca_snapshots
+                        else ("alpaca_stock_stream_v1",)
+                    ),
                     DataArtifact.mime_type == "application/json",
                 ),
             ),

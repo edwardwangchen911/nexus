@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from nexus.jobs.market_authority import ProviderMarketBinding
+from nexus.market.database_series import load_intraday_series
 from nexus.market.intraday_ingestion import (
     archive_intraday_snapshot_raw,
     ingest_intraday_snapshot,
@@ -126,13 +127,13 @@ def _snapshot(
         symbol=symbol,
         trade=SnapshotTrade(
             price=price,
-            observed_at=RECEIVED_AT.replace(second=14, microsecond=400_000),
+            observed_at=received_at - timedelta(milliseconds=200),
             provider_trade_id=f"{symbol}-trade",
         ),
         quote=SnapshotQuote(
             bid=price - Decimal("0.02"),
             ask=price + Decimal("0.02"),
-            observed_at=RECEIVED_AT.replace(second=14, microsecond=500_000),
+            observed_at=received_at - timedelta(milliseconds=100),
         ),
         minute_bar=SnapshotMinuteBar(
             bar=PriceBar(
@@ -199,6 +200,36 @@ async def test_intraday_ingestion_is_raw_first_and_replay_idempotent(
         assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 2
         assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 2
         assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 2
+
+
+@pytest.mark.asyncio
+async def test_scheduled_alpaca_rest_snapshot_is_visible_to_intraday_loader(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instruments(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    received_at = datetime.now(UTC) - timedelta(seconds=1)
+    async with factory() as session, session.begin():
+        await ingest_intraday_snapshot(
+            session,
+            _ObjectStore(),
+            _batch(received_at=received_at),
+            commit=False,
+        )
+
+    async with factory() as session:
+        view = await load_intraday_series(
+            session,
+            UUID(str(AAPL_ID)),
+            received_at + timedelta(seconds=1),
+        )
+
+    assert view.source == "alpaca"
+    assert view.feed == "iex"
+    assert view.delivery_mode == "real_time"
+    assert view.trade is not None and view.trade.last == Decimal("227.16")
+    assert view.quote is not None and view.quote.bid == Decimal("227.14")
+    assert view.quote.ask == Decimal("227.18")
 
 
 @pytest.mark.asyncio

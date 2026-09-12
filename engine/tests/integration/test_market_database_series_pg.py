@@ -117,7 +117,7 @@ def _batch(*, received_at: datetime, close: str) -> SnapshotBatch:
 
 
 @pytest.mark.asyncio
-async def test_current_database_loaders_exclude_legacy_alpaca_and_fixture_authorities(
+async def test_current_database_loaders_admit_current_alpaca_before_decision_only(
     migrated_database_url: str,
 ) -> None:
     settings = EngineSettings(database_url=migrated_database_url)
@@ -145,11 +145,16 @@ async def test_current_database_loaders_exclude_legacy_alpaca_and_fixture_author
         intraday = await load_intraday_series(session, INSTRUMENT_ID, DECISION_TIME)
 
     assert daily == ()
-    assert intraday.source is None
+    assert intraday.source == "alpaca"
+    assert intraday.feed == "iex"
+    assert intraday.delivery_mode == "real_time"
     assert intraday.bars == ()
-    assert intraday.trade is None
-    assert intraday.quote is None
-    assert intraday.quality_reasons == ("INTRADAY_DATA_UNAVAILABLE",)
+    assert intraday.trade is not None
+    assert intraday.trade.last == Decimal("103")
+    assert intraday.quote is not None
+    assert intraday.quote.bid == Decimal("102.98")
+    assert intraday.quote.ask == Decimal("103.02")
+    assert intraday.quality_reasons == ()
 
 
 @pytest.mark.asyncio
