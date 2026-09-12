@@ -48,7 +48,6 @@ from nexus.settings import EngineSettings
 
 _ACCESSION = re.compile(r"[0-9]{10}-[0-9]{2}-[0-9]{6}")
 _PRIMARY_DOCUMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.html?")
-_MAX_FUND_FILING_CANDIDATES = 3
 
 
 class _IndexLinks(HTMLParser):
@@ -213,7 +212,7 @@ async def collect_fund_evidence(
     selectors.mkdir(mode=0o700)
     await collect_profile(symbol=symbol, key=fmp_key, output_dir=fmp_archive, client=client)
 
-    budget = _Budget(6)
+    budget = _Budget(5)
     headers = (("User-Agent", f"NEXUS {sec_contact}"), ("Accept-Encoding", "gzip, deflate"))
     directory = _BoundedBytes(client, "www.sec.gov", budget)
     mapping_raw = await directory.get_bytes(("files", "company_tickers_mf.json"), (), headers)
@@ -223,25 +222,32 @@ async def collect_fund_evidence(
         )
     except ValueError:
         raise ValueError("PENDING_IDENTITY_FUND_MAPPING_UNAVAILABLE") from None
+    mapping_file = selectors / "company_tickers_mf.json"
+    write_private(mapping_file, mapping_raw)
+    class_search_raw = await directory.get_bytes(
+        ("cgi-bin", "browse-edgar"),
+        (
+            ("CIK", class_id),
+            ("action", "getcompany"),
+            ("type", "497K"),
+            ("owner", "exclude"),
+            ("count", "10"),
+        ),
+        headers,
+    )
+    write_private(selectors / "class-search.html", class_search_raw)
     submissions_raw = await _BoundedBytes(client, "data.sec.gov", budget).get_bytes(
         ("submissions", f"CIK{selected_cik}.json"), (), headers
     )
+    write_private(selectors / "submissions.json", submissions_raw)
     received_at = datetime.now(UTC)
-    filing_candidates = _filing_candidates(
-        _json_object(submissions_raw, "PENDING_IDENTITY_FUND_FILING_UNAVAILABLE"),
-        cik=selected_cik,
-        forms=frozenset({"497K"}),
+    selected = select_fund_class_filing(
+        mapping_raw=mapping_raw,
+        class_search_raw=class_search_raw,
+        submissions_raw=submissions_raw,
+        symbol=symbol,
         received_at=received_at,
-        unavailable_code="PENDING_IDENTITY_FUND_FILING_UNAVAILABLE",
     )
-    filename_symbol = re.compile(
-        rf"(?:^|[^A-Z0-9]){re.escape(symbol)}(?:[^A-Z0-9]|$)", re.IGNORECASE
-    )
-    filing_candidates.sort(
-        key=lambda candidate: filename_symbol.search(candidate[1]) is not None,
-        reverse=True,
-    )
-    filing_candidates = filing_candidates[:_MAX_FUND_FILING_CANDIDATES]
     row = parse_profile((fmp_archive / "profile.json").read_bytes(), symbol)
     if (
         row.get("currency") != "USD"
@@ -250,46 +256,23 @@ async def collect_fund_evidence(
     ):
         raise ValueError("PENDING_IDENTITY_FUND_SOURCE_CONFLICT")
 
-    selected: FundFilingSelection | None = None
-    index_raw: bytes | None = None
-    root: tuple[str, ...] | None = None
-    index_name: str | None = None
-    indices_attempted = 0
-    for candidate_number, (accession, primary_document) in enumerate(filing_candidates, start=1):
-        candidate_root = (
-            "Archives",
-            "edgar",
-            "data",
-            str(int(selected_cik)),
-            accession.replace("-", ""),
-        )
-        candidate_index_name = f"{accession}-index.html"
-        candidate_index = await directory.get_bytes(
-            (*candidate_root, candidate_index_name), (), headers
-        )
-        indices_attempted += 1
-        write_private(selectors / f"candidate-{candidate_number:02d}-index.raw", candidate_index)
-        if not _fund_index_matches(
-            candidate_index,
-            root=candidate_root,
-            primary_document=primary_document,
-            symbol=symbol,
-            series_id=series_id,
-            class_id=class_id,
-        ):
-            continue
-        selected = FundFilingSelection(
-            selected_cik,
-            series_id,
-            class_id,
-            accession,
-            primary_document,
-        )
-        index_raw = candidate_index
-        root = candidate_root
-        index_name = candidate_index_name
-        break
-    if selected is None or index_raw is None or root is None or index_name is None:
+    root = (
+        "Archives",
+        "edgar",
+        "data",
+        str(int(selected.cik)),
+        selected.accession.replace("-", ""),
+    )
+    index_name = f"{selected.accession}-index.html"
+    index_raw = await directory.get_bytes((*root, index_name), (), headers)
+    if not _fund_index_matches(
+        index_raw,
+        root=root,
+        primary_document=selected.primary_document,
+        symbol=symbol,
+        series_id=selected.series_id,
+        class_id=selected.class_id,
+    ):
         raise ValueError("PENDING_IDENTITY_FUND_FILING_UNAVAILABLE")
     disclosure_raw = await directory.get_bytes((*root, selected.primary_document), (), headers)
     excerpt, _ = disclosure_excerpt(disclosure_raw)
@@ -326,9 +309,6 @@ async def collect_fund_evidence(
         write_private(sec_archive / f"receipt-{number}.json", json.dumps(receipt).encode())
         receipts.append(receipt)
     write_private(sec_archive / "receipts.json", json.dumps(receipts).encode())
-    mapping_file = selectors / "company_tickers_mf.json"
-    write_private(mapping_file, mapping_raw)
-    write_private(selectors / "submissions.json", submissions_raw)
     write_private(
         selectors / "selection.json",
         json.dumps(
@@ -345,12 +325,7 @@ async def collect_fund_evidence(
             separators=(",", ":"),
         ).encode(),
     )
-    return CollectedIdentityEvidence(
-        fmp_archive,
-        sec_archive,
-        4 + indices_attempted,
-        mapping_file,
-    )
+    return CollectedIdentityEvidence(fmp_archive, sec_archive, 6, mapping_file)
 
 
 async def bind_fund_mapping(
@@ -800,3 +775,57 @@ def select_fund_filing(
         unavailable_code="PENDING_IDENTITY_FUND_FILING_UNAVAILABLE",
     )
     return FundFilingSelection(cik, series_id, class_id, accession, primary)
+
+
+def select_fund_class_filing(
+    *,
+    mapping_raw: bytes,
+    class_search_raw: bytes,
+    submissions_raw: bytes,
+    symbol: str,
+    received_at: datetime,
+) -> FundFilingSelection:
+    """Select the latest 497K returned by SEC's exact class-level search."""
+
+    try:
+        cik_value, series_id, class_id = resolve_fund(
+            _json_object(mapping_raw, "PENDING_IDENTITY_FUND_MAPPING_UNAVAILABLE"), symbol
+        )
+        search_text, truncated = disclosure_excerpt(class_search_raw)
+        if (
+            truncated
+            or len(re.findall(rf"\bClass/Contract:\s*{class_id}\b", search_text)) != 1
+            or len(re.findall(rf"\bTicker Symbol:\s*{re.escape(symbol)}\b", search_text)) != 1
+        ):
+            raise ValueError
+        links = _IndexLinks()
+        links.feed(class_search_raw.decode("utf-8-sig"))
+        browse_accessions: set[str] = set()
+        for link in links.links:
+            match = re.fullmatch(
+                r"(?:https://www\.sec\.gov)?/Archives/edgar/data/[0-9]+/([0-9]{18})/"
+                r"([0-9]{10}-[0-9]{2}-[0-9]{6})-index\.html?",
+                link,
+            )
+            if match and match[1] == match[2].replace("-", ""):
+                browse_accessions.add(match[2])
+        candidates = _filing_candidates(
+            _json_object(submissions_raw, "PENDING_IDENTITY_FUND_FILING_UNAVAILABLE"),
+            cik=cik_value,
+            forms=frozenset({"497K"}),
+            received_at=received_at,
+            unavailable_code="PENDING_IDENTITY_FUND_FILING_UNAVAILABLE",
+        )
+        selected = [candidate for candidate in candidates if candidate[0] in browse_accessions]
+        if not selected:
+            raise ValueError
+        accession, primary_document = selected[0]
+        return FundFilingSelection(
+            cik_value,
+            series_id,
+            class_id,
+            accession,
+            primary_document,
+        )
+    except (UnicodeError, ValueError):
+        raise ValueError("PENDING_IDENTITY_FUND_FILING_UNAVAILABLE") from None
