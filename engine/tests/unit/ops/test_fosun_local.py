@@ -270,3 +270,22 @@ def test_safe_failure_preserves_stable_gateway_categories(
     category: str,
 ) -> None:
     assert safe_failure(GatewayClientError(message))["category"] == category
+
+
+def test_pending_latest_attempt_blocks_ready_snapshot_decisions() -> None:
+    assert (
+        fosun_local._decision_readiness_for_latest_attempt(
+            "DECISION_READY",
+            latest_run_status="PARTIAL",
+            latest_failure_reason="IDENTITY_PENDING",
+        )
+        == "NOT_READY"
+    )
+    assert (
+        fosun_local._decision_readiness_for_latest_attempt(
+            "DECISION_READY",
+            latest_run_status="READY",
+            latest_failure_reason=None,
+        )
+        == "DECISION_READY"
+    )

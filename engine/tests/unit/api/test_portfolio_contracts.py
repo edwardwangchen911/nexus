@@ -107,6 +107,7 @@ def test_portfolio_contracts_publish_fixed_collection_bounds() -> None:
 
     assert page_schema["properties"]["items"]["maxItems"] == 50
     assert snapshot_schema["properties"]["cash"]["maxItems"] == 32
+    assert snapshot_schema["properties"]["pending_instruments"]["maxItems"] == 20
     assert snapshot_schema["properties"]["positions"]["maxItems"] == 2000
     assert snapshot_schema["properties"]["open_orders"]["maxItems"] == 2000
 
@@ -169,7 +170,22 @@ def test_maximum_legal_snapshot_envelope_fits_the_bff_four_mebibyte_limit() -> N
                 "coverage_scope": "broker_account",
                 "status": "READY",
                 "display_readiness": "DISPLAY_READY",
-                "decision_readiness": "DECISION_READY",
+                "decision_readiness": "NOT_READY",
+                "latest_sync_run_status": "PARTIAL",
+                "latest_sync_failure_reason": "IDENTITY_PENDING",
+                "pending_instrument_count": 20,
+                "pending_identity_evidence_at": "2026-08-23T08:00:00.123456Z",
+                "pending_instruments": (
+                    {
+                        "provider_code": "us" + "X" * 15,
+                        "provider_name": "X" * 256,
+                        "routing_family": "unknown",
+                        "recommended_identity_route": "manual_review",
+                        "available_at": "2026-08-23T08:00:00.123456Z",
+                        "identity_status": "pending",
+                    },
+                )
+                * 20,
                 "cash_flow_quality": "PASS",
                 "cash_flow_count": 0,
                 "execution_locked": True,

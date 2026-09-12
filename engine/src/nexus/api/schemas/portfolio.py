@@ -12,7 +12,11 @@ type PortfolioKind = Literal["real_read_only", "internal_paper", "shadow"]
 type SnapshotStatus = Literal["READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED"]
 type DisplayReadiness = Literal["DISPLAY_READY", "DISPLAY_UNAVAILABLE"]
 type DecisionReadiness = Literal[
-    "DECISION_READY", "RECONCILIATION_PENDING", "DATA_STALE", "RECONCILIATION_REQUIRED"
+    "DECISION_READY",
+    "NOT_READY",
+    "RECONCILIATION_PENDING",
+    "DATA_STALE",
+    "RECONCILIATION_REQUIRED",
 ]
 type SyncRunStatus = Literal[
     "ACTIVE", "READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED", "FAILED"
@@ -20,6 +24,12 @@ type SyncRunStatus = Literal[
 type CurrencyCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
 type CashFlowQuality = Literal["PASS", "PARTIAL", "NOT_RUN"]
 type SnapshotTimeBasis = Literal["provider_event", "gateway_observed", "unknown"]
+type PendingInstrumentRoutingFamily = Literal[
+    "company_equity_like", "fund_or_structured_like", "unknown"
+]
+type PendingInstrumentRoute = Literal[
+    "current_held_common_stock", "current_held_fund_or_structured", "manual_review"
+]
 
 
 def snapshot_time_basis(observations: Sequence[Mapping[str, object]]) -> SnapshotTimeBasis:
@@ -50,6 +60,18 @@ def derive_snapshot_readiness(
         return display, decisions[status]
     except KeyError as exc:
         raise ValueError(f"unsupported snapshot status: {status!r}") from exc
+
+
+def decision_readiness_for_latest_attempt(
+    snapshot_readiness: DecisionReadiness,
+    *,
+    latest_run_status: SyncRunStatus | str | None,
+    latest_failure_reason: str | None,
+) -> DecisionReadiness:
+    """A newer unresolved identity attempt cannot inherit READY decision state."""
+    if latest_run_status == "PARTIAL" and latest_failure_reason == "IDENTITY_PENDING":
+        return "NOT_READY"
+    return snapshot_readiness
 
 
 class _StrictSchema(BaseModel):
@@ -171,6 +193,15 @@ class OpenOrderResponse(_StrictSchema):
     read_only: Literal[True]
 
 
+class PendingInstrumentIdentityResponse(_StrictSchema):
+    provider_code: str = Field(pattern=r"^us[A-Z][A-Z0-9.-]{0,14}$")
+    provider_name: str | None = Field(default=None, min_length=1, max_length=256)
+    routing_family: PendingInstrumentRoutingFamily
+    recommended_identity_route: PendingInstrumentRoute
+    available_at: AwareDatetime
+    identity_status: Literal["pending"]
+
+
 class PortfolioSnapshotResponse(_StrictSchema):
     portfolio_snapshot_id: UUID
     portfolio_id: UUID
@@ -178,6 +209,11 @@ class PortfolioSnapshotResponse(_StrictSchema):
     status: SnapshotStatus
     display_readiness: DisplayReadiness
     decision_readiness: DecisionReadiness
+    latest_sync_run_status: SyncRunStatus | None
+    latest_sync_failure_reason: Literal["IDENTITY_PENDING"] | None
+    pending_instrument_count: int = Field(ge=0, le=20)
+    pending_identity_evidence_at: AwareDatetime | None
+    pending_instruments: tuple[PendingInstrumentIdentityResponse, ...] = Field(max_length=20)
     cash_flow_quality: CashFlowQuality
     cash_flow_count: int = Field(ge=0)
     execution_locked: Literal[True]

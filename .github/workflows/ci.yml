@@ -118,6 +118,9 @@ jobs:
             engine/tests/integration/test_formal_optimization_producer.py \
             engine/tests/integration/test_scenario_spread_cost_authority_pg.py \
             engine/tests/integration/test_scenario_selection_migration.py \
+            engine/tests/integration/test_fosun_identity_selection.py \
+            engine/tests/integration/test_fosun_instrument_discovery_storage.py \
+            engine/tests/integration/test_fosun_refresh_order_pg.py \
             engine/tests/integration/test_fosun_security_classification_storage.py \
             engine/tests/integration/test_fosun_security_classification_migration.py \
             engine/tests/integration/test_fosun_push_local.py \

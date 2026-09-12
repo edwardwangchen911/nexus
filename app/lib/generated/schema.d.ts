@@ -1672,7 +1672,7 @@ export interface components {
             run_id: string;
         };
         /** @enum {string} */
-        DecisionReadiness: "DECISION_READY" | "RECONCILIATION_PENDING" | "DATA_STALE" | "RECONCILIATION_REQUIRED";
+        DecisionReadiness: "DECISION_READY" | "NOT_READY" | "RECONCILIATION_PENDING" | "DATA_STALE" | "RECONCILIATION_REQUIRED";
         /** DiagnosticItemResponse */
         DiagnosticItemResponse: {
             /**
@@ -3279,6 +3279,29 @@ export interface components {
             /** Unrealized Pnl */
             unrealized_pnl: string;
         };
+        /** PendingInstrumentIdentityResponse */
+        PendingInstrumentIdentityResponse: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /**
+             * Identity Status
+             * @constant
+             */
+            identity_status: "pending";
+            /** Provider Code */
+            provider_code: string;
+            /** Provider Name */
+            provider_name?: string | null;
+            recommended_identity_route: components["schemas"]["PendingInstrumentRoute"];
+            routing_family: components["schemas"]["PendingInstrumentRoutingFamily"];
+        };
+        /** @enum {string} */
+        PendingInstrumentRoute: "current_held_common_stock" | "current_held_fund_or_structured" | "manual_review";
+        /** @enum {string} */
+        PendingInstrumentRoutingFamily: "company_equity_like" | "fund_or_structured_like" | "unknown";
         /** PortfolioDecisionCitationResponse */
         PortfolioDecisionCitationResponse: {
             /** Citation Id */
@@ -3898,8 +3921,17 @@ export interface components {
              * @constant
              */
             execution_locked: true;
+            /** Latest Sync Failure Reason */
+            latest_sync_failure_reason: "IDENTITY_PENDING" | null;
+            latest_sync_run_status: components["schemas"]["SyncRunStatus"] | null;
             /** Open Orders */
             open_orders: components["schemas"]["OpenOrderResponse"][];
+            /** Pending Identity Evidence At */
+            pending_identity_evidence_at: string | null;
+            /** Pending Instrument Count */
+            pending_instrument_count: number;
+            /** Pending Instruments */
+            pending_instruments: components["schemas"]["PendingInstrumentIdentityResponse"][];
             /**
              * Portfolio Id
              * Format: uuid

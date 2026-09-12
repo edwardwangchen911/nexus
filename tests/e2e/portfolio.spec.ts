@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import type { PortfolioSnapshot } from "../../app/(protected)/portfolio/page";
 import { diagnosticReport } from "../unit/optimize/fixtures";
 import { assertReleaseAccessibility, releaseViewports } from "./helpers/accessibility";
 
@@ -18,13 +19,18 @@ const portfolio = {
   last_sync_run_status: "READY",
 };
 
-const snapshot = {
+const snapshot: PortfolioSnapshot = {
   portfolio_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e702",
   portfolio_id: portfolioId,
   coverage_scope: "broker_account",
   status: "READY",
   display_readiness: "DISPLAY_READY",
   decision_readiness: "DECISION_READY",
+  latest_sync_run_status: "READY",
+  latest_sync_failure_reason: null,
+  pending_instrument_count: 0,
+  pending_identity_evidence_at: null,
+  pending_instruments: [],
   cash_flow_quality: "PASS",
   cash_flow_count: 12,
   execution_locked: true,
@@ -127,6 +133,32 @@ test("fail-closed readiness remains fully visible on a 390px viewport", async ({
   await expect(page.getByRole("button", { name: /买入|卖出|下单|修改持仓/ })).toHaveCount(0);
 });
 
+test("pending instrument identity remains visible while the previous snapshot stays read-only", async ({ page }) => {
+  await installPortfolioFixtures(page, {
+    decision_readiness: "NOT_READY",
+    latest_sync_run_status: "PARTIAL",
+    latest_sync_failure_reason: "IDENTITY_PENDING",
+    pending_instrument_count: 1,
+    pending_identity_evidence_at: "2026-09-12T02:15:00Z",
+    pending_instruments: [{
+      provider_code: "US.ABCD",
+      provider_name: "Example Holdings",
+      routing_family: "company_equity_like",
+      recommended_identity_route: "current_held_common_stock",
+      available_at: "2026-09-12T02:15:00Z",
+      identity_status: "pending",
+    }],
+  });
+  await page.goto("/portfolio");
+
+  const pending = page.getByRole("status", { name: "新增证券身份待确认" });
+  await expect(pending).toContainText("已保留复星分类证据；确认前不参与决策或交易");
+  await expect(pending).toContainText("普通股身份资料待核验");
+  await expect(pending).toContainText("当前显示的是上一份完整快照");
+  await expect(page.getByText("账户快照核验通过", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /买入|卖出|下单|修改持仓/ })).toHaveCount(0);
+});
+
 test("local refresh disclosure is keyboard-visible and never starts a sync", async ({ page }) => {
   const brokerSyncRequests: string[] = [];
   page.on("request", (request) => {
@@ -174,7 +206,7 @@ test("desktop formal diagnosis survives page refresh with reconciliation and exe
     ...baseReport,
     portfolio_snapshot_id: snapshot.portfolio_snapshot_id,
     snapshot_as_of: snapshot.as_of,
-    trading_day: snapshot.as_of.slice(0, 10),
+    trading_day: snapshot.as_of!.slice(0, 10),
     items: baseReport.items.map((item) => ({
       ...item,
       evidence_refs: item.evidence_refs.map((ref) => ({ ...ref, available_at: snapshot.as_of })),

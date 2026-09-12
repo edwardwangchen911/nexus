@@ -3,7 +3,7 @@
 import { statusLabel } from "../../lib/display-labels";
 import { formatDisplayTime, snapshotTimeLabel } from "../../lib/display-format";
 
-import { ChevronDown, RefreshCw, TerminalSquare } from "lucide-react";
+import { ChevronDown, RefreshCw, ShieldAlert, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { AuthorityLedger } from "../../components/authority-ledger";
@@ -180,6 +180,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
               {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">{stateDetail(state)}</p> : null}
               {snapshot.decision_readiness === "RECONCILIATION_PENDING" ? <p className="inline-notice">资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。</p> : null}
               {snapshot.status === "RECONCILIATION_REQUIRED" ? <p className="inline-notice inline-notice--error">双读对账未通过。快照仅供展示，不能用作优化基线。</p> : null}
+              <PendingInstrumentIdentity snapshot={snapshot} />
               <div className="portfolio-assets" aria-label="原币种资产总览">
                 {currencies.map((currency) => <PortfolioValuationSummary key={currency} provider={selected.provider} snapshot={snapshot} currency={currency} compact />)}
               </div>
@@ -195,6 +196,35 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function PendingInstrumentIdentity({ snapshot }: { snapshot: PortfolioSnapshot }): React.ReactElement | null {
+  const visible = snapshot.latest_sync_run_status === "PARTIAL"
+    && snapshot.latest_sync_failure_reason === "IDENTITY_PENDING"
+    && snapshot.pending_instrument_count > 0
+    && snapshot.pending_instruments.length > 0;
+  if (!visible) return null;
+  return (
+    <section className="portfolio-identity-pending" role="status" aria-labelledby="portfolio-identity-pending-title">
+      <div className="portfolio-identity-pending__heading">
+        <span className="portfolio-identity-pending__icon"><ShieldAlert aria-hidden="true" size={19} /></span>
+        <div>
+          <p className="eyebrow">最近一次只读刷新未完成</p>
+          <h2 id="portfolio-identity-pending-title">新增证券身份待确认</h2>
+        </div>
+        <span className="state-chip" data-state="partial">{snapshot.pending_instrument_count} 个标的待核验</span>
+      </div>
+      <p className="portfolio-identity-pending__summary">已保留复星分类证据；确认前不参与决策或交易。</p>
+      <ul>
+        {snapshot.pending_instruments.map((instrument) => <li key={`${instrument.provider_code}:${instrument.available_at}`}>
+          <span><strong>{instrument.provider_name || instrument.provider_code}</strong><code>{instrument.provider_code}</code></span>
+          <span>{pendingIdentityRouteLabel(instrument.recommended_identity_route)}</span>
+          <time dateTime={instrument.available_at}>{formatTime(instrument.available_at)}</time>
+        </li>)}
+      </ul>
+      <p className="portfolio-identity-pending__previous">当前显示的是上一份完整快照（{formatTime(snapshot.as_of)}），不代表最近一次刷新已通过。</p>
     </section>
   );
 }
@@ -222,5 +252,8 @@ function snapshotState(status: PortfolioSnapshot["status"]): DataStateKind { ret
 function kindLabel(kind: PortfolioItem["kind"]): string { return ({ real_read_only: "真实只读", internal_paper: "内部模拟", shadow: "影子组合" })[kind]; }
 function coverageLabel(scope: string): string { return scope === "broker_account" ? "券商账户" : scope; }
 function cashFlowQualityLabel(value: PortfolioSnapshot["cash_flow_quality"]): string { return ({ PASS: "已通过", PARTIAL: "不完整", NOT_RUN: "未运行" })[value]; }
+function pendingIdentityRouteLabel(value: PortfolioSnapshot["pending_instruments"][number]["recommended_identity_route"]): string {
+  return ({ current_held_common_stock: "普通股身份资料待核验", current_held_fund_or_structured: "基金或结构化证券身份资料待核验", manual_review: "证券身份需人工核验" })[value];
+}
 function formatTime(value: string | null | undefined): string { return formatDisplayTime(value); }
 function stateDetail(state: DataStateKind): string { return ({ loading: "正在读取脱敏组合和冻结快照。", empty: "尚无可展示的冻结组合快照。", ready: "组合快照已就绪。", partial: "资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。", stale: "显示最后已知快照，不触发业务动作。", error: "读取失败；未开启任何交易能力。", forbidden: "当前身份无权读取组合事实。" })[state]; }

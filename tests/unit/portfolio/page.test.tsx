@@ -77,6 +77,37 @@ describe("portfolio vertical slice", () => {
     expect(screen.getByText("执行能力").parentElement).toHaveTextContent("已锁定");
   });
 
+  it("shows persisted identity evidence while keeping the previous complete snapshot non-decision-ready", () => {
+    const pendingSnapshot: PortfolioSnapshot = {
+      ...snapshot,
+      decision_readiness: "NOT_READY",
+      latest_sync_run_status: "PARTIAL",
+      latest_sync_failure_reason: "IDENTITY_PENDING",
+      pending_instrument_count: 3,
+      pending_identity_evidence_at: "2026-09-12T02:15:00Z",
+      pending_instruments: [
+        { provider_code: "US.ABCD", provider_name: "Example Holdings", routing_family: "company_equity_like", recommended_identity_route: "current_held_common_stock", available_at: "2026-09-12T02:15:00Z", identity_status: "pending" },
+        { provider_code: "US.FUND", provider_name: "Example Fund", routing_family: "fund_or_structured_like", recommended_identity_route: "current_held_fund_or_structured", available_at: "2026-09-12T02:15:00Z", identity_status: "pending" },
+        { provider_code: "US.UNKNOWN", provider_name: null, routing_family: "unknown", recommended_identity_route: "manual_review", available_at: "2026-09-12T02:15:00Z", identity_status: "pending" },
+      ],
+    };
+
+    render(<PortfolioPanel state="ready" portfolios={[portfolio]}
+      snapshot={pendingSnapshot} selectedPortfolioId={portfolioId}
+      notice={null} onSelect={vi.fn()} onRefresh={vi.fn()}
+    />);
+
+    const pending = screen.getByRole("status", { name: "新增证券身份待确认" });
+    expect(pending).toHaveTextContent("已保留复星分类证据；确认前不参与决策或交易");
+    expect(pending).toHaveTextContent("普通股身份资料待核验");
+    expect(pending).toHaveTextContent("基金或结构化证券身份资料待核验");
+    expect(pending).toHaveTextContent("证券身份需人工核验");
+    expect(pending).toHaveTextContent("Example Holdings");
+    expect(pending).toHaveTextContent("US.ABCD");
+    expect(pending).toHaveTextContent("当前显示的是上一份完整快照");
+    expect(screen.queryByText("账户快照核验通过")).not.toBeInTheDocument();
+  });
+
   it.each([false, true])("uses the same cash time provenance with valuation shown=%s", (showValuation) => {
     const { rerender } = render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot,
       time_basis: "gateway_observed", cash: [{ ...snapshot.cash[1], provider_as_of: null }],

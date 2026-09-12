@@ -26,6 +26,15 @@ from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.diagnostics.service import diagnose_and_persist, preview_snapshot_diagnostic
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.market_authority import ProviderMarketBinding
+from nexus.market.fosun_instrument_discovery import (
+    FosunInstrumentDiscoveryDocument,
+    recommended_identity_route,
+)
+from nexus.market.fosun_instrument_discovery_storage import (
+    persist_instrument_discovery,
+    read_pending_instrument_discoveries,
+    save_discovery_artifact,
+)
 from nexus.market.ingestion import archive_fosun_price_page_raw, ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.market.object_store import S3ProviderEvidenceStore
@@ -112,6 +121,7 @@ class _MarketReader(Protocol):
 @dataclass(frozen=True)
 class _MarketSnapshotReads:
     codes: tuple[str, ...]
+    resolved_codes: tuple[str, ...]
     quote_raw: RawGatewayResponse
     bars_raw: tuple[tuple[str, RawGatewayResponse], ...]
     request_counts: dict[str, int]
@@ -124,6 +134,7 @@ class _LocalBrokerIdentity:
     portfolio_id: UUID
     sync_run_id: UUID
     instrument_ids: dict[str, UUID]
+    unresolved_codes: tuple[str, ...]
     previous_cash_flow_watermark: date | None
     identity_date: date
 
@@ -360,11 +371,18 @@ async def refresh_local_fosun(
         holdings = _active_holdings(holdings)
         engine = create_async_engine(settings.database_url, pool_pre_ping=True)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
+        holding_codes = _us_holding_codes(holdings)
+        quote_raw = await _read_quote_snapshot(market, codes=holding_codes)
         async with sessions() as session:
-            identity = await _load_local_broker_identity(session, holdings=holdings)
+            identity = await _load_local_broker_identity(
+                session, holdings=holdings, allow_unresolved=True
+            )
+        resolved_codes = tuple(code for code in holding_codes if code in identity.instrument_ids)
         market_reads = await _read_market_snapshot(
             market,
-            codes=_us_holding_codes(holdings),
+            codes=resolved_codes,
+            quote_codes=holding_codes,
+            quote_raw=quote_raw,
             request_start_at=request_start_at,
             request_end_at=request_end_at,
             expected_sessions=expected_sessions,
@@ -379,6 +397,7 @@ async def refresh_local_fosun(
                     store,
                     settings=settings,
                     accounts_page=accounts_page,
+                    holdings_observed_at=holdings_page.as_of,
                     holdings=holdings,
                     identity=identity,
                     market_reads=market_reads,
@@ -394,6 +413,35 @@ async def refresh_local_fosun(
             ):
                 raise
             raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
+        if identity.unresolved_codes:
+            try:
+                async with sessions() as session, session.begin():
+                    await _persist_identity_pending_sync(
+                        session,
+                        identity=identity,
+                        completed_at=datetime.now(UTC),
+                    )
+            except Exception:
+                raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
+            provider_requests = {
+                "accounts": 1,
+                "holdings": 1,
+                "quotes": market_reads.request_counts["quotes"],
+                "bars": market_reads.request_counts["bars"],
+                "cash": 0,
+                "orders": 0,
+                "cash_flows": 0,
+            }
+            provider_requests["total"] = sum(provider_requests.values())
+            return {
+                **market_result,
+                "status": "identity_pending",
+                "source": "fosun",
+                "snapshot_status": "PARTIAL",
+                "execution_locked": True,
+                "portfolio_snapshot_updated": False,
+                "provider_requests": provider_requests,
+            }
         frozen, cash_flow_result = await _read_broker_facts(
             broker,
             account_id=identity.account_id,
@@ -708,6 +756,7 @@ async def _load_local_broker_identity(
     session: AsyncSession,
     *,
     holdings: tuple[PositionItem, ...],
+    allow_unresolved: bool = False,
 ) -> _LocalBrokerIdentity:
     """Resolve stable local IDs without writing before broker reconciliation succeeds."""
     accounts = tuple(
@@ -749,12 +798,16 @@ async def _load_local_broker_identity(
         if code in instrument_ids and instrument_ids[code] != instrument_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_AMBIGUOUS")
         instrument_ids[code] = instrument_id
+    unresolved_codes: list[str] = []
     for item in holdings:
         existing_id = await _resolve_local_instrument(
             session, item.instrument_code, currency=item.currency, identity_date=identity_date
         )
         if existing_id is None and _symbol_and_market(item.instrument_code)[1] == "US":
-            raise ValueError("LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED")
+            if not allow_unresolved:
+                raise ValueError("LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED")
+            unresolved_codes.append(item.instrument_code)
+            continue
         instrument_ids[item.instrument_code] = (
             existing_id
             if existing_id is not None
@@ -765,6 +818,7 @@ async def _load_local_broker_identity(
         portfolio_id=portfolio_id,
         sync_run_id=new_uuid7(),
         instrument_ids=instrument_ids,
+        unresolved_codes=tuple(sorted(set(unresolved_codes))),
         identity_date=identity_date,
         previous_cash_flow_watermark=await session.scalar(
             select(BrokerCashFlowWatermark.provider_business_date).where(
@@ -871,17 +925,87 @@ async def _persist_ready_broker_snapshot(
     )
 
 
+async def _persist_identity_pending_sync(
+    session: AsyncSession,
+    *,
+    identity: _LocalBrokerIdentity,
+    completed_at: datetime,
+) -> None:
+    """Record an incomplete attempt without inventing a portfolio snapshot."""
+    account = await session.get(Account, identity.account_id)
+    if account is None:
+        account = Account(id=identity.account_id, provider="fosun", status="ACTIVE")
+        session.add(account)
+        await session.flush()
+    elif account.provider != "fosun" or account.status != "ACTIVE":
+        raise ValueError("LOCAL_BROKER_ACCOUNT_INVALID")
+    portfolio = await session.get(Portfolio, identity.portfolio_id)
+    if portfolio is None:
+        portfolio = Portfolio(
+            id=identity.portfolio_id,
+            account_id=identity.account_id,
+            name="复星只读账户",
+        )
+        session.add(portfolio)
+        await session.flush()
+    elif portfolio.account_id != identity.account_id:
+        raise ValueError("LOCAL_BROKER_PORTFOLIO_INVALID")
+    session.add(
+        BrokerSyncRun(
+            id=identity.sync_run_id,
+            account_id=identity.account_id,
+            portfolio_id=identity.portfolio_id,
+            trigger_kind="MANUAL",
+            actor_id="nexus-mac-local-read-only",
+            route="local-fosun-refresh",
+            idempotency_key=str(identity.sync_run_id),
+            request_hash=hashlib.sha256(str(identity.sync_run_id).encode()).hexdigest(),
+            status="PARTIAL",
+            accepted_at=completed_at,
+            completed_at=completed_at,
+            attempt_count=1,
+            failure_reason="IDENTITY_PENDING",
+            cash_flow_quality="NOT_RUN",
+        )
+    )
+    await session.flush()
+
+
+async def _read_quote_snapshot(
+    market: _MarketReader,
+    *,
+    codes: tuple[str, ...],
+) -> RawGatewayResponse:
+    if codes != tuple(sorted(set(codes))) or not 1 <= len(codes) <= _MAX_US_HOLDING_SYMBOLS:
+        raise ValueError("LOCAL_US_HOLDING_SCOPE_INVALID")
+    if any(_US_PROVIDER_CODE.fullmatch(code) is None for code in codes):
+        raise ValueError("LOCAL_US_HOLDING_SCOPE_INVALID")
+    quote_raw = await market.read_quotes_raw(codes)
+    try:
+        parse_quote_page(quote_raw, expected_codes=codes)
+    except Exception:
+        raise RuntimeError("LOCAL_QUOTE_CONTRACT_INVALID") from None
+    return quote_raw
+
+
 async def _read_market_snapshot(
     market: _MarketReader,
     *,
     codes: tuple[str, ...],
+    quote_codes: tuple[str, ...],
+    quote_raw: RawGatewayResponse,
     request_start_at: datetime,
     request_end_at: datetime,
     expected_sessions: tuple[date, ...],
 ) -> _MarketSnapshotReads:
-    if codes != tuple(sorted(set(codes))) or not 1 <= len(codes) <= _MAX_US_HOLDING_SYMBOLS:
+    if codes != tuple(sorted(set(codes))) or not 0 <= len(codes) <= _MAX_US_HOLDING_SYMBOLS:
         raise ValueError("LOCAL_US_HOLDING_SCOPE_INVALID")
-    if any(_US_PROVIDER_CODE.fullmatch(code) is None for code in codes):
+    if (
+        quote_codes != tuple(sorted(set(quote_codes)))
+        or not 1 <= len(quote_codes) <= _MAX_US_HOLDING_SYMBOLS
+        or not set(codes).issubset(quote_codes)
+        or any(_US_PROVIDER_CODE.fullmatch(code) is None for code in quote_codes)
+    ):
         raise ValueError("LOCAL_US_HOLDING_SCOPE_INVALID")
     bar_limit = len(expected_sessions)
     if not 1 <= bar_limit <= 500:
@@ -889,9 +1013,8 @@ async def _read_market_snapshot(
     if 10 + len(codes) > _MAX_PROVIDER_REQUESTS:
         raise ValueError("LOCAL_PROVIDER_REQUEST_BUDGET_EXCEEDED")
 
-    quote_raw = await market.read_quotes_raw(codes)
     try:
-        parse_quote_page(quote_raw, expected_codes=codes)
+        parse_quote_page(quote_raw, expected_codes=quote_codes)
     except Exception:
         raise RuntimeError("LOCAL_QUOTE_CONTRACT_INVALID") from None
 
@@ -927,7 +1050,8 @@ async def _read_market_snapshot(
         reported_delays.add(page.provider_reported_delay)
 
     return _MarketSnapshotReads(
-        codes=codes,
+        codes=quote_codes,
+        resolved_codes=codes,
         quote_raw=quote_raw,
         bars_raw=tuple(bars_raw),
         delivery_mode=(
@@ -998,12 +1122,90 @@ async def _persist_quote_classifications(
             raise ValueError("FOSUN_CLASSIFICATION_READBACK_FAILED")
 
 
+async def _persist_pending_instrument_discoveries(
+    session: AsyncSession,
+    store: S3ProviderEvidenceStore,
+    *,
+    quote_items: tuple[FosunQuoteItem, ...],
+    holdings: tuple[PositionItem, ...],
+    unresolved_codes: tuple[str, ...],
+    holdings_observed_at: datetime,
+    quote_raw: RawGatewayResponse,
+    quote_artifact: DataArtifact,
+) -> dict[str, int]:
+    """Persist provider evidence for unresolved holdings without minting identity."""
+    unresolved = set(unresolved_codes)
+    holdings_by_code = {
+        item.instrument_code: item for item in holdings if item.instrument_code in unresolved
+    }
+    if set(holdings_by_code) != unresolved:
+        raise ValueError("FOSUN_DISCOVERY_HOLDING_MISSING")
+    route_counts = {
+        "current_held_common_stock": 0,
+        "current_held_fund_or_structured": 0,
+        "manual_review": 0,
+    }
+    for item in quote_items:
+        if item.instrument_code not in unresolved:
+            continue
+        holding = holdings_by_code[item.instrument_code]
+        source = item.provider_classification
+        family = classify_fosun_security_family(source)
+        route = recommended_identity_route(family)
+        document = FosunInstrumentDiscoveryDocument(
+            provider_code=item.instrument_code,
+            provider_name=item.provider_name or holding.provider_name,
+            provider_product_type=holding.provider_product_type,
+            levels=FosunClassificationLevels(
+                first=source.level_1 if source is not None else None,
+                second=source.level_2 if source is not None else None,
+                third=source.level_3 if source is not None else None,
+            ),
+            equity_profile_fields_complete=(
+                source.equity_profile_fields_complete if source is not None else False
+            ),
+            net_asset_profile_fields_complete=(
+                source.net_asset_profile_fields_complete if source is not None else False
+            ),
+            fund_asset_type=FosunFundAssetType(
+                chs=source.fund_asset_type_chs if source is not None else None,
+                cht=source.fund_asset_type_cht if source is not None else None,
+                eng=source.fund_asset_type_eng if source is not None else None,
+            ),
+            routing_family=family,
+            recommended_identity_route=route,
+            holding_observed_at=holdings_observed_at,
+            received_at=quote_raw.received_at,
+            available_at=quote_raw.received_at,
+            raw_quote=FosunRawQuoteBinding(
+                artifact_sha256=quote_artifact.sha256,
+                artifact_byte_length=quote_artifact.byte_size,
+                artifact_uri=quote_artifact.uri,
+                gateway_request_id=quote_raw.gateway_request_id,
+                request_body_sha256=quote_raw.request_body_sha256,
+            ),
+        )
+        location = await save_discovery_artifact(session, store, document)
+        snapshot = await persist_instrument_discovery(session, document, location=location)
+        readback = await read_pending_instrument_discoveries(
+            session,
+            as_of=datetime.now(UTC),
+        )
+        if readback.get(snapshot.id) != document:
+            raise ValueError("FOSUN_DISCOVERY_READBACK_FAILED")
+        route_counts[route] += 1
+    if sum(route_counts.values()) != len(unresolved_codes):
+        raise ValueError("FOSUN_DISCOVERY_QUOTE_MISSING")
+    return route_counts
+
+
 async def _persist_market_snapshot(
     session: AsyncSession,
     store: S3ProviderEvidenceStore,
     *,
     settings: LocalFosunRefreshSettings,
     accounts_page: GatewayResponsePage,
+    holdings_observed_at: datetime,
     holdings: tuple[PositionItem, ...],
     identity: _LocalBrokerIdentity,
     market_reads: _MarketSnapshotReads,
@@ -1017,7 +1219,7 @@ async def _persist_market_snapshot(
     account_page_as_of = accounts_page.as_of
     instrument_ids = identity.instrument_ids
     for item in holdings:
-        if item.instrument_code not in market_reads.codes:
+        if item.instrument_code not in market_reads.resolved_codes:
             continue
         expected_id = instrument_ids[item.instrument_code]
         actual_id = await _ensure_instrument(
@@ -1029,22 +1231,25 @@ async def _persist_market_snapshot(
         )
         if actual_id != expected_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
-    await _ensure_market_universe(
-        session,
-        instrument_ids=tuple(instrument_ids[code] for code in market_reads.codes),
-        published_at=min(
-            account_page_as_of,
-            quote_raw.received_at,
-            *(raw.received_at for raw in bars_raw_by_code.values()),
-        ),
-        effective_from=request_start_at.date(),
-    )
-    quote_binding, bars_binding = await _ensure_market_bindings(
-        session,
-        authorized_at=authorized_at,
-        delivery_mode=settings.market_delivery_mode,
-        bars_delivery_mode=market_reads.delivery_mode,
-    )
+    if market_reads.resolved_codes:
+        await _ensure_market_universe(
+            session,
+            instrument_ids=tuple(
+                instrument_ids[code] for code in market_reads.resolved_codes
+            ),
+            published_at=min(
+                account_page_as_of,
+                quote_raw.received_at,
+                *(raw.received_at for raw in bars_raw_by_code.values()),
+            ),
+            effective_from=request_start_at.date(),
+        )
+        quote_binding, bars_binding = await _ensure_market_bindings(
+            session,
+            authorized_at=authorized_at,
+            delivery_mode=settings.market_delivery_mode,
+            bars_delivery_mode=market_reads.delivery_mode,
+        )
     quote_page = parse_quote_page(
         quote_raw,
         expected_codes=market_reads.codes,
@@ -1069,13 +1274,25 @@ async def _persist_market_snapshot(
     await _persist_quote_classifications(
         session,
         store,
-        quote_items=quote_page.items,
+        quote_items=tuple(
+            item for item in quote_page.items if item.instrument_code in instrument_ids
+        ),
         instrument_ids=instrument_ids,
         quote_raw=quote_raw,
         quote_artifact=quote_artifact,
     )
+    pending_route_counts = await _persist_pending_instrument_discoveries(
+        session,
+        store,
+        quote_items=quote_page.items,
+        holdings=holdings,
+        unresolved_codes=identity.unresolved_codes,
+        holdings_observed_at=holdings_observed_at,
+        quote_raw=quote_raw,
+        quote_artifact=quote_artifact,
+    )
     for quote_item in quote_page.items:
-        if quote_item.price is None:
+        if quote_item.price is None or quote_item.instrument_code not in instrument_ids:
             continue
         quality_flags = ["INTRADAY_BID_ASK_UNAVAILABLE"]
         quality_flags.append("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")
@@ -1115,61 +1332,65 @@ async def _persist_market_snapshot(
             )
         )
     bars_received_at = tuple(raw.received_at for raw in bars_raw_by_code.values())
-    calendar_authority = await _insert_calendar(
-        session,
-        rows=calendar_rows,
-        range_start=request_start_at.date(),
-        range_end=authorized_at.date(),
-        published_at=min(quote_raw.received_at, *bars_received_at),
-    )
-    bar_provider = FosunMarketDataProvider(
-        _ClosedMarketGateway(),
-        symbol_resolver=_UnusedSymbolResolver(),
-        delivery_mode=market_reads.delivery_mode,
-    )
     bar_count = 0
-    for code, bars_raw in market_reads.bars_raw:
-        archived_bars = await archive_fosun_price_page_raw(
+    if market_reads.bars_raw:
+        calendar_authority = await _insert_calendar(
             session,
-            store,
-            bars_raw,
-            commit=False,
+            rows=calendar_rows,
+            range_start=request_start_at.date(),
+            range_end=authorized_at.date(),
+            published_at=min(quote_raw.received_at, *bars_received_at),
         )
-        bar_request = BarsRequest(
-            instrument_id=InstrumentId(instrument_ids[code]),
-            start=request_start_at,
-            end=request_end_at,
-            interval="1Day",
-            adjustment="raw",
+        bar_provider = FosunMarketDataProvider(
+            _ClosedMarketGateway(),
+            symbol_resolver=_UnusedSymbolResolver(),
+            delivery_mode=market_reads.delivery_mode,
         )
-        normalized_bars = await bar_provider.normalize_bars(
-            bar_request,
-            bars_raw,
-            symbol=code.removeprefix("us"),
-        )
-        ingestion = await ingest_price_page(
-            session,
-            store,
-            normalized_bars,
-            provider_binding=bars_binding,
-            raw_artifact=archived_bars.raw_artifact,
-            calendar_authority_id=calendar_authority.id,
-            gateway_request_start_at=request_start_at,
-            gateway_request_end_at=request_end_at,
-            commit=False,
-        )
-        if ingestion.manifest.delivery_mode != market_reads.delivery_mode:
-            raise ValueError("LOCAL_KLINE_DISPLAY_MODE_INVALID")
-        bar_count += len(normalized_bars.items)
+        for code, bars_raw in market_reads.bars_raw:
+            archived_bars = await archive_fosun_price_page_raw(
+                session,
+                store,
+                bars_raw,
+                commit=False,
+            )
+            bar_request = BarsRequest(
+                instrument_id=InstrumentId(instrument_ids[code]),
+                start=request_start_at,
+                end=request_end_at,
+                interval="1Day",
+                adjustment="raw",
+            )
+            normalized_bars = await bar_provider.normalize_bars(
+                bar_request,
+                bars_raw,
+                symbol=code.removeprefix("us"),
+            )
+            ingestion = await ingest_price_page(
+                session,
+                store,
+                normalized_bars,
+                provider_binding=bars_binding,
+                raw_artifact=archived_bars.raw_artifact,
+                calendar_authority_id=calendar_authority.id,
+                gateway_request_start_at=request_start_at,
+                gateway_request_end_at=request_end_at,
+                commit=False,
+            )
+            if ingestion.manifest.delivery_mode != market_reads.delivery_mode:
+                raise ValueError("LOCAL_KLINE_DISPLAY_MODE_INVALID")
+            bar_count += len(normalized_bars.items)
     quote_success = sum(item.price is not None for item in quote_page.items)
     return {
-        "market_symbols": len(market_reads.codes),
+        "market_symbols": len(market_reads.resolved_codes),
+        "known_market_symbols": len(market_reads.resolved_codes),
+        "pending_instrument_count": len(identity.unresolved_codes),
+        "pending_route_counts": pending_route_counts,
         "quotes": len(quote_page.items),
         "quote_success": quote_success,
         "quote_missing": len(quote_page.items) - quote_success,
         "bar_series": len(market_reads.bars_raw),
         "bars": bar_count,
-        "market_as_of": max(quote_raw.received_at, *bars_received_at).isoformat(),
+        "market_as_of": max((quote_raw.received_at, *bars_received_at)).isoformat(),
     }
 
 

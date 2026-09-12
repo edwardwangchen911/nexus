@@ -1788,6 +1788,7 @@
       "DecisionReadiness": {
         "enum": [
           "DECISION_READY",
+          "NOT_READY",
           "RECONCILIATION_PENDING",
           "DATA_STALE",
           "RECONCILIATION_REQUIRED"
@@ -5920,6 +5921,70 @@
         "title": "PaperPositionResponse",
         "type": "object"
       },
+      "PendingInstrumentIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "identity_status": {
+            "const": "pending",
+            "title": "Identity Status",
+            "type": "string"
+          },
+          "provider_code": {
+            "pattern": "^us[A-Z][A-Z0-9.-]{0,14}$",
+            "title": "Provider Code",
+            "type": "string"
+          },
+          "provider_name": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Name"
+          },
+          "recommended_identity_route": {
+            "$ref": "#/components/schemas/PendingInstrumentRoute"
+          },
+          "routing_family": {
+            "$ref": "#/components/schemas/PendingInstrumentRoutingFamily"
+          }
+        },
+        "required": [
+          "provider_code",
+          "routing_family",
+          "recommended_identity_route",
+          "available_at",
+          "identity_status"
+        ],
+        "title": "PendingInstrumentIdentityResponse",
+        "type": "object"
+      },
+      "PendingInstrumentRoute": {
+        "enum": [
+          "current_held_common_stock",
+          "current_held_fund_or_structured",
+          "manual_review"
+        ],
+        "type": "string"
+      },
+      "PendingInstrumentRoutingFamily": {
+        "enum": [
+          "company_equity_like",
+          "fund_or_structured_like",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "PortfolioDecisionCitationResponse": {
         "additionalProperties": false,
         "properties": {
@@ -7400,12 +7465,60 @@
             "title": "Execution Locked",
             "type": "boolean"
           },
+          "latest_sync_failure_reason": {
+            "anyOf": [
+              {
+                "const": "IDENTITY_PENDING",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Sync Failure Reason"
+          },
+          "latest_sync_run_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncRunStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "open_orders": {
             "items": {
               "$ref": "#/components/schemas/OpenOrderResponse"
             },
             "maxItems": 2000,
             "title": "Open Orders",
+            "type": "array"
+          },
+          "pending_identity_evidence_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Identity Evidence At"
+          },
+          "pending_instrument_count": {
+            "maximum": 20,
+            "minimum": 0,
+            "title": "Pending Instrument Count",
+            "type": "integer"
+          },
+          "pending_instruments": {
+            "items": {
+              "$ref": "#/components/schemas/PendingInstrumentIdentityResponse"
+            },
+            "maxItems": 20,
+            "title": "Pending Instruments",
             "type": "array"
           },
           "portfolio_id": {
@@ -7441,6 +7554,11 @@
           "status",
           "display_readiness",
           "decision_readiness",
+          "latest_sync_run_status",
+          "latest_sync_failure_reason",
+          "pending_instrument_count",
+          "pending_identity_evidence_at",
+          "pending_instruments",
           "cash_flow_quality",
           "cash_flow_count",
           "execution_locked",

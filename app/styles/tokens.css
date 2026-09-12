@@ -288,6 +288,17 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .portfolio-rail button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--color-action) 24%, var(--color-border)); border-inline-start-color: var(--color-action); background: color-mix(in srgb, var(--color-action) 7%, var(--color-surface)); }
 .portfolio-rail button span { color: var(--color-text-muted); font-size: 0.75rem; overflow-wrap: anywhere; }
 .portfolio-detail { display: grid; min-inline-size: 0; gap: var(--space-4); }
+.portfolio-identity-pending { display: grid; gap: var(--space-3); min-inline-size: 0; border: 1px solid color-mix(in srgb, var(--color-warning) 42%, var(--color-border)); border-inline-start: 4px solid var(--color-warning); background: linear-gradient(110deg, color-mix(in srgb, var(--color-warning) 9%, transparent), transparent 42%), var(--color-surface); padding: var(--space-4); }
+.portfolio-identity-pending__heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--space-3); align-items: center; }
+.portfolio-identity-pending__heading h2 { margin: var(--space-1) 0 0; font-size: 1.125rem; }
+.portfolio-identity-pending__icon { display: grid; place-items: center; inline-size: 38px; block-size: 38px; border: 1px solid color-mix(in srgb, var(--color-warning) 38%, var(--color-border)); background: color-mix(in srgb, var(--color-warning) 10%, var(--color-surface)); color: var(--color-warning); }
+.portfolio-identity-pending__summary, .portfolio-identity-pending__previous { max-inline-size: 70ch; margin: 0; }
+.portfolio-identity-pending__summary { font-weight: 650; }
+.portfolio-identity-pending ul { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.portfolio-identity-pending li { display: grid; grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 1fr) auto; gap: var(--space-3); align-items: center; border-block-start: 1px solid var(--color-border); padding-block-start: var(--space-2); }
+.portfolio-identity-pending li > span:first-child { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; min-inline-size: 0; }
+.portfolio-identity-pending code, .portfolio-identity-pending time { color: var(--color-text-muted); font-size: 0.75rem; overflow-wrap: anywhere; }
+.portfolio-identity-pending__previous { border-block-start: 1px solid var(--color-border); padding-block-start: var(--space-3); color: var(--color-text-muted); font-size: 0.8125rem; }
 .portfolio-local-refresh { min-inline-size: 0; border: 1px solid var(--color-border); background: var(--color-surface); }
 .portfolio-local-refresh > summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: var(--space-3); align-items: center; min-block-size: 56px; padding: var(--space-2) var(--space-3); cursor: pointer; list-style: none; }
 .portfolio-local-refresh > summary::-webkit-details-marker { display: none; }
@@ -879,6 +890,9 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
   .portfolio-page__actions { align-items: stretch; flex-direction: column; }
   .portfolio-workspace { grid-template-columns: 1fr; }
   .portfolio-rail { position: static; }
+  .portfolio-identity-pending__heading { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .portfolio-identity-pending__heading .state-chip { grid-column: 2; justify-self: start; }
+  .portfolio-identity-pending li { grid-template-columns: 1fr; gap: var(--space-1); }
   .portfolio-snapshot-band { grid-template-columns: 1fr; }
   .portfolio-snapshot-band dl, .portfolio-valuation__facts, .portfolio-summary__cash { grid-template-columns: 1fr; }
   .portfolio-allocation li { grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1); }
@@ -955,6 +969,8 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
   .authority-ledger ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .portfolio-workspace { grid-template-columns: 1fr; }
   .portfolio-rail { position: static; }
+  .portfolio-identity-pending li { grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 1fr); }
+  .portfolio-identity-pending li time { grid-column: 1 / -1; }
   .portfolio-snapshot-band { grid-template-columns: 1fr; }
   .portfolio-snapshot-band dl, .portfolio-valuation__facts, .portfolio-summary__cash { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .portfolio-scenario__controls { grid-template-columns: repeat(2, minmax(10rem, 1fr)); }
