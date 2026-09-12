@@ -3,7 +3,6 @@
 import json
 import subprocess
 import sys
-import time
 from datetime import UTC, date, datetime
 from hashlib import sha256
 
@@ -13,6 +12,21 @@ from unit.ops.test_alpaca_prices_local import invoke as _invoke
 from unit.ops.test_alpaca_prices_local import page
 
 invoke = _invoke
+
+
+def _install_controlled_deadline(invoke, monkeypatch):
+    now = 0.0
+
+    def monotonic():
+        return now
+
+    def expire():
+        nonlocal now
+        now = 31.0
+
+    monkeypatch.setattr(invoke.cli, "_COLLECTION_SECONDS", 30.0)
+    monkeypatch.setattr(invoke.cli, "monotonic", monotonic)
+    return expire
 
 
 def test_oversized_http_body_is_not_archived(invoke):
@@ -271,11 +285,11 @@ def test_fixed_metadata_rejects_undeclared_fields(invoke, scope):
 
 def test_synchronous_archive_work_cannot_claim_success_past_deadline(invoke, monkeypatch):
     original = invoke.cli.write_private
-    monkeypatch.setattr(invoke.cli, "_COLLECTION_SECONDS", 0.02)
+    expire = _install_controlled_deadline(invoke, monkeypatch)
 
     def slow_write(path, content):
         if path.name == "page-001.json":
-            time.sleep(0.03)
+            expire()
         original(path, content)
 
     monkeypatch.setattr(invoke.cli, "write_private", slow_write)
@@ -291,13 +305,13 @@ def test_final_local_stages_cannot_publish_success_past_deadline(invoke, monkeyp
 
     from nexus.research.alpaca_prices_archive import load_price_collection
 
-    monkeypatch.setattr(invoke.cli, "_COLLECTION_SECONDS", 0.05)
+    expire = _install_controlled_deadline(invoke, monkeypatch)
     if phase == "manifest":
         original = invoke.cli.write_private
 
         def slow_write(path, content):
             if path.name.startswith("manifest"):
-                time.sleep(0.06)
+                expire()
             original(path, content)
 
         monkeypatch.setattr(invoke.cli, "write_private", slow_write)
@@ -306,7 +320,7 @@ def test_final_local_stages_cannot_publish_success_past_deadline(invoke, monkeyp
 
         def slow_reader(*args, **kwargs):
             result = original_reader(*args, **kwargs)
-            time.sleep(0.06)
+            expire()
             return result
 
         monkeypatch.setattr(invoke.cli, "_verify_pending_collection", slow_reader)
@@ -315,7 +329,7 @@ def test_final_local_stages_cannot_publish_success_past_deadline(invoke, monkeyp
 
         def slow_link(*args, **kwargs):
             result = original_link(*args, **kwargs)
-            time.sleep(0.06)
+            expire()
             return result
 
         monkeypatch.setattr(invoke.cli.os, "link", slow_link)
@@ -325,7 +339,7 @@ def test_final_local_stages_cannot_publish_success_past_deadline(invoke, monkeyp
         def slow_unlink(path, *args, **kwargs):
             result = original_unlink(path, *args, **kwargs)
             if path.name == "manifest.pending.json":
-                time.sleep(0.06)
+                expire()
             return result
 
         monkeypatch.setattr(invoke.cli.Path, "unlink", slow_unlink)
