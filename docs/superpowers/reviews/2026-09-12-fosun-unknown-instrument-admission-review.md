@@ -57,3 +57,73 @@ the unknown-holding path a required cross-layer acceptance case.
 
 The three unawarded points are implementation-layout uncertainty, not unresolved
 business semantics. The design is sufficiently precise for direct test-first coding.
+
+## Implementation verification
+
+Verification date: 2026-09-12
+Branch: `codex/fosun-identity-pending`
+Migration head: `0052_fosun_classification` (no new migration)
+
+The implementation preserves the previous complete portfolio snapshot, records the
+new attempt as `PARTIAL / IDENTITY_PENDING`, and publishes only bounded provider-code
+discovery fields. Unknown securities do not receive an `Instrument`, alias, position,
+order, decision authority, or execution authority. Portfolio and page reads remain
+persisted-only and perform no provider or model work.
+
+### Verification evidence
+
+- Fresh empty PostgreSQL migration from `0001` through
+  `0052_fosun_classification`, followed by all six affected unit/integration files:
+  **97 passed**.
+- Discovery artifact/snapshot replay, raw-binding tamper rejection, same-clock
+  conflict, and post-alias resolution: **3 passed**.
+- Engine CI merge gate, including all three new PostgreSQL files: **3625 passed,
+  6 skipped, 1 performance test deselected**.
+- Ruff: all Engine checks passed. Mypy: no issues in **431 source files**.
+- OpenAPI generated-client check, frontend ESLint, and TypeScript: passed.
+- Frontend unit suite: **976 passed, 1 skipped**. Portfolio Playwright suite across
+  mobile, tablet, desktop, keyboard, and read-only boundaries: **12 passed**.
+- Production Web build: passed.
+
+### Final review findings
+
+Two verification gaps were found and fixed; neither required a production-policy
+change:
+
+1. The explicit Engine merge gate did not collect the three new PostgreSQL files.
+   They are now listed in `.github/workflows/ci.yml`.
+2. The maximum legal portfolio-envelope test used the old response contract. It now
+   includes the maximum 20 pending records together with 2000 positions and 2000 open
+   orders and still verifies the 4 MiB BFF limit.
+
+No remaining code finding was identified for invented identity, partial-portfolio
+leakage, raw/hash/clock mismatch acceptance, hidden provider calls, request-count
+drift, API privacy, or page-triggered external work.
+
+### Residual risks
+
+- No real provider refresh was run during development verification. Actual Fosun
+  response shape, local credentials, service image/code version, and object-store
+  connectivity still require one bounded runtime acceptance after integration.
+- Fosun routing evidence intentionally does not distinguish ETF from ETN. Resolution
+  remains the responsibility of an existing authoritative identity importer.
+- A provider result whose completion is uncertain must be checked in persisted
+  `run -> job -> outputs` state and must not be replayed merely because observation
+  timed out.
+
+### Rollout sequence
+
+1. Merge the isolated branch only when the main checkout is clean or its unrelated
+   work has been safely committed by its owner; never reset or stash those changes.
+2. Create a protected complete backup using the existing backup runbook.
+3. Rebuild the API/Web/runtime artifacts from the merged revision and verify Alembic
+   still reports `0052_fosun_classification` as head.
+4. Replace only the affected local services and verify their running revision and
+   `local_read_only` configuration before any provider call.
+5. Inspect persisted `BrokerSyncRun`, job, and output state. If no completed or
+   uncertain acceptance attempt exists, invoke exactly one normal full Fosun refresh.
+6. Verify the same attempt across raw quote artifact, discovery snapshot, known-market
+   updates, `PARTIAL / IDENTITY_PENDING` sync, absence of a new portfolio snapshot,
+   protected API projection, and the portfolio page. Execution must remain locked.
+7. If the attempt is READY because every identity is already authoritative, verify
+   the unchanged complete-snapshot path instead; do not manufacture an unknown symbol.
