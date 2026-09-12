@@ -13,7 +13,12 @@ from nexus.diagnostics.assembler import load_diagnostic_source_policy
 from nexus.diagnostics.series_authority import select_authoritative_series
 from nexus.domain.ids import new_uuid7
 from nexus.ops import fosun_local_refresh as module
-from nexus.persistence.models.data import DataArtifact, PriceBarSetAuthority, PriceSeriesManifest
+from nexus.persistence.models.data import (
+    DataArtifact,
+    DataSnapshot,
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticItemRecord
 from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQuote
 from nexus.persistence.models.portfolio import BrokerSyncRun, PortfolioSnapshotRecord
@@ -197,6 +202,27 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
     }
     factory = session_factory(settings(migrated_database_url))
     calls = Counter()
+    instrument_id = uuid4()
+    async with factory() as session, session.begin():
+        session.add(
+            Instrument(
+                id=instrument_id,
+                asset_type="equity",
+                exchange="XNYS",
+                currency="USD",
+                tick_size=None,
+                risk_bucket="EQUITY",
+            )
+        )
+        session.add(
+            InstrumentAlias(
+                instrument_id=instrument_id,
+                symbol="ALPHA",
+                alias_type="ticker",
+                valid_from=date(2026, 1, 1),
+                valid_to=None,
+            )
+        )
 
     def page(items):
         return GatewayResponsePage(
@@ -401,5 +427,194 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
                 assert liquidity is not None
                 assert liquidity.metric_value is None
                 assert liquidity.unknown_reason == "ADV20_VOLUME_UNIT_UNVERIFIED"
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_unknown_only_refresh_persists_discovery_and_partial_attempt_without_snapshot(
+    migrated_database_url,
+    monkeypatch,
+):
+    factory = session_factory(settings(migrated_database_url))
+    calls = Counter()
+
+    def page(items):
+        return GatewayResponsePage(
+            items=tuple(items),
+            source_request_id=str(uuid4()),
+            has_more=False,
+            next_cursor=None,
+            as_of=datetime.now(UTC),
+            quality="PASS",
+        )
+
+    class Store:
+        def __init__(self):
+            self.objects = {}
+
+        async def archive_raw(self, key, content):
+            uri = f"memory://{key}"
+            self.objects[uri] = content
+            return uri
+
+        async def put_if_absent(self, *, key, content):
+            uri = f"memory://{key}"
+            self.objects.setdefault(uri, content)
+            return uri
+
+        async def read_evidence(self, _key, *, uri):
+            return self.objects[uri]
+
+    store = Store()
+
+    class Broker:
+        async def read_accounts(self):
+            calls["accounts"] += 1
+            return page(
+                [
+                    {
+                        "kind": "account",
+                        "external_account_id": "synthetic",
+                        "status": "ACTIVE",
+                        "base_currency": "USD",
+                    }
+                ]
+            )
+
+        async def read_holdings(self, *_args, **_kwargs):
+            calls["holdings"] += 1
+            return page(
+                [
+                    {
+                        "kind": "position",
+                        "external_account_id": "synthetic",
+                        "instrument_code": "usNEW",
+                        "currency": "USD",
+                        "quantity": "1",
+                        "available_quantity": "1",
+                        "frozen_quantity": "0",
+                        "average_cost": "100",
+                        "diluted_cost": None,
+                        "current_price": "100",
+                        "provider_as_of": None,
+                        "provider_name": "New Company",
+                        "provider_symbol": "NEW",
+                        "provider_product_type": 6,
+                    }
+                ]
+            )
+
+        async def read_cash(self, *_args, **_kwargs):
+            raise AssertionError("identity pending read cash")
+
+        async def read_orders(self, *_args, **_kwargs):
+            raise AssertionError("identity pending read orders")
+
+        async def read_cash_flows(self, *_args, **_kwargs):
+            raise AssertionError("identity pending read cash flows")
+
+        async def aclose(self):
+            return None
+
+    class Market:
+        async def read_quotes_raw(self, codes):
+            calls["quotes"] += 1
+            assert codes == ("usNEW",)
+            now = datetime.now(UTC)
+            payload = {
+                "items": [
+                    {
+                        "kind": "quote",
+                        "instrument_code": "usNEW",
+                        "price": "100",
+                        "as_of": now.isoformat(),
+                        "provider_name": "New Company",
+                        "provider_classification": {
+                            "level_1": 1,
+                            "level_2": 101,
+                            "level_3": 10105,
+                            "equity_profile_fields_complete": True,
+                            "net_asset_profile_fields_complete": False,
+                            "fund_asset_type_chs": "",
+                            "fund_asset_type_cht": "",
+                            "fund_asset_type_eng": "",
+                        },
+                    }
+                ],
+                "source_request_id": str(uuid4()),
+                "has_more": False,
+                "next_cursor": None,
+                "as_of": now.isoformat(),
+                "quality": "PARTIAL",
+            }
+            content = json.dumps(payload).encode()
+            return RawGatewayResponse(
+                operation="fosun_get_quotes",
+                gateway_request_id=new_uuid7(),
+                request_body_sha256=hashlib.sha256(b"synthetic-pending").hexdigest(),
+                raw_payload=content,
+                sent_at=now,
+                received_at=now,
+            )
+
+        async def read_bars_raw(self, **_kwargs):
+            raise AssertionError("unresolved instrument read bars")
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(module, "_broker_settings", lambda _: None)
+    monkeypatch.setattr(module, "_market_identity", lambda _: None)
+    monkeypatch.setattr(module, "FosunGatewayClient", lambda _: Broker())
+    monkeypatch.setattr(module, "FosunMarketGatewayClient", lambda _: Market())
+    monkeypatch.setattr(module, "S3ProviderEvidenceStore", lambda _: store)
+    configured = SimpleNamespace(database_url=migrated_database_url, market_delivery_mode="unknown")
+
+    try:
+        result = await module.refresh_local_fosun(configured)
+        assert result["status"] == "identity_pending"
+        assert result["snapshot_status"] == "PARTIAL"
+        assert result["execution_locked"] is True
+        assert result["portfolio_snapshot_updated"] is False
+        assert result["known_market_symbols"] == 0
+        assert result["pending_instrument_count"] == 1
+        assert result["pending_route_counts"] == {
+            "current_held_common_stock": 1,
+            "current_held_fund_or_structured": 0,
+            "manual_review": 0,
+        }
+        assert result["provider_requests"] == {
+            "accounts": 1,
+            "holdings": 1,
+            "quotes": 1,
+            "bars": 0,
+            "cash": 0,
+            "orders": 0,
+            "cash_flows": 0,
+            "total": 3,
+        }
+        async with factory() as session:
+            run = await session.scalar(select(BrokerSyncRun))
+            discovery = await session.scalar(
+                select(DataSnapshot).where(
+                    DataSnapshot.source == "fosun_instrument_discovery"
+                )
+            )
+            assert run is not None
+            assert (run.status, run.failure_reason, run.cash_flow_quality) == (
+                "PARTIAL",
+                "IDENTITY_PENDING",
+                "NOT_RUN",
+            )
+            assert discovery is not None
+            assert discovery.payload["canonical_instrument_id"] is None
+            assert discovery.payload["execution_locked"] is True
+            assert await session.scalar(select(func.count()).select_from(Instrument)) == 0
+            assert (
+                await session.scalar(select(func.count()).select_from(PortfolioSnapshotRecord))
+                == 0
+            )
+            assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
     finally:
         await factory.kw["bind"].dispose()

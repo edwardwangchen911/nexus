@@ -132,9 +132,13 @@ async def test_local_delivery_uses_only_consistent_response_declarations(delays,
             doc["provider_reported_delay"] = delays[codes.index(kwargs["code"])]
             return raw.model_copy(update={"raw_payload": json.dumps(doc).encode()})
 
+    market = Market(codes)
+    quote_raw = await market.read_quotes_raw(codes)
     result = await _read_market_snapshot(
-        Market(codes),
+        market,
         codes=codes,
+        quote_codes=codes,
+        quote_raw=quote_raw,
         request_start_at=datetime(2026, 8, 31, tzinfo=UTC),
         request_end_at=datetime(2026, 9, 1, tzinfo=UTC),
         expected_sessions=(date(2026, 8, 31),),
@@ -469,10 +473,13 @@ async def test_market_snapshot_uses_one_exact_quote_set_and_one_bar_read_per_cod
     market = _RecordingMarket(codes)
     start = datetime(2026, 8, 31, tzinfo=UTC)
     end = datetime(2026, 8, 31, tzinfo=UTC)
+    quote_raw = await market.read_quotes_raw(codes)
 
     snapshot = await _read_market_snapshot(
         market,
         codes=codes,
+        quote_codes=codes,
+        quote_raw=quote_raw,
         request_start_at=start,
         request_end_at=end,
         expected_sessions=(date(2026, 8, 31),),
@@ -494,10 +501,13 @@ async def test_market_snapshot_accepts_a_listing_limited_daily_series() -> None:
     market = _RecordingMarket(("usNEW",))
     start = datetime(2026, 8, 28, tzinfo=UTC)
     end = datetime(2026, 8, 31, tzinfo=UTC)
+    quote_raw = await market.read_quotes_raw(("usNEW",))
 
     snapshot = await _read_market_snapshot(
         market,
         codes=("usNEW",),
+        quote_codes=("usNEW",),
+        quote_raw=quote_raw,
         request_start_at=start,
         request_end_at=end,
         expected_sessions=(date(2026, 8, 28), date(2026, 8, 31)),
@@ -518,11 +528,14 @@ async def test_market_snapshot_failure_returns_before_any_persistence_input_exis
     codes = ("usAAPL", "usMSFT")
     market = _FailingMarket(codes)
     instant = datetime(2026, 8, 31, tzinfo=UTC)
+    quote_raw = await market.read_quotes_raw(codes)
 
     with pytest.raises(RuntimeError, match="LOCAL_TEST_READ_FAILED"):
         await _read_market_snapshot(
             market,
             codes=codes,
+            quote_codes=codes,
+            quote_raw=quote_raw,
             request_start_at=instant,
             request_end_at=instant,
             expected_sessions=(date(2026, 8, 31),),

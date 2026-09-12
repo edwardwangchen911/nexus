@@ -98,6 +98,23 @@ async def test_invalid_holding_identity_rejected_before_freeze(migrated_database
 
 
 @pytest.mark.asyncio
+async def test_full_refresh_can_return_unresolved_code_without_creating_identity(
+    migrated_database_url,
+):
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as s:
+        identity = await refresh._load_local_broker_identity(
+            s,
+            holdings=(holding(),),
+            allow_unresolved=True,
+        )
+        assert identity.instrument_ids == {}
+        assert identity.unresolved_codes == ("usAAPL",)
+        assert await s.scalar(select(Instrument)) is None
+        assert await s.scalar(select(InstrumentAlias)) is None
+
+
+@pytest.mark.asyncio
 async def test_current_alias_survives_history_through_broker_persistence(migrated_database_url):
     today = NOW.date()
     factory = session_factory(settings(migrated_database_url))
@@ -229,10 +246,14 @@ async def test_sourced_market_identity_is_current_and_reusable_by_broker(
                 None,
                 settings=None,
                 accounts_page=SimpleNamespace(as_of=NOW),
+                holdings_observed_at=NOW,
                 holdings=(holding(),),
                 identity=identity,
                 market_reads=SimpleNamespace(
-                    quote_raw=SimpleNamespace(received_at=NOW), bars_raw=(), codes=("usAAPL",)
+                    quote_raw=SimpleNamespace(received_at=NOW),
+                    bars_raw=(),
+                    codes=("usAAPL",),
+                    resolved_codes=("usAAPL",),
                 ),
                 request_start_at=NOW - timedelta(days=400),
                 request_end_at=NOW,
