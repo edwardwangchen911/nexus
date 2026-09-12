@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import and_, desc, func, or_, select, true, union_all
@@ -13,16 +14,21 @@ from nexus.api.schemas.portfolio import (
     CashBucketResponse,
     InternalPaperPortfolioListItemResponse,
     OpenOrderResponse,
+    PendingInstrumentIdentityResponse,
     PortfolioKind,
     PortfolioListItemResponse,
     PortfolioPageResponse,
     PortfolioSnapshotResponse,
     PositionResponse,
+    decision_readiness_for_latest_attempt,
     derive_snapshot_readiness,
     snapshot_time_basis,
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
+from nexus.market.fosun_instrument_discovery_storage import (
+    read_pending_instrument_discoveries,
+)
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.paper import PaperAccountRecord
@@ -281,6 +287,48 @@ class PortfolioService:
         ).first()
         if snapshot is None:
             raise _snapshot_not_found(portfolio_id)
+        latest_run = (
+            await self._session.execute(
+                select(BrokerSyncRun.status, BrokerSyncRun.failure_reason)
+                .where(
+                    BrokerSyncRun.portfolio_id == portfolio_id,
+                    BrokerSyncRun.created_at <= self._request_time,
+                )
+                .order_by(desc(BrokerSyncRun.created_at), desc(BrokerSyncRun.id))
+                .limit(1)
+            )
+        ).first()
+        latest_failure_reason: Literal["IDENTITY_PENDING"] | None = (
+            "IDENTITY_PENDING"
+            if latest_run is not None
+            and latest_run.status == "PARTIAL"
+            and latest_run.failure_reason == "IDENTITY_PENDING"
+            else None
+        )
+        pending_documents = (
+            await read_pending_instrument_discoveries(
+                self._session,
+                as_of=self._request_time,
+            )
+            if latest_failure_reason is not None
+            else {}
+        )
+        if len(pending_documents) > 20:
+            _raise_collection_overflow("pending_instruments", 20)
+        pending_instruments = tuple(
+            PendingInstrumentIdentityResponse(
+                provider_code=document.provider_code,
+                provider_name=document.provider_name,
+                routing_family=document.routing_family,
+                recommended_identity_route=document.recommended_identity_route,
+                available_at=document.available_at,
+                identity_status="pending",
+            )
+            for document in sorted(
+                pending_documents.values(),
+                key=lambda item: (item.provider_code, item.available_at),
+            )
+        )
         cash_rows = (
             await self._session.execute(
                 select(
@@ -354,6 +402,11 @@ class PortfolioService:
             has_display_facts=bool(cash_rows or position_rows),
             cash_flow_quality=snapshot.cash_flow_quality,
         )
+        decision_readiness = decision_readiness_for_latest_attempt(
+            decision_readiness,
+            latest_run_status=latest_run.status if latest_run else None,
+            latest_failure_reason=latest_failure_reason,
+        )
         return PortfolioSnapshotResponse(
             portfolio_snapshot_id=snapshot.snapshot_id,
             portfolio_id=snapshot.portfolio_id,
@@ -361,6 +414,14 @@ class PortfolioService:
             status=snapshot.status,
             display_readiness=display_readiness,
             decision_readiness=decision_readiness,
+            latest_sync_run_status=latest_run.status if latest_run else None,
+            latest_sync_failure_reason=latest_failure_reason,
+            pending_instrument_count=len(pending_instruments),
+            pending_identity_evidence_at=max(
+                (item.available_at for item in pending_instruments),
+                default=None,
+            ),
+            pending_instruments=pending_instruments,
             cash_flow_quality=snapshot.cash_flow_quality,
             cash_flow_count=int(cash_flow_count or 0),
             time_basis=snapshot_time_basis(snapshot.source_observations),

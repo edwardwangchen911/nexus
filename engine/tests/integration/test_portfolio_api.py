@@ -1,10 +1,14 @@
 import json
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from urllib.parse import urlencode
 from uuid import UUID
 
 import httpx
 import pytest
+from helpers.portfolio_api import (
+    ACCOUNTS as _ACCOUNTS,
+)
 from helpers.portfolio_api import (
     CLOCK as _CLOCK,
 )
@@ -36,13 +40,108 @@ from helpers.portfolio_api import (
     seed_portfolio_list as _seed_portfolio_list,
 )
 from helpers.portfolio_api import (
+    settings as _settings,
+)
+from helpers.portfolio_api import (
     terminalize_broker_sync as _terminalize_broker_sync,
+)
+from nexus.market.fosun_instrument_discovery import FosunInstrumentDiscoveryDocument
+from nexus.market.fosun_instrument_discovery_storage import (
+    persist_instrument_discovery,
+    save_discovery_artifact,
+)
+from nexus.ops.fosun_local import read_local_status
+from nexus.persistence.models.data import DataArtifact
+from nexus.persistence.models.portfolio import BrokerSyncRun
+from nexus.persistence.session import session_factory
+from nexus.research.fosun_security_classification import (
+    RAW_SCHEMA,
+    FosunClassificationLevels,
+    FosunFundAssetType,
+    FosunRawQuoteBinding,
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 _SYNC_PATH = "/internal/v1/broker-sync-runs"
 _PAPER_NOW = datetime(2026, 8, 27, 1, tzinfo=UTC)
+
+
+async def _seed_pending_identity(database_url: str, *, observed_at: datetime) -> None:
+    raw = b'{"synthetic":"pending-identity"}'
+    raw_hash = sha256(raw).hexdigest()
+    raw_uri = f"memory://raw/{raw_hash}.json"
+
+    class Store:
+        def __init__(self) -> None:
+            self.objects = {raw_uri: raw}
+
+        async def put_if_absent(self, *, key: str, content: bytes) -> str:
+            uri = f"memory://{key}"
+            self.objects.setdefault(uri, content)
+            return uri
+
+        async def read_evidence(self, _key: str, *, uri: str) -> bytes:
+            return self.objects[uri]
+
+    document = FosunInstrumentDiscoveryDocument(
+        provider_code="usNEW",
+        provider_name="New Company",
+        provider_product_type=6,
+        levels=FosunClassificationLevels(first=1, second=101, third=10105),
+        equity_profile_fields_complete=True,
+        net_asset_profile_fields_complete=False,
+        fund_asset_type=FosunFundAssetType(chs="", cht="", eng=""),
+        routing_family="company_equity_like",
+        recommended_identity_route="current_held_common_stock",
+        holding_observed_at=observed_at - timedelta(seconds=2),
+        received_at=observed_at - timedelta(seconds=1),
+        available_at=observed_at - timedelta(seconds=1),
+        raw_quote=FosunRawQuoteBinding(
+            artifact_sha256=raw_hash,
+            artifact_byte_length=len(raw),
+            artifact_uri=raw_uri,
+            gateway_request_id=UUID("0198d500-1000-7000-8000-000000000081"),
+            request_body_sha256="d" * 64,
+        ),
+    )
+    factory = session_factory(_settings(database_url))
+    async with factory() as session, session.begin():
+        session.add(
+            DataArtifact(
+                uri=raw_uri,
+                sha256=raw_hash,
+                byte_size=len(raw),
+                mime_type="application/json",
+                schema_version=RAW_SCHEMA,
+                source="fosun",
+                observed_at=document.received_at,
+                received_at=document.received_at,
+                available_at=document.available_at,
+            )
+        )
+        await session.flush()
+        location = await save_discovery_artifact(session, Store(), document)
+        await persist_instrument_discovery(session, document, location=location)
+        session.add(
+            BrokerSyncRun(
+                id=UUID("0198d500-1000-7000-8000-000000000082"),
+                account_id=_ACCOUNTS[0],
+                portfolio_id=_PORTFOLIOS[0],
+                trigger_kind="MANUAL",
+                actor_id="nexus-mac-local-read-only",
+                route="local-fosun-refresh",
+                idempotency_key="pending-identity",
+                request_hash="e" * 64,
+                status="PARTIAL",
+                accepted_at=observed_at,
+                completed_at=observed_at,
+                attempt_count=1,
+                failure_reason="IDENTITY_PENDING",
+                cash_flow_quality="NOT_RUN",
+            )
+        )
+    await factory.kw["bind"].dispose()
 
 
 def _sync_body(portfolio_id: UUID, *, padded: bool = False) -> bytes:
@@ -290,6 +389,65 @@ async def test_latest_snapshot_preserves_currency_costs_and_read_only_ids(
     encoded = json.dumps(response.json())
     for canary in ("provider-order-secret-canary", "external-request-canary", "secret-canary"):
         assert canary not in encoded
+
+
+@pytest.mark.asyncio
+async def test_ready_snapshot_remains_visible_but_newer_pending_attempt_blocks_decisions(
+    migrated_database_url: str,
+) -> None:
+    observed_at = datetime.now(UTC)
+    request_time = observed_at + timedelta(minutes=1)
+    await _seed_portfolio_list(migrated_database_url)
+    await _seed_pending_identity(migrated_database_url, observed_at=observed_at)
+
+    status = await read_local_status(migrated_database_url)
+    assert status["snapshot_status"] == "READY"
+    assert status["latest_sync_run_status"] == "PARTIAL"
+    assert status["latest_sync_failure_reason"] == "IDENTITY_PENDING"
+    assert status["decision_readiness"] == "NOT_READY"
+    assert status["pending_instrument_count"] == 1
+
+    path = f"/internal/v1/portfolios/{_PORTFOLIOS[0]}/snapshots/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=_app(migrated_database_url, now=request_time)
+        ),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "READY"
+    assert data["display_readiness"] == "DISPLAY_READY"
+    assert data["decision_readiness"] == "NOT_READY"
+    assert data["latest_sync_run_status"] == "PARTIAL"
+    assert data["latest_sync_failure_reason"] == "IDENTITY_PENDING"
+    assert data["pending_instrument_count"] == 1
+    assert data["pending_identity_evidence_at"] == (
+        observed_at - timedelta(seconds=1)
+    ).isoformat().replace("+00:00", "Z")
+    pending = data["pending_instruments"]
+    assert pending == [
+        {
+            "provider_code": "usNEW",
+            "provider_name": "New Company",
+            "routing_family": "company_equity_like",
+            "recommended_identity_route": "current_held_common_stock",
+            "available_at": (
+                observed_at - timedelta(seconds=1)
+            ).isoformat().replace("+00:00", "Z"),
+            "identity_status": "pending",
+        }
+    ]
+    assert set(pending[0]) == {
+        "provider_code",
+        "provider_name",
+        "routing_family",
+        "recommended_identity_route",
+        "available_at",
+        "identity_status",
+    }
 
 
 @pytest.mark.asyncio

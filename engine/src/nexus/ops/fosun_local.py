@@ -21,7 +21,13 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from nexus.api.schemas.portfolio import (
+    decision_readiness_for_latest_attempt as _decision_readiness_for_latest_attempt,
+)
 from nexus.api.schemas.portfolio import derive_snapshot_readiness, snapshot_time_basis
+from nexus.market.fosun_instrument_discovery_storage import (
+    read_pending_instrument_discoveries,
+)
 from nexus.ops.fosun_local_refresh import (
     LocalFosunBrokerRefreshSettings,
     LocalFosunRefreshSettings,
@@ -244,31 +250,61 @@ async def read_local_status(database_url: str) -> dict[str, object]:
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with sessions() as session:
-            snapshot = (
+            latest_run = (
                 await session.execute(
-                    select(PortfolioSnapshotRecord)
-                    .order_by(
-                        desc(PortfolioSnapshotRecord.created_at),
-                        desc(PortfolioSnapshotRecord.id),
-                    )
+                    select(BrokerSyncRun)
+                    .order_by(desc(BrokerSyncRun.created_at), desc(BrokerSyncRun.id))
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            run = (
-                await session.get(BrokerSyncRun, snapshot.sync_run_id)
-                if snapshot
-                else (
-                    await session.execute(
-                        select(BrokerSyncRun)
-                        .order_by(desc(BrokerSyncRun.created_at), desc(BrokerSyncRun.id))
-                        .limit(1)
-                    )
-                ).scalar_one_or_none()
+            snapshot_query = select(PortfolioSnapshotRecord)
+            if latest_run is not None:
+                snapshot_query = snapshot_query.where(
+                    PortfolioSnapshotRecord.portfolio_id == latest_run.portfolio_id
+                )
+            snapshot = (
+                await session.execute(
+                    snapshot_query.order_by(
+                        desc(PortfolioSnapshotRecord.created_at),
+                        desc(PortfolioSnapshotRecord.id),
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            snapshot_run = (
+                await session.get(BrokerSyncRun, snapshot.sync_run_id) if snapshot else None
+            )
+            latest_failure_reason = (
+                "IDENTITY_PENDING"
+                if latest_run is not None
+                and latest_run.status == "PARTIAL"
+                and latest_run.failure_reason == "IDENTITY_PENDING"
+                else None
+            )
+            pending = (
+                await read_pending_instrument_discoveries(
+                    session,
+                    as_of=datetime.now(UTC),
+                )
+                if latest_failure_reason is not None
+                else {}
+            )
+            pending_evidence_at = max(
+                (document.available_at for document in pending.values()),
+                default=None,
             )
             if snapshot is None:
                 return {
                     "status": "no_snapshot",
-                    "last_sync_run_status": run.status if run else None,
+                    "last_sync_run_status": latest_run.status if latest_run else None,
+                    "latest_sync_run_status": latest_run.status if latest_run else None,
+                    "latest_sync_failure_reason": latest_failure_reason,
+                    "decision_readiness": (
+                        "NOT_READY" if latest_failure_reason is not None else None
+                    ),
+                    "pending_instrument_count": len(pending),
+                    "pending_identity_evidence_at": (
+                        pending_evidence_at.isoformat() if pending_evidence_at else None
+                    ),
                     "network_checked": False,
                 }
             counts: dict[str, int] = {}
@@ -286,7 +322,14 @@ async def read_local_status(database_url: str) -> dict[str, object]:
             display, decision = derive_snapshot_readiness(
                 snapshot.status,
                 has_display_facts=bool(counts["cash"] or counts["positions"]),
-                cash_flow_quality=run.cash_flow_quality if run else "NOT_RUN",
+                cash_flow_quality=(
+                    snapshot_run.cash_flow_quality if snapshot_run else "NOT_RUN"
+                ),
+            )
+            decision = _decision_readiness_for_latest_attempt(
+                decision,
+                latest_run_status=latest_run.status if latest_run else None,
+                latest_failure_reason=latest_failure_reason,
             )
             return {
                 "status": "ok",
@@ -295,8 +338,14 @@ async def read_local_status(database_url: str) -> dict[str, object]:
                 "decision_readiness": decision,
                 "as_of": snapshot.as_of.isoformat() if snapshot.as_of else None,
                 "time_basis": snapshot_time_basis(snapshot.source_observations),
-                "last_sync_run_status": run.status if run else None,
-                "cash_flow_quality": run.cash_flow_quality if run else None,
+                "last_sync_run_status": latest_run.status if latest_run else None,
+                "latest_sync_run_status": latest_run.status if latest_run else None,
+                "latest_sync_failure_reason": latest_failure_reason,
+                "pending_instrument_count": len(pending),
+                "pending_identity_evidence_at": (
+                    pending_evidence_at.isoformat() if pending_evidence_at else None
+                ),
+                "cash_flow_quality": snapshot_run.cash_flow_quality if snapshot_run else None,
                 "counts": counts,
                 "price_evidence": await read_price_evidence_status(
                     session,
