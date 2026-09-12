@@ -276,6 +276,11 @@ async def test_collect_fund_evidence_uses_five_bounded_requests_and_archives_exa
             b'"exchange":"AMEX","isEtf":true}]'
         ),
         ("www.sec.gov", "/files/company_tickers_mf.json"): mapping,
+        ("www.sec.gov", "/cgi-bin/browse-edgar"): (
+            b"<html><body>Class/Contract: C000000001 Synthetic Class Ticker Symbol: FUND "
+            b'<a href="/Archives/edgar/data/777777/000077777726000011/'
+            b'0000777777-26-000011-index.html">Documents</a></body></html>'
+        ),
         ("data.sec.gov", "/submissions/CIK0000777777.json"): submissions,
         ("www.sec.gov", root + "/0000777777-26-000011-index.html"): (
             b"<html>S000000001 C000000001 FUND "
@@ -301,7 +306,7 @@ async def test_collect_fund_evidence_uses_five_bounded_requests_and_archives_exa
             client=client,
         )
 
-    assert result.request_count == 5
+    assert result.request_count == 6
     assert requests == list(responses)
     assert result.mapping_file == output_dir / "selectors" / "company_tickers_mf.json"
     assert (output_dir / "sec" / "submissions.raw").read_bytes() == submissions
@@ -329,7 +334,6 @@ async def test_collect_fund_evidence_skips_latest_497k_for_another_share_class(t
         ("0000777777-26-000012", "2026-09-01T12:00:00Z", "2026-09-01", "497K", "other.htm"),
         ("0000777777-26-000011", "2026-08-01T12:00:00Z", "2026-08-01", "497K", "current.htm"),
     )
-    latest_root = "/Archives/edgar/data/777777/000077777726000012"
     selected_root = "/Archives/edgar/data/777777/000077777726000011"
     responses = {
         ("financialmodelingprep.com", "/stable/profile"): (
@@ -337,10 +341,12 @@ async def test_collect_fund_evidence_skips_latest_497k_for_another_share_class(t
             b'"exchange":"AMEX","isEtf":true}]'
         ),
         ("www.sec.gov", "/files/company_tickers_mf.json"): mapping,
-        ("data.sec.gov", "/submissions/CIK0000777777.json"): submissions,
-        ("www.sec.gov", latest_root + "/0000777777-26-000012-index.html"): (
-            b'<html>S000000009 C000000009 OTHER <a href="other.htm">document</a></html>'
+        ("www.sec.gov", "/cgi-bin/browse-edgar"): (
+            b"<html><body>Class/Contract: C000000001 Synthetic Class Ticker Symbol: FUND "
+            b'<a href="/Archives/edgar/data/777777/000077777726000011/'
+            b'0000777777-26-000011-index.html">Documents</a></body></html>'
         ),
+        ("data.sec.gov", "/submissions/CIK0000777777.json"): submissions,
         ("www.sec.gov", selected_root + "/0000777777-26-000011-index.html"): (
             b"<html>S000000001 C000000001 FUND "
             b'<a href="/Archives/edgar/data/777777/000077777726000011/current.htm">'
@@ -375,14 +381,15 @@ async def test_collect_fund_evidence_skips_latest_497k_for_another_share_class(t
     selection = json.loads((output_dir / "selectors" / "selection.json").read_bytes())
     assert selection["accession"] == "0000777777-26-000011"
     assert (
-        (output_dir / "selectors" / "candidate-01-index.raw")
-        .read_bytes()
-        .startswith(b"<html>S000000009")
+        b"Class/Contract: C000000001"
+        in (output_dir / "selectors" / "class-search.html").read_bytes()
     )
 
 
 @pytest.mark.asyncio
-async def test_collect_fund_evidence_prioritizes_symbol_named_filing_within_bound(tmp_path) -> None:
+async def test_collect_fund_evidence_uses_class_search_instead_of_issuer_recent_order(
+    tmp_path,
+) -> None:
     mapping = json.dumps(
         {
             "fields": ["cik", "seriesId", "classId", "symbol"],
@@ -395,7 +402,7 @@ async def test_collect_fund_evidence_prioritizes_symbol_named_filing_within_boun
         ("0000777777-26-000014", "2026-09-04T12:00:00Z", "2026-09-04", "497K", "other4.htm"),
         ("0000777777-26-000013", "2026-09-03T12:00:00Z", "2026-09-03", "497K", "other3.htm"),
         ("0000777777-26-000012", "2026-09-02T12:00:00Z", "2026-09-02", "497K", "other2.htm"),
-        ("0000777777-26-000011", "2026-09-01T12:00:00Z", "2026-09-01", "497K", "fund-497k.htm"),
+        ("0000777777-26-000011", "2026-09-01T12:00:00Z", "2026-09-01", "497K", "document.htm"),
     )
     root = "/Archives/edgar/data/777777/000077777726000011"
     responses = {
@@ -404,15 +411,18 @@ async def test_collect_fund_evidence_prioritizes_symbol_named_filing_within_boun
             b'"exchange":"AMEX","isEtf":true}]'
         ),
         ("www.sec.gov", "/files/company_tickers_mf.json"): mapping,
+        ("www.sec.gov", "/cgi-bin/browse-edgar"): (
+            b"<html><body>Class/Contract: C000000001 Synthetic Class Ticker Symbol: FUND "
+            b'<a href="/Archives/edgar/data/777777/000077777726000011/'
+            b'0000777777-26-000011-index.html">Documents</a></body></html>'
+        ),
         ("data.sec.gov", "/submissions/CIK0000777777.json"): submissions,
         ("www.sec.gov", root + "/0000777777-26-000011-index.html"): (
             b"<html>S000000001 C000000001 FUND "
-            b'<a href="/Archives/edgar/data/777777/000077777726000011/fund-497k.htm">'
+            b'<a href="/Archives/edgar/data/777777/000077777726000011/document.htm">'
             b"document</a></html>"
         ),
-        ("www.sec.gov", root + "/fund-497k.htm"): (
-            b"<html>FUND current prospectus document</html>"
-        ),
+        ("www.sec.gov", root + "/document.htm"): (b"<html>FUND current prospectus document</html>"),
     }
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -428,7 +438,7 @@ async def test_collect_fund_evidence_prioritizes_symbol_named_filing_within_boun
             client=client,
         )
 
-    assert result.request_count == 5
+    assert result.request_count == 6
 
 
 class _FakeTransaction:
@@ -515,7 +525,7 @@ async def test_resolver_processes_persisted_batch_with_one_broker_read(
         item_dir.mkdir(mode=0o700)
         mapping_file = item_dir / "mapping.json"
         mapping_file.write_bytes(b"mapping")
-        return CollectedIdentityEvidence(item_dir / "fmp", item_dir / "sec", 5, mapping_file)
+        return CollectedIdentityEvidence(item_dir / "fmp", item_dir / "sec", 6, mapping_file)
 
     async def import_identity(*args, **kwargs):
         return SimpleNamespace(snapshot_id=UUID(int=3))
@@ -562,7 +572,7 @@ async def test_resolver_processes_persisted_batch_with_one_broker_read(
         "manual_review_required": 0,
         "resolution_counts": {"common_stock": 1, "equity_etf": 1},
         "portfolio_refresh_required": True,
-        "public_requests": 9,
+        "public_requests": 10,
         "broker_requests": 2,
         "execution_locked": True,
     }
