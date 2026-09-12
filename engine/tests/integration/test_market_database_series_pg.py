@@ -165,7 +165,8 @@ async def test_current_database_loaders_preserve_frozen_fosun_v2_bindings_after_
     await seed_price_candidate(factory)
     checked_at = datetime.now(UTC)
     received_at = checked_at - timedelta(seconds=1)
-    decision_time = checked_at + timedelta(seconds=1)
+    capability_expires_at = checked_at + timedelta(seconds=30)
+    decision_time = capability_expires_at + timedelta(seconds=1)
     status_id = uuid4()
     quote_capability_id = uuid4()
     bars_capability_id = uuid4()
@@ -178,7 +179,7 @@ async def test_current_database_loaders_preserve_frozen_fosun_v2_bindings_after_
                     provider="fosun",
                     capability="READ_ONLY",
                     contract_hash=contract_hash,
-                    expires_at=checked_at + timedelta(milliseconds=500),
+                    expires_at=capability_expires_at,
                     schema_version="1",
                     payload={
                         "operation": "fosun_get_quotes",
@@ -192,7 +193,7 @@ async def test_current_database_loaders_preserve_frozen_fosun_v2_bindings_after_
                     provider="fosun",
                     capability="READ_ONLY",
                     contract_hash=contract_hash,
-                    expires_at=checked_at + timedelta(milliseconds=500),
+                    expires_at=capability_expires_at,
                     schema_version="1",
                     payload={
                         "operation": "fosun_get_bars",
