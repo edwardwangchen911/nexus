@@ -376,11 +376,16 @@ def test_collector_rejects_unreviewed_proxy_before_creating_archive(tmp_path, pr
 
 
 @pytest.mark.asyncio
-async def test_unsolicited_heartbeat_ack_is_rejected_without_reply(tmp_path):
+async def test_unsolicited_heartbeat_ack_is_rejected_without_reply(tmp_path, monkeypatch):
     quote = _quote_frame()
     socket = Socket([SUB_REPLY, {"topic": "hb", "hbValue": 17}, quote])
 
-    result = await _collect(socket=socket, directory=tmp_path / "run", max_frames=3)
+    result = await _controlled_collect(
+        socket=socket,
+        directory=tmp_path / "run",
+        max_frames=3,
+        monkeypatch=monkeypatch,
+    )
 
     assert result["status"] == "partial"
     assert result["stop_reason"] == "PROTOCOL_INVALID"
