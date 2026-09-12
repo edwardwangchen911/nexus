@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import getpass
 import json
 import logging
@@ -38,6 +39,8 @@ from nexus.ops.local_recovery import write_private
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.session import session_factory
+from nexus.providers.base import InstrumentId, MarketDataProvenance
+from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.schwab_oauth import (
     SchwabOAuthError,
     build_schwab_authorization_url,
@@ -56,6 +59,14 @@ from nexus.providers.market.schwab_stream import (
     build_level_one_subscription,
     build_login,
     validate_streamer_url,
+)
+from nexus.providers.market.snapshot_contracts import (
+    IntradaySnapshotRequest,
+    MarketSnapshot,
+    SnapshotBatch,
+    SnapshotInstrument,
+    SnapshotQuote,
+    SnapshotTrade,
 )
 from nexus.providers.news import validate_symbol
 from nexus.settings import EngineSettings
@@ -457,8 +468,7 @@ async def _collect(
     return _summary(receipt)
 
 
-def load_provider_market_stream_archive(directory: Path) -> dict[str, Any]:
-    """Revalidate a complete private archive and derive observations from originals."""
+def _read_provider_market_stream_files(directory: Path) -> tuple[bytes, tuple[bytes, ...]]:
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         if os.fstat(descriptor).st_mode & 0o077:
@@ -476,13 +486,32 @@ def load_provider_market_stream_archive(directory: Path) -> dict[str, Any]:
             raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
     finally:
         os.close(descriptor)
-    _validate_receipt(receipt, frames)
-    if receipt["status"] != "bounded_complete":
+    return receipt_raw, tuple(frames)
+
+
+def _decode_provider_market_stream_archive(
+    receipt_raw: bytes,
+    frames: tuple[bytes, ...],
+    *,
+    require_complete: bool,
+    derive_observations: bool = True,
+) -> dict[str, Any]:
+    receipt = _receipt_object(receipt_raw)
+    frame_list = list(frames)
+    _validate_receipt(receipt, frame_list)
+    if require_complete and receipt["status"] != "bounded_complete":
         raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_INCOMPLETE")
-    state = SchwabLevelOneState(tuple(receipt["symbols"]))
     observations: list[Any] = []
+    if not derive_observations:
+        return {
+            "receipt": receipt,
+            "receipt_raw": receipt_raw,
+            "frames": frames,
+            "observations": (),
+        }
+    state = SchwabLevelOneState(tuple(receipt["symbols"]))
     authenticated = subscribed = False
-    for entry, raw in zip(receipt["frames"], frames, strict=True):
+    for entry, raw in zip(receipt["frames"], frame_list, strict=True):
         value = _json_object(raw)
         received_at = datetime.fromisoformat(entry["received_at"])
         control = _schwab_control(value)
@@ -505,9 +534,19 @@ def load_provider_market_stream_archive(directory: Path) -> dict[str, Any]:
     return {
         "receipt": receipt,
         "receipt_raw": receipt_raw,
-        "frames": tuple(frames),
+        "frames": frames,
         "observations": tuple(observations),
     }
+
+
+def load_provider_market_stream_archive(directory: Path) -> dict[str, Any]:
+    """Revalidate a complete private archive and derive observations from originals."""
+    receipt_raw, frames = _read_provider_market_stream_files(directory)
+    return _decode_provider_market_stream_archive(
+        receipt_raw,
+        frames,
+        require_complete=True,
+    )
 
 
 def _frozen_schwab_payload(receipt_raw: bytes, frames: tuple[bytes, ...]) -> bytes:
@@ -522,6 +561,164 @@ def _frozen_schwab_payload(receipt_raw: bytes, frames: tuple[bytes, ...]) -> byt
     ).encode()
 
 
+def pack_provider_market_stream_archive(directory: Path) -> bytes:
+    """Validate and package bounded capture files before interpreting completeness."""
+    receipt_raw, frames = _read_provider_market_stream_files(directory)
+    _decode_provider_market_stream_archive(
+        receipt_raw,
+        frames,
+        require_complete=False,
+        derive_observations=False,
+    )
+    return _frozen_schwab_payload(receipt_raw, frames)
+
+
+def _unpack_provider_market_stream_archive(raw_payload: bytes) -> dict[str, Any]:
+    try:
+        if not raw_payload or len(raw_payload) > MAX_BYTES * 2:
+            raise ValueError
+        value = json.loads(raw_payload, object_pairs_hook=_unique)
+        if not isinstance(value, dict) or set(value) != {
+            "schema",
+            "receipt_base64",
+            "frames_base64",
+        }:
+            raise ValueError
+        if value["schema"] != ARCHIVE_SCHEMA or not isinstance(value["frames_base64"], list):
+            raise ValueError
+        receipt_raw = base64.b64decode(value["receipt_base64"], validate=True)
+        frames = tuple(base64.b64decode(frame, validate=True) for frame in value["frames_base64"])
+        return _decode_provider_market_stream_archive(
+            receipt_raw,
+            frames,
+            require_complete=True,
+        )
+    except (
+        TypeError,
+        ValueError,
+        KeyError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+        ProviderMarketStreamError,
+        SchwabStreamError,
+    ) as error:
+        code = str(error)
+        if code not in {
+            "PROVIDER_MARKET_STREAM_INCOMPLETE",
+            "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID",
+        }:
+            code = "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID"
+        raise MarketProviderPayloadError(code) from None
+
+
+def parse_schwab_snapshot_batch(
+    raw_payload: bytes,
+    request: IntradaySnapshotRequest,
+) -> SnapshotBatch:
+    """Normalize a complete real-time Schwab transcript for its exact request."""
+    if request.feed != "l1" or request.delivery_mode != "real_time" or request.include_minute_bars:
+        raise MarketProviderPayloadError("SCHWAB_INTRADAY_AUTHORITY_MISMATCH")
+    archive = _unpack_provider_market_stream_archive(raw_payload)
+    receipt = archive["receipt"]
+    expected = {item.symbol: item for item in request.instruments}
+    if set(receipt["symbols"]) != set(expected) or len(receipt["symbols"]) != len(expected):
+        raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
+    completed_at = datetime.fromisoformat(receipt["ended_at"]).astimezone(UTC)
+    observations = archive["observations"]
+    if any(
+        observation.delayed is not False
+        or observation.received_at > completed_at
+        or observation.symbol not in expected
+        for observation in observations
+    ):
+        raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+
+    snapshots: list[MarketSnapshot] = []
+    for symbol, instrument in expected.items():
+        values = [item for item in observations if item.symbol == symbol]
+        if any((item.bid is None) != (item.ask is None) for item in values):
+            raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+        trades = [item for item in values if item.last is not None and item.trade_time is not None]
+        quotes: list[tuple[Any, datetime]] = []
+        for item in values:
+            quote_time = max(
+                (
+                    time
+                    for time in (item.bid_time, item.ask_time, item.quote_time)
+                    if time is not None
+                ),
+                default=None,
+            )
+            if item.bid is not None and item.ask is not None and quote_time is not None:
+                if item.bid <= 0 or item.ask <= 0 or item.bid > item.ask:
+                    raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+                quotes.append((item, quote_time))
+        trade = max(
+            trades,
+            key=lambda item: (
+                item.trade_time,
+                -1 if item.sequence is None else item.sequence,
+                item.received_at,
+            ),
+            default=None,
+        )
+        quote_pair = max(
+            quotes,
+            key=lambda pair: (
+                pair[1],
+                -1 if pair[0].sequence is None else pair[0].sequence,
+                pair[0].received_at,
+            ),
+            default=None,
+        )
+        trade_time = None if trade is None else trade.trade_time
+        quote = None if quote_pair is None else quote_pair[0]
+        quote_time = None if quote_pair is None else quote_pair[1]
+        if trade is not None and (trade.last is None or trade.last <= 0):
+            raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+        if any(time is not None and time > completed_at for time in (trade_time, quote_time)):
+            raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+        if trade is None and quote is None:
+            continue
+        snapshots.append(
+            MarketSnapshot(
+                instrument_id=InstrumentId(instrument.instrument_id),
+                symbol=symbol,
+                trade=(
+                    None
+                    if trade is None or trade_time is None
+                    else SnapshotTrade(price=trade.last, observed_at=trade_time)
+                ),
+                quote=(
+                    None
+                    if quote is None or quote_time is None
+                    else SnapshotQuote(
+                        bid=quote.bid,
+                        ask=quote.ask,
+                        observed_at=quote_time,
+                    )
+                ),
+                minute_bar=None,
+            )
+        )
+    if not snapshots:
+        raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EMPTY")
+    return SnapshotBatch(
+        snapshots=tuple(snapshots),
+        raw_payload=raw_payload,
+        received_at=completed_at,
+        provenance=MarketDataProvenance(
+            source="schwab",
+            feed="l1",
+            adjustment="raw",
+            interval="1Min",
+            mode="read_only",
+            delivery_mode="real_time",
+        ),
+    )
+
+
 async def import_schwab_market_stream(
     session: AsyncSession,
     store: MarketObjectStore,
@@ -533,7 +730,8 @@ async def import_schwab_market_stream(
     """Import the latest verified trade and two-sided quote per requested symbol."""
     if imported_at.tzinfo is None or imported_at.utcoffset() != timedelta(0):
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_IMPORT_TIME_INVALID")
-    archive = load_provider_market_stream_archive(directory)
+    raw_payload = pack_provider_market_stream_archive(directory)
+    archive = _unpack_provider_market_stream_archive(raw_payload)
     receipt = archive["receipt"]
     symbols = tuple(receipt["symbols"])
     completed_at = datetime.fromisoformat(receipt["ended_at"]).astimezone(UTC)
@@ -543,80 +741,35 @@ async def import_schwab_market_stream(
         or len(set(bindings.values())) != len(bindings)
     ):
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
-    observations = archive["observations"]
-    if (
-        not observations
-        or completed_at > imported_at
-        or any(
-            observation.delayed is not False
-            or observation.received_at > completed_at
-            or observation.symbol not in bindings
-            for observation in observations
-        )
-    ):
+    if completed_at > imported_at:
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
-
-    selected: dict[str, tuple[Any | None, datetime | None, Any | None, datetime | None]] = {}
-    for symbol in symbols:
-        symbol_observations = [
-            observation for observation in observations if observation.symbol == symbol
-        ]
-        trade_candidates = [
-            observation
-            for observation in symbol_observations
-            if observation.last is not None and observation.trade_time is not None
-        ]
-        quote_candidates: list[tuple[Any, datetime]] = []
-        for observation in symbol_observations:
-            quote_time = max(
-                (
-                    value
-                    for value in (
-                        observation.bid_time,
-                        observation.ask_time,
-                        observation.quote_time,
+    try:
+        batch = parse_schwab_snapshot_batch(
+            raw_payload,
+            IntradaySnapshotRequest(
+                instruments=tuple(
+                    SnapshotInstrument(
+                        instrument_id=InstrumentId(bindings[symbol]),
+                        symbol=symbol,
                     )
-                    if value is not None
+                    for symbol in symbols
                 ),
-                default=None,
-            )
-            if observation.bid is not None and observation.ask is not None and quote_time:
-                if (
-                    observation.bid <= 0
-                    or observation.ask <= 0
-                    or observation.bid > observation.ask
-                ):
-                    raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
-                quote_candidates.append((observation, quote_time))
-        trade = max(
-            trade_candidates,
-            key=lambda value: (
-                value.trade_time,
-                -1 if value.sequence is None else value.sequence,
-                value.received_at,
+                symbol_as_of=completed_at.date(),
+                feed="l1",
+                delivery_mode="real_time",
             ),
-            default=None,
         )
-        quote = max(
-            quote_candidates,
-            key=lambda value: (
-                value[1],
-                -1 if value[0].sequence is None else value[0].sequence,
-                value[0].received_at,
-            ),
-            default=None,
+    except MarketProviderPayloadError as error:
+        raise ProviderMarketStreamError(str(error)) from None
+    selected = {
+        snapshot.symbol: (
+            snapshot.trade,
+            None if snapshot.trade is None else snapshot.trade.observed_at,
+            snapshot.quote,
+            None if snapshot.quote is None else snapshot.quote.observed_at,
         )
-        trade_time = None if trade is None else trade.trade_time
-        quote_observation = None if quote is None else quote[0]
-        quote_time = None if quote is None else quote[1]
-        if trade is not None and (trade.last is None or trade.last <= 0):
-            raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
-        if any(value is not None and value > completed_at for value in (trade_time, quote_time)):
-            raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
-        if trade is not None or quote_observation is not None:
-            selected[symbol] = (trade, trade_time, quote_observation, quote_time)
-    if not selected:
-        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY")
+        for snapshot in batch.snapshots
+    }
 
     identity_rows = (
         await session.execute(
@@ -650,7 +803,6 @@ async def import_schwab_market_stream(
             if len(matches) != 1:
                 raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_IDENTITY_REQUIRED")
 
-    raw_payload = _frozen_schwab_payload(archive["receipt_raw"], archive["frames"])
     raw_digest = sha256(raw_payload).hexdigest()
     raw_key = f"raw/market/schwab/stream/{completed_at:%Y/%m/%d}/{raw_digest}.json"
     raw_uri = await store.archive_raw(raw_key, raw_payload)
@@ -697,7 +849,7 @@ async def import_schwab_market_stream(
                     event_kind="trade",
                     bid=None,
                     ask=None,
-                    last=trade.last,
+                    last=trade.price,
                     observed_at=trade_time,
                     available_at=completed_at,
                     received_at=completed_at,

@@ -446,7 +446,7 @@ def build_intraday_collection_registry(
                     else "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH"
                 ),
             )
-        incomplete = sum(
+        incomplete = len(request.instruments) - len(batch.snapshots) + sum(
             snapshot.trade is None
             or snapshot.quote is None
             or (payload.include_minute_bars and snapshot.minute_bar is None)
@@ -559,8 +559,14 @@ def _batch_matches_payload(
 ) -> bool:
     expected = tuple((item.instrument_id, item.symbol) for item in request.instruments)
     actual = tuple((item.instrument_id, item.symbol) for item in batch.snapshots)
+    shape_matches = actual == expected
+    if source == "schwab" and actual:
+        actual_set = set(actual)
+        shape_matches = len(actual_set) == len(actual) and actual == tuple(
+            item for item in expected if item in actual_set
+        )
     return (
-        actual == expected
+        shape_matches
         and batch.provenance.source == source
         and batch.provenance.feed == request.feed
         and batch.provenance.delivery_mode == request.delivery_mode

@@ -77,7 +77,7 @@ class MarketDataProvenance(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    source: Literal["fosun", "alpaca", "fixture"]
+    source: Literal["fosun", "alpaca", "schwab", "fixture"]
     feed: str
     adjustment: Literal["raw", "split", "all"]
     interval: Literal["1Min", "1Day"]

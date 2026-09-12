@@ -94,12 +94,14 @@ git commit -m "feat: admit Schwab intraday jobs"
 - Modify: `engine/src/nexus/ops/schwab_market_stream.py`
 - Create: `engine/src/nexus/providers/market/schwab_snapshot.py`
 - Modify: `engine/src/nexus/providers/market/snapshot_contracts.py`
+- Modify: `engine/src/nexus/providers/base.py`
+- Modify: `engine/src/nexus/providers/market/fosun.py`
 - Modify: `engine/src/nexus/jobs/intraday_collection.py`
-- Modify: `engine/src/nexus/ops/schwab_snapshot_import.py`
-- Modify: `engine/tests/unit/test_schwab_market_stream.py`
-- Create: `engine/tests/unit/test_schwab_snapshot_provider.py`
-- Modify: `engine/tests/unit/test_intraday_collection.py`
-- Modify: `engine/tests/unit/test_schwab_snapshot_import.py`
+- Modify: `engine/src/nexus/market/intraday_ingestion.py`
+- Modify: `engine/tests/unit/ops/test_schwab_market_stream.py`
+- Create: `engine/tests/unit/providers/test_schwab_snapshot.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_collection.py`
+- Modify: `engine/tests/unit/providers/test_fosun_market.py`
 
 ### Contract to implement
 
@@ -122,17 +124,17 @@ Create `SchwabSnapshotProvider` with injected repository root, `httpx.AsyncClien
 
 ### Steps
 
-- [ ] Add failing parser tests for a complete real-time two-sided quote, a valid requested-symbol subset, trade-only evidence, one-sided quote rejection, unknown or delayed data, incomplete authentication/subscription, wrong symbol binding, malformed frames, and out-of-order frames.
+- [x] Add failing parser tests for a complete real-time two-sided quote, a valid requested-symbol subset, trade-only evidence, one-sided quote rejection, unknown or delayed data, incomplete authentication/subscription, wrong symbol binding, malformed frames, and out-of-order frames.
 
-- [ ] Add failing provider tests proving one bounded collector invocation, deterministic request metadata, raw bytes returned before normalization, private temporary-directory cleanup, and no retry after collector failure.
+- [x] Add failing provider tests proving one bounded collector invocation, deterministic request metadata, raw bytes returned before normalization, private temporary-directory cleanup, and no retry after collector failure.
 
-- [ ] Extend `MarketDataProvenance.source` and raw archive schema mapping with `schwab`, while retaining exact schema/hash validation for Fosun and Alpaca.
+- [x] Extend `MarketDataProvenance.source` and raw archive schema mapping with `schwab`, while retaining exact schema/hash validation for Fosun and Alpaca.
 
-- [ ] Implement the packer, shared parser, and provider. Increase the generic L1 request bound to thirty only where required by the Schwab v3 contract; retain the Fosun payload limit of ten in its Job validator.
+- [x] Implement the packer, shared parser, and provider. Increase the generic L1 request bound to thirty only where required by the Schwab v3 contract; retain the Fosun payload limit of ten in its Job and provider validators.
 
-- [ ] Refactor the manual Schwab import to use the same packer and parser so manual and automatic paths cannot diverge on completeness, delay, symbol binding, or price selection.
+- [x] Refactor the manual Schwab import to use the same packer and parser so manual and automatic paths cannot diverge on completeness, delay, symbol binding, or price selection.
 
-- [ ] Run focused tests and static checks:
+- [x] Run focused tests and static checks (actual paths listed above; the PostgreSQL manual-import integration test also passed):
 
 ```bash
 cd engine

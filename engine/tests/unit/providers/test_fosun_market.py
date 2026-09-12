@@ -449,15 +449,22 @@ async def test_snapshot_request_rejects_more_than_ten_fosun_symbols() -> None:
         for index in range(11)
     )
 
-    with pytest.raises(ValueError):
-        IntradaySnapshotRequest(
-            instruments=instruments,
-            symbol_as_of=date(2026, 8, 29),
-            bucket_start=datetime(2026, 8, 29, 14, 30, tzinfo=UTC),
-            include_minute_bars=True,
-            feed="l1",
-            delivery_mode="unknown",
-        )
+    request = IntradaySnapshotRequest(
+        instruments=instruments,
+        symbol_as_of=date(2026, 8, 29),
+        bucket_start=datetime(2026, 8, 29, 14, 30, tzinfo=UTC),
+        include_minute_bars=True,
+        feed="l1",
+        delivery_mode="unknown",
+    )
+    provider = FosunSnapshotProvider(
+        _gateway(),
+        symbol_resolver=_Resolver(),
+        delivery_mode="unknown",
+    )
+
+    with pytest.raises(MarketProviderPayloadError, match="FOSUN_INTRADAY_AUTHORITY_MISMATCH"):
+        await provider.fetch_raw_snapshots(request)
 
 
 @pytest.mark.asyncio
