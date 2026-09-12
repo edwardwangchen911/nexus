@@ -214,11 +214,12 @@ git commit -m "feat: run Schwab intraday jobs"
 **Files:**
 
 - Create: `engine/src/nexus/ops/provider_worker_local.py`
+- Modify: `engine/src/nexus/provider_worker.py`
 - Modify: `engine/pyproject.toml`
-- Modify: `engine/tests/unit/test_provider_worker_local.py`
+- Create: `engine/tests/unit/ops/test_provider_worker_local.py`
 - Modify: `infra/env.example`
 - Modify: `README.md`
-- Modify: `docs/runbooks/local-read-only.md`
+- Modify: `docs/runbooks/intraday-market-monitor.md`
 
 ### Contract to implement
 
@@ -234,28 +235,28 @@ The runbook must state that:
 
 ### Steps
 
-- [ ] Add failing CLI/config tests for precedence, loopback localization of Compose hostnames, absent-secret-path rejection, secret redaction, and preservation of an explicitly supplied provider-worker alias.
+- [x] Add failing CLI/config tests for precedence, loopback localization of Compose hostnames, absent-secret-path rejection, secret redaction, and preservation of an explicitly supplied provider-worker alias.
 
-- [ ] Implement the local settings loader and CLI entry using the existing worker loop and signal handling.
+- [x] Implement the local settings loader and CLI entry using the existing worker loop and signal handling.
 
-- [ ] Add the optional `NEXUS_INTRADAY_PROVIDER=` line to `infra/env.example` with a concise explanation; do not add Schwab secrets or a Compose profile.
+- [x] Add the optional `NEXUS_INTRADAY_PROVIDER=` line to `infra/env.example` with a concise explanation; do not add Schwab secrets or a Compose profile.
 
-- [ ] Update the README and local-read-only runbook with the exact startup, shutdown, migration, and durable-state inspection commands.
+- [x] Update the README and existing intraday-monitor runbook with the exact startup, shutdown, migration, and durable-state inspection commands; do not create a duplicate local-read-only runbook.
 
-- [ ] Run focused tests and packaging checks:
+- [x] Run focused tests and packaging checks:
 
 ```bash
 cd engine
-uv run pytest tests/unit/test_provider_worker_local.py -q
-uv run ruff check src/nexus/ops/provider_worker_local.py tests/unit/test_provider_worker_local.py
-uv run mypy src/nexus/ops/provider_worker_local.py
+uv run pytest tests/unit/ops/test_provider_worker_local.py tests/unit/providers/test_provider_worker.py -q
+uv run ruff check src/nexus/provider_worker.py src/nexus/ops/provider_worker_local.py tests/unit/providers/test_provider_worker.py tests/unit/ops/test_provider_worker_local.py
+uv run mypy src/nexus/provider_worker.py src/nexus/ops/provider_worker_local.py
 uv run nexus-engine-provider-worker-local --help
 ```
 
-- [ ] Commit the local entry slice:
+- [x] Commit the local entry slice:
 
 ```bash
-git add engine/src/nexus/ops/provider_worker_local.py engine/pyproject.toml engine/tests/unit/test_provider_worker_local.py infra/env.example README.md docs/runbooks/local-read-only.md
+git add engine/src/nexus/provider_worker.py engine/src/nexus/ops/provider_worker_local.py engine/pyproject.toml engine/tests/unit/ops/test_provider_worker_local.py infra/env.example README.md docs/runbooks/intraday-market-monitor.md docs/superpowers/plans/2026-09-12-schwab-intraday-automatic-trigger.md
 git commit -m "feat: add local provider worker entry"
 ```
 

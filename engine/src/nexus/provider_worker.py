@@ -835,6 +835,7 @@ async def run_provider_worker(
     provider_settings: ProviderSettings | None = None,
     *,
     run_forever: bool = False,
+    repo_root: Path = _REPO_ROOT,
 ) -> None:
     """Poll only the provider queue and schedule provider-owned data jobs."""
     runtime = runtime_settings or ProviderWorkerSettings.model_validate({})
@@ -862,6 +863,7 @@ async def run_provider_worker(
                 provider_http_client=client,
                 store=store,
                 raw_archive_session_factory=factory,
+                repo_root=repo_root,
             ) as registry:
                 worker_id = f"provider-{new_uuid7()}"
                 started_at = datetime.now(UTC)
