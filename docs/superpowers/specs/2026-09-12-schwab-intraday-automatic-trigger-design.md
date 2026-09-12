@@ -1,6 +1,6 @@
 # Schwab Intraday Automatic Trigger Design
 
-Status: approved in chat; awaiting written-spec review
+Status: reviewed and implementation-ready
 Decision date: 2026-09-12
 
 ## 1. Outcome and boundaries
