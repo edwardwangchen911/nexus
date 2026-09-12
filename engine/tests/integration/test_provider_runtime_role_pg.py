@@ -162,7 +162,7 @@ async def test_provider_probe_rejects_a_dropped_intraday_bucket_index(
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with factory() as session, session.begin():
-        await session.execute(text("DROP INDEX public.uq_jobs_intraday_v2_bucket"))
+        await session.execute(text("DROP INDEX public.uq_jobs_intraday_v3_bucket"))
 
     async with factory() as session:
         with pytest.raises(

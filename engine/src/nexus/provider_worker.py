@@ -21,7 +21,7 @@ from nexus.jobs.intraday_collection import (
     build_intraday_collection_registry,
 )
 from nexus.jobs.intraday_schedule import (
-    IntradaySnapshotJobPayloadV2,
+    IntradaySnapshotJobPayloadV3,
     schedule_due_intraday_snapshot,
 )
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
@@ -46,12 +46,12 @@ from nexus.providers.settings import (
 )
 
 _PROCESS_VERSION = "nexus-provider-phase3-intraday"
-_CURRENT_INTRADAY_JOB_SCHEMA = "intraday_snapshot_job_v2"
+_CURRENT_INTRADAY_JOB_SCHEMA = "intraday_snapshot_job_v3"
 _PROVIDER_INTRADAY_BUCKET_INDEX_DEFINITION = (
-    "CREATE UNIQUE INDEX uq_jobs_intraday_v2_bucket ON public.jobs USING btree "
+    "CREATE UNIQUE INDEX uq_jobs_intraday_v3_bucket ON public.jobs USING btree "
     "(effective_at) WHERE (((job_type)::text = "
     "'collect.intraday_snapshot'::text) AND ((schema_version)::text = "
-    "'intraday_snapshot_job_v2'::text))"
+    "'intraday_snapshot_job_v3'::text))"
 )
 _PROVIDER_TICKER_ALIAS_CONSTRAINTS = {
     "ex_instrument_aliases_ticker_instrument_period": (
@@ -269,7 +269,7 @@ _PROVIDER_SECURITY_DEFINER_TRIGGERS = {
 }
 _PROVIDER_TRIGGER_FUNCTIONS = {
     "nexus_guard_intraday_job_schema_admission": _ProviderTriggerFunctionSpec(
-        "532d7cdb9bf48ddb50fe129dfda5845ea9ad62b63771d0611ecfc18e25fb916f",
+        "6a7e75b1b6c8df9e8d4c0e547994a34a5e4153c03a1bc529e60779a04dd0909f",
         True,
     ),
     "nexus_guard_job_attempt": _ProviderTriggerFunctionSpec(
@@ -690,7 +690,7 @@ class ProviderStore(MarketObjectStore, RawEvidenceStore, Protocol):
 
 
 async def _assert_intraday_job_queue_drained(session: AsyncSession) -> None:
-    """Block v2 activation while any retryable incompatible intraday Job remains."""
+    """Block v3 activation while any retryable incompatible intraday Job remains."""
     payload_source = Job.payload["source"].as_string()
     payload_feed = Job.payload["feed"].as_string()
     admitted_source_feed = or_(
@@ -698,6 +698,12 @@ async def _assert_intraday_job_queue_drained(session: AsyncSession) -> None:
         and_(
             payload_source == "alpaca",
             payload_feed.in_(("iex", "sip", "delayed_sip")),
+        ),
+        and_(
+            payload_source == "schwab",
+            payload_feed == "l1",
+            Job.payload["delivery_mode"].as_string() == "real_time",
+            Job.payload["include_minute_bars"].as_boolean().is_(False),
         ),
     )
     incompatible = await session.scalar(
@@ -793,7 +799,7 @@ async def _provider_registry(
 
 
 def _disabled_intraday_spec() -> JobHandlerSpec:
-    """Drain already-approved v2 work without any network when monitoring is off."""
+    """Drain already-approved v3 work without any network when monitoring is off."""
 
     async def skip(_context: JobHandlerContext) -> JobHandlerResult:
         return JobHandlerResult(
@@ -804,7 +810,7 @@ def _disabled_intraday_spec() -> JobHandlerSpec:
     return JobHandlerSpec(
         job_type=JobType.COLLECT_INTRADAY_SNAPSHOT,
         schema_version=_CURRENT_INTRADAY_JOB_SCHEMA,
-        payload_model=IntradaySnapshotJobPayloadV2,
+        payload_model=IntradaySnapshotJobPayloadV3,
         queue=QueueName.PROVIDER,
         timeout_seconds=1,
         retry_policy=RetryPolicy.NEVER,
@@ -1371,7 +1377,7 @@ async def _assert_provider_intraday_bucket_index(session: AsyncSession) -> None:
                     "ON access_method.oid = index_relation.relam "
                     "WHERE table_namespace.nspname = 'public' "
                     "AND table_relation.relname = 'jobs' "
-                    "AND index_relation.relname = 'uq_jobs_intraday_v2_bucket'"
+                    "AND index_relation.relname = 'uq_jobs_intraday_v3_bucket'"
                 )
             )
         )
@@ -1382,7 +1388,7 @@ async def _assert_provider_intraday_bucket_index(session: AsyncSession) -> None:
         (
             row["schema_name"] != "public",
             row["table_name"] != "jobs",
-            row["index_name"] != "uq_jobs_intraday_v2_bucket",
+            row["index_name"] != "uq_jobs_intraday_v3_bucket",
             row["access_method"] != "btree",
             row["relation_kind"] != "i",
             not bool(row["unique_index"]),

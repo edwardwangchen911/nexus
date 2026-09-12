@@ -34,6 +34,7 @@ from nexus.provider_worker import (
 )
 from nexus.providers.settings import ProviderSettings, ProviderWorkerSettings
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
 
 def _settings(*, intraday: bool) -> ProviderSettings:
@@ -79,6 +80,28 @@ async def test_intraday_queue_gate_fails_closed_on_actionable_v1_jobs() -> None:
 
     with pytest.raises(RuntimeError, match="INTRADAY_V1_QUEUE_DRAIN_REQUIRED"):
         await _assert_intraday_job_queue_drained(_Session())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_intraday_queue_gate_admits_the_v3_schwab_source_shape() -> None:
+    captured = ""
+
+    class _Session:
+        async def scalar(self, statement: object) -> int:
+            nonlocal captured
+            captured = str(
+                statement.compile(  # type: ignore[attr-defined]
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            )
+            return 0
+
+    await _assert_intraday_job_queue_drained(_Session())  # type: ignore[arg-type]
+
+    assert "intraday_snapshot_job_v3" in captured
+    assert "schwab" in captured
+    assert "real_time" in captured
 
 
 @pytest.mark.asyncio
@@ -453,7 +476,7 @@ async def test_provider_registry_contains_only_provider_capabilities_without_htt
 
 
 @pytest.mark.asyncio
-async def test_disabled_intraday_registry_safely_drains_v2_jobs_without_provider_read() -> None:
+async def test_disabled_intraday_registry_safely_drains_v3_jobs_without_provider_read() -> None:
     requests = 0
     gateway = _NoopGateway()
 
@@ -471,6 +494,7 @@ async def test_disabled_intraday_registry_safely_drains_v2_jobs_without_provider
         ) as registry:
             spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
             assert spec is not None
+            assert spec.schema_version == "intraday_snapshot_job_v3"
             result = await spec.handler(SimpleNamespace())  # type: ignore[arg-type]
 
     assert (result.outcome, result.result_code) == (
@@ -513,7 +537,7 @@ def test_provider_contract_includes_fosun_daily_jobs_and_staging() -> None:
     )
     assert (
         _PROVIDER_TRIGGER_FUNCTIONS["nexus_guard_intraday_job_schema_admission"].source_sha256
-        == "532d7cdb9bf48ddb50fe129dfda5845ea9ad62b63771d0611ecfc18e25fb916f"
+        == "6a7e75b1b6c8df9e8d4c0e547994a34a5e4153c03a1bc529e60779a04dd0909f"
     )
 
 

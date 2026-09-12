@@ -26,14 +26,20 @@
 **Files:**
 
 - Modify: `engine/src/nexus/providers/settings.py`
-- Modify: `engine/src/nexus/providers/base.py`
 - Modify: `engine/src/nexus/jobs/intraday_schedule.py`
+- Modify: `engine/src/nexus/jobs/intraday_collection.py`
 - Modify: `engine/src/nexus/provider_worker.py`
+- Modify: `engine/src/nexus/persistence/migrations.py`
+- Modify: `engine/src/nexus/persistence/models/runtime.py`
 - Create: `engine/alembic/versions/0055_schwab_intraday_job_v3.py`
-- Modify: `engine/tests/unit/test_provider_settings.py`
-- Modify: `engine/tests/unit/test_intraday_schedule.py`
-- Modify: `engine/tests/unit/test_provider_worker.py`
-- Create: `engine/tests/integration/test_migration_0055_schwab_intraday_job_v3.py`
+- Modify: `engine/tests/unit/providers/test_composition.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_schedule.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_collection.py`
+- Modify: `engine/tests/unit/providers/test_provider_worker.py`
+- Modify: `engine/tests/integration/test_intraday_collection_pg.py`
+- Modify: `engine/tests/integration/test_intraday_schema_admission_migration.py`
+- Modify: `engine/tests/integration/test_provider_runtime_role_pg.py`
+- Create: `engine/tests/integration/test_schwab_intraday_job_migration.py`
 
 ### Contract to implement
 
@@ -52,31 +58,30 @@ The v3 Fosun and Alpaca branches retain their v2 field rules. Add `SCHWAB_SNAPSH
 
 ### Steps
 
-- [ ] Add failing settings tests proving an absent intraday setting inherits Fosun or Alpaca, an explicit Schwab value is accepted, and `NEXUS_MARKET_PROVIDER=schwab` is rejected.
+- [x] Add failing settings tests proving an absent intraday setting inherits Fosun or Alpaca, an explicit Schwab value is accepted, and `NEXUS_MARKET_PROVIDER=schwab` is rejected.
 
-- [ ] Add failing payload tests proving the exact Schwab contract above, the thirty-symbol bound, duplicate-symbol rejection, and rejection of minute bars or non-real-time data.
+- [x] Add failing payload tests proving the exact Schwab contract above, the thirty-symbol bound, duplicate-symbol rejection, and rejection of minute bars or non-real-time data.
 
-- [ ] Add failing scheduling tests proving a Schwab-selected worker creates v3 Schwab Jobs while the daily market provider remains Fosun, and proving omitted configuration preserves current behavior.
+- [x] Add failing scheduling tests proving a Schwab-selected worker creates v3 Schwab Jobs while the daily market provider remains Fosun, and proving omitted configuration preserves current behavior.
 
-- [ ] Implement the enum, setting, inherited selector, v3 payload model, builders, schema constant, and scheduler selection with no changes to retry or cooldown policy.
+- [x] Implement the enum, setting, inherited selector, v3 payload model, builders, schema constant, and scheduler selection with no changes to retry or cooldown policy.
 
-- [ ] Add migration `0055_schwab_intraday_job_v3.py`. Upgrade must lock the admitted-schema state, fail closed if actionable v2 Jobs remain, replace the admission trigger and partial index with an exact v3 predicate, and preserve all Job rows. Downgrade must apply the symmetric v3 drain fence and restore the exact v2 trigger and index from migration 0031.
+- [x] Add migration `0055_schwab_intraday_job_v3.py`. Upgrade must lock the admitted-schema state, fail closed if actionable v2 Jobs remain, replace the admission trigger and partial index with an exact v3 predicate, and preserve all Job rows. Downgrade must apply the symmetric v3 drain fence and restore the exact v2 trigger and index from migration 0031.
 
-- [ ] Add PostgreSQL migration tests covering successful admission of each v3 provider branch, rejection of malformed Schwab payloads, upgrade refusal with actionable v2 rows, downgrade refusal with actionable v3 rows, and row preservation.
+- [x] Add PostgreSQL migration tests covering successful admission of each v3 provider branch, rejection of malformed Schwab payloads, upgrade refusal with actionable v2 rows, downgrade refusal with actionable v3 rows, and row preservation.
 
-- [ ] Run the focused tests and static checks:
+- [x] Run the focused tests and static checks:
 
 ```bash
-cd engine
-uv run pytest tests/unit/test_provider_settings.py tests/unit/test_intraday_schedule.py tests/unit/test_provider_worker.py tests/integration/test_migration_0055_schwab_intraday_job_v3.py -q
-uv run ruff check src/nexus/providers/settings.py src/nexus/providers/base.py src/nexus/jobs/intraday_schedule.py src/nexus/provider_worker.py alembic/versions/0055_schwab_intraday_job_v3.py tests/unit/test_provider_settings.py tests/unit/test_intraday_schedule.py tests/unit/test_provider_worker.py tests/integration/test_migration_0055_schwab_intraday_job_v3.py
-uv run mypy src/nexus/providers/settings.py src/nexus/providers/base.py src/nexus/jobs/intraday_schedule.py src/nexus/provider_worker.py
+uv run --project engine pytest engine/tests/unit/providers/test_composition.py engine/tests/unit/jobs/test_intraday_schedule.py engine/tests/unit/jobs/test_intraday_collection.py engine/tests/unit/providers/test_provider_worker.py engine/tests/integration/test_schwab_intraday_job_migration.py -q
+uv run --project engine ruff check engine/src/nexus/providers/settings.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/provider_worker.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py engine/alembic/versions/0055_schwab_intraday_job_v3.py
+uv run --project engine mypy engine/src/nexus/providers/settings.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/provider_worker.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py
 ```
 
-- [ ] Commit this contract slice:
+- [x] Commit this contract slice:
 
 ```bash
-git add engine/src/nexus/providers/settings.py engine/src/nexus/providers/base.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/provider_worker.py engine/alembic/versions/0055_schwab_intraday_job_v3.py engine/tests/unit/test_provider_settings.py engine/tests/unit/test_intraday_schedule.py engine/tests/unit/test_provider_worker.py engine/tests/integration/test_migration_0055_schwab_intraday_job_v3.py
+git add engine/src/nexus/providers/settings.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/provider_worker.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py engine/alembic/versions/0055_schwab_intraday_job_v3.py engine/tests docs/superpowers/plans/2026-09-12-schwab-intraday-automatic-trigger.md
 git commit -m "feat: admit Schwab intraday jobs"
 ```
 

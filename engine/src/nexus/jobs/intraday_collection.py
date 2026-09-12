@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.jobs.errors import UnsafeJobError
 from nexus.jobs.intraday_schedule import (
-    IntradaySnapshotJobPayloadV2,
+    IntradaySnapshotJobPayloadV3,
     revalidate_intraday_payload_authority,
 )
 from nexus.jobs.market_authority import (
@@ -96,7 +96,7 @@ class RevalidateAuthority(Protocol):
     async def __call__(
         self,
         session: AsyncSession,
-        payload: IntradaySnapshotJobPayloadV2,
+        payload: IntradaySnapshotJobPayloadV3,
         *,
         effective_at: datetime,
         settings: ProviderSettings,
@@ -121,7 +121,7 @@ class _IntradayAuthorityGuard:
         self,
         *,
         context: JobHandlerContext,
-        payload: IntradaySnapshotJobPayloadV2,
+        payload: IntradaySnapshotJobPayloadV3,
         settings: ProviderSettings,
         revalidate: RevalidateAuthority,
         request: IntradaySnapshotRequest,
@@ -262,7 +262,7 @@ def build_intraday_collection_registry(
                 outcome="skipped",
                 result_code="INTRADAY_ONE_SHOT_ALREADY_ATTEMPTED",
             )
-        payload = cast(IntradaySnapshotJobPayloadV2, context.payload)
+        payload = cast(IntradaySnapshotJobPayloadV3, context.payload)
         if payload.source == "fosun" and loop.time() >= fetch_deadline:
             return JobHandlerResult(
                 outcome="skipped",
@@ -505,8 +505,8 @@ def build_intraday_collection_registry(
         (
             JobHandlerSpec(
                 job_type=JobType.COLLECT_INTRADAY_SNAPSHOT,
-                schema_version="intraday_snapshot_job_v2",
-                payload_model=IntradaySnapshotJobPayloadV2,
+                schema_version="intraday_snapshot_job_v3",
+                payload_model=IntradaySnapshotJobPayloadV3,
                 queue=QueueName.PROVIDER,
                 timeout_seconds=30,
                 retry_policy=RetryPolicy.NEVER,
@@ -555,7 +555,7 @@ def _batch_matches_payload(
     batch: SnapshotBatch,
     request: IntradaySnapshotRequest,
     *,
-    source: Literal["fosun", "alpaca"],
+    source: Literal["fosun", "alpaca", "schwab"],
 ) -> bool:
     expected = tuple((item.instrument_id, item.symbol) for item in request.instruments)
     actual = tuple((item.instrument_id, item.symbol) for item in batch.snapshots)

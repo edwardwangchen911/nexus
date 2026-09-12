@@ -25,6 +25,12 @@ class MarketProvider(StrEnum):
     ALPACA = "alpaca"
 
 
+class IntradayProvider(StrEnum):
+    FOSUN = "fosun"
+    ALPACA = "alpaca"
+    SCHWAB = "schwab"
+
+
 class AlpacaMarketMode(StrEnum):
     DISABLED = "disabled"
     ENABLED = "enabled"
@@ -99,6 +105,10 @@ class ProviderSettings(BaseSettings):
     market_provider: MarketProvider = Field(
         default=MarketProvider.FOSUN,
         validation_alias="NEXUS_MARKET_PROVIDER",
+    )
+    intraday_provider: IntradayProvider | None = Field(
+        default=None,
+        validation_alias="NEXUS_INTRADAY_PROVIDER",
     )
     alpaca_market_mode: AlpacaMarketMode = Field(
         default=AlpacaMarketMode.DISABLED,
@@ -182,19 +192,26 @@ class ProviderSettings(BaseSettings):
         return [
             ("runtime_mode", self.runtime_mode),
             ("market_provider", self.market_provider),
+            ("intraday_provider", self.intraday_provider),
             ("alpaca_market_mode", self.alpaca_market_mode),
             ("intraday_monitor_mode", self.intraday_monitor_mode),
         ]
+
+    @property
+    def selected_intraday_provider(self) -> IntradayProvider:
+        if self.intraday_provider is not None:
+            return self.intraday_provider
+        return IntradayProvider(self.market_provider.value)
 
     @model_validator(mode="after")
     def require_production_authorities(self) -> Self:
         if self.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
             if self.runtime_mode is not ProviderRuntimeMode.PRODUCTION:
                 raise ValueError("INTRADAY_PRODUCTION_PROVIDER_MODE_REQUIRED")
-            if self.market_provider is MarketProvider.FOSUN:
+            if self.selected_intraday_provider is IntradayProvider.FOSUN:
                 if self.intraday_max_symbols > 10:
                     raise ValueError("FOSUN_INTRADAY_MAX_SYMBOLS_EXCEEDED")
-            else:
+            elif self.selected_intraday_provider is IntradayProvider.ALPACA:
                 if self.alpaca_intraday_feed is None:
                     raise ValueError("ALPACA_INTRADAY_FEED_REQUIRED")
                 if self.alpaca_intraday_delivery_mode is None:

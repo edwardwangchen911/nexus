@@ -10,6 +10,7 @@ from uuid import UUID
 
 import nexus.jobs.intraday_collection as intraday_collection_module
 import pytest
+from nexus.jobs import intraday_schedule
 from nexus.jobs.intraday_collection import build_intraday_collection_registry
 from nexus.jobs.intraday_schedule import (
     bucket_for,
@@ -321,6 +322,8 @@ def test_collection_registry_is_one_shot() -> None:
     spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
 
     assert spec is not None
+    assert spec.schema_version == "intraday_snapshot_job_v3"
+    assert spec.payload_model is intraday_schedule.IntradaySnapshotJobPayloadV3
     assert spec.retry_policy is RetryPolicy.NEVER
     assert spec.max_attempts == 1
 

@@ -293,6 +293,37 @@ def test_intraday_poll_seconds_accepts_the_compose_environment_value(
     assert ProviderSettings().intraday_poll_seconds == 15
 
 
+def test_intraday_provider_inherits_the_daily_market_provider() -> None:
+    fosun = ProviderSettings(market_provider="fosun")
+    alpaca = ProviderSettings(market_provider="alpaca")
+
+    assert fosun.selected_intraday_provider.value == "fosun"
+    assert alpaca.selected_intraday_provider.value == "alpaca"
+
+
+def test_schwab_can_be_selected_only_for_intraday_collection() -> None:
+    settings = ProviderSettings(
+        market_provider="fosun",
+        intraday_provider="schwab",
+    )
+
+    assert settings.market_provider.value == "fosun"
+    assert settings.selected_intraday_provider.value == "schwab"
+
+
+def test_provider_environment_rejects_schwab_as_the_daily_market_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEXUS_MARKET_PROVIDER", "schwab")
+    monkeypatch.setenv("NEXUS_INTRADAY_PROVIDER", "schwab")
+
+    with pytest.raises(ValidationError):
+        ProviderSettings()
+
+    monkeypatch.setenv("NEXUS_MARKET_PROVIDER", "fosun")
+    assert ProviderSettings().selected_intraday_provider.value == "schwab"
+
+
 @pytest.mark.asyncio
 async def test_intraday_snapshot_factory_binds_exact_authority() -> None:
     instrument_id = InstrumentId(UUID("019d0000-0000-7000-8000-0000000000a1"))
