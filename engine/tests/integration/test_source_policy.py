@@ -18,6 +18,7 @@ from nexus.quality.source_policy import (
     INTRADAY_SOURCE_POLICY_V2_PAYLOAD,
     INTRADAY_SOURCE_POLICY_V3_ID,
     INTRADAY_SOURCE_POLICY_V4_ID,
+    INTRADAY_SOURCE_POLICY_V5_ID,
     QUOTE_SOURCE_POLICY_V2_ID,
     SOURCE_POLICY_ID,
     SOURCE_POLICY_V2_ID,
@@ -119,6 +120,10 @@ async def test_intraday_policy_replay_uses_v2_before_valid_v3_publication(
         await session.execute(
             text("UPDATE source_policies SET created_at=:future WHERE id=:id"),
             {"future": future, "id": INTRADAY_SOURCE_POLICY_V4_ID},
+        )
+        await session.execute(
+            text("UPDATE source_policies SET created_at=:future WHERE id=:id"),
+            {"future": future, "id": INTRADAY_SOURCE_POLICY_V5_ID},
         )
         await session.execute(text("ALTER TABLE source_policies ENABLE TRIGGER USER"))
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import getpass
 import json
 import logging
@@ -12,17 +13,31 @@ import subprocess
 import sys
 import webbrowser
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from typing import Any
+from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
+from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncSession
 from websockets.asyncio.client import connect
 
+from nexus.market.ingestion import MarketObjectStore, object_uri_matches_key
+from nexus.market.intraday_ingestion import _get_or_create_artifact, _insert_observation
+from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
+from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.persistence.session import session_factory
 from nexus.providers.market.schwab_oauth import (
     SchwabOAuthError,
     build_schwab_authorization_url,
@@ -42,8 +57,11 @@ from nexus.providers.market.schwab_stream import (
     build_login,
     validate_streamer_url,
 )
+from nexus.providers.news import validate_symbol
+from nexus.settings import EngineSettings
 
 SCHEMA = "nexus_provider_market_stream_receipt_v1"
+ARCHIVE_SCHEMA = "schwab_level_one_stream_v1"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_FRAME = 2 * 1024 * 1024
 MAX_FRAMES = 100
@@ -54,6 +72,13 @@ TOKEN_REFRESH_WINDOW = timedelta(minutes=5)
 
 class ProviderMarketStreamError(ValueError):
     """Stable, value-free bounded market stream error."""
+
+
+@dataclass(frozen=True)
+class SchwabMarketStreamImportResult:
+    raw_sha256: str
+    created_observations: int
+    symbols_observed: int
 
 
 class _FixedConnect(connect):
@@ -74,6 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
     child.add_argument("--output-dir", type=Path, required=True)
     child.add_argument("--duration", type=float, default=60)
     child.add_argument("--max-frames", type=int, default=100)
+    import_parser = subparsers.add_parser("import")
+    import_parser.add_argument("--repo-root", type=Path, required=True)
+    import_parser.add_argument("--binding", action="append", required=True)
+    import_parser.add_argument("--stream-dir", type=Path, required=True)
     return parser
 
 
@@ -130,9 +159,7 @@ async def authorize_schwab(
         "完成嘉信授权后，粘贴浏览器地址栏中的完整回调 URL："
     )
     code = parse_schwab_callback(config, callback)
-    token = await exchange_schwab_authorization_code(
-        config, code, client, now=now
-    )
+    token = await exchange_schwab_authorization_code(config, code, client, now=now)
     token_path = save_schwab_token(repo_root, token)
     return {
         "status": "authorized",
@@ -201,6 +228,21 @@ async def _run(
     dialog_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    if arguments.source == "import":
+        environment = load_local_environment(arguments.repo_root, os.environ)
+        imported = await import_schwab_market_stream_local(
+            EngineSettings.model_validate(environment),
+            bindings=_parse_bindings(arguments.binding),
+            directory=arguments.stream_dir,
+        )
+        return {
+            "status": "stored_display_quote",
+            "raw_sha256": imported.raw_sha256,
+            "created_observations": imported.created_observations,
+            "symbols_observed": imported.symbols_observed,
+            "execution_locked": True,
+            "model_called": False,
+        }
     if client is None:
         async with httpx.AsyncClient(follow_redirects=False, timeout=10) as transport:
             return await _run(
@@ -468,6 +510,303 @@ def load_provider_market_stream_archive(directory: Path) -> dict[str, Any]:
     }
 
 
+def _frozen_schwab_payload(receipt_raw: bytes, frames: tuple[bytes, ...]) -> bytes:
+    return json.dumps(
+        {
+            "schema": ARCHIVE_SCHEMA,
+            "receipt_base64": base64.b64encode(receipt_raw).decode(),
+            "frames_base64": [base64.b64encode(frame).decode() for frame in frames],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+async def import_schwab_market_stream(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    bindings: dict[str, UUID],
+    directory: Path,
+    imported_at: datetime,
+) -> SchwabMarketStreamImportResult:
+    """Import the latest verified trade and two-sided quote per requested symbol."""
+    if imported_at.tzinfo is None or imported_at.utcoffset() != timedelta(0):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_IMPORT_TIME_INVALID")
+    archive = load_provider_market_stream_archive(directory)
+    receipt = archive["receipt"]
+    symbols = tuple(receipt["symbols"])
+    completed_at = datetime.fromisoformat(receipt["ended_at"]).astimezone(UTC)
+    if (
+        set(bindings) != set(symbols)
+        or any(type(value) is not UUID for value in bindings.values())
+        or len(set(bindings.values())) != len(bindings)
+    ):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
+    observations = archive["observations"]
+    if (
+        not observations
+        or completed_at > imported_at
+        or any(
+            observation.delayed is not False
+            or observation.received_at > completed_at
+            or observation.symbol not in bindings
+            for observation in observations
+        )
+    ):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+
+    selected: dict[str, tuple[Any | None, datetime | None, Any | None, datetime | None]] = {}
+    for symbol in symbols:
+        symbol_observations = [
+            observation for observation in observations if observation.symbol == symbol
+        ]
+        trade_candidates = [
+            observation
+            for observation in symbol_observations
+            if observation.last is not None and observation.trade_time is not None
+        ]
+        quote_candidates: list[tuple[Any, datetime]] = []
+        for observation in symbol_observations:
+            quote_time = max(
+                (
+                    value
+                    for value in (
+                        observation.bid_time,
+                        observation.ask_time,
+                        observation.quote_time,
+                    )
+                    if value is not None
+                ),
+                default=None,
+            )
+            if observation.bid is not None and observation.ask is not None and quote_time:
+                if (
+                    observation.bid <= 0
+                    or observation.ask <= 0
+                    or observation.bid > observation.ask
+                ):
+                    raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+                quote_candidates.append((observation, quote_time))
+        trade = max(
+            trade_candidates,
+            key=lambda value: (
+                value.trade_time,
+                -1 if value.sequence is None else value.sequence,
+                value.received_at,
+            ),
+            default=None,
+        )
+        quote = max(
+            quote_candidates,
+            key=lambda value: (
+                value[1],
+                -1 if value[0].sequence is None else value[0].sequence,
+                value[0].received_at,
+            ),
+            default=None,
+        )
+        trade_time = None if trade is None else trade.trade_time
+        quote_observation = None if quote is None else quote[0]
+        quote_time = None if quote is None else quote[1]
+        if trade is not None and (trade.last is None or trade.last <= 0):
+            raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+        if any(value is not None and value > completed_at for value in (trade_time, quote_time)):
+            raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+        if trade is not None or quote_observation is not None:
+            selected[symbol] = (trade, trade_time, quote_observation, quote_time)
+    if not selected:
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY")
+
+    identity_rows = (
+        await session.execute(
+            select(InstrumentAlias, Instrument)
+            .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
+            .where(
+                InstrumentAlias.instrument_id.in_(tuple(bindings.values())),
+                InstrumentAlias.symbol.in_(symbols),
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.created_at <= completed_at,
+                Instrument.currency == "USD",
+                Instrument.exchange.in_(US_EQUITY_EXCHANGES),
+            )
+        )
+    ).all()
+    for symbol, instrument_id in bindings.items():
+        event_dates = {
+            timestamp.date()
+            for timestamp in selected.get(symbol, (None, None, None, None))[1::2]
+            if timestamp is not None
+        } or {completed_at.date()}
+        for event_date in event_dates:
+            matches = [
+                alias
+                for alias, _ in identity_rows
+                if alias.symbol == symbol
+                and alias.instrument_id == instrument_id
+                and alias.valid_from <= event_date
+                and (alias.valid_to is None or alias.valid_to >= event_date)
+            ]
+            if len(matches) != 1:
+                raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_IDENTITY_REQUIRED")
+
+    raw_payload = _frozen_schwab_payload(archive["receipt_raw"], archive["frames"])
+    raw_digest = sha256(raw_payload).hexdigest()
+    raw_key = f"raw/market/schwab/stream/{completed_at:%Y/%m/%d}/{raw_digest}.json"
+    raw_uri = await store.archive_raw(raw_key, raw_payload)
+    if not object_uri_matches_key(raw_uri, raw_key):
+        raise RuntimeError("SCHWAB_MARKET_STREAM_OBJECT_URI_MISMATCH")
+    if await store.read_raw(raw_key, uri=raw_uri) != raw_payload:
+        raise RuntimeError("SCHWAB_MARKET_STREAM_OBJECT_READBACK_MISMATCH")
+    event_times = [
+        timestamp
+        for item in selected.values()
+        for timestamp in (item[1], item[3])
+        if timestamp is not None
+    ]
+    artifact, _ = await _get_or_create_artifact(
+        session,
+        uri=raw_uri,
+        digest=raw_digest,
+        byte_size=len(raw_payload),
+        mime_type="application/json",
+        schema_version=ARCHIVE_SCHEMA,
+        source="schwab",
+        observed_at=max(event_times),
+        available_at=completed_at,
+        received_at=completed_at,
+    )
+    if (
+        artifact.observed_at != max(event_times)
+        or artifact.available_at != completed_at
+        or artifact.received_at != completed_at
+    ):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_ARTIFACT_REPLAY_CONFLICT")
+
+    created = 0
+    for symbol, (trade, trade_time, quote, quote_time) in selected.items():
+        if trade is not None and trade_time is not None:
+            created += int(
+                await _insert_observation(
+                    session,
+                    raw_artifact=artifact,
+                    instrument_id=bindings[symbol],
+                    source="schwab",
+                    feed="l1",
+                    delivery_mode="real_time",
+                    event_kind="trade",
+                    bid=None,
+                    ask=None,
+                    last=trade.last,
+                    observed_at=trade_time,
+                    available_at=completed_at,
+                    received_at=completed_at,
+                    revision=raw_digest,
+                    quality_flags=(),
+                    provider_binding=None,
+                )
+            )
+        if quote is not None and quote_time is not None:
+            created += int(
+                await _insert_observation(
+                    session,
+                    raw_artifact=artifact,
+                    instrument_id=bindings[symbol],
+                    source="schwab",
+                    feed="l1",
+                    delivery_mode="real_time",
+                    event_kind="quote",
+                    bid=quote.bid,
+                    ask=quote.ask,
+                    last=None,
+                    observed_at=quote_time,
+                    available_at=completed_at,
+                    received_at=completed_at,
+                    revision=raw_digest,
+                    quality_flags=(),
+                    provider_binding=None,
+                )
+            )
+    return SchwabMarketStreamImportResult(
+        raw_sha256=raw_digest,
+        created_observations=created,
+        symbols_observed=len(selected),
+    )
+
+
+def _parse_bindings(values: list[str]) -> dict[str, UUID]:
+    bindings: dict[str, UUID] = {}
+    try:
+        for value in values:
+            symbol_raw, separator, instrument_raw = value.partition("=")
+            if not separator:
+                raise ValueError
+            symbol = validate_symbol(symbol_raw)
+            if symbol in bindings:
+                raise ValueError
+            bindings[symbol] = UUID(instrument_raw)
+    except (AttributeError, TypeError, ValueError):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID") from None
+    if not bindings:
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
+    return bindings
+
+
+def _require_local_services(settings: EngineSettings) -> None:
+    database = make_url(settings.database_url) if settings.database_url else None
+    endpoint = urlsplit(settings.object_store_endpoint or "")
+    local = {"localhost", "127.0.0.1", "::1"}
+    if (
+        database is None
+        or database.drivername != "postgresql+asyncpg"
+        or database.host not in local
+        or database.query
+        or endpoint.scheme not in {"http", "https"}
+        or endpoint.hostname not in local
+        or endpoint.username
+        or endpoint.password
+        or endpoint.path
+        or endpoint.query
+        or endpoint.fragment
+    ):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_LOCAL_SERVICES_REQUIRED")
+
+
+async def import_schwab_market_stream_local(
+    settings: EngineSettings,
+    *,
+    bindings: dict[str, UUID],
+    directory: Path,
+) -> SchwabMarketStreamImportResult:
+    _require_local_services(settings)
+    store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+    factory = session_factory(settings)
+    async with asyncio.timeout(120):
+        async with factory.begin() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                {"key": SCHEMA_ADMISSION_LOCK_KEY},
+            )
+            head = await session.scalar(
+                text(
+                    "SELECT CASE WHEN COUNT(*) = 1 THEN MIN(version_num) END "
+                    "FROM public.alembic_version"
+                )
+            )
+            if head != CURRENT_MIGRATION_HEAD:
+                raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_SCHEMA_NOT_READY")
+            imported_at = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(imported_at, datetime):
+                raise RuntimeError("SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID")
+            return await import_schwab_market_stream(
+                session,
+                store,
+                bindings=bindings,
+                directory=directory,
+                imported_at=imported_at,
+            )
+
+
 def _schwab_control(value: dict[str, Any]) -> str | None:
     if "notify" in value:
         if (
@@ -484,9 +823,11 @@ def _schwab_control(value: dict[str, Any]) -> str | None:
         return "heartbeat"
     if "response" not in value:
         return None
-    if set(value) != {"response"} or not isinstance(value["response"], list) or len(
-        value["response"]
-    ) != 1:
+    if (
+        set(value) != {"response"}
+        or not isinstance(value["response"], list)
+        or len(value["response"]) != 1
+    ):
         raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_PROTOCOL_INVALID")
     response = value["response"][0]
     if not isinstance(response, dict) or not isinstance(response.get("content"), dict):
@@ -543,10 +884,23 @@ def _limits(duration: float, max_frames: int) -> tuple[float, int]:
 
 def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> None:
     required = {
-        "schema", "source", "transport", "origin", "symbols", "started_at", "ended_at",
-        "authenticated", "subscription_confirmed", "status", "stop_reason", "frames",
-        "observation_count", "requested_duration_seconds", "requested_max_frames",
-        "elapsed_monotonic_seconds", "frame_count",
+        "schema",
+        "source",
+        "transport",
+        "origin",
+        "symbols",
+        "started_at",
+        "ended_at",
+        "authenticated",
+        "subscription_confirmed",
+        "status",
+        "stop_reason",
+        "frames",
+        "observation_count",
+        "requested_duration_seconds",
+        "requested_max_frames",
+        "elapsed_monotonic_seconds",
+        "frame_count",
     }
     if set(receipt) != required or (
         receipt.get("schema") != SCHEMA
@@ -630,7 +984,11 @@ def _summary(receipt: dict[str, Any]) -> dict[str, Any]:
     return {
         key: receipt[key]
         for key in (
-            "status", "stop_reason", "authenticated", "subscription_confirmed",
-            "observation_count", "frame_count",
+            "status",
+            "stop_reason",
+            "authenticated",
+            "subscription_confirmed",
+            "observation_count",
+            "frame_count",
         )
     }

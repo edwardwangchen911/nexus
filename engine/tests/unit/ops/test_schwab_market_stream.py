@@ -122,6 +122,19 @@ def test_market_stream_cli_supports_only_schwab_without_command_line_credentials
     assert parsed.source == "schwab"
     assert parsed.symbol == ["AAPL"]
     assert all("token" not in key and "secret" not in key for key in vars(parsed))
+    imported = build_parser().parse_args(
+        [
+            "import",
+            "--repo-root",
+            "/tmp/repo",
+            "--binding",
+            "AAPL=019d0000-0000-7000-8000-0000000000c1",
+            "--stream-dir",
+            "/tmp/archive",
+        ]
+    )
+    assert imported.source == "import"
+    assert all("token" not in key and "secret" not in key for key in vars(imported))
     with pytest.raises(SystemExit):
         build_parser().parse_args(
             [

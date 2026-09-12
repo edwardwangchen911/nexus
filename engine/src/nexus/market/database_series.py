@@ -54,6 +54,7 @@ from nexus.providers.base import InstrumentId, PriceBar, PriceSeries
 from nexus.quality.source_policy import (
     IntradaySourcePolicyV3,
     IntradaySourcePolicyV4,
+    IntradaySourcePolicyV5,
     load_intraday_source_policy,
 )
 
@@ -398,8 +399,11 @@ async def load_intraday_series(
             (authority.available_at, authority.id, _price_bar(record)) for record in records
         )
 
-    allow_alpaca = isinstance(policy, IntradaySourcePolicyV3 | IntradaySourcePolicyV4)
-    allow_alpaca_snapshots = isinstance(policy, IntradaySourcePolicyV4)
+    allow_alpaca = isinstance(
+        policy, IntradaySourcePolicyV3 | IntradaySourcePolicyV4 | IntradaySourcePolicyV5
+    )
+    allow_alpaca_snapshots = isinstance(policy, IntradaySourcePolicyV4 | IntradaySourcePolicyV5)
+    allow_schwab = isinstance(policy, IntradaySourcePolicyV5)
     candidates = tuple(
         _intraday_candidate(key, rows)
         for key, rows in grouped.items()
@@ -411,6 +415,7 @@ async def load_intraday_series(
         decision_time=decision,
         allow_alpaca=allow_alpaca,
         allow_alpaca_snapshots=allow_alpaca_snapshots,
+        allow_schwab=allow_schwab,
     )
     selected_key = _select_intraday_key(candidates, observations)
     if selected_key is None:
@@ -578,6 +583,7 @@ def _intraday_provenance_allowed(
     delivery_mode: str,
     *,
     allow_alpaca: bool = True,
+    allow_schwab: bool = True,
 ) -> bool:
     return bool(
         (
@@ -589,6 +595,12 @@ def _intraday_provenance_allowed(
             allow_alpaca
             and source == "alpaca"
             and feed == "iex"
+            and delivery_mode == "real_time"
+        )
+        or (
+            allow_schwab
+            and source == "schwab"
+            and feed == "l1"
             and delivery_mode == "real_time"
         )
     )
@@ -631,6 +643,7 @@ async def _latest_intraday_observations(
     decision_time: datetime,
     allow_alpaca: bool,
     allow_alpaca_snapshots: bool,
+    allow_schwab: bool,
 ) -> tuple[LatestQuote, ...]:
     ranked = (
         select(
@@ -717,6 +730,21 @@ async def _latest_intraday_observations(
                         if allow_alpaca_snapshots
                         else ("alpaca_stock_stream_v1",)
                     ),
+                    DataArtifact.mime_type == "application/json",
+                ),
+                and_(
+                    true() if allow_schwab else false(),
+                    LatestQuote.event_kind.in_(("trade", "quote")),
+                    LatestQuote.source == "schwab",
+                    LatestQuote.feed == "l1",
+                    LatestQuote.delivery_mode == "real_time",
+                    LatestQuote.provider_capability_id.is_(None),
+                    LatestQuote.provider_status_id.is_(None),
+                    LatestQuote.provider_status_version.is_(None),
+                    LatestQuote.provider_contract_hash.is_(None),
+                    LatestQuote.provider_authorized_at.is_(None),
+                    DataArtifact.source == "schwab",
+                    DataArtifact.schema_version == "schwab_level_one_stream_v1",
                     DataArtifact.mime_type == "application/json",
                 ),
             ),

@@ -1,6 +1,6 @@
 # 嘉信美股行情流本地验证
 
-本入口用于申请凭据后的显式、短时、只读验证；它不调用账户、持仓或订单接口，不下单、不写数据库、不自动重连，也不会被页面刷新或调度器触发。为获得嘉信要求的推送登录参数，它会调用一次 `userPreference`；该响应可能同时包含账户偏好，但实现只在内存中提取五个推送字段，不保存原始响应。原始行情帧、来源时间与接收时间分开保留。
+本入口用于申请凭据后的显式、短时、只读验证；它不调用账户、持仓或订单接口，不下单、不自动重连，也不会被页面刷新或调度器触发。采集命令只写私密归档；只有后文的显式 `import` 命令才会把已验证归档写入现有本地 PostgreSQL 和对象存储，仅用于盘中展示。为获得嘉信要求的推送登录参数，它会调用一次 `userPreference`；该响应可能同时包含账户偏好，但实现只在内存中提取五个推送字段，不保存原始响应。原始行情帧、来源时间与接收时间分开保留。
 
 ## 嘉信 Level One
 
@@ -42,6 +42,17 @@ uv run --package nexus-engine nexus-engine-schwab-market-stream schwab \
 
 ## 归档与判定
 
-输出目录为 0700，`frame-NNNNN.json` 与 `receipt.json` 为 0600；不保存出站认证消息，检测到入站帧反射密钥时拒绝落盘。加载器重新核对文件集合、权限、长度、hash、时间、终态、认证/订阅顺序和观察数，仅接受 `bounded_complete`。这表示本次有限窗口正常结束，不表示全天稳定性、全市场覆盖或实时权限已经成立。
+输出目录为 0700，`frame-NNNNN.json` 与 `receipt.json` 为 0600；不保存出站认证消息，检测到入站帧反射密钥时拒绝落盘。加载器重新核对文件集合、权限、长度、hash、时间、终态、认证/订阅顺序和观察数，仅接受 `bounded_complete`。这表示本次有限窗口正常结束，不表示全天稳定性或全市场覆盖已经成立。
 
-首轮有凭据验收应选取一小批流动性较好的美股，核对订阅是否被接受、`delayed` 标记、quote/trade 时间与本机接收时间差、空档和断线。在证据完成前，嘉信只是候选行情源，不接入研究准入或执行许可。
+导入前须先将数据库升级到当前 migration head，并使用 instrument master 中的真实 UUID：
+
+```sh
+uv run --package nexus-engine nexus-engine-schwab-market-stream import \
+  --repo-root /Users/wangchen/Documents/ChatGPT/投资 \
+  --binding AAPL=<instrument-uuid> \
+  --stream-dir /absolute/path/to/private-schwab-archive
+```
+
+`import` 仅接受完整且每条观察都明确为 `delayed=false` 的归档；会冻结原始回执和帧、核对代码与 instrument UUID，并幂等写入最新成交价及双边报价。输出中始终保留 `execution_locked=true`，不授予研究准入或任何交易权限。
+
+首轮有凭据验收应选取一小批流动性较好的美股，核对订阅是否被接受、`delayed` 标记、quote/trade 时间与本机接收时间差、空档和断线。通过的归档可作为盘中展示数据，但不接入研究准入或执行许可。
