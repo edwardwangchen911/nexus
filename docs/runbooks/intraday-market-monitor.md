@@ -2,7 +2,7 @@
 
 ## 当前裁决
 
-`Intraday Monitor local_read_only / default_disabled`
+`Intraday Monitor local_read_only / code_accepted / eligible_live_bucket_pending`
 
 本地 schema、只读采集链、确定性指标、API 和页面已可用。默认
 `NEXUS_INTRADAY_MONITOR_MODE=disabled`；使用已有配置和已有只读权限启动本地 Provider
@@ -150,6 +150,20 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml exec -T postgre
 闭市、盘前或完整日历明确休市时不创建 Schwab Job，也不调用 Schwab；这只证明日历抑制。
 真正的自动采集验收必须在一个可交易 bucket 中观察到新 v3 Job 的终态、raw artifact、
 `delayed=false` 的成交/双边报价及查询视图，然后立即停止本轮 worker。
+
+### 2026-09-12 本地验收记录
+
+- 受影响的单测与隔离 PostgreSQL 集成测试共 281 项通过；Ruff、Mypy 和
+  Compose 配置解析通过。
+- 正常 Compose/Alembic 入口已将本地库从 `0054_schwab_stream_policy` 升级到
+  `0055_schwab_intraday_job_v3`。
+- Mac 本地 worker 以 `production / fosun daily / schwab intraday` 配置启动，留下
+  0055 Provider heartbeat，并通过一次 `Ctrl-C` 停止。
+- 完整 XNYS authority 覆盖当天，但 2026-09-12 为周六且 session 行数为 0；
+  本轮没有创建 `schwab-intraday` Job，也没有新增 Schwab raw artifact。
+
+这只验收了真实本地入口和闭市抑制。首个可交易 bucket 仍需做一次有界真实验收；
+在出现新 v3 Job 前，不得将历史手工 Schwab artifact 当作自动触发证据。
 
 ## 回滚与保留影响
 
