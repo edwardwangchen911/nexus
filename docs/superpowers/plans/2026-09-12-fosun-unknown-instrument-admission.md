@@ -118,7 +118,7 @@ causing the item to disappear from the current pending query without mutation.
 Run:
 
 ```bash
-NEXUS_TEST_DATABASE_URL="$NEXUS_TEST_DATABASE_URL" PYTHONPATH=engine/src \
+DATABASE_URL="$DATABASE_URL" PYTHONPATH=engine/src \
   /Users/wangchen/Documents/ChatGPT/投资/.venv/bin/python -m pytest -q \
   engine/tests/integration/test_fosun_instrument_discovery_storage.py
 ```
@@ -254,7 +254,7 @@ new PortfolioSnapshot, no Instrument/alias for unknown, and READY recovery after
 authoritative alias is seeded. Run:
 
 ```bash
-NEXUS_TEST_DATABASE_URL="$NEXUS_TEST_DATABASE_URL" PYTHONPATH=engine/src \
+DATABASE_URL="$DATABASE_URL" PYTHONPATH=engine/src \
   /Users/wangchen/Documents/ChatGPT/投资/.venv/bin/python -m pytest -q \
   engine/tests/integration/test_fosun_identity_selection.py \
   engine/tests/integration/test_fosun_refresh_order_pg.py
