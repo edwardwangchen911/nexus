@@ -23,6 +23,12 @@ CI 不部署、不发布镜像、不改变权限，也不构成复星 SDK admiss
 
 ## 本地复现
 
+本地结果只覆盖实际执行的命令，不能自动外推为六个 GitHub job 全部通过。CI 失败时先确认
+run 的 head SHA 与待验收提交一致，并一次性检查所有失败或取消的 job；收齐日志、完成归因后
+再修改和推送，避免逐个错误反复触发新 run。时间相关测试优先使用受控时钟或条件等待，复杂
+E2E 可以设置有界的单测试超时，但不得删除断言或降低安全、策略门禁。完成判定以同一 head
+SHA 的全部必需 job 成功为准。
+
 ```bash
 NEXUS_OFFLINE_SOCKET_GUARD=1 \
 PYTHONPATH="$PWD/scripts/offline_guard" \
