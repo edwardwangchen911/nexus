@@ -64,12 +64,14 @@ Vinext Web / BFF ── HMAC ──► Python Engine ──► PostgreSQL
 - Python `>=3.12,<3.13` 与 uv
 - 提供 Docker API 和 Compose v2 的运行时，例如 Docker Desktop、OrbStack 或 Colima
 
-先安装锁定依赖并创建只用于本地 fixture 的配置：
+先安装锁定依赖；仅在配置文件不存在时创建本地 fixture 配置，已有配置应保留：
 
 ```bash
 npm ci
 uv sync --frozen --all-packages
-cp infra/env.example infra/.env.local
+if [ ! -e infra/.env.local ]; then
+  cp infra/env.example infra/.env.local
+fi
 ```
 
 不要在 `infra/.env.local` 中填写真实 Provider 密钥、账户资料或生产证书。按文件注释填写
@@ -126,10 +128,11 @@ uv run ruff check engine
 uv run mypy engine/src
 ```
 
-复星 Gateway 的离线验证：
+复星 Gateway 的离线测试使用 [CI 手册的本地复现命令](docs/runbooks/ci-release-gates.md#本地复现)，
+包含网络 guard 和仓库内受保护的 pytest 临时目录；不要替换为公共 `/tmp` 目录，
+以免触发安全路径校验。静态检查：
 
 ```bash
-uv run pytest integrations/fosun_gateway/tests -q
 uv run ruff check integrations/fosun_gateway scripts/offline_guard
 uv run mypy integrations/fosun_gateway/src
 ```
@@ -166,7 +169,11 @@ CI 的完整门禁及发布含义见 [CI 与离线发布门禁](docs/runbooks/ci
 - 风控、回测、交易状态机和财务口径变更必须有对应回归测试。
 - `/health/live` 只证明 API 进程存活，不代表数据库、对象存储、worker 或业务数据就绪。
 - `DISPLAY_READY`、`DECISION_READY` 与 `execution_locked` 是不同状态；前两者不会自动授权交易。
-- 提交前不要把本地环境文件、账户事实、原始凭据或受保护验收材料加入版本控制。
+- 应提交源码、测试、迁移、依赖锁文件、生成客户端、无敏感信息的配置模板和通用文档；
+  本地环境文件、凭据、账户原始数据、数据库备份、受保护验收材料、运行产物和缓存留在本地。
+  `.gitignore` 不会自动移除已经跟踪的文件，提交前仍需检查暂存差异。
+- 删除 worktree 或分支前，确认没有活跃写入、未提交改动及尚未合入或可靠备份的独有提交。
+  GitHub 保存代码历史；业务数据库和证据对象按[备份恢复手册](docs/runbooks/backup-restore.md)单独备份。
 
 更完整的产品边界和协作规则见 [AGENTS.md](AGENTS.md)，当前迭代恢复入口见
 [核心迭代交接](docs/plans/2026-09-02-nexus-core-iteration-handoff.md)。

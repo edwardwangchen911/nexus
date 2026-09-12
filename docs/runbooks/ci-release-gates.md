@@ -12,10 +12,15 @@ CI 不部署、不发布镜像、不改变权限，也不构成复星 SDK admiss
 | --- | --- |
 | `web` | npm clean install、lint、typecheck、unit、generated client、production build |
 | `gateway-offline` | guard 自测、guard 下全部 gateway 测试、Ruff、Mypy |
-| `engine-postgres` | 固定 digest PostgreSQL、空库迁移到 head、全部 Engine 测试、隔离 PostgreSQL＋MinIO fixture 恢复演练、Ruff、Mypy |
+| `engine-postgres` | 固定 digest PostgreSQL、空库迁移到 head、Ruff、Mypy；普通推送/PR 运行合并门禁测试，手动运行时执行全部 Engine 测试及隔离 PostgreSQL＋MinIO fixture 恢复演练 |
 | `e2e` | Playwright Chromium、3 workers 的 synthetic browser E2E；可使用浏览器层的合成 API 响应来验证页面契约 |
 | `real-e2e` | 固定 digest PostgreSQL 17 的专用 `nexus_e2e_ci` 空库、锁定 Node/uv/npm/Python 依赖与 Chromium，只运行 `npm run test:e2e:real`，验证本地 Engine、同源 BFF、PostgreSQL 的 fixture 链路 |
 | `policy` | 全部策略测试、密钥/精确只读面/TLS 修复/SDK lock/容器/CI 策略、依赖许可证清单、npm/Python 漏洞审计、四个 Compose profile |
+
+普通推送/PR 的 Engine 门禁覆盖 unit、contract、evals、property 及选定集成测试，排除
+`performance` 标记；具体清单以 [ci.yml](../../.github/workflows/ci.yml) 为准。
+通过 GitHub Actions 的 Run workflow（`workflow_dispatch`）执行全量 Engine 回归及恢复演练；
+普通推送的绿灯不代表这两项已执行。
 
 第三方 Actions 使用完整 commit SHA；容器引用同时保留可读 tag 和不可变 SHA-256 digest。两个运行镜像最终都声明非 root 用户，`.dockerignore` 排除 VCS、secret、env、依赖缓存和测试产物域。
 
