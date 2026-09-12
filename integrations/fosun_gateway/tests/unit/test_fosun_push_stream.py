@@ -3,7 +3,6 @@ import base64
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from time import monotonic
 from unittest.mock import ANY
 
 import pytest
@@ -88,11 +87,10 @@ class SendBlockingSocket(Socket):
     def __init__(self, act):
         super().__init__([SUB_REPLY])
         self.act = act
-        self.start = monotonic()
         self.offset = 0.0
 
     def clock(self):
-        return monotonic() - self.start + self.offset
+        return self.offset
 
     async def recv(self):
         result = await super().recv()
@@ -208,12 +206,13 @@ async def test_latest_push_quote_preserves_archive_and_scales_last_price(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_authority_digest_is_bound_into_v3_archive(tmp_path):
+async def test_authority_digest_is_bound_into_v3_archive(tmp_path, monkeypatch):
     directory = tmp_path / "run"
     digest = "a" * 64
-    await _collect(
+    await _controlled_collect(
         socket=Socket([SUB_REPLY, _quote_frame()]),
         directory=directory,
+        monkeypatch=monkeypatch,
         max_frames=2,
         authority_sha256=digest,
     )
@@ -798,13 +797,17 @@ async def test_secret_reflection_is_not_persisted(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("nested_format", ['{{"extra":"{}",}}', '{{"extra":"{}"', '["{}"]'])
 async def test_malformed_nested_json_cannot_archive_unicode_escaped_session(
-    tmp_path, nested_format
+    tmp_path, nested_format, monkeypatch
 ):
     escaped_secret = "".join(f"\\u{ord(character):04x}" for character in "synthetic-session")
     nested = nested_format.format(escaped_secret)
     frame = {"topic": "qt", "items": [{"code": "usAAPL", "msg": nested}]}
 
-    result = await _collect(socket=Socket([SUB_REPLY, frame]), directory=tmp_path / "run")
+    result = await _controlled_collect(
+        socket=Socket([SUB_REPLY, frame]),
+        directory=tmp_path / "run",
+        monkeypatch=monkeypatch,
+    )
 
     assert result["status"] == "partial"
     assert result["stop_reason"] == "QUOTE_INVALID"
