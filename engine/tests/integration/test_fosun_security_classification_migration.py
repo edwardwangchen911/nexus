@@ -5,6 +5,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -25,7 +26,7 @@ def test_classification_migration_roundtrip_and_refuses_frozen_owner(
     scripts = ScriptDirectory.from_config(config)
     revision = scripts.get_revision(REVISION)
     assert revision is not None and revision.down_revision == PARENT
-    assert scripts.get_heads() == [REVISION]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
 
     command.upgrade(config, PARENT)
     command.upgrade(config, REVISION)

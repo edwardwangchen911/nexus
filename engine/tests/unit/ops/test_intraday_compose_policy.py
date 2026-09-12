@@ -65,7 +65,7 @@ def test_intraday_defaults_are_disabled_and_do_not_contain_credentials() -> None
 def test_intraday_runbook_preserves_external_activation_stop_boundary() -> None:
     runbook = (ROOT / "docs/runbooks/intraday-market-monitor.md").read_text(encoding="utf-8")
 
-    assert "Intraday Monitor offline_ready / external_data_activation_blocked" in runbook
+    assert "Intraday Monitor local_read_only / default_disabled" in runbook
     assert "GET https://data.alpaca.markets/v2/stocks/snapshots" in runbook
     assert "逐次批准" in runbook
     assert "真实订单" in runbook

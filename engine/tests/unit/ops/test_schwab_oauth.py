@@ -137,8 +137,10 @@ def test_native_dialog_returns_callback_without_putting_it_in_process_arguments(
 @pytest.mark.asyncio
 async def test_macos_authorize_command_uses_native_dialog_by_default(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_config(tmp_path)
+    monkeypatch.setattr(provider_market_stream.sys, "platform", "darwin")
     arguments = provider_market_stream.build_parser().parse_args(
         ["authorize", "--repo-root", str(tmp_path)]
     )
