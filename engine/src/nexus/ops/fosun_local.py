@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import dotenv_values
-from pydantic import Field, ValidationError
+from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import desc, func, select
 from sqlalchemy.engine import make_url
@@ -46,6 +46,8 @@ from nexus.persistence.models.portfolio import (
     PositionSnapshot,
 )
 from nexus.providers.broker.gateway_contracts import GatewayClientError
+from nexus.providers.broker.settings import BrokerWorkerSettings
+from nexus.settings import EngineSettings
 
 _REQUIRED_ENVIRONMENT = (
     "DATABASE_URL",
@@ -66,6 +68,8 @@ _REQUIRED_ENVIRONMENT = (
     "FOSUN_MARKET_GATEWAY_CLIENT_CERT",
     "FOSUN_MARKET_GATEWAY_CLIENT_KEY",
     "FOSUN_MARKET_GATEWAY_CLIENT_CA",
+    "FMP_API_KEY",
+    "SEC_CONTACT",
 )
 _TLS_ENVIRONMENT = (
     "FOSUN_GATEWAY_CLIENT_CERT",
@@ -322,9 +326,7 @@ async def read_local_status(database_url: str) -> dict[str, object]:
             display, decision = derive_snapshot_readiness(
                 snapshot.status,
                 has_display_facts=bool(counts["cash"] or counts["positions"]),
-                cash_flow_quality=(
-                    snapshot_run.cash_flow_quality if snapshot_run else "NOT_RUN"
-                ),
+                cash_flow_quality=(snapshot_run.cash_flow_quality if snapshot_run else "NOT_RUN"),
             )
             decision = _decision_readiness_for_latest_attempt(
                 decision,
@@ -371,6 +373,54 @@ async def read_local_status_safely(
         raise
     except (OSError, SQLAlchemyError):
         raise LocalDatabaseError("LOCAL_DATABASE_UNAVAILABLE") from None
+
+
+async def refresh_local_fosun_resolving_pending(
+    refresh_settings: LocalFosunRefreshSettings,
+    environment: Mapping[str, str],
+    *,
+    output_dir: Path,
+    identity_settings: EngineSettings | None = None,
+    broker_settings: BrokerWorkerSettings | None = None,
+    refresh: Callable[[LocalFosunRefreshSettings], Awaitable[dict[str, object]]] | None = None,
+    resolve: Callable[..., Awaitable[dict[str, object]]] | None = None,
+) -> dict[str, object]:
+    """Run one explicit refresh, resolve persisted identities once, then optionally re-read."""
+    refresh = refresh or refresh_local_fosun
+    first = await refresh(refresh_settings)
+    if first.get("status") != "identity_pending":
+        return first
+
+    archive_root = output_dir.parent
+    archive_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if archive_root.is_symlink() or archive_root.stat().st_mode & 0o077:
+        raise ValueError("PENDING_IDENTITY_ARCHIVE_INVALID")
+    if resolve is None:
+        from nexus.ops.pending_identity_local import resolve_pending_identities
+
+        resolve = resolve_pending_identities
+    identity_settings = identity_settings or EngineSettings.model_validate(environment)
+    broker_settings = broker_settings or BrokerWorkerSettings.model_validate(environment)
+    resolution = await resolve(
+        identity_settings,
+        broker_settings,
+        fmp_key=SecretStr(environment.get("FMP_API_KEY", "")),
+        sec_contact=environment.get("SEC_CONTACT", ""),
+        output_dir=output_dir,
+    )
+    if not resolution.get("portfolio_refresh_required"):
+        return {
+            **first,
+            "refresh_attempts": 1,
+            "identity_resolution": resolution,
+        }
+
+    second = await refresh(refresh_settings)
+    return {
+        **second,
+        "refresh_attempts": 2,
+        "identity_resolution": resolution,
+    }
 
 
 def safe_failure(error: Exception) -> dict[str, str]:
@@ -421,7 +471,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             result = asyncio.run(refresh_local_fosun_broker(broker_refresh_settings))
         else:
             full_refresh_settings = LocalFosunRefreshSettings.model_validate(local_environment)
-            result = asyncio.run(refresh_local_fosun(full_refresh_settings))
+            archive_dir = (
+                Path.cwd()
+                / ".secrets"
+                / "nexus-fosun-local"
+                / "pending-identity"
+                / datetime.now(UTC).date().isoformat()
+            )
+            result = asyncio.run(
+                refresh_local_fosun_resolving_pending(
+                    full_refresh_settings,
+                    local_environment,
+                    output_dir=archive_dir,
+                )
+            )
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as error:
