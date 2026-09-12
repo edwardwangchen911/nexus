@@ -16,6 +16,8 @@ class MarketStreamObservation:
     sequence: int | None
     quote_time: datetime | None = None
     trade_time: datetime | None = None
+    bid_time: datetime | None = None
+    ask_time: datetime | None = None
     provider_time_unit: Literal["seconds", "milliseconds"] | None = None
     delayed: bool | None = None
     bid: Decimal | None = None
@@ -28,3 +30,6 @@ class MarketStreamObservation:
     bid_exchange: str | None = None
     ask_exchange: str | None = None
     last_exchange: str | None = None
+    bid_mic_id: str | None = None
+    ask_mic_id: str | None = None
+    last_mic_id: str | None = None

@@ -92,6 +92,8 @@ class SchwabLevelOneState:
             sequence=sequence,
             quote_time=_epoch_millis(current.get("34")),
             trade_time=_epoch_millis(current.get("35")),
+            bid_time=_epoch_millis(current.get("37")),
+            ask_time=_epoch_millis(current.get("38")),
             provider_time_unit="milliseconds",
             delayed=_optional_bool(current.get("delayed")),
             bid=_decimal(current.get("1")),
@@ -104,6 +106,9 @@ class SchwabLevelOneState:
             ask_exchange=_optional_text(current.get("6")),
             bid_exchange=_optional_text(current.get("7")),
             last_exchange=_optional_text(current.get("16")),
+            ask_mic_id=_optional_text(current.get("39")),
+            bid_mic_id=_optional_text(current.get("40")),
+            last_mic_id=_optional_text(current.get("41")),
         )
 
 

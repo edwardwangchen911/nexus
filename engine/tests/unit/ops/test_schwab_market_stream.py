@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 
 import pytest
 from nexus.ops.schwab_market_stream import (
@@ -77,6 +78,11 @@ SCHWAB_DATA = {
                     "3": 227.15,
                     "34": 1_789_912_201_000,
                     "35": 1_789_912_200_900,
+                    "37": 1_789_912_200_800,
+                    "38": 1_789_912_200_700,
+                    "39": "ARCX",
+                    "40": "XNAS",
+                    "41": "XNYS",
                     "delayed": False,
                     "assetMainType": "EQUITY",
                 }
@@ -162,8 +168,14 @@ async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> N
         "SUBS",
     ]
     archive = load_provider_market_stream_archive(directory)
-    assert archive["observations"][0].delayed is False
-    assert archive["observations"][0].last.as_tuple().exponent == -2
+    observation = archive["observations"][0]
+    assert observation.delayed is False
+    assert observation.last.as_tuple().exponent == -2
+    assert observation.bid_time == datetime.fromtimestamp(1_789_912_200.8, UTC)
+    assert observation.ask_time == datetime.fromtimestamp(1_789_912_200.7, UTC)
+    assert observation.ask_mic_id == "ARCX"
+    assert observation.bid_mic_id == "XNAS"
+    assert observation.last_mic_id == "XNYS"
     assert not any(
         "access-token" in item.read_text() for item in directory.iterdir()
     )
