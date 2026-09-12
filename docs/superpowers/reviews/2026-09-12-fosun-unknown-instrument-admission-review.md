@@ -62,7 +62,9 @@ business semantics. The design is sufficiently precise for direct test-first cod
 
 Verification date: 2026-09-12
 Branch: `codex/fosun-identity-pending`
-Migration head: `0052_fosun_classification` (no new migration)
+Feature migration impact: none. The isolated branch was verified at
+`0052_fosun_classification`; after integration, unrelated Alpaca/Schwab migrations
+advance current `main` to `0054_schwab_stream_policy`.
 
 The implementation preserves the previous complete portfolio snapshot, records the
 new attempt as `PARTIAL / IDENTITY_PENDING`, and publishes only bounded provider-code
@@ -77,6 +79,8 @@ persisted-only and perform no provider or model work.
   **97 passed**.
 - Discovery artifact/snapshot replay, raw-binding tamper rejection, same-clock
   conflict, and post-alias resolution: **3 passed**.
+- Post-merge Engine CI gate on `main` at migration head
+  `0054_schwab_stream_policy`: **3630 passed, 6 skipped, 1 deselected**.
 - Engine CI merge gate, including all three new PostgreSQL files: **3625 passed,
   6 skipped, 1 performance test deselected**.
 - Ruff: all Engine checks passed. Mypy: no issues in **431 source files**.
