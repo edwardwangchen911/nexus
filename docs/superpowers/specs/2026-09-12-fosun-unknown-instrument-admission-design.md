@@ -188,10 +188,17 @@ Split the current combined market read into two bounded operations:
    - run the existing classification, latest-quote, universe, calendar, and bar paths
      only for resolved codes;
    - read back every new discovery/classification record before commit.
+   When no code is resolved, skip universe, quote, calendar, and bar producers that
+   require a non-empty instrument set; the raw artifact and discovery snapshots still
+   commit.
 5. If unresolved codes exist, persist one terminal `BrokerSyncRun(status="PARTIAL")`
    with `cash_flow_quality="NOT_RUN"`, `failure_reason="IDENTITY_PENDING"`, completed
    time, attempt count one, and the existing safe local route/idempotency conventions.
    Do not create a `PortfolioSnapshotRecord` for this run.
+   Reuse the existing account/portfolio validation-and-create rules before inserting
+   the run, so a first-ever local refresh does not violate foreign keys. Creating this
+   local account/portfolio container does not create an unresolved Instrument or a
+   portfolio position.
 6. Stop before cash, orders, and cash-flow reads. Return the pending result.
 7. If no unresolved code exists, continue the current broker freeze/persistence and
    diagnosis path unchanged.

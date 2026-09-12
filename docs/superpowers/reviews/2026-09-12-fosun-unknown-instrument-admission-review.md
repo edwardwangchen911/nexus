@@ -52,6 +52,8 @@ the unknown-holding path a required cross-layer acceptance case.
   reads select bounded latest rows and derive resolution, rather than deleting history.
 - Exact ETF/ETN resolution remains external to this slice. The UI and Agent must call
   it pending, not “ETF detected.”
+- Cold-start pending runs reuse the existing local Account/Portfolio container rules;
+  tests must prove foreign-key correctness without creating an unresolved Instrument.
 
 The three unawarded points are implementation-layout uncertainty, not unresolved
 business semantics. The design is sufficiently precise for direct test-first coding.
