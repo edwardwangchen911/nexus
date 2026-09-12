@@ -145,7 +145,7 @@ def _collect(*, socket, directory, **kwargs):
         directory=directory,
         api_key="synthetic-api-key",
         session="synthetic-session",
-        duration=kwargs.pop("duration", 0.03),
+        duration=kwargs.pop("duration", 1),
         max_frames=kwargs.pop("max_frames", 100),
         connector=lambda *args, **connector_kwargs: socket,
         request_id_factory=lambda: "request-123",
@@ -228,7 +228,7 @@ async def test_authority_digest_is_bound_into_v3_archive(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_latest_push_quote_rejects_complete_window_without_quote(tmp_path):
     directory = tmp_path / "run"
-    await _collect(socket=Socket([SUB_REPLY]), directory=directory)
+    await _collect(socket=Socket([SUB_REPLY]), directory=directory, duration=0.03)
 
     with pytest.raises(PushStreamError, match="PUSH_QUOTE_UNAVAILABLE"):
         load_latest_push_quote(directory)
@@ -405,7 +405,9 @@ async def test_provider_subscription_reply_topic_is_accepted(tmp_path):
         "subRep": [{"topic": "qt", "scode": ["usAAPL"]}],
     }
 
-    result = await _collect(socket=Socket([reply]), directory=tmp_path / "run")
+    result = await _collect(
+        socket=Socket([reply]), directory=tmp_path / "run", duration=0.03
+    )
 
     assert result == {
         "status": "bounded_complete",
@@ -696,6 +698,7 @@ async def test_empty_official_error_message_values_are_not_failures(tmp_path, er
     result = await _collect(
         socket=Socket([{**SUB_REPLY, "errMsg": error}]),
         directory=tmp_path / "run",
+        duration=0.03,
     )
 
     assert result["status"] == "bounded_complete"
@@ -994,7 +997,9 @@ async def test_consecutive_quote_ids_must_increase_only_when_both_are_known(tmp_
 async def test_only_us_and_five_digit_hk_codes_are_supported(tmp_path, code):
     socket = Socket([_sub_reply(code)])
 
-    result = await _collect(socket=socket, directory=tmp_path / code, code=code)
+    result = await _collect(
+        socket=socket, directory=tmp_path / code, code=code, duration=0.03
+    )
 
     assert result["status"] == "bounded_complete"
 
@@ -1175,7 +1180,7 @@ async def test_total_byte_limit_stops_before_the_overflow_frame_is_written(tmp_p
 async def test_loader_rejects_tampered_frame_and_terminal_state(tmp_path):
     socket = Socket([SUB_REPLY])
     directory = tmp_path / "run"
-    await _collect(socket=socket, directory=directory)
+    await _collect(socket=socket, directory=directory, duration=0.03)
 
     (directory / "frame-00000.json").write_text("{}")
     with pytest.raises(PushStreamError, match="PUSH_ARCHIVE_INVALID"):
@@ -1183,7 +1188,7 @@ async def test_loader_rejects_tampered_frame_and_terminal_state(tmp_path):
 
     socket = Socket([SUB_REPLY])
     directory = tmp_path / "terminal"
-    await _collect(socket=socket, directory=directory)
+    await _collect(socket=socket, directory=directory, duration=0.03)
     receipt = json.loads((directory / "receipt.json").read_text())
     receipt["status"] = "partial"
     (directory / "receipt.json").write_text(json.dumps(receipt))
