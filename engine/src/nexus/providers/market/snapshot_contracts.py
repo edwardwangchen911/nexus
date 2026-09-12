@@ -55,7 +55,7 @@ class IntradaySnapshotRequest(BaseModel):
 
     @model_validator(mode="after")
     def _bounded_and_consistent(self) -> IntradaySnapshotRequest:
-        maximum = 10 if self.feed == "l1" else 30
+        maximum = 30
         if not 1 <= len(self.instruments) <= maximum:
             raise ValueError(f"snapshot instruments must contain 1 to {maximum} items")
         ids = tuple(item.instrument_id for item in self.instruments)

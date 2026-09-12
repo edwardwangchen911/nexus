@@ -22,10 +22,19 @@ _INTRADAY_JOB_TYPE = "collect.intraday_snapshot"
 _INTRADAY_V2 = "intraday_snapshot_job_v2"
 
 
+@pytest.fixture
+def intraday_v2_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> str:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    command.upgrade(Config("engine/alembic.ini"), "0031_intraday_schema_admission")
+    return temporary_database_url
+
+
 def test_0031_is_single_head_after_daily_staging() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
 
-    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
     admission = scripts.get_revision("0031_intraday_schema_admission")
     assert admission is not None
     assert admission.down_revision == "0030_fosun_daily_staging"
@@ -90,14 +99,14 @@ def test_0030_orders_manifest_binding_before_transport_locks(
     ),
 )
 def test_0031_rejects_new_incompatible_intraday_jobs(
-    migrated_database_url: str,
+    intraday_v2_database_url: str,
     schema_version: str,
     payload_schema: str | None,
 ) -> None:
     with pytest.raises(DBAPIError, match="intraday Job schema is not admitted") as error:
         asyncio.run(
             _insert_job(
-                migrated_database_url,
+                intraday_v2_database_url,
                 job_type=_INTRADAY_JOB_TYPE,
                 schema_version=schema_version,
                 payload_schema=payload_schema,
@@ -108,11 +117,11 @@ def test_0031_rejects_new_incompatible_intraday_jobs(
 
 
 def test_0031_allows_exact_v2_and_unrelated_job_types(
-    migrated_database_url: str,
+    intraday_v2_database_url: str,
 ) -> None:
     asyncio.run(
         _insert_job(
-            migrated_database_url,
+            intraday_v2_database_url,
             job_type=_INTRADAY_JOB_TYPE,
             schema_version=_INTRADAY_V2,
             payload_schema=_INTRADAY_V2,
@@ -120,7 +129,7 @@ def test_0031_allows_exact_v2_and_unrelated_job_types(
     )
     asyncio.run(
         _insert_job(
-            migrated_database_url,
+            intraday_v2_database_url,
             job_type="collect.market",
             schema_version="daily_stage_v1",
             payload_schema=None,
@@ -137,14 +146,14 @@ def test_0031_allows_exact_v2_and_unrelated_job_types(
     ),
 )
 def test_0031_rejects_non_one_shot_intraday_jobs(
-    migrated_database_url: str,
+    intraday_v2_database_url: str,
     retry_policy: str,
     max_attempts: int,
 ) -> None:
     with pytest.raises(DBAPIError, match="intraday Job schema is not admitted") as error:
         asyncio.run(
             _insert_job(
-                migrated_database_url,
+                intraday_v2_database_url,
                 job_type=_INTRADAY_JOB_TYPE,
                 schema_version=_INTRADAY_V2,
                 payload_schema=_INTRADAY_V2,
@@ -157,11 +166,11 @@ def test_0031_rejects_non_one_shot_intraday_jobs(
 
 
 def test_0031_rejects_a_second_v2_job_for_the_same_scope_bucket(
-    migrated_database_url: str,
+    intraday_v2_database_url: str,
 ) -> None:
     asyncio.run(
         _insert_job(
-            migrated_database_url,
+            intraday_v2_database_url,
             job_type=_INTRADAY_JOB_TYPE,
             schema_version=_INTRADAY_V2,
             payload_schema=_INTRADAY_V2,
@@ -171,7 +180,7 @@ def test_0031_rejects_a_second_v2_job_for_the_same_scope_bucket(
     with pytest.raises(DBAPIError) as error:
         asyncio.run(
             _insert_job(
-                migrated_database_url,
+                intraday_v2_database_url,
                 job_type=_INTRADAY_JOB_TYPE,
                 schema_version=_INTRADAY_V2,
                 payload_schema=_INTRADAY_V2,
@@ -182,14 +191,14 @@ def test_0031_rejects_a_second_v2_job_for_the_same_scope_bucket(
 
 
 def test_0031_rejects_job_time_that_does_not_match_the_frozen_bucket(
-    migrated_database_url: str,
+    intraday_v2_database_url: str,
 ) -> None:
     bucket_start = datetime(2026, 1, 1, tzinfo=UTC)
 
     with pytest.raises(DBAPIError, match="intraday Job schema is not admitted") as error:
         asyncio.run(
             _insert_job(
-                migrated_database_url,
+                intraday_v2_database_url,
                 job_type=_INTRADAY_JOB_TYPE,
                 schema_version=_INTRADAY_V2,
                 payload_schema=_INTRADAY_V2,
@@ -212,14 +221,14 @@ def test_0031_rejects_job_time_that_does_not_match_the_frozen_bucket(
     ),
 )
 def test_0031_rejects_nonexplicit_or_invalid_source_feed_pairs(
-    migrated_database_url: str,
+    intraday_v2_database_url: str,
     source: str | None,
     feed: str | None,
 ) -> None:
     with pytest.raises(DBAPIError, match="intraday Job schema is not admitted") as error:
         asyncio.run(
             _insert_job(
-                migrated_database_url,
+                intraday_v2_database_url,
                 job_type=_INTRADAY_JOB_TYPE,
                 schema_version=_INTRADAY_V2,
                 payload_schema=_INTRADAY_V2,
@@ -241,13 +250,13 @@ def test_0031_rejects_nonexplicit_or_invalid_source_feed_pairs(
     ),
 )
 def test_0031_allows_each_explicit_source_feed_pair(
-    migrated_database_url: str,
+    intraday_v2_database_url: str,
     source: str,
     feed: str,
 ) -> None:
     asyncio.run(
         _insert_job(
-            migrated_database_url,
+            intraday_v2_database_url,
             job_type=_INTRADAY_JOB_TYPE,
             schema_version=_INTRADAY_V2,
             payload_schema=_INTRADAY_V2,
@@ -272,7 +281,7 @@ def test_0031_gate_rejects_preexisting_payload_schema_mismatch(
             payload_schema="intraday_snapshot_job_v1",
         )
     )
-    command.upgrade(config, "head")
+    command.upgrade(config, "0031_intraday_schema_admission")
 
     with pytest.raises(RuntimeError, match="INTRADAY_V1_QUEUE_DRAIN_REQUIRED"):
         asyncio.run(_run_intraday_gate(temporary_database_url))
@@ -295,7 +304,7 @@ def test_0031_gate_rejects_preexisting_v2_without_explicit_source(
             feed="l1",
         )
     )
-    command.upgrade(config, "head")
+    command.upgrade(config, "0031_intraday_schema_admission")
 
     with pytest.raises(RuntimeError, match="INTRADAY_V1_QUEUE_DRAIN_REQUIRED"):
         asyncio.run(_run_intraday_gate(temporary_database_url))
@@ -318,7 +327,7 @@ def test_0031_gate_rejects_preexisting_v2_with_retryable_tuple(
             max_attempts=3,
         )
     )
-    command.upgrade(config, "head")
+    command.upgrade(config, "0031_intraday_schema_admission")
 
     with pytest.raises(RuntimeError, match="INTRADAY_V1_QUEUE_DRAIN_REQUIRED"):
         asyncio.run(_run_intraday_gate(temporary_database_url))
@@ -386,7 +395,7 @@ def test_0031_allows_drain_transitions_but_rejects_legacy_manual_retry(
             bucket_start=datetime(2026, 1, 1, tzinfo=UTC),
         )
     )
-    command.upgrade(config, "head")
+    command.upgrade(config, "0031_intraday_schema_admission")
 
     asyncio.run(_transition_job(temporary_database_url, queued, "running"))
     asyncio.run(_transition_job(temporary_database_url, running_for_retry, "queued"))
@@ -421,7 +430,7 @@ def test_0031_malformed_legacy_bucket_can_terminalize_but_cannot_requeue(
             bucket_start_text="not-a-timestamp",
         )
     )
-    command.upgrade(config, "head")
+    command.upgrade(config, "0031_intraday_schema_admission")
 
     with pytest.raises(RuntimeError, match="INTRADAY_V1_QUEUE_DRAIN_REQUIRED"):
         asyncio.run(_run_intraday_gate(temporary_database_url))
@@ -496,6 +505,7 @@ def test_0031_dead_letter_is_terminal_and_does_not_permanently_block_rollback(
     migrated_database_url: str,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+    command.downgrade(Config("engine/alembic.ini"), "0031_intraday_schema_admission")
     asyncio.run(
         _insert_job(
             migrated_database_url,

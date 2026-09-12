@@ -150,6 +150,8 @@ async def ingest_intraday_snapshot(
         expected_raw_schema = (
             "fosun_gateway_market_snapshot_v1"
             if batch.provenance.source == "fosun"
+            else "schwab_level_one_stream_v1"
+            if batch.provenance.source == "schwab"
             else "alpaca_stock_snapshots_v1"
         )
         if (
@@ -303,6 +305,8 @@ async def archive_intraday_snapshot_raw(
             schema_version=(
                 "fosun_gateway_market_snapshot_v1"
                 if envelope.provenance.source == "fosun"
+                else "schwab_level_one_stream_v1"
+                if envelope.provenance.source == "schwab"
                 else "alpaca_stock_snapshots_v1"
             ),
             source=envelope.provenance.source,

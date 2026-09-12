@@ -628,7 +628,11 @@ class FosunSnapshotProvider:
         return self.normalize_raw_snapshots(envelope, request)
 
     def _validate_request(self, request: IntradaySnapshotRequest) -> None:
-        if request.feed != "l1" or request.delivery_mode != self._delivery_mode:
+        if (
+            request.feed != "l1"
+            or request.delivery_mode != self._delivery_mode
+            or len(request.instruments) > 10
+        ):
             raise MarketProviderPayloadError("FOSUN_INTRADAY_AUTHORITY_MISMATCH")
         if request.bucket_start is None:
             raise MarketProviderPayloadError("FOSUN_INTRADAY_BUCKET_REQUIRED")

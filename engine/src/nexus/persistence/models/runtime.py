@@ -85,12 +85,12 @@ class Job(ImmutableCreatedAt, Base):
             "id",
         ),
         Index(
-            "uq_jobs_intraday_v2_bucket",
+            "uq_jobs_intraday_v3_bucket",
             "effective_at",
             unique=True,
             postgresql_where=text(
                 "job_type = 'collect.intraday_snapshot' "
-                "AND schema_version = 'intraday_snapshot_job_v2'"
+                "AND schema_version = 'intraday_snapshot_job_v3'"
             ),
         ),
     )

@@ -26,14 +26,20 @@
 **Files:**
 
 - Modify: `engine/src/nexus/providers/settings.py`
-- Modify: `engine/src/nexus/providers/base.py`
 - Modify: `engine/src/nexus/jobs/intraday_schedule.py`
+- Modify: `engine/src/nexus/jobs/intraday_collection.py`
 - Modify: `engine/src/nexus/provider_worker.py`
+- Modify: `engine/src/nexus/persistence/migrations.py`
+- Modify: `engine/src/nexus/persistence/models/runtime.py`
 - Create: `engine/alembic/versions/0055_schwab_intraday_job_v3.py`
-- Modify: `engine/tests/unit/test_provider_settings.py`
-- Modify: `engine/tests/unit/test_intraday_schedule.py`
-- Modify: `engine/tests/unit/test_provider_worker.py`
-- Create: `engine/tests/integration/test_migration_0055_schwab_intraday_job_v3.py`
+- Modify: `engine/tests/unit/providers/test_composition.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_schedule.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_collection.py`
+- Modify: `engine/tests/unit/providers/test_provider_worker.py`
+- Modify: `engine/tests/integration/test_intraday_collection_pg.py`
+- Modify: `engine/tests/integration/test_intraday_schema_admission_migration.py`
+- Modify: `engine/tests/integration/test_provider_runtime_role_pg.py`
+- Create: `engine/tests/integration/test_schwab_intraday_job_migration.py`
 
 ### Contract to implement
 
@@ -52,31 +58,30 @@ The v3 Fosun and Alpaca branches retain their v2 field rules. Add `SCHWAB_SNAPSH
 
 ### Steps
 
-- [ ] Add failing settings tests proving an absent intraday setting inherits Fosun or Alpaca, an explicit Schwab value is accepted, and `NEXUS_MARKET_PROVIDER=schwab` is rejected.
+- [x] Add failing settings tests proving an absent intraday setting inherits Fosun or Alpaca, an explicit Schwab value is accepted, and `NEXUS_MARKET_PROVIDER=schwab` is rejected.
 
-- [ ] Add failing payload tests proving the exact Schwab contract above, the thirty-symbol bound, duplicate-symbol rejection, and rejection of minute bars or non-real-time data.
+- [x] Add failing payload tests proving the exact Schwab contract above, the thirty-symbol bound, duplicate-symbol rejection, and rejection of minute bars or non-real-time data.
 
-- [ ] Add failing scheduling tests proving a Schwab-selected worker creates v3 Schwab Jobs while the daily market provider remains Fosun, and proving omitted configuration preserves current behavior.
+- [x] Add failing scheduling tests proving a Schwab-selected worker creates v3 Schwab Jobs while the daily market provider remains Fosun, and proving omitted configuration preserves current behavior.
 
-- [ ] Implement the enum, setting, inherited selector, v3 payload model, builders, schema constant, and scheduler selection with no changes to retry or cooldown policy.
+- [x] Implement the enum, setting, inherited selector, v3 payload model, builders, schema constant, and scheduler selection with no changes to retry or cooldown policy.
 
-- [ ] Add migration `0055_schwab_intraday_job_v3.py`. Upgrade must lock the admitted-schema state, fail closed if actionable v2 Jobs remain, replace the admission trigger and partial index with an exact v3 predicate, and preserve all Job rows. Downgrade must apply the symmetric v3 drain fence and restore the exact v2 trigger and index from migration 0031.
+- [x] Add migration `0055_schwab_intraday_job_v3.py`. Upgrade must lock the admitted-schema state, fail closed if actionable v2 Jobs remain, replace the admission trigger and partial index with an exact v3 predicate, and preserve all Job rows. Downgrade must apply the symmetric v3 drain fence and restore the exact v2 trigger and index from migration 0031.
 
-- [ ] Add PostgreSQL migration tests covering successful admission of each v3 provider branch, rejection of malformed Schwab payloads, upgrade refusal with actionable v2 rows, downgrade refusal with actionable v3 rows, and row preservation.
+- [x] Add PostgreSQL migration tests covering successful admission of each v3 provider branch, rejection of malformed Schwab payloads, upgrade refusal with actionable v2 rows, downgrade refusal with actionable v3 rows, and row preservation.
 
-- [ ] Run the focused tests and static checks:
+- [x] Run the focused tests and static checks:
 
 ```bash
-cd engine
-uv run pytest tests/unit/test_provider_settings.py tests/unit/test_intraday_schedule.py tests/unit/test_provider_worker.py tests/integration/test_migration_0055_schwab_intraday_job_v3.py -q
-uv run ruff check src/nexus/providers/settings.py src/nexus/providers/base.py src/nexus/jobs/intraday_schedule.py src/nexus/provider_worker.py alembic/versions/0055_schwab_intraday_job_v3.py tests/unit/test_provider_settings.py tests/unit/test_intraday_schedule.py tests/unit/test_provider_worker.py tests/integration/test_migration_0055_schwab_intraday_job_v3.py
-uv run mypy src/nexus/providers/settings.py src/nexus/providers/base.py src/nexus/jobs/intraday_schedule.py src/nexus/provider_worker.py
+uv run --project engine pytest engine/tests/unit/providers/test_composition.py engine/tests/unit/jobs/test_intraday_schedule.py engine/tests/unit/jobs/test_intraday_collection.py engine/tests/unit/providers/test_provider_worker.py engine/tests/integration/test_schwab_intraday_job_migration.py -q
+uv run --project engine ruff check engine/src/nexus/providers/settings.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/provider_worker.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py engine/alembic/versions/0055_schwab_intraday_job_v3.py
+uv run --project engine mypy engine/src/nexus/providers/settings.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/provider_worker.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py
 ```
 
-- [ ] Commit this contract slice:
+- [x] Commit this contract slice:
 
 ```bash
-git add engine/src/nexus/providers/settings.py engine/src/nexus/providers/base.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/provider_worker.py engine/alembic/versions/0055_schwab_intraday_job_v3.py engine/tests/unit/test_provider_settings.py engine/tests/unit/test_intraday_schedule.py engine/tests/unit/test_provider_worker.py engine/tests/integration/test_migration_0055_schwab_intraday_job_v3.py
+git add engine/src/nexus/providers/settings.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/provider_worker.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py engine/alembic/versions/0055_schwab_intraday_job_v3.py engine/tests docs/superpowers/plans/2026-09-12-schwab-intraday-automatic-trigger.md
 git commit -m "feat: admit Schwab intraday jobs"
 ```
 
@@ -89,12 +94,14 @@ git commit -m "feat: admit Schwab intraday jobs"
 - Modify: `engine/src/nexus/ops/schwab_market_stream.py`
 - Create: `engine/src/nexus/providers/market/schwab_snapshot.py`
 - Modify: `engine/src/nexus/providers/market/snapshot_contracts.py`
+- Modify: `engine/src/nexus/providers/base.py`
+- Modify: `engine/src/nexus/providers/market/fosun.py`
 - Modify: `engine/src/nexus/jobs/intraday_collection.py`
-- Modify: `engine/src/nexus/ops/schwab_snapshot_import.py`
-- Modify: `engine/tests/unit/test_schwab_market_stream.py`
-- Create: `engine/tests/unit/test_schwab_snapshot_provider.py`
-- Modify: `engine/tests/unit/test_intraday_collection.py`
-- Modify: `engine/tests/unit/test_schwab_snapshot_import.py`
+- Modify: `engine/src/nexus/market/intraday_ingestion.py`
+- Modify: `engine/tests/unit/ops/test_schwab_market_stream.py`
+- Create: `engine/tests/unit/providers/test_schwab_snapshot.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_collection.py`
+- Modify: `engine/tests/unit/providers/test_fosun_market.py`
 
 ### Contract to implement
 
@@ -117,17 +124,17 @@ Create `SchwabSnapshotProvider` with injected repository root, `httpx.AsyncClien
 
 ### Steps
 
-- [ ] Add failing parser tests for a complete real-time two-sided quote, a valid requested-symbol subset, trade-only evidence, one-sided quote rejection, unknown or delayed data, incomplete authentication/subscription, wrong symbol binding, malformed frames, and out-of-order frames.
+- [x] Add failing parser tests for a complete real-time two-sided quote, a valid requested-symbol subset, trade-only evidence, one-sided quote rejection, unknown or delayed data, incomplete authentication/subscription, wrong symbol binding, malformed frames, and out-of-order frames.
 
-- [ ] Add failing provider tests proving one bounded collector invocation, deterministic request metadata, raw bytes returned before normalization, private temporary-directory cleanup, and no retry after collector failure.
+- [x] Add failing provider tests proving one bounded collector invocation, deterministic request metadata, raw bytes returned before normalization, private temporary-directory cleanup, and no retry after collector failure.
 
-- [ ] Extend `MarketDataProvenance.source` and raw archive schema mapping with `schwab`, while retaining exact schema/hash validation for Fosun and Alpaca.
+- [x] Extend `MarketDataProvenance.source` and raw archive schema mapping with `schwab`, while retaining exact schema/hash validation for Fosun and Alpaca.
 
-- [ ] Implement the packer, shared parser, and provider. Increase the generic L1 request bound to thirty only where required by the Schwab v3 contract; retain the Fosun payload limit of ten in its Job validator.
+- [x] Implement the packer, shared parser, and provider. Increase the generic L1 request bound to thirty only where required by the Schwab v3 contract; retain the Fosun payload limit of ten in its Job and provider validators.
 
-- [ ] Refactor the manual Schwab import to use the same packer and parser so manual and automatic paths cannot diverge on completeness, delay, symbol binding, or price selection.
+- [x] Refactor the manual Schwab import to use the same packer and parser so manual and automatic paths cannot diverge on completeness, delay, symbol binding, or price selection.
 
-- [ ] Run focused tests and static checks:
+- [x] Run focused tests and static checks (actual paths listed above; the PostgreSQL manual-import integration test also passed):
 
 ```bash
 cd engine
@@ -136,7 +143,7 @@ uv run ruff check src/nexus/ops/schwab_market_stream.py src/nexus/providers/mark
 uv run mypy src/nexus/ops/schwab_market_stream.py src/nexus/providers/market/schwab_snapshot.py src/nexus/providers/market/snapshot_contracts.py src/nexus/jobs/intraday_collection.py src/nexus/ops/schwab_snapshot_import.py
 ```
 
-- [ ] Commit this adapter slice:
+- [x] Commit this adapter slice:
 
 ```bash
 git add engine/src/nexus/ops/schwab_market_stream.py engine/src/nexus/providers/market/schwab_snapshot.py engine/src/nexus/providers/market/snapshot_contracts.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/ops/schwab_snapshot_import.py engine/tests/unit/test_schwab_market_stream.py engine/tests/unit/test_schwab_snapshot_provider.py engine/tests/unit/test_intraday_collection.py engine/tests/unit/test_schwab_snapshot_import.py
@@ -151,9 +158,13 @@ git commit -m "feat: adapt Schwab intraday snapshots"
 
 - Modify: `engine/src/nexus/provider_worker.py`
 - Modify: `engine/src/nexus/jobs/intraday_collection.py`
-- Modify: `engine/tests/unit/test_provider_worker.py`
-- Modify: `engine/tests/unit/test_intraday_collection.py`
+- Modify: `engine/src/nexus/jobs/intraday_schedule.py`
+- Modify: `engine/src/nexus/providers/market/schwab_snapshot.py`
+- Modify: `engine/tests/unit/providers/test_provider_worker.py`
+- Modify: `engine/tests/unit/jobs/test_intraday_collection.py`
+- Modify: `engine/tests/unit/providers/test_schwab_snapshot.py`
 - Create: `engine/tests/integration/test_schwab_intraday_automatic_job.py`
+- Modify: `engine/tests/integration/test_intraday_collection_pg.py`
 
 ### Contract to implement
 
@@ -170,17 +181,17 @@ Do not retry inside the adapter. The existing one-attempt Job policy and cross-b
 
 ### Steps
 
-- [ ] Add failing registry tests proving Fosun daily plus Schwab intraday coexist in one worker and proving Fosun/Alpaca configurations remain unchanged.
+- [x] Add failing registry tests proving Fosun daily plus Schwab intraday coexist in one worker and proving Fosun/Alpaca configurations remain unchanged.
 
-- [ ] Add failing handler tests proving the exact stable error mapping, raw artifact persistence before parse rejection, valid subset publication with `INTRADAY_SNAPSHOT_PARTIAL`, and no `LatestQuote` publication for incomplete, delayed, or one-sided quote evidence.
+- [x] Add failing handler tests proving the exact stable error mapping, raw artifact persistence before parse rejection, valid subset publication with `INTRADAY_SNAPSHOT_PARTIAL`, and no `LatestQuote` publication for incomplete, delayed, or one-sided quote evidence.
 
-- [ ] Implement snapshot-only selection and stable error mapping. Add `INTRADAY_PROVIDER_AUTH_REQUIRED` to the existing provider-failure cooldown set; do not change daily bundle construction, handler deadline, attempts, or the 60-second duration.
+- [x] Implement snapshot-only selection and stable error mapping. Add `INTRADAY_PROVIDER_AUTH_REQUIRED` to the existing provider-failure cooldown set; do not change daily bundle construction, handler deadline, attempts, or the 60-second duration.
 
-- [ ] Add a PostgreSQL integration test that seeds an eligible calendar row and watchlist, schedules a real v3 Schwab Job, executes `run_job_worker_once`, and asserts the persisted `Job`, `JobAttempt`, `DataArtifact`, normalized quote observations, `LatestQuote`, and query view. Replace only the external WebSocket/preferences boundary with a deterministic transcript.
+- [x] Add a PostgreSQL integration test that seeds an eligible calendar row and watchlist, schedules a real v3 Schwab Job, executes `run_job_worker_once`, and asserts the persisted `Job`, `JobAttempt`, `DataArtifact`, normalized quote observations, `LatestQuote`, and query view. Replace only the external WebSocket/preferences boundary with a deterministic transcript.
 
-- [ ] Add a second integration case where the bounded capture is incomplete: the raw artifact exists, the Job ends with the expected stable code, and neither normalized quote observations nor `LatestQuote` are written.
+- [x] Add a second integration case where the bounded capture is incomplete: the raw artifact exists, the Job ends with the expected stable code, and neither normalized quote observations nor `LatestQuote` are written.
 
-- [ ] Run focused verification:
+- [x] Run focused verification using the actual paths listed above.
 
 ```bash
 cd engine
@@ -189,7 +200,7 @@ uv run ruff check src/nexus/provider_worker.py src/nexus/jobs/intraday_collectio
 uv run mypy src/nexus/provider_worker.py src/nexus/jobs/intraday_collection.py
 ```
 
-- [ ] Commit the worker slice:
+- [x] Commit the worker slice:
 
 ```bash
 git add engine/src/nexus/provider_worker.py engine/src/nexus/jobs/intraday_collection.py engine/tests/unit/test_provider_worker.py engine/tests/unit/test_intraday_collection.py engine/tests/integration/test_schwab_intraday_automatic_job.py
@@ -203,11 +214,12 @@ git commit -m "feat: run Schwab intraday jobs"
 **Files:**
 
 - Create: `engine/src/nexus/ops/provider_worker_local.py`
+- Modify: `engine/src/nexus/provider_worker.py`
 - Modify: `engine/pyproject.toml`
-- Modify: `engine/tests/unit/test_provider_worker_local.py`
+- Create: `engine/tests/unit/ops/test_provider_worker_local.py`
 - Modify: `infra/env.example`
 - Modify: `README.md`
-- Modify: `docs/runbooks/local-read-only.md`
+- Modify: `docs/runbooks/intraday-market-monitor.md`
 
 ### Contract to implement
 
@@ -223,28 +235,28 @@ The runbook must state that:
 
 ### Steps
 
-- [ ] Add failing CLI/config tests for precedence, loopback localization of Compose hostnames, absent-secret-path rejection, secret redaction, and preservation of an explicitly supplied provider-worker alias.
+- [x] Add failing CLI/config tests for precedence, loopback localization of Compose hostnames, absent-secret-path rejection, secret redaction, and preservation of an explicitly supplied provider-worker alias.
 
-- [ ] Implement the local settings loader and CLI entry using the existing worker loop and signal handling.
+- [x] Implement the local settings loader and CLI entry using the existing worker loop and signal handling.
 
-- [ ] Add the optional `NEXUS_INTRADAY_PROVIDER=` line to `infra/env.example` with a concise explanation; do not add Schwab secrets or a Compose profile.
+- [x] Add the optional `NEXUS_INTRADAY_PROVIDER=` line to `infra/env.example` with a concise explanation; do not add Schwab secrets or a Compose profile.
 
-- [ ] Update the README and local-read-only runbook with the exact startup, shutdown, migration, and durable-state inspection commands.
+- [x] Update the README and existing intraday-monitor runbook with the exact startup, shutdown, migration, and durable-state inspection commands; do not create a duplicate local-read-only runbook.
 
-- [ ] Run focused tests and packaging checks:
+- [x] Run focused tests and packaging checks:
 
 ```bash
 cd engine
-uv run pytest tests/unit/test_provider_worker_local.py -q
-uv run ruff check src/nexus/ops/provider_worker_local.py tests/unit/test_provider_worker_local.py
-uv run mypy src/nexus/ops/provider_worker_local.py
+uv run pytest tests/unit/ops/test_provider_worker_local.py tests/unit/providers/test_provider_worker.py -q
+uv run ruff check src/nexus/provider_worker.py src/nexus/ops/provider_worker_local.py tests/unit/providers/test_provider_worker.py tests/unit/ops/test_provider_worker_local.py
+uv run mypy src/nexus/provider_worker.py src/nexus/ops/provider_worker_local.py
 uv run nexus-engine-provider-worker-local --help
 ```
 
-- [ ] Commit the local entry slice:
+- [x] Commit the local entry slice:
 
 ```bash
-git add engine/src/nexus/ops/provider_worker_local.py engine/pyproject.toml engine/tests/unit/test_provider_worker_local.py infra/env.example README.md docs/runbooks/local-read-only.md
+git add engine/src/nexus/provider_worker.py engine/src/nexus/ops/provider_worker_local.py engine/pyproject.toml engine/tests/unit/ops/test_provider_worker_local.py infra/env.example README.md docs/runbooks/intraday-market-monitor.md docs/superpowers/plans/2026-09-12-schwab-intraday-automatic-trigger.md
 git commit -m "feat: add local provider worker entry"
 ```
 
@@ -271,52 +283,49 @@ The deterministic PostgreSQL integration test proves this chain without spending
 
 ### Steps
 
-- [ ] Run the complete affected Python suite:
+- [x] Run the complete affected Python suite:
 
 ```bash
-cd engine
-uv run pytest tests/unit/test_provider_settings.py tests/unit/test_intraday_schedule.py tests/unit/test_provider_worker.py tests/unit/test_schwab_market_stream.py tests/unit/test_schwab_snapshot_provider.py tests/unit/test_intraday_collection.py tests/unit/test_schwab_snapshot_import.py tests/unit/test_provider_worker_local.py tests/integration/test_migration_0055_schwab_intraday_job_v3.py tests/integration/test_schwab_intraday_automatic_job.py -q
-uv run ruff check src/nexus/providers/settings.py src/nexus/providers/base.py src/nexus/providers/market/snapshot_contracts.py src/nexus/providers/market/schwab_snapshot.py src/nexus/jobs/intraday_schedule.py src/nexus/jobs/intraday_collection.py src/nexus/provider_worker.py src/nexus/ops/schwab_market_stream.py src/nexus/ops/schwab_snapshot_import.py src/nexus/ops/provider_worker_local.py alembic/versions/0055_schwab_intraday_job_v3.py
-uv run mypy src/nexus/providers/settings.py src/nexus/providers/base.py src/nexus/providers/market/snapshot_contracts.py src/nexus/providers/market/schwab_snapshot.py src/nexus/jobs/intraday_schedule.py src/nexus/jobs/intraday_collection.py src/nexus/provider_worker.py src/nexus/ops/schwab_market_stream.py src/nexus/ops/schwab_snapshot_import.py src/nexus/ops/provider_worker_local.py
+uv run --project engine pytest engine/tests/unit/providers/test_composition.py engine/tests/unit/providers/test_fosun_market.py engine/tests/unit/providers/test_provider_worker.py engine/tests/unit/providers/test_schwab_snapshot.py engine/tests/unit/jobs/test_intraday_schedule.py engine/tests/unit/jobs/test_intraday_collection.py engine/tests/unit/ops/test_schwab_market_stream.py engine/tests/unit/ops/test_provider_worker_local.py engine/tests/integration/test_intraday_collection_pg.py engine/tests/integration/test_intraday_schema_admission_migration.py engine/tests/integration/test_provider_runtime_role_pg.py engine/tests/integration/test_schwab_intraday_job_migration.py engine/tests/integration/test_schwab_intraday_automatic_job.py -q
+uv run --project engine ruff check engine/src/nexus/providers/settings.py engine/src/nexus/providers/base.py engine/src/nexus/providers/market/snapshot_contracts.py engine/src/nexus/providers/market/schwab_snapshot.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/market/intraday_ingestion.py engine/src/nexus/provider_worker.py engine/src/nexus/ops/schwab_market_stream.py engine/src/nexus/ops/provider_worker_local.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py engine/alembic/versions/0055_schwab_intraday_job_v3.py
+uv run --project engine mypy engine/src/nexus/providers/settings.py engine/src/nexus/providers/base.py engine/src/nexus/providers/market/snapshot_contracts.py engine/src/nexus/providers/market/schwab_snapshot.py engine/src/nexus/jobs/intraday_schedule.py engine/src/nexus/jobs/intraday_collection.py engine/src/nexus/market/intraday_ingestion.py engine/src/nexus/provider_worker.py engine/src/nexus/ops/schwab_market_stream.py engine/src/nexus/ops/provider_worker_local.py engine/src/nexus/persistence/migrations.py engine/src/nexus/persistence/models/runtime.py
 ```
 
-- [ ] Validate migration and Compose configuration through normal project entry points:
+- [x] Validate migration and Compose configuration through normal project entry points:
 
 ```bash
-cd engine
-uv run alembic upgrade head
-cd ../infra
-docker compose config --quiet
+docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app config --quiet
+docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app run --rm --no-deps --build api alembic -c engine/alembic.ini upgrade head
 ```
 
-- [ ] Inspect the current durable Job state and Schwab artifacts before starting the worker. Record exact Job IDs, terminal states, attempt counts, artifact hashes, and timestamps without printing credentials or raw personal account facts.
+- [x] Inspect the current durable Job state and Schwab artifacts before starting the worker. Record exact Job IDs, terminal states, attempt counts, artifact hashes, and timestamps without printing credentials or raw personal account facts.
 
-- [ ] Start the Mac-local worker with the documented entry and existing local configuration:
+- [x] Start the Mac-local worker with the documented entry and existing local configuration:
 
 ```bash
 cd engine
 uv run nexus-engine-provider-worker-local --repo-root /Users/wangchen/Documents/ChatGPT/投资
 ```
 
-- [ ] On a market-closed date, verify that the calendar path creates no Schwab Job and makes no Schwab network call, then stop the worker cleanly. Report that live automatic-trigger acceptance remains pending until an eligible market bucket; do not create a fake open session.
+- [x] On a market-closed date, verify that the calendar path creates no Schwab Job and makes no Schwab network call, then stop the worker cleanly. Report that live automatic-trigger acceptance remains pending until an eligible market bucket; do not create a fake open session.
 
 - [ ] During an eligible market bucket, wait for one newly persisted v3 Schwab Job to reach a terminal state. Inspect that Job once and verify its attempt, raw artifact, normalized quote, bid/ask timestamps, `delayed=false`, source identity, and query-view visibility. Stop the worker after this single bounded acceptance.
 
 - [ ] If the live Job fails, diagnose from its persisted error code and frozen artifact. Fix only a defect demonstrated by that evidence, rerun the smallest affected test set, and do not replay the provider request merely because observation output was interrupted.
 
-- [ ] Update the design status and runbook acceptance section with the actual result and remaining external dependency. Do not claim full live acceptance from integration tests or closed-market suppression.
+- [x] Update the design status and runbook acceptance section with the actual result and remaining external dependency. Do not claim full live acceptance from integration tests or closed-market suppression.
 
-- [ ] Run final repository checks:
+- [x] Run final repository checks:
 
 ```bash
 git diff --check
 git status --short
 ```
 
-- [ ] Commit only if verification required code or documentation changes:
+- [x] Commit only if verification required code or documentation changes:
 
 ```bash
-git add engine README.md docs/runbooks/local-read-only.md docs/superpowers/specs/2026-09-12-schwab-intraday-automatic-trigger-design.md infra/env.example
+git add docs/runbooks/intraday-market-monitor.md docs/superpowers/plans/2026-09-12-schwab-intraday-automatic-trigger.md docs/superpowers/specs/2026-09-12-schwab-intraday-automatic-trigger-design.md
 git commit -m "test: verify Schwab intraday automation"
 ```
 

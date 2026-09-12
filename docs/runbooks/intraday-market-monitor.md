@@ -2,7 +2,7 @@
 
 ## 当前裁决
 
-`Intraday Monitor local_read_only / default_disabled`
+`Intraday Monitor local_read_only / code_accepted / eligible_live_bucket_pending`
 
 本地 schema、只读采集链、确定性指标、API 和页面已可用。默认
 `NEXUS_INTRADAY_MONITOR_MODE=disabled`；使用已有配置和已有只读权限启动本地 Provider
@@ -12,13 +12,17 @@
 
 ## 固定能力边界
 
-- 唯一外部操作：`GET https://data.alpaca.markets/v2/stocks/snapshots`。
-- 固定查询键：`symbols`、`feed`、`currency=USD`；每批 1–30 个由数据库 authority 解析的美股 ticker。
+- Alpaca 路径的唯一外部操作是 `GET https://data.alpaca.markets/v2/stocks/snapshots`；
+  Schwab 路径先读取一次 user preference，再建立一次有界 `LEVELONE_EQUITIES` WebSocket，
+  不重连、不自动 fallback。
+- 每批标的都由数据库 authority 解析：复星最多 10 个，Alpaca 和 Schwab 最多 30 个。
 - 固定调度：15 秒 bucket；超过 bucket 结束 45 秒的任务跳过，不补发。
 - Alpaca Snapshot 每个 Job 只发起一次 HTTP 尝试；供应商失败后 60 秒内不创建新 bucket，
   不在传输层或跨 bucket 隐式放大请求。
 - 页面只轮询 NEXUS 数据库，浏览器不直连 Alpaca，也不创建采集 Job。
-- 采集只由 `nexus-engine-provider-worker` 从独立 `provider` 队列执行；通用 Agent worker 不加载 Provider handler、配置或凭据。
+- 采集只由 `nexus-engine-provider-worker` 或其 Mac 本地包装入口
+  `nexus-engine-provider-worker-local` 从独立 `provider` 队列执行；通用 Agent worker
+  不加载 Provider handler、配置或凭据。
 - Provider worker 保留独立进程、队列、凭据变量和 `provider/market` 对象前缀。
   Mac 本地默认复用已有数据库与 MinIO 身份；独立最小权限角色只是可选的部署加固。
 - Provider 对 authority 输入保持 `SELECT`-only，且不读回测成员表；输入变更与事实提交由配对 transaction advisory lock 串行。两个最小 trigger-only `SECURITY DEFINER` 分别服务两个 publication `AFTER INSERT` trigger 和一个 frozen-bar `BEFORE INSERT` trigger；Provider/`PUBLIC` 不可直接执行或写发布标记，函数或 trigger topology 漂移即启动失败。
@@ -100,9 +104,66 @@ docker compose --env-file infra/env.example -f infra/compose.yaml --profile prov
 停止后不自动切回 fixture，不补发过期 bucket，不删除或改写已落库事实，也不扩大 source policy。
 
 供应商传输失败分别落为 `INTRADAY_PROVIDER_UNAVAILABLE`、
+`INTRADAY_PROVIDER_AUTH_REQUIRED`、
 `INTRADAY_PROVIDER_STATUS_REJECTED` 或 `INTRADAY_PROVIDER_POLICY_REJECTED`，不再折叠为
 `HANDLER_FAILED`。若数据库没有覆盖当天的完整 XNYS 日历 authority，调度器以
 `INTRADAY_CALENDAR_AUTHORITY_MISSING` 明确失败；已有完整覆盖但当天休市或尚未开盘时仍正常空操作。
+
+## Mac 本地 Schwab 启动
+
+这个入口只用 `infra/.env.local` 中现有的 `DATABASE_URL` 和 `OBJECT_STORE_*`；仅当
+`PROVIDER_DATABASE_URL` 或 `PROVIDER_OBJECT_STORE_*` 已显式配置时才保留覆盖值。Compose
+服务名会转换成本机映射端口，原始配置与进程环境不会被改写。Schwab token 固定从
+`.secrets/nexus-schwab-local/tokens.json` 读取，命令行不接受任何凭据。
+
+`infra/.env.local` 的关键非秘密选择应为：
+
+```dotenv
+NEXUS_PROVIDER_RUNTIME_MODE=production
+NEXUS_MARKET_PROVIDER=fosun
+NEXUS_INTRADAY_PROVIDER=schwab
+NEXUS_INTRADAY_MONITOR_MODE=production
+NEXUS_INTRADAY_MAX_SYMBOLS=30
+```
+
+`NEXUS_MARKET_PROVIDER=fosun` 继续控制日线和通用行情；
+`NEXUS_INTRADAY_PROVIDER=schwab` 只改变盘中 Snapshot。先按普通 Compose 入口迁移，不直接
+拼接数据库密码：
+
+```bash
+docker compose --env-file infra/.env.local -f infra/compose.yaml \
+  --profile app run --rm --no-deps api alembic -c engine/alembic.ini upgrade head
+cd engine
+uv run nexus-engine-provider-worker-local --repo-root "$PWD/.."
+```
+
+单次 `Ctrl-C` 会取消 worker 并关闭数据库连接；它没有 Broker、模拟盘或实盘写权限。
+另一个终端可只读检查最近的 Schwab Job 和 raw artifact，不输出凭据或账户事实：
+
+```bash
+docker compose --env-file infra/.env.local -f infra/compose.yaml exec -T postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT id,status,attempt_count,result_code,last_error_code,effective_at,finished_at FROM jobs WHERE job_type='"'"'collect.intraday_snapshot'"'"' AND scope_id='"'"'schwab-intraday'"'"' ORDER BY created_at DESC LIMIT 5"'
+docker compose --env-file infra/.env.local -f infra/compose.yaml exec -T postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT id,sha256,schema_version,observed_at,received_at FROM data_artifacts WHERE source='"'"'schwab'"'"' ORDER BY created_at DESC LIMIT 5"'
+```
+
+闭市、盘前或完整日历明确休市时不创建 Schwab Job，也不调用 Schwab；这只证明日历抑制。
+真正的自动采集验收必须在一个可交易 bucket 中观察到新 v3 Job 的终态、raw artifact、
+`delayed=false` 的成交/双边报价及查询视图，然后立即停止本轮 worker。
+
+### 2026-09-12 本地验收记录
+
+- 受影响的单测与隔离 PostgreSQL 集成测试共 281 项通过；Ruff、Mypy 和
+  Compose 配置解析通过。
+- 正常 Compose/Alembic 入口已将本地库从 `0054_schwab_stream_policy` 升级到
+  `0055_schwab_intraday_job_v3`。
+- Mac 本地 worker 以 `production / fosun daily / schwab intraday` 配置启动，留下
+  0055 Provider heartbeat，并通过一次 `Ctrl-C` 停止。
+- 完整 XNYS authority 覆盖当天，但 2026-09-12 为周六且 session 行数为 0；
+  本轮没有创建 `schwab-intraday` Job，也没有新增 Schwab raw artifact。
+
+这只验收了真实本地入口和闭市抑制。首个可交易 bucket 仍需做一次有界真实验收；
+在出现新 v3 Job 前，不得将历史手工 Schwab artifact 当作自动触发证据。
 
 ## 回滚与保留影响
 

@@ -1,6 +1,6 @@
 # Schwab Intraday Automatic Trigger Design
 
-Status: reviewed and implementation-ready
+Status: implemented and code-accepted; closed-market acceptance passed; eligible live bucket pending
 Decision date: 2026-09-12
 
 ## 1. Outcome and boundaries
@@ -118,3 +118,22 @@ TDD acceptance covers:
 Focused Pytest, PostgreSQL integration tests, Ruff, Mypy, migration round-trip, and Compose config
 parsing must pass. Rollback stops the exact local Provider worker and restores
 `NEXUS_INTRADAY_MONITOR_MODE=disabled`; persisted evidence is not deleted or relabeled.
+
+## 7. Acceptance status on 2026-09-12
+
+The affected unit and isolated PostgreSQL suite passed with 281 tests. Ruff, Mypy, and Compose
+configuration parsing also passed. The normal Compose/Alembic entry upgraded the Mac-local
+database from `0054_schwab_stream_policy` to `0055_schwab_intraday_job_v3`, and the local worker
+started with `production / fosun daily / schwab intraday` configuration before stopping on one
+interrupt.
+
+The complete XNYS authority covered 2026-09-12 and contained no session for that Saturday. The
+worker persisted a `provider` heartbeat at migration head 0055, created no `schwab-intraday` Job,
+and did not add a Schwab artifact. The only pre-existing Schwab artifact remained
+`01a093e1-a99d-75ef-bdb2-6c8e57eb6cfc` with SHA-256
+`67f2f39cfa8338bb464bd59f890d91e42969b19d20c5f670c3d0d2b1b29ad80a`; it is not evidence of
+automatic triggering.
+
+This proves the real local entry and closed-market suppression only. Full live acceptance still
+requires one newly persisted v3 Job during an eligible XNYS bucket, followed once through raw
+artifact, normalized trade and two-sided quote, `delayed=false`, `LatestQuote`, and the query view.

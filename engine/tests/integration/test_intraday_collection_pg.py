@@ -16,7 +16,7 @@ from nexus.jobs.intraday_collection import (
     build_intraday_collection_registry,
 )
 from nexus.jobs.intraday_schedule import (
-    IntradaySnapshotJobPayloadV2,
+    IntradaySnapshotJobPayloadV3,
     bucket_for,
     build_intraday_payload,
     revalidate_intraday_payload_authority,
@@ -104,6 +104,24 @@ def _alpaca_settings() -> ProviderSettings:
         intraday_max_symbols=30,
         alpaca_intraday_feed="iex",
         alpaca_intraday_delivery_mode="real_time",
+        sec_contact="owner@example.com",
+        fred_api_key="fred-canary",
+    )
+
+
+def _schwab_settings() -> ProviderSettings:
+    return ProviderSettings(
+        runtime_mode="production",
+        market_provider="fosun",
+        intraday_provider="schwab",
+        intraday_monitor_mode="production",
+        intraday_max_symbols=30,
+        fosun_market_gateway_origin="https://fosun-gateway.internal:8443",
+        fosun_market_gateway_key_id="synthetic-market-current",
+        fosun_market_gateway_secret="synthetic-market-secret",
+        fosun_market_gateway_client_cert="/synthetic/market.crt",
+        fosun_market_gateway_client_key="/synthetic/market.key",
+        fosun_market_gateway_client_ca="/synthetic/ca.crt",
         sec_contact="owner@example.com",
         fred_api_key="fred-canary",
     )
@@ -764,7 +782,7 @@ async def test_ready_intraday_claim_preempts_slow_daily_shard_queue(
 
 
 @pytest.mark.asyncio
-async def test_schedule_enqueues_explicit_alpaca_v2_without_fosun_authority(
+async def test_schedule_enqueues_explicit_alpaca_v3_without_fosun_authority(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -786,10 +804,41 @@ async def test_schedule_enqueues_explicit_alpaca_v2_without_fosun_authority(
         )
 
     assert job is not None
-    assert job.schema_version == "intraday_snapshot_job_v2"
+    assert job.schema_version == "intraday_snapshot_job_v3"
     assert job.scope_id == "alpaca-intraday"
     assert job.payload["source"] == "alpaca"
     assert job.payload["feed"] == "iex"
+    assert job.payload["quote_authority"] is None
+    assert job.payload["bars_authority"] is None
+
+
+@pytest.mark.asyncio
+async def test_schedule_uses_schwab_only_for_intraday_jobs(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_schedule(migrated_database_url)
+
+    async def forbidden_fosun_authority(*_: object, **__: object) -> object:
+        raise AssertionError("Schwab intraday scheduling must not load Fosun authority")
+
+    monkeypatch.setattr(
+        "nexus.jobs.intraday_schedule.load_frozen_fosun_market_authority",
+        forbidden_fosun_authority,
+    )
+    settings = _schwab_settings()
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        job = await schedule_due_intraday_snapshot(session, now=NOW, settings=settings)
+
+    assert job is not None
+    assert settings.market_provider.value == "fosun"
+    assert job.schema_version == "intraday_snapshot_job_v3"
+    assert job.scope_id == "schwab-intraday"
+    assert job.payload["source"] == "schwab"
+    assert job.payload["feed"] == "l1"
+    assert job.payload["delivery_mode"] == "real_time"
+    assert job.payload["include_minute_bars"] is False
     assert job.payload["quote_authority"] is None
     assert job.payload["bars_authority"] is None
 
@@ -845,8 +894,13 @@ async def test_schedule_fails_clearly_when_calendar_authority_does_not_cover_tod
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_code",
+    ("INTRADAY_PROVIDER_UNAVAILABLE", "INTRADAY_PROVIDER_AUTH_REQUIRED"),
+)
 async def test_provider_failure_cools_down_new_buckets_for_sixty_seconds(
     migrated_database_url: str,
+    failure_code: str,
 ) -> None:
     """A provider outage must not create a new dead letter every 15 seconds."""
 
@@ -874,7 +928,7 @@ async def test_provider_failure_cools_down_new_buckets_for_sixty_seconds(
             session,
             claim=claim,
             now=failed_at,
-            error_code="INTRADAY_PROVIDER_UNAVAILABLE",
+            error_code=failure_code,
         )
 
     async with factory() as session, session.begin():
@@ -928,7 +982,7 @@ async def test_execution_authority_revalidation_detects_watchlist_drift(
     async with factory() as session, session.begin():
         job = await schedule_due_intraday_snapshot(session, now=NOW, settings=_settings())
     assert job is not None
-    payload = IntradaySnapshotJobPayloadV2.model_validate(job.payload)
+    payload = IntradaySnapshotJobPayloadV3.model_validate(job.payload)
 
     async with factory() as session, session.begin():
         assert await revalidate_intraday_payload_authority(

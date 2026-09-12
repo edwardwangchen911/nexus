@@ -10,11 +10,13 @@ from uuid import UUID
 
 import nexus.jobs.intraday_collection as intraday_collection_module
 import pytest
+from nexus.jobs import intraday_schedule
 from nexus.jobs.intraday_collection import build_intraday_collection_registry
 from nexus.jobs.intraday_schedule import (
     bucket_for,
     build_alpaca_intraday_payload,
     build_intraday_payload,
+    build_schwab_intraday_payload,
 )
 from nexus.jobs.market_authority import FrozenFosunMarketAuthority
 from nexus.jobs.models import JobType, RetryPolicy
@@ -30,6 +32,7 @@ from nexus.providers.market.fosun import (
     FosunSnapshotReadGuard,
 )
 from nexus.providers.market.fosun_gateway import RawGatewayResponse
+from nexus.providers.market.schwab_snapshot import SchwabSnapshotFetchError
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     MarketSnapshot,
@@ -193,6 +196,40 @@ class _UnavailableAlpacaProvider(_AlpacaProvider):
         raise HttpPolicyError(self.error_code)
 
 
+@dataclass
+class _SchwabProvider(_AlpacaProvider):
+    async def fetch_raw_snapshots(
+        self,
+        request: IntradaySnapshotRequest,
+    ) -> RawSnapshotEnvelope:
+        self.calls += 1
+        return RawSnapshotEnvelope(
+            raw_payload=b'{"schema":"schwab_level_one_stream_v1"}',
+            received_at=NOW,
+            provenance=MarketDataProvenance(
+                source="schwab",
+                feed="l1",
+                adjustment="raw",
+                interval="1Min",
+                mode="read_only",
+                delivery_mode="real_time",
+            ),
+        )
+
+    def normalize_raw_snapshots(
+        self,
+        envelope: RawSnapshotEnvelope,
+        request: IntradaySnapshotRequest,
+    ) -> SnapshotBatch:
+        assert self.snapshot is not None
+        return SnapshotBatch(
+            snapshots=(self.snapshot,),
+            raw_payload=envelope.raw_payload,
+            received_at=envelope.received_at,
+            provenance=envelope.provenance,
+        )
+
+
 async def _archive_raw(*_: object, **__: object) -> object:
     return SimpleNamespace(raw_artifact=SimpleNamespace())
 
@@ -250,10 +287,85 @@ def _alpaca_payload() -> object:
     )
 
 
+def _schwab_payload() -> object:
+    return build_schwab_intraday_payload(
+        calendar_authority_id=CALENDAR_ID,
+        session="2026-08-28",
+        bucket=bucket_for(NOW),
+        instruments=(
+            (INSTRUMENT_ID, "AAPL"),
+            (UUID("019d0000-0000-7000-8000-0000000000a2"), "MSFT"),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_schwab_requested_symbol_subset_is_ingested_then_reported_partial() -> None:
+    provider = _SchwabProvider(
+        snapshot=MarketSnapshot(
+            instrument_id=InstrumentId(INSTRUMENT_ID),
+            symbol="AAPL",
+            trade=SnapshotTrade(price=Decimal("100"), observed_at=NOW),
+            quote=SnapshotQuote(
+                bid=Decimal("99.99"),
+                ask=Decimal("100.01"),
+                observed_at=NOW,
+            ),
+            minute_bar=None,
+        )
+    )
+    ingested: list[SnapshotBatch] = []
+
+    async def ingest(*args: object, **kwargs: object) -> object:
+        del kwargs
+        ingested.append(cast(SnapshotBatch, args[2]))
+        return SimpleNamespace(
+            created_trade_observations=1,
+            created_quote_observations=1,
+            created_bar_authorities=0,
+            replayed=0,
+        )
+
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        ingest=ingest,
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    result = await spec.handler(_context(_schwab_payload()))
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "INTRADAY_SNAPSHOT_PARTIAL"
+    assert [item.symbol for item in ingested[0].snapshots] == ["AAPL"]
+
+
 def _settings() -> ProviderSettings:
     return ProviderSettings(
         runtime_mode="production",
         intraday_monitor_mode="production",
+        fosun_market_gateway_origin="https://fosun-gateway.internal:8443",
+        fosun_market_gateway_key_id="synthetic-market-current",
+        fosun_market_gateway_secret="synthetic-market-secret",
+        fosun_market_gateway_client_cert="/synthetic/market.crt",
+        fosun_market_gateway_client_key="/synthetic/market.key",
+        fosun_market_gateway_client_ca="/synthetic/ca.crt",
+        sec_contact="owner@example.com",
+        fred_api_key="fred-canary",
+    )
+
+
+def _schwab_settings() -> ProviderSettings:
+    return ProviderSettings(
+        runtime_mode="production",
+        intraday_provider="schwab",
+        intraday_monitor_mode="production",
+        intraday_max_symbols=30,
         fosun_market_gateway_origin="https://fosun-gateway.internal:8443",
         fosun_market_gateway_key_id="synthetic-market-current",
         fosun_market_gateway_secret="synthetic-market-secret",
@@ -321,6 +433,8 @@ def test_collection_registry_is_one_shot() -> None:
     spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
 
     assert spec is not None
+    assert spec.schema_version == "intraday_snapshot_job_v3"
+    assert spec.payload_model is intraday_schedule.IntradaySnapshotJobPayloadV3
     assert spec.retry_policy is RetryPolicy.NEVER
     assert spec.max_attempts == 1
 
@@ -1132,6 +1246,103 @@ async def test_alpaca_transport_failure_maps_to_a_safe_actionable_code(
         await spec.handler(_context(_alpaca_payload()))
 
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_schwab_authentication_failure_maps_to_auth_required() -> None:
+    class _AuthFailure(_SchwabProvider):
+        async def fetch_raw_snapshots(
+            self,
+            request: IntradaySnapshotRequest,
+        ) -> RawSnapshotEnvelope:
+            del request
+            self.calls += 1
+            raise SchwabSnapshotFetchError("INTRADAY_PROVIDER_AUTH_REQUIRED")
+
+    provider = _AuthFailure()
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_schwab_settings(),
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    with pytest.raises(UnsafeJobError, match="INTRADAY_PROVIDER_AUTH_REQUIRED"):
+        await spec.handler(_context(_schwab_payload()))
+
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_code", "job_code", "dead_letter"),
+    (
+        (
+            "PROVIDER_MARKET_STREAM_INCOMPLETE",
+            "INTRADAY_PROVIDER_UNAVAILABLE",
+            True,
+        ),
+        (
+            "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID",
+            "INTRADAY_PROVIDER_POLICY_REJECTED",
+            True,
+        ),
+        (
+            "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID",
+            "INTRADAY_CONTRACT_MISMATCH",
+            False,
+        ),
+    ),
+)
+async def test_schwab_parse_failure_is_mapped_after_raw_archive(
+    provider_code: str,
+    job_code: str,
+    dead_letter: bool,
+) -> None:
+    archived: list[bytes] = []
+
+    class _ParseFailure(_SchwabProvider):
+        def normalize_raw_snapshots(
+            self,
+            envelope: RawSnapshotEnvelope,
+            request: IntradaySnapshotRequest,
+        ) -> SnapshotBatch:
+            del envelope, request
+            raise MarketProviderPayloadError(provider_code)
+
+    async def archive(
+        _session: object,
+        _store: object,
+        envelope: RawSnapshotEnvelope,
+        **_kwargs: object,
+    ) -> object:
+        archived.append(envelope.raw_payload)
+        return SimpleNamespace(raw_artifact=SimpleNamespace())
+
+    provider = _ParseFailure()
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_schwab_settings(),
+        archive_raw=archive,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    if dead_letter:
+        with pytest.raises(UnsafeJobError, match=job_code):
+            await spec.handler(_context(_schwab_payload()))
+    else:
+        result = await spec.handler(_context(_schwab_payload()))
+        assert result.result_code == job_code
+
+    assert archived == [b'{"schema":"schwab_level_one_stream_v1"}']
 
 
 @pytest.mark.asyncio

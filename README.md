@@ -92,6 +92,20 @@ npm run dev
 完整配置字段、端口调整、readiness 检查、停止和故障处理见
 [本地开发 runbook](docs/runbooks/local-development.md)。普通开发不要启用 `broker` profile。
 
+已有本地 PostgreSQL、MinIO、复星日线配置及受保护的 Schwab 授权时，可只把盘中来源切到
+Schwab。先通过上述 Compose 入口迁移到当前 head，再在 `infra/.env.local` 设置
+`NEXUS_PROVIDER_RUNTIME_MODE=production`、`NEXUS_MARKET_PROVIDER=fosun`、
+`NEXUS_INTRADAY_PROVIDER=schwab` 和 `NEXUS_INTRADAY_MONITOR_MODE=production`，然后启动：
+
+```bash
+cd engine
+uv run nexus-engine-provider-worker-local --repo-root "$PWD/.."
+```
+
+该入口复用现有本地 PostgreSQL 与 MinIO，不要求额外身份或 Compose profile；按一次
+`Ctrl-C` 即可停止。闭市启动只验收日历抑制，不代表 Schwab 行情采集成功。配置、迁移和
+持久化 Job 核对命令见[盘中市场监控手册](docs/runbooks/intraday-market-monitor.md)。
+
 ## 验证
 
 前端与合同：

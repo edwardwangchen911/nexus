@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.jobs.errors import UnsafeJobError
 from nexus.jobs.intraday_schedule import (
-    IntradaySnapshotJobPayloadV2,
+    IntradaySnapshotJobPayloadV3,
     revalidate_intraday_payload_authority,
 )
 from nexus.jobs.market_authority import (
@@ -45,6 +45,7 @@ from nexus.providers.market.fosun import (
     FosunSnapshotReadGuard,
 )
 from nexus.providers.market.fosun_gateway import RawGatewayResponse
+from nexus.providers.market.schwab_snapshot import SchwabSnapshotFetchError
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     RawSnapshotEnvelope,
@@ -96,7 +97,7 @@ class RevalidateAuthority(Protocol):
     async def __call__(
         self,
         session: AsyncSession,
-        payload: IntradaySnapshotJobPayloadV2,
+        payload: IntradaySnapshotJobPayloadV3,
         *,
         effective_at: datetime,
         settings: ProviderSettings,
@@ -121,7 +122,7 @@ class _IntradayAuthorityGuard:
         self,
         *,
         context: JobHandlerContext,
-        payload: IntradaySnapshotJobPayloadV2,
+        payload: IntradaySnapshotJobPayloadV3,
         settings: ProviderSettings,
         revalidate: RevalidateAuthority,
         request: IntradaySnapshotRequest,
@@ -262,7 +263,7 @@ def build_intraday_collection_registry(
                 outcome="skipped",
                 result_code="INTRADAY_ONE_SHOT_ALREADY_ATTEMPTED",
             )
-        payload = cast(IntradaySnapshotJobPayloadV2, context.payload)
+        payload = cast(IntradaySnapshotJobPayloadV3, context.payload)
         if payload.source == "fosun" and loop.time() >= fetch_deadline:
             return JobHandlerResult(
                 outcome="skipped",
@@ -335,6 +336,8 @@ def build_intraday_collection_registry(
                     )
         except HttpPolicyError as exc:
             raise UnsafeJobError(_provider_request_error_code(str(exc))) from None
+        except SchwabSnapshotFetchError as exc:
+            raise UnsafeJobError(exc.result_code) from None
         except FosunSnapshotReadAborted as exc:
             if (
                 exc.result_code == "INTRADAY_SNAPSHOT_READ_CANCELLED"
@@ -386,7 +389,15 @@ def build_intraday_collection_registry(
             raise UnsafeJobError("INTRADAY_RAW_ARCHIVE_DEADLINE_EXCEEDED") from None
         try:
             batch = provider.normalize_raw_snapshots(envelope, request)
-        except MarketProviderPayloadError:
+        except MarketProviderPayloadError as error:
+            if payload.source == "schwab":
+                result_code = _schwab_payload_error_code(str(error))
+                if result_code != "INTRADAY_CONTRACT_MISMATCH":
+                    raise UnsafeJobError(result_code) from None
+                return JobHandlerResult(
+                    outcome="skipped",
+                    result_code=result_code,
+                )
             return JobHandlerResult(
                 outcome="skipped",
                 result_code="INTRADAY_SNAPSHOT_PAYLOAD_INVALID",
@@ -446,7 +457,7 @@ def build_intraday_collection_registry(
                     else "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH"
                 ),
             )
-        incomplete = sum(
+        incomplete = len(request.instruments) - len(batch.snapshots) + sum(
             snapshot.trade is None
             or snapshot.quote is None
             or (payload.include_minute_bars and snapshot.minute_bar is None)
@@ -505,8 +516,8 @@ def build_intraday_collection_registry(
         (
             JobHandlerSpec(
                 job_type=JobType.COLLECT_INTRADAY_SNAPSHOT,
-                schema_version="intraday_snapshot_job_v2",
-                payload_model=IntradaySnapshotJobPayloadV2,
+                schema_version="intraday_snapshot_job_v3",
+                payload_model=IntradaySnapshotJobPayloadV3,
                 queue=QueueName.PROVIDER,
                 timeout_seconds=30,
                 retry_policy=RetryPolicy.NEVER,
@@ -524,6 +535,17 @@ def _provider_request_error_code(code: str) -> str:
     if code == "STATUS_REJECTED":
         return "INTRADAY_PROVIDER_STATUS_REJECTED"
     return "INTRADAY_PROVIDER_POLICY_REJECTED"
+
+
+def _schwab_payload_error_code(code: str) -> str:
+    if code in {
+        "PROVIDER_MARKET_STREAM_INCOMPLETE",
+        "SCHWAB_MARKET_STREAM_EMPTY",
+    }:
+        return "INTRADAY_PROVIDER_UNAVAILABLE"
+    if code == "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID":
+        return "INTRADAY_PROVIDER_POLICY_REJECTED"
+    return "INTRADAY_CONTRACT_MISMATCH"
 
 
 async def _archive_snapshot_raw(
@@ -555,12 +577,18 @@ def _batch_matches_payload(
     batch: SnapshotBatch,
     request: IntradaySnapshotRequest,
     *,
-    source: Literal["fosun", "alpaca"],
+    source: Literal["fosun", "alpaca", "schwab"],
 ) -> bool:
     expected = tuple((item.instrument_id, item.symbol) for item in request.instruments)
     actual = tuple((item.instrument_id, item.symbol) for item in batch.snapshots)
+    shape_matches = actual == expected
+    if source == "schwab" and actual:
+        actual_set = set(actual)
+        shape_matches = len(actual_set) == len(actual) and actual == tuple(
+            item for item in expected if item in actual_set
+        )
     return (
-        actual == expected
+        shape_matches
         and batch.provenance.source == source
         and batch.provenance.feed == request.feed
         and batch.provenance.delivery_mode == request.delivery_mode
