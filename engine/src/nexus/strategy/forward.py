@@ -42,6 +42,7 @@ from nexus.quality.source_policy import (
     load_source_policy_v2,
     source_policy_v2_supports_adjusted_prices,
 )
+from nexus.risk.models import PaperDecisionAuthority
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _QUANTUM = Decimal("0.000000000001")
@@ -126,6 +127,11 @@ class ForwardStrategyDecision(_FrozenModel):
     cash_weight: Decimal
     reason: Literal["WEEKLY_REBALANCE"]
     targets: tuple[ForwardStrategyTarget, ...]
+
+    @property
+    def execution_source_policy_id(self) -> None:
+        """Registered decisions intentionally have no separate fill-price policy."""
+        return None
 
     @field_validator("cash_weight", mode="before")
     @classmethod
@@ -345,9 +351,9 @@ async def evaluate_registered_forward_strategy_decision(
     )
 
 
-async def _authority_is_valid(
+async def require_paper_decision_authority(
     session: AsyncSession,
-    decision: ForwardStrategyDecision,
+    decision: PaperDecisionAuthority,
 ) -> None:
     account = await session.get(PaperAccountRecord, decision.account_id)
     if account is None or account.portfolio_id != decision.portfolio_id:
@@ -422,6 +428,13 @@ def _domain_from_records(
     record: StrategyDecisionRecord,
     targets: Sequence[StrategyDecisionTargetRecord],
 ) -> ForwardStrategyDecision:
+    if (
+        record.decision_origin != "registered_strategy"
+        or record.strategy_definition_id is None
+        or record.registry_event_id is None
+        or record.champion_generation is None
+    ):
+        raise ValueError("stored decision is not a registered strategy decision")
     decision = ForwardStrategyDecision(
         account_id=record.account_id,
         portfolio_id=record.portfolio_id,
@@ -529,7 +542,7 @@ async def persist_forward_strategy_decision(
     )
     if not source_policy_v2_supports_adjusted_prices():
         raise ValueError("adjusted price authority is unavailable")
-    await _authority_is_valid(session, decision)
+    await require_paper_decision_authority(session, decision)
     registry = await session.get(StrategyRegistryHeadRecord, "internal_paper")
     if registry is None:
         raise ValueError("internal-paper strategy registry is incomplete")

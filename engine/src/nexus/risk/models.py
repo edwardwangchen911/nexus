@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, localcontext
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import (
@@ -169,6 +169,50 @@ class RiskMarketSnapshot(FrozenRiskModel):
         if late_price or late_proof:
             raise ValueError("authority was available after decision time")
         return self
+
+
+@runtime_checkable
+class PaperDecisionTarget(Protocol):
+    @property
+    def instrument_id(self) -> UUID: ...
+
+    @property
+    def target_weight(self) -> Decimal: ...
+
+    @property
+    def exit(self) -> bool: ...
+
+    @property
+    def strategy_priority(self) -> int: ...
+
+    @property
+    def reason(self) -> str: ...
+
+
+@runtime_checkable
+class PaperDecisionAuthority(Protocol):
+    """Fields shared by registry and Agent paper decisions at the risk boundary."""
+
+    account_id: UUID
+    portfolio_id: UUID
+    decision_session: date
+    decision_time: datetime
+    execution_session: date
+    source_policy_id: UUID
+
+    @property
+    def execution_source_policy_id(self) -> UUID | None: ...
+
+    calendar_authority_id: UUID
+    universe_snapshot_id: UUID
+    quality_report_id: UUID
+    portfolio_projection_hash: str
+    authority_hash: str
+    decision_hash: str
+    cash_weight: Decimal
+
+    @property
+    def targets(self) -> tuple[PaperDecisionTarget, ...]: ...
 
 
 class PaperPositionBalance(FrozenRiskModel):

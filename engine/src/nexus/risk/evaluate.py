@@ -9,6 +9,7 @@ from uuid import UUID
 from nexus.risk.canonical import canonical_risk_evaluation_result_hash
 from nexus.risk.models import (
     OrderCandidate,
+    PaperDecisionAuthority,
     PaperPortfolioProjection,
     RiskEvaluation,
     RiskMarketSnapshot,
@@ -21,7 +22,6 @@ from nexus.risk.policy import (
     drawdown_allows_candidate,
     verify_policy_content_hash,
 )
-from nexus.strategy.forward import ForwardStrategyDecision
 
 _QUANTUM = Decimal("0.000000000001")
 _ZERO = Decimal(0)
@@ -138,7 +138,7 @@ def _preflight(
 
 
 def derive_order_candidates(
-    decision: ForwardStrategyDecision,
+    decision: PaperDecisionAuthority,
     portfolio: PaperPortfolioProjection,
     market: RiskMarketSnapshot,
 ) -> tuple[OrderCandidate, ...]:

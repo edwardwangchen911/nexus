@@ -66,7 +66,7 @@ def _digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _target_payload(decision: ForwardStrategyDecision) -> list[dict[str, Any]]:
+def canonical_target_payload(decision: ForwardStrategyDecision) -> list[dict[str, Any]]:
     return [
         {
             "exit": target.exit,
@@ -103,7 +103,7 @@ def canonical_forward_strategy_decision_hash(decision: ForwardStrategyDecision) 
             "strategy_parameters_hash": _hash(decision.strategy_parameters_hash),
             "cash_weight": _decimal(decision.cash_weight),
             "reason": decision.reason,
-            "targets": _target_payload(decision),
+            "targets": canonical_target_payload(decision),
         }
     )
 
@@ -133,7 +133,7 @@ def canonical_legacy_forward_strategy_decision_hash(
             "strategy_parameters_hash": _hash(decision.strategy_parameters_hash),
             "cash_weight": _decimal(decision.cash_weight),
             "reason": decision.reason,
-            "targets": _target_payload(decision),
+            "targets": canonical_target_payload(decision),
         }
     )
 
