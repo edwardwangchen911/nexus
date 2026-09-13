@@ -15,6 +15,12 @@ Agent 候选严格取自已发布的 `us_liquid/us_liquid_v1` 成员；当前本
 `fosun_local_read_only` 可直接复用。Agent 路径不要求另造 `QualityReport`，但注册策略原有的
 PASS QualityReport 门槛保持不变。候选为空或超过五只时停止，不自动扩大股票池。
 
+若预检缺少候选的决策日复权日线，先按
+[Alpaca 日线手册](alpaca-prices-local.md)在私有新目录完成一次 `adjustment=all` 归档，再以
+`--purpose agent-paper-decision` 导入；历史日线采集不要求美股开市。若缺少行业 authority，
+按[行业审核手册](sector-exposure-local.md)生成单候选私有审核单，确认来源后再导入。两者都不
+创建周期、研究 Job 或订单。
+
 先读取持久化状态，顺序固定为：
 
 ```text

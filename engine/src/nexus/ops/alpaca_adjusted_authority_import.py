@@ -1,4 +1,4 @@
-"""Import one verified Alpaca all-adjusted archive as diagnostic price authority."""
+"""Import one verified Alpaca all-adjusted archive for an explicit price purpose."""
 
 import argparse
 import asyncio
@@ -8,7 +8,7 @@ import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import NoReturn
+from typing import Literal, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -21,12 +21,22 @@ from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
+from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider, AlpacaRawResponse
 from nexus.providers.market.alpaca_http import load_exact_json
 from nexus.research.alpaca_prices_archive import ValidatedPriceArchive, load_price_collection
 from nexus.settings import EngineSettings
 
 _PAGE = re.compile(r"^page-\d{3}\.json$")
+AuthorityPurpose = Literal["diagnostic", "agent-paper-decision"]
+
+
+def _source_policy_id(purpose: AuthorityPurpose) -> UUID | None:
+    if purpose == "diagnostic":
+        return None
+    if purpose == "agent-paper-decision":
+        return PAPER_DECISION_SOURCE_POLICY_ID
+    raise ValueError("ADJUSTED_AUTHORITY_PURPOSE_INVALID")
 
 
 class _ArchivedTransport:
@@ -56,6 +66,7 @@ async def import_adjusted_authority(
     *,
     instrument_id: UUID,
     collection_dir: Path,
+    purpose: AuthorityPurpose = "diagnostic",
     store: S3ProviderEvidenceStore | None = None,
 ) -> dict[str, object]:
     database = make_url(settings.database_url) if settings.database_url else None
@@ -108,7 +119,13 @@ async def import_adjusted_authority(
                 )
                 if head != CURRENT_MIGRATION_HEAD:
                     raise ValueError("ADJUSTED_AUTHORITY_SCHEMA_NOT_READY")
-                result = await ingest_price_page(session, object_store, page, commit=False)
+                result = await ingest_price_page(
+                    session,
+                    object_store,
+                    page,
+                    source_policy_id=_source_policy_id(purpose),
+                    commit=False,
+                )
                 if result.price_authority is None or result.price_evidence_ref is None:
                     raise ValueError("ADJUSTED_AUTHORITY_NOT_FINALIZED")
                 return {
@@ -140,6 +157,11 @@ def main() -> int:
     parser.add_argument("--instrument-id", type=UUID, required=True)
     parser.add_argument("--collection-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--purpose",
+        choices=("diagnostic", "agent-paper-decision"),
+        default="diagnostic",
+    )
     started = False
     try:
         args = parser.parse_args()
@@ -154,6 +176,7 @@ def main() -> int:
                 settings,
                 instrument_id=args.instrument_id,
                 collection_dir=args.collection_dir,
+                purpose=args.purpose,
             )
         )
         write_private(args.output, json.dumps(result, sort_keys=True).encode())

@@ -328,3 +328,62 @@ async def test_review_template_contains_only_latest_snapshot_sector_gaps(
         await sector_exposure_local.export_review_template(
             settings(migrated_database_url), output_path=output_path
         )
+
+
+@pytest.mark.asyncio
+async def test_review_template_can_scope_one_agent_paper_candidate(
+    migrated_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """The Agent workflow must not depend on a real-portfolio snapshot."""
+    from nexus.ops import sector_exposure_local
+
+    decision_time = datetime(2026, 1, 2, tzinfo=UTC)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        await _seed_instruments(session)
+        session.add(
+            InstrumentAlias(
+                instrument_id=STOCK_ID,
+                symbol="AGENT-CANDIDATE",
+                alias_type="ticker",
+                valid_from=date(2026, 1, 1),
+                valid_to=None,
+            )
+        )
+
+    tmp_path.chmod(0o700)
+    output_path = tmp_path / "agent-sector-review.json"
+    result = await sector_exposure_local.export_review_template(
+        settings(migrated_database_url),
+        output_path=output_path,
+        instrument_id=STOCK_ID,
+        decision_time=decision_time,
+    )
+    payload = json.loads(output_path.read_bytes())
+
+    assert result == {
+        "status": "review_template_written",
+        "required_instrument_count": 1,
+        "missing_instrument_count": 1,
+        "execution_locked": True,
+        "model_called": False,
+    }
+    assert payload["scope"] == "agent_paper_candidate"
+    assert payload["decision_time"] == decision_time.isoformat()
+    assert "portfolio_snapshot_id" not in payload
+    assert payload["missing_instruments"] == [
+        {
+            "symbol": "AGENT-CANDIDATE",
+            "instrument_id": str(STOCK_ID),
+            "asset_type": "common_stock",
+            "import_row": {
+                "instrument_id": str(STOCK_ID),
+                "sector_code": "",
+                "weight": "",
+                "as_of": "",
+                "source_url": "",
+                "content_hash": "",
+            },
+        }
+    ]

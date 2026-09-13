@@ -30,6 +30,19 @@ uv run --project engine nexus-engine-sector-exposure-local \
 行业代码和待填写导入行。文件以 `0600` 新建且不覆盖已有文件；终端只返回聚合数量，
 不输出持仓代码或内部标识。模板是人工审核工作单，不是行业证据，也不能直接解除门禁。
 
+Agent 内部模拟候选不依赖真实组合快照。为一个已冻结候选生成私有审核单时，同时提供其本地
+Instrument ID 和周期 decision time；入口只读取该时点有效的唯一 ticker 与既有行业事实：
+
+```bash
+uv run --project engine nexus-engine-sector-exposure-local \
+  --repo-root /absolute/path/to/repo \
+  --review-template /absolute/private/path/sector-review/agent-review.json \
+  --instrument-id "$NEXUS_AGENT_CANDIDATE_ID" \
+  --decision-time "$NEXUS_AGENT_DECISION_TIME"
+```
+
+该模式最多输出一个缺口，不扩展股票池，也不把供应商分类提示自动升级为风险权威。
+
 审核完成后，将 `import_row` 按上述严格列顺序整理为 CSV，再运行：
 
 ```bash

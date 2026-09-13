@@ -50,6 +50,15 @@ def test_multi_page_archive_is_not_silently_truncated() -> None:
         _ArchivedTransport(_archive(pages=2))
 
 
+def test_agent_paper_purpose_selects_its_decision_price_policy() -> None:
+    entry = importlib.import_module("nexus.ops.alpaca_adjusted_authority_import")
+
+    assert entry._source_policy_id("diagnostic") is None
+    assert entry._source_policy_id("agent-paper-decision") == UUID(
+        "2573d63a-fb6d-53d3-8d44-207766a78322"
+    )
+
+
 def test_invalid_cli_fails_before_loading_local_configuration(monkeypatch, capsys) -> None:
     name = "nexus.ops.alpaca_adjusted_authority_import"
     assert importlib.util.find_spec(name) is not None
