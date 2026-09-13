@@ -65,7 +65,7 @@ def _cycle() -> AgentPaperCycleRecord:
         decision_time=AT,
         execution_session=date(2026, 9, 14),
         universe_snapshot_id=UUID(int=5),
-        quality_report_id=UUID(int=6),
+        quality_report_id=None,
         decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
         execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
         candidate_manifest=[],
@@ -133,7 +133,7 @@ def _market(
         source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
         calendar_authority_id=UUID(int=4),
         universe_snapshot_id=UUID(int=5),
-        quality_report_id=UUID(int=6),
+        quality_report_id=None,
         required_instrument_ids=ids,
         whitelisted_instrument_ids=ids,
         prices=tuple(

@@ -4,6 +4,24 @@
 
 在仓库根目录使用项目 Python 环境，沿用已配置的 `DATABASE_URL`。数据库只接受 `postgresql+asyncpg` 和 `localhost`、`127.0.0.1` 或 `::1`；不支持通过 URL 查询参数覆盖连接地址。不要把连接串、账户事实或命令结果粘贴到聊天。
 
+Agent 单次闭环还要求同一决策交易日的公司行动、停牌和退市查询证明。当前正式入口仅支持
+`us_liquid_v1` 中唯一的 AAPL/Nasdaq 首环，不泛化到其他标的或交易所：
+
+```sh
+uv run --project engine nexus-engine-agent-risk-authority \
+  --decision-session <纽约当日YYYY-MM-DD> \
+  --decision-time <已存权威日历中的UTC决策时刻> \
+  --output-dir <新的本机受保护目录>
+```
+
+入口先查数据库；若同一股票池和交易日已有三条完整证明，则直接核验并返回，不再次请求来源。
+首次运行只读 Alpaca Corporate Actions、Nasdaq Trader 当前停牌 RSS 和 Nasdaq 当日上市目录，
+把原始响应写入新目录后才追加数据库证明。停牌 RSS 超过两分钟、目录不是纽约当日、分页未穷尽、
+响应异常或任何来源失败时均不写证明。首次采集只能在权威决策时刻前两分钟内启动；同日旧停牌
+快照也不能复用，后续闭环保持 `RISK_INPUT_REQUIRED`。`complete` 仅表示指定查询和分页已完整执行，
+不把 Alpaca 标注的来源完整性未知改写为全球事实完备。该命令不调用模型，
+不创建周期、决策、订单、成交或账本记录；页面仍只读已持久化结果。
+
 ```sh
 PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.paper_once --help
 ```
