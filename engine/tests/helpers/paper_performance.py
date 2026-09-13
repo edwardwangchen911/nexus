@@ -36,6 +36,8 @@ async def seed_paper_performance(
     source: str = "fixture",
     feed: str = "fixture",
     delivery_mode: str = "fixture",
+    adjustment: str = "raw",
+    source_policy_id: UUID | None = None,
     exact_sector: bool = True,
     sector_created_at: datetime = MARKET_CLOSE,
 ) -> PaperPerformanceSeed:
@@ -81,7 +83,7 @@ async def seed_paper_performance(
                     source=source,
                     feed=feed,
                     delivery_mode=delivery_mode,
-                    adjustment="raw",
+                    adjustment=adjustment,
                     interval="1Day",
                     start_at=MARKET_CLOSE,
                     end_at=MARKET_CLOSE,
@@ -108,7 +110,12 @@ async def seed_paper_performance(
                     )
                 )
                 await session.flush()
-                assert await finalize_price_bar_set(session, manifest) is not None
+                assert (
+                    await finalize_price_bar_set(
+                        session, manifest, source_policy_id=source_policy_id
+                    )
+                    is not None
+                )
             if exact_sector:
                 session.add(
                     SectorExposure(

@@ -149,6 +149,7 @@ async def ingest_price_page(
     calendar_authority_id: UUID | None = None,
     gateway_request_start_at: datetime | None = None,
     gateway_request_end_at: datetime | None = None,
+    source_policy_id: UUID | None = None,
     commit: bool = True,
 ) -> MarketIngestionResult:
     """Prepare immutable objects, then atomically persist their metadata."""
@@ -170,6 +171,7 @@ async def ingest_price_page(
             calendar_authority_id=calendar_authority_id,
             gateway_request_start_at=gateway_request_start_at,
             gateway_request_end_at=gateway_request_end_at,
+            source_policy_id=source_policy_id,
         )
         if commit:
             await session.commit()
@@ -246,6 +248,7 @@ async def persist_prepared_price_page(
     calendar_authority_id: UUID | None = None,
     gateway_request_start_at: datetime | None = None,
     gateway_request_end_at: datetime | None = None,
+    source_policy_id: UUID | None = None,
 ) -> MarketIngestionResult:
     """Persist one fully prepared page inside the caller's transaction."""
     page = prepared.page
@@ -339,7 +342,7 @@ async def persist_prepared_price_page(
         for bar in bars
     )
     await session.flush()
-    finalized = await finalize_price_bar_set(session, manifest)
+    finalized = await finalize_price_bar_set(session, manifest, source_policy_id=source_policy_id)
     return MarketIngestionResult(
         raw_uri=prepared.raw_uri,
         artifact=artifact,

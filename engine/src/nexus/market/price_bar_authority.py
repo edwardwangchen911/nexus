@@ -8,6 +8,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManifest
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_EXECUTION_SOURCE_POLICY_ID,
+)
 from nexus.persistence.models.research import ResearchEvidenceRef
 
 SOURCE_POLICY_ID = UUID("3c60888d-e92d-5e04-913c-7d427004cfef")
@@ -35,6 +39,7 @@ async def prepare_price_bar_set(
     manifest_id: UUID,
     *,
     as_of: datetime | None = None,
+    source_policy_id: UUID | None = None,
 ) -> PriceBarSetPreparation | None:
     """Ask PostgreSQL whether a manifest can become price authority evidence."""
     manifest_identity = (
@@ -48,44 +53,71 @@ async def prepare_price_bar_set(
     if manifest_identity is None:
         return None
     source, provider_authorized_at = manifest_identity
-    if source == "fosun":
+    parameters: dict[str, object]
+    if source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID:
+        if source != "alpaca":
+            return None
+        statement = text("SELECT * FROM nexus_prepare_agent_paper_price_bar_set(:manifest_id)")
+        parameters = {"manifest_id": manifest_id}
+    elif source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID:
+        if source != "alpaca":
+            return None
+        statement = text(
+            "SELECT * FROM nexus_prepare_agent_paper_decision_price_bar_set(:manifest_id)"
+        )
+        parameters = {"manifest_id": manifest_id}
+    elif source == "fosun":
         effective_at = as_of or provider_authorized_at
         if effective_at is None:
             return None
-        statement = text(
-            "SELECT * FROM nexus_prepare_price_bar_set_v2_at(:manifest_id,:as_of)"
-        )
+        statement = text("SELECT * FROM nexus_prepare_price_bar_set_v2_at(:manifest_id,:as_of)")
         parameters = {"manifest_id": manifest_id, "as_of": effective_at}
     else:
         statement = text("SELECT * FROM nexus_prepare_price_bar_set(:manifest_id)")
         parameters = {"manifest_id": manifest_id}
     row = (
-        await session.execute(
-            statement,
-            parameters,
+        (
+            await session.execute(
+                statement,
+                parameters,
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     return None if row is None else PriceBarSetPreparation(**dict(row))
 
 
 async def finalize_price_bar_set(
-    session: AsyncSession, manifest: PriceSeriesManifest
+    session: AsyncSession,
+    manifest: PriceSeriesManifest,
+    *,
+    source_policy_id: UUID | None = None,
 ) -> tuple[PriceBarSetAuthority, ResearchEvidenceRef] | None:
     """Persist the database-prepared authority and its owned evidence in this transaction."""
     prepared = await prepare_price_bar_set(
         session,
         manifest.id,
         as_of=manifest.provider_authorized_at,
+        source_policy_id=source_policy_id,
     )
     if prepared is None:
         return None
 
     if manifest.source == "fosun":
+        if source_policy_id is not None:
+            raise ValueError("PRICE_BAR_SOURCE_POLICY_OVERRIDE_INVALID")
         source_policy_id = SOURCE_POLICY_V2_ID
         hash_version = HASH_VERSION_V2
         policy_version = POLICY_VERSION_V2
     else:
-        source_policy_id = SOURCE_POLICY_ID
+        if source_policy_id not in {
+            None,
+            PAPER_DECISION_SOURCE_POLICY_ID,
+            PAPER_EXECUTION_SOURCE_POLICY_ID,
+        }:
+            raise ValueError("PRICE_BAR_SOURCE_POLICY_OVERRIDE_INVALID")
+        source_policy_id = source_policy_id or SOURCE_POLICY_ID
         hash_version = HASH_VERSION
         policy_version = POLICY_VERSION
 

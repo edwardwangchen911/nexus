@@ -19,6 +19,7 @@ from nexus.paper.performance import (
     publish_paper_performance_snapshot,
 )
 from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
     PaperPerformanceAttributionRecord,
     PaperPerformanceSnapshotRecord,
     PaperPositionSnapshotRecord,
@@ -57,6 +58,35 @@ async def test_v2_mark_selection_never_falls_back_to_legacy_close(
         await engine.dispose()
 
     assert mark is None
+
+
+@pytest.mark.asyncio
+async def test_agent_paper_mark_requires_exact_adjusted_sip_daily_policy(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(
+        migrated_database_url,
+        source="alpaca",
+        feed="sip",
+        delivery_mode="delayed",
+        adjustment="all",
+        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    )
+    engine = create_async_engine(migrated_database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            mark = await _select_mark(
+                session,
+                instrument_id=seed.execution.instrument_id,
+                session_date=seed.as_of.date(),
+                as_of=seed.as_of,
+                source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+            )
+            assert mark is not None
+            assert mark[1].source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+            assert mark[2].adjustment == "all"
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -208,10 +238,7 @@ async def test_publish_performance_exact_replay_survives_authority_gate_closure(
         async with sessions() as session:
             before_counts = tuple(
                 [
-                    int(
-                        await session.scalar(select(func.count()).select_from(model))
-                        or 0
-                    )
+                    int(await session.scalar(select(func.count()).select_from(model)) or 0)
                     for model in (
                         PaperPerformanceSnapshotRecord,
                         PaperPositionSnapshotRecord,
@@ -239,10 +266,7 @@ async def test_publish_performance_exact_replay_survives_authority_gate_closure(
         async with sessions() as session:
             after_counts = tuple(
                 [
-                    int(
-                        await session.scalar(select(func.count()).select_from(model))
-                        or 0
-                    )
+                    int(await session.scalar(select(func.count()).select_from(model)) or 0)
                     for model in (
                         PaperPerformanceSnapshotRecord,
                         PaperPositionSnapshotRecord,

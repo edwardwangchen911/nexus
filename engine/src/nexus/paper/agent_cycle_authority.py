@@ -8,7 +8,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.persistence import select_authoritative_snapshot
-from nexus.market.price_bar_authority import SOURCE_POLICY_ID
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.paper.agent_cycle_models import (
     CandidateAuthority,
@@ -33,7 +32,7 @@ from nexus.persistence.models.market import (
     UniverseMember,
     UniverseSnapshot,
 )
-from nexus.persistence.models.paper import PaperAccountRecord
+from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID, PaperAccountRecord
 
 
 class CycleAuthority(BaseModel):
@@ -173,7 +172,7 @@ async def prepare_candidates(
                 PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
             )
             .where(
-                PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+                PriceBarSetAuthority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
                 PriceBarSetAuthority.created_at <= authority.decision_time,
                 PriceBarRecord.instrument_id == instrument_id,
                 PriceBarRecord.session == authority.decision_session,

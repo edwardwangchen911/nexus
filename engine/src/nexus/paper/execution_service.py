@@ -73,6 +73,8 @@ from nexus.persistence.models.data import (
 )
 from nexus.persistence.models.market import Instrument, LatestQuote
 from nexus.persistence.models.paper import (
+    PAPER_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperMarketWindowRecord,
     PaperAccountRecord,
     PaperExecutionModelRecord,
     PaperExecutionWindowAuthorityRecord,
@@ -90,16 +92,13 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import OutboxEvent
-from nexus.quality.source_policy import current_paper_execution_price_authority_available
+from nexus.quality.source_policy import paper_execution_price_authorized
 
 _SOURCE_PRIORITY = {"fosun": 0, "alpaca": 1, "fixture": 2}
 
 
 def _paper_execution_authority_available(source_policy_id: UUID) -> bool:
-    return (
-        source_policy_id == SOURCE_POLICY_V2_ID
-        and current_paper_execution_price_authority_available()
-    )
+    return paper_execution_price_authorized(source_policy_id)
 
 
 @dataclass(frozen=True)
@@ -573,11 +572,12 @@ async def _qualified_window(
     evaluated_at: datetime,
     prior_window: PaperExecutionWindowAuthorityRecord | None,
 ) -> tuple[QualifiedExecutionWindow, PriceBarSetAuthority] | None:
+    agent_paper = source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
     if source_policy_id == SOURCE_POLICY_V2_ID:
         # Fosun v2 currently proves daily bars only. The separate intraday
         # authority is display-only and cannot authorize simulated fills.
         return None
-    if source_policy_id != SOURCE_POLICY_ID:
+    if source_policy_id not in {SOURCE_POLICY_ID, PAPER_EXECUTION_SOURCE_POLICY_ID}:
         return None
     window_start = calendar.market_open_at + timedelta(
         minutes=(window_seq - 1) * model.window_minutes
@@ -596,13 +596,28 @@ async def _qualified_window(
             PriceSeriesManifest.end_at == window_end - timedelta(minutes=1),
             PriceSeriesManifest.row_count == model.window_minutes,
             PriceBarSetAuthority.available_at <= evaluated_at,
-            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+            PriceBarSetAuthority.source_policy_id == source_policy_id,
             PriceBarSetAuthority.hash_version == HASH_VERSION,
             PriceBarSetAuthority.policy_version == POLICY_VERSION,
-            PriceSeriesManifest.source.in_(("alpaca", "fixture")),
             PriceSeriesManifest.adjustment == "raw",
         )
     )
+    if agent_paper:
+        statement = statement.join(
+            AgentPaperMarketWindowRecord,
+            AgentPaperMarketWindowRecord.source_authority_id == PriceBarSetAuthority.id,
+        ).where(
+            AgentPaperMarketWindowRecord.order_id == order.id,
+            AgentPaperMarketWindowRecord.instrument_id == order.instrument_id,
+            AgentPaperMarketWindowRecord.purpose == "paper_fill",
+            AgentPaperMarketWindowRecord.window_start_at == window_start,
+            AgentPaperMarketWindowRecord.window_end_at == window_end,
+            AgentPaperMarketWindowRecord.evaluated_at <= evaluated_at,
+            AgentPaperMarketWindowRecord.price_series_manifest_id == PriceSeriesManifest.id,
+            PriceSeriesManifest.source == "alpaca",
+        )
+    else:
+        statement = statement.where(PriceSeriesManifest.source.in_(("alpaca", "fixture")))
     if prior_window is not None:
         statement = statement.where(
             PriceSeriesManifest.source == prior_window.source,
@@ -620,11 +635,20 @@ async def _qualified_window(
     authority, manifest = candidate
     if not (
         (
-            manifest.source == "alpaca"
+            agent_paper
+            and manifest.source == "alpaca"
+            and manifest.feed == "iex"
+            and manifest.delivery_mode == "real_time"
+        )
+        or (
+            not agent_paper
+            and manifest.source == "alpaca"
             and manifest.feed == "sip"
             and manifest.delivery_mode == "delayed"
         )
-        or (manifest.source == "fixture" and manifest.delivery_mode == "fixture")
+        or (
+            not agent_paper and manifest.source == "fixture" and manifest.delivery_mode == "fixture"
+        )
     ):
         return None
     bar_rows = tuple(
@@ -1169,7 +1193,8 @@ async def advance_internal_paper_order(
         return result
     if status not in {"submitted", "partially_filled", "reconciling"}:
         raise PaperExecutionError("PAPER_EXECUTION_INVALID")
-    price_authority_available = _paper_execution_authority_available(decision.source_policy_id)
+    execution_source_policy_id = decision.execution_source_policy_id or decision.source_policy_id
+    price_authority_available = _paper_execution_authority_available(execution_source_policy_id)
 
     reservation = await session.scalar(
         select(PaperReservationRecord)
@@ -1291,7 +1316,7 @@ async def advance_internal_paper_order(
         await _qualified_window(
             session,
             order=order,
-            source_policy_id=decision.source_policy_id,
+            source_policy_id=execution_source_policy_id,
             calendar=calendar,
             model=model,
             window_seq=window_seq,

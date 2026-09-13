@@ -58,7 +58,10 @@ from nexus.persistence.models.paper import (
     PaperReservationRecord,
     StrategyDecisionRecord,
 )
-from nexus.quality.source_policy import current_paper_performance_price_authority_available
+from nexus.quality.source_policy import (
+    current_paper_performance_price_authority_available,
+    paper_decision_price_authorized,
+)
 
 _QUANTUM = Decimal("0.000000000001")
 _SOURCE_PRIORITY = {"fosun": 0, "alpaca": 1, "fixture": 2}
@@ -660,8 +663,14 @@ async def _select_mark(
         # paper flow has a complete corporate-action-safe v2 mark contract,
         # publication remains incomplete.
         return None
-    if source_policy_id != SOURCE_POLICY_ID:
+    agent_paper = paper_decision_price_authorized(source_policy_id)
+    if source_policy_id != SOURCE_POLICY_ID and not agent_paper:
         return None
+    source_predicate = (
+        PriceSeriesManifest.source == "alpaca"
+        if agent_paper
+        else PriceSeriesManifest.source.in_(("alpaca", "fixture"))
+    )
     statement = (
         select(PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest)
         .join(
@@ -680,11 +689,11 @@ async def _select_mark(
             PriceBarSetAuthority.available_at <= as_of,
             PriceSeriesManifest.instrument == str(instrument_id),
             PriceSeriesManifest.interval == "1Day",
-            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+            PriceBarSetAuthority.source_policy_id == source_policy_id,
             PriceBarSetAuthority.hash_version == HASH_VERSION,
             PriceBarSetAuthority.policy_version == POLICY_VERSION,
-            PriceSeriesManifest.source.in_(("alpaca", "fixture")),
-            PriceSeriesManifest.adjustment == "raw",
+            source_predicate,
+            PriceSeriesManifest.adjustment == ("all" if agent_paper else "raw"),
         )
         .order_by(
             case(_SOURCE_PRIORITY, value=PriceSeriesManifest.source, else_=99),
@@ -699,7 +708,14 @@ async def _select_mark(
     if candidate is None:
         return None
     bar, authority, manifest = candidate
-    if not (
+    if agent_paper:
+        if not (
+            manifest.source == "alpaca"
+            and manifest.feed == "sip"
+            and manifest.delivery_mode == "delayed"
+        ):
+            return None
+    elif not (
         (
             manifest.source == "alpaca"
             and manifest.feed == "sip"
@@ -1052,12 +1068,7 @@ async def publish_paper_performance_snapshot(
     except (KeyError, ValueError) as error:
         raise PaperPerformanceError("PAPER_PERFORMANCE_PROJECTION_INVALID") from error
 
-    has_open_positions = any(
-        projection.quantity != 0 for projection in projections.values()
-    )
-    if has_open_positions and not current_paper_performance_price_authority_available():
-        raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
-
+    has_open_positions = any(projection.quantity != 0 for projection in projections.values())
     source_policy_id: UUID | None = None
     if has_open_positions:
         source_policy_id = await session.scalar(
@@ -1073,6 +1084,11 @@ async def publish_paper_performance_snapshot(
             .limit(1)
         )
         if source_policy_id is None:
+            raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
+        if not (
+            paper_decision_price_authorized(source_policy_id)
+            or current_paper_performance_price_authority_available()
+        ):
             raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
 
     marked_positions: list[MarkedPosition] = []

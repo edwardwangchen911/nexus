@@ -168,6 +168,85 @@ class AgentPaperCycleEventRecord(ImmutableCreatedAt, Base):
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
+class AgentPaperMarketWindowRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "agent_paper_market_windows"
+    __table_args__ = (
+        UniqueConstraint(
+            "cycle_id",
+            "instrument_id",
+            "window_start_at",
+            name="uq_agent_paper_market_windows_scope",
+        ),
+        ForeignKeyConstraint(
+            ["cycle_id"], ["agent_paper_cycles.id"], name="fk_agent_paper_market_windows_cycle"
+        ),
+        ForeignKeyConstraint(
+            ["instrument_id"], ["instruments.id"], name="fk_agent_paper_market_windows_instrument"
+        ),
+        ForeignKeyConstraint(
+            ["order_id"], ["paper_orders.id"], name="fk_agent_paper_market_windows_order"
+        ),
+        ForeignKeyConstraint(
+            ["raw_artifact_id"],
+            ["data_artifacts.id"],
+            name="fk_agent_paper_market_windows_raw_artifact",
+        ),
+        ForeignKeyConstraint(
+            ["price_series_manifest_id"],
+            ["price_series_manifests.id"],
+            name="fk_agent_paper_market_windows_manifest",
+        ),
+        ForeignKeyConstraint(
+            ["source_authority_id", "source", "source_content_hash"],
+            [
+                "price_bar_set_authorities.id",
+                "price_bar_set_authorities.source",
+                "price_bar_set_authorities.content_hash",
+            ],
+            name="fk_agent_paper_market_windows_authority",
+        ),
+        CheckConstraint(
+            "purpose IN ('paper_fill','acceptance_probe') AND "
+            "((purpose='paper_fill' AND order_id IS NOT NULL) OR "
+            "(purpose='acceptance_probe' AND order_id IS NULL))",
+            name="purpose_order_shape",
+        ),
+        CheckConstraint(
+            "window_end_at = window_start_at + interval '5 minutes' "
+            "AND data_available_at <= evaluated_at",
+            name="window_bounds",
+        ),
+        CheckConstraint(
+            "source='alpaca' AND feed='iex' AND delivery_mode='real_time'",
+            name="source_fixed",
+        ),
+        CheckConstraint(
+            "source_content_hash ~ '^[0-9a-f]{64}$' AND "
+            "raw_content_hash ~ '^[0-9a-f]{64}$' AND content_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes_canonical",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    cycle_id: Mapped[UUID]
+    instrument_id: Mapped[UUID]
+    order_id: Mapped[UUID | None]
+    purpose: Mapped[str] = mapped_column(String(30))
+    source_authority_id: Mapped[UUID]
+    raw_artifact_id: Mapped[UUID]
+    price_series_manifest_id: Mapped[UUID]
+    window_start_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    window_end_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    data_available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    source: Mapped[str] = mapped_column(String(100))
+    feed: Mapped[str] = mapped_column(String(100))
+    delivery_mode: Mapped[str] = mapped_column(String(20))
+    source_content_hash: Mapped[str] = mapped_column(String(64))
+    raw_content_hash: Mapped[str] = mapped_column(String(64))
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+
 class RiskPolicyRecord(ImmutableCreatedAt, Base):
     __tablename__ = "risk_policies"
     __table_args__ = (

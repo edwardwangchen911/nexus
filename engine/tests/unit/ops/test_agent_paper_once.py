@@ -2,7 +2,12 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from nexus.ops.agent_paper_once import AgentPaperRunRequest, main, parser
+from nexus.ops.agent_paper_once import (
+    AgentPaperCollectWindowRequest,
+    AgentPaperRunRequest,
+    main,
+    parser,
+)
 from nexus.settings import EngineSettings
 
 
@@ -58,6 +63,45 @@ def test_parser_rejects_provider_and_credential_overrides() -> None:
                 datetime(2026, 8, 26, 21, tzinfo=UTC).isoformat(),
                 "--idempotency-key",
                 "cycle-1",
+                "--provider-url",
+                "https://example.invalid",
+            ]
+        )
+
+
+def test_collect_window_requires_explicit_utc_window_start() -> None:
+    with pytest.raises(ValueError, match="explicit UTC time is required"):
+        AgentPaperCollectWindowRequest(
+            action="collect-window",
+            cycle_id=UUID(int=1),
+            instrument_id=UUID(int=2),
+            window_start=datetime(2026, 8, 27, 13, 30),
+        )
+
+
+def test_collect_window_parser_has_no_provider_or_credential_override() -> None:
+    parsed = parser().parse_args(
+        [
+            "collect-window",
+            "--cycle-id",
+            str(UUID(int=1)),
+            "--instrument-id",
+            str(UUID(int=2)),
+            "--window-start",
+            datetime(2026, 8, 27, 13, 30, tzinfo=UTC).isoformat(),
+        ]
+    )
+    assert parsed.action == "collect-window"
+    with pytest.raises(SystemExit):
+        parser().parse_args(
+            [
+                "collect-window",
+                "--cycle-id",
+                str(UUID(int=1)),
+                "--instrument-id",
+                str(UUID(int=2)),
+                "--window-start",
+                datetime(2026, 8, 27, 13, 30, tzinfo=UTC).isoformat(),
                 "--provider-url",
                 "https://example.invalid",
             ]

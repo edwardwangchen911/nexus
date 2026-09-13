@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.domain.time import require_utc
 from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.models.data import SourcePolicy as SourcePolicyRecord
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_EXECUTION_SOURCE_POLICY_ID,
+)
 from nexus.providers.base import (
     PriceBar,
     PriceSeries,
@@ -245,6 +249,16 @@ def current_paper_execution_price_authority_available() -> bool:
 def current_paper_performance_price_authority_available() -> bool:
     """Return whether current price authority can mark nonzero paper positions."""
     return source_policy_v2_supports_adjusted_prices()
+
+
+def paper_decision_price_authorized(source_policy_id: UUID) -> bool:
+    """Authorize only the immutable Agent paper daily-price policy."""
+    return source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+
+
+def paper_execution_price_authorized(source_policy_id: UUID) -> bool:
+    """Authorize only the immutable Agent paper IEX execution policy."""
+    return source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
 
 
 def current_proposal_shadow_price_authority_available(
@@ -540,9 +554,7 @@ class FosunMarketAdmission(BaseModel):
     admitted_contract_hash: str
     provider: Literal["fosun"]
     mode: Literal["read_only"]
-    operation: Literal[
-        "fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"
-    ]
+    operation: Literal["fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"]
     market_scope: Literal["US"]
     delivery_mode: Literal["unknown", "real_time", "delayed"]
     contract_hash: str
@@ -965,11 +977,15 @@ async def load_fosun_market_admission(
     market_scope: str,
 ) -> FosunMarketAdmission | None:
     decision_time = require_utc(decision_time)
-    if operation not in {
-        "fosun_get_quotes",
-        "fosun_get_bars",
-        "fosun_subscribe_quotes",
-    } or market_scope != "US":
+    if (
+        operation
+        not in {
+            "fosun_get_quotes",
+            "fosun_get_bars",
+            "fosun_subscribe_quotes",
+        }
+        or market_scope != "US"
+    ):
         return None
     service = IntegrationStatusService(session, decision_time)
     status = await service.find_status("fosun")
@@ -1011,15 +1027,11 @@ async def load_fosun_market_admission(
         provider="fosun",
         mode="read_only",
         operation=cast(
-            Literal[
-                "fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"
-            ],
+            Literal["fosun_get_quotes", "fosun_get_bars", "fosun_subscribe_quotes"],
             payload_operation,
         ),
         market_scope=cast(Literal["US"], payload_market_scope),
-        delivery_mode=cast(
-            Literal["unknown", "real_time", "delayed"], payload_delivery_mode
-        ),
+        delivery_mode=cast(Literal["unknown", "real_time", "delayed"], payload_delivery_mode),
         contract_hash=authority.contract_hash,
         expires_at=authority.expires_at,
     )
@@ -1094,9 +1106,7 @@ def apply_source_policy_v2(
         if len(visible) != len(candidate.bars):
             reasons.add("FUTURE_DATA_EXCLUDED")
         eligible.append(
-            candidate.model_copy(
-                update={"bars": canonical_price_bars(candidate, visible)}
-            )
+            candidate.model_copy(update={"bars": canonical_price_bars(candidate, visible)})
         )
     if not eligible:
         return SourceSelection(

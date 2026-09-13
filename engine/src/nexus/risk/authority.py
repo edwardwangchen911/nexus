@@ -122,7 +122,7 @@ def _valid_price_protocol(
 ) -> bool:
     if requested_source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID:
         return (
-            authority.source_policy_id == SOURCE_POLICY_ID
+            authority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
             and authority.hash_version == HASH_VERSION
             and authority.policy_version == POLICY_VERSION
             and authority.source == manifest.source == "alpaca"
@@ -386,11 +386,7 @@ async def _load_prices(
     decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[RiskPrice, ...]:
-    price_authority_policy_id = (
-        SOURCE_POLICY_ID
-        if decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
-        else decision.source_policy_id
-    )
+    price_authority_policy_id = decision.source_policy_id
     query = (
         select(
             PriceBarSetAuthority,
@@ -444,6 +440,11 @@ async def _load_prices(
             session,
             manifest.id,
             as_of=decision.decision_time,
+            source_policy_id=(
+                PAPER_DECISION_SOURCE_POLICY_ID
+                if decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+                else None
+            ),
         )
         if (
             prepared is None

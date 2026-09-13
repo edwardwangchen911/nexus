@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -9,6 +9,8 @@ from nexus.agents.committee import load_prompt_assets
 from nexus.agents.execution_authority import ROLE_ORDER
 from nexus.market.ingestion import ingest_price_page
 from nexus.paper.agent_cycle import advance_agent_paper_cycle
+from nexus.paper.agent_market import collect_agent_paper_window
+from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
@@ -38,6 +40,44 @@ class _ObjectStore:
 
     async def put_normalized(self, key: str, payload: bytes) -> str:
         return f"memory://{key}"
+
+
+class _IexProvider:
+    calls = 0
+
+    async def fetch_bars(self, request, cursor=None):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        assert cursor is None
+        evaluated_at = request.end + timedelta(seconds=2)
+        return ProviderPage(
+            items=tuple(
+                PriceBar(
+                    instrument_id=request.instrument_id,
+                    session=request.start.date(),
+                    open=Decimal("100"),
+                    high=Decimal("101"),
+                    low=Decimal("99"),
+                    close=Decimal("100.5"),
+                    volume=Decimal("20"),
+                    observed_at=request.start + timedelta(minutes=index),
+                    available_at=evaluated_at - timedelta(seconds=1),
+                    received_at=evaluated_at - timedelta(seconds=1),
+                )
+                for index in range(5)
+            ),
+            next_cursor=None,
+            raw_payload=b'{"bars":"real-shape-fixture"}',
+            source_request_id="agent-cycle-iex-window",
+            as_of=evaluated_at - timedelta(seconds=1),
+            provenance=MarketDataProvenance(
+                source="alpaca",
+                feed="iex",
+                adjustment="raw",
+                interval="1Min",
+                mode="read_only",
+                delivery_mode="real_time",
+            ),
+        )
 
 
 async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> None:
@@ -75,7 +115,13 @@ async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> N
                     delivery_mode="delayed",
                 ),
             )
-            result = await ingest_price_page(session, store, page, commit=False)
+            result = await ingest_price_page(
+                session,
+                store,
+                page,
+                commit=False,
+                source_policy_id=(PAPER_DECISION_SOURCE_POLICY_ID if adjustment == "all" else None),
+            )
             assert result.price_authority is not None
     required = tuple(item[0] for item in INSTRUMENTS)
     for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
@@ -223,7 +269,8 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seed = await seed_paper_batch(migrated_database_url)
+    market_close = datetime(2026, 8, 27, 20, tzinfo=UTC)
+    seed = await seed_paper_batch(migrated_database_url, execution_market_close_at=market_close)
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
@@ -330,8 +377,8 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
                     instrument_id=instrument[0],
                     output_id=output.id,
                     intent_hash=f"{index + 3}" * 64,
-                    stance="watch",
-                    sizing_action="none",
+                    stance="buy_candidate" if index == 1 else "watch",
+                    sizing_action="increase" if index == 1 else "none",
                     evidence_ref_ids=(UUID(int=0x63000000000000000000000000000200 + index),),
                 )
 
@@ -355,10 +402,10 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
                 decision_time=DECISION_TIME,
                 idempotency_key="agent-paper-cycle-1",
             )
-        assert completed.status == "completed"
+        assert completed.status == "awaiting_market"
         assert completed.strategy_decision_id is not None
         assert completed.batch_id is not None
-        assert completed.order_ids == ()
+        assert len(completed.order_ids) == 1
         assert completed.replayed is False
 
         async with sessions.begin() as session:
@@ -369,6 +416,27 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
                 idempotency_key="agent-paper-cycle-1",
             )
             assert replayed == completed.model_copy(update={"replayed": True})
+
+        window_start = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
+        evaluated_at = window_start + timedelta(minutes=25, seconds=2)
+        market = await collect_agent_paper_window(
+            sessions,
+            cycle_id=completed.cycle_id,
+            instrument_id=INSTRUMENTS[0][0],
+            window_start=window_start,
+            provider=_IexProvider(),
+            object_store=_ObjectStore(),
+            evaluated_at=evaluated_at,
+        )
+        assert market.purpose == "paper_fill"
+        async with sessions.begin() as session:
+            advanced = await advance_internal_paper_order(
+                session,
+                order_id=completed.order_ids[0],
+                evaluated_at=evaluated_at,
+                idempotency_key="agent-paper-first-fill",
+            )
+        assert advanced.action == "partially_filled"
     finally:
         await engine.dispose()
 

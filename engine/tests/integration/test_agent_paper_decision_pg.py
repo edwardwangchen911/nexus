@@ -134,9 +134,7 @@ async def _seed_adjusted_authority(session: AsyncSession, decision) -> None:
                     ),
                 ),
                 next_cursor=None,
-                raw_payload=(
-                    f'{{"agent_price":{index},"adjustment":"{adjustment}"}}'.encode()
-                ),
+                raw_payload=(f'{{"agent_price":{index},"adjustment":"{adjustment}"}}'.encode()),
                 source_request_id=None,
                 as_of=available_at,
                 provenance=MarketDataProvenance(
@@ -148,7 +146,13 @@ async def _seed_adjusted_authority(session: AsyncSession, decision) -> None:
                     delivery_mode="delayed",
                 ),
             )
-            result = await ingest_price_page(session, store, page, commit=False)
+            result = await ingest_price_page(
+                session,
+                store,
+                page,
+                commit=False,
+                source_policy_id=(PAPER_DECISION_SOURCE_POLICY_ID if adjustment == "all" else None),
+            )
             assert result.price_authority is not None
     required = tuple(item[0] for item in INSTRUMENTS)
     for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):

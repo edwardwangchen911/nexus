@@ -23,7 +23,7 @@ MIGRATION_PATH = ENGINE_ROOT / "alembic/versions/0055_schwab_intraday_job_v3.py"
 def test_0055_precedes_the_agent_paper_cycle_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0056_agent_paper_cycle"
+    assert CURRENT_MIGRATION_HEAD == "0057_agent_paper_market_window"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     migration = scripts.get_revision("0055_schwab_intraday_job_v3")
     assert migration is not None
@@ -79,8 +79,7 @@ def test_job_model_declares_only_the_v3_intraday_bucket_index() -> None:
 
     assert intraday_indexes == {
         "uq_jobs_intraday_v3_bucket": (
-            "job_type = 'collect.intraday_snapshot' "
-            "AND schema_version = 'intraday_snapshot_job_v3'"
+            "job_type = 'collect.intraday_snapshot' AND schema_version = 'intraday_snapshot_job_v3'"
         )
     }
 
