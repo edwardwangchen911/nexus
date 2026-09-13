@@ -7,6 +7,7 @@ from helpers.paper_batch import DECISION_TIME, INSTRUMENTS, seed_paper_batch
 from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.execution_authority import ROLE_ORDER
+from nexus.market.ingestion import ingest_price_page
 from nexus.paper.agent_cycle import advance_agent_paper_cycle
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -17,12 +18,94 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import InstrumentAlias
-from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    AgentPaperCycleEventRecord,
+    AgentPaperCycleRecord,
+    RiskQueryAuthorityRecord,
+)
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
+from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
+from nexus.risk.authority import canonical_query_authority_hash
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from test_agent_paper_decision_pg import _seed_adjusted_authority
+
+
+class _ObjectStore:
+    async def archive_raw(self, key: str, payload: bytes) -> str:
+        return f"memory://{key}"
+
+    async def put_normalized(self, key: str, payload: bytes) -> str:
+        return f"memory://{key}"
+
+
+async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> None:
+    available_at = decision.decision_time - timedelta(minutes=30)
+    store = _ObjectStore()
+    for index, (instrument_id, close, _, _) in enumerate(INSTRUMENTS, start=1):
+        for adjustment in ("raw", "all"):
+            page = ProviderPage(
+                items=(
+                    PriceBar(
+                        instrument_id=instrument_id,
+                        session=decision.decision_session,
+                        open=close,
+                        high=close,
+                        low=close,
+                        close=close,
+                        volume=Decimal("1000000"),
+                        observed_at=available_at,
+                        available_at=available_at,
+                        received_at=available_at,
+                        revision=f"agent-{adjustment}-{index}",
+                        quality_flags=(),
+                    ),
+                ),
+                next_cursor=None,
+                raw_payload=(f'{{"agent_price":{index},"adjustment":"{adjustment}"}}'.encode()),
+                source_request_id=None,
+                as_of=available_at,
+                provenance=MarketDataProvenance(
+                    source="alpaca",
+                    feed="sip",
+                    adjustment=adjustment,
+                    interval="1Day",
+                    mode="delayed",
+                    delivery_mode="delayed",
+                ),
+            )
+            result = await ingest_price_page(session, store, page, commit=False)
+            assert result.price_authority is not None
+    required = tuple(item[0] for item in INSTRUMENTS)
+    for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
+        content_hash = canonical_query_authority_hash(
+            source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+            universe_snapshot_id=decision.universe_snapshot_id,
+            decision_session=decision.decision_session,
+            kind=kind,
+            required_instrument_ids=required,
+            blocked_instrument_ids=(),
+            complete=True,
+            source_watermark_hash=f"{index + 6}" * 64,
+            available_at=available_at,
+        )
+        session.add(
+            RiskQueryAuthorityRecord(
+                id=UUID(int=0x63000000000000000000000000000500 + index),
+                source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                universe_snapshot_id=decision.universe_snapshot_id,
+                decision_session=decision.decision_session,
+                kind=kind,
+                required_instrument_ids=list(required),
+                blocked_instrument_ids=[],
+                complete=True,
+                source_watermark_hash=f"{index + 6}" * 64,
+                available_at=available_at,
+                content_hash=content_hash,
+            )
+        )
+    await session.flush()
 
 
 async def _seed_cycle_research_authority(
