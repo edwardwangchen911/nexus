@@ -42,7 +42,10 @@ from nexus.persistence.models.market import (
     UniverseMember,
     UniverseSnapshot,
 )
-from nexus.persistence.models.paper import RiskQueryAuthorityRecord
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    RiskQueryAuthorityRecord,
+)
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.quality.source_policy import (
     SOURCE_POLICY_KEY,
@@ -54,11 +57,11 @@ from nexus.quality.source_policy import (
 from nexus.risk.canonical import canonical_risk_market_authority_hash
 from nexus.risk.models import (
     AuthorityQueryProof,
+    PaperDecisionAuthority,
     RiskMarketSnapshot,
     RiskPrice,
     RiskSectorExposure,
 )
-from nexus.strategy.forward import ForwardStrategyDecision
 
 _QUERY_KINDS = frozenset(("corporate_action", "suspension", "delisting"))
 
@@ -85,6 +88,16 @@ class RiskAuthorityInput(BaseModel):
 
 
 def _valid_source_policy(policy: SourcePolicy) -> bool:
+    if policy.id == PAPER_DECISION_SOURCE_POLICY_ID:
+        return (
+            policy.key == "paper_decision_price"
+            and policy.version == "paper_decision_price_policy_v1"
+            and policy.schema_version == "1"
+            and policy.payload.get("selected_source") == "alpaca"
+            and policy.payload.get("fallback") == "disabled"
+            and policy.payload.get("content_hash")
+            == "70737603eb58331d60668bb6a039e4910d856a2c992e972fc8af0adcf05db579"
+        )
     if policy.id == SOURCE_POLICY_V2_ID:
         return (
             policy.key == SOURCE_POLICY_KEY
@@ -105,7 +118,19 @@ def _valid_source_policy(policy: SourcePolicy) -> bool:
 def _valid_price_protocol(
     authority: PriceBarSetAuthority,
     manifest: PriceSeriesManifest,
+    requested_source_policy_id: UUID,
 ) -> bool:
+    if requested_source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID:
+        return (
+            authority.source_policy_id == SOURCE_POLICY_ID
+            and authority.hash_version == HASH_VERSION
+            and authority.policy_version == POLICY_VERSION
+            and authority.source == manifest.source == "alpaca"
+            and manifest.feed == "sip"
+            and manifest.delivery_mode == "delayed"
+            and manifest.adjustment == "all"
+            and manifest.interval == "1Day"
+        )
     if authority.source_policy_id == SOURCE_POLICY_V2_ID:
         return (
             authority.hash_version == HASH_VERSION_V2
@@ -230,7 +255,7 @@ def canonical_query_authority_hash(
 
 def build_risk_market_snapshot(
     *,
-    decision: ForwardStrategyDecision | RiskAuthorityInput,
+    decision: PaperDecisionAuthority | RiskAuthorityInput,
     required_instrument_ids: Sequence[UUID],
     whitelisted_instrument_ids: Sequence[UUID],
     prices: Sequence[RiskPrice],
@@ -268,7 +293,7 @@ def build_risk_market_snapshot(
 
 
 def require_decision_authority_match(
-    decision: ForwardStrategyDecision,
+    decision: PaperDecisionAuthority,
     market: RiskMarketSnapshot,
 ) -> None:
     """Bind a reloaded authority set to the immutable forward decision."""
@@ -279,7 +304,7 @@ def require_decision_authority_match(
 
 async def _validate_root_authorities(
     session: AsyncSession,
-    decision: ForwardStrategyDecision | RiskAuthorityInput,
+    decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[UUID, ...]:
     source_policy = await session.get(SourcePolicy, decision.source_policy_id)
@@ -358,43 +383,55 @@ async def _validate_root_authorities(
 
 async def _load_prices(
     session: AsyncSession,
-    decision: ForwardStrategyDecision | RiskAuthorityInput,
+    decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[RiskPrice, ...]:
-    rows = (
-        await session.execute(
-            select(
-                PriceBarSetAuthority,
-                PriceSeriesManifest,
-                PriceBarRecord,
-                Instrument,
-                ResearchEvidenceRef,
-                ProviderCapability,
-            )
-            .join(
-                PriceSeriesManifest,
-                PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
-            )
-            .join(
-                PriceBarRecord,
-                PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
-            )
-            .join(Instrument, Instrument.id == PriceBarRecord.instrument_id)
-            .join(
-                ResearchEvidenceRef,
-                ResearchEvidenceRef.id == PriceBarSetAuthority.evidence_ref_id,
-            )
-            .outerjoin(
-                ProviderCapability,
-                ProviderCapability.id == PriceSeriesManifest.provider_capability_id,
-            )
-            .where(
-                PriceBarSetAuthority.source_policy_id == decision.source_policy_id,
-                PriceBarRecord.instrument_id.in_(required),
-                PriceBarRecord.session == decision.decision_session,
-            )
+    price_authority_policy_id = (
+        SOURCE_POLICY_ID
+        if decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+        else decision.source_policy_id
+    )
+    query = (
+        select(
+            PriceBarSetAuthority,
+            PriceSeriesManifest,
+            PriceBarRecord,
+            Instrument,
+            ResearchEvidenceRef,
+            ProviderCapability,
         )
-    ).all()
+        .join(
+            PriceSeriesManifest,
+            PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
+        )
+        .join(
+            PriceBarRecord,
+            PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
+        )
+        .join(Instrument, Instrument.id == PriceBarRecord.instrument_id)
+        .join(
+            ResearchEvidenceRef,
+            ResearchEvidenceRef.id == PriceBarSetAuthority.evidence_ref_id,
+        )
+        .outerjoin(
+            ProviderCapability,
+            ProviderCapability.id == PriceSeriesManifest.provider_capability_id,
+        )
+        .where(
+            PriceBarSetAuthority.source_policy_id == price_authority_policy_id,
+            PriceBarRecord.instrument_id.in_(required),
+            PriceBarRecord.session == decision.decision_session,
+        )
+    )
+    if decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID:
+        query = query.where(
+            PriceSeriesManifest.source == "alpaca",
+            PriceSeriesManifest.feed == "sip",
+            PriceSeriesManifest.delivery_mode == "delayed",
+            PriceSeriesManifest.adjustment == "all",
+            PriceSeriesManifest.interval == "1Day",
+        )
+    rows = (await session.execute(query)).all()
     if len(rows) != len(required):
         raise ValueError("risk prices do not exactly cover required instruments")
     prices: list[RiskPrice] = []
@@ -416,13 +453,13 @@ async def _load_prices(
             or prepared.first_session != authority.first_session
             or prepared.last_session != authority.last_session
             or prepared.available_at != authority.available_at
-            or not _valid_price_protocol(authority, manifest)
+            or not _valid_price_protocol(authority, manifest, decision.source_policy_id)
             or not _valid_price_evidence(authority, manifest, evidence)
-                or not _valid_v2_provider_authority(
-                    manifest,
-                    capability,
-                    decision.decision_time,
-                )
+            or not _valid_v2_provider_authority(
+                manifest,
+                capability,
+                decision.decision_time,
+            )
             or instrument.currency != "USD"
             or instrument.asset_type not in {"ETF", "common_stock"}
             or instrument.exchange not in US_EQUITY_EXCHANGES
@@ -451,7 +488,7 @@ async def _load_prices(
 
 async def _load_sectors(
     session: AsyncSession,
-    decision: ForwardStrategyDecision | RiskAuthorityInput,
+    decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[RiskSectorExposure, ...]:
     records = tuple(
@@ -485,7 +522,7 @@ async def _load_sectors(
 
 async def _load_query_proofs(
     session: AsyncSession,
-    decision: ForwardStrategyDecision | RiskAuthorityInput,
+    decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[AuthorityQueryProof, ...]:
     records = tuple(
@@ -542,7 +579,7 @@ async def _load_query_proofs(
 async def load_risk_market_snapshot(
     session: AsyncSession,
     *,
-    decision: ForwardStrategyDecision,
+    decision: PaperDecisionAuthority,
     required_instrument_ids: Sequence[UUID],
 ) -> RiskMarketSnapshot:
     """Load all risk authority facts from one caller-owned transaction snapshot."""

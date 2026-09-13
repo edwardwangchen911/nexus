@@ -18,6 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
+from nexus.paper.agent_decision import AgentPaperDecision
+from nexus.paper.agent_decision_store import (
+    load_paper_decision,
+    require_agent_decision_bindings,
+    require_agent_source_policies,
+)
 from nexus.paper.errors import PaperBatchError, PaperBatchErrorCode
 from nexus.paper.ledger import make_buy_reservation_transaction
 from nexus.paper.projection import load_paper_projection
@@ -59,13 +65,13 @@ from nexus.risk.evaluate import (
     evaluate_order_batch,
 )
 from nexus.risk.models import (
+    PaperDecisionAuthority,
     PaperPortfolioProjection,
     RiskEvaluation,
     RiskMarketSnapshot,
     RiskRuleEvidence,
 )
 from nexus.risk.policy import RiskPolicy, select_active_policy
-from nexus.strategy.forward import ForwardStrategyDecision, load_forward_strategy_decision
 
 _ROUTE = "paper.order_batch.create"
 _ACTOR = "system:task18"
@@ -183,7 +189,7 @@ def _no_change_evidence_hash(
 
 
 def _derive_no_change_evidence(
-    decision: ForwardStrategyDecision,
+    decision: PaperDecisionAuthority,
     portfolio: PaperPortfolioProjection,
     market: RiskMarketSnapshot,
 ) -> tuple[_NoChangeEvidence, ...]:
@@ -1070,31 +1076,37 @@ async def create_paper_order_batch(
     )
     if newer_decision_id is not None:
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
-    persisted = await load_forward_strategy_decision(
-        session,
-        account_id=account_id,
-        strategy_version=decision_record.strategy_version,
-        decision_session=decision_record.decision_session,
-    )
+    try:
+        persisted = await load_paper_decision(
+            session,
+            account_id=account_id,
+            decision_id=strategy_decision_id,
+        )
+    except ValueError as error:
+        raise PaperBatchError("STRATEGY_DECISION_INVALID") from error
     if persisted is None or persisted.decision_id != strategy_decision_id:
         raise PaperBatchError("STRATEGY_DECISION_INVALID")
     decision = persisted.decision
     if request_time < decision.decision_time or account.portfolio_id != decision.portfolio_id:
         raise PaperBatchError("STRATEGY_DECISION_INVALID")
-    if decision.source_policy_id != SOURCE_POLICY_V2_ID:
-        raise PaperBatchError("STRATEGY_DECISION_INVALID")
     try:
-        source_policy = await load_source_policy_v2(
-            session,
-            instrument_tick_size=None,
-            decision_time=decision.decision_time,
-        )
+        if isinstance(decision, AgentPaperDecision):
+            await require_agent_source_policies(session, decision)
+            await require_agent_decision_bindings(session, decision)
+        else:
+            if decision.source_policy_id != SOURCE_POLICY_V2_ID:
+                raise ValueError("registered source policy is invalid")
+            source_policy = await load_source_policy_v2(
+                session,
+                instrument_tick_size=None,
+                decision_time=decision.decision_time,
+            )
+            if source_policy.record_id != decision.source_policy_id:
+                raise ValueError("registered source policy is invalid")
+            if not current_paper_order_price_authority_available():
+                raise ValueError("registered order price authority is unavailable")
     except ValueError as error:
         raise PaperBatchError("STRATEGY_DECISION_INVALID") from error
-    if source_policy.record_id != decision.source_policy_id:
-        raise PaperBatchError("STRATEGY_DECISION_INVALID")
-    if not current_paper_order_price_authority_available():
-        raise PaperBatchError("STRATEGY_DECISION_INVALID")
     idempotency, idempotency_is_new = await _claim_idempotency(
         session,
         account_id=account_id,
