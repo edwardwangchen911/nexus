@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import NoReturn
 
 import pytest
@@ -17,6 +18,7 @@ from nexus.ops.backup_restore import (
     pg_dump_command,
     pg_restore_command,
     postgres_container_command,
+    resolve_single_migration_head,
     verify_manifest_object_binding,
 )
 
@@ -176,6 +178,25 @@ def test_verification_set_covers_authority_roots_and_balanced_ledger() -> None:
         "audit_events",
         "audit_chain_manifests",
     )
+
+
+def test_drill_resolves_the_configured_alembic_head_instead_of_a_stale_revision(
+    tmp_path: Path,
+) -> None:
+    migrations = tmp_path / "migrations"
+    versions = migrations / "versions"
+    versions.mkdir(parents=True)
+    (versions / "0999_test_head.py").write_text(
+        "revision = '0999_test_head'\ndown_revision = None\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "alembic.ini"
+    config.write_text(
+        f"[alembic]\nscript_location = {migrations}\n",
+        encoding="utf-8",
+    )
+
+    assert resolve_single_migration_head(config) == "0999_test_head"
 
 
 def test_manifest_database_record_must_bind_to_the_restored_object() -> None:

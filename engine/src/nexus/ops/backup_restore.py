@@ -19,7 +19,9 @@ from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
 import boto3  # type: ignore[import-untyped]
-from botocore.config import Config  # type: ignore[import-untyped]
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
+from botocore.config import Config as BotocoreConfig  # type: ignore[import-untyped]
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -67,6 +69,16 @@ _MAX_OBJECTS = 100
 _MAX_OBJECT_BYTES = 4 * 1024 * 1024
 _COMMAND_TIMEOUT_SECONDS = 30
 _MIGRATION_TIMEOUT_SECONDS = 120
+
+
+def resolve_single_migration_head(alembic_config: Path) -> str:
+    """Resolve the one migration head accepted by a drill on this checkout."""
+    heads = ScriptDirectory.from_config(
+        AlembicConfig(str(alembic_config.resolve()))
+    ).get_heads()
+    if len(heads) != 1:
+        raise RuntimeError("drill requires exactly one Alembic migration head")
+    return heads[0]
 
 
 @dataclass(frozen=True)
@@ -350,7 +362,7 @@ class LocalDockerDrillOperations:
             region_name="us-east-1",
             aws_access_key_id=self._minio_access_key,
             aws_secret_access_key=self._minio_secret_key,
-            config=Config(
+            config=BotocoreConfig(
                 connect_timeout=1,
                 read_timeout=2,
                 retries={"max_attempts": 0},
@@ -538,7 +550,9 @@ class LocalDockerDrillOperations:
         restored = await self._database_snapshot(self._required_url(self._restore_url))
         if source != restored:
             raise RuntimeError("restored database authority roots do not match source")
-        if source["migration_head"] != "0021_manual_job_retry_allowance":
+        if source["migration_head"] != resolve_single_migration_head(
+            self._alembic_config
+        ):
             raise RuntimeError("restored database migration head is incompatible")
         ledger = source["ledger"]
         if not isinstance(ledger, tuple) or ledger[0] != ledger[1] or ledger[0] <= 0:
