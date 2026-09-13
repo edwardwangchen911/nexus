@@ -24,6 +24,7 @@ from sqlalchemy.engine import make_url
 
 from nexus.agents import codex_token_budget
 from nexus.agents.codex_versions import (
+    ACTIONABLE_CONFIG_VERSION,
     INLINE_CITATION_CONFIG_VERSION,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     PORTFOLIO_DECISION_MAX_INPUT_TOKENS,
@@ -177,6 +178,7 @@ async def prepare_database(
     aggregate_input_tokens: int = 64000,
     max_wire_bytes: int = 55808,
     inline_citations: bool = False,
+    actionable_paper: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -185,6 +187,18 @@ async def prepare_database(
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
     config = dict(_CONFIG)
+    if (
+        type(actionable_paper) is not bool
+        or actionable_paper
+        and (
+            not structured_synthesis
+            or aggregate_input_tokens != 96000
+            or max_wire_bytes != 64000
+            or not inline_citations
+            or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        )
+    ):
+        raise ValueError("CODEX_ACTIONABLE_SETUP_INVALID")
     if (
         type(inline_citations) is not bool
         or inline_citations
@@ -238,6 +252,8 @@ async def prepare_database(
                 if aggregate_input_tokens == 96000
                 else STRUCTURED_CONFIG_VERSION
             )
+        if actionable_paper:
+            version = ACTIONABLE_CONFIG_VERSION
         if strategy_rnd:
             from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
 
@@ -489,6 +505,11 @@ def main() -> int:
     parser.add_argument("--aggregate-input-tokens", type=int, choices=(64000, 96000), default=64000)
     parser.add_argument("--max-wire-bytes", type=int, choices=(55808, 64000), default=55808)
     parser.add_argument("--inline-citations", action="store_true")
+    parser.add_argument(
+        "--actionable-paper",
+        action="store_true",
+        help="Setup the bounded v4 Agent paper research version",
+    )
     for part in ("submissions", "parent", "exhibit"):
         parser.add_argument(f"--sec-{part}", type=Path)
         parser.add_argument(f"--sec-{part}-receipt", type=Path)
@@ -517,6 +538,15 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.actionable_paper and (
+            args.action != "setup"
+            or args.backend != "codex_sdk"
+            or not args.structured_synthesis
+            or args.aggregate_input_tokens != 96000
+            or args.max_wire_bytes != 64000
+            or not args.inline_citations
+        ):
+            raise ValueError("CODEX_ACTIONABLE_SETUP_INVALID")
         if args.news_evidence_id is not None and args.action != "prepare-research":
             raise ValueError("OPENAI_NEWS_ARGUMENTS_INVALID")
         if args.inline_citations and (
@@ -606,6 +636,7 @@ def main() -> int:
                     settings,
                     staged=args.staged,
                     strategy_rnd=args.strategy_rnd,
+                    **({"actionable_paper": True} if args.actionable_paper else {}),
                     **({"inline_citations": True} if args.inline_citations else {}),
                     **({"structured_synthesis": True} if args.structured_synthesis else {}),
                     **(

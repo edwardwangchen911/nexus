@@ -44,6 +44,7 @@ def aggregate_input_limit(version: str) -> int:
             STRUCTURED_96K_CONFIG_VERSION,
             STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
             INLINE_CITATION_CONFIG_VERSION,
+            ACTIONABLE_CONFIG_VERSION,
         }
         else 64000
     )
@@ -58,6 +59,7 @@ def wire_byte_limit(version: str) -> int:
         in {
             STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
             INLINE_CITATION_CONFIG_VERSION,
+            ACTIONABLE_CONFIG_VERSION,
         }
         else 55808
     )

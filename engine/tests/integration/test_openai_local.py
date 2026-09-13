@@ -186,3 +186,34 @@ async def test_inline_setup_is_idempotent_and_preserves_old_config(migrated_data
         )
         for model_type in (AgentResearchRunRecord, DataSnapshot, Job):
             assert await session.scalar(select(func.count()).select_from(model_type)) == 0
+
+
+@pytest.mark.asyncio
+async def test_actionable_setup_is_idempotent_and_creates_no_work(migrated_database_url):
+    from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    options = dict(
+        actionable_paper=True,
+        structured_synthesis=True,
+        aggregate_input_tokens=96000,
+        max_wire_bytes=64000,
+        inline_citations=True,
+    )
+    await prepare_database(settings, **options)
+    await prepare_database(settings, **options)
+    async with session_factory(settings)() as session:
+        models = tuple(
+            await session.scalars(
+                select(AgentModelConfigRecord).where(
+                    AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION
+                )
+            )
+        )
+        assert len(models) == 1
+        assert models[0].max_input_tokens == 96000
+        assert models[0].max_output_tokens == 8192
+        assert models[0].max_tool_calls == 0
+        for model_type in (AgentResearchRunRecord, DataSnapshot, Job):
+            assert await session.scalar(select(func.count()).select_from(model_type)) == 0

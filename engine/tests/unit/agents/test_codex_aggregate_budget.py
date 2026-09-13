@@ -131,6 +131,51 @@ async def test_worker_rejects_budget_that_does_not_bind_frozen_version(monkeypat
     assert isinstance(result, worker._UnavailableResponsesCommittee)
 
 
+@pytest.mark.asyncio
+async def test_worker_builds_actionable_committee_with_exact_frozen_limits(monkeypatch):
+    from types import SimpleNamespace
+
+    from nexus import worker
+    from nexus.agents.codex_sdk import MODEL_ID
+    from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+    from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
+    from nexus.agents.price_authority import FrozenPriceAuthorityStatus
+    from nexus.settings import EngineSettings
+
+    _, _, prompts = _authority()
+    model = SimpleNamespace(
+        version=ACTIONABLE_CONFIG_VERSION,
+        model_id=MODEL_ID,
+        config_hash="a" * 64,
+        max_input_tokens=96000,
+        max_output_tokens=8192,
+        input_usd_per_million=0,
+        output_usd_per_million=0,
+    )
+    run = SimpleNamespace(
+        model_config_id=None, pricing_version=model.version, model_hash=model.config_hash
+    )
+    session = SimpleNamespace(get=AsyncMock(return_value=model))
+    monkeypatch.setattr(worker, "load_frozen_evidence", AsyncMock(return_value=(object(),)))
+    monkeypatch.setattr(
+        worker,
+        "revalidate_frozen_price_authority",
+        AsyncMock(return_value=FrozenPriceAuthorityStatus.MISSING),
+    )
+    monkeypatch.setattr(worker, "load_frozen_prompts", AsyncMock(return_value=prompts))
+    result = await worker._committee(
+        session,
+        EngineSettings(agent_runtime_mode="codex_sdk"),
+        run,
+        responses_client=None,
+        tools=_tools(),
+    )
+    assert isinstance(result, StructuredStagedCodexCommittee)
+    assert result._aggregate_input_tokens == 96000
+    assert result._max_wire_bytes == 64000
+    assert result._inline_citations is True
+
+
 @pytest.mark.parametrize(
     "args",
     [

@@ -29,6 +29,20 @@ uv run --project engine alembic -c engine/alembic.ini current
 若已存在相同账户和 decision session 的周期，必须用原 idempotency key 恢复，不得换 key 重建。
 若有 queued/running Job、非终态周期或订单，先恢复对应 worker；不得重复调用模型或行情。
 
+首次使用前通过现有本地配置入口幂等登记 actionable v4。该命令只登记冻结的模型与提示词配置，
+不创建研究、Job 或订单，也不调用模型：
+
+```bash
+uv run --project engine nexus-openai-local setup \
+  --backend codex_sdk \
+  --structured-synthesis \
+  --aggregate-input-tokens 96000 \
+  --max-wire-bytes 64000 \
+  --inline-citations \
+  --actionable-paper \
+  --skip-key
+```
+
 ## 单次推进
 
 在 `infra/.env.local` 中显式设置 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=true`；默认模板为 false。

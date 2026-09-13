@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
+    ACTIONABLE_CONFIG_VERSION,
     INLINE_CITATION_CONFIG_VERSION,
     PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
     SDK_CONFIG_VERSIONS,
@@ -452,7 +453,7 @@ async def _committee(
             ),
             **(
                 {"inline_citations": True}
-                if model.version == INLINE_CITATION_CONFIG_VERSION
+                if model.version in {INLINE_CITATION_CONFIG_VERSION, ACTIONABLE_CONFIG_VERSION}
                 else {}
             ),
             **(
