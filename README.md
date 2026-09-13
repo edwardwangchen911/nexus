@@ -108,6 +108,11 @@ uv run nexus-engine-provider-worker-local --repo-root "$PWD/.."
 `Ctrl-C` 即可停止。闭市启动只验收日历抑制，不代表 Schwab 行情采集成功。配置、迁移和
 持久化 Job 核对命令见[盘中市场监控手册](docs/runbooks/intraday-market-monitor.md)。
 
+内部 Agent 模拟周期是默认关闭的单次本地入口。它只读取已持久化研究与市场事实，把研究方向
+交给确定性 sizing、硬风控、内部模拟订单、成交和账本，不连接券商下单域。启用、状态恢复、
+真实 IEX 五分钟窗口验收、停止与回滚见
+[Agent 内部模拟周期手册](docs/runbooks/agent-paper-cycle.md)。
+
 ## 验证
 
 前端与合同：
@@ -156,6 +161,7 @@ CI 的完整门禁及发布含义见 [CI 与离线发布门禁](docs/runbooks/ci
 - [新闻本地采集](docs/runbooks/news-local.md)
 - [盘中市场监控](docs/runbooks/intraday-market-monitor.md)
 - [内部模拟单次运行](docs/runbooks/nexus-paper-once.md)
+- [Agent 内部模拟周期](docs/runbooks/agent-paper-cycle.md)
 - [券商模拟激活](docs/runbooks/broker-simulation-activation.md)
 
 任何包含凭据、外部请求或业务写入的操作，都应从对应 runbook 的正常产品入口执行；不要把密钥

@@ -176,3 +176,8 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml exec -T postgre
 ## 与交易能力的关系
 
 盘中监控的完成不会解锁 Phase 3B、复星模拟写入或实盘。它只提供可追溯的显示证据；交易意图、确定性硬风控、人工审批和订单执行仍是隔离的权限域。任何真实订单继续逐笔确认，Agent 永远不能直接下单或修改硬风控。
+
+Agent 内部模拟成交使用独立的 `paper_execution_price_policy_v1`，仅接受 Alpaca IEX、
+`real_time`、raw、1Min 的完整五分钟窗口；这里的 Schwab `display_only_intraday_monitor`
+不能成为模拟成交 authority。两条链路不得互相回退，详见
+[Agent 内部模拟周期手册](agent-paper-cycle.md)。

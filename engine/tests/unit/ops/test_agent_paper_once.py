@@ -8,6 +8,7 @@ from nexus.ops.agent_paper_once import (
     main,
     parser,
 )
+from nexus.paper.agent_cycle import AgentPaperCycleError
 from nexus.settings import EngineSettings
 
 
@@ -41,6 +42,36 @@ def test_disabled_command_emits_only_fixed_code(
 
     assert exit_code == 1
     assert capsys.readouterr().out == '{"error_code":"AGENT_PAPER_CYCLE_DISABLED"}\n'
+
+
+def test_non_internal_account_emits_stable_boundary_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "nexus.ops.agent_paper_once.load_local_environment",
+        lambda *_: {"NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true", "DATABASE_URL": "x"},
+    )
+
+    async def reject(*_args: object) -> None:
+        raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
+
+    monkeypatch.setattr("nexus.ops.agent_paper_once.run_once", reject)
+
+    exit_code = main(
+        [
+            "run",
+            "--account-id",
+            str(UUID(int=1)),
+            "--decision-time",
+            datetime(2026, 8, 26, 21, tzinfo=UTC).isoformat(),
+            "--idempotency-key",
+            "cycle-invalid-account",
+        ]
+    )
+
+    assert exit_code == 1
+    assert capsys.readouterr().out == '{"error_code":"AGENT_PAPER_ACCOUNT_INVALID"}\n'
 
 
 def test_feature_flag_is_disabled_by_default_and_can_be_explicitly_enabled(

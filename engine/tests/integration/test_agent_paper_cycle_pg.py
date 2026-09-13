@@ -11,6 +11,7 @@ from nexus.market.ingestion import ingest_price_page
 from nexus.paper.agent_cycle import advance_agent_paper_cycle
 from nexus.paper.agent_market import collect_agent_paper_window
 from nexus.paper.execution_service import advance_internal_paper_order
+from nexus.paper.read_service import PaperReadService
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
@@ -66,7 +67,7 @@ class _IexProvider:
                 for index in range(5)
             ),
             next_cursor=None,
-            raw_payload=b'{"bars":"real-shape-fixture"}',
+            raw_payload=(f'{{"bars":"{request.start.isoformat()}"}}'.encode()),
             source_request_id="agent-cycle-iex-window",
             as_of=evaluated_at - timedelta(seconds=1),
             provenance=MarketDataProvenance(
@@ -437,6 +438,40 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
                 idempotency_key="agent-paper-first-fill",
             )
         assert advanced.action == "partially_filled"
+        async with sessions() as session:
+            historical = await PaperReadService(
+                session, evaluated_at - timedelta(seconds=1)
+            ).latest_agent_cycle()
+            projected = await PaperReadService(session, evaluated_at).latest_agent_cycle()
+        assert historical is not None
+        assert historical.status == "awaiting_market"
+        assert projected is not None
+        assert projected.status == "partially_filled"
+        assert projected.result_code == "PAPER_ORDERS_PARTIALLY_FILLED"
+        second_window_start = window_start + timedelta(minutes=5)
+        second_evaluated_at = evaluated_at + timedelta(minutes=5)
+        await collect_agent_paper_window(
+            sessions,
+            cycle_id=completed.cycle_id,
+            instrument_id=INSTRUMENTS[0][0],
+            window_start=second_window_start,
+            provider=_IexProvider(),
+            object_store=_ObjectStore(),
+            evaluated_at=second_evaluated_at,
+        )
+        async with sessions.begin() as session:
+            final_fill = await advance_internal_paper_order(
+                session,
+                order_id=completed.order_ids[0],
+                evaluated_at=second_evaluated_at,
+                idempotency_key="agent-paper-final-fill",
+            )
+        assert final_fill.action == "filled"
+        async with sessions() as session:
+            projected = await PaperReadService(session, second_evaluated_at).latest_agent_cycle()
+        assert projected is not None
+        assert projected.status == "completed"
+        assert projected.result_code == "PAPER_CYCLE_COMPLETED"
     finally:
         await engine.dispose()
 

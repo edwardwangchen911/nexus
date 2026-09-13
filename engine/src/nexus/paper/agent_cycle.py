@@ -42,6 +42,7 @@ from nexus.persistence.models.paper import (
     PAPER_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
+    PaperAccountRecord,
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import Job
@@ -53,11 +54,16 @@ __all__ = [
     "CandidateAuthority",
     "CandidateManifestEntry",
     "CycleStatus",
+    "AgentPaperCycleError",
     "advance_agent_paper_cycle",
     "candidate_manifest_hash",
     "canonical_cycle_event_hash",
     "select_candidate_manifest",
 ]
+
+
+class AgentPaperCycleError(ValueError):
+    """Stable fail-closed error for the internal-only cycle boundary."""
 
 
 async def advance_agent_paper_cycle(
@@ -76,6 +82,9 @@ async def advance_agent_paper_cycle(
         or len(idempotency_key) > 255
     ):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    account = await session.get(PaperAccountRecord, account_id)
+    if account is None or account.capability != "simulation_write_internal":
+        raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
     request_hash = job_input_hash(
         {
             "schema": "agent-paper-cycle-v1",

@@ -215,6 +215,49 @@ class PaperReadService:
                     tuple[Literal["approved", "reduced", "rejected"], ...], risk_outcomes
                 ),
             )
+        projected_status = event.to_status
+        projected_result_code = event.result_code
+        if event.to_status == "awaiting_market" and order_ids:
+            latest_order_events = (
+                select(
+                    PaperOrderEventRecord.order_id,
+                    func.max(PaperOrderEventRecord.event_seq).label("event_seq"),
+                )
+                .where(
+                    PaperOrderEventRecord.order_id.in_(order_ids),
+                    PaperOrderEventRecord.occurred_at <= self._request_time,
+                )
+                .group_by(PaperOrderEventRecord.order_id)
+                .subquery()
+            )
+            order_statuses = tuple(
+                await self._session.scalars(
+                    select(PaperOrderEventRecord.to_status)
+                    .join(
+                        latest_order_events,
+                        and_(
+                            latest_order_events.c.order_id == PaperOrderEventRecord.order_id,
+                            latest_order_events.c.event_seq == PaperOrderEventRecord.event_seq,
+                        ),
+                    )
+                    .order_by(PaperOrderEventRecord.order_id)
+                )
+            )
+            if len(order_statuses) != len(order_ids):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent paper order projection is incomplete.",
+                    status_code=409,
+                )
+            if "partially_filled" in order_statuses:
+                projected_status = "partially_filled"
+                projected_result_code = "PAPER_ORDERS_PARTIALLY_FILLED"
+            elif all(
+                status in {"filled", "cancelled", "rejected", "risk_rejected"}
+                for status in order_statuses
+            ):
+                projected_status = "completed"
+                projected_result_code = "PAPER_CYCLE_COMPLETED"
         windows = tuple(
             await self._session.scalars(
                 select(AgentPaperMarketWindowRecord)
@@ -234,8 +277,8 @@ class PaperReadService:
             market_status = "probe"
         return AgentPaperCycleResponse(
             cycle_id=cycle.id,
-            status=cast(Any, event.to_status),
-            result_code=event.result_code,
+            status=cast(Any, projected_status),
+            result_code=projected_result_code,
             decision_session=cycle.decision_session,
             decision_time=cycle.decision_time,
             execution_session=cycle.execution_session,
