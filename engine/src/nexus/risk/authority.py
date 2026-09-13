@@ -10,7 +10,7 @@ from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.market.price_bar_authority import (
@@ -503,13 +503,36 @@ async def _load_sectors(
     decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[RiskSectorExposure, ...]:
+    latest = (
+        select(
+            SectorExposure.instrument_id,
+            func.max(SectorExposure.as_of).label("as_of"),
+        )
+        .where(
+            SectorExposure.instrument_id.in_(required),
+            SectorExposure.as_of <= decision.decision_session,
+            SectorExposure.created_at <= decision.decision_time,
+            SectorExposure.reviewed.is_(True),
+            SectorExposure.synthetic.is_(False),
+        )
+        .group_by(SectorExposure.instrument_id)
+        .subquery()
+    )
     records = tuple(
         (
             await session.scalars(
-                select(SectorExposure).where(
-                    SectorExposure.instrument_id.in_(required),
-                    SectorExposure.as_of == decision.decision_session,
+                select(SectorExposure)
+                .join(
+                    latest,
+                    (SectorExposure.instrument_id == latest.c.instrument_id)
+                    & (SectorExposure.as_of == latest.c.as_of),
                 )
+                .where(
+                    SectorExposure.created_at <= decision.decision_time,
+                    SectorExposure.reviewed.is_(True),
+                    SectorExposure.synthetic.is_(False),
+                )
+                .order_by(SectorExposure.instrument_id, SectorExposure.sector_code)
             )
         ).all()
     )

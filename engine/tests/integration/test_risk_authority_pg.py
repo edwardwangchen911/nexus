@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -118,6 +118,8 @@ async def _seed_authority(
     capability_expires_at: datetime = datetime(2027, 1, 1, tzinfo=UTC),
     decision_time: datetime = DECISION_TIME,
     exchange: str = "NASDAQ",
+    sector_as_of: date = DECISION_SESSION,
+    older_sector_as_of: date | None = None,
 ) -> ForwardStrategyDecision:
     source_policy_id = (
         SOURCE_POLICY_V2_ID if price_source == "fosun" else SOURCE_POLICY_ID
@@ -351,13 +353,27 @@ async def _seed_authority(
                     instrument_id=INSTRUMENT_ID,
                     sector_code="technology",
                     weight=Decimal(1),
-                    as_of=DECISION_SESSION,
+                    as_of=sector_as_of,
                     source_url="memory://paper-risk-sector",
                     content_hash="f" * 64,
                     synthetic=False,
                     reviewed=True,
                 )
             )
+            if older_sector_as_of is not None:
+                session.add(
+                    SectorExposure(
+                        id=UUID("40000000-0000-0000-0000-000000000019"),
+                        instrument_id=INSTRUMENT_ID,
+                        sector_code="industrials",
+                        weight=Decimal(1),
+                        as_of=older_sector_as_of,
+                        source_url="memory://paper-risk-sector-older",
+                        content_hash="9" * 64,
+                        synthetic=False,
+                        reviewed=True,
+                    )
+                )
             await session.flush()
             finalized = await finalize_price_bar_set(session, manifest)
             assert finalized is not None
@@ -502,6 +518,37 @@ def test_pg_loader_reconstructs_the_exact_bound_authority(
     assert market.prices[0].source == "fixture"
     assert market.prices[0].delivery_mode == "fixture"
     assert market.whitelisted_instrument_ids == (INSTRUMENT_ID,)
+
+
+def test_pg_loader_accepts_reviewed_sector_effective_before_decision(
+    migrated_database_url: str,
+) -> None:
+    decision = asyncio.run(
+        _seed_authority(
+            migrated_database_url,
+            sector_as_of=DECISION_SESSION - timedelta(days=1),
+        )
+    )
+
+    market = asyncio.run(_load(migrated_database_url, decision))
+
+    assert market.sector_exposures[0].authority_id == SECTOR_ID
+
+
+def test_pg_loader_selects_only_latest_reviewed_sector_snapshot(
+    migrated_database_url: str,
+) -> None:
+    decision = asyncio.run(
+        _seed_authority(
+            migrated_database_url,
+            sector_as_of=DECISION_SESSION - timedelta(days=1),
+            older_sector_as_of=DECISION_SESSION - timedelta(days=2),
+        )
+    )
+
+    market = asyncio.run(_load(migrated_database_url, decision))
+
+    assert tuple(row.authority_id for row in market.sector_exposures) == (SECTOR_ID,)
 
 
 @pytest.mark.parametrize("exchange", ("ARCA", "NYSEARCA"))
