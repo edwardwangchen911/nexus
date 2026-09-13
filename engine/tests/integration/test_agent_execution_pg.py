@@ -13,6 +13,7 @@ import pytest
 from helpers.fosun_lineage import seed_fosun_daily_lineage
 from helpers.portfolio_api import app, headers
 from nexus.agents.codex_staged import StagedCodexCommittee
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
 from nexus.agents.committee import (
     ROLE_ORDER,
     AgentRole,
@@ -27,6 +28,7 @@ from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import (
     ResearchAdmission,
     admit_research_run,
+    load_actionable_research_output,
     release_daily_budget,
 )
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES, ToolInputError
@@ -56,6 +58,7 @@ from nexus.persistence.models.research import Filing, FinancialFactRecord, Resea
 from nexus.persistence.models.runtime import IdempotencyRecord, IntegrationStatus, Job
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings, Environment
+from nexus.strategy.intents import ResearchClaim, SynthesisAssessment, SynthesisClaimReview
 from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
@@ -1775,6 +1778,59 @@ async def _prepared_production_price_admission(database_url: str):
             allow_fixture_price_authority=False,
         )
     return factory, admission
+
+
+@pytest.mark.asyncio
+async def test_completed_v4_output_is_reloaded_through_current_postgres_authority(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(
+        factory,
+        include_base_evidence=False,
+        model_version=ACTIONABLE_CONFIG_VERSION,
+    )
+    await _seed_database_tool_authority(factory, link_price=False, price_source="fosun")
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=False,
+        )
+    async with factory() as session, session.begin():
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=_ActionableFixtureCommittee(),
+            allow_fixture_evidence=False,
+        )
+        assert result.status == "completed"
+        await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
+        await session.execute(text("ALTER TABLE agent_research_outputs DISABLE TRIGGER USER"))
+        try:
+            await session.execute(
+                text("UPDATE agent_research_runs SET created_at=:created_at WHERE id=:run_id"),
+                {"created_at": _NOW, "run_id": admission.run_id},
+            )
+            await session.execute(
+                text(
+                    "UPDATE agent_research_outputs SET created_at=:created_at WHERE run_id=:run_id"
+                ),
+                {"created_at": _NOW, "run_id": admission.run_id},
+            )
+        finally:
+            await session.execute(text("ALTER TABLE agent_research_outputs ENABLE TRIGGER USER"))
+            await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
+    async with factory() as session:
+        decision = await load_actionable_research_output(
+            session,
+            run_id=admission.run_id,
+            decision_time=_NOW + timedelta(days=1),
+        )
+    assert decision.instrument_id == _INSTRUMENT_ID
+    assert decision.stance == "buy_candidate"
+    assert decision.sizing_action == "increase"
+    assert len(decision.evidence_ref_ids) == 4
 
 
 async def _persisted_run_intents(session: AsyncSession, run_id: UUID):
@@ -4187,6 +4243,48 @@ async def _seed_database_tool_authority(
                 content_hash=record.content_hash,
             )
             for record in linked
+        )
+
+
+class _ActionableFixtureCommittee:
+    async def analyze(
+        self,
+        role: AgentRole,
+        request: ResearchRequest,
+        evidence_refs: tuple[EvidenceRef, ...],
+        prompt: PromptAsset,
+    ) -> CommitteeRoleOutput:
+        del request
+        assessment = None
+        if role == "portfolio":
+            assessment = SynthesisAssessment(
+                stance="buy_candidate",
+                claims=(
+                    ResearchClaim(text="完整证据支持候选方向。", evidence_refs=evidence_refs[:1]),
+                ),
+                reviews=tuple(
+                    SynthesisClaimReview(
+                        claim_id=f"{review_role}:0",
+                        status="accepted",
+                        rationale="冻结证据已逐条回应。",
+                        evidence_refs=evidence_refs[:1],
+                        resolved=True,
+                        missing_evidence=(),
+                        prevented_conclusion=None,
+                    )
+                    for review_role in ("bear", "evidence_audit")
+                ),
+                review_conclusion="sufficient",
+                uncertainties=(),
+            )
+        return CommitteeRoleOutput(
+            role=role,
+            vote="support",
+            claims=(ResearchClaim(text=f"{role} complete review", evidence_refs=evidence_refs),),
+            prompt_hash=prompt.content_hash,
+            input_tokens=1,
+            output_tokens=1,
+            synthesis_assessment=assessment,
         )
 
 

@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
 
 import pytest
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
 from nexus.agents.committee import CommitteeRoleOutput
+from nexus.agents.synthesis import staged_intent_semantics_valid
 from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import ResearchClaim, SynthesisAssessment, SynthesisClaimReview
 
@@ -74,3 +76,26 @@ def test_optional_assessment_keeps_closed_serialization_schema(kind):
     assert schema["additionalProperties"] is False
     assert "synthesis_assessment" in schema["properties"]
     assert "stance" in schema["properties"] if kind == "intent" else "role" in schema["properties"]
+
+
+def test_actionable_version_does_not_admit_a_legacy_watch_shape():
+    from unit.agents.test_execution import _synthesize
+
+    intent = _synthesize(("support",) * 8, structured=True)
+    assert not staged_intent_semantics_valid(intent, ACTIONABLE_CONFIG_VERSION)
+
+
+def test_actionable_version_rejects_a_missing_evidence_audit_review_without_raising():
+    from unit.agents.test_execution import _synthesize
+
+    intent = _synthesize(("support",) * 8, actionable=True)
+    assessment = intent.synthesis_assessment
+    assert assessment is not None
+    intent = intent.model_copy(
+        update={
+            "synthesis_assessment": assessment.model_copy(
+                update={"reviews": (assessment.reviews[0],)}
+            )
+        }
+    )
+    assert not staged_intent_semantics_valid(intent, ACTIONABLE_CONFIG_VERSION)

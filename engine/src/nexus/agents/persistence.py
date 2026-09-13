@@ -10,9 +10,16 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.actionable_research import (
+    RESEARCH_OUTPUT_NOT_ACTIONABLE,
+    ActionableResearchDecision,
+    ActionableResearchError,
+    admit_actionable_research_output,
+)
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
     PORTFOLIO_DECISION_CONFIG_VERSION,
@@ -20,10 +27,18 @@ from nexus.agents.codex_versions import (
     STAGED_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import ROLE_ORDER, AgentRole
-from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
+from nexus.agents.execution_authority import (
+    MAX_FROZEN_EVIDENCE,
+    load_frozen_evidence,
+    load_frozen_symbol,
+)
 from nexus.agents.models import ResearchRequest
 from nexus.agents.portfolio_context import read_portfolio_context
-from nexus.agents.price_authority import freeze_price_authority
+from nexus.agents.price_authority import (
+    FrozenPriceAuthorityStatus,
+    freeze_price_authority,
+    revalidate_frozen_price_authority,
+)
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
 from nexus.jobs.models import (
     JobKeyV1,
@@ -39,6 +54,8 @@ from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
+    AgentResearchOutputEvidenceRecord,
+    AgentResearchOutputRecord,
     AgentResearchRunRecord,
     PortfolioDecisionBudgetReservationRecord,
     PortfolioDecisionRunRecord,
@@ -49,6 +66,7 @@ from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
+from nexus.strategy.intents import ResearchIntent
 
 _ADMISSION_SCHEMA_VERSION = "agent_research_run_v1"
 
@@ -61,6 +79,102 @@ class ResearchAdmission:
     @property
     def run_id(self) -> UUID:
         return self.run.id
+
+
+async def load_actionable_research_output(
+    session: AsyncSession, *, run_id: UUID, decision_time: datetime
+) -> ActionableResearchDecision:
+    """Load and revalidate the one complete v4 terminal without model I/O."""
+    try:
+        run = await session.get(AgentResearchRunRecord, run_id, populate_existing=True)
+        if run is None:
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        terminals = tuple(
+            await session.scalars(
+                select(AgentResearchOutputRecord)
+                .where(
+                    AgentResearchOutputRecord.run_id == run_id,
+                    AgentResearchOutputRecord.role.is_(None),
+                    AgentResearchOutputRecord.status.in_(("completed", "failed", "abstained")),
+                )
+                .order_by(AgentResearchOutputRecord.sequence.desc())
+                .limit(2)
+                .execution_options(populate_existing=True)
+            )
+        )
+        if len(terminals) != 1 or terminals[0].status != "completed":
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        output = terminals[0]
+        if output.intent is None:
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        intent = ResearchIntent.model_validate(output.intent)
+        bindings = tuple(
+            await session.scalars(
+                select(AgentResearchOutputEvidenceRecord)
+                .where(AgentResearchOutputEvidenceRecord.output_id == output.id)
+                .order_by(AgentResearchOutputEvidenceRecord.evidence_ref_id)
+                .limit(101)
+                .execution_options(populate_existing=True)
+            )
+        )
+        evidence = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
+        current_by_id = {record.id: record for record in evidence}
+        if (
+            not evidence
+            or len(bindings) > 100
+            or set(current_by_id) != {binding.evidence_ref_id for binding in bindings}
+            or any(
+                (
+                    binding.source,
+                    binding.provider_object_id,
+                    binding.revision,
+                    binding.available_at,
+                    binding.location,
+                    binding.content_hash,
+                )
+                != (
+                    current_by_id[binding.evidence_ref_id].source,
+                    current_by_id[binding.evidence_ref_id].provider_object_id,
+                    current_by_id[binding.evidence_ref_id].revision,
+                    current_by_id[binding.evidence_ref_id].available_at,
+                    current_by_id[binding.evidence_ref_id].location,
+                    current_by_id[binding.evidence_ref_id].content_hash,
+                )
+                for binding in bindings
+            )
+        ):
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        instrument = await session.get(Instrument, run.instrument_id, populate_existing=True)
+        snapshot = await session.get(DataSnapshot, run.data_snapshot_id, populate_existing=True)
+        symbol = await load_frozen_symbol(session, run)
+        price_status = await revalidate_frozen_price_authority(
+            session,
+            run=run,
+            evidence_records=evidence,
+            allow_fixture=False,
+        )
+        if (
+            instrument is None
+            or snapshot is None
+            or symbol != intent.display_symbol
+            or snapshot.available_at > run.decision_time
+            or snapshot.received_at > run.decision_time
+            or max(run.created_at, output.created_at) > decision_time
+            or price_status is not FrozenPriceAuthorityStatus.VALID
+        ):
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        return admit_actionable_research_output(
+            run=run,
+            output=output,
+            intent=intent,
+            terminal_outputs=terminals,
+            bound_evidence=bindings,
+            decision_time=decision_time,
+        )
+    except ActionableResearchError:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError, ValidationError) as error:
+        raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE) from error
 
 
 async def load_complete_prompt_authority(
@@ -549,9 +663,7 @@ async def admit_research_run(
         payload={"run_id": str(run.id)},
         queue=QueueName.GENERAL,
         retry_policy=RetryPolicy.AUTOMATIC_SAFE,
-        max_attempts=1
-        if model.version in SDK_CONFIG_VERSIONS
-        else 3,
+        max_attempts=1 if model.version in SDK_CONFIG_VERSIONS else 3,
         available_at=now,
     )
     await session.flush()

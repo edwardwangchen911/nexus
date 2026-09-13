@@ -126,6 +126,7 @@ def _synthesize(
     price_authority_valid: bool | None = None,
     staged: bool = False,
     structured: bool = False,
+    actionable: bool = False,
     portfolio_context=None,
 ):
     now = datetime(2026, 8, 24, tzinfo=UTC)
@@ -151,6 +152,7 @@ def _synthesize(
     )
     from nexus.strategy.intents import SynthesisAssessment, SynthesisClaimReview
 
+    structured = structured or actionable
     assessment = (
         SynthesisAssessment(
             stance="buy_candidate",
@@ -206,7 +208,9 @@ def _synthesize(
     )
     model = AgentModelConfigRecord(
         model_id="fixture-model",
-        version="codex-sdk-chatgpt-v3"
+        version="codex-sdk-chatgpt-v4-actionable"
+        if actionable
+        else "codex-sdk-chatgpt-v3"
         if structured
         else "codex-sdk-chatgpt-v2"
         if staged
@@ -285,6 +289,19 @@ def test_staged_role_vote_cannot_establish_action_or_resolved_evidence(final_vot
     assert intent.quality_status == "partial"
     assert intent.evidence_audit == "partial"
     assert "三阶段角色表态未明确投资方向或审查缺口是否解决，仅供研究观察。" in intent.uncertainties
+
+
+def test_actionable_v4_preserves_reviewed_direction_only_when_audit_is_complete() -> None:
+    admitted = _synthesize(("support",) * 8, actionable=True)
+    assert (admitted.stance, admitted.exposure_action) == (
+        "buy_candidate",
+        "eligible_for_increase",
+    )
+    assert admitted.quality_status == admitted.evidence_audit == "complete"
+
+    rejected = _synthesize(("support",) * 6 + ("abstain", "support"), actionable=True)
+    assert (rejected.stance, rejected.exposure_action) == ("watch", "none")
+    assert rejected.quality_status == rejected.evidence_audit == "partial"
 
 
 def test_price_shaped_strings_do_not_establish_revalidated_authority() -> None:

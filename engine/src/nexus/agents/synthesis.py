@@ -7,7 +7,12 @@ from decimal import Decimal
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from nexus.agents.codex_versions import STAGED_CONFIG_VERSIONS, STRUCTURED_CONFIG_VERSIONS
+from nexus.agents.actionable_research import actionable_intent_shape_valid
+from nexus.agents.codex_versions import (
+    ACTIONABLE_CONFIG_VERSION,
+    STAGED_CONFIG_VERSIONS,
+    STRUCTURED_CONFIG_VERSIONS,
+)
 from nexus.agents.committee import AgentRole, CommitteeRoleOutput
 from nexus.agents.concentration import evaluate_frozen_concentration_conditions
 from nexus.agents.portfolio_context import PortfolioResearchContext
@@ -26,6 +31,8 @@ STAGED_SEMANTICS_UNCERTAINTY = "三阶段角色表态未明确投资方向或审
 
 def staged_intent_semantics_valid(intent: ResearchIntent, pricing_version: str) -> bool:
     """Legacy stage votes establish neither an investment action nor resolved objections."""
+    if pricing_version == ACTIONABLE_CONFIG_VERSION:
+        return actionable_intent_shape_valid(intent)
     return pricing_version not in STAGED_CONFIG_VERSIONS or (
         intent.stance == "watch"
         and intent.exposure_action == "none"
@@ -123,6 +130,7 @@ def synthesize_intent(
     counter_theses = oppose_claims or by_role["bear"].claims[:5]
     structured = model.version in STRUCTURED_CONFIG_VERSIONS
     staged = model.version in STAGED_CONFIG_VERSIONS
+    actionable = model.version == ACTIONABLE_CONFIG_VERSION
     assessment = by_role["portfolio"].synthesis_assessment if structured else None
     review_incomplete = staged and by_role["evidence_audit"].vote != "support"
     if staged:
@@ -148,11 +156,13 @@ def synthesize_intent(
         ):
             raise ValueError("STRUCTURED_SYNTHESIS_REVIEW_INVALID")
         theses = assessment.claims
-        review_incomplete = assessment.review_conclusion != "sufficient" or any(
-            not review.resolved for review in assessment.reviews
+        review_incomplete = (
+            by_role["evidence_audit"].vote != "support"
+            or assessment.review_conclusion != "sufficient"
+            or any(not review.resolved for review in assessment.reviews)
         )
-        # Structured model assertions are not a complete deterministic decision admission.
-        stance = "watch"
+        # Only v4 can preserve the structurally reviewed portfolio direction.
+        stance = assessment.stance if actionable and not review_incomplete else "watch"
         exposure_action = exposure_action_for_stance(stance)
     extra_uncertainties = (
         ()
@@ -189,7 +199,10 @@ def synthesize_intent(
                 message
                 for condition, message in (
                     (staged and not structured, STAGED_SEMANTICS_UNCERTAINTY),
-                    (structured, "结构化审查已保存，但尚不具备完整确定性决策准入，仅供研究观察。"),
+                    (
+                        structured and not actionable,
+                        "结构化审查已保存，但尚不具备完整确定性决策准入，仅供研究观察。",
+                    ),
                     (fundamental_missing, "HKEX fundamental authority is unavailable."),
                     (price_missing, "Price authority is unavailable."),
                     (review_incomplete, "Evidence review has unresolved objections."),
@@ -228,9 +241,11 @@ def synthesize_intent(
         ),
         valid_until=run.decision_time + timedelta(days=7),
         quality_status="partial"
-        if staged or fundamental_missing or price_missing or review_incomplete
+        if (staged and not actionable) or fundamental_missing or price_missing or review_incomplete
         else "complete",
-        evidence_audit="partial" if staged else "complete",
+        evidence_audit="partial"
+        if staged and (not actionable or by_role["evidence_audit"].vote != "support")
+        else "complete",
         role_votes=votes,
         disagreement="support and opposition are both present"
         if {"support", "oppose"}.issubset(vote_values)
