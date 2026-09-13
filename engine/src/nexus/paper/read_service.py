@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import and_, desc, func, or_, select
@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.paper import (
+    AgentPaperCandidateResponse,
+    AgentPaperCycleResponse,
+    AgentPaperDecisionResponse,
+    AgentPaperMarketResponse,
     PaperAttributionResponse,
     PaperFillResponse,
     PaperOrderEventResponse,
@@ -27,11 +31,15 @@ from nexus.domain.time import require_utc
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
+from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.backtest import StrategyDefinitionRecord
 from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.evolution import StrategyRegistryEventRecord
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.paper import (
+    AgentPaperCycleEventRecord,
+    AgentPaperCycleRecord,
+    AgentPaperMarketWindowRecord,
     PaperAccountRecord,
     PaperExecutionWindowAuthorityRecord,
     PaperFillRecord,
@@ -43,7 +51,9 @@ from nexus.persistence.models.paper import (
     PaperPositionSnapshotRecord,
     PaperReservationEventRecord,
     PaperReservationRecord,
+    RiskEvaluationRecord,
     RiskPolicyRecord,
+    StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.portfolio import Portfolio
@@ -84,6 +94,165 @@ class PaperReadService:
                 status_code=409,
             )
         return rows[0][0], rows[0][1]
+
+    async def latest_agent_cycle(self) -> AgentPaperCycleResponse | None:
+        account, _ = await self.account()
+        cycle = await self._session.scalar(
+            select(AgentPaperCycleRecord)
+            .where(
+                AgentPaperCycleRecord.account_id == account.id,
+                AgentPaperCycleRecord.decision_time <= self._request_time,
+            )
+            .order_by(AgentPaperCycleRecord.decision_time.desc(), AgentPaperCycleRecord.id.desc())
+            .limit(1)
+        )
+        if cycle is None:
+            return None
+        event = await self._session.scalar(
+            select(AgentPaperCycleEventRecord)
+            .where(AgentPaperCycleEventRecord.cycle_id == cycle.id)
+            .order_by(AgentPaperCycleEventRecord.sequence.desc())
+            .limit(1)
+        )
+        if event is None:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL, "The Agent paper cycle is incomplete.", status_code=409
+            )
+        decision = await self._session.scalar(
+            select(StrategyDecisionRecord).where(
+                StrategyDecisionRecord.account_id == cycle.account_id,
+                StrategyDecisionRecord.decision_session == cycle.decision_session,
+                StrategyDecisionRecord.decision_origin == "agent_research",
+            )
+        )
+        outputs: dict[
+            UUID, tuple[AgentResearchOutputRecord, StrategyDecisionAgentOutputRecord]
+        ] = {}
+        if decision is not None:
+            rows = (
+                await self._session.execute(
+                    select(
+                        AgentResearchRunRecord.instrument_id,
+                        AgentResearchOutputRecord,
+                        StrategyDecisionAgentOutputRecord,
+                    )
+                    .join(
+                        AgentResearchOutputRecord,
+                        AgentResearchOutputRecord.run_id == AgentResearchRunRecord.id,
+                    )
+                    .join(
+                        StrategyDecisionAgentOutputRecord,
+                        StrategyDecisionAgentOutputRecord.agent_research_output_id
+                        == AgentResearchOutputRecord.id,
+                    )
+                    .where(StrategyDecisionAgentOutputRecord.strategy_decision_id == decision.id)
+                    .limit(6)
+                )
+            ).all()
+            if len(rows) > 5:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL, "The Agent paper cycle is unbounded.", status_code=409
+                )
+            outputs = {instrument_id: (output, binding) for instrument_id, output, binding in rows}
+        candidates = []
+        for raw in cycle.candidate_manifest:
+            instrument_id = UUID(str(raw["instrument_id"]))
+            bound = outputs.get(instrument_id)
+            output, binding = bound if bound is not None else (None, None)
+            intent = output.intent if output is not None and isinstance(output.intent, dict) else {}
+            stance = intent.get("stance")
+            candidates.append(
+                AgentPaperCandidateResponse(
+                    instrument_id=instrument_id,
+                    symbol=str(raw["symbol"]),
+                    selection_reasons=(str(raw["inclusion_reason"]),),
+                    research_status="completed" if bound is not None else "pending",
+                    stance=cast(
+                        Literal["buy_candidate", "reduce_candidate", "hold", "watch"] | None,
+                        stance
+                        if stance in {"buy_candidate", "reduce_candidate", "hold", "watch"}
+                        else None,
+                    ),
+                    sizing_action=cast(
+                        Literal["increase", "reduce", "maintain", "none"] | None,
+                        None if binding is None else binding.sizing_action,
+                    ),
+                    intent_hash=None if binding is None else binding.intent_hash,
+                    output_id=None if output is None else output.id,
+                    rejection_code=None,
+                )
+            )
+        order_ids: tuple[UUID, ...] = ()
+        risk_outcomes: tuple[str, ...] = ()
+        decision_response = None
+        if decision is not None:
+            order_ids = tuple(
+                await self._session.scalars(
+                    select(PaperOrderRecord.id)
+                    .where(PaperOrderRecord.strategy_decision_id == decision.id)
+                    .order_by(PaperOrderRecord.id)
+                    .limit(51)
+                )
+            )
+            if len(order_ids) > 50:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL, "The Agent paper cycle is unbounded.", status_code=409
+                )
+            risk_outcomes = tuple(
+                await self._session.scalars(
+                    select(RiskEvaluationRecord.outcome)
+                    .join(PaperOrderRecord, PaperOrderRecord.id == RiskEvaluationRecord.order_id)
+                    .where(PaperOrderRecord.strategy_decision_id == decision.id)
+                    .order_by(PaperOrderRecord.id)
+                    .limit(50)
+                )
+            )
+            decision_response = AgentPaperDecisionResponse(
+                decision_id=decision.id,
+                sizing_policy_version="agent_paper_sizing_v1",
+                target_cash_weight=decimal_to_string(decision.cash_weight),
+                risk_outcomes=cast(
+                    tuple[Literal["approved", "reduced", "rejected"], ...], risk_outcomes
+                ),
+            )
+        windows = tuple(
+            await self._session.scalars(
+                select(AgentPaperMarketWindowRecord)
+                .where(AgentPaperMarketWindowRecord.cycle_id == cycle.id)
+                .order_by(AgentPaperMarketWindowRecord.created_at.desc())
+                .limit(51)
+            )
+        )
+        if len(windows) > 50:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL, "The Agent paper cycle is unbounded.", status_code=409
+            )
+        market_status: Literal["pending", "qualified", "probe"] = "pending"
+        if any(row.purpose == "paper_fill" for row in windows):
+            market_status = "qualified"
+        elif windows:
+            market_status = "probe"
+        return AgentPaperCycleResponse(
+            cycle_id=cycle.id,
+            status=cast(Any, event.to_status),
+            result_code=event.result_code,
+            decision_session=cycle.decision_session,
+            decision_time=cycle.decision_time,
+            execution_session=cycle.execution_session,
+            execution_locked=True,
+            candidate_count=len(candidates),
+            candidates=tuple(candidates),
+            decision=decision_response,
+            market=AgentPaperMarketResponse(
+                source="alpaca",
+                feed="iex",
+                delivery_mode="real_time",
+                coverage="IEX_EXCHANGE_SUBSET",
+                window_minutes=5,
+                status=market_status,
+            ),
+            order_ids=order_ids,
+        )
 
     async def portfolio(self) -> PaperPortfolioResponse:
         account, portfolio = await self.account()

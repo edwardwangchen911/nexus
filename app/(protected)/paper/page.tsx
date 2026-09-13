@@ -10,6 +10,7 @@ import { AlertTriangle, Check, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
+import { AgentPaperCycle, type AgentPaperCycleFact } from "../../components/agent-paper-cycle";
 import { DecisionPath } from "../../components/decision-path";
 import { formatPaperDecimal, formatPaperTime, OrderTimeline, type PaperOrder } from "../../components/order-timeline";
 import type { components } from "../../lib/generated/schema";
@@ -26,6 +27,8 @@ type PaperPanelProps = {
   statusFilter: "" | OrderStatus;
   loadingMore: boolean;
   notice: Notice;
+  cycle?: AgentPaperCycleFact | null;
+  cycleUnavailable?: boolean;
   onRefresh: () => void;
   onStatusFilter: (status: "" | OrderStatus) => void;
   onLoadMore: () => void;
@@ -48,6 +51,8 @@ export default function PaperPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [portfolio, setPortfolio] = useState<PaperPortfolio | null>(null);
   const [orders, setOrders] = useState<PaperOrder[]>([]);
+  const [cycle, setCycle] = useState<AgentPaperCycleFact | null>(null);
+  const [cycleUnavailable, setCycleUnavailable] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"" | OrderStatus>("");
   const [loadingMore, setLoadingMore] = useState(false);
@@ -68,6 +73,8 @@ export default function PaperPage(): React.ReactElement {
     ordersRef.current = [];
     setPortfolio(null);
     setOrders([]);
+    setCycle(null);
+    setCycleUnavailable(false);
     setNextCursor(null);
   }, []);
 
@@ -79,9 +86,10 @@ export default function PaperPage(): React.ReactElement {
     if (!portfolioRef.current) setState("loading");
     try {
       const filter = filterRef.current;
-      const [portfolioResponse, orderResponse] = await Promise.all([
+      const [portfolioResponse, orderResponse, cycleResponse] = await Promise.all([
         fetchWithTimeout("/api/v1/paper/portfolio"),
         fetchWithTimeout(orderPath(filter, null)),
+        fetchWithTimeout("/api/v1/paper/cycles/latest").catch(() => new Response(null, { status: 502 })),
       ]);
       if (version !== loadVersion.current) return false;
       if ([401, 403].includes(portfolioResponse.status) || [401, 403].includes(orderResponse.status)) {
@@ -108,6 +116,12 @@ export default function PaperPage(): React.ReactElement {
       if (!page) throw new Error("paper orders invalid");
       ordersRef.current = page.items; setOrders(page.items); setNextCursor(page.next_cursor);
       cursorHistory.current = new Set(page.next_cursor ? [page.next_cursor] : []);
+      if (cycleResponse.ok) {
+        const cyclePayload = await cycleResponse.json() as { data?: AgentPaperCycleFact };
+        setCycle(cyclePayload.data ?? null); setCycleUnavailable(!cyclePayload.data);
+      } else {
+        setCycle(null); setCycleUnavailable(cycleResponse.status !== 404);
+      }
       setState(portfolioState(nextPortfolio.data_state));
       return true;
     } catch (error) {
@@ -238,6 +252,7 @@ export default function PaperPage(): React.ReactElement {
 
   return <>
     <PaperPanel state={state} portfolio={portfolio} orders={orders} nextCursor={nextCursor}
+      cycle={cycle} cycleUnavailable={cycleUnavailable}
       statusFilter={statusFilter} loadingMore={loadingMore} notice={notice}
       onRefresh={() => void refresh()} onStatusFilter={(value) => void changeStatusFilter(value)}
       onLoadMore={() => void loadMoreOrders()} onCancel={openCancel} />
@@ -246,7 +261,7 @@ export default function PaperPage(): React.ReactElement {
   </>;
 }
 
-export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
+export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycle = null, cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
   const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
@@ -264,6 +279,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
           <div><p className="eyebrow">模拟账户权威</p><h2>{portfolio.name}</h2><p>初始资金 <strong className="numeric-data">USD {formatPaperDecimal(portfolio.initial_capital, 2)}</strong> · 仅内部模拟成交 · 实盘能力保持关闭</p></div>
           <span className="mode-badge">不是实盘</span>
         </section>
+        <AgentPaperCycle cycle={cycle} unavailable={cycleUnavailable} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         <PerformanceFacts portfolio={portfolio} />
         <Positions portfolio={portfolio} />

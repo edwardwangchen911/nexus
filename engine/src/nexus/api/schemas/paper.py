@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 from uuid import UUID
 
@@ -126,6 +127,64 @@ class PaperOrderPageResponse(_StrictSchema):
 
 class PaperOrderPageEnvelope(_StrictSchema):
     data: PaperOrderPageResponse
+    meta: SuccessMetaResponse
+
+
+class AgentPaperCandidateResponse(_StrictSchema):
+    instrument_id: UUID
+    symbol: str = Field(min_length=1, max_length=32)
+    selection_reasons: tuple[str, ...] = Field(min_length=1, max_length=4)
+    research_status: Literal["pending", "completed", "unavailable"]
+    stance: Literal["buy_candidate", "reduce_candidate", "hold", "watch"] | None
+    sizing_action: Literal["increase", "reduce", "maintain", "none"] | None
+    intent_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")
+    output_id: UUID | None
+    rejection_code: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class AgentPaperDecisionResponse(_StrictSchema):
+    decision_id: UUID
+    sizing_policy_version: Literal["agent_paper_sizing_v1"]
+    target_cash_weight: DecimalString
+    risk_outcomes: tuple[Literal["approved", "reduced", "rejected"], ...] = Field(max_length=50)
+
+
+class AgentPaperMarketResponse(_StrictSchema):
+    source: Literal["alpaca"]
+    feed: Literal["iex"]
+    delivery_mode: Literal["real_time"]
+    coverage: Literal["IEX_EXCHANGE_SUBSET"]
+    window_minutes: Literal[5]
+    status: Literal["pending", "qualified", "probe"]
+
+
+class AgentPaperCycleResponse(_StrictSchema):
+    cycle_id: UUID
+    status: Literal[
+        "prepared",
+        "researching",
+        "decision_recorded",
+        "risk_evaluated",
+        "awaiting_market",
+        "partially_filled",
+        "completed",
+        "unavailable",
+        "failed",
+    ]
+    result_code: str = Field(min_length=1, max_length=100)
+    decision_session: date
+    decision_time: AwareDatetime
+    execution_session: date
+    execution_locked: Literal[True]
+    candidate_count: int = Field(ge=0, le=5)
+    candidates: tuple[AgentPaperCandidateResponse, ...] = Field(max_length=5)
+    decision: AgentPaperDecisionResponse | None
+    market: AgentPaperMarketResponse
+    order_ids: tuple[UUID, ...] = Field(max_length=50)
+
+
+class AgentPaperCycleEnvelope(_StrictSchema):
+    data: AgentPaperCycleResponse
     meta: SuccessMetaResponse
 
 

@@ -2,10 +2,26 @@ import type { components } from "../../../app/lib/generated/schema";
 
 export type PaperPortfolio = components["schemas"]["PaperPortfolioResponse"];
 export type PaperOrder = components["schemas"]["PaperOrderResponse"];
+export type AgentPaperCycle = components["schemas"]["AgentPaperCycleResponse"];
 
 export const portfolioId = "0198f7a0-1111-7777-8111-111111111121";
 export const orderId = "0198f7a0-1111-7777-8111-111111111122";
 export const instrumentId = "0198f7a0-1111-7777-8111-111111111123";
+
+export const agentPaperCycle: AgentPaperCycle = {
+  cycle_id: "0198f7a0-1111-7777-8111-111111111120",
+  status: "awaiting_market",
+  result_code: "PAPER_ORDERS_AWAITING_MARKET",
+  decision_session: "2026-08-26",
+  decision_time: "2026-08-26T21:00:00Z",
+  execution_session: "2026-08-27",
+  execution_locked: true,
+  candidate_count: 1,
+  candidates: [{ instrument_id: instrumentId, symbol: "AAPL", selection_reasons: ["quality_rank"], research_status: "completed", stance: "buy_candidate", sizing_action: "increase", intent_hash: "a".repeat(64), output_id: "0198f7a0-1111-7777-8111-111111111126", rejection_code: null }],
+  decision: { decision_id: "0198f7a0-1111-7777-8111-111111111127", sizing_policy_version: "agent_paper_sizing_v1", target_cash_weight: "0.950000000000", risk_outcomes: ["approved"] },
+  market: { source: "alpaca", feed: "iex", delivery_mode: "real_time", coverage: "IEX_EXCHANGE_SUBSET", window_minutes: 5, status: "pending" },
+  order_ids: [orderId],
+};
 
 export const paperPortfolio: PaperPortfolio = {
   portfolio_id: portfolioId,

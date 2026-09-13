@@ -13,6 +13,7 @@ from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.portfolios import _utc_now
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.api.schemas.paper import (
+    AgentPaperCycleEnvelope,
     PaperCancelEnvelope,
     PaperCancelRequest,
     PaperCancelResponse,
@@ -62,6 +63,30 @@ async def get_paper_portfolio(
 ) -> PaperPortfolioEnvelope:
     data = await PaperReadService(session, now).portfolio()
     return PaperPortfolioEnvelope(
+        data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/cycles/latest",
+    operation_id="getLatestInternalAgentPaperCycle",
+    response_model=AgentPaperCycleEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_latest_agent_paper_cycle(
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> AgentPaperCycleEnvelope:
+    data = await PaperReadService(session, now).latest_agent_cycle()
+    if data is None:
+        raise NexusError(
+            ErrorCode.NOT_FOUND,
+            "The Agent paper cycle was not found.",
+            status_code=404,
+        )
+    return AgentPaperCycleEnvelope(
         data=data,
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )

@@ -17,6 +17,23 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("internal paper page", () => {
+  it("keeps portfolio and orders when the cycle read fails", async () => {
+    const methods: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      methods.push(init?.method ?? "GET");
+      const url = String(input);
+      if (url === "/api/v1/paper/portfolio") return Response.json({ data: paperPortfolio, meta: meta() });
+      if (url === "/api/v1/paper/orders?limit=20") return Response.json({ data: { items: [cancellableOrder], next_cursor: null }, meta: meta() });
+      if (url === "/api/v1/paper/cycles/latest") return Response.json({ error: { code: "UPSTREAM_ERROR" } }, { status: 502 });
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    render(<PaperPage />);
+    expect(await screen.findByText("账户绩效")).toBeVisible();
+    expect(screen.getByText(/Agent 周期事实暂不可用/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消 AAPL 模拟订单" })).toBeVisible();
+    expect(methods.every((method) => method === "GET")).toBe(true);
+  });
   it.each(["1", "0.1"])("renders integer and short-decimal drawdown ratios correctly: %s", (ratio) => {
     const portfolio = structuredClone(paperPortfolio);
     portfolio.performance!.drawdown_ratio = ratio;

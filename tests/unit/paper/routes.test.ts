@@ -15,6 +15,18 @@ vi.mock("../../../app/lib/engine/client", () => ({
 }));
 
 describe("internal-paper BFF routes", () => {
+  it("forwards the latest cycle as a query-free GET", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/cycles/latest/route");
+    await GET(new Request("https://nexus.test/api/v1/paper/cycles/latest"));
+    expect(engineFetch).toHaveBeenCalledWith(
+      "/internal/v1/paper/cycles/latest",
+      expect.objectContaining({ method: "GET" }),
+    );
+    const rejected = await GET(
+      new Request("https://nexus.test/api/v1/paper/cycles/latest?account_id=secret"),
+    );
+    expect(rejected.status).toBe(400);
+  });
   beforeEach(() => {
     engineFetch.mockReset();
     engineFetch.mockResolvedValue(Response.json({

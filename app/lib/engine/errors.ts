@@ -17,6 +17,7 @@ import {
   paperCancelRuntimeSchema,
   paperOrderPageRuntimeSchema,
   paperPortfolioRuntimeSchema,
+  agentPaperCycleRuntimeSchema,
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
   portfolioDecisionRunRuntimeSchema,
@@ -262,6 +263,18 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || !Array.isArray(data.positions) || data.positions.length > 500
       || !Array.isArray(data.attributions) || data.attributions.length > 500
       || !paperPortfolioValid(data)) return INVALID_DATA;
+    return data;
+  }
+  if (pathname === "/internal/v1/paper/cycles/latest") {
+    if (requestMethod?.toUpperCase() !== "GET"
+      || !matchesRuntimeSchema(data, agentPaperCycleRuntimeSchema)
+      || !isPlain(data)
+      || data.execution_locked !== true
+      || !Array.isArray(data.candidates)
+      || data.candidates.length > 5
+      || data.candidate_count !== data.candidates.length
+      || !Array.isArray(data.order_ids)
+      || data.order_ids.length > 50) return INVALID_DATA;
     return data;
   }
   if (pathname === "/internal/v1/paper/orders") {

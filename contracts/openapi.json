@@ -226,6 +226,334 @@
         "title": "AdjustmentScenarioConstraintsV1",
         "type": "object"
       },
+      "AgentPaperCandidateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "intent_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent Hash"
+          },
+          "output_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Id"
+          },
+          "rejection_code": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Code"
+          },
+          "research_status": {
+            "enum": [
+              "pending",
+              "completed",
+              "unavailable"
+            ],
+            "title": "Research Status",
+            "type": "string"
+          },
+          "selection_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Selection Reasons",
+            "type": "array"
+          },
+          "sizing_action": {
+            "anyOf": [
+              {
+                "enum": [
+                  "increase",
+                  "reduce",
+                  "maintain",
+                  "none"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sizing Action"
+          },
+          "stance": {
+            "anyOf": [
+              {
+                "enum": [
+                  "buy_candidate",
+                  "reduce_candidate",
+                  "hold",
+                  "watch"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stance"
+          },
+          "symbol": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "symbol",
+          "selection_reasons",
+          "research_status",
+          "stance",
+          "sizing_action",
+          "intent_hash",
+          "output_id"
+        ],
+        "title": "AgentPaperCandidateResponse",
+        "type": "object"
+      },
+      "AgentPaperCycleEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentPaperCycleResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "AgentPaperCycleEnvelope",
+        "type": "object"
+      },
+      "AgentPaperCycleResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_count": {
+            "maximum": 5,
+            "minimum": 0,
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPaperCandidateResponse"
+            },
+            "maxItems": 5,
+            "title": "Candidates",
+            "type": "array"
+          },
+          "cycle_id": {
+            "format": "uuid",
+            "title": "Cycle Id",
+            "type": "string"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperDecisionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decision_session": {
+            "format": "date",
+            "title": "Decision Session",
+            "type": "string"
+          },
+          "decision_time": {
+            "format": "date-time",
+            "title": "Decision Time",
+            "type": "string"
+          },
+          "execution_locked": {
+            "const": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "execution_session": {
+            "format": "date",
+            "title": "Execution Session",
+            "type": "string"
+          },
+          "market": {
+            "$ref": "#/components/schemas/AgentPaperMarketResponse"
+          },
+          "order_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Order Ids",
+            "type": "array"
+          },
+          "result_code": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Result Code",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "prepared",
+              "researching",
+              "decision_recorded",
+              "risk_evaluated",
+              "awaiting_market",
+              "partially_filled",
+              "completed",
+              "unavailable",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cycle_id",
+          "status",
+          "result_code",
+          "decision_session",
+          "decision_time",
+          "execution_session",
+          "execution_locked",
+          "candidate_count",
+          "candidates",
+          "decision",
+          "market",
+          "order_ids"
+        ],
+        "title": "AgentPaperCycleResponse",
+        "type": "object"
+      },
+      "AgentPaperDecisionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "decision_id": {
+            "format": "uuid",
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "risk_outcomes": {
+            "items": {
+              "enum": [
+                "approved",
+                "reduced",
+                "rejected"
+              ],
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Risk Outcomes",
+            "type": "array"
+          },
+          "sizing_policy_version": {
+            "const": "agent_paper_sizing_v1",
+            "title": "Sizing Policy Version",
+            "type": "string"
+          },
+          "target_cash_weight": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Target Cash Weight",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "sizing_policy_version",
+          "target_cash_weight",
+          "risk_outcomes"
+        ],
+        "title": "AgentPaperDecisionResponse",
+        "type": "object"
+      },
+      "AgentPaperMarketResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage": {
+            "const": "IEX_EXCHANGE_SUBSET",
+            "title": "Coverage",
+            "type": "string"
+          },
+          "delivery_mode": {
+            "const": "real_time",
+            "title": "Delivery Mode",
+            "type": "string"
+          },
+          "feed": {
+            "const": "iex",
+            "title": "Feed",
+            "type": "string"
+          },
+          "source": {
+            "const": "alpaca",
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "qualified",
+              "probe"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "window_minutes": {
+            "const": 5,
+            "title": "Window Minutes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source",
+          "feed",
+          "delivery_mode",
+          "coverage",
+          "window_minutes",
+          "status"
+        ],
+        "title": "AgentPaperMarketResponse",
+        "type": "object"
+      },
       "AgentRole": {
         "enum": [
           "orchestrator",
@@ -15727,6 +16055,64 @@
           }
         },
         "summary": "Get Overview"
+      }
+    },
+    "/internal/v1/paper/cycles/latest": {
+      "get": {
+        "operationId": "getLatestInternalAgentPaperCycle",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPaperCycleEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Latest Agent Paper Cycle"
       }
     },
     "/internal/v1/paper/orders": {

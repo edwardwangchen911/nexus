@@ -483,6 +483,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/cycles/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Latest Agent Paper Cycle */
+        get: operations["getLatestInternalAgentPaperCycle"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/orders": {
         parameters: {
             query?: never;
@@ -1065,6 +1082,131 @@ export interface components {
              * @constant
              */
             universe_policy: "current_holdings_only";
+        };
+        /** AgentPaperCandidateResponse */
+        AgentPaperCandidateResponse: {
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Intent Hash */
+            intent_hash: string | null;
+            /** Output Id */
+            output_id: string | null;
+            /** Rejection Code */
+            rejection_code?: string | null;
+            /**
+             * Research Status
+             * @enum {string}
+             */
+            research_status: "pending" | "completed" | "unavailable";
+            /** Selection Reasons */
+            selection_reasons: string[];
+            /** Sizing Action */
+            sizing_action: ("increase" | "reduce" | "maintain" | "none") | null;
+            /** Stance */
+            stance: ("buy_candidate" | "reduce_candidate" | "hold" | "watch") | null;
+            /** Symbol */
+            symbol: string;
+        };
+        /** AgentPaperCycleEnvelope */
+        AgentPaperCycleEnvelope: {
+            data: components["schemas"]["AgentPaperCycleResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** AgentPaperCycleResponse */
+        AgentPaperCycleResponse: {
+            /** Candidate Count */
+            candidate_count: number;
+            /** Candidates */
+            candidates: components["schemas"]["AgentPaperCandidateResponse"][];
+            /**
+             * Cycle Id
+             * Format: uuid
+             */
+            cycle_id: string;
+            decision: components["schemas"]["AgentPaperDecisionResponse"] | null;
+            /**
+             * Decision Session
+             * Format: date
+             */
+            decision_session: string;
+            /**
+             * Decision Time
+             * Format: date-time
+             */
+            decision_time: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Execution Session
+             * Format: date
+             */
+            execution_session: string;
+            market: components["schemas"]["AgentPaperMarketResponse"];
+            /** Order Ids */
+            order_ids: string[];
+            /** Result Code */
+            result_code: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "prepared" | "researching" | "decision_recorded" | "risk_evaluated" | "awaiting_market" | "partially_filled" | "completed" | "unavailable" | "failed";
+        };
+        /** AgentPaperDecisionResponse */
+        AgentPaperDecisionResponse: {
+            /**
+             * Decision Id
+             * Format: uuid
+             */
+            decision_id: string;
+            /** Risk Outcomes */
+            risk_outcomes: ("approved" | "reduced" | "rejected")[];
+            /**
+             * Sizing Policy Version
+             * @constant
+             */
+            sizing_policy_version: "agent_paper_sizing_v1";
+            /** Target Cash Weight */
+            target_cash_weight: string;
+        };
+        /** AgentPaperMarketResponse */
+        AgentPaperMarketResponse: {
+            /**
+             * Coverage
+             * @constant
+             */
+            coverage: "IEX_EXCHANGE_SUBSET";
+            /**
+             * Delivery Mode
+             * @constant
+             */
+            delivery_mode: "real_time";
+            /**
+             * Feed
+             * @constant
+             */
+            feed: "iex";
+            /**
+             * Source
+             * @constant
+             */
+            source: "alpaca";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "qualified" | "probe";
+            /**
+             * Window Minutes
+             * @constant
+             */
+            window_minutes: 5;
         };
         /** @enum {string} */
         AgentRole: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";
@@ -7811,6 +7953,62 @@ export interface operations {
                 };
             };
             /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getLatestInternalAgentPaperCycle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentPaperCycleEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
             422: {
                 headers: {
                     [name: string]: unknown;

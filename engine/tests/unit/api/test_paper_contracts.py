@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from nexus.api.schemas.paper import (
+    AgentPaperCycleResponse,
     PaperCancelRequest,
     PaperOrderPageResponse,
     PaperPortfolioResponse,
@@ -34,14 +35,19 @@ def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_cre
     assert portfolio_schema["properties"]["positions"]["maxItems"] == 500
     assert portfolio_schema["properties"]["attributions"]["maxItems"] == 500
     performance = portfolio_schema["$defs"]["PaperPerformanceResponse"]
-    assert {"cash", "available_cash", "reserved_cash"} <= set(
-        performance["required"]
-    )
+    assert {"cash", "available_cash", "reserved_cash"} <= set(performance["required"])
     assert page_schema["properties"]["items"]["maxItems"] == 50
     wire = str({"portfolio": portfolio_schema, "orders": page_schema}).lower()
     assert "account_id" not in wire
     assert "broker_order" not in wire
     assert "create_order" not in wire
+
+    cycle_schema = AgentPaperCycleResponse.model_json_schema()
+    assert cycle_schema["properties"]["candidates"]["maxItems"] == 5
+    assert cycle_schema["properties"]["order_ids"]["maxItems"] == 50
+    cycle_wire = str(cycle_schema).lower()
+    assert "prompt" not in cycle_wire
+    assert "account_id" not in cycle_wire
 
 
 def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() -> None:
@@ -49,6 +55,7 @@ def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() 
     paths = document["paths"]
 
     assert set(paths["/internal/v1/paper/portfolio"]) == {"get"}
+    assert set(paths["/internal/v1/paper/cycles/latest"]) == {"get"}
     assert set(paths["/internal/v1/paper/orders"]) == {"get"}
     assert set(paths["/internal/v1/paper/orders/{order_id}/cancel"]) == {"post"}
     assert not any(

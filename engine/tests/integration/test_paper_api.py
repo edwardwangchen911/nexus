@@ -4,12 +4,34 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 import pytest
 from helpers.paper_api import app, headers, seed_ready_paper_api, settings
+from helpers.paper_batch import (
+    DATA_SNAPSHOT_ID,
+    DECISION_SESSION,
+    DECISION_TIME,
+    EXECUTION_SESSION,
+    INSTRUMENTS,
+    QUALITY_REPORT_ID,
+    UNIVERSE_ID,
+    seed_paper_batch,
+)
 from helpers.paper_execution import seed_paper_execution
+from nexus.paper.agent_cycle_models import (
+    CandidateManifestEntry,
+    candidate_manifest_hash,
+    canonical_cycle_event_hash,
+)
 from nexus.paper.execution_service import advance_internal_paper_order
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCycleEventRecord,
+    AgentPaperCycleRecord,
+)
 from nexus.persistence.session import session_factory
 
 
@@ -41,6 +63,98 @@ async def test_paper_endpoints_require_hmac_and_bound_queries(
     assert unauthenticated.json()["error"]["code"] == "UNAUTHENTICATED"
     assert all(response.status_code == 422 for response in invalid)
     assert all(response.json()["error"]["code"] == "VALIDATION_ERROR" for response in invalid)
+
+
+@pytest.mark.asyncio
+async def test_latest_agent_paper_cycle_is_404_without_a_cycle(
+    migrated_database_url: str,
+) -> None:
+    path = "/internal/v1/paper/cycles/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_latest_agent_paper_cycle_returns_only_bounded_redacted_facts(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    candidate = CandidateManifestEntry(
+        instrument_id=INSTRUMENTS[0][0],
+        symbol="T1",
+        inclusion_reason="quality_rank",
+        research_snapshot_id=DATA_SNAPSHOT_ID,
+    )
+    cycle_id = UUID("72000000-0000-0000-0000-000000000001")
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        session.add(
+            AgentPaperCycleRecord(
+                id=cycle_id,
+                account_id=seed.account_id,
+                portfolio_id=seed.portfolio_id,
+                decision_session=DECISION_SESSION,
+                decision_time=DECISION_TIME,
+                execution_session=EXECUTION_SESSION,
+                universe_snapshot_id=UNIVERSE_ID,
+                quality_report_id=QUALITY_REPORT_ID,
+                decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+                candidate_manifest=[candidate.model_dump(mode="json")],
+                candidate_hash=candidate_manifest_hash((candidate,)),
+                sizing_policy_version="agent_paper_sizing_v1",
+                sizing_policy_hash="7" * 64,
+                execution_locked=True,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentPaperCycleEventRecord(
+                cycle_id=cycle_id,
+                sequence=1,
+                from_status=None,
+                to_status="prepared",
+                result_code="CYCLE_PREPARED",
+                fact_ids={},
+                occurred_at=DECISION_TIME,
+                event_hash=canonical_cycle_event_hash(
+                    cycle_id=cycle_id,
+                    sequence=1,
+                    from_status=None,
+                    to_status="prepared",
+                    result_code="CYCLE_PREPARED",
+                    fact_ids={},
+                    occurred_at=DECISION_TIME,
+                ),
+            )
+        )
+    path = "/internal/v1/paper/cycles/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["cycle_id"] == str(cycle_id)
+    assert data["execution_locked"] is True
+    assert data["candidate_count"] == len(data["candidates"]) == 1
+    assert data["market"] == {
+        "source": "alpaca",
+        "feed": "iex",
+        "delivery_mode": "real_time",
+        "coverage": "IEX_EXCHANGE_SUBSET",
+        "window_minutes": 5,
+        "status": "pending",
+    }
+    assert "prompt" not in response.text.lower()
+    assert "account_id" not in response.text.lower()
 
 
 @pytest.mark.asyncio

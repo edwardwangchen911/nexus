@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
-import { cancellableOrder, filledOrder, meta, paperPortfolio } from "../unit/paper/fixtures";
+import { agentPaperCycle, cancellableOrder, filledOrder, meta, paperPortfolio } from "../unit/paper/fixtures";
 
 for (const viewport of [
   { name: "desktop", width: 1440, height: 1000 },
@@ -17,6 +17,8 @@ for (const viewport of [
     await expect(currentStage).toHaveAttribute("aria-current", "step");
     await expect(currentStage).toBeInViewport();
     await expect(page.getByRole("region", { name: "模拟账户边界" })).toContainText("不是实盘");
+    await expect(page.getByRole("heading", { name: "最新 Agent 模拟周期" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Agent 模拟候选，可横向滚动" })).toContainText("AAPL");
     await expect(page.getByLabel("模拟账户绩效事实")).toContainText("USD 8,500.00");
     await expect(page.getByRole("table", { name: "内部模拟持仓" })).toContainText("alpaca / iex");
     const activeOrder = page.locator("article.paper-order").filter({ hasText: cancellableOrder.order_id });
@@ -169,6 +171,10 @@ async function installPaperFixtures(
         : JSON.stringify({ error: { code: "UPSTREAM_ERROR", message: "paper fixture unavailable" }, meta: meta() }),
     });
   });
+  await page.route("**/api/v1/paper/cycles/latest", async (route) => route.fulfill({
+    status: 200, contentType: "application/json",
+    body: JSON.stringify({ data: agentPaperCycle, meta: meta() }),
+  }));
   await page.route("**/api/v1/paper/orders?**", options.ordersHandler ?? (async (route) => route.fulfill({
     status: 200, contentType: "application/json",
     body: JSON.stringify({ data: { items: [cancellableOrder, filledOrder], next_cursor: null }, meta: meta() }),

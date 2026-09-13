@@ -18,6 +18,21 @@ afterEach(() => {
 });
 
 describe("internal-paper Engine response boundary", () => {
+  it("accepts only a bounded locked Agent cycle", async () => {
+    const data = {
+      cycle_id: portfolioId, status: "awaiting_market", result_code: "PAPER_ORDERS_AWAITING_MARKET",
+      decision_session: "2026-08-26", decision_time: "2026-08-26T21:00:00Z",
+      execution_session: "2026-08-27", execution_locked: true, candidate_count: 1,
+      candidates: [{ instrument_id: instrumentId, symbol: "AAPL", selection_reasons: ["quality_rank"], research_status: "completed", stance: "hold", sizing_action: "maintain", intent_hash: "a".repeat(64), output_id: orderId, rejection_code: null }],
+      decision: { decision_id: requestId, sizing_policy_version: "agent_paper_sizing_v1", target_cash_weight: "1.000000000000", risk_outcomes: [] },
+      market: { source: "alpaca", feed: "iex", delivery_mode: "real_time", coverage: "IEX_EXCHANGE_SUBSET", window_minutes: 5, status: "pending" },
+      order_ids: [],
+    };
+    const path = "/internal/v1/paper/cycles/latest";
+    expect((await sanitizeEngineResponse(json({ data, meta }), undefined, path, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { ...data, execution_locked: false }, meta }), undefined, path, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { ...data, candidate_count: 2 }, meta }), undefined, path, "GET")).status).toBe(500);
+  });
   it("accepts the strict portfolio projection and rejects nested extras", async () => {
     const data = portfolio();
     expect((await sanitizeEngineResponse(json({ data, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(200);
