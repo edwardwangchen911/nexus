@@ -19,7 +19,8 @@ PASS QualityReport 门槛保持不变。候选为空或超过五只时停止，�
 [Alpaca 日线手册](alpaca-prices-local.md)在私有新目录完成一次 `adjustment=all` 归档，再以
 `--purpose agent-paper-decision` 导入；历史日线采集不要求美股开市。若缺少行业 authority，
 按[行业审核手册](sector-exposure-local.md)生成单候选私有审核单，确认来源后再导入。两者都不
-创建周期、研究 Job 或订单。
+创建周期、研究 Job 或订单。新收件的历史日线不得回填更早的 decision time；实际周期只能使用
+目标交易日收盘并完成收件后已可用的 authority。
 
 先读取持久化状态，顺序固定为：
 
