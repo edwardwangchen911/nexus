@@ -37,6 +37,10 @@ def _uuid(value: UUID) -> str:
     return str(value).lower()
 
 
+def _optional_uuid(value: UUID | None) -> str | None:
+    return None if value is None else _uuid(value)
+
+
 def _date(value: date) -> str:
     return value.isoformat()
 
@@ -241,7 +245,7 @@ def _market_payload(market: RiskMarketSnapshot) -> dict[str, Any]:
             }
             for price in sorted(market.prices, key=lambda item: item.instrument_id.int)
         ],
-        "quality_report_id": _uuid(market.quality_report_id),
+        "quality_report_id": _optional_uuid(market.quality_report_id),
         "query_proofs": [
             {
                 "authority_id": _uuid(proof.authority_id),

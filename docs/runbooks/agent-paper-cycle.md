@@ -11,6 +11,10 @@
 US-liquid universe、决策日调整后日线 authority、风险查询 authority；模型预算与 Alpaca IEX
 只读权限已存在。任何凭据只放受保护的 `infra/.env.local`，不得粘贴进命令、聊天或日志。
 
+Agent 候选严格取自已发布的 `us_liquid/us_liquid_v1` 成员；当前本地只读来源
+`fosun_local_read_only` 可直接复用。Agent 路径不要求另造 `QualityReport`，但注册策略原有的
+PASS QualityReport 门槛保持不变。候选为空或超过五只时停止，不自动扩大股票池。
+
 先读取持久化状态，顺序固定为：
 
 ```text

@@ -126,7 +126,7 @@ def _create_cycle_tables() -> None:
         sa.Column("decision_time", sa.DateTime(timezone=True), nullable=False),
         sa.Column("execution_session", sa.Date(), nullable=False),
         sa.Column("universe_snapshot_id", sa.UUID(), nullable=False),
-        sa.Column("quality_report_id", sa.UUID(), nullable=False),
+        sa.Column("quality_report_id", sa.UUID(), nullable=True),
         sa.Column("decision_price_policy_id", sa.UUID(), nullable=False),
         sa.Column("execution_price_policy_id", sa.UUID(), nullable=False),
         sa.Column("candidate_manifest", postgresql.JSONB(), nullable=False),
@@ -186,6 +186,7 @@ def _create_cycle_tables() -> None:
             name="sizing_policy_fixed",
         ),
         sa.CheckConstraint("execution_locked", name="execution_locked"),
+        sa.CheckConstraint("quality_report_id IS NULL", name="quality_report_unused"),
     )
     op.create_table(
         "agent_paper_cycle_events",
@@ -257,6 +258,7 @@ def _extend_decisions() -> None:
     )
     for column_name in ("strategy_definition_id", "registry_event_id", "champion_generation"):
         op.alter_column("strategy_decisions", column_name, nullable=True)
+    op.alter_column("strategy_decisions", "quality_report_id", nullable=True)
     op.create_check_constraint(
         op.f("ck_strategy_decisions_strategy_content_addressed"),
         "strategy_decisions",
@@ -278,11 +280,13 @@ def _extend_decisions() -> None:
         "(decision_origin = 'registered_strategy' "
         "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 3 "
         "AND champion_generation >= 1 AND execution_source_policy_id IS NULL "
+        "AND quality_report_id IS NOT NULL "
         "AND reason = 'WEEKLY_REBALANCE') OR "
         "(decision_origin = 'agent_research' "
         "AND strategy_id = 'agent_research' "
         "AND strategy_version = 'agent_paper_decision_v1' "
         "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 0 "
+        "AND quality_report_id IS NULL "
         "AND source_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
         "AND execution_source_policy_id = 'e99532cc-e24c-52a8-8165-c8076325fbd2'::uuid "
         "AND reason = 'AGENT_RESEARCH')",
@@ -548,6 +552,7 @@ def downgrade() -> None:
     )
     for column_name in ("strategy_definition_id", "registry_event_id", "champion_generation"):
         op.alter_column("strategy_decisions", column_name, nullable=False)
+    op.alter_column("strategy_decisions", "quality_report_id", nullable=False)
     op.create_check_constraint(
         op.f("ck_strategy_decisions_strategy_content_addressed"),
         "strategy_decisions",

@@ -9,7 +9,6 @@ from helpers.paper_batch import (
     DECISION_TIME,
     EXECUTION_SESSION,
     INSTRUMENTS,
-    QUALITY_REPORT_ID,
     UNIVERSE_ID,
     seed_paper_batch,
 )
@@ -104,7 +103,7 @@ async def test_no_trade_cycle_persists_one_replayable_non_fill_probe(
                 decision_time=DECISION_TIME,
                 execution_session=EXECUTION_SESSION,
                 universe_snapshot_id=UNIVERSE_ID,
-                quality_report_id=QUALITY_REPORT_ID,
+                quality_report_id=None,
                 decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
                 execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
                 candidate_manifest=[candidate.model_dump(mode="json")],

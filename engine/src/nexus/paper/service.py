@@ -200,10 +200,14 @@ def _derive_no_change_evidence(
     for exposure in market.sector_exposures:
         sectors.setdefault(exposure.instrument_id, []).append(exposure.authority_id)
     common_authorities = {
-        market.calendar_authority_id,
-        market.universe_snapshot_id,
-        market.quality_report_id,
-        *(proof.authority_id for proof in market.query_proofs),
+        authority_id
+        for authority_id in (
+            market.calendar_authority_id,
+            market.universe_snapshot_id,
+            market.quality_report_id,
+            *(proof.authority_id for proof in market.query_proofs),
+        )
+        if authority_id is not None
     }
     evidence: list[_NoChangeEvidence] = []
     for target in decision.targets:

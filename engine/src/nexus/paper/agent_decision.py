@@ -70,7 +70,7 @@ class AgentPaperDecision(BaseModel):
     execution_source_policy_id: UUID
     calendar_authority_id: UUID
     universe_snapshot_id: UUID
-    quality_report_id: UUID
+    quality_report_id: UUID | None
     portfolio_projection_hash: Hash64
     authority_hash: Hash64
     sizing_policy_hash: Hash64
@@ -99,6 +99,7 @@ class AgentPaperDecision(BaseModel):
         if (
             self.source_policy_id != PAPER_DECISION_SOURCE_POLICY_ID
             or self.execution_source_policy_id != PAPER_EXECUTION_SOURCE_POLICY_ID
+            or self.quality_report_id is not None
             or self.sizing_policy_hash != AGENT_PAPER_SIZING_POLICY_HASH
             or not set(binding_ids) <= set(target_ids)
         ):

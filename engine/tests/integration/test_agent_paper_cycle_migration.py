@@ -359,7 +359,7 @@ async def _seed_agent_decision_and_outputs(database_url: str) -> tuple[str, list
                     "'2026-09-14',:decision_policy,:execution_policy,"
                     "'30000000-0000-0000-0000-000000000002',"
                     "'30000000-0000-0000-0000-000000000003',"
-                    "'30000000-0000-0000-0000-000000000005',repeat('5',64),repeat('6',64),"
+                    "NULL,repeat('5',64),repeat('6',64),"
                     "repeat('7',64),repeat('8',64),1,'AGENT_RESEARCH')"
                 ),
                 {
@@ -450,7 +450,7 @@ async def _seed_second_agent_decision(database_url: str) -> str:
                     "'2026-09-15T20:00:00Z','2026-09-16',:decision_policy,:execution_policy,"
                     "'30000000-0000-0000-0000-000000000002',"
                     "'30000000-0000-0000-0000-000000000003',"
-                    "'30000000-0000-0000-0000-000000000005',repeat('9',64),repeat('a',64),"
+                    "NULL,repeat('9',64),repeat('a',64),"
                     "repeat('b',64),repeat('c',64),1,'AGENT_RESEARCH')"
                 ),
                 {
@@ -481,7 +481,7 @@ async def _seed_agent_cycle(database_url: str) -> str:
                     "(CAST(:id AS uuid),:account_id,:portfolio_id,'2026-09-17',"
                     "'2026-09-17T20:00:00Z','2026-09-18',"
                     "'30000000-0000-0000-0000-000000000003',"
-                    "'30000000-0000-0000-0000-000000000005',:decision_policy,"
+                    "NULL,:decision_policy,"
                     ":execution_policy,'[]'::jsonb,repeat('a',64),'agent_paper_sizing_v1',"
                     "repeat('b',64),true)"
                 ),

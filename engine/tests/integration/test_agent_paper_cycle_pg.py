@@ -163,11 +163,23 @@ async def _seed_cycle_research_authority(
         await session.execute(
             text(
                 "UPDATE universe_snapshots SET key='us_liquid',version='us_liquid_v1',"
-                "source='nexus_internal_us_liquid_v1'"
+                "source='fosun_local_read_only'"
             )
         )
     finally:
         await session.execute(text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER"))
+    # Agent admission validates its exact roots directly. A legacy QualityReport
+    # must not be an otherwise unreachable prerequisite for this path.
+    await session.execute(text("ALTER TABLE quality_reports DISABLE TRIGGER USER"))
+    try:
+        await session.execute(
+            text(
+                "UPDATE quality_reports SET payload=jsonb_set("
+                "payload,'{decision_session}','\"2026-01-01\"'::jsonb)"
+            )
+        )
+    finally:
+        await session.execute(text("ALTER TABLE quality_reports ENABLE TRIGGER USER"))
     prompts = load_prompt_assets()
     session.add_all(
         AgentPromptVersionRecord(

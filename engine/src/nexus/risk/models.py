@@ -120,7 +120,7 @@ class RiskMarketSnapshot(FrozenRiskModel):
     source_policy_id: UUID
     calendar_authority_id: UUID
     universe_snapshot_id: UUID
-    quality_report_id: UUID
+    quality_report_id: UUID | None
     required_instrument_ids: tuple[UUID, ...]
     whitelisted_instrument_ids: tuple[UUID, ...]
     prices: tuple[RiskPrice, ...]
@@ -205,7 +205,10 @@ class PaperDecisionAuthority(Protocol):
 
     calendar_authority_id: UUID
     universe_snapshot_id: UUID
-    quality_report_id: UUID
+
+    @property
+    def quality_report_id(self) -> UUID | None: ...
+
     portfolio_projection_hash: str
     authority_hash: str
     decision_hash: str

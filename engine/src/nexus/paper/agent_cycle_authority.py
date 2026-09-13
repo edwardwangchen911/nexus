@@ -19,12 +19,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
-from nexus.persistence.models.data import (
-    PriceBarRecord,
-    PriceBarSetAuthority,
-    PriceSeriesManifest,
-    QualityReport,
-)
+from nexus.persistence.models.data import PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
@@ -45,7 +40,7 @@ class CycleAuthority(BaseModel):
     execution_session: date
     calendar_authority_id: UUID
     universe_snapshot_id: UUID
-    quality_report_id: UUID
+    quality_report_id: UUID | None = None
 
 
 async def load_cycle_authority(
@@ -88,23 +83,12 @@ async def load_cycle_authority(
         select(UniverseSnapshot).where(
             UniverseSnapshot.key == "us_liquid",
             UniverseSnapshot.version == "us_liquid_v1",
-            UniverseSnapshot.source == "nexus_internal_us_liquid_v1",
+            UniverseSnapshot.source == "fosun_local_read_only",
             UniverseSnapshot.effective_from <= decision_session.session,
             UniverseSnapshot.published_at <= decision_time,
         )
     )
-    quality = await session.scalar(
-        select(QualityReport)
-        .where(
-            QualityReport.status == "PASS",
-            QualityReport.payload["decision_session"].as_string()
-            == decision_session.session.isoformat(),
-            QualityReport.created_at <= decision_time,
-        )
-        .order_by(QualityReport.created_at.desc(), QualityReport.id.desc())
-        .limit(1)
-    )
-    if execution_session is None or universe is None or quality is None:
+    if execution_session is None or universe is None:
         raise ValueError("AGENT_PAPER_ROOT_AUTHORITY_UNAVAILABLE")
     return CycleAuthority(
         account_id=account.id,
@@ -114,20 +98,22 @@ async def load_cycle_authority(
         execution_session=execution_session,
         calendar_authority_id=calendar.id,
         universe_snapshot_id=universe.id,
-        quality_report_id=quality.id,
+        quality_report_id=None,
     )
 
 
 async def prepare_candidates(
     session: AsyncSession, *, authority: CycleAuthority
 ) -> tuple[CandidateManifestEntry, ...]:
-    quality = await session.get(QualityReport, authority.quality_report_id)
-    raw_ids = None if quality is None else quality.payload.get("required_instrument_ids")
-    if not isinstance(raw_ids, list) or not all(isinstance(value, str) for value in raw_ids):
-        return ()
-    try:
-        required = tuple(UUID(value) for value in raw_ids)
-    except ValueError:
+    required = tuple(
+        await session.scalars(
+            select(UniverseMember.instrument_id)
+            .where(UniverseMember.universe_snapshot_id == authority.universe_snapshot_id)
+            .order_by(UniverseMember.instrument_id)
+            .limit(6)
+        )
+    )
+    if not required or len(required) > 5:
         return ()
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time

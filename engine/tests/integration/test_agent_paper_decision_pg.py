@@ -217,7 +217,7 @@ async def test_agent_decision_round_trip_uses_existing_risk_and_order_batch_path
                     source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
                     calendar_authority_id=registered.decision.calendar_authority_id,
                     universe_snapshot_id=registered.decision.universe_snapshot_id,
-                    quality_report_id=registered.decision.quality_report_id,
+                    quality_report_id=None,
                 ),
                 required_instrument_ids=tuple(item[0] for item in INSTRUMENTS),
             )
@@ -247,7 +247,7 @@ async def test_agent_decision_round_trip_uses_existing_risk_and_order_batch_path
                 decision_time=registered.decision.decision_time,
                 execution_session=registered.decision.execution_session,
                 universe_snapshot_id=registered.decision.universe_snapshot_id,
-                quality_report_id=registered.decision.quality_report_id,
+                quality_report_id=None,
                 decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
                 execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
                 candidate_manifest=[],

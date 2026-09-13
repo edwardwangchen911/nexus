@@ -77,7 +77,7 @@ class RiskAuthorityInput(BaseModel):
     source_policy_id: UUID
     calendar_authority_id: UUID
     universe_snapshot_id: UUID
-    quality_report_id: UUID
+    quality_report_id: UUID | None
 
     @field_validator("decision_time")
     @classmethod
@@ -307,28 +307,38 @@ async def _validate_root_authorities(
     decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[UUID, ...]:
+    agent_paper = decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
     source_policy = await session.get(SourcePolicy, decision.source_policy_id)
     calendar = await session.get(ExchangeCalendarAuthorityRecord, decision.calendar_authority_id)
     universe = await session.get(UniverseSnapshot, decision.universe_snapshot_id)
-    quality = await session.get(QualityReport, decision.quality_report_id)
+    quality = (
+        None
+        if decision.quality_report_id is None
+        else await session.get(QualityReport, decision.quality_report_id)
+    )
     if (
         source_policy is None
         or not _valid_source_policy(source_policy)
         or calendar is None
         or universe is None
-        or quality is None
+        or agent_paper != (decision.quality_report_id is None)
+        or (not agent_paper and quality is None)
     ):
         raise ValueError("risk authority roots are incomplete")
-    quality_snapshot = await session.get(DataSnapshot, quality.data_snapshot_id)
-    if quality_snapshot is None or quality.status != "PASS":
+    quality_snapshot = (
+        None if quality is None else await session.get(DataSnapshot, quality.data_snapshot_id)
+    )
+    if not agent_paper and (
+        quality_snapshot is None or quality is None or quality.status != "PASS"
+    ):
         raise ValueError("risk quality report is incomplete")
-    available_times = (
+    available_times: tuple[datetime | None, ...] = (
         source_policy.created_at,
         calendar.published_at,
         universe.published_at,
-        quality.created_at,
-        quality_snapshot.available_at,
     )
+    if quality is not None and quality_snapshot is not None:
+        available_times += (quality.created_at, quality_snapshot.available_at)
     if any(
         available_at is None or available_at > decision.decision_time
         for available_at in available_times
@@ -372,12 +382,13 @@ async def _validate_root_authorities(
     )
     if set(whitelist) != required or len(whitelist) != len(required):
         raise ValueError("risk universe does not exactly cover required instruments")
-    expected_quality_ids = sorted(str(value).lower() for value in required)
-    if (
-        quality.payload.get("required_instrument_ids") != expected_quality_ids
-        or quality.payload.get("decision_session") != decision.decision_session.isoformat()
-    ):
-        raise ValueError("risk quality report does not cover the exact authority set")
+    if quality is not None:
+        expected_quality_ids = sorted(str(value).lower() for value in required)
+        if (
+            quality.payload.get("required_instrument_ids") != expected_quality_ids
+            or quality.payload.get("decision_session") != decision.decision_session.isoformat()
+        ):
+            raise ValueError("risk quality report does not cover the exact authority set")
     return tuple(sorted(whitelist, key=lambda value: value.int))
 
 

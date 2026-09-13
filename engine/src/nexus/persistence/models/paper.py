@@ -117,6 +117,7 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
             name="sizing_policy_fixed",
         ),
         CheckConstraint("execution_locked", name="execution_locked"),
+        CheckConstraint("quality_report_id IS NULL", name="quality_report_unused"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -126,7 +127,7 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
     decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
     execution_session: Mapped[date] = mapped_column(Date)
     universe_snapshot_id: Mapped[UUID]
-    quality_report_id: Mapped[UUID]
+    quality_report_id: Mapped[UUID | None]
     decision_price_policy_id: Mapped[UUID]
     execution_price_policy_id: Mapped[UUID]
     candidate_manifest: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
@@ -354,11 +355,13 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             "(decision_origin = 'registered_strategy' "
             "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 3 "
             "AND champion_generation >= 1 AND execution_source_policy_id IS NULL "
+            "AND quality_report_id IS NOT NULL "
             "AND reason = 'WEEKLY_REBALANCE') OR "
             "(decision_origin = 'agent_research' "
             "AND strategy_id = 'agent_research' "
             "AND strategy_version = 'agent_paper_decision_v1' "
             "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 0 "
+            "AND quality_report_id IS NULL "
             "AND source_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
             "AND execution_source_policy_id = 'e99532cc-e24c-52a8-8165-c8076325fbd2'::uuid "
             "AND reason = 'AGENT_RESEARCH')",
@@ -402,7 +405,7 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     execution_source_policy_id: Mapped[UUID | None]
     calendar_authority_id: Mapped[UUID]
     universe_snapshot_id: Mapped[UUID]
-    quality_report_id: Mapped[UUID]
+    quality_report_id: Mapped[UUID | None]
     portfolio_projection_hash: Mapped[str] = mapped_column(String(64))
     authority_hash: Mapped[str] = mapped_column(String(64))
     strategy_parameters_hash: Mapped[str] = mapped_column(String(64))

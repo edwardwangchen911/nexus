@@ -33,6 +33,7 @@ from nexus.persistence.models.evolution import (
 )
 from nexus.persistence.models.market import UniverseMember, UniverseSnapshot
 from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
     PaperAccountRecord,
     StrategyDecisionRecord,
     StrategyDecisionTargetRecord,
@@ -362,20 +363,35 @@ async def require_paper_decision_authority(
     source_policy = await session.get(SourcePolicy, decision.source_policy_id)
     calendar = await session.get(ExchangeCalendarAuthorityRecord, decision.calendar_authority_id)
     universe = await session.get(UniverseSnapshot, decision.universe_snapshot_id)
-    quality = await session.get(QualityReport, decision.quality_report_id)
-    if source_policy is None or calendar is None or universe is None or quality is None:
+    agent_paper = decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+    quality = (
+        None
+        if decision.quality_report_id is None
+        else await session.get(QualityReport, decision.quality_report_id)
+    )
+    if (
+        source_policy is None
+        or calendar is None
+        or universe is None
+        or agent_paper != (decision.quality_report_id is None)
+        or (not agent_paper and quality is None)
+    ):
         raise ValueError("forward decision authority is incomplete")
-    quality_snapshot = await session.get(DataSnapshot, quality.data_snapshot_id)
-    if quality_snapshot is None or quality.status != "PASS":
+    quality_snapshot = (
+        None if quality is None else await session.get(DataSnapshot, quality.data_snapshot_id)
+    )
+    if not agent_paper and (
+        quality_snapshot is None or quality is None or quality.status != "PASS"
+    ):
         raise ValueError("forward decision quality authority is incomplete")
 
-    available_times = (
+    available_times: tuple[datetime | None, ...] = (
         source_policy.created_at,
         calendar.published_at,
         universe.published_at,
-        quality.created_at,
-        quality_snapshot.available_at,
     )
+    if quality is not None and quality_snapshot is not None:
+        available_times += (quality.created_at, quality_snapshot.available_at)
     if any(
         available_at is None or available_at > decision.decision_time
         for available_at in available_times
@@ -433,6 +449,7 @@ def _domain_from_records(
         or record.strategy_definition_id is None
         or record.registry_event_id is None
         or record.champion_generation is None
+        or record.quality_report_id is None
     ):
         raise ValueError("stored decision is not a registered strategy decision")
     decision = ForwardStrategyDecision(
