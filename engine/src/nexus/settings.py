@@ -98,6 +98,10 @@ class EngineSettings(_SafeSettings):
     agent_daily_budget_usd: Decimal = Field(
         default=Decimal("3.00"), validation_alias="AGENT_DAILY_BUDGET_USD", gt=0
     )
+    agent_paper_cycle_enabled: bool = Field(
+        default=False,
+        validation_alias="NEXUS_AGENT_PAPER_CYCLE_ENABLED",
+    )
     provider_jobs_enabled: bool = Field(
         default=False,
         validation_alias="NEXUS_PROVIDER_JOBS_ENABLED",
