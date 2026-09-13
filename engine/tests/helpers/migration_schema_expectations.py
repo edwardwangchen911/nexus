@@ -104,6 +104,9 @@ SHADOW_TABLES = {
 }
 EXPECTED_TABLES = EXPECTED_TABLES | SHADOW_TABLES
 PAPER_TABLES = {
+    "agent_paper_cycles",
+    "agent_paper_cycle_events",
+    "strategy_decision_agent_outputs",
     "risk_policies",
     "strategy_decisions",
     "strategy_decision_targets",
@@ -195,7 +198,10 @@ EXPECTED_TABLES = EXPECTED_TABLES | BROKER_SIMULATION_TABLES
 INTRADAY_MARKET_TABLES = {"intraday_bar_set_authorities"}
 EXPECTED_TABLES = EXPECTED_TABLES | INTRADAY_MARKET_TABLES
 EXPECTED_TABLES = EXPECTED_TABLES | {"strategy_rank_checkpoints"}
+EXPECTED_TABLES = EXPECTED_TABLES | {"portfolio_scenario_selections"}
 NO_CREATED_AT_TRIGGER_TABLES = {
+    "backtest_corporate_action_authority_members",
+    "portfolio_scenario_selections",
     "strategy_experiment_state_projections",
     "strategy_research_lineage_projections",
     "strategy_experiment_candidate_projections",
@@ -285,6 +291,28 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
 )
 
 EXPECTED_FOREIGN_KEYS = {
+    "agent_paper_cycles": {
+        "fk_agent_paper_cycles_paper_account",
+        "fk_agent_paper_cycles_universe",
+        "fk_agent_paper_cycles_quality",
+        "fk_agent_paper_cycles_decision_policy",
+        "fk_agent_paper_cycles_execution_policy",
+    },
+    "agent_paper_cycle_events": "fk_agent_paper_cycle_events_cycle",
+    "strategy_decision_agent_outputs": {
+        "fk_strategy_decision_agent_outputs_decision",
+        "fk_strategy_decision_agent_outputs_output",
+    },
+    "strategy_decisions": {
+        "fk_strategy_decisions_paper_account",
+        "fk_strategy_decisions_source_policy",
+        "fk_strategy_decisions_execution_source_policy",
+        "fk_strategy_decisions_calendar",
+        "fk_strategy_decisions_universe",
+        "fk_strategy_decisions_quality",
+        "fk_strategy_decisions_strategy_definition",
+        "fk_strategy_decisions_registry_event",
+    },
     "fosun_daily_bar_staging": {
         "fk_fosun_daily_staging_root_job",
         "fk_fosun_daily_staging_instrument",

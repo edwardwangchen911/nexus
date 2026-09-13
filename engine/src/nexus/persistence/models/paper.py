@@ -25,6 +25,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import DECIMAL_NUMERIC, Base, ImmutableCreatedAt, UTCDateTime
 
+PAPER_DECISION_SOURCE_POLICY_ID = UUID("2573d63a-fb6d-53d3-8d44-207766a78322")
+PAPER_EXECUTION_SOURCE_POLICY_ID = UUID("e99532cc-e24c-52a8-8165-c8076325fbd2")
+
 
 class PaperAccountRecord(ImmutableCreatedAt, Base):
     __tablename__ = "paper_accounts"
@@ -59,6 +62,110 @@ class PaperAccountRecord(ImmutableCreatedAt, Base):
     position_model: Mapped[str] = mapped_column(String(20))
     initial_capital: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     capability: Mapped[str] = mapped_column(String(50))
+
+
+class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "agent_paper_cycles"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "decision_session",
+            name="uq_agent_paper_cycles_account_session",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "portfolio_id"],
+            ["paper_accounts.id", "paper_accounts.portfolio_id"],
+            name="fk_agent_paper_cycles_paper_account",
+        ),
+        ForeignKeyConstraint(
+            ["universe_snapshot_id"],
+            ["universe_snapshots.id"],
+            name="fk_agent_paper_cycles_universe",
+        ),
+        ForeignKeyConstraint(
+            ["quality_report_id"],
+            ["quality_reports.id"],
+            name="fk_agent_paper_cycles_quality",
+        ),
+        ForeignKeyConstraint(
+            ["decision_price_policy_id"],
+            ["source_policies.id"],
+            name="fk_agent_paper_cycles_decision_policy",
+        ),
+        ForeignKeyConstraint(
+            ["execution_price_policy_id"],
+            ["source_policies.id"],
+            name="fk_agent_paper_cycles_execution_policy",
+        ),
+        CheckConstraint("execution_session > decision_session", name="sessions_ordered"),
+        CheckConstraint(
+            "decision_price_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
+            "AND execution_price_policy_id = 'e99532cc-e24c-52a8-8165-c8076325fbd2'::uuid",
+            name="policies_fixed",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(candidate_manifest) = 'array' "
+            "AND jsonb_array_length(candidate_manifest) BETWEEN 0 AND 5",
+            name="candidate_manifest_bounded",
+        ),
+        CheckConstraint(
+            "candidate_hash ~ '^[0-9a-f]{64}$' AND sizing_policy_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes_canonical",
+        ),
+        CheckConstraint(
+            "sizing_policy_version = 'agent_paper_sizing_v1'",
+            name="sizing_policy_fixed",
+        ),
+        CheckConstraint("execution_locked", name="execution_locked"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID]
+    portfolio_id: Mapped[UUID]
+    decision_session: Mapped[date] = mapped_column(Date)
+    decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    execution_session: Mapped[date] = mapped_column(Date)
+    universe_snapshot_id: Mapped[UUID]
+    quality_report_id: Mapped[UUID]
+    decision_price_policy_id: Mapped[UUID]
+    execution_price_policy_id: Mapped[UUID]
+    candidate_manifest: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    candidate_hash: Mapped[str] = mapped_column(String(64))
+    sizing_policy_version: Mapped[str] = mapped_column(String(50))
+    sizing_policy_hash: Mapped[str] = mapped_column(String(64))
+    execution_locked: Mapped[bool] = mapped_column(Boolean)
+
+
+class AgentPaperCycleEventRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "agent_paper_cycle_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["cycle_id"],
+            ["agent_paper_cycles.id"],
+            name="fk_agent_paper_cycle_events_cycle",
+        ),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        CheckConstraint(
+            "(from_status IS NULL OR from_status IN "
+            "('prepared','researching','decision_recorded','risk_evaluated',"
+            "'awaiting_market','partially_filled')) AND to_status IN "
+            "('prepared','researching','decision_recorded','risk_evaluated',"
+            "'awaiting_market','partially_filled','completed','unavailable','failed')",
+            name="statuses_allowed",
+        ),
+        CheckConstraint("btrim(result_code) <> ''", name="result_code_nonempty"),
+        CheckConstraint("jsonb_typeof(fact_ids) = 'object'", name="fact_ids_object"),
+        CheckConstraint("event_hash ~ '^[0-9a-f]{64}$'", name="event_hash_canonical"),
+    )
+
+    cycle_id: Mapped[UUID] = mapped_column(primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    from_status: Mapped[str | None] = mapped_column(String(30))
+    to_status: Mapped[str] = mapped_column(String(30))
+    result_code: Mapped[str] = mapped_column(String(100))
+    fact_ids: Mapped[dict[str, object]] = mapped_column(JSONB)
+    event_hash: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class RiskPolicyRecord(ImmutableCreatedAt, Base):
@@ -135,6 +242,11 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             name="fk_strategy_decisions_source_policy",
         ),
         ForeignKeyConstraint(
+            ["execution_source_policy_id"],
+            ["source_policies.id"],
+            name="fk_strategy_decisions_execution_source_policy",
+        ),
+        ForeignKeyConstraint(
             ["calendar_authority_id"],
             ["exchange_calendar_authorities.id"],
             name="fk_strategy_decisions_calendar",
@@ -160,12 +272,29 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             name="fk_strategy_decisions_registry_event",
         ),
         CheckConstraint(
-            "btrim(strategy_id) <> '' AND btrim(strategy_version) <> '' "
-            "AND champion_generation >= 1",
+            "(decision_origin = 'registered_strategy' "
+            "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 3 "
+            "AND champion_generation >= 1 AND execution_source_policy_id IS NULL "
+            "AND reason = 'WEEKLY_REBALANCE') OR "
+            "(decision_origin = 'agent_research' "
+            "AND strategy_id = 'agent_research' "
+            "AND strategy_version = 'agent_paper_decision_v1' "
+            "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 0 "
+            "AND source_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
+            "AND execution_source_policy_id = 'e99532cc-e24c-52a8-8165-c8076325fbd2'::uuid "
+            "AND reason = 'AGENT_RESEARCH')",
+            name="origin_authority",
+        ),
+        CheckConstraint(
+            "decision_origin IN ('registered_strategy','agent_research')",
+            name="origin_allowed",
+        ),
+        CheckConstraint(
+            "btrim(strategy_id) <> '' AND btrim(strategy_version) <> ''",
             name="strategy_content_addressed",
         ),
         CheckConstraint("execution_session > decision_session", name="sessions_ordered"),
-        CheckConstraint("reason = 'WEEKLY_REBALANCE'", name="reason_weekly"),
+        CheckConstraint("reason IN ('WEEKLY_REBALANCE','AGENT_RESEARCH')", name="reason_allowed"),
         CheckConstraint("cash_weight >= 0 AND cash_weight <= 1", name="cash_weight"),
         CheckConstraint(
             "portfolio_projection_hash ~ '^[0-9a-f]{64}$' "
@@ -181,13 +310,17 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     portfolio_id: Mapped[UUID]
     strategy_id: Mapped[str] = mapped_column(String(50))
     strategy_version: Mapped[str] = mapped_column(String(50))
-    strategy_definition_id: Mapped[UUID]
-    registry_event_id: Mapped[UUID]
-    champion_generation: Mapped[int] = mapped_column(BigInteger)
+    strategy_definition_id: Mapped[UUID | None]
+    registry_event_id: Mapped[UUID | None]
+    champion_generation: Mapped[int | None] = mapped_column(BigInteger)
+    decision_origin: Mapped[str] = mapped_column(
+        String(30), default="registered_strategy", server_default="registered_strategy"
+    )
     decision_session: Mapped[date] = mapped_column(Date)
     decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
     execution_session: Mapped[date] = mapped_column(Date)
     source_policy_id: Mapped[UUID]
+    execution_source_policy_id: Mapped[UUID | None]
     calendar_authority_id: Mapped[UUID]
     universe_snapshot_id: Mapped[UUID]
     quality_report_id: Mapped[UUID]
@@ -197,6 +330,40 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     decision_hash: Mapped[str] = mapped_column(String(64))
     cash_weight: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     reason: Mapped[str] = mapped_column(String(30))
+
+
+class StrategyDecisionAgentOutputRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "strategy_decision_agent_outputs"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_research_output_id",
+            name="uq_strategy_decision_agent_outputs_output",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_decision_id"],
+            ["strategy_decisions.id"],
+            name="fk_strategy_decision_agent_outputs_decision",
+        ),
+        ForeignKeyConstraint(
+            ["agent_research_output_id"],
+            ["agent_research_outputs.id"],
+            name="fk_strategy_decision_agent_outputs_output",
+        ),
+        CheckConstraint(
+            "intent_hash ~ '^[0-9a-f]{64}$' AND binding_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes_canonical",
+        ),
+        CheckConstraint(
+            "sizing_action IN ('increase','reduce','maintain','none')",
+            name="sizing_action_allowed",
+        ),
+    )
+
+    strategy_decision_id: Mapped[UUID] = mapped_column(primary_key=True)
+    agent_research_output_id: Mapped[UUID] = mapped_column(primary_key=True)
+    intent_hash: Mapped[str] = mapped_column(String(64))
+    sizing_action: Mapped[str] = mapped_column(String(16))
+    binding_hash: Mapped[str] = mapped_column(String(64))
 
 
 class StrategyDecisionTargetRecord(ImmutableCreatedAt, Base):
@@ -1464,16 +1631,17 @@ class StrategyRankCheckpointRecord(ImmutableCreatedAt, Base):
     __tablename__ = "strategy_rank_checkpoints"
     __table_args__ = (
         ForeignKeyConstraint(["decision_id"], ["strategy_decisions.id"]),
-        ForeignKeyConstraint(
-            ["previous_decision_id"], ["strategy_rank_checkpoints.decision_id"]
-        ),
+        ForeignKeyConstraint(["previous_decision_id"], ["strategy_rank_checkpoints.decision_id"]),
         CheckConstraint("schema_version = 'rank_checkpoint_v1'", name="schema_version"),
         CheckConstraint(
             "input_snapshot_hash ~ '^[0-9a-f]{64}$' AND checkpoint_hash ~ '^[0-9a-f]{64}$'",
             name="hashes_canonical",
         ),
         CheckConstraint("jsonb_typeof(observations) = 'object'", name="observations_object"),
-        CheckConstraint("previous_decision_id IS NULL OR previous_decision_id <> decision_id", name="parent_distinct"),
+        CheckConstraint(
+            "previous_decision_id IS NULL OR previous_decision_id <> decision_id",
+            name="parent_distinct",
+        ),
     )
 
     decision_id: Mapped[UUID] = mapped_column(primary_key=True)

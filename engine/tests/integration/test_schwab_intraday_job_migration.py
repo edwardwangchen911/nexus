@@ -20,12 +20,12 @@ ENGINE_ROOT = Path(__file__).parents[2]
 MIGRATION_PATH = ENGINE_ROOT / "alembic/versions/0055_schwab_intraday_job_v3.py"
 
 
-def test_0055_is_the_single_head_after_schwab_stream_policy() -> None:
+def test_0055_precedes_the_agent_paper_cycle_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0055_schwab_intraday_job_v3"
+    assert CURRENT_MIGRATION_HEAD == "0056_agent_paper_cycle"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
-    migration = scripts.get_revision(CURRENT_MIGRATION_HEAD)
+    migration = scripts.get_revision("0055_schwab_intraday_job_v3")
     assert migration is not None
     assert migration.down_revision == "0054_schwab_stream_policy"
 
