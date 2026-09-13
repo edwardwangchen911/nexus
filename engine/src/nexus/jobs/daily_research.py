@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import ResearchAdmission, admit_research_run
 from nexus.agents.portfolio_context import read_portfolio_context
@@ -19,13 +20,15 @@ from nexus.jobs.daily_manual import (
     manual_daily_job_ids,
 )
 from nexus.jobs.models import JobType, QueueName, job_input_hash
-from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.runtime import Job, JobDependency
 
 _ACTOR = "local-daily-research"
 _ROUTE = "manual-daily-research-v1"
 _BINDING_ERROR = "MANUAL_DAILY_RESEARCH_BINDING_INVALID"
+_AGENT_PAPER_ACTOR = "local-agent-paper-cycle"
+_AGENT_PAPER_ROUTE = "agent-paper-cycle-v1"
 
 
 async def _diagnosis(
@@ -241,3 +244,52 @@ async def admit_daily_research(
             await session.flush()
         await resolve_daily_research_job(session, root_id=root_id, run_id=admission.run_id)
         return admission
+
+
+async def admit_agent_paper_research(
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    instrument_id: UUID,
+    research_snapshot_id: UUID,
+    research_as_of: datetime,
+    daily_limit_usd: Decimal,
+    now: datetime,
+) -> ResearchAdmission:
+    """Admit one already-frozen candidate through the native research Job path."""
+    idempotency_key = f"agent-paper:{cycle_id}:{instrument_id}"
+    request_hash = job_input_hash(
+        {
+            "schema": _AGENT_PAPER_ROUTE,
+            "cycle_id": str(cycle_id),
+            "instrument_id": str(instrument_id),
+            "research_snapshot_id": str(research_snapshot_id),
+            "research_as_of": research_as_of.isoformat(),
+        }
+    )
+    model_config_id = await session.scalar(
+        select(AgentModelConfigRecord.id)
+        .where(
+            AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION,
+            AgentModelConfigRecord.pricing_available_at <= now,
+            AgentModelConfigRecord.pricing_expires_at > now,
+        )
+        .order_by(AgentModelConfigRecord.created_at.desc(), AgentModelConfigRecord.id.desc())
+        .limit(1)
+    )
+    return await admit_research_run(
+        session,
+        actor_id=_AGENT_PAPER_ACTOR,
+        route=_AGENT_PAPER_ROUTE,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        request=ResearchRequest(
+            instrument_id=instrument_id,
+            data_snapshot_id=research_snapshot_id,
+            decision_time=research_as_of,
+        ),
+        prompt_version_id=None,
+        model_config_id=model_config_id,
+        daily_limit_usd=daily_limit_usd,
+        now=now,
+    )
