@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
@@ -63,6 +63,7 @@ from nexus.risk.evaluate import (
     RiskBatchRejected,
     derive_order_candidates,
     evaluate_order_batch,
+    target_whole_share_quantity,
 )
 from nexus.risk.models import (
     PaperDecisionAuthority,
@@ -207,10 +208,13 @@ def _derive_no_change_evidence(
     evidence: list[_NoChangeEvidence] = []
     for target in decision.targets:
         price = prices[target.instrument_id]
-        target_quantity = (target.target_weight * portfolio.nav / price.close).to_integral_value(
-            rounding=ROUND_FLOOR
-        )
         current_quantity = positions.get(target.instrument_id, Decimal(0))
+        target_quantity = target_whole_share_quantity(
+            target=target,
+            current_quantity=current_quantity,
+            nav=portfolio.nav,
+            price=price.close,
+        )
         if target_quantity != current_quantity:
             continue
         authority_ids = tuple(

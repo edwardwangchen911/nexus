@@ -10,6 +10,7 @@ from nexus.risk.canonical import canonical_risk_evaluation_result_hash
 from nexus.risk.models import (
     OrderCandidate,
     PaperDecisionAuthority,
+    PaperDecisionTarget,
     PaperPortfolioProjection,
     RiskEvaluation,
     RiskMarketSnapshot,
@@ -47,6 +48,19 @@ def _floor_shares(value: Decimal) -> Decimal:
     if value <= 0:
         return _ZERO
     return value.to_integral_value(rounding=ROUND_FLOOR)
+
+
+def target_whole_share_quantity(
+    *,
+    target: PaperDecisionTarget,
+    current_quantity: Decimal,
+    nav: Decimal,
+    price: Decimal,
+) -> Decimal:
+    """Preserve explicit Agent no-action quantities; floor all target changes."""
+    if target.reason in {"AGENT_RESEARCH_MAINTAIN", "AGENT_RESEARCH_NONE"}:
+        return current_quantity
+    return _floor_shares(target.target_weight * nav / price)
 
 
 def _candidate_sort_key(candidate: OrderCandidate) -> tuple[int, Decimal, int]:
@@ -165,8 +179,13 @@ def derive_order_candidates(
         price = prices.get(target.instrument_id)
         if price is None or target.instrument_id not in sectors:
             raise RiskBatchRejected("RISK_AUTHORITY_INCOMPLETE")
-        target_quantity = _floor_shares(target.target_weight * portfolio.nav / price)
         current_quantity = positions.get(target.instrument_id, _ZERO)
+        target_quantity = target_whole_share_quantity(
+            target=target,
+            current_quantity=current_quantity,
+            nav=portfolio.nav,
+            price=price,
+        )
         delta = target_quantity - current_quantity
         if delta == 0:
             continue

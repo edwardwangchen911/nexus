@@ -313,6 +313,11 @@ def test_decimal_weights_are_exact_to_twelve_places() -> None:
 
     assert decision.targets[0].target_weight == Decimal("0.333333333333")
     assert decision.cash_weight == Decimal("0.666666666667")
+    assert derive_order_candidates(
+        decision,
+        projection,
+        _market(((HOLD_ID, "1", "technology"),)),
+    ) == ()
     assert all(
         -value.as_tuple().exponent <= 12
         for value in (decision.cash_weight, decision.targets[0].target_weight)
