@@ -107,6 +107,8 @@ class PaperForwardRequest(_Request):
     def _ordered(self) -> "PaperForwardRequest":
         if self.references.market.decision_time > self.request_time:
             raise ValueError("forward request precedes its frozen cutoff")
+        if self.references.market.quality_report_id is None:
+            raise ValueError("forward request requires a quality report")
         return self
 
 
@@ -125,6 +127,9 @@ async def _forward(session: AsyncSession, request: PaperForwardRequest) -> dict[
     if account is None:
         raise PaperOnceError("PAPER_ONCE_ACCOUNT_MISMATCH")
     identity = request.references.market
+    quality_report_id = identity.quality_report_id
+    if quality_report_id is None:
+        raise PaperOnceError("PAPER_FORWARD_INPUT_UNAVAILABLE")
     projection = await load_paper_projection(
         session, account_id=request.account_id, as_of=identity.decision_time
     )
@@ -155,7 +160,7 @@ async def _forward(session: AsyncSession, request: PaperForwardRequest) -> dict[
             source_policy_id=identity.source_policy_id,
             calendar_authority_id=identity.calendar_authority_id,
             universe_snapshot_id=identity.universe_snapshot_id,
-            quality_report_id=identity.quality_report_id,
+            quality_report_id=quality_report_id,
             portfolio_projection_hash=projection.projection_hash,
             authority_hash=market.authority_hash,
             input_references=request.references,

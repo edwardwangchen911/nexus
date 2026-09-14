@@ -153,6 +153,14 @@ def test_forward_rejects_missing_or_conflicting_frozen_request(changes):
         paper_once.PaperForwardRequest.model_validate({**forward_values(), **changes})
 
 
+def test_forward_rejects_agent_only_market_identity_without_quality_report():
+    values = forward_values()
+    values["references"]["market"]["quality_report_id"] = None
+
+    with pytest.raises(ValidationError):
+        paper_once.PaperForwardRequest.model_validate(values)
+
+
 def test_forward_json_cli_preserves_exact_source_rejection(tmp_path, monkeypatch, capsys):
     path = tmp_path / "forward.json"
     path.write_text(json.dumps(forward_values()))
