@@ -3,12 +3,30 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from helpers.paper_batch import NO_CHANGE_INSTRUMENT, seed_paper_batch
+from helpers.paper_batch import (
+    CALENDAR_ID,
+    DECISION_SESSION,
+    NO_CHANGE_INSTRUMENT,
+    UNIVERSE_ID,
+    seed_paper_batch,
+)
 from helpers.paper_execution import FIRST_EVALUATION, seed_paper_execution
-from nexus.paper.agent_cycle import AgentPaperCycleError, advance_agent_paper_cycle
+from nexus.paper.agent_cycle import (
+    AgentPaperCycleError,
+    _resume_batch,
+    advance_agent_paper_cycle,
+)
+from nexus.paper.agent_cycle_models import (
+    candidate_manifest_hash,
+    canonical_cycle_event_hash,
+    floor_decision_slot,
+)
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     PaperFillRecord,
     PaperLedgerEntryRecord,
@@ -19,6 +37,7 @@ from nexus.persistence.models.paper import (
     PaperReservationRecord,
     RiskNoChangeEvaluationRecord,
     RiskPolicyRecord,
+    StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord
 from sqlalchemy import func, select
@@ -278,5 +297,150 @@ async def test_controlled_loop_preserves_policy_and_reaches_honest_outcomes(
                 )
             )
             assert imbalance == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_same_day_resume_fallback_is_scoped_to_the_cycle(
+    migrated_database_url: str,
+) -> None:
+    """A missing event fact must not bind another intraday cycle's decision."""
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    first_cycle_id = UUID("68000000-0000-0000-0000-000000000101")
+    second_cycle_id = UUID("68000000-0000-0000-0000-000000000102")
+    first_decision_id = UUID("68000000-0000-0000-0000-000000000201")
+    second_decision_id = UUID("68000000-0000-0000-0000-000000000202")
+    first_time = datetime(2026, 8, 26, 14, 30, tzinfo=UTC)
+    second_time = first_time + timedelta(minutes=5)
+
+    def cycle(cycle_id: UUID, decision_time: datetime) -> AgentPaperCycleRecord:
+        return AgentPaperCycleRecord(
+            id=cycle_id,
+            account_id=seed.account_id,
+            portfolio_id=seed.portfolio_id,
+            decision_session=DECISION_SESSION,
+            decision_time=decision_time,
+            decision_slot_at=floor_decision_slot(decision_time),
+            execution_session=DECISION_SESSION,
+            universe_snapshot_id=UNIVERSE_ID,
+            quality_report_id=None,
+            decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+            candidate_manifest=[],
+            candidate_hash=candidate_manifest_hash(()),
+            sizing_policy_version="agent_paper_sizing_v1",
+            sizing_policy_hash="8" * 64,
+            execution_locked=True,
+        )
+
+    def decision(
+        decision_id: UUID,
+        cycle_id: UUID,
+        decision_time: datetime,
+        hash_digit: str,
+    ) -> StrategyDecisionRecord:
+        return StrategyDecisionRecord(
+            id=decision_id,
+            account_id=seed.account_id,
+            portfolio_id=seed.portfolio_id,
+            strategy_id="agent_research",
+            strategy_version="agent_paper_decision_v1",
+            strategy_definition_id=None,
+            registry_event_id=None,
+            champion_generation=None,
+            decision_origin="agent_research",
+            agent_paper_cycle_id=cycle_id,
+            decision_session=DECISION_SESSION,
+            decision_time=decision_time,
+            execution_session=DECISION_SESSION,
+            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            execution_source_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+            calendar_authority_id=CALENDAR_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            quality_report_id=None,
+            portfolio_projection_hash=hash_digit * 64,
+            authority_hash=hash_digit * 64,
+            strategy_parameters_hash=hash_digit * 64,
+            decision_hash=("a" if hash_digit == "1" else "b") * 64,
+            cash_weight=Decimal("1"),
+            reason="AGENT_RESEARCH",
+        )
+
+    def event(
+        sequence: int,
+        from_status: str | None,
+        to_status: str,
+        result_code: str,
+        fact_ids: dict[str, object],
+    ) -> AgentPaperCycleEventRecord:
+        occurred_at = second_time + timedelta(seconds=sequence)
+        return AgentPaperCycleEventRecord(
+            cycle_id=second_cycle_id,
+            sequence=sequence,
+            from_status=from_status,
+            to_status=to_status,
+            result_code=result_code,
+            fact_ids=fact_ids,
+            occurred_at=occurred_at,
+            event_hash=canonical_cycle_event_hash(
+                cycle_id=second_cycle_id,
+                sequence=sequence,
+                from_status=from_status,
+                to_status=to_status,
+                result_code=result_code,
+                fact_ids=fact_ids,
+                occurred_at=occurred_at,
+            ),
+        )
+
+    try:
+        async with sessions.begin() as session:
+            first_cycle = cycle(first_cycle_id, first_time)
+            second_cycle = cycle(second_cycle_id, second_time)
+            session.add_all((first_cycle, second_cycle))
+            await session.flush()
+            session.add_all(
+                (
+                    decision(first_decision_id, first_cycle_id, first_time, "1"),
+                    decision(second_decision_id, second_cycle_id, second_time, "2"),
+                    event(1, None, "prepared", "CYCLE_PREPARED", {}),
+                    event(2, "prepared", "researching", "RESEARCH_JOBS_PREPARED", {}),
+                    event(
+                        3,
+                        "researching",
+                        "decision_recorded",
+                        "AGENT_DECISION_RECORDED",
+                        {},
+                    ),
+                    event(
+                        4,
+                        "decision_recorded",
+                        "risk_evaluated",
+                        "PAPER_BATCH_EVALUATED",
+                        {
+                            "batch_id": "68000000-0000-0000-0000-000000000301",
+                            "order_ids": [],
+                        },
+                    ),
+                )
+            )
+            await session.flush()
+            events = tuple(
+                await session.scalars(
+                    select(AgentPaperCycleEventRecord)
+                    .where(AgentPaperCycleEventRecord.cycle_id == second_cycle_id)
+                    .order_by(AgentPaperCycleEventRecord.sequence)
+                )
+            )
+
+            result = await _resume_batch(session, cycle=second_cycle, events=events)
+
+        assert result.cycle_id == second_cycle_id
+        assert result.status == "completed"
+        assert result.result_code == "NO_ORDER_REQUIRED"
+        assert result.strategy_decision_id == second_decision_id
     finally:
         await engine.dispose()

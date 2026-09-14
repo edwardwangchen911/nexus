@@ -591,8 +591,7 @@ async def _resume_batch(
 ) -> AgentPaperCycleResult:
     decision_id = _fact_uuid(events, "strategy_decision_id") or await session.scalar(
         select(StrategyDecisionRecord.id).where(
-            StrategyDecisionRecord.account_id == cycle.account_id,
-            StrategyDecisionRecord.decision_session == cycle.decision_session,
+            StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
             StrategyDecisionRecord.decision_origin == "agent_research",
         )
     )
@@ -632,7 +631,10 @@ async def _resume_batch(
             "risk_evaluated",
             status,
             code,
-            {"order_ids": [str(value) for value in order_ids]},
+            {
+                "strategy_decision_id": str(decision_id),
+                "order_ids": [str(value) for value in order_ids],
+            },
         )
         events = await _events(session, cycle.id)
     return _result(cycle.id, events, replayed=False)

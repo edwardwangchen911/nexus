@@ -268,8 +268,7 @@ async def collect_agent_paper_window(
             .where(
                 PaperOrderRecord.account_id == cycle.account_id,
                 PaperOrderRecord.instrument_id == instrument_id,
-                StrategyDecisionRecord.account_id == cycle.account_id,
-                StrategyDecisionRecord.decision_session == cycle.decision_session,
+                StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
                 StrategyDecisionRecord.decision_origin == "agent_research",
             )
             .order_by(PaperOrderRecord.id)
@@ -405,8 +404,7 @@ async def resolve_agent_paper_market_scope(
                 & (ExchangeCalendarSessionRecord.session == cycle.execution_session),
             )
             .where(
-                StrategyDecisionRecord.account_id == cycle.account_id,
-                StrategyDecisionRecord.decision_session == cycle.decision_session,
+                StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
                 StrategyDecisionRecord.decision_origin == "agent_research",
                 StrategyDecisionRecord.execution_source_policy_id
                 == cycle.execution_price_policy_id,
