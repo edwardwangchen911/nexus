@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -14,6 +14,7 @@ from nexus.api.routes.portfolios import _utc_now
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.api.schemas.paper import (
     AgentPaperCycleEnvelope,
+    AgentPaperCyclePageEnvelope,
     PaperCancelEnvelope,
     PaperCancelRequest,
     PaperCancelResponse,
@@ -47,6 +48,29 @@ def _cursor_secrets(settings: EngineSettings) -> tuple[str, ...]:
             settings.engine_hmac_previous_secret,
         )
         if value is not None
+    )
+
+
+@router.get(
+    "/internal/v1/paper/cycles",
+    operation_id="listInternalAgentPaperCycles",
+    response_model=AgentPaperCyclePageEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def list_agent_paper_cycles(
+    decision_session: date | None = None,
+    limit: Annotated[int, Query(ge=1, le=20)] = 20,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> AgentPaperCyclePageEnvelope:
+    data = await PaperReadService(session, now).agent_cycles(
+        decision_session=decision_session,
+        limit=limit,
+    )
+    return AgentPaperCyclePageEnvelope(
+        data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
 
 

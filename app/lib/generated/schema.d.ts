@@ -483,6 +483,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/cycles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Agent Paper Cycles */
+        get: operations["listInternalAgentPaperCycles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/cycles/latest": {
         parameters: {
             query?: never;
@@ -1143,6 +1160,16 @@ export interface components {
             data: components["schemas"]["AgentPaperCycleResponse"];
             meta: components["schemas"]["SuccessMetaResponse"];
         };
+        /** AgentPaperCyclePageEnvelope */
+        AgentPaperCyclePageEnvelope: {
+            data: components["schemas"]["AgentPaperCyclePageResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** AgentPaperCyclePageResponse */
+        AgentPaperCyclePageResponse: {
+            /** Items */
+            items: components["schemas"]["AgentPaperCycleResponse"][];
+        };
         /** AgentPaperCycleResponse */
         AgentPaperCycleResponse: {
             /** Candidate Count */
@@ -1161,6 +1188,11 @@ export interface components {
              * Format: date
              */
             decision_session: string;
+            /**
+             * Decision Slot At
+             * Format: date-time
+             */
+            decision_slot_at: string;
             /**
              * Decision Time
              * Format: date-time
@@ -8006,6 +8038,65 @@ export interface operations {
                 };
             };
             /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    listInternalAgentPaperCycles: {
+        parameters: {
+            query?: {
+                decision_session?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentPaperCyclePageEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
             422: {
                 headers: {
                     [name: string]: unknown;

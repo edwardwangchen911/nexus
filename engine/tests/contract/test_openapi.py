@@ -204,10 +204,18 @@ def test_openapi_exposes_distinct_closed_shadow_start_and_read_contracts() -> No
 
 
 def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct() -> None:
-    schemas = create_engine_app(EngineSettings.for_test()).openapi()["components"]["schemas"]
+    document = create_engine_app(EngineSettings.for_test()).openapi()
+    schemas = document["components"]["schemas"]
     cycle = schemas["AgentPaperCycleResponse"]
-    assert {"decision_market", "execution_market"} <= set(cycle["required"])
+    assert {"decision_market", "decision_slot_at", "execution_market"} <= set(
+        cycle["required"]
+    )
     assert "market" not in cycle["properties"]
+    cycle_list = document["paths"]["/internal/v1/paper/cycles"]["get"]
+    assert cycle_list["operationId"] == "listInternalAgentPaperCycles"
+    limit = next(item for item in cycle_list["parameters"] if item["name"] == "limit")
+    assert limit["schema"]["maximum"] == 20
+    assert schemas["AgentPaperCyclePageResponse"]["properties"]["items"]["maxItems"] == 20
     execution = cycle["properties"]["execution_market"]
     assert execution["discriminator"] == {
         "propertyName": "source",

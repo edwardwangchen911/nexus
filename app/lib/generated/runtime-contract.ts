@@ -277,6 +277,24 @@ export const runtimeContractSchemas = {
     "title": "AgentPaperCandidateResponse",
     "type": "object"
   },
+  "AgentPaperCyclePageResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "items": {
+        "items": {
+          "$ref": "#/components/schemas/AgentPaperCycleResponse"
+        },
+        "maxItems": 20,
+        "title": "Items",
+        "type": "array"
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "title": "AgentPaperCyclePageResponse",
+    "type": "object"
+  },
   "AgentPaperCycleResponse": {
     "additionalProperties": false,
     "properties": {
@@ -322,6 +340,11 @@ export const runtimeContractSchemas = {
       "decision_session": {
         "format": "date",
         "title": "Decision Session",
+        "type": "string"
+      },
+      "decision_slot_at": {
+        "format": "date-time",
+        "title": "Decision Slot At",
         "type": "string"
       },
       "decision_time": {
@@ -394,6 +417,7 @@ export const runtimeContractSchemas = {
       "result_code",
       "decision_session",
       "decision_time",
+      "decision_slot_at",
       "execution_session",
       "execution_locked",
       "candidate_count",
@@ -12693,6 +12717,8 @@ export const evolutionActionRuntimeSchema = runtimeContractSchemas.EvolutionActi
 export const paperPortfolioRuntimeSchema = runtimeContractSchemas.PaperPortfolioResponse;
 
 export const agentPaperCycleRuntimeSchema = runtimeContractSchemas.AgentPaperCycleResponse;
+
+export const agentPaperCyclePageRuntimeSchema = runtimeContractSchemas.AgentPaperCyclePageResponse;
 
 export const paperOrderPageRuntimeSchema = runtimeContractSchemas.PaperOrderPageResponse;
 

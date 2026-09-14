@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.paper import (
     AgentPaperAlpacaExecutionMarketResponse,
     AgentPaperCandidateResponse,
+    AgentPaperCyclePageResponse,
     AgentPaperCycleResponse,
     AgentPaperDecisionMarketResponse,
     AgentPaperDecisionResponse,
@@ -35,7 +37,11 @@ from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
-from nexus.persistence.models.backtest import StrategyDefinitionRecord
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+    StrategyDefinitionRecord,
+)
 from nexus.persistence.models.data import DataArtifact, PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.evolution import StrategyRegistryEventRecord
 from nexus.persistence.models.market import InstrumentAlias, LatestQuote
@@ -108,11 +114,79 @@ class PaperReadService:
                 AgentPaperCycleRecord.account_id == account.id,
                 AgentPaperCycleRecord.decision_time <= self._request_time,
             )
-            .order_by(AgentPaperCycleRecord.decision_time.desc(), AgentPaperCycleRecord.id.desc())
+            .order_by(
+                AgentPaperCycleRecord.decision_slot_at.desc(),
+                AgentPaperCycleRecord.id.desc(),
+            )
             .limit(1)
         )
         if cycle is None:
             return None
+        return await self._agent_cycle(cycle)
+
+    async def agent_cycles(
+        self,
+        *,
+        decision_session: date | None,
+        limit: int,
+    ) -> AgentPaperCyclePageResponse:
+        if not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        account, _ = await self.account()
+        resolved_session = decision_session
+        if resolved_session is None:
+            resolved_session = await self._current_xnys_session()
+        if resolved_session is None:
+            return AgentPaperCyclePageResponse(items=())
+        cycles = tuple(
+            await self._session.scalars(
+                select(AgentPaperCycleRecord)
+                .where(
+                    AgentPaperCycleRecord.account_id == account.id,
+                    AgentPaperCycleRecord.decision_session == resolved_session,
+                    AgentPaperCycleRecord.decision_time <= self._request_time,
+                )
+                .order_by(
+                    AgentPaperCycleRecord.decision_slot_at.desc(),
+                    AgentPaperCycleRecord.id.desc(),
+                )
+                .limit(limit)
+            )
+        )
+        return AgentPaperCyclePageResponse(
+            items=tuple([await self._agent_cycle(cycle) for cycle in cycles])
+        )
+
+    async def _current_xnys_session(self) -> date | None:
+        local_date = self._request_time.astimezone(ZoneInfo("America/New_York")).date()
+        session_date = await self._session.scalar(
+            select(ExchangeCalendarSessionRecord.session)
+            .join(
+                ExchangeCalendarAuthorityRecord,
+                ExchangeCalendarAuthorityRecord.id
+                == ExchangeCalendarSessionRecord.calendar_authority_id,
+            )
+            .where(
+                ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+                ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+                ExchangeCalendarAuthorityRecord.published_at <= self._request_time,
+                ExchangeCalendarAuthorityRecord.created_at <= self._request_time,
+                ExchangeCalendarSessionRecord.created_at <= self._request_time,
+                ExchangeCalendarSessionRecord.session == local_date,
+            )
+            .order_by(
+                ExchangeCalendarAuthorityRecord.published_at.desc(),
+                ExchangeCalendarAuthorityRecord.version.desc(),
+                ExchangeCalendarAuthorityRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        return cast(date | None, session_date)
+
+    async def _agent_cycle(
+        self,
+        cycle: AgentPaperCycleRecord,
+    ) -> AgentPaperCycleResponse:
         event = await self._session.scalar(
             select(AgentPaperCycleEventRecord)
             .where(AgentPaperCycleEventRecord.cycle_id == cycle.id)
@@ -135,8 +209,7 @@ class PaperReadService:
             ) from None
         decision = await self._session.scalar(
             select(StrategyDecisionRecord).where(
-                StrategyDecisionRecord.account_id == cycle.account_id,
-                StrategyDecisionRecord.decision_session == cycle.decision_session,
+                StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
                 StrategyDecisionRecord.decision_origin == "agent_research",
             )
         )
@@ -365,6 +438,7 @@ class PaperReadService:
             result_code=projected_result_code,
             decision_session=cycle.decision_session,
             decision_time=cycle.decision_time,
+            decision_slot_at=cycle.decision_slot_at,
             execution_session=cycle.execution_session,
             execution_locked=True,
             candidate_count=len(candidates),

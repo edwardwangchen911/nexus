@@ -195,6 +195,7 @@ class AgentPaperCycleResponse(_StrictSchema):
     result_code: str = Field(min_length=1, max_length=100)
     decision_session: date
     decision_time: AwareDatetime
+    decision_slot_at: AwareDatetime
     execution_session: date
     execution_locked: Literal[True]
     candidate_count: int = Field(ge=0, le=5)
@@ -207,6 +208,15 @@ class AgentPaperCycleResponse(_StrictSchema):
 
 class AgentPaperCycleEnvelope(_StrictSchema):
     data: AgentPaperCycleResponse
+    meta: SuccessMetaResponse
+
+
+class AgentPaperCyclePageResponse(_StrictSchema):
+    items: tuple[AgentPaperCycleResponse, ...] = Field(max_length=20)
+
+
+class AgentPaperCyclePageEnvelope(_StrictSchema):
+    data: AgentPaperCyclePageResponse
     meta: SuccessMetaResponse
 
 

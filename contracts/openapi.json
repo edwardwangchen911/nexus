@@ -404,6 +404,41 @@
         "title": "AgentPaperCycleEnvelope",
         "type": "object"
       },
+      "AgentPaperCyclePageEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentPaperCyclePageResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "AgentPaperCyclePageEnvelope",
+        "type": "object"
+      },
+      "AgentPaperCyclePageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPaperCycleResponse"
+            },
+            "maxItems": 20,
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "AgentPaperCyclePageResponse",
+        "type": "object"
+      },
       "AgentPaperCycleResponse": {
         "additionalProperties": false,
         "properties": {
@@ -449,6 +484,11 @@
           "decision_session": {
             "format": "date",
             "title": "Decision Session",
+            "type": "string"
+          },
+          "decision_slot_at": {
+            "format": "date-time",
+            "title": "Decision Slot At",
             "type": "string"
           },
           "decision_time": {
@@ -521,6 +561,7 @@
           "result_code",
           "decision_session",
           "decision_time",
+          "decision_slot_at",
           "execution_session",
           "execution_locked",
           "candidate_count",
@@ -16159,6 +16200,95 @@
           }
         },
         "summary": "Get Overview"
+      }
+    },
+    "/internal/v1/paper/cycles": {
+      "get": {
+        "operationId": "listInternalAgentPaperCycles",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "decision_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Decision Session"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPaperCyclePageEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "List Agent Paper Cycles"
       }
     },
     "/internal/v1/paper/cycles/latest": {

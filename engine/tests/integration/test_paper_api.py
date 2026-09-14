@@ -11,6 +11,7 @@ import httpx
 import pytest
 from helpers.paper_api import app, headers, seed_ready_paper_api, settings
 from helpers.paper_batch import (
+    CALENDAR_ID,
     DATA_SNAPSHOT_ID,
     DECISION_SESSION,
     DECISION_TIME,
@@ -24,8 +25,8 @@ from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
     candidate_manifest_hash,
-    floor_decision_slot,
     canonical_cycle_event_hash,
+    floor_decision_slot,
 )
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.persistence.models.data import DataArtifact
@@ -37,6 +38,7 @@ from nexus.persistence.models.paper import (
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
+    StrategyDecisionRecord,
 )
 from nexus.persistence.session import session_factory
 from sqlalchemy import text
@@ -85,6 +87,151 @@ async def test_latest_agent_paper_cycle_is_404_without_a_cycle(
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    older_time = DECISION_TIME - timedelta(minutes=10)
+    newer_time = DECISION_TIME - timedelta(minutes=5)
+    older_id = UUID("72000000-0000-0000-0000-000000000101")
+    newer_id = UUID("72000000-0000-0000-0000-000000000102")
+    older_decision_id = UUID("72000000-0000-0000-0000-000000000201")
+    newer_decision_id = UUID("72000000-0000-0000-0000-000000000202")
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        for cycle_id, decision_id, decision_time, hash_digit in (
+            (older_id, older_decision_id, older_time, "1"),
+            (newer_id, newer_decision_id, newer_time, "2"),
+        ):
+            session.add(
+                AgentPaperCycleRecord(
+                    id=cycle_id,
+                    account_id=seed.account_id,
+                    portfolio_id=seed.portfolio_id,
+                    decision_session=DECISION_SESSION,
+                    decision_time=decision_time,
+                    decision_slot_at=floor_decision_slot(decision_time),
+                    execution_session=DECISION_SESSION,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    quality_report_id=None,
+                    decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                    candidate_manifest=[],
+                    candidate_hash=candidate_manifest_hash(()),
+                    sizing_policy_version="agent_paper_sizing_v1",
+                    sizing_policy_hash="9" * 64,
+                    execution_locked=True,
+                )
+            )
+            await session.flush()
+            session.add(
+                AgentPaperCycleEventRecord(
+                    cycle_id=cycle_id,
+                    sequence=1,
+                    from_status=None,
+                    to_status="prepared",
+                    result_code="CYCLE_PREPARED",
+                    fact_ids={},
+                    occurred_at=decision_time,
+                    event_hash=canonical_cycle_event_hash(
+                        cycle_id=cycle_id,
+                        sequence=1,
+                        from_status=None,
+                        to_status="prepared",
+                        result_code="CYCLE_PREPARED",
+                        fact_ids={},
+                        occurred_at=decision_time,
+                    ),
+                )
+            )
+            session.add(
+                StrategyDecisionRecord(
+                    id=decision_id,
+                    account_id=seed.account_id,
+                    portfolio_id=seed.portfolio_id,
+                    strategy_id="agent_research",
+                    strategy_version="agent_paper_decision_v1",
+                    strategy_definition_id=None,
+                    registry_event_id=None,
+                    champion_generation=None,
+                    decision_origin="agent_research",
+                    agent_paper_cycle_id=cycle_id,
+                    decision_session=DECISION_SESSION,
+                    decision_time=decision_time,
+                    execution_session=DECISION_SESSION,
+                    source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    execution_source_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                    calendar_authority_id=CALENDAR_ID,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    quality_report_id=None,
+                    portfolio_projection_hash=hash_digit * 64,
+                    authority_hash=hash_digit * 64,
+                    strategy_parameters_hash=hash_digit * 64,
+                    decision_hash=("3" if hash_digit == "1" else "4") * 64,
+                    cash_weight=Decimal("1"),
+                    reason="AGENT_RESEARCH",
+                )
+            )
+            session.add(
+                AgentPaperCycleEventRecord(
+                    cycle_id=cycle_id,
+                    sequence=2,
+                    from_status="prepared",
+                    to_status="unavailable",
+                    result_code="RISK_INPUT_REQUIRED",
+                    fact_ids={},
+                    occurred_at=decision_time,
+                    event_hash=canonical_cycle_event_hash(
+                        cycle_id=cycle_id,
+                        sequence=2,
+                        from_status="prepared",
+                        to_status="unavailable",
+                        result_code="RISK_INPUT_REQUIRED",
+                        fact_ids={},
+                        occurred_at=decision_time,
+                    ),
+                )
+            )
+
+    path = f"/internal/v1/paper/cycles?decision_session={DECISION_SESSION}&limit=20"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+        current_session_path = "/internal/v1/paper/cycles?limit=20"
+        current_session = await client.get(
+            current_session_path,
+            headers=headers("GET", current_session_path),
+        )
+        invalid_low_path = "/internal/v1/paper/cycles?limit=0"
+        invalid_high_path = "/internal/v1/paper/cycles?limit=21"
+        invalid_low = await client.get(
+            invalid_low_path, headers=headers("GET", invalid_low_path)
+        )
+        invalid_high = await client.get(
+            invalid_high_path, headers=headers("GET", invalid_high_path)
+        )
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [item["cycle_id"] for item in items] == [str(newer_id), str(older_id)]
+    assert [item["decision"]["decision_id"] for item in items] == [
+        str(newer_decision_id),
+        str(older_decision_id),
+    ]
+    assert [item["decision_slot_at"] for item in items] == [
+        floor_decision_slot(newer_time).isoformat().replace("+00:00", "Z"),
+        floor_decision_slot(older_time).isoformat().replace("+00:00", "Z"),
+    ]
+    assert all(item["decision_session"] == DECISION_SESSION.isoformat() for item in items)
+    assert current_session.status_code == 200
+    assert current_session.json()["data"]["items"] == []
+    assert invalid_low.status_code == invalid_high.status_code == 422
+    assert "account_id" not in response.text.lower()
 
 
 @pytest.mark.asyncio
