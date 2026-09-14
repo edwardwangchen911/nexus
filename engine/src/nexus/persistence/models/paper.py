@@ -21,12 +21,15 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.schema import conv
 
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import DECIMAL_NUMERIC, Base, ImmutableCreatedAt, UTCDateTime
 
 PAPER_DECISION_SOURCE_POLICY_ID = UUID("2573d63a-fb6d-53d3-8d44-207766a78322")
 PAPER_EXECUTION_SOURCE_POLICY_ID = UUID("e99532cc-e24c-52a8-8165-c8076325fbd2")
+PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID = UUID("4d24df4a-b510-541b-8a6a-fe7db5afaac4")
+PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID = UUID("cf525f07-4e55-5f84-a839-60d845819ec5")
 
 
 class PaperAccountRecord(ImmutableCreatedAt, Base):
@@ -97,10 +100,14 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
             ["source_policies.id"],
             name="fk_agent_paper_cycles_execution_policy",
         ),
-        CheckConstraint("execution_session > decision_session", name="sessions_ordered"),
+        CheckConstraint("execution_session >= decision_session", name="sessions_ordered"),
         CheckConstraint(
-            "decision_price_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
-            "AND execution_price_policy_id = 'e99532cc-e24c-52a8-8165-c8076325fbd2'::uuid",
+            "((decision_price_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
+            "AND execution_price_policy_id = 'e99532cc-e24c-52a8-8165-c8076325fbd2'::uuid "
+            "AND execution_session > decision_session) OR "
+            "(decision_price_policy_id = '4d24df4a-b510-541b-8a6a-fe7db5afaac4'::uuid "
+            "AND execution_price_policy_id = 'cf525f07-4e55-5f84-a839-60d845819ec5'::uuid "
+            "AND execution_session = decision_session))",
             name="policies_fixed",
         ),
         CheckConstraint(
@@ -172,6 +179,12 @@ class AgentPaperCycleEventRecord(ImmutableCreatedAt, Base):
 class AgentPaperMarketWindowRecord(ImmutableCreatedAt, Base):
     __tablename__ = "agent_paper_market_windows"
     __table_args__ = (
+        Index(
+            "uq_agent_paper_market_windows_probe",
+            "cycle_id",
+            unique=True,
+            postgresql_where=text("purpose='acceptance_probe'"),
+        ),
         UniqueConstraint(
             "cycle_id",
             "instrument_id",
@@ -210,21 +223,23 @@ class AgentPaperMarketWindowRecord(ImmutableCreatedAt, Base):
             "purpose IN ('paper_fill','acceptance_probe') AND "
             "((purpose='paper_fill' AND order_id IS NOT NULL) OR "
             "(purpose='acceptance_probe' AND order_id IS NULL))",
-            name="purpose_order_shape",
+            # 0057 passed a convention-expanded name through the naming convention.
+            name=conv("ck_agent_paper_market_windows_ck_agent_paper_market_win_80e7"),
         ),
         CheckConstraint(
             "window_end_at = window_start_at + interval '5 minutes' "
             "AND data_available_at <= evaluated_at",
-            name="window_bounds",
+            name=conv("ck_agent_paper_market_windows_ck_agent_paper_market_win_177a"),
         ),
         CheckConstraint(
-            "source='alpaca' AND feed='iex' AND delivery_mode='real_time'",
+            "(source='alpaca' AND feed='iex' AND delivery_mode='real_time') OR "
+            "(source='schwab' AND feed='price_history' AND delivery_mode='unknown')",
             name="source_fixed",
         ),
         CheckConstraint(
             "source_content_hash ~ '^[0-9a-f]{64}$' AND "
             "raw_content_hash ~ '^[0-9a-f]{64}$' AND content_hash ~ '^[0-9a-f]{64}$'",
-            name="hashes_canonical",
+            name=conv("ck_agent_paper_market_windows_ck_agent_paper_market_win_7e52"),
         ),
     )
 
@@ -356,15 +371,20 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 3 "
             "AND champion_generation >= 1 AND execution_source_policy_id IS NULL "
             "AND quality_report_id IS NOT NULL "
-            "AND reason = 'WEEKLY_REBALANCE') OR "
+            "AND reason = 'WEEKLY_REBALANCE' "
+            "AND execution_session > decision_session) OR "
             "(decision_origin = 'agent_research' "
             "AND strategy_id = 'agent_research' "
             "AND strategy_version = 'agent_paper_decision_v1' "
             "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 0 "
             "AND quality_report_id IS NULL "
-            "AND source_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
+            "AND reason = 'AGENT_RESEARCH' "
+            "AND ((source_policy_id = '2573d63a-fb6d-53d3-8d44-207766a78322'::uuid "
             "AND execution_source_policy_id = 'e99532cc-e24c-52a8-8165-c8076325fbd2'::uuid "
-            "AND reason = 'AGENT_RESEARCH')",
+            "AND execution_session > decision_session) OR "
+            "(source_policy_id = '4d24df4a-b510-541b-8a6a-fe7db5afaac4'::uuid "
+            "AND execution_source_policy_id = 'cf525f07-4e55-5f84-a839-60d845819ec5'::uuid "
+            "AND execution_session = decision_session)))",
             name="origin_authority",
         ),
         CheckConstraint(
@@ -375,7 +395,7 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             "btrim(strategy_id) <> '' AND btrim(strategy_version) <> ''",
             name="strategy_content_addressed",
         ),
-        CheckConstraint("execution_session > decision_session", name="sessions_ordered"),
+        CheckConstraint("execution_session >= decision_session", name="sessions_ordered"),
         CheckConstraint("reason IN ('WEEKLY_REBALANCE','AGENT_RESEARCH')", name="reason_allowed"),
         CheckConstraint("cash_weight >= 0 AND cash_weight <= 1", name="cash_weight"),
         CheckConstraint(

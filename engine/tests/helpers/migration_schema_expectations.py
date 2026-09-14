@@ -106,6 +106,7 @@ EXPECTED_TABLES = EXPECTED_TABLES | SHADOW_TABLES
 PAPER_TABLES = {
     "agent_paper_cycles",
     "agent_paper_cycle_events",
+    "agent_paper_market_windows",
     "strategy_decision_agent_outputs",
     "risk_policies",
     "strategy_decisions",

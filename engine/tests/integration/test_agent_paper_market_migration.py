@@ -33,12 +33,12 @@ async def _tables(database_url: str) -> set[str]:
         await engine.dispose()
 
 
-def test_0057_is_single_head_and_declares_market_binding() -> None:
+def test_0057_remains_in_the_forward_chain_and_declares_market_binding() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0057_agent_paper_market_window"
+    assert CURRENT_MIGRATION_HEAD == "0058_agent_paper_schwab_realtime"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
-    revision = scripts.get_revision(CURRENT_MIGRATION_HEAD)
+    revision = scripts.get_revision("0057_agent_paper_market_window")
     assert revision is not None
     assert revision.down_revision == "0056_agent_paper_cycle"
     assert AgentPaperMarketWindowRecord.__tablename__ == "agent_paper_market_windows"

@@ -16,6 +16,8 @@ from nexus.persistence.models.data import SourcePolicy as SourcePolicyRecord
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
 )
 from nexus.providers.base import (
     PriceBar,
@@ -252,13 +254,19 @@ def current_paper_performance_price_authority_available() -> bool:
 
 
 def paper_decision_price_authorized(source_policy_id: UUID) -> bool:
-    """Authorize only the immutable Agent paper daily-price policy."""
-    return source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+    """Authorize only immutable Agent paper decision-price policies."""
+    return source_policy_id in {
+        PAPER_DECISION_SOURCE_POLICY_ID,
+        PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    }
 
 
 def paper_execution_price_authorized(source_policy_id: UUID) -> bool:
-    """Authorize only the immutable Agent paper IEX execution policy."""
-    return source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+    """Authorize only immutable Agent paper execution-price policies."""
+    return source_policy_id in {
+        PAPER_EXECUTION_SOURCE_POLICY_ID,
+        PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    }
 
 
 def current_proposal_shadow_price_authority_available(
