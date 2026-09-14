@@ -187,7 +187,7 @@ async def _seed_adjusted_authority(session: AsyncSession, decision) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_decision_round_trip_uses_existing_risk_and_order_batch_path(
+async def test_agent_decision_round_trip_keeps_registered_forward_lookup_isolated(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -296,6 +296,15 @@ async def test_agent_decision_round_trip_uses_existing_risk_and_order_batch_path
             )
             assert isinstance(loaded, PersistedAgentPaperDecision)
             assert loaded.decision == decision
+            assert (
+                await load_forward_strategy_decision(
+                    session,
+                    account_id=seed.account_id,
+                    strategy_version="baseline_v1",
+                    decision_session=decision.decision_session,
+                )
+                is None
+            )
 
             result = await create_paper_order_batch(
                 session,

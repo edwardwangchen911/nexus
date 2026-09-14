@@ -525,6 +525,7 @@ async def load_forward_strategy_decision(
         select(StrategyDecisionRecord).where(
             StrategyDecisionRecord.account_id == account_id,
             StrategyDecisionRecord.decision_session == decision_session,
+            StrategyDecisionRecord.decision_origin == "registered_strategy",
         )
     )
     if record is None:
