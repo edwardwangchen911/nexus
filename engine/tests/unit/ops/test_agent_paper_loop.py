@@ -130,6 +130,38 @@ def test_foreground_loop_executes_persisted_action_then_stops() -> None:
     assert actions == [(loop.AgentPaperLoopAction.RUN_RESEARCH_JOB, "job-1")]
 
 
+def test_foreground_loop_honors_known_executor_stop_without_reinspection() -> None:
+    inspections = 0
+
+    async def inspect():
+        nonlocal inspections
+        inspections += 1
+        if inspections > 1:
+            return snapshot(
+                now=AFTER_CLOSE,
+                cycle_status="completed",
+                cycle_slot_at=LAST_SLOT,
+            )
+        return snapshot(
+            cycle_id=UUID(int=2),
+            cycle_status="awaiting_market",
+            market_window_ready=True,
+            has_open_order=True,
+            order_id=UUID(int=3),
+        )
+
+    async def execute(_action, _state):
+        return A.STOP_ORDER_UNAVAILABLE
+
+    async def no_sleep(_seconds: float) -> None:
+        raise AssertionError("a known no-trade result must stop without sleeping")
+
+    result = asyncio.run(loop.run_foreground_loop(inspect=inspect, execute=execute, sleep=no_sleep))
+
+    assert result == A.STOP_ORDER_UNAVAILABLE
+    assert inspections == 1
+
+
 @pytest.mark.parametrize(
     ("first", "expected_sleep"),
     [
@@ -315,6 +347,46 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     request = requests[0]
     assert request.account_id == UUID(int=1)
     assert request.idempotency_key == "agent-paper-loop:2026-09-14T14:05:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("paper_action", "expected"),
+    [
+        ("no_data", A.STOP_ORDER_UNAVAILABLE),
+        ("no_capacity", A.STOP_ORDER_UNAVAILABLE),
+        ("filled", None),
+    ],
+)
+def test_order_executor_surfaces_only_known_no_trade_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    paper_action: str,
+    expected: loop.AgentPaperLoopAction | None,
+) -> None:
+    async def advance(_settings, request):
+        return {
+            "status": "submitted",
+            "action": paper_action,
+            "order_id": str(request.order_id),
+        }
+
+    monkeypatch.setattr(loop, "run_paper_once", advance)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            snapshot=snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                market_window_ready=True,
+                has_open_order=True,
+                order_id=UUID(int=3),
+            ),
+        )
+    )
+
+    assert result == expected
 
 
 def test_cycle_view_maps_exact_order_and_delayed_collection_time() -> None:

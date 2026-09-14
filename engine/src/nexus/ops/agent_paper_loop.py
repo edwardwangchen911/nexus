@@ -48,6 +48,7 @@ class AgentPaperLoopAction(StrEnum):
     WAIT_FOR_MARKET = "wait_for_market"
     STOP_RESULT_UNKNOWN = "stop_result_unknown"
     STOP_CYCLE_UNAVAILABLE = "stop_cycle_unavailable"
+    STOP_ORDER_UNAVAILABLE = "stop_order_unavailable"
     STOP_DISABLED = "stop_disabled"
     STOP_SESSION_CLOSED = "stop_session_closed"
 
@@ -197,7 +198,10 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
 async def run_foreground_loop(
     *,
     inspect: Callable[[], Awaitable[AgentPaperLoopSnapshot]],
-    execute: Callable[[AgentPaperLoopAction, AgentPaperLoopSnapshot], Awaitable[None]],
+    execute: Callable[
+        [AgentPaperLoopAction, AgentPaperLoopSnapshot],
+        Awaitable[AgentPaperLoopAction | None],
+    ],
     sleep: Callable[[float], Awaitable[None]],
 ) -> AgentPaperLoopAction:
     """Run persisted one-step actions until a fail-closed stop condition is reached."""
@@ -219,7 +223,9 @@ async def run_foreground_loop(
             assert snapshot.market_window_end_at is not None
             await sleep((snapshot.market_window_end_at - snapshot.now).total_seconds())
             continue
-        await execute(action, snapshot)
+        stop = await execute(action, snapshot)
+        if stop is not None:
+            return stop
 
 
 async def run_local_agent_paper_loop(
@@ -238,8 +244,8 @@ async def run_local_agent_paper_loop(
 
     async def execute(
         action: AgentPaperLoopAction, snapshot: AgentPaperLoopSnapshot
-    ) -> None:
-        await execute_agent_paper_loop_action(
+    ) -> AgentPaperLoopAction | None:
+        return await execute_agent_paper_loop_action(
             settings,
             account_id=account_id,
             repo_root=repo_root,
@@ -257,7 +263,7 @@ async def execute_agent_paper_loop_action(
     repo_root: Path,
     action: AgentPaperLoopAction,
     snapshot: AgentPaperLoopSnapshot,
-) -> None:
+) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
     if action == AgentPaperLoopAction.TRIGGER:
         environment = load_local_environment(repo_root, {})
@@ -272,7 +278,7 @@ async def execute_agent_paper_loop_action(
             ),
             repo_root=repo_root,
         )
-        return
+        return None
     if action == AgentPaperLoopAction.RUN_RESEARCH_JOB:
         if not isinstance(snapshot.research_job_id, UUID):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -282,7 +288,7 @@ async def execute_agent_paper_loop_action(
         )
         if not worked:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-        return
+        return None
     if snapshot.cycle_id is None:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     if action == AgentPaperLoopAction.RESUME:
@@ -294,7 +300,7 @@ async def execute_agent_paper_loop_action(
                 idempotency_key=f"agent-paper-loop-resume:{snapshot.cycle_id}",
             ),
         )
-        return
+        return None
     if action == AgentPaperLoopAction.COLLECT_WINDOW:
         environment = load_local_environment(repo_root, {})
         await collect_window_once(
@@ -304,9 +310,9 @@ async def execute_agent_paper_loop_action(
             ),
             repo_root=repo_root,
         )
-        return
+        return None
     if action == AgentPaperLoopAction.ADVANCE_ORDER and snapshot.order_id is not None:
-        await run_paper_once(
+        result = await run_paper_once(
             settings,
             PaperAdvanceRequest(
                 action="advance",
@@ -316,7 +322,9 @@ async def execute_agent_paper_loop_action(
                 idempotency_key=f"agent-paper-loop-advance:{snapshot.order_id}",
             ),
         )
-        return
+        if result.get("action") in {"no_data", "no_capacity"}:
+            return AgentPaperLoopAction.STOP_ORDER_UNAVAILABLE
+        return None
     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
 
 
