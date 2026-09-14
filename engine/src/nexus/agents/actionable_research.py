@@ -9,6 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from nexus.agents.price_authority import FrozenPriceAuthorityStatus
 from nexus.audit.canonical import Hash64
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
@@ -115,6 +116,7 @@ def admit_actionable_research_output(
     terminal_outputs: Sequence[AgentResearchOutputRecord],
     bound_evidence: Sequence[AgentResearchOutputEvidenceRecord],
     decision_time: datetime,
+    price_authority_status: FrozenPriceAuthorityStatus,
     allow_safe_no_trade: bool = False,
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
@@ -132,6 +134,15 @@ def admit_actionable_research_output(
         }
         evidence_by_identity = {_evidence_identity(ref): ref for ref in intent.evidence_refs}
         binding_by_identity = {_binding_identity(binding): binding for binding in bindings}
+        actionable_shape = actionable_intent_shape_valid(intent)
+        safe_no_trade_shape = allow_safe_no_trade and safe_no_trade_intent_shape_valid(intent)
+        price_authority_admitted = (
+            price_authority_status is FrozenPriceAuthorityStatus.VALID
+            or (
+                price_authority_status is FrozenPriceAuthorityStatus.MISSING
+                and safe_no_trade_shape
+            )
+        )
         if (
             decision_time.tzinfo != UTC
             or run.status != "completed"
@@ -150,10 +161,8 @@ def admit_actionable_research_output(
             or decision_time < run.decision_time
             or intent.valid_until < decision_time
             or output.payload.get("quality_status") != intent.quality_status
-            or not (
-                actionable_intent_shape_valid(intent)
-                or (allow_safe_no_trade and safe_no_trade_intent_shape_valid(intent))
-            )
+            or not (actionable_shape or safe_no_trade_shape)
+            or not price_authority_admitted
             or not bindings
             or len(evidence_by_identity) != len(intent.evidence_refs)
             or len(binding_by_identity) != len(bindings)

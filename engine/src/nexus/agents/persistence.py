@@ -35,7 +35,6 @@ from nexus.agents.execution_authority import (
 from nexus.agents.models import ResearchRequest
 from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.agents.price_authority import (
-    FrozenPriceAuthorityStatus,
     freeze_price_authority,
     revalidate_frozen_price_authority,
 )
@@ -164,7 +163,6 @@ async def load_actionable_research_output(
             or snapshot.available_at > run.decision_time
             or snapshot.received_at > run.decision_time
             or max(run.created_at, output.created_at) > decision_time
-            or price_status is not FrozenPriceAuthorityStatus.VALID
         ):
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         return admit_actionable_research_output(
@@ -174,6 +172,7 @@ async def load_actionable_research_output(
             terminal_outputs=terminals,
             bound_evidence=bindings,
             decision_time=decision_time,
+            price_authority_status=price_status,
             allow_safe_no_trade=allow_safe_no_trade,
         )
     except ActionableResearchError:

@@ -9,6 +9,7 @@ from nexus.agents.actionable_research import (
     admit_actionable_research_output,
 )
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
+from nexus.agents.price_authority import FrozenPriceAuthorityStatus
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentResearchOutputEvidenceRecord,
@@ -235,6 +236,7 @@ def _case(mutation: str = "valid_buy") -> dict[str, object]:
         "terminal_outputs": terminals,
         "bound_evidence": (binding,),
         "decision_time": _DECISION_TIME,
+        "price_authority_status": FrozenPriceAuthorityStatus.VALID,
     }
 
 
@@ -317,8 +319,11 @@ def test_actionable_v4_maps_direction_without_weight_or_quantity() -> None:
 
 
 def test_paper_admission_maps_partial_watch_to_no_trade() -> None:
+    case = _partial_watch_case()
+    case["price_authority_status"] = FrozenPriceAuthorityStatus.MISSING
     result = admit_actionable_research_output(
-        **_partial_watch_case(), allow_safe_no_trade=True
+        **case,
+        allow_safe_no_trade=True,
     )
 
     assert result.stance == "watch"
@@ -336,4 +341,24 @@ def test_paper_no_trade_admission_cannot_grant_exposure_authority(mutation: str)
     with pytest.raises(ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"):
         admit_actionable_research_output(
             **_partial_watch_case(mutation), allow_safe_no_trade=True
+        )
+
+
+def test_paper_no_trade_admission_rejects_corrupt_price_authority() -> None:
+    case = _partial_watch_case()
+    case["price_authority_status"] = FrozenPriceAuthorityStatus.INVALID
+    with pytest.raises(ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"):
+        admit_actionable_research_output(
+            **case,
+            allow_safe_no_trade=True,
+        )
+
+
+def test_missing_price_authority_cannot_grant_increase() -> None:
+    case = _case()
+    case["price_authority_status"] = FrozenPriceAuthorityStatus.MISSING
+    with pytest.raises(ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"):
+        admit_actionable_research_output(
+            **case,
+            allow_safe_no_trade=True,
         )
