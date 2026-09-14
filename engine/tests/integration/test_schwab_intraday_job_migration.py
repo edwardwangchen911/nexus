@@ -23,7 +23,7 @@ MIGRATION_PATH = ENGINE_ROOT / "alembic/versions/0055_schwab_intraday_job_v3.py"
 def test_0055_precedes_the_agent_paper_cycle_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0057_agent_paper_market_window"
+    assert CURRENT_MIGRATION_HEAD == "0059_agent_paper_intraday_cycles"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     migration = scripts.get_revision("0055_schwab_intraday_job_v3")
     assert migration is not None

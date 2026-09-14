@@ -26,6 +26,7 @@ from nexus.paper.agent_cycle_models import (
     CycleStatus,
     candidate_manifest_hash,
     canonical_cycle_event_hash,
+    floor_decision_slot,
 )
 from nexus.paper.agent_decision import (
     AGENT_PAPER_SIZING_POLICY_HASH,
@@ -78,10 +79,15 @@ async def claim_schwab_agent_paper_trigger(
     *,
     account_id: UUID,
     decision_session: date,
+    decision_slot_at: datetime,
     idempotency_key: str,
 ) -> AgentPaperCycleResult | None:
     """Claim and lock one session before any external provider collection."""
-    if not idempotency_key or len(idempotency_key) > 255:
+    if (
+        floor_decision_slot(decision_slot_at) != decision_slot_at
+        or not idempotency_key
+        or len(idempotency_key) > 255
+    ):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
@@ -91,12 +97,13 @@ async def claim_schwab_agent_paper_trigger(
             "schema": "agent-paper-schwab-trigger-v1",
             "account_id": str(account_id),
             "decision_session": decision_session.isoformat(),
+            "decision_slot_at": decision_slot_at.isoformat(),
             "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
         }
     )
     claim, _ = await claim_or_lock(
         session,
-        f"local-agent-paper-schwab:{account_id}:{decision_session}",
+        f"local-agent-paper-schwab:{account_id}:{decision_slot_at.isoformat()}",
         "agent-paper-schwab-trigger-v1",
         idempotency_key,
         request_hash,
@@ -111,7 +118,7 @@ async def claim_schwab_agent_paper_trigger(
     cycle = await session.scalar(
         select(AgentPaperCycleRecord).where(
             AgentPaperCycleRecord.account_id == account_id,
-            AgentPaperCycleRecord.decision_session == decision_session,
+            AgentPaperCycleRecord.decision_slot_at == decision_slot_at,
         )
     )
     if cycle is None:
@@ -131,6 +138,7 @@ async def start_schwab_agent_paper_cycle(
     session: AsyncSession,
     *,
     authority: CycleAuthority,
+    decision_slot_at: datetime,
     idempotency_key: str,
     daily_limit_usd: Decimal = Decimal("3.00"),
 ) -> AgentPaperCycleResult:
@@ -148,6 +156,7 @@ async def start_schwab_agent_paper_cycle(
         session,
         account_id=authority.account_id,
         decision_session=authority.decision_session,
+        decision_slot_at=decision_slot_at,
         idempotency_key=idempotency_key,
     )
     if replay is not None:
@@ -155,6 +164,7 @@ async def start_schwab_agent_paper_cycle(
     return await _start_cycle(
         session,
         authority=authority,
+        decision_slot_at=decision_slot_at,
         daily_limit_usd=daily_limit_usd,
     )
 
@@ -253,14 +263,20 @@ async def advance_agent_paper_cycle(
     authority = await load_cycle_authority(
         session, account_id=account_id, decision_time=decision_time
     )
+    decision_slot_at = floor_decision_slot(decision_time)
     cycle = await session.scalar(
         select(AgentPaperCycleRecord).where(
             AgentPaperCycleRecord.account_id == account_id,
-            AgentPaperCycleRecord.decision_session == authority.decision_session,
+            AgentPaperCycleRecord.decision_slot_at == decision_slot_at,
         )
     )
     if cycle is None:
-        return await _start_cycle(session, authority=authority, daily_limit_usd=daily_limit_usd)
+        return await _start_cycle(
+            session,
+            authority=authority,
+            decision_slot_at=decision_slot_at,
+            daily_limit_usd=daily_limit_usd,
+        )
     if cycle.decision_time != decision_time:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
     manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
@@ -290,6 +306,7 @@ async def _start_cycle(
     session: AsyncSession,
     *,
     authority: CycleAuthority,
+    decision_slot_at: datetime,
     daily_limit_usd: Decimal,
 ) -> AgentPaperCycleResult:
     projection = await load_paper_projection(
@@ -304,6 +321,7 @@ async def _start_cycle(
         portfolio_id=authority.portfolio_id,
         decision_session=authority.decision_session,
         decision_time=authority.decision_time,
+        decision_slot_at=decision_slot_at,
         execution_session=authority.execution_session,
         universe_snapshot_id=authority.universe_snapshot_id,
         quality_report_id=authority.quality_report_id,

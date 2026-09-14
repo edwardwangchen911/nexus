@@ -33,6 +33,7 @@ from nexus.paper.agent_cycle import (
     start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
+from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.agent_market import (
     PaperMarketWindowResult,
     collect_agent_paper_window,
@@ -229,10 +230,12 @@ async def trigger_in_session(
     if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     decision_session = local_time.date()
+    decision_slot_at = floor_decision_slot(initial_time)
     replay = await claim_schwab_agent_paper_trigger(
         session,
         account_id=request.account_id,
         decision_session=decision_session,
+        decision_slot_at=decision_slot_at,
         idempotency_key=request.idempotency_key,
     )
     if replay is not None:
@@ -307,6 +310,7 @@ async def trigger_in_session(
     return await start_schwab_agent_paper_cycle(
         session,
         authority=authority,
+        decision_slot_at=decision_slot_at,
         idempotency_key=request.idempotency_key,
         daily_limit_usd=settings.agent_daily_budget_usd,
     )

@@ -72,8 +72,8 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint(
             "account_id",
-            "decision_session",
-            name="uq_agent_paper_cycles_account_session",
+            "decision_slot_at",
+            name="uq_agent_paper_cycles_account_slot",
         ),
         ForeignKeyConstraint(
             ["account_id", "portfolio_id"],
@@ -132,6 +132,7 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
     portfolio_id: Mapped[UUID]
     decision_session: Mapped[date] = mapped_column(Date)
     decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    decision_slot_at: Mapped[datetime] = mapped_column(UTCDateTime())
     execution_session: Mapped[date] = mapped_column(Date)
     universe_snapshot_id: Mapped[UUID]
     quality_report_id: Mapped[UUID | None]
@@ -319,10 +320,18 @@ Index(
 class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     __tablename__ = "strategy_decisions"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_strategy_decisions_registered_account_session",
             "account_id",
             "decision_session",
-            name="uq_strategy_decisions_account_session",
+            unique=True,
+            postgresql_where=text("decision_origin='registered_strategy'"),
+        ),
+        Index(
+            "uq_strategy_decisions_agent_cycle",
+            "agent_paper_cycle_id",
+            unique=True,
+            postgresql_where=text("decision_origin='agent_research'"),
         ),
         UniqueConstraint("id", "account_id", name="uq_strategy_decisions_id_account"),
         UniqueConstraint("decision_hash", name="uq_strategy_decisions_hash"),
@@ -350,6 +359,16 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             ["universe_snapshot_id"],
             ["universe_snapshots.id"],
             name="fk_strategy_decisions_universe",
+        ),
+        ForeignKeyConstraint(
+            ["agent_paper_cycle_id"],
+            ["agent_paper_cycles.id"],
+            name="fk_strategy_decisions_agent_paper_cycle",
+        ),
+        CheckConstraint(
+            "((decision_origin='registered_strategy' AND agent_paper_cycle_id IS NULL) OR "
+            "(decision_origin='agent_research' AND agent_paper_cycle_id IS NOT NULL))",
+            name="agent_cycle_binding",
         ),
         ForeignKeyConstraint(
             ["quality_report_id"],
@@ -418,6 +437,7 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     decision_origin: Mapped[str] = mapped_column(
         String(30), default="registered_strategy", server_default="registered_strategy"
     )
+    agent_paper_cycle_id: Mapped[UUID | None]
     decision_session: Mapped[date] = mapped_column(Date)
     decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
     execution_session: Mapped[date] = mapped_column(Date)
@@ -971,7 +991,8 @@ class RiskQueryAuthorityRecord(ImmutableCreatedAt, Base):
             "universe_snapshot_id",
             "decision_session",
             "kind",
-            name="uq_risk_query_authorities_scope",
+            "available_at",
+            name="uq_risk_query_authorities_scope_available",
         ),
         UniqueConstraint(
             "id",

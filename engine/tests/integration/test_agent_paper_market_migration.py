@@ -36,7 +36,7 @@ async def _tables(database_url: str) -> set[str]:
 def test_0057_remains_in_the_forward_chain_and_declares_market_binding() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0058_agent_paper_schwab_realtime"
+    assert CURRENT_MIGRATION_HEAD == "0059_agent_paper_intraday_cycles"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     revision = scripts.get_revision("0057_agent_paper_market_window")
     assert revision is not None

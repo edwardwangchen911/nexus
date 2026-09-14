@@ -6,8 +6,20 @@ from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
     candidate_manifest_hash,
     canonical_cycle_event_hash,
+    floor_decision_slot,
 )
 from pydantic import ValidationError
+
+
+def test_floor_decision_slot_uses_utc_five_minute_boundary() -> None:
+    assert floor_decision_slot(datetime(2026, 9, 14, 14, 7, 59, tzinfo=UTC)) == datetime(
+        2026, 9, 14, 14, 5, tzinfo=UTC
+    )
+
+
+def test_floor_decision_slot_rejects_naive_time() -> None:
+    with pytest.raises(ValueError, match="AGENT_PAPER_REQUEST_INVALID"):
+        floor_decision_slot(datetime(2026, 9, 14, 14, 7, 59))
 
 
 def _candidate(*, evidence_hash: str = "a" * 64) -> CandidateManifestEntry:

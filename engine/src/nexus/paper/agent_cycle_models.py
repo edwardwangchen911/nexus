@@ -23,6 +23,18 @@ type CycleStatus = Literal[
 ]
 
 
+def floor_decision_slot(value: datetime) -> datetime:
+    """Return the containing five-minute UTC decision slot."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    utc_value = value.astimezone(UTC)
+    return utc_value.replace(
+        minute=utc_value.minute - utc_value.minute % 5,
+        second=0,
+        microsecond=0,
+    )
+
+
 class CandidateManifestEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

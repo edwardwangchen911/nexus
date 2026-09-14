@@ -12,7 +12,11 @@ from helpers.paper_batch import (
     UNIVERSE_ID,
     seed_paper_batch,
 )
-from nexus.paper.agent_cycle_models import CandidateManifestEntry, candidate_manifest_hash
+from nexus.paper.agent_cycle_models import (
+    CandidateManifestEntry,
+    candidate_manifest_hash,
+    floor_decision_slot,
+)
 from nexus.paper.agent_market import (
     AgentPaperMarketScope,
     PaperMarketError,
@@ -138,6 +142,7 @@ async def test_no_trade_cycle_persists_one_replayable_non_fill_probe(
                 portfolio_id=seed.portfolio_id,
                 decision_session=DECISION_SESSION,
                 decision_time=DECISION_TIME,
+                decision_slot_at=floor_decision_slot(DECISION_TIME),
                 execution_session=EXECUTION_SESSION,
                 universe_snapshot_id=UNIVERSE_ID,
                 quality_report_id=None,
@@ -232,6 +237,9 @@ async def test_schwab_cycle_persists_one_unknown_delivery_probe(
                     portfolio_id=seed.portfolio_id,
                     decision_session=EXECUTION_SESSION,
                     decision_time=WINDOW_START - timedelta(minutes=5),
+                    decision_slot_at=floor_decision_slot(
+                        WINDOW_START - timedelta(minutes=5)
+                    ),
                     execution_session=EXECUTION_SESSION,
                     universe_snapshot_id=UNIVERSE_ID,
                     quality_report_id=None,

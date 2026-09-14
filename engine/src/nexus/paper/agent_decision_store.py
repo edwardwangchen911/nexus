@@ -157,11 +157,10 @@ async def _load_agent_paper_decision(
     session: AsyncSession,
     record: StrategyDecisionRecord,
 ) -> PersistedAgentPaperDecision:
-    cycle = await session.scalar(
-        select(AgentPaperCycleRecord).where(
-            AgentPaperCycleRecord.account_id == record.account_id,
-            AgentPaperCycleRecord.decision_session == record.decision_session,
-        )
+    cycle = (
+        None
+        if record.agent_paper_cycle_id is None
+        else await session.get(AgentPaperCycleRecord, record.agent_paper_cycle_id)
     )
     if cycle is None or record.execution_source_policy_id is None:
         raise ValueError("Agent paper decision authority is missing")
@@ -298,16 +297,12 @@ async def persist_agent_paper_decision(
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 1709))"),
         {
-            "lock_key": (
-                f"forward-strategy-decision:{decision.account_id}:"
-                f"{decision.decision_session.isoformat()}"
-            )
+            "lock_key": f"agent-paper-decision:{decision.cycle_id}"
         },
     )
     existing = await session.scalar(
         select(StrategyDecisionRecord).where(
-            StrategyDecisionRecord.account_id == decision.account_id,
-            StrategyDecisionRecord.decision_session == decision.decision_session,
+            StrategyDecisionRecord.agent_paper_cycle_id == decision.cycle_id,
         )
     )
     if existing is not None:
@@ -335,6 +330,7 @@ async def persist_agent_paper_decision(
             registry_event_id=None,
             champion_generation=None,
             decision_origin="agent_research",
+            agent_paper_cycle_id=decision.cycle_id,
             decision_session=decision.decision_session,
             decision_time=decision.decision_time,
             execution_session=decision.execution_session,

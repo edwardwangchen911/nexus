@@ -226,7 +226,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         universe_snapshot_id=universe_id,
     )
 
-    async def claim(*_args, **_kwargs):
+    async def claim(*_args, **kwargs):
+        assert kwargs["decision_slot_at"] == initial
         events.append("claim")
         return None
 
@@ -256,7 +257,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         events.append("persist-risk")
         return ()
 
-    async def start(*_args, **_kwargs):
+    async def start(*_args, **kwargs):
+        assert kwargs["decision_slot_at"] == initial
         events.append("cycle-job")
         return AgentPaperCycleResult(
             cycle_id=cycle_id,

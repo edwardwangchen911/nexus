@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from nexus.agents.actionable_research import ActionableResearchDecision
+from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.agent_decision import (
     AGENT_PAPER_SIZING_POLICY_HASH,
     AgentPaperDecisionError,
@@ -65,6 +66,7 @@ def _cycle() -> AgentPaperCycleRecord:
         portfolio_id=PORTFOLIO_ID,
         decision_session=date(2026, 9, 11),
         decision_time=AT,
+        decision_slot_at=floor_decision_slot(AT),
         execution_session=date(2026, 9, 14),
         universe_snapshot_id=UUID(int=5),
         quality_report_id=None,

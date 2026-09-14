@@ -29,7 +29,7 @@ EXECUTION_POLICY_ID = "e99532cc-e24c-52a8-8165-c8076325fbd2"
 def test_0056_remains_in_the_forward_chain_and_declares_agent_paper_tables() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0058_agent_paper_schwab_realtime"
+    assert CURRENT_MIGRATION_HEAD == "0059_agent_paper_intraday_cycles"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     migration = scripts.get_revision("0056_agent_paper_cycle")
     assert migration is not None

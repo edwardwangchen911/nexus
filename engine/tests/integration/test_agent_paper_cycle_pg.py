@@ -19,7 +19,7 @@ from nexus.paper.agent_cycle_authority import (
     load_quasi_realtime_cycle_authority,
     prepare_candidates,
 )
-from nexus.paper.agent_cycle_models import candidate_manifest_hash
+from nexus.paper.agent_cycle_models import candidate_manifest_hash, floor_decision_slot
 from nexus.paper.agent_market import (
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
@@ -581,6 +581,7 @@ async def test_quasi_realtime_authority_observes_dst_holiday_and_session_uniquen
                     portfolio_id=winter.portfolio_id,
                     decision_session=winter.decision_session,
                     decision_time=winter.decision_time,
+                    decision_slot_at=floor_decision_slot(winter.decision_time),
                     execution_session=winter.execution_session,
                     universe_snapshot_id=winter.universe_snapshot_id,
                     quality_report_id=None,
@@ -713,6 +714,7 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
                 portfolio_id=authority.portfolio_id,
                 decision_session=authority.decision_session,
                 decision_time=authority.decision_time,
+                decision_slot_at=floor_decision_slot(authority.decision_time),
                 execution_session=authority.execution_session,
                 universe_snapshot_id=authority.universe_snapshot_id,
                 quality_report_id=None,
@@ -737,12 +739,14 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
             first = await start_schwab_agent_paper_cycle(
                 session,
                 authority=authority,
+                decision_slot_at=floor_decision_slot(authority.decision_time),
                 idempotency_key="schwab-trigger-1",
             )
         async with sessions.begin() as session:
             replay = await start_schwab_agent_paper_cycle(
                 session,
                 authority=authority,
+                decision_slot_at=floor_decision_slot(authority.decision_time),
                 idempotency_key="schwab-trigger-1",
             )
             job_count = await session.scalar(select(func.count()).select_from(Job))

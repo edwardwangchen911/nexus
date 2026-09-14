@@ -27,6 +27,7 @@ from nexus.persistence.models.paper import (
     PAPER_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleRecord,
     RiskQueryAuthorityRecord,
+    StrategyDecisionRecord,
 )
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 from nexus.risk.authority import (
@@ -245,6 +246,11 @@ async def test_agent_decision_round_trip_uses_existing_risk_and_order_batch_path
                 portfolio_id=seed.portfolio_id,
                 decision_session=registered.decision.decision_session,
                 decision_time=registered.decision.decision_time,
+                decision_slot_at=registered.decision.decision_time.replace(
+                    minute=(registered.decision.decision_time.minute // 5) * 5,
+                    second=0,
+                    microsecond=0,
+                ),
                 execution_session=registered.decision.execution_session,
                 universe_snapshot_id=registered.decision.universe_snapshot_id,
                 quality_report_id=None,
@@ -275,6 +281,9 @@ async def test_agent_decision_round_trip_uses_existing_risk_and_order_batch_path
                 market=paper_market,
             )
             persisted = await persist_agent_paper_decision(session, decision)
+            stored = await session.get(StrategyDecisionRecord, persisted.decision_id)
+            assert stored is not None
+            assert stored.agent_paper_cycle_id == cycle.id
             loaded = await load_paper_decision(
                 session,
                 account_id=seed.account_id,

@@ -24,6 +24,7 @@ from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
     candidate_manifest_hash,
+    floor_decision_slot,
     canonical_cycle_event_hash,
 )
 from nexus.paper.execution_service import advance_internal_paper_order
@@ -101,6 +102,7 @@ async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_resu
                 portfolio_id=seed.portfolio_id,
                 decision_session=DECISION_SESSION,
                 decision_time=DECISION_TIME,
+                decision_slot_at=floor_decision_slot(DECISION_TIME),
                 execution_session=DECISION_SESSION,
                 universe_snapshot_id=UNIVERSE_ID,
                 quality_report_id=None,
@@ -185,6 +187,7 @@ async def test_latest_agent_paper_cycle_returns_only_bounded_redacted_facts(
                 portfolio_id=seed.portfolio_id,
                 decision_session=DECISION_SESSION,
                 decision_time=DECISION_TIME,
+                decision_slot_at=floor_decision_slot(DECISION_TIME),
                 execution_session=EXECUTION_SESSION,
                 universe_snapshot_id=UNIVERSE_ID,
                 quality_report_id=None,
@@ -356,6 +359,7 @@ async def test_latest_schwab_agent_cycle_uses_its_frozen_quote_and_unknown_execu
                 portfolio_id=seed.portfolio_id,
                 decision_session=DECISION_SESSION,
                 decision_time=decision_time,
+                decision_slot_at=floor_decision_slot(decision_time),
                 execution_session=DECISION_SESSION,
                 universe_snapshot_id=UNIVERSE_ID,
                 quality_report_id=None,

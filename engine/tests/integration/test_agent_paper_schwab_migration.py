@@ -24,11 +24,11 @@ SCHWAB_DECISION_POLICY_ID = UUID("4d24df4a-b510-541b-8a6a-fe7db5afaac4")
 SCHWAB_EXECUTION_POLICY_ID = UUID("cf525f07-4e55-5f84-a839-60d845819ec5")
 
 
-def test_0058_is_the_single_forward_head() -> None:
+def test_0058_precedes_the_intraday_cycle_head() -> None:
     """Catch an omitted or incorrectly chained Schwab admission migration."""
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0058_agent_paper_schwab_realtime"
+    assert CURRENT_MIGRATION_HEAD == "0059_agent_paper_intraday_cycles"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     revision = scripts.get_revision(CURRENT_MIGRATION_HEAD)
     assert revision is not None
