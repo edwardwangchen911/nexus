@@ -738,10 +738,23 @@ async def _qualified_window(
         if quote_row is not None and quote_row.bid is not None and quote_row.ask is not None
         else None
     )
+    qualification_calendar = calendar
+    qualification_model = model
+    if schwab_binding is not None:
+        # The persisted Agent window is the source-frozen execution boundary for
+        # this order. Regular-session offsets belong to the legacy EOD policy.
+        qualification_calendar = ExecutionCalendarSession(
+            session=calendar.session,
+            market_open_at=schwab_binding.window_start_at,
+            market_close_at=calendar.market_close_at,
+        )
+        qualification_model = model.model_copy(
+            update={"first_evaluation_offset_minutes": 0}
+        )
     try:
         window = qualify_execution_window(
-            model=model,
-            calendar=calendar,
+            model=qualification_model,
+            calendar=qualification_calendar,
             bars=bars,
             quote=quote,
             evaluated_at=evaluated_at,
@@ -924,6 +937,7 @@ async def _replay_result(
     evaluated_at: datetime,
     record: PaperRequestIdempotencyRecord,
     calendar: ExecutionCalendarSession,
+    execution_source_policy_id: UUID,
 ) -> PaperAdvanceResult:
     fills = tuple(
         (
@@ -986,8 +1000,11 @@ async def _replay_result(
         action = "terminal"
     elif fill is not None:
         action = "filled" if status == "filled" else "partially_filled"
-    elif evaluated_at < calendar.market_open_at + timedelta(
-        minutes=EXECUTION_MODEL_V1.first_evaluation_offset_minutes
+    elif (
+        execution_source_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        and evaluated_at
+        < calendar.market_open_at
+        + timedelta(minutes=EXECUTION_MODEL_V1.first_evaluation_offset_minutes)
     ):
         action = "not_due"
     else:
@@ -1172,6 +1189,7 @@ async def advance_internal_paper_order(
     if execution_model_hash(model) != model_row.content_hash:
         raise PaperExecutionError("PAPER_EXECUTION_AUTHORITY_INCOMPLETE")
 
+    execution_source_policy_id = decision.execution_source_policy_id or decision.source_policy_id
     request_hash = _request_hash(order_id=order.id, evaluated_at=evaluated_at)
     existing_request = await _existing_idempotency(
         session,
@@ -1186,6 +1204,7 @@ async def advance_internal_paper_order(
             evaluated_at=evaluated_at,
             record=existing_request,
             calendar=calendar,
+            execution_source_policy_id=execution_source_policy_id,
         )
     if events and evaluated_at < events[-1].occurred_at:
         raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
@@ -1224,7 +1243,6 @@ async def advance_internal_paper_order(
         return result
     if status not in {"submitted", "partially_filled", "reconciling"}:
         raise PaperExecutionError("PAPER_EXECUTION_INVALID")
-    execution_source_policy_id = decision.execution_source_policy_id or decision.source_policy_id
     price_authority_available = _paper_execution_authority_available(execution_source_policy_id)
 
     reservation = await session.scalar(
@@ -1276,7 +1294,10 @@ async def advance_internal_paper_order(
     )
     if prior_window is not None and evaluated_at < prior_window.evaluated_at:
         raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
-    if evaluated_at < first_evaluation_at:
+    if (
+        execution_source_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        and evaluated_at < first_evaluation_at
+    ):
         result = _result(
             order_id=order.id,
             account_id=order.account_id,

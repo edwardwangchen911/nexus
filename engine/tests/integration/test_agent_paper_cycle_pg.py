@@ -256,6 +256,7 @@ async def _seed_cycle_research_authority(
     quote_received_at: datetime = DECISION_TIME,
     price_available_at: datetime | None = None,
 ) -> None:
+    authority_time = price_available_at or DECISION_TIME
     await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
     try:
         await session.execute(
@@ -286,7 +287,7 @@ async def _seed_cycle_research_authority(
     session.add(
         ExchangeCalendarSessionRecord(
             calendar_authority_id=calendar_authority_id,
-            session=DECISION_TIME.date() - timedelta(days=1),
+            session=authority_time.date() - timedelta(days=1),
             decision_at=DECISION_TIME - timedelta(days=1),
         )
     )
@@ -311,8 +312,8 @@ async def _seed_cycle_research_authority(
             max_output_tokens=100,
             input_usd_per_million=Decimal("1"),
             output_usd_per_million=Decimal("1"),
-            pricing_available_at=DECISION_TIME - timedelta(days=1),
-            pricing_expires_at=DECISION_TIME + timedelta(days=1),
+            pricing_available_at=authority_time - timedelta(days=1),
+            pricing_expires_at=authority_time + timedelta(days=1),
         )
     )
     for index, (instrument_id, _, _, _) in enumerate(INSTRUMENTS, start=1):
@@ -321,7 +322,7 @@ async def _seed_cycle_research_authority(
             source="sec",
             provider_object_id=f"agent-paper:{instrument_id}",
             revision="v1",
-            available_at=DECISION_TIME - timedelta(hours=2),
+            available_at=authority_time - timedelta(hours=2),
             location=f"memory://sha256/{f'{index + 6}' * 64}",
             content_hash=f"{index + 6}" * 64,
             byte_length=10,
@@ -331,9 +332,9 @@ async def _seed_cycle_research_authority(
             source="nexus_research",
             provider_object_id=str(instrument_id),
             revision="agent-paper-v1",
-            observed_at=DECISION_TIME - timedelta(hours=2),
-            available_at=DECISION_TIME - timedelta(hours=2),
-            received_at=DECISION_TIME - timedelta(hours=2),
+            observed_at=authority_time - timedelta(hours=2),
+            available_at=authority_time - timedelta(hours=2),
+            received_at=authority_time - timedelta(hours=2),
             schema_version="research_filings_v1",
             payload={"scope": "persisted_research_observations"},
         )
@@ -361,9 +362,9 @@ async def _seed_cycle_research_authority(
                 revision=evidence.revision,
                 accession_number=f"000000000{index}-26-000001",
                 form="10-Q",
-                filed_at=DECISION_TIME - timedelta(days=1),
-                accepted_at=DECISION_TIME - timedelta(hours=2),
-                created_at=DECISION_TIME - timedelta(hours=2),
+                filed_at=authority_time - timedelta(days=1),
+                accepted_at=authority_time - timedelta(hours=2),
+                created_at=authority_time - timedelta(hours=2),
             )
         )
         await session.flush()
@@ -611,7 +612,7 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
     seed = await seed_paper_batch(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    decision_time = DECISION_TIME - timedelta(minutes=90)
+    decision_time = datetime(2026, 8, 26, 11, 30, tzinfo=UTC)
     try:
         from nexus.strategy.forward import load_forward_strategy_decision
 
@@ -838,8 +839,8 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
 
         async with sessions() as session:
             scope = await resolve_agent_paper_market_scope(session, cycle_id=first.cycle_id)
-        assert scope.window_start == datetime(2026, 8, 26, 19, 31, tzinfo=UTC)
-        assert scope.window_end == datetime(2026, 8, 26, 19, 36, tzinfo=UTC)
+        assert scope.window_start == datetime(2026, 8, 26, 11, 31, tzinfo=UTC)
+        assert scope.window_end == datetime(2026, 8, 26, 11, 36, tzinfo=UTC)
         evaluated_at = scope.window_end + timedelta(seconds=2)
         async with sessions.begin() as session:
             no_window = await advance_internal_paper_order(
