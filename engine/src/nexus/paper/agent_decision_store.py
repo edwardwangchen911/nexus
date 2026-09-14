@@ -142,6 +142,7 @@ async def require_agent_decision_bindings(
             session,
             run_id=output.run_id,
             decision_time=max(decision.decision_time, output.created_at),
+            allow_safe_no_trade=True,
         )
         if (
             admitted.output_id != binding.output_id

@@ -238,6 +238,57 @@ def _case(mutation: str = "valid_buy") -> dict[str, object]:
     }
 
 
+def _partial_watch_case(mutation: str = "valid") -> dict[str, object]:
+    case = _case()
+    intent = case["intent"]
+    output = case["output"]
+    assert isinstance(intent, ResearchIntent)
+    assert isinstance(output, AgentResearchOutputRecord)
+    assessment = intent.synthesis_assessment
+    assert assessment is not None
+    unresolved_bear = assessment.reviews[0].model_copy(
+        update={
+            "status": "unresolved",
+            "resolved": False,
+            "missing_evidence": ("price authority",),
+            "prevented_conclusion": "Only watch/no-trade is permitted.",
+        }
+    )
+    intent = intent.model_copy(
+        update={
+            "stance": "watch",
+            "exposure_action": "none",
+            "quality_status": "partial",
+            "evidence_audit": "partial",
+            "synthesis_assessment": assessment.model_copy(
+                update={
+                    "stance": "watch",
+                    "reviews": (unresolved_bear, assessment.reviews[1]),
+                    "review_conclusion": "limited",
+                }
+            ),
+        }
+    )
+    if mutation == "increase":
+        intent = intent.model_copy(
+            update={"stance": "buy_candidate", "exposure_action": "eligible_for_increase"}
+        )
+    elif mutation == "failed_audit":
+        intent = intent.model_copy(update={"evidence_audit": "failed"})
+    output.payload = {"quality_status": "partial"}
+    output.intent = intent.model_dump(mode="json")
+    output.content_hash = _canonical_hash(
+        {
+            "status": output.status,
+            "role": output.role,
+            "payload": output.payload,
+            "intent": output.intent,
+        }
+    )
+    case["intent"] = intent
+    return case
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -263,3 +314,26 @@ def test_actionable_v4_maps_direction_without_weight_or_quantity() -> None:
     assert result.evidence_ref_ids == (_EVIDENCE_ID,)
     assert not hasattr(result, "target_weight")
     assert not hasattr(result, "quantity")
+
+
+def test_paper_admission_maps_partial_watch_to_no_trade() -> None:
+    result = admit_actionable_research_output(
+        **_partial_watch_case(), allow_safe_no_trade=True
+    )
+
+    assert result.stance == "watch"
+    assert result.sizing_action == "none"
+    assert result.evidence_ref_ids == (_EVIDENCE_ID,)
+
+
+def test_default_actionable_admission_still_rejects_partial_watch() -> None:
+    with pytest.raises(ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"):
+        admit_actionable_research_output(**_partial_watch_case())
+
+
+@pytest.mark.parametrize("mutation", ["increase", "failed_audit"])
+def test_paper_no_trade_admission_cannot_grant_exposure_authority(mutation: str) -> None:
+    with pytest.raises(ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"):
+        admit_actionable_research_output(
+            **_partial_watch_case(mutation), allow_safe_no_trade=True
+        )

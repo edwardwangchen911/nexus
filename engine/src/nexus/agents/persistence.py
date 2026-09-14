@@ -82,7 +82,11 @@ class ResearchAdmission:
 
 
 async def load_actionable_research_output(
-    session: AsyncSession, *, run_id: UUID, decision_time: datetime
+    session: AsyncSession,
+    *,
+    run_id: UUID,
+    decision_time: datetime,
+    allow_safe_no_trade: bool = False,
 ) -> ActionableResearchDecision:
     """Load and revalidate the one complete v4 terminal without model I/O."""
     try:
@@ -170,6 +174,7 @@ async def load_actionable_research_output(
             terminal_outputs=terminals,
             bound_evidence=bindings,
             decision_time=decision_time,
+            allow_safe_no_trade=allow_safe_no_trade,
         )
     except ActionableResearchError:
         raise

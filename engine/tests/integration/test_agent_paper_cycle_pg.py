@@ -867,6 +867,7 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
             *_args, decision_time: datetime, **_kwargs
         ) -> ActionableResearchDecision:
             assert decision_time == output_at
+            assert _kwargs["allow_safe_no_trade"] is True
             return admitted
 
         monkeypatch.setattr(
@@ -1095,9 +1096,14 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
                 )
 
         async def fake_load_actionable(
-            _session: AsyncSession, *, run_id: UUID, decision_time: datetime
+            _session: AsyncSession,
+            *,
+            run_id: UUID,
+            decision_time: datetime,
+            allow_safe_no_trade: bool,
         ) -> ActionableResearchDecision:
             assert decision_time == DECISION_TIME
+            assert allow_safe_no_trade is True
             return admitted[run_id]
 
         monkeypatch.setattr(

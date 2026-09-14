@@ -80,6 +80,33 @@ def actionable_intent_shape_valid(intent: ResearchIntent) -> bool:
     )
 
 
+def safe_no_trade_intent_shape_valid(intent: ResearchIntent) -> bool:
+    """Admit an incomplete conclusion only when it cannot request exposure changes."""
+    assessment = intent.synthesis_assessment
+    votes = {vote.role: vote.vote for vote in intent.role_votes}
+    if (
+        assessment is None
+        or intent.stance != "watch"
+        or assessment.stance != "watch"
+        or intent.exposure_action != "none"
+        or intent.quality_status != "partial"
+        or intent.evidence_audit == "failed"
+        or assessment.review_conclusion == "sufficient"
+        or len(votes) != 8
+        or not intent.theses
+        or not intent.counter_theses
+    ):
+        return False
+    reviews_by_role: dict[str, set[int]] = {"bear": set(), "evidence_audit": set()}
+    for review in assessment.reviews:
+        role, raw_index = review.claim_id.split(":", 1)
+        reviews_by_role[role].add(int(raw_index))
+    return all(
+        bool(indexes) and indexes == set(range(max(indexes) + 1))
+        for indexes in reviews_by_role.values()
+    )
+
+
 def admit_actionable_research_output(
     *,
     run: AgentResearchRunRecord,
@@ -88,6 +115,7 @@ def admit_actionable_research_output(
     terminal_outputs: Sequence[AgentResearchOutputRecord],
     bound_evidence: Sequence[AgentResearchOutputEvidenceRecord],
     decision_time: datetime,
+    allow_safe_no_trade: bool = False,
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
     try:
@@ -122,7 +150,10 @@ def admit_actionable_research_output(
             or decision_time < run.decision_time
             or intent.valid_until < decision_time
             or output.payload.get("quality_status") != intent.quality_status
-            or not actionable_intent_shape_valid(intent)
+            or not (
+                actionable_intent_shape_valid(intent)
+                or (allow_safe_no_trade and safe_no_trade_intent_shape_valid(intent))
+            )
             or not bindings
             or len(evidence_by_identity) != len(intent.evidence_refs)
             or len(binding_by_identity) != len(bindings)

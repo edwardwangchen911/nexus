@@ -266,8 +266,13 @@ async def test_agent_decision_round_trip_uses_existing_risk_and_order_batch_path
             admitted_by_run = await _seed_output_rows(session)
 
             async def fake_load_actionable(
-                _session: AsyncSession, *, run_id: UUID, decision_time: object
+                _session: AsyncSession,
+                *,
+                run_id: UUID,
+                decision_time: object,
+                allow_safe_no_trade: bool,
             ) -> ActionableResearchDecision:
+                assert allow_safe_no_trade is True
                 return admitted_by_run[run_id]
 
             monkeypatch.setattr(

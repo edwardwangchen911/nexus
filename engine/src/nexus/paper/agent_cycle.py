@@ -524,7 +524,10 @@ async def _resume_research(
         actions = tuple(
             [
                 await load_actionable_research_output(
-                    session, run_id=run_id, decision_time=output_available_at
+                    session,
+                    run_id=run_id,
+                    decision_time=output_available_at,
+                    allow_safe_no_trade=True,
                 )
                 for run_id in run_ids
             ]
