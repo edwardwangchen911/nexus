@@ -30,9 +30,12 @@ def test_0058_precedes_the_intraday_cycle_head() -> None:
 
     assert CURRENT_MIGRATION_HEAD == "0059_agent_paper_intraday_cycles"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
-    revision = scripts.get_revision(CURRENT_MIGRATION_HEAD)
-    assert revision is not None
-    assert revision.down_revision == "0057_agent_paper_market_window"
+    intraday_revision = scripts.get_revision(CURRENT_MIGRATION_HEAD)
+    assert intraday_revision is not None
+    assert intraday_revision.down_revision == "0058_agent_paper_schwab_realtime"
+    schwab_revision = scripts.get_revision(intraday_revision.down_revision)
+    assert schwab_revision is not None
+    assert schwab_revision.down_revision == "0057_agent_paper_market_window"
 
 
 def test_schwab_policy_ids_are_authorized_only_for_their_exact_purposes() -> None:

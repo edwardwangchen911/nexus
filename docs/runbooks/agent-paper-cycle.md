@@ -6,7 +6,8 @@
 `execution_locked=true`，也不等于券商模拟盘或实盘。
 
 页面和只读 API 只读取已持久化事实；刷新 `/paper` 不会触发行情、模型或周期推进。功能开关
-默认关闭，失败不自动重试。一次周期只允许一个研究 Job 和至多一次模型执行。
+默认关闭，失败不自动重试。每个五分钟决策槽最多一个周期；每个周期只允许一个研究 Job 和至多
+一次模型执行。同一交易日可以在前一周期及其订单都进入诚实终态后运行下一槽，不按“每天一次”限制。
 
 ## 1. Preflight：先查状态，不先发请求
 
@@ -31,9 +32,10 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 → Engine API/BFF/page
 ```
 
-发现同账户、同 XNYS session 的周期时停止 `trigger`，恢复已有 `CYCLE_ID`。发现 queued/running
-Job 时先读取其状态；断流、观察超时、worker 退出或终端输出丢失都不是换 key 重放的许可。
-存在非终态订单时先对账，不删除事实、不重建周期。
+发现当前五分钟槽已有周期时停止新建，恢复该槽已有 `CYCLE_ID`；同日较早周期不阻止下一槽。
+发现 queued/running Job 时先读取其状态；断流、观察超时、worker 退出或终端输出丢失都不是换 key
+重放的许可。存在非终态订单时先对账，不删除事实、不重建周期。`unavailable` 是保留的诚实终态，
+不恢复、不删除；到下一合法槽后可以新建周期。
 
 运行前还必须满足：
 
@@ -61,7 +63,8 @@ uv run --project engine nexus-openai-local setup \
 
 ## 2. Trigger：冻结一次决策证据
 
-`trigger` 不接受 symbol 或 decision time。它先认领同账户、同 session 的唯一周期；缺少现成
+`trigger` 不接受 symbol 或 decision time。数据库按当前时间归入五分钟决策槽，并认领同账户、同槽
+的唯一周期；缺少现成
 风险查询证明时，按既有只读 Alpaca 入口补齐一次，然后对 AAPL 做一次有界 Schwab Level One
 采集。Schwab 路径固定一次 LOGIN、一次订阅、最多 15 秒/100 帧/8 MiB，不重连、不重试。
 
@@ -159,6 +162,31 @@ NEXUS_REAL_AGENT_PAPER_ACCEPTANCE=1 npm run test:e2e -- \
   tests/e2e/agent-paper-cycle-real.spec.ts
 ```
 
+### 同日两槽固定验收顺序
+
+两个槽使用受保护的本地变量 `NEXUS_ACCEPTANCE_PAPER_ACCOUNT_ID`、
+`NEXUS_ACCEPTANCE_SLOT_A_KEY` 和 `NEXUS_ACCEPTANCE_SLOT_B_KEY`；值不得写入命令历史、聊天、Git
+或验收文档。每一个动作前都先按本节开头的事实链顺序读取持久状态，固定流程为：
+
+```text
+read current cycle/job/order state
+→ trigger slot A
+→ run existing one-shot worker（仅当该 Job 为 queued）
+→ resume
+→ collect-window（仅当存在订单）并 advance
+→ resume and read DB/API/BFF/page
+→ slot A 的 cycle 与订单均终态后等待 slot B
+→ trigger slot B
+→ run/resume/collect/advance as required
+→ read both cycles and disable the feature flag
+```
+
+槽 B 必须获得不同的 `cycle_id`、Job/Run/Output 和 decision，并从槽 A 终态后的最新模拟现金、持仓、
+当日换手、预算及未结订单事实重新投影。两槽都允许合规 no-trade；但都必须实际形成 Agent 决策并
+经过确定性硬风控。同槽使用原幂等键回读不得增加 Job、订单、成交或账本。连接或命令结果未知时只
+查原 `run → job → outputs` 和业务事实，不换 key、不重放。原始模型全文、token 和个人账户事实不
+进入 Git 或验收记录。
+
 ## 8. Stop：默认关闭并保留现场
 
 1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`。只停止本轮自己启动的进程；一次性 worker 正常
@@ -175,18 +203,22 @@ NEXUS_REAL_AGENT_PAPER_ACCEPTANCE=1 npm run test:e2e -- \
 首选应用回退：保持 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`，回退应用版本但保留数据库 head 和
 所有事实。出现数据合同问题时前向修复；Git 回退不是业务数据恢复。
 
-迁移 `0058_agent_paper_schwab_realtime` 的降级只允许在专用空临时数据库演练。先按
+迁移 `0058_agent_paper_schwab_realtime` 与 `0059_agent_paper_intraday_cycles` 的降级只允许在专用
+空临时数据库演练。先按
 [备份恢复手册](backup-restore.md)完成独立备份/恢复演练，再对临时库执行：
 
 ```bash
 DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
-  uv run --project engine alembic -c engine/alembic.ini upgrade 0058_agent_paper_schwab_realtime
+  uv run --project engine alembic -c engine/alembic.ini upgrade 0059_agent_paper_intraday_cycles
+DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
+  uv run --project engine alembic -c engine/alembic.ini downgrade 0058_agent_paper_schwab_realtime
 DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
   uv run --project engine alembic -c engine/alembic.ini downgrade 0057_agent_paper_market_window
 DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
-  uv run --project engine alembic -c engine/alembic.ini upgrade 0058_agent_paper_schwab_realtime
+  uv run --project engine alembic -c engine/alembic.ini upgrade 0059_agent_paper_intraday_cycles
 ```
 
-存在任一 Schwab Agent cycle、decision、authority 或 window 事实时，downgrade 必须以
-`SCHWAB_AGENT_PAPER_FACTS_EXIST` 失败。不得为降级删除事实，不得在当前业务库试跑，不删除 MinIO
-bucket、volume、数据库或迁移历史。
+存在同账户同交易日的多 cycle、多 Agent decision 或同 scope 多版 risk proof 时，0059 downgrade
+必须以 `AGENT_PAPER_INTRADAY_FACTS_EXIST` 失败；存在任一 Schwab Agent cycle、decision、authority
+或 window 事实时，0058 downgrade 必须以 `SCHWAB_AGENT_PAPER_FACTS_EXIST` 失败。不得为降级删除
+事实，不得在当前业务库试跑，不删除 MinIO bucket、volume、数据库或迁移历史。

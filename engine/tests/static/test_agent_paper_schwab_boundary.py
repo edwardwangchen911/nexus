@@ -100,6 +100,7 @@ def test_agent_paper_is_default_off_and_readback_cannot_unlock_execution() -> No
                 "result_code": "NO_ORDER_REQUIRED",
                 "decision_session": "2026-09-14",
                 "decision_time": "2026-09-14T12:00:00Z",
+                "decision_slot_at": "2026-09-14T12:00:00Z",
                 "execution_session": "2026-09-14",
                 "execution_locked": False,
                 "candidate_count": 0,
