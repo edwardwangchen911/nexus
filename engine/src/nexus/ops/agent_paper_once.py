@@ -33,13 +33,22 @@ from nexus.paper.agent_cycle import (
     start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
-from nexus.paper.agent_market import PaperMarketWindowResult, collect_agent_paper_window
+from nexus.paper.agent_market import (
+    PaperMarketWindowResult,
+    collect_agent_paper_window,
+    resolve_agent_paper_market_scope,
+)
 from nexus.persistence.models.data import DataArtifact
 from nexus.persistence.models.market import LatestQuote
-from nexus.persistence.models.paper import PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+)
+from nexus.providers.base import MarketDataProvider
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider
 from nexus.providers.market.alpaca_http import AlpacaHttpTransport, SqlInstrumentSymbolResolver
+from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
 from nexus.risk.query_authority_producer import (
     RiskSourceProof,
     inspect_query_authority_scope,
@@ -87,20 +96,13 @@ class AgentPaperCollectWindowRequest(BaseModel):
 
     action: Literal["collect-window"]
     cycle_id: UUID
-    instrument_id: UUID
-    window_start: datetime
-
-    @field_validator("window_start")
-    @classmethod
-    def _utc(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
-            raise ValueError("explicit UTC time is required")
-        return value
 
 
 class AgentPaperMarketSettings(EngineSettings):
-    alpaca_key: SecretStr = Field(validation_alias="ALPACA_API_KEY_ID")
-    alpaca_secret: SecretStr = Field(validation_alias="ALPACA_API_SECRET_KEY")
+    alpaca_key: SecretStr | None = Field(default=None, validation_alias="ALPACA_API_KEY_ID")
+    alpaca_secret: SecretStr | None = Field(
+        default=None, validation_alias="ALPACA_API_SECRET_KEY"
+    )
 
 
 class AgentPaperTriggerSettings(EngineSettings):
@@ -123,8 +125,6 @@ def parser() -> argparse.ArgumentParser:
     resume.add_argument("--idempotency-key", required=True)
     collect = commands.add_parser("collect-window")
     collect.add_argument("--cycle-id", required=True)
-    collect.add_argument("--instrument-id", required=True)
-    collect.add_argument("--window-start", required=True)
     return root
 
 
@@ -368,6 +368,8 @@ async def resume_once(
 async def collect_window_once(
     settings: AgentPaperMarketSettings,
     request: AgentPaperCollectWindowRequest,
+    *,
+    repo_root: Path,
 ) -> PaperMarketWindowResult:
     if not settings.database_url:
         raise ValueError("AGENT_PAPER_DATABASE_UNCONFIGURED")
@@ -384,8 +386,6 @@ async def collect_window_once(
         or endpoint.path not in {"", "/"}
         or endpoint.query
         or endpoint.fragment
-        or not settings.alpaca_key.get_secret_value().strip()
-        or not settings.alpaca_secret.get_secret_value().strip()
     ):
         raise ValueError("AGENT_PAPER_MARKET_CONFIG_INVALID")
     engine = create_async_engine(settings.database_url)
@@ -396,28 +396,43 @@ async def collect_window_once(
             factory() as resolver_session,
             httpx.AsyncClient(follow_redirects=False, timeout=30) as http,
         ):
-            client = FixedOriginHttpClient(
-                provider_name="alpaca",
-                origin=AllowedOrigin(scheme="https", host="data.alpaca.markets"),
-                policy=HttpRequestPolicy(max_attempts=1),
-                client=http,
+            scope = await resolve_agent_paper_market_scope(
+                resolver_session, cycle_id=request.cycle_id
             )
-            provider = AlpacaMarketDataProvider(
-                AlpacaHttpTransport(
-                    client,
-                    key_id=settings.alpaca_key,
-                    secret=settings.alpaca_secret,
+            resolver = SqlInstrumentSymbolResolver(resolver_session)
+            provider: MarketDataProvider
+            if scope.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
+                provider = SchwabPriceHistoryProvider(
+                    repo_root, http, symbol_resolver=resolver
+                )
+            else:
+                if (
+                    settings.alpaca_key is None
+                    or settings.alpaca_secret is None
+                    or not settings.alpaca_key.get_secret_value().strip()
+                    or not settings.alpaca_secret.get_secret_value().strip()
+                ):
+                    raise ValueError("AGENT_PAPER_MARKET_CONFIG_INVALID")
+                client = FixedOriginHttpClient(
+                    provider_name="alpaca",
+                    origin=AllowedOrigin(scheme="https", host="data.alpaca.markets"),
+                    policy=HttpRequestPolicy(max_attempts=1),
+                    client=http,
+                )
+                provider = AlpacaMarketDataProvider(
+                    AlpacaHttpTransport(
+                        client,
+                        key_id=settings.alpaca_key,
+                        secret=settings.alpaca_secret,
+                        feed="iex",
+                        symbol_resolver=resolver,
+                    ),
                     feed="iex",
-                    symbol_resolver=SqlInstrumentSymbolResolver(resolver_session),
-                ),
-                feed="iex",
-                delivery_mode="real_time",
-            )
+                    delivery_mode="real_time",
+                )
             return await collect_agent_paper_window(
                 factory,
                 cycle_id=request.cycle_id,
-                instrument_id=request.instrument_id,
-                window_start=request.window_start,
                 provider=provider,
                 object_store=store,
             )
@@ -453,7 +468,9 @@ def main(argv: list[str] | None = None) -> int:
             result = asyncio.run(resume_once(settings, request))
         else:
             market_settings = AgentPaperMarketSettings.model_validate(environment)
-            result = asyncio.run(collect_window_once(market_settings, request))
+            result = asyncio.run(
+                collect_window_once(market_settings, request, repo_root=Path.cwd())
+            )
     except Exception as error:
         code = str(error)
         if code not in {

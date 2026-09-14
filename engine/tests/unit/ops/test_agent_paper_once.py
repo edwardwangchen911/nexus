@@ -112,13 +112,15 @@ def test_parser_rejects_provider_and_credential_overrides() -> None:
         )
 
 
-def test_collect_window_requires_explicit_utc_window_start() -> None:
-    with pytest.raises(ValueError, match="explicit UTC time is required"):
-        AgentPaperCollectWindowRequest(
-            action="collect-window",
-            cycle_id=UUID(int=1),
-            instrument_id=UUID(int=2),
-            window_start=datetime(2026, 8, 27, 13, 30),
+def test_collect_window_rejects_client_instrument_and_time() -> None:
+    with pytest.raises(ValidationError):
+        AgentPaperCollectWindowRequest.model_validate(
+            {
+                "action": "collect-window",
+                "cycle_id": UUID(int=1),
+                "instrument_id": UUID(int=2),
+                "window_start": datetime(2026, 8, 27, 13, 30, tzinfo=UTC),
+            }
         )
 
 
@@ -128,10 +130,6 @@ def test_collect_window_parser_has_no_provider_or_credential_override() -> None:
             "collect-window",
             "--cycle-id",
             str(UUID(int=1)),
-            "--instrument-id",
-            str(UUID(int=2)),
-            "--window-start",
-            datetime(2026, 8, 27, 13, 30, tzinfo=UTC).isoformat(),
         ]
     )
     assert parsed.action == "collect-window"
@@ -141,12 +139,8 @@ def test_collect_window_parser_has_no_provider_or_credential_override() -> None:
                 "collect-window",
                 "--cycle-id",
                 str(UUID(int=1)),
-                "--instrument-id",
-                str(UUID(int=2)),
                 "--window-start",
                 datetime(2026, 8, 27, 13, 30, tzinfo=UTC).isoformat(),
-                "--provider-url",
-                "https://example.invalid",
             ]
         )
 

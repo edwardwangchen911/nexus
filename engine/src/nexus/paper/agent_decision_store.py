@@ -17,6 +17,8 @@ from nexus.paper.agent_decision import (
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.data import SourcePolicy
 from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleRecord,
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
@@ -51,31 +53,71 @@ def _binding_valid(decision: AgentPaperDecision, binding: AgentPaperDecisionBind
 async def require_agent_source_policies(
     session: AsyncSession, decision: AgentPaperDecision
 ) -> None:
-    expected = (
-        (
-            decision.source_policy_id,
-            "paper_decision_price",
-            "paper_decision_price_policy_v1",
-            "70737603eb58331d60668bb6a039e4910d856a2c992e972fc8af0adcf05db579",
-        ),
-        (
-            decision.execution_source_policy_id,
-            "paper_execution_price",
-            "paper_execution_price_policy_v1",
-            "41efc2c8625321bc8d9d941500fd3f809868a12fcc13ee2fefdfa4bf52705682",
-        ),
-    )
-    for policy_id, key, version, content_hash in expected:
+    expected: tuple[tuple[UUID, str, str, str, str | None], ...]
+    if (
+        decision.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        and decision.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+    ):
+        expected = (
+            (
+                decision.source_policy_id,
+                "paper_decision_price",
+                "paper_schwab_l1_decision_v1",
+                "fcbb81143639771e8c9228d768707cb11b720a7e69fcd0598aef2af958dba885",
+                None,
+            ),
+            (
+                decision.execution_source_policy_id,
+                "paper_execution_price",
+                "paper_schwab_price_history_execution_v1",
+                "b53d7d39a12ae0debf366b6bdb36c8e86f67229517d4b490b68878875a883dac",
+                "schwab",
+            ),
+        )
+    else:
+        expected = (
+            (
+                decision.source_policy_id,
+                "paper_decision_price",
+                "paper_decision_price_policy_v1",
+                "70737603eb58331d60668bb6a039e4910d856a2c992e972fc8af0adcf05db579",
+                "alpaca",
+            ),
+            (
+                decision.execution_source_policy_id,
+                "paper_execution_price",
+                "paper_execution_price_policy_v1",
+                "41efc2c8625321bc8d9d941500fd3f809868a12fcc13ee2fefdfa4bf52705682",
+                "alpaca",
+            ),
+        )
+    for policy_id, key, version, content_hash, selected_source in expected:
         policy = await session.get(SourcePolicy, policy_id, populate_existing=True)
+        if policy is None:
+            raise ValueError("Agent decision source policy is missing or invalid")
+        price_source = policy.payload.get("price_source")
+        schwab = policy.payload.get("schwab")
         if (
-            policy is None
-            or policy.key != key
+            policy.key != key
             or policy.version != version
             or policy.schema_version != "1"
             or policy.created_at > decision.decision_time
             or policy.payload.get("fallback") != "disabled"
-            or policy.payload.get("selected_source") != "alpaca"
+            or (
+                selected_source is not None
+                and policy.payload.get("selected_source") != selected_source
+            )
             or policy.payload.get("content_hash") != content_hash
+            or (
+                policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+                and (
+                    policy.payload.get("market_context_source") != "schwab"
+                    or not isinstance(price_source, dict)
+                    or price_source.get("source") != "alpaca"
+                    or not isinstance(schwab, dict)
+                    or schwab.get("delayed") is not False
+                )
+            )
         ):
             raise ValueError("Agent decision source policy is missing or invalid")
 
@@ -99,7 +141,7 @@ async def require_agent_decision_bindings(
         admitted = await load_actionable_research_output(
             session,
             run_id=output.run_id,
-            decision_time=decision.decision_time,
+            decision_time=max(decision.decision_time, output.created_at),
         )
         if (
             admitted.output_id != binding.output_id

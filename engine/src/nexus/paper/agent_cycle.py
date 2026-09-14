@@ -428,11 +428,17 @@ async def _resume_research(
         return await _stop_unavailable(session, cycle, events)
     if any(job.status in {"queued", "running"} for job in jobs):
         return _result(cycle.id, events, replayed=True)
+    if any(job.finished_at is None for job in jobs):
+        return await _stop_unavailable(session, cycle, events)
+    output_available_at = max(
+        cycle.decision_time,
+        *(job.finished_at for job in jobs if job.finished_at is not None),
+    )
     try:
         actions = tuple(
             [
                 await load_actionable_research_output(
-                    session, run_id=run_id, decision_time=cycle.decision_time
+                    session, run_id=run_id, decision_time=output_available_at
                 )
                 for run_id in run_ids
             ]

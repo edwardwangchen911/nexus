@@ -74,6 +74,7 @@ from nexus.persistence.models.data import (
 from nexus.persistence.models.market import Instrument, LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperMarketWindowRecord,
     PaperAccountRecord,
     PaperExecutionModelRecord,
@@ -573,16 +574,38 @@ async def _qualified_window(
     prior_window: PaperExecutionWindowAuthorityRecord | None,
 ) -> tuple[QualifiedExecutionWindow, PriceBarSetAuthority] | None:
     agent_paper = source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+    schwab_agent_paper = source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
     if source_policy_id == SOURCE_POLICY_V2_ID:
         # Fosun v2 currently proves daily bars only. The separate intraday
         # authority is display-only and cannot authorize simulated fills.
         return None
-    if source_policy_id not in {SOURCE_POLICY_ID, PAPER_EXECUTION_SOURCE_POLICY_ID}:
+    if source_policy_id not in {
+        SOURCE_POLICY_ID,
+        PAPER_EXECUTION_SOURCE_POLICY_ID,
+        PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    }:
         return None
-    window_start = calendar.market_open_at + timedelta(
-        minutes=(window_seq - 1) * model.window_minutes
-    )
-    window_end = window_start + timedelta(minutes=model.window_minutes)
+    schwab_binding: AgentPaperMarketWindowRecord | None = None
+    if schwab_agent_paper:
+        if prior_window is not None or window_seq != 1:
+            return None
+        schwab_binding = await session.scalar(
+            select(AgentPaperMarketWindowRecord).where(
+                AgentPaperMarketWindowRecord.order_id == order.id,
+                AgentPaperMarketWindowRecord.instrument_id == order.instrument_id,
+                AgentPaperMarketWindowRecord.purpose == "paper_fill",
+                AgentPaperMarketWindowRecord.evaluated_at <= evaluated_at,
+            )
+        )
+        if schwab_binding is None:
+            return None
+        window_start = schwab_binding.window_start_at
+        window_end = schwab_binding.window_end_at
+    else:
+        window_start = calendar.market_open_at + timedelta(
+            minutes=(window_seq - 1) * model.window_minutes
+        )
+        window_end = window_start + timedelta(minutes=model.window_minutes)
     statement = (
         select(PriceBarSetAuthority, PriceSeriesManifest)
         .join(
@@ -602,7 +625,7 @@ async def _qualified_window(
             PriceSeriesManifest.adjustment == "raw",
         )
     )
-    if agent_paper:
+    if agent_paper or schwab_agent_paper:
         statement = statement.join(
             AgentPaperMarketWindowRecord,
             AgentPaperMarketWindowRecord.source_authority_id == PriceBarSetAuthority.id,
@@ -614,7 +637,9 @@ async def _qualified_window(
             AgentPaperMarketWindowRecord.window_end_at == window_end,
             AgentPaperMarketWindowRecord.evaluated_at <= evaluated_at,
             AgentPaperMarketWindowRecord.price_series_manifest_id == PriceSeriesManifest.id,
-            PriceSeriesManifest.source == "alpaca",
+            PriceSeriesManifest.source == (
+                "schwab" if schwab_agent_paper else "alpaca"
+            ),
         )
     else:
         statement = statement.where(PriceSeriesManifest.source.in_(("alpaca", "fixture")))
@@ -639,6 +664,12 @@ async def _qualified_window(
             and manifest.source == "alpaca"
             and manifest.feed == "iex"
             and manifest.delivery_mode == "real_time"
+        )
+        or (
+            schwab_agent_paper
+            and manifest.source == "schwab"
+            and manifest.feed == "price_history"
+            and manifest.delivery_mode == "unknown"
         )
         or (
             not agent_paper
@@ -1327,7 +1358,12 @@ async def advance_internal_paper_order(
         else None
     )
     if qualified is None:
-        if evaluated_at >= missing_cancel_at and filled_before == 0 and prior_window is None:
+        if (
+            execution_source_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+            and evaluated_at >= missing_cancel_at
+            and filled_before == 0
+            and prior_window is None
+        ):
             event = await _cancel(
                 session,
                 order=order,

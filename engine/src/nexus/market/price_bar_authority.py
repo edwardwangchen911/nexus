@@ -11,6 +11,7 @@ from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManif
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
 )
 from nexus.persistence.models.research import ResearchEvidenceRef
 
@@ -58,6 +59,13 @@ async def prepare_price_bar_set(
         if source != "alpaca":
             return None
         statement = text("SELECT * FROM nexus_prepare_agent_paper_price_bar_set(:manifest_id)")
+        parameters = {"manifest_id": manifest_id}
+    elif source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
+        if source != "schwab":
+            return None
+        statement = text(
+            "SELECT * FROM nexus_prepare_agent_paper_schwab_price_bar_set(:manifest_id)"
+        )
         parameters = {"manifest_id": manifest_id}
     elif source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID:
         if source != "alpaca":
@@ -115,6 +123,7 @@ async def finalize_price_bar_set(
             None,
             PAPER_DECISION_SOURCE_POLICY_ID,
             PAPER_EXECUTION_SOURCE_POLICY_ID,
+            PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
         }:
             raise ValueError("PRICE_BAR_SOURCE_POLICY_OVERRIDE_INVALID")
         source_policy_id = source_policy_id or SOURCE_POLICY_ID

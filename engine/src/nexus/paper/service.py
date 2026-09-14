@@ -28,6 +28,8 @@ from nexus.paper.errors import PaperBatchError, PaperBatchErrorCode
 from nexus.paper.ledger import make_buy_reservation_transaction
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCycleRecord,
     PaperAccountRecord,
     PaperDrawdownLockEventRecord,
     PaperLedgerAccountRecord,
@@ -53,7 +55,10 @@ from nexus.quality.source_policy import (
     current_paper_order_price_authority_available,
     load_source_policy_v2,
 )
-from nexus.risk.authority import load_risk_market_snapshot
+from nexus.risk.authority import (
+    load_risk_market_snapshot,
+    prepare_schwab_realtime_risk_snapshot,
+)
 from nexus.risk.canonical import (
     canonical_paper_order_batch_hash,
     canonical_risk_batch_input_hash,
@@ -1138,11 +1143,23 @@ async def create_paper_order_batch(
         *(order.instrument_id for order in projection.open_orders),
     }
     try:
-        market = await load_risk_market_snapshot(
-            session,
-            decision=decision,
-            required_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
-        )
+        if (
+            isinstance(decision, AgentPaperDecision)
+            and decision.execution_source_policy_id
+            == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        ):
+            cycle = await session.get(AgentPaperCycleRecord, decision.cycle_id)
+            if cycle is None:
+                raise ValueError("Schwab Agent cycle is missing")
+            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+            if set(market.required_instrument_ids) != required:
+                raise ValueError("Schwab Agent risk scope is incomplete")
+        else:
+            market = await load_risk_market_snapshot(
+                session,
+                decision=decision,
+                required_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
+            )
     except ValueError as error:
         raise PaperBatchError("RISK_AUTHORITY_INCOMPLETE") from error
     policy_id, policy = await _load_policy(session)

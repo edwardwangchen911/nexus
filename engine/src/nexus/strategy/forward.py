@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Annotated, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import (
     BaseModel,
@@ -34,6 +35,7 @@ from nexus.persistence.models.evolution import (
 from nexus.persistence.models.market import UniverseMember, UniverseSnapshot
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PaperAccountRecord,
     StrategyDecisionRecord,
     StrategyDecisionTargetRecord,
@@ -363,7 +365,13 @@ async def require_paper_decision_authority(
     source_policy = await session.get(SourcePolicy, decision.source_policy_id)
     calendar = await session.get(ExchangeCalendarAuthorityRecord, decision.calendar_authority_id)
     universe = await session.get(UniverseSnapshot, decision.universe_snapshot_id)
-    agent_paper = decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+    agent_paper = decision.source_policy_id in {
+        PAPER_DECISION_SOURCE_POLICY_ID,
+        PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    }
+    schwab_agent_paper = (
+        decision.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+    )
     quality = (
         None
         if decision.quality_report_id is None
@@ -418,7 +426,15 @@ async def require_paper_decision_authority(
     if len(matching_indexes) != 1:
         raise ValueError("decision session is missing from calendar authority")
     decision_index = matching_indexes[0]
-    if (
+    if schwab_agent_paper:
+        local_decision = decision.decision_time.astimezone(ZoneInfo("America/New_York"))
+        if (
+            decision.execution_session != decision.decision_session
+            or local_decision.date() != decision.decision_session
+            or not time(7) <= local_decision.time().replace(tzinfo=None) < time(16)
+        ):
+            raise ValueError("execution session is not the decision authority session")
+    elif (
         calendar_sessions[decision_index].decision_at != decision.decision_time
         or decision_index + 1 >= len(calendar_sessions)
         or calendar_sessions[decision_index + 1].session != decision.execution_session

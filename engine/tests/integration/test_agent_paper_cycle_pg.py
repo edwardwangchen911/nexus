@@ -20,7 +20,10 @@ from nexus.paper.agent_cycle_authority import (
     prepare_candidates,
 )
 from nexus.paper.agent_cycle_models import candidate_manifest_hash
-from nexus.paper.agent_market import collect_agent_paper_window
+from nexus.paper.agent_market import (
+    collect_agent_paper_window,
+    resolve_agent_paper_market_scope,
+)
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.models.agents import (
@@ -42,6 +45,11 @@ from nexus.persistence.models.paper import (
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
+    PaperExecutionWindowAuthorityRecord,
+    PaperExecutionWindowMemberRecord,
+    PaperFillRecord,
+    PaperLedgerEntryRecord,
+    PaperReservationEventRecord,
     RiskQueryAuthorityRecord,
 )
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
@@ -98,6 +106,27 @@ class _IexProvider:
                 mode="read_only",
                 delivery_mode="real_time",
             ),
+        )
+
+
+class _SchwabPriceHistoryProvider(_IexProvider):
+    async def fetch_bars(self, request, cursor=None):  # type: ignore[no-untyped-def]
+        page = await super().fetch_bars(request, cursor)
+        return page.model_copy(
+            update={
+                "items": tuple(
+                    bar.model_copy(update={"volume": Decimal("2000")}) for bar in page.items
+                ),
+                "raw_payload": b'{"candles":"agent-cycle-schwab-window"}',
+                "source_request_id": None,
+                "provenance": page.provenance.model_copy(
+                    update={
+                        "source": "schwab",
+                        "feed": "price_history",
+                        "delivery_mode": "unknown",
+                    }
+                ),
+            }
         )
 
 
@@ -577,6 +606,7 @@ async def test_quasi_realtime_authority_observes_dst_holiday_and_session_uniquen
 @pytest.mark.asyncio
 async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
@@ -728,6 +758,160 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
         assert resumed == first.model_copy(update={"replayed": True})
         assert len(first.research_run_ids) == 1
         assert job_count == resumed_job_count == 1
+
+        output_at = decision_time + timedelta(seconds=10)
+        output_id = UUID("63000000-0000-0000-0000-000000000777")
+        admitted = ActionableResearchDecision(
+            instrument_id=manifest[0].instrument_id,
+            output_id=output_id,
+            intent_hash="9" * 64,
+            stance="buy_candidate",
+            sizing_action="increase",
+            evidence_ref_ids=(UUID(int=778),),
+        )
+        async with sessions.begin() as session:
+            await session.execute(
+                text("ALTER TABLE strategy_decision_targets DISABLE TRIGGER USER")
+            )
+            await session.execute(text("ALTER TABLE strategy_decisions DISABLE TRIGGER USER"))
+            try:
+                await session.execute(text("DELETE FROM strategy_decision_targets"))
+                await session.execute(text("DELETE FROM strategy_decisions"))
+            finally:
+                await session.execute(text("ALTER TABLE strategy_decisions ENABLE TRIGGER USER"))
+                await session.execute(
+                    text("ALTER TABLE strategy_decision_targets ENABLE TRIGGER USER")
+                )
+            await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
+            await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text("UPDATE agent_research_runs SET status='completed' WHERE id=:run_id"),
+                    {"run_id": first.research_run_ids[0]},
+                )
+                await session.execute(
+                    text(
+                        "UPDATE jobs SET status='succeeded',started_at=:at,finished_at=:at,"
+                        "attempt_count=1,result_code='AGENT_RESEARCH_COMPLETED',version=version+1"
+                    ),
+                    {"at": output_at},
+                )
+            finally:
+                await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER USER"))
+                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
+            session.add(
+                AgentResearchOutputRecord(
+                    id=output_id,
+                    run_id=first.research_run_ids[0],
+                    sequence=1,
+                    status="completed",
+                    role=None,
+                    prompt_hash=None,
+                    content_hash="7" * 64,
+                    payload={},
+                    intent={},
+                    created_at=output_at,
+                )
+            )
+
+        async def fake_load_actionable(
+            *_args, decision_time: datetime, **_kwargs
+        ) -> ActionableResearchDecision:
+            assert decision_time == output_at
+            return admitted
+
+        monkeypatch.setattr(
+            "nexus.paper.agent_cycle.load_actionable_research_output", fake_load_actionable
+        )
+        monkeypatch.setattr(
+            "nexus.paper.agent_decision_store.load_actionable_research_output",
+            fake_load_actionable,
+        )
+        async with sessions.begin() as session:
+            awaiting_market = await resume_schwab_agent_paper_cycle(
+                session,
+                cycle_id=first.cycle_id,
+                idempotency_key="schwab-resume-2",
+            )
+        assert awaiting_market.status == "awaiting_market", awaiting_market.result_code
+        assert len(awaiting_market.order_ids) == 1
+
+        async with sessions() as session:
+            scope = await resolve_agent_paper_market_scope(session, cycle_id=first.cycle_id)
+        assert scope.window_start == datetime(2026, 8, 26, 19, 31, tzinfo=UTC)
+        assert scope.window_end == datetime(2026, 8, 26, 19, 36, tzinfo=UTC)
+        evaluated_at = scope.window_end + timedelta(seconds=2)
+        async with sessions.begin() as session:
+            no_window = await advance_internal_paper_order(
+                session,
+                order_id=awaiting_market.order_ids[0],
+                evaluated_at=evaluated_at,
+                idempotency_key="schwab-paper-no-window-1",
+            )
+        assert no_window.action == "no_data"
+        assert no_window.fill_id is None
+
+        provider = _SchwabPriceHistoryProvider()
+        window = await collect_agent_paper_window(
+            sessions,
+            cycle_id=first.cycle_id,
+            provider=provider,
+            object_store=_ObjectStore(),
+            evaluated_at=evaluated_at,
+        )
+        window_replay = await collect_agent_paper_window(
+            sessions,
+            cycle_id=first.cycle_id,
+            provider=provider,
+            object_store=_ObjectStore(),
+            evaluated_at=evaluated_at,
+        )
+        assert window.purpose == "paper_fill"
+        assert (window.source, window.feed, window.delivery_mode) == (
+            "schwab",
+            "price_history",
+            "unknown",
+        )
+        assert window_replay == window.model_copy(update={"replayed": True})
+        assert provider.calls == 1
+        async with sessions.begin() as session:
+            filled = await advance_internal_paper_order(
+                session,
+                order_id=awaiting_market.order_ids[0],
+                evaluated_at=evaluated_at,
+                idempotency_key="schwab-paper-fill-1",
+            )
+        async with sessions.begin() as session:
+            fill_replay = await advance_internal_paper_order(
+                session,
+                order_id=awaiting_market.order_ids[0],
+                evaluated_at=evaluated_at,
+                idempotency_key="schwab-paper-fill-1",
+            )
+        assert filled.action == "filled"
+        assert fill_replay == filled
+        async with sessions() as session:
+            debits = await session.scalar(select(func.sum(PaperLedgerEntryRecord.debit_amount)))
+            credits = await session.scalar(select(func.sum(PaperLedgerEntryRecord.credit_amount)))
+            fill_count = await session.scalar(select(func.count(PaperFillRecord.id)))
+            execution_window_count = await session.scalar(
+                select(func.count(PaperExecutionWindowAuthorityRecord.id))
+            )
+            execution_member_count = await session.scalar(
+                select(func.count(PaperExecutionWindowMemberRecord.bar_id))
+            )
+            reservation_events = tuple(
+                await session.scalars(
+                    select(PaperReservationEventRecord.event_type)
+                    .where(PaperReservationEventRecord.account_id == seed.account_id)
+                    .order_by(PaperReservationEventRecord.event_seq)
+                )
+            )
+        assert debits == credits
+        assert fill_count == execution_window_count == 1
+        assert execution_member_count == 5
+        assert "consumed" in reservation_events
+        assert "released" in reservation_events
     finally:
         await engine.dispose()
 

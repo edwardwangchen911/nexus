@@ -5,6 +5,7 @@ from uuid import UUID
 import pytest
 from nexus.paper.agent_market import (
     PaperMarketError,
+    agent_paper_window_bounds,
     qualify_agent_paper_window,
 )
 from nexus.persistence.models.paper import (
@@ -86,6 +87,88 @@ def test_iex_window_requires_five_consecutive_minutes() -> None:
     assert qualified.source == "alpaca"
     assert qualified.feed == "iex"
     assert qualified.delivery_mode == "real_time"
+
+
+def test_schwab_window_uses_next_minute_after_output_and_rejects_close_overrun() -> None:
+    output_available_at = datetime(2026, 9, 14, 19, 52, 0, tzinfo=UTC)
+    market_close_at = datetime(2026, 9, 14, 20, 0, tzinfo=UTC)
+
+    assert agent_paper_window_bounds(output_available_at, market_close_at) == (
+        datetime(2026, 9, 14, 19, 53, tzinfo=UTC),
+        datetime(2026, 9, 14, 19, 58, tzinfo=UTC),
+    )
+    with pytest.raises(PaperMarketError, match="PAPER_MARKET_WINDOW_UNAVAILABLE"):
+        agent_paper_window_bounds(datetime(2026, 9, 14, 19, 55, 0, tzinfo=UTC), market_close_at)
+
+
+def test_schwab_price_history_window_is_qualified_as_unknown_delivery() -> None:
+    page = _page()
+    schwab = page.model_copy(
+        update={
+            "provenance": page.provenance.model_copy(
+                update={"source": "schwab", "feed": "price_history", "delivery_mode": "unknown"}
+            )
+        }
+    )
+
+    qualified = qualify_agent_paper_window(
+        page=schwab,
+        instrument_id=INSTRUMENT_ID,
+        window_start=WINDOW_START,
+        evaluated_at=EVALUATED_AT,
+        expected_source="schwab",
+    )
+
+    assert qualified.source == "schwab"
+    assert qualified.feed == "price_history"
+    assert qualified.delivery_mode == "unknown"
+
+
+def test_schwab_price_history_rejects_a_stale_latest_bar() -> None:
+    page = _page()
+    stale_received = WINDOW_START + timedelta(minutes=7, seconds=1)
+    schwab = page.model_copy(
+        update={
+            "items": tuple(
+                bar.model_copy(
+                    update={"available_at": stale_received, "received_at": stale_received}
+                )
+                for bar in page.items
+            ),
+            "provenance": page.provenance.model_copy(
+                update={"source": "schwab", "feed": "price_history", "delivery_mode": "unknown"}
+            ),
+        }
+    )
+
+    with pytest.raises(PaperMarketError, match="PAPER_MARKET_WINDOW_UNAVAILABLE"):
+        qualify_agent_paper_window(
+            page=schwab,
+            instrument_id=INSTRUMENT_ID,
+            window_start=WINDOW_START,
+            evaluated_at=stale_received,
+            expected_source="schwab",
+        )
+
+
+def test_schwab_price_history_reports_incomplete_window_as_unavailable() -> None:
+    page = _page("four_bars")
+    schwab = page.model_copy(
+        update={
+            "provenance": page.provenance.model_copy(
+                update={"source": "schwab", "feed": "price_history", "delivery_mode": "unknown"}
+            )
+        }
+    )
+
+    with pytest.raises(PaperMarketError, match="PAPER_MARKET_WINDOW_UNAVAILABLE"):
+        qualify_agent_paper_window(
+            page=schwab,
+            instrument_id=INSTRUMENT_ID,
+            window_start=WINDOW_START,
+            evaluated_at=EVALUATED_AT,
+            expected_source="schwab",
+        )
 
 
 def test_agent_paper_price_purposes_require_their_exact_policy_ids() -> None:
