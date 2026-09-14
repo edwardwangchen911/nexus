@@ -52,7 +52,6 @@ from nexus.providers.market.alpaca import AlpacaMarketDataProvider
 from nexus.providers.market.alpaca_http import AlpacaHttpTransport, SqlInstrumentSymbolResolver
 from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
 from nexus.risk.query_authority_producer import (
-    RiskSourceProof,
     inspect_query_authority_scope,
     persist_query_authorities,
 )
@@ -247,22 +246,21 @@ async def trigger_in_session(
         universe_snapshot_id=initial_authority.universe_snapshot_id,
         source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     )
-    proofs: tuple[RiskSourceProof, ...] | None = None
-    if not scope.existing:
-        digest = sha256(request.idempotency_key.encode()).hexdigest()[:16]
-        output_parent = repo_root / ".secrets" / "nexus-agent-paper"
-        output_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            proofs = await collect_source_proofs(
-                symbol="AAPL",
-                instrument_id=scope.instrument_id,
-                decision_session=decision_session,
-                key_id=settings.alpaca_key,
-                secret=settings.alpaca_secret,
-                output_dir=output_parent / f"{decision_session}-{digest}",
-            )
-        except ValueError as error:
-            raise ValueError("RISK_INPUT_REQUIRED") from error
+    digest = sha256(request.idempotency_key.encode()).hexdigest()[:16]
+    output_parent = repo_root / ".secrets" / "nexus-agent-paper"
+    output_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        proofs = await collect_source_proofs(
+            symbol="AAPL",
+            instrument_id=scope.instrument_id,
+            decision_session=decision_session,
+            key_id=settings.alpaca_key,
+            secret=settings.alpaca_secret,
+            output_dir=output_parent
+            / f"{decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}",
+        )
+    except ValueError as error:
+        raise ValueError("RISK_INPUT_REQUIRED") from error
 
     try:
         stream = await capture_and_import_schwab_level_one_once(
@@ -287,18 +285,17 @@ async def trigger_in_session(
     artifact = await session.get(DataArtifact, stream.artifact_id)
     _validate_trigger_quote(quote, artifact, stream, decision_time=decision_time)
 
-    if proofs is not None:
-        try:
-            await persist_query_authorities(
-                session,
-                universe_snapshot_id=scope.universe_snapshot_id,
-                decision_session=decision_session,
-                symbol="AAPL",
-                proofs=proofs,
-                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
-            )
-        except ValueError as error:
-            raise ValueError("RISK_INPUT_REQUIRED") from error
+    try:
+        await persist_query_authorities(
+            session,
+            universe_snapshot_id=scope.universe_snapshot_id,
+            decision_session=decision_session,
+            symbol="AAPL",
+            proofs=proofs,
+            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+        )
+    except ValueError as error:
+        raise ValueError("RISK_INPUT_REQUIRED") from error
     authority = await load_quasi_realtime_cycle_authority(
         session, account_id=request.account_id, now=decision_time
     )

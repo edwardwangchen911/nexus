@@ -240,7 +240,11 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
 
     async def scope(*_args, **_kwargs):
         events.append("scope")
-        return RiskQueryScope(instrument_id, universe_id, ())
+        return RiskQueryScope(
+            instrument_id,
+            universe_id,
+            (object(), object(), object()),  # type: ignore[arg-type]
+        )
 
     async def risk(**_kwargs):
         events.append("risk-action-delisting-halt")

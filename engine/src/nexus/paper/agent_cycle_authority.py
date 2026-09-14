@@ -355,9 +355,16 @@ async def prepare_candidates(
                 RiskQueryAuthorityRecord.available_at <= authority.decision_time,
                 RiskQueryAuthorityRecord.created_at <= authority.decision_time,
             )
+            .order_by(
+                RiskQueryAuthorityRecord.kind,
+                RiskQueryAuthorityRecord.available_at.desc(),
+                RiskQueryAuthorityRecord.id.desc(),
+            )
         )
     )
-    risks = {row.kind: row for row in risk_rows}
+    risks: dict[str, RiskQueryAuthorityRecord] = {}
+    for row in risk_rows:
+        risks.setdefault(row.kind, row)
     if (
         prior_daily is None
         or not has_sector

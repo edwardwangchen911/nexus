@@ -22,7 +22,11 @@ from nexus.persistence.models.paper import (
     RiskQueryAuthorityRecord,
 )
 from nexus.risk.authority import canonical_query_authority_hash
-from nexus.risk.query_authority_producer import RiskSourceProof, persist_query_authorities
+from nexus.risk.query_authority_producer import (
+    RiskSourceProof,
+    inspect_query_authority_scope,
+    persist_query_authorities,
+)
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -309,6 +313,108 @@ def test_persists_exact_three_proofs_and_replay_returns_existing_rows(
         )
 
 
+def test_persists_a_newer_complete_proof_set_in_the_same_session(
+    migrated_database_url,
+) -> None:
+    asyncio.run(_seed(migrated_database_url))
+
+    async def persist_versions():
+        engine = create_async_engine(migrated_database_url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory.begin() as session:
+                older = await persist_query_authorities(
+                    session,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    decision_session=SESSION,
+                    symbol="AAPL",
+                    proofs=_proofs(),
+                )
+            newer_at = AVAILABLE_AT + timedelta(minutes=5)
+            newer_proofs = tuple(
+                RiskSourceProof(kind, False, character * 64, newer_at)
+                for kind, character in (
+                    ("corporate_action", "d"),
+                    ("suspension", "e"),
+                    ("delisting", "f"),
+                )
+            )
+            async with factory.begin() as session:
+                newer = await persist_query_authorities(
+                    session,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    decision_session=SESSION,
+                    symbol="AAPL",
+                    proofs=newer_proofs,
+                )
+                count = await session.scalar(
+                    select(func.count()).select_from(RiskQueryAuthorityRecord)
+                )
+            return older, newer, count
+        finally:
+            await engine.dispose()
+
+    older, newer, count = asyncio.run(persist_versions())
+
+    assert count == 6
+    assert {row.id for row in older}.isdisjoint(row.id for row in newer)
+
+
+def test_scope_selects_latest_complete_eligible_proof_set(migrated_database_url) -> None:
+    asyncio.run(_seed(migrated_database_url))
+
+    async def persist_and_inspect():
+        engine = create_async_engine(migrated_database_url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory.begin() as session:
+                older = await persist_query_authorities(
+                    session,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    decision_session=SESSION,
+                    symbol="AAPL",
+                    proofs=_proofs(),
+                )
+                newer_at = AVAILABLE_AT + timedelta(minutes=1)
+                newer = await persist_query_authorities(
+                    session,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    decision_session=SESSION,
+                    symbol="AAPL",
+                    proofs=tuple(
+                        RiskSourceProof(kind, False, character * 64, newer_at)
+                        for kind, character in (
+                            ("corporate_action", "d"),
+                            ("suspension", "e"),
+                            ("delisting", "f"),
+                        )
+                    ),
+                )
+            async with factory() as session:
+                older_scope = await inspect_query_authority_scope(
+                    session,
+                    decision_session=SESSION,
+                    symbol="AAPL",
+                    as_of=AVAILABLE_AT + timedelta(seconds=30),
+                    universe_snapshot_id=UNIVERSE_ID,
+                )
+                newer_scope = await inspect_query_authority_scope(
+                    session,
+                    decision_session=SESSION,
+                    symbol="AAPL",
+                    as_of=AVAILABLE_AT + timedelta(minutes=1, seconds=30),
+                    universe_snapshot_id=UNIVERSE_ID,
+                )
+            return older, newer, older_scope, newer_scope
+        finally:
+            await engine.dispose()
+
+    older, newer, older_scope, newer_scope = asyncio.run(persist_and_inspect())
+
+    assert {row.id for row in older_scope.existing} == {row.id for row in older}
+    assert {row.id for row in newer_scope.existing} == {row.id for row in newer}
+
+
 def test_persists_exact_three_proofs_for_schwab_decision_policy(
     migrated_database_url,
 ) -> None:
@@ -472,10 +578,12 @@ async def _run_with_stale_existing(url: str, output: Path) -> None:
     )
 
 
-def test_normal_entry_rejects_stale_existing_halt_proof(migrated_database_url, tmp_path) -> None:
+def test_normal_entry_does_not_reuse_stale_halt_proof(
+    migrated_database_url, tmp_path
+) -> None:
     asyncio.run(_seed(migrated_database_url))
 
-    with pytest.raises(ValueError, match="RISK_QUERY_AUTHORITY_CONFLICT"):
+    with pytest.raises(ValueError, match="AGENT_RISK_COLLECTION_WINDOW_INVALID"):
         asyncio.run(_run_with_stale_existing(migrated_database_url, tmp_path / "risk"))
 
 

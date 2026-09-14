@@ -480,7 +480,6 @@ async def test_quasi_realtime_authority_uses_database_time_window_and_same_sessi
                 await session.execute(
                     text("ALTER TABLE exchange_calendar_authorities ENABLE TRIGGER USER")
                 )
-
         async with sessions() as session:
             at_open = await load_quasi_realtime_cycle_authority(
                 session,
@@ -671,8 +670,51 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
                 await session.execute(
                     text("ALTER TABLE exchange_calendar_authorities ENABLE TRIGGER USER")
                 )
+            newest_risk_ids = set(
+                await session.scalars(
+                    select(RiskQueryAuthorityRecord.id).where(
+                        RiskQueryAuthorityRecord.source_policy_id
+                        == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                        RiskQueryAuthorityRecord.available_at == decision_time,
+                    )
+                )
+            )
+            for index, kind in enumerate(
+                ("corporate_action", "suspension", "delisting"), start=1
+            ):
+                older_at = decision_time - timedelta(minutes=1)
+                watermark = f"{index + 3}" * 64
+                session.add(
+                    RiskQueryAuthorityRecord(
+                        id=UUID(int=0x63000000000000000000000000000900 + index),
+                        source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                        universe_snapshot_id=registered.decision.universe_snapshot_id,
+                        decision_session=registered.decision.decision_session,
+                        kind=kind,
+                        required_instrument_ids=[INSTRUMENTS[0][0]],
+                        blocked_instrument_ids=[],
+                        complete=True,
+                        source_watermark_hash=watermark,
+                        available_at=older_at,
+                        content_hash=canonical_query_authority_hash(
+                            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                            universe_snapshot_id=registered.decision.universe_snapshot_id,
+                            decision_session=registered.decision.decision_session,
+                            kind=kind,
+                            required_instrument_ids=[INSTRUMENTS[0][0]],
+                            blocked_instrument_ids=[],
+                            complete=True,
+                            source_watermark_hash=watermark,
+                            available_at=older_at,
+                        ),
+                        created_at=decision_time,
+                    )
+                )
+            await session.flush()
 
         async with sessions() as session:
+            await session.execute(text("SET LOCAL enable_indexscan=off"))
+            await session.execute(text("SET LOCAL enable_bitmapscan=off"))
             authority = await load_quasi_realtime_cycle_authority(
                 session,
                 account_id=seed.account_id,
@@ -708,6 +750,7 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
                     )
             manifest = await prepare_candidates(session, authority=authority)
             assert len(manifest) == 1
+            assert set(manifest[0].risk_query_authority_ids) == newest_risk_ids
             cycle = AgentPaperCycleRecord(
                 id=UUID("63000000-0000-0000-0000-000000000099"),
                 account_id=authority.account_id,

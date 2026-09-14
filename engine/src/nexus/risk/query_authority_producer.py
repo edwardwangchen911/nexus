@@ -11,7 +11,7 @@ from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.market.scope import US_EQUITY_EXCHANGES
@@ -282,13 +282,25 @@ async def inspect_query_authority_scope(
                 RiskQueryAuthorityRecord.source_policy_id == source_policy_id,
                 RiskQueryAuthorityRecord.universe_snapshot_id == universe_snapshot_id,
                 RiskQueryAuthorityRecord.decision_session == decision_session,
+                RiskQueryAuthorityRecord.available_at <= as_of,
             )
-            .order_by(RiskQueryAuthorityRecord.kind)
+            .order_by(
+                RiskQueryAuthorityRecord.kind,
+                RiskQueryAuthorityRecord.available_at.desc(),
+                RiskQueryAuthorityRecord.id.desc(),
+            )
         )
     )
-    if existing and len(existing) != 3:
+    latest: dict[str, RiskQueryAuthorityRecord] = {}
+    for record in existing:
+        latest.setdefault(record.kind, record)
+    if latest and set(latest) != {"corporate_action", "suspension", "delisting"}:
         raise ValueError("RISK_QUERY_AUTHORITY_CONFLICT")
-    return RiskQueryScope(instrument_id, universe_snapshot_id, existing)
+    selected = tuple(latest[kind] for kind in sorted(latest))
+    suspension = latest.get("suspension")
+    if suspension is not None and as_of - suspension.available_at > _MAX_HALT_AGE:
+        selected = ()
+    return RiskQueryScope(instrument_id, universe_snapshot_id, selected)
 
 
 async def persist_query_authorities(
@@ -350,14 +362,43 @@ async def persist_query_authorities(
                 content_hash=content_hash,
             )
         )
-    existing = scope.existing
-    if existing:
-        if len(existing) != 3 or any(
-            not _record_matches(record, draft)
-            for record, draft in zip(existing, expected, strict=True)
-        ):
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {
+            "scope": (
+                f"nexus:risk-query-authority:{source_policy_id}:"
+                f"{universe_snapshot_id}:{decision_session.isoformat()}"
+            )
+        },
+    )
+    matching_scope = tuple(
+        await session.scalars(
+            select(RiskQueryAuthorityRecord).where(
+                RiskQueryAuthorityRecord.source_policy_id == source_policy_id,
+                RiskQueryAuthorityRecord.universe_snapshot_id == universe_snapshot_id,
+                RiskQueryAuthorityRecord.decision_session == decision_session,
+                RiskQueryAuthorityRecord.kind.in_(kinds),
+                RiskQueryAuthorityRecord.available_at.in_(
+                    proof.available_at for proof in proofs
+                ),
+            )
+        )
+    )
+    persisted: list[RiskQueryAuthorityRecord] = []
+    additions: list[RiskQueryAuthorityRecord] = []
+    for draft in expected:
+        matches = [
+            record
+            for record in matching_scope
+            if record.kind == draft.kind and record.available_at == draft.available_at
+        ]
+        if len(matches) > 1 or (matches and not _record_matches(matches[0], draft)):
             raise ValueError("RISK_QUERY_AUTHORITY_CONFLICT")
-        return existing
-    session.add_all(expected)
+        if matches:
+            persisted.append(matches[0])
+        else:
+            additions.append(draft)
+            persisted.append(draft)
+    session.add_all(additions)
     await session.flush()
-    return tuple(expected)
+    return tuple(persisted)
