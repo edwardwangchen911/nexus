@@ -39,6 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 WINDOW_START = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
 EVALUATED_AT = WINDOW_START + timedelta(minutes=5, seconds=2)
+SCHWAB_RECEIVED_AT = WINDOW_START + timedelta(minutes=5, seconds=45)
+SCHWAB_EVALUATED_AT = SCHWAB_RECEIVED_AT + timedelta(seconds=1)
 
 
 class _Store:
@@ -95,6 +97,15 @@ class _SchwabProvider(_Provider):
         page = await super().fetch_bars(request, cursor)
         return page.model_copy(
             update={
+                "items": tuple(
+                    bar.model_copy(
+                        update={
+                            "available_at": SCHWAB_RECEIVED_AT,
+                            "received_at": SCHWAB_RECEIVED_AT,
+                        }
+                    )
+                    for bar in page.items
+                ),
                 "raw_payload": b'{"candles":"real-shape-fixture"}',
                 "source_request_id": None,
                 "provenance": page.provenance.model_copy(
@@ -196,7 +207,7 @@ async def test_no_trade_cycle_persists_one_replayable_non_fill_probe(
 
 
 @pytest.mark.asyncio
-async def test_schwab_cycle_persists_one_unknown_delivery_probe(
+async def test_schwab_cycle_evaluates_after_receipt_and_persists_probe(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,12 +273,19 @@ async def test_schwab_cycle_persists_one_unknown_delivery_probe(
                 evaluated_at=EVALUATED_AT,
             )
 
+        provider = _SchwabProvider()
+        provider.calls = 0
+
+        def after_provider_now() -> datetime:
+            assert provider.calls == 1
+            return SCHWAB_EVALUATED_AT
+
+        monkeypatch.setattr("nexus.paper.agent_market._utc_now", after_provider_now)
         result = await collect_agent_paper_window(
             sessions,
             cycle_id=cycle_id,
-            provider=_SchwabProvider(),
+            provider=provider,
             object_store=_Store(),
-            evaluated_at=EVALUATED_AT,
         )
 
         assert result.purpose == "acceptance_probe"
@@ -293,5 +311,7 @@ async def test_schwab_cycle_persists_one_unknown_delivery_probe(
             assert authority.source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
             assert raw is not None
             assert raw.schema_version == "schwab_price_history_raw_v1"
+            assert binding.data_available_at == SCHWAB_RECEIVED_AT
+            assert binding.evaluated_at == SCHWAB_EVALUATED_AT
     finally:
         await engine.dispose()

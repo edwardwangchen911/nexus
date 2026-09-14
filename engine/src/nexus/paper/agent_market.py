@@ -108,6 +108,10 @@ class SchwabPaperMarketWindowResult(_PaperMarketWindowResult):
 type PaperMarketWindowResult = AlpacaPaperMarketWindowResult | SchwabPaperMarketWindowResult
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def qualify_agent_paper_window(
     *,
     page: ProviderPage[PriceBar],
@@ -213,7 +217,6 @@ async def collect_agent_paper_window(
     evaluated_at: datetime | None = None,
 ) -> PaperMarketWindowResult:
     """Fetch, archive, qualify and bind one derived window with no retry or fallback."""
-    evaluation_time = evaluated_at or datetime.now(UTC)
     async with session_factory() as session, session.begin():
         cycle = await session.get(AgentPaperCycleRecord, cycle_id)
         if cycle is None:
@@ -301,6 +304,7 @@ async def collect_agent_paper_window(
             if cycle.execution_price_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
                 raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE") from None
             raise
+        evaluation_time = evaluated_at or _utc_now()
         qualified = qualify_agent_paper_window(
             page=page,
             instrument_id=instrument_id,
