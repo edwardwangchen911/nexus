@@ -508,7 +508,7 @@ async def test_quasi_realtime_authority_uses_database_time_window_and_same_sessi
 
 
 @pytest.mark.asyncio
-async def test_quasi_realtime_authority_observes_dst_holiday_and_session_uniqueness(
+async def test_quasi_realtime_authority_observes_dst_holiday_and_allows_later_slots(
     migrated_database_url: str,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
@@ -594,12 +594,13 @@ async def test_quasi_realtime_authority_observes_dst_holiday_and_session_uniquen
                 )
             )
         async with sessions() as session:
-            with pytest.raises(ValueError, match="AGENT_PAPER_CYCLE_EXISTS"):
-                await load_quasi_realtime_cycle_authority(
-                    session,
-                    account_id=seed.account_id,
-                    now=datetime(2026, 12, 1, 12, tzinfo=UTC),
-                )
+            later = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=seed.account_id,
+                now=datetime(2026, 12, 1, 12, 5, tzinfo=UTC),
+            )
+        assert later.decision_session == winter_session
+        assert later.decision_time == datetime(2026, 12, 1, 12, 5, tzinfo=UTC)
     finally:
         await engine.dispose()
 

@@ -100,14 +100,6 @@ async def load_quasi_realtime_cycle_authority(
     if row is None:
         raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
     calendar, calendar_session = row
-    existing_cycle = await session.scalar(
-        select(AgentPaperCycleRecord.id).where(
-            AgentPaperCycleRecord.account_id == account_id,
-            AgentPaperCycleRecord.decision_session == calendar_session.session,
-        )
-    )
-    if existing_cycle is not None:
-        raise ValueError("AGENT_PAPER_CYCLE_EXISTS")
     universe = await session.scalar(
         select(UniverseSnapshot)
         .where(
