@@ -17,7 +17,7 @@ const MAX_AUDIT_EXPORT_BYTES = 32 * 1024 * 1024;
 const MAX_AUDIT_EXPORT_ROWS = 100_000;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}` | "/health/ready">;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
-type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/paper/orders" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research" | "/internal/v1/instruments/{instrument_id}/research-admission" | "/internal/v1/portfolio-decision-runs/latest" | "/internal/v1/risk-audit" | "/internal/v1/risk-audit/export" | "/internal/v1/strategy-evolution">;
+type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/paper/cycles" | "/internal/v1/paper/orders" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research" | "/internal/v1/instruments/{instrument_id}/research-admission" | "/internal/v1/portfolio-decision-runs/latest" | "/internal/v1/risk-audit" | "/internal/v1/risk-audit/export" | "/internal/v1/strategy-evolution">;
 type EngineBody = string | Uint8Array | ArrayBuffer;
 type MethodFor<Path extends InternalPath> =
   | (Exclude<paths[Path]["get"], undefined> extends never ? never : "GET")
@@ -185,11 +185,13 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
   if (!matchesTemplate(template, path)) return null;
 
   const query = dynamic?.query;
-  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/paper/orders" && template !== "/internal/v1/portfolios" && template !== "/internal/v1/instruments/{instrument_id}/research" && template !== "/internal/v1/instruments/{instrument_id}/research-admission" && template !== "/internal/v1/portfolio-decision-runs/latest" && template !== "/internal/v1/risk-audit" && template !== "/internal/v1/risk-audit/export" && template !== "/internal/v1/strategy-evolution") return null;
+  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/paper/cycles" && template !== "/internal/v1/paper/orders" && template !== "/internal/v1/portfolios" && template !== "/internal/v1/instruments/{instrument_id}/research" && template !== "/internal/v1/instruments/{instrument_id}/research-admission" && template !== "/internal/v1/portfolio-decision-runs/latest" && template !== "/internal/v1/risk-audit" && template !== "/internal/v1/risk-audit/export" && template !== "/internal/v1/strategy-evolution") return null;
   const canonicalQuery = template === "/internal/v1/market"
     ? canonicalMarketQuery(query ?? "")
     : template === "/internal/v1/overview"
       ? canonicalOverviewQuery(query ?? "")
+    : template === "/internal/v1/paper/cycles"
+      ? canonicalPaperCycleQuery(query ?? "")
     : template === "/internal/v1/paper/orders"
       ? canonicalPaperOrderQuery(query ?? "")
     : template === "/internal/v1/portfolios"
@@ -226,7 +228,7 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const news = /^\/internal\/v1\/instruments\/([^/]+)\/news$/.exec(path);
   if (news && validateUuid(news[1])) return template === "/internal/v1/instruments/{instrument_id}/news";
   if (template === "/internal/v1/optimization-proposal-drafts") return path === template;
-  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
+  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/paper/cycles", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -363,6 +365,22 @@ function canonicalPaperOrderQuery(query: string): string | null {
     if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 50)) return null;
     if (key === "status" && !statuses.has(value)) return null;
     if (key === "cursor" && (value.length < 1 || value.length > 2048)) return null;
+    seen.add(key);
+    pairs.push([strictPercentEncode(key), strictPercentEncode(value)]);
+  }
+  pairs.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  return pairs.map(([key, value]) => `${key}=${value}`).join("&");
+}
+
+function canonicalPaperCycleQuery(query: string): string | null {
+  if (query.includes("?") || query.includes("#") || !hasValidPercentEscapes(query)) return null;
+  const allowedKeys = new Set(["decision_session", "limit"]);
+  const seen = new Set<string>();
+  const pairs: Array<[string, string]> = [];
+  for (const [key, value] of new URLSearchParams(query)) {
+    if (!allowedKeys.has(key) || seen.has(key)) return null;
+    if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 20)) return null;
+    if (key === "decision_session" && !isIsoDate(value)) return null;
     seen.add(key);
     pairs.push([strictPercentEncode(key), strictPercentEncode(value)]);
   }

@@ -5,11 +5,11 @@ const enabled = process.env.NEXUS_REAL_AGENT_PAPER_ACCEPTANCE === "1";
 test("real local Agent paper cycle is the same persisted fact in API and page", async ({ page, request }) => {
   test.skip(!enabled, "manual real-provider acceptance only");
 
-  const response = await request.get("/api/v1/paper/cycles/latest");
+  const response = await request.get("/api/v1/paper/cycles?limit=20");
   expect(response.status()).toBe(200);
   const envelope = await response.json();
-  const cycle = envelope.data;
-  expect(cycle).not.toBeNull();
+  expect(envelope.data.items).not.toHaveLength(0);
+  const cycle = envelope.data.items[0];
   expect(cycle.execution_locked).toBe(true);
   expect(cycle.cycle_id).toMatch(/^[0-9a-f-]{36}$/);
   expect(cycle.decision_market).toMatchObject({
@@ -26,8 +26,8 @@ test("real local Agent paper cycle is the same persisted fact in API and page", 
   });
 
   await page.goto("/paper");
-  await expect(page.getByRole("heading", { name: "最新 Agent 模拟周期" })).toBeVisible();
-  const region = page.getByRole("region", { name: "最新 Agent 模拟周期" });
+  await expect(page.getByRole("heading", { name: "当日 Agent 模拟周期" })).toBeVisible();
+  const region = page.getByRole("region", { name: "当日 Agent 模拟周期" });
   await expect(region).toContainText(cycle.result_code);
   await expect(region.locator(`time[datetime="${cycle.decision_time}"]`)).toHaveCount(1);
   await expect(region).toContainText("决策报价 · Schwab Level One · 实时");

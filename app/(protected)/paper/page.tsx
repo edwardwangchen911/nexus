@@ -27,7 +27,7 @@ type PaperPanelProps = {
   statusFilter: "" | OrderStatus;
   loadingMore: boolean;
   notice: Notice;
-  cycle?: AgentPaperCycleFact | null;
+  cycles?: AgentPaperCycleFact[];
   cycleUnavailable?: boolean;
   onRefresh: () => void;
   onStatusFilter: (status: "" | OrderStatus) => void;
@@ -51,7 +51,7 @@ export default function PaperPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [portfolio, setPortfolio] = useState<PaperPortfolio | null>(null);
   const [orders, setOrders] = useState<PaperOrder[]>([]);
-  const [cycle, setCycle] = useState<AgentPaperCycleFact | null>(null);
+  const [cycles, setCycles] = useState<AgentPaperCycleFact[]>([]);
   const [cycleUnavailable, setCycleUnavailable] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"" | OrderStatus>("");
@@ -73,7 +73,7 @@ export default function PaperPage(): React.ReactElement {
     ordersRef.current = [];
     setPortfolio(null);
     setOrders([]);
-    setCycle(null);
+    setCycles([]);
     setCycleUnavailable(false);
     setNextCursor(null);
   }, []);
@@ -89,7 +89,7 @@ export default function PaperPage(): React.ReactElement {
       const [portfolioResponse, orderResponse, cycleResponse] = await Promise.all([
         fetchWithTimeout("/api/v1/paper/portfolio"),
         fetchWithTimeout(orderPath(filter, null)),
-        fetchWithTimeout("/api/v1/paper/cycles/latest").catch(() => new Response(null, { status: 502 })),
+        fetchWithTimeout("/api/v1/paper/cycles?limit=20").catch(() => new Response(null, { status: 502 })),
       ]);
       if (version !== loadVersion.current) return false;
       if ([401, 403].includes(portfolioResponse.status) || [401, 403].includes(orderResponse.status)) {
@@ -117,10 +117,12 @@ export default function PaperPage(): React.ReactElement {
       ordersRef.current = page.items; setOrders(page.items); setNextCursor(page.next_cursor);
       cursorHistory.current = new Set(page.next_cursor ? [page.next_cursor] : []);
       if (cycleResponse.ok) {
-        const cyclePayload = await cycleResponse.json() as { data?: AgentPaperCycleFact };
-        setCycle(cyclePayload.data ?? null); setCycleUnavailable(!cyclePayload.data);
+        const cyclePayload = await cycleResponse.json() as { data?: { items?: AgentPaperCycleFact[] } };
+        const nextCycles = validCyclePage(cyclePayload.data);
+        if (!nextCycles) throw new Error("paper cycles invalid");
+        setCycles(nextCycles); setCycleUnavailable(false);
       } else {
-        setCycle(null); setCycleUnavailable(cycleResponse.status !== 404);
+        setCycles([]); setCycleUnavailable(true);
       }
       setState(portfolioState(nextPortfolio.data_state));
       return true;
@@ -252,7 +254,7 @@ export default function PaperPage(): React.ReactElement {
 
   return <>
     <PaperPanel state={state} portfolio={portfolio} orders={orders} nextCursor={nextCursor}
-      cycle={cycle} cycleUnavailable={cycleUnavailable}
+      cycles={cycles} cycleUnavailable={cycleUnavailable}
       statusFilter={statusFilter} loadingMore={loadingMore} notice={notice}
       onRefresh={() => void refresh()} onStatusFilter={(value) => void changeStatusFilter(value)}
       onLoadMore={() => void loadMoreOrders()} onCancel={openCancel} />
@@ -261,7 +263,7 @@ export default function PaperPage(): React.ReactElement {
   </>;
 }
 
-export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycle = null, cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
+export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
   const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
@@ -279,7 +281,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
           <div><p className="eyebrow">模拟账户权威</p><h2>{portfolio.name}</h2><p>初始资金 <strong className="numeric-data">USD {formatPaperDecimal(portfolio.initial_capital, 2)}</strong> · 仅内部模拟成交 · 实盘能力保持关闭</p></div>
           <span className="mode-badge">不是实盘</span>
         </section>
-        <AgentPaperCycle cycle={cycle} unavailable={cycleUnavailable} />
+        <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         <PerformanceFacts portfolio={portfolio} />
         <Positions portfolio={portfolio} />
@@ -345,6 +347,7 @@ function orderPath(status: "" | OrderStatus, cursor: string | null): string {
 }
 function validPortfolio(value: PaperPortfolio | undefined): PaperPortfolio | null { return value?.mode === "internal_paper" && value.currency === "USD" && Array.isArray(value.positions) && Array.isArray(value.attributions) ? value : null; }
 function validOrderPage(value: { items?: PaperOrder[]; next_cursor?: string | null } | undefined): { items: PaperOrder[]; next_cursor: string | null } | null { return value && Array.isArray(value.items) && value.items.length <= ORDER_PAGE_SIZE && (value.next_cursor === null || typeof value.next_cursor === "string" && value.next_cursor.length > 0 && value.next_cursor.length <= 2048) ? { items: value.items, next_cursor: value.next_cursor } : null; }
+function validCyclePage(value: { items?: AgentPaperCycleFact[] } | undefined): AgentPaperCycleFact[] | null { return value && Array.isArray(value.items) && value.items.length <= 20 ? value.items : null; }
 function portfolioState(state: PaperPortfolio["data_state"]): DataStateKind { return ({ EMPTY: "empty", READY: "ready", PARTIAL: "partial", STALE: "stale" })[state] as DataStateKind; }
 function paperStateDetail(state: DataStateKind): string { return ({ loading: "正在读取冻结绩效、持仓和订单事实。", empty: "尚无已发布的内部模拟绩效快照。", ready: "模拟盘事实已就绪。", partial: "部分归因证据不完整；保留已发布事实，不猜测缺失值。", stale: "显示最后已知快照；新的取消操作需先核对订单版本。", error: "读取失败；没有触发任何模拟或真实订单动作。", forbidden: "当前身份无权读取内部模拟盘。" })[state]; }
 function attributionLabel(value: PaperPortfolio["attributions"][number]["dimension"]): string { return ({ cash: "现金", instrument: "标的", sector: "行业" })[value]; }

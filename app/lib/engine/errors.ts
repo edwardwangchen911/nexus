@@ -18,6 +18,7 @@ import {
   paperOrderPageRuntimeSchema,
   paperPortfolioRuntimeSchema,
   agentPaperCycleRuntimeSchema,
+  agentPaperCyclePageRuntimeSchema,
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
   portfolioDecisionRunRuntimeSchema,
@@ -266,15 +267,18 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     return data;
   }
   if (pathname === "/internal/v1/paper/cycles/latest") {
+    if (requestMethod?.toUpperCase() !== "GET" || !agentPaperCycleValid(data)) {
+      return INVALID_DATA;
+    }
+    return data;
+  }
+  if (pathname === "/internal/v1/paper/cycles") {
     if (requestMethod?.toUpperCase() !== "GET"
-      || !matchesRuntimeSchema(data, agentPaperCycleRuntimeSchema)
+      || !matchesRuntimeSchema(data, agentPaperCyclePageRuntimeSchema)
       || !isPlain(data)
-      || data.execution_locked !== true
-      || !Array.isArray(data.candidates)
-      || data.candidates.length > 5
-      || data.candidate_count !== data.candidates.length
-      || !Array.isArray(data.order_ids)
-      || data.order_ids.length > 50) return INVALID_DATA;
+      || !Array.isArray(data.items)
+      || data.items.length > 20
+      || data.items.some((cycle) => !agentPaperCycleValid(cycle))) return INVALID_DATA;
     return data;
   }
   if (pathname === "/internal/v1/paper/orders") {
@@ -695,6 +699,17 @@ function shadowStartValid(data: unknown, groupId: string): data is Record<string
   return sameUuid(data.proposal_group_id, groupId)
     && data.status === "shadowing"
     && orderedShadowWindow(data);
+}
+
+function agentPaperCycleValid(value: unknown): boolean {
+  return matchesRuntimeSchema(value, agentPaperCycleRuntimeSchema)
+    && isPlain(value)
+    && value.execution_locked === true
+    && Array.isArray(value.candidates)
+    && value.candidates.length <= 5
+    && value.candidate_count === value.candidates.length
+    && Array.isArray(value.order_ids)
+    && value.order_ids.length <= 50;
 }
 
 function paperOrderValid(value: unknown): boolean {

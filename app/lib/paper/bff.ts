@@ -15,6 +15,7 @@ const ORDER_STATUSES = new Set([
   "reconciling",
 ]);
 const ORDER_QUERY_KEYS = new Set(["cursor", "limit", "status"]);
+const CYCLE_QUERY_KEYS = new Set(["decision_session", "limit"]);
 
 export function rejectQuery(request: Request, message: string): void {
   if ([...new URL(request.url).searchParams].length > 0) throw invalid(message);
@@ -26,6 +27,20 @@ export function canonicalPaperOrderQuery(search: URLSearchParams): string {
   for (const [key, value] of search) {
     if (!ORDER_QUERY_KEYS.has(key) || seen.has(key) || !validOrderQueryValue(key, value)) {
       throw invalid("The paper order query is invalid.");
+    }
+    seen.add(key);
+    entries.push([strictPercentEncode(key), strictPercentEncode(value)]);
+  }
+  entries.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  return entries.map(([key, value]) => `${key}=${value}`).join("&");
+}
+
+export function canonicalPaperCycleQuery(search: URLSearchParams): string {
+  const seen = new Set<string>();
+  const entries: Array<[string, string]> = [];
+  for (const [key, value] of search) {
+    if (!CYCLE_QUERY_KEYS.has(key) || seen.has(key) || !validCycleQueryValue(key, value)) {
+      throw invalid("The Agent paper cycle query is invalid.");
     }
     seen.add(key);
     entries.push([strictPercentEncode(key), strictPercentEncode(value)]);
@@ -70,6 +85,13 @@ function validOrderQueryValue(key: string, value: string): boolean {
   if (key === "status") return ORDER_STATUSES.has(value);
   if (key === "cursor") return value.length >= 1 && value.length <= 2048;
   return false;
+}
+
+function validCycleQueryValue(key: string, value: string): boolean {
+  if (key === "limit") return /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 20;
+  if (key !== "decision_session" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 function strictPercentEncode(value: string): string {

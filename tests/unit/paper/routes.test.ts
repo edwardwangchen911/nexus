@@ -27,6 +27,30 @@ describe("internal-paper BFF routes", () => {
     );
     expect(rejected.status).toBe(400);
   });
+
+  it("canonicalizes only the bounded Agent cycle list filters", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/cycles/route");
+    await GET(new Request("https://nexus.test/api/v1/paper/cycles?limit=20&decision_session=2026-09-14"));
+
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/paper/cycles",
+      path: "/internal/v1/paper/cycles",
+      query: "decision_session=2026-09-14&limit=20",
+    }, { method: "GET", actor });
+  });
+
+  it.each([
+    "limit=0",
+    "limit=21",
+    "decision_session=2026-02-30",
+    "decision_session=2026-09-14&decision_session=2026-09-15",
+    "account_id=secret",
+  ])("rejects invalid Agent cycle list filters before Engine: %s", async (query) => {
+    const { GET } = await import("../../../app/api/v1/paper/cycles/route");
+    const response = await GET(new Request(`https://nexus.test/api/v1/paper/cycles?${query}`));
+    expect(response.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     engineFetch.mockReset();
     engineFetch.mockResolvedValue(Response.json({

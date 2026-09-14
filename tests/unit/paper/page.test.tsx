@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import PaperPage, { PaperPanel } from "../../../app/(protected)/paper/page";
 import { AgentPaperCycle } from "../../../app/components/agent-paper-cycle";
 import type { DataStateKind } from "../../../app/components/data-state";
-import { agentPaperCycle, cancellableOrder, filledOrder, meta, paperPortfolio } from "./fixtures";
+import { agentPaperCycle, cancellableOrder, filledOrder, meta, olderAgentPaperCycle, paperPortfolio } from "./fixtures";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -19,13 +19,25 @@ const states: Array<[DataStateKind, string]> = [
 
 describe("internal paper page", () => {
   it("separates realtime Schwab decision quotes from unknown-delivery execution bars", () => {
-    render(<AgentPaperCycle cycle={agentPaperCycle} />);
+    render(<AgentPaperCycle cycles={[agentPaperCycle]} />);
 
-    const region = screen.getByRole("region", { name: "最新 Agent 模拟周期" });
+    const region = screen.getByRole("region", { name: "当日 Agent 模拟周期" });
     expect(region).toHaveTextContent("决策报价 · Schwab Level One · 实时");
     expect(region).toHaveTextContent("执行分钟线 · Schwab pricehistory · 实时性未由响应声明");
     expect(region).not.toHaveTextContent("下一交易日");
     expect(region).not.toHaveTextContent("嘉信实时成交");
+    expect(within(region).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("switches between bounded same-session Agent cycles without triggering an action", () => {
+    render(<AgentPaperCycle cycles={[agentPaperCycle, olderAgentPaperCycle]} />);
+
+    const region = screen.getByRole("region", { name: "当日 Agent 模拟周期" });
+    const selector = screen.getByRole("combobox", { name: "当日 Agent 模拟周期" });
+    expect(region).toHaveTextContent("PAPER_ORDERS_AWAITING_MARKET");
+    fireEvent.change(selector, { target: { value: olderAgentPaperCycle.cycle_id } });
+    expect(region).toHaveTextContent("RISK_INPUT_REQUIRED");
+    expect(region).toHaveTextContent("实盘锁定");
     expect(within(region).queryByRole("button")).not.toBeInTheDocument();
   });
 
@@ -36,7 +48,7 @@ describe("internal paper page", () => {
       const url = String(input);
       if (url === "/api/v1/paper/portfolio") return Response.json({ data: paperPortfolio, meta: meta() });
       if (url === "/api/v1/paper/orders?limit=20") return Response.json({ data: { items: [cancellableOrder], next_cursor: null }, meta: meta() });
-      if (url === "/api/v1/paper/cycles/latest") return Response.json({ error: { code: "UPSTREAM_ERROR" } }, { status: 502 });
+      if (url === "/api/v1/paper/cycles?limit=20") return Response.json({ error: { code: "UPSTREAM_ERROR" } }, { status: 502 });
       throw new Error(`unexpected request: ${url}`);
     }));
 

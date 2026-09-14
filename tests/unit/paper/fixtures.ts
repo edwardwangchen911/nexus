@@ -14,6 +14,7 @@ export const agentPaperCycle: AgentPaperCycle = {
   result_code: "PAPER_ORDERS_AWAITING_MARKET",
   decision_session: "2026-08-26",
   decision_time: "2026-08-26T19:30:00Z",
+  decision_slot_at: "2026-08-26T19:30:00Z",
   execution_session: "2026-08-26",
   execution_locked: true,
   candidate_count: 1,
@@ -22,6 +23,20 @@ export const agentPaperCycle: AgentPaperCycle = {
   decision_market: { source: "schwab", feed: "l1", delivery_mode: "real_time", delayed: false, quote_at: "2026-08-26T19:29:50Z" },
   execution_market: { source: "schwab", feed: "price_history", delivery_mode: "unknown", window_minutes: 5, status: "pending" },
   order_ids: [orderId],
+};
+
+export const olderAgentPaperCycle: AgentPaperCycle = {
+  ...agentPaperCycle,
+  cycle_id: "0198f7a0-1111-7777-8111-111111111119",
+  status: "unavailable",
+  result_code: "RISK_INPUT_REQUIRED",
+  decision_time: "2026-08-26T19:25:00Z",
+  decision_slot_at: "2026-08-26T19:25:00Z",
+  candidate_count: 0,
+  candidates: [],
+  decision: null,
+  decision_market: null,
+  order_ids: [],
 };
 
 export const paperPortfolio: PaperPortfolio = {

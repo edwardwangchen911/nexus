@@ -1,4 +1,5 @@
 import type { components } from "../lib/generated/schema";
+import { useState } from "react";
 import { formatPaperTime } from "./order-timeline";
 
 export type AgentPaperCycleFact = components["schemas"]["AgentPaperCycleResponse"];
@@ -16,13 +17,15 @@ const marketStatusLabels: Record<AgentPaperCycleFact["execution_market"]["status
   unavailable: "窗口不可用",
 };
 
-export function AgentPaperCycle({ cycle, unavailable = false }: {
-  cycle: AgentPaperCycleFact | null;
+export function AgentPaperCycle({ cycles, unavailable = false }: {
+  cycles: AgentPaperCycleFact[];
   unavailable?: boolean;
 }): React.ReactElement {
+  const [selectedCycleId, setSelectedCycleId] = useState<string | null>(null);
+  const cycle = cycles.find((item) => item.cycle_id === selectedCycleId) ?? cycles[0] ?? null;
   if (!cycle) {
     return <section className="paper-orders" aria-labelledby="agent-cycle-title">
-      <header><div><p className="eyebrow">只读事实链</p><h2 id="agent-cycle-title">最新 Agent 模拟周期</h2></div></header>
+      <header><div><p className="eyebrow">只读事实链</p><h2 id="agent-cycle-title">当日 Agent 模拟周期</h2></div></header>
       <p className="paper-orders__empty">{unavailable ? "Agent 周期事实暂不可用；账户绩效与订单仍按各自事实显示。" : "尚无 Agent 模拟周期。"}</p>
     </section>;
   }
@@ -30,7 +33,7 @@ export function AgentPaperCycle({ cycle, unavailable = false }: {
     ? "执行分钟线 · Schwab pricehistory · 实时性未由响应声明"
     : "执行分钟线 · Alpaca IEX · 实时子集";
   return <section className="paper-orders" aria-labelledby="agent-cycle-title">
-    <header className="paper-orders__heading"><div><p className="eyebrow">只读事实链 · 仅内部模拟</p><h2 id="agent-cycle-title">最新 Agent 模拟周期</h2><p>{statusLabels[cycle.status]} · 决策 <time dateTime={cycle.decision_time}>{formatPaperTime(cycle.decision_time)}</time> · 执行交易日 {cycle.execution_session}</p></div><span className="mode-badge">实盘锁定</span></header>
+    <header className="paper-orders__heading"><div><p className="eyebrow">只读事实链 · 仅内部模拟</p><h2 id="agent-cycle-title">当日 Agent 模拟周期</h2><p>{statusLabels[cycle.status]} · 决策 <time dateTime={cycle.decision_time}>{formatPaperTime(cycle.decision_time)}</time> · 执行交易日 {cycle.execution_session}</p></div><div className="page-actions">{cycles.length > 1 ? <label className="paper-orders__filter">当日 Agent 模拟周期<select value={cycle.cycle_id} onChange={(event) => setSelectedCycleId(event.target.value)}>{cycles.map((item) => <option key={item.cycle_id} value={item.cycle_id}>{formatPaperTime(item.decision_time)} · {statusLabels[item.status]}</option>)}</select></label> : null}<span className="mode-badge">实盘锁定</span></div></header>
     <p>{cycle.decision_market ? <>决策报价 · Schwab Level One · 实时 · <time dateTime={cycle.decision_market.quote_at}>{formatPaperTime(cycle.decision_market.quote_at)}</time></> : "决策报价 · 历史周期未单独投影"}</p>
     <p>{executionMarket} · 连续 {cycle.execution_market.window_minutes} 分钟 · {marketStatusLabels[cycle.execution_market.status]}</p>
     <p>停止原因：{cycle.result_code}</p>
