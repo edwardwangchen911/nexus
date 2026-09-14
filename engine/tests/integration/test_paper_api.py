@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -19,19 +20,25 @@ from helpers.paper_batch import (
     seed_paper_batch,
 )
 from helpers.paper_execution import seed_paper_execution
+from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
     candidate_manifest_hash,
     canonical_cycle_event_hash,
 )
 from nexus.paper.execution_service import advance_internal_paper_order
+from nexus.persistence.models.data import DataArtifact
+from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
 )
 from nexus.persistence.session import session_factory
+from sqlalchemy import text
 
 
 @pytest.fixture(autouse=True)
@@ -150,16 +157,209 @@ async def test_latest_agent_paper_cycle_returns_only_bounded_redacted_facts(
     assert data["cycle_id"] == str(cycle_id)
     assert data["execution_locked"] is True
     assert data["candidate_count"] == len(data["candidates"]) == 1
-    assert data["market"] == {
+    assert data["decision_market"] is None
+    assert data["execution_market"] == {
         "source": "alpaca",
         "feed": "iex",
         "delivery_mode": "real_time",
-        "coverage": "IEX_EXCHANGE_SUBSET",
         "window_minutes": 5,
         "status": "pending",
     }
     assert "prompt" not in response.text.lower()
     assert "account_id" not in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_latest_schwab_agent_cycle_uses_its_frozen_quote_and_unknown_execution(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    decision_time = DECISION_TIME - timedelta(minutes=90)
+    quote_at = decision_time - timedelta(seconds=10)
+    artifact_id = UUID("72000000-0000-0000-0000-000000000010")
+    quote_id = UUID("72000000-0000-0000-0000-000000000011")
+    artifact_hash = "e" * 64
+    candidate = CandidateManifestEntry(
+        instrument_id=INSTRUMENTS[0][0],
+        symbol="AAPL",
+        inclusion_reason="quality_rank",
+        research_snapshot_id=DATA_SNAPSHOT_ID,
+        prior_daily_price_authority_id=UUID(int=41),
+        decision_quote_id=quote_id,
+        decision_trade_id=None,
+        decision_artifact_id=artifact_id,
+        decision_evidence_hash=artifact_hash,
+        risk_query_authority_ids=(UUID(int=44), UUID(int=45), UUID(int=46)),
+    )
+    cycle_id = UUID("72000000-0000-0000-0000-000000000012")
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        artifact = DataArtifact(
+            id=artifact_id,
+            uri="memory://must-not-leak/schwab.json",
+            sha256=artifact_hash,
+            byte_size=100,
+            mime_type="application/json",
+            schema_version="schwab_level_one_stream_v1",
+            source="schwab",
+            observed_at=quote_at,
+            available_at=decision_time,
+            received_at=decision_time,
+            created_at=decision_time,
+        )
+        quote_payload = canonical_quote_observation(
+            instrument_id=INSTRUMENTS[0][0],
+            source="schwab",
+            feed="l1",
+            delivery_mode="real_time",
+            event_kind="quote",
+            bid=Decimal("99.90"),
+            ask=Decimal("100.10"),
+            last=None,
+            observed_at=quote_at,
+            available_at=decision_time,
+            received_at=decision_time,
+            revision=artifact_hash,
+        )
+        frozen_quote = LatestQuote(
+            id=quote_id,
+            instrument_id=INSTRUMENTS[0][0],
+            source="schwab",
+            feed="l1",
+            delivery_mode="real_time",
+            bid=Decimal("99.90"),
+            ask=Decimal("100.10"),
+            last=None,
+            observed_at=quote_at,
+            available_at=decision_time,
+            received_at=decision_time,
+            revision=artifact_hash,
+            quality_flags=[],
+            event_kind="quote",
+            content_hash=sha256(quote_payload).hexdigest(),
+            evidence_status="verified",
+            data_artifact_id=artifact_id,
+            created_at=decision_time,
+        )
+        newer_at = decision_time + timedelta(seconds=1)
+        newer_payload = canonical_quote_observation(
+            instrument_id=INSTRUMENTS[0][0],
+            source="schwab",
+            feed="l1",
+            delivery_mode="real_time",
+            event_kind="quote",
+            bid=Decimal("100.90"),
+            ask=Decimal("101.10"),
+            last=None,
+            observed_at=newer_at,
+            available_at=newer_at,
+            received_at=newer_at,
+            revision=artifact_hash,
+        )
+        newer_global_quote = LatestQuote(
+            id=UUID("72000000-0000-0000-0000-000000000013"),
+            instrument_id=INSTRUMENTS[0][0],
+            source="schwab",
+            feed="l1",
+            delivery_mode="real_time",
+            bid=Decimal("100.90"),
+            ask=Decimal("101.10"),
+            last=None,
+            observed_at=newer_at,
+            available_at=newer_at,
+            received_at=newer_at,
+            revision=artifact_hash,
+            quality_flags=[],
+            event_kind="quote",
+            content_hash=sha256(newer_payload).hexdigest(),
+            evidence_status="verified",
+            data_artifact_id=artifact_id,
+            created_at=newer_at,
+        )
+        session.add_all((artifact, frozen_quote, newer_global_quote))
+        session.add(
+            AgentPaperCycleRecord(
+                id=cycle_id,
+                account_id=seed.account_id,
+                portfolio_id=seed.portfolio_id,
+                decision_session=DECISION_SESSION,
+                decision_time=decision_time,
+                execution_session=DECISION_SESSION,
+                universe_snapshot_id=UNIVERSE_ID,
+                quality_report_id=None,
+                decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                candidate_manifest=[candidate.model_dump(mode="json")],
+                candidate_hash=candidate_manifest_hash((candidate,)),
+                sizing_policy_version="agent_paper_sizing_v1",
+                sizing_policy_hash="8" * 64,
+                execution_locked=True,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentPaperCycleEventRecord(
+                cycle_id=cycle_id,
+                sequence=1,
+                from_status=None,
+                to_status="prepared",
+                result_code="CYCLE_PREPARED",
+                fact_ids={},
+                occurred_at=decision_time,
+                event_hash=canonical_cycle_event_hash(
+                    cycle_id=cycle_id,
+                    sequence=1,
+                    from_status=None,
+                    to_status="prepared",
+                    result_code="CYCLE_PREPARED",
+                    fact_ids={},
+                    occurred_at=decision_time,
+                ),
+            )
+        )
+
+    path = "/internal/v1/paper/cycles/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["decision_market"] == {
+        "source": "schwab",
+        "feed": "l1",
+        "delivery_mode": "real_time",
+        "delayed": False,
+        "quote_at": quote_at.isoformat().replace("+00:00", "Z"),
+    }
+    assert data["execution_market"] == {
+        "source": "schwab",
+        "feed": "price_history",
+        "delivery_mode": "unknown",
+        "window_minutes": 5,
+        "status": "pending",
+    }
+    wire = response.text.lower()
+    assert "must-not-leak" not in wire
+    assert all(secret not in wire for secret in ("artifact", "manifest", "token", "transcript"))
+
+    async with factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE latest_quotes DISABLE TRIGGER USER"))
+        try:
+            await session.execute(
+                text("DELETE FROM latest_quotes WHERE id=:quote_id"), {"quote_id": quote_id}
+            )
+        finally:
+            await session.execute(text("ALTER TABLE latest_quotes ENABLE TRIGGER USER"))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        incomplete = await client.get(path, headers=headers("GET", path))
+    assert incomplete.status_code == 409
+    assert incomplete.json()["error"]["code"] == "DATA_PARTIAL"
 
 
 @pytest.mark.asyncio

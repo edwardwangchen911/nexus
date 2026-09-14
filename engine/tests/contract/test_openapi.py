@@ -203,6 +203,33 @@ def test_openapi_exposes_distinct_closed_shadow_start_and_read_contracts() -> No
     assert "trade_id" not in wire
 
 
+def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct() -> None:
+    schemas = create_engine_app(EngineSettings.for_test()).openapi()["components"]["schemas"]
+    cycle = schemas["AgentPaperCycleResponse"]
+    assert {"decision_market", "execution_market"} <= set(cycle["required"])
+    assert "market" not in cycle["properties"]
+    execution = cycle["properties"]["execution_market"]
+    assert execution["discriminator"] == {
+        "propertyName": "source",
+        "mapping": {
+            "alpaca": "#/components/schemas/AgentPaperAlpacaExecutionMarketResponse",
+            "schwab": "#/components/schemas/AgentPaperSchwabExecutionMarketResponse",
+        },
+    }
+    assert schemas["AgentPaperDecisionMarketResponse"]["properties"]["delayed"] == {
+        "const": False,
+        "title": "Delayed",
+        "type": "boolean",
+    }
+    wire = str(
+        {name: schema for name, schema in schemas.items() if name.startswith("AgentPaper")}
+    ).lower()
+    assert not any(
+        forbidden in wire
+        for forbidden in ("artifact_uri", "manifest", "token", "transcript", "account_id")
+    )
+
+
 def test_openapi_exposes_closed_strategy_evolution_surface() -> None:
     document = create_engine_app(EngineSettings.for_test()).openapi()
     paths = document["paths"]

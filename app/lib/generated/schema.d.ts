@@ -1083,6 +1083,34 @@ export interface components {
              */
             universe_policy: "current_holdings_only";
         };
+        /** AgentPaperAlpacaExecutionMarketResponse */
+        AgentPaperAlpacaExecutionMarketResponse: {
+            /**
+             * Delivery Mode
+             * @constant
+             */
+            delivery_mode: "real_time";
+            /**
+             * Feed
+             * @constant
+             */
+            feed: "iex";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            source: "alpaca";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "qualified" | "probe" | "unavailable";
+            /**
+             * Window Minutes
+             * @constant
+             */
+            window_minutes: 5;
+        };
         /** AgentPaperCandidateResponse */
         AgentPaperCandidateResponse: {
             /**
@@ -1127,6 +1155,7 @@ export interface components {
              */
             cycle_id: string;
             decision: components["schemas"]["AgentPaperDecisionResponse"] | null;
+            decision_market: components["schemas"]["AgentPaperDecisionMarketResponse"] | null;
             /**
              * Decision Session
              * Format: date
@@ -1142,12 +1171,13 @@ export interface components {
              * @constant
              */
             execution_locked: true;
+            /** Execution Market */
+            execution_market: components["schemas"]["AgentPaperAlpacaExecutionMarketResponse"] | components["schemas"]["AgentPaperSchwabExecutionMarketResponse"];
             /**
              * Execution Session
              * Format: date
              */
             execution_session: string;
-            market: components["schemas"]["AgentPaperMarketResponse"];
             /** Order Ids */
             order_ids: string[];
             /** Result Code */
@@ -1157,6 +1187,34 @@ export interface components {
              * @enum {string}
              */
             status: "prepared" | "researching" | "decision_recorded" | "risk_evaluated" | "awaiting_market" | "partially_filled" | "completed" | "unavailable" | "failed";
+        };
+        /** AgentPaperDecisionMarketResponse */
+        AgentPaperDecisionMarketResponse: {
+            /**
+             * Delayed
+             * @constant
+             */
+            delayed: false;
+            /**
+             * Delivery Mode
+             * @constant
+             */
+            delivery_mode: "real_time";
+            /**
+             * Feed
+             * @constant
+             */
+            feed: "l1";
+            /**
+             * Quote At
+             * Format: date-time
+             */
+            quote_at: string;
+            /**
+             * Source
+             * @constant
+             */
+            source: "schwab";
         };
         /** AgentPaperDecisionResponse */
         AgentPaperDecisionResponse: {
@@ -1175,33 +1233,28 @@ export interface components {
             /** Target Cash Weight */
             target_cash_weight: string;
         };
-        /** AgentPaperMarketResponse */
-        AgentPaperMarketResponse: {
-            /**
-             * Coverage
-             * @constant
-             */
-            coverage: "IEX_EXCHANGE_SUBSET";
+        /** AgentPaperSchwabExecutionMarketResponse */
+        AgentPaperSchwabExecutionMarketResponse: {
             /**
              * Delivery Mode
              * @constant
              */
-            delivery_mode: "real_time";
+            delivery_mode: "unknown";
             /**
              * Feed
              * @constant
              */
-            feed: "iex";
+            feed: "price_history";
             /**
-             * Source
-             * @constant
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
-            source: "alpaca";
+            source: "schwab";
             /**
              * Status
              * @enum {string}
              */
-            status: "pending" | "qualified" | "probe";
+            status: "pending" | "qualified" | "probe" | "unavailable";
             /**
              * Window Minutes
              * @constant

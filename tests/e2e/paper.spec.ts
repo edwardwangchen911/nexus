@@ -18,6 +18,10 @@ for (const viewport of [
     await expect(currentStage).toBeInViewport();
     await expect(page.getByRole("region", { name: "模拟账户边界" })).toContainText("不是实盘");
     await expect(page.getByRole("heading", { name: "最新 Agent 模拟周期" })).toBeVisible();
+    const agentCycle = page.getByRole("region", { name: "最新 Agent 模拟周期" });
+    await expect(agentCycle).toContainText("决策报价 · Schwab Level One · 实时");
+    await expect(agentCycle).toContainText("执行分钟线 · Schwab pricehistory · 实时性未由响应声明");
+    await expect(agentCycle.getByRole("button")).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Agent 模拟候选，可横向滚动" })).toContainText("AAPL");
     await expect(page.getByLabel("模拟账户绩效事实")).toContainText("USD 8,500.00");
     await expect(page.getByRole("table", { name: "内部模拟持仓" })).toContainText("alpaca / iex");

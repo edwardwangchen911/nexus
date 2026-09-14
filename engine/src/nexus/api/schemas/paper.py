@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from nexus.api.schemas.integrations import SuccessMetaResponse
@@ -149,13 +149,34 @@ class AgentPaperDecisionResponse(_StrictSchema):
     risk_outcomes: tuple[Literal["approved", "reduced", "rejected"], ...] = Field(max_length=50)
 
 
-class AgentPaperMarketResponse(_StrictSchema):
+class AgentPaperDecisionMarketResponse(_StrictSchema):
+    source: Literal["schwab"]
+    feed: Literal["l1"]
+    delivery_mode: Literal["real_time"]
+    delayed: Literal[False]
+    quote_at: AwareDatetime
+
+
+class AgentPaperAlpacaExecutionMarketResponse(_StrictSchema):
     source: Literal["alpaca"]
     feed: Literal["iex"]
     delivery_mode: Literal["real_time"]
-    coverage: Literal["IEX_EXCHANGE_SUBSET"]
     window_minutes: Literal[5]
-    status: Literal["pending", "qualified", "probe"]
+    status: Literal["pending", "qualified", "probe", "unavailable"]
+
+
+class AgentPaperSchwabExecutionMarketResponse(_StrictSchema):
+    source: Literal["schwab"]
+    feed: Literal["price_history"]
+    delivery_mode: Literal["unknown"]
+    window_minutes: Literal[5]
+    status: Literal["pending", "qualified", "probe", "unavailable"]
+
+
+AgentPaperExecutionMarketResponse = Annotated[
+    AgentPaperAlpacaExecutionMarketResponse | AgentPaperSchwabExecutionMarketResponse,
+    Field(discriminator="source"),
+]
 
 
 class AgentPaperCycleResponse(_StrictSchema):
@@ -179,7 +200,8 @@ class AgentPaperCycleResponse(_StrictSchema):
     candidate_count: int = Field(ge=0, le=5)
     candidates: tuple[AgentPaperCandidateResponse, ...] = Field(max_length=5)
     decision: AgentPaperDecisionResponse | None
-    market: AgentPaperMarketResponse
+    decision_market: AgentPaperDecisionMarketResponse | None
+    execution_market: AgentPaperExecutionMarketResponse
     order_ids: tuple[UUID, ...] = Field(max_length=50)
 
 

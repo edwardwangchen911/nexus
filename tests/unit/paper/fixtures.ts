@@ -13,13 +13,14 @@ export const agentPaperCycle: AgentPaperCycle = {
   status: "awaiting_market",
   result_code: "PAPER_ORDERS_AWAITING_MARKET",
   decision_session: "2026-08-26",
-  decision_time: "2026-08-26T21:00:00Z",
-  execution_session: "2026-08-27",
+  decision_time: "2026-08-26T19:30:00Z",
+  execution_session: "2026-08-26",
   execution_locked: true,
   candidate_count: 1,
   candidates: [{ instrument_id: instrumentId, symbol: "AAPL", selection_reasons: ["quality_rank"], research_status: "completed", stance: "buy_candidate", sizing_action: "increase", intent_hash: "a".repeat(64), output_id: "0198f7a0-1111-7777-8111-111111111126", rejection_code: null }],
   decision: { decision_id: "0198f7a0-1111-7777-8111-111111111127", sizing_policy_version: "agent_paper_sizing_v1", target_cash_weight: "0.950000000000", risk_outcomes: ["approved"] },
-  market: { source: "alpaca", feed: "iex", delivery_mode: "real_time", coverage: "IEX_EXCHANGE_SUBSET", window_minutes: 5, status: "pending" },
+  decision_market: { source: "schwab", feed: "l1", delivery_mode: "real_time", delayed: false, quote_at: "2026-08-26T19:29:50Z" },
+  execution_market: { source: "schwab", feed: "price_history", delivery_mode: "unknown", window_minutes: 5, status: "pending" },
   order_ids: [orderId],
 };
 

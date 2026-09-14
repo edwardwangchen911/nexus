@@ -13,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.paper import (
+    AgentPaperAlpacaExecutionMarketResponse,
     AgentPaperCandidateResponse,
     AgentPaperCycleResponse,
+    AgentPaperDecisionMarketResponse,
     AgentPaperDecisionResponse,
-    AgentPaperMarketResponse,
+    AgentPaperSchwabExecutionMarketResponse,
     PaperAttributionResponse,
     PaperFillResponse,
     PaperOrderEventResponse,
@@ -28,15 +30,18 @@ from nexus.api.schemas.paper import (
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
+from nexus.paper.agent_cycle_models import CandidateManifestEntry
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.backtest import StrategyDefinitionRecord
-from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManifest
+from nexus.persistence.models.data import DataArtifact, PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.evolution import StrategyRegistryEventRecord
-from nexus.persistence.models.market import InstrumentAlias
+from nexus.persistence.models.market import InstrumentAlias, LatestQuote
 from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
@@ -118,6 +123,16 @@ class PaperReadService:
             raise NexusError(
                 ErrorCode.DATA_PARTIAL, "The Agent paper cycle is incomplete.", status_code=409
             )
+        try:
+            manifest = tuple(
+                CandidateManifestEntry.model_validate(raw) for raw in cycle.candidate_manifest
+            )
+        except (TypeError, ValueError):
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper cycle manifest is incomplete.",
+                status_code=409,
+            ) from None
         decision = await self._session.scalar(
             select(StrategyDecisionRecord).where(
                 StrategyDecisionRecord.account_id == cycle.account_id,
@@ -155,8 +170,8 @@ class PaperReadService:
                 )
             outputs = {instrument_id: (output, binding) for instrument_id, output, binding in rows}
         candidates = []
-        for raw in cycle.candidate_manifest:
-            instrument_id = UUID(str(raw["instrument_id"]))
+        for candidate in manifest:
+            instrument_id = candidate.instrument_id
             bound = outputs.get(instrument_id)
             output, binding = bound if bound is not None else (None, None)
             intent = output.intent if output is not None and isinstance(output.intent, dict) else {}
@@ -164,8 +179,8 @@ class PaperReadService:
             candidates.append(
                 AgentPaperCandidateResponse(
                     instrument_id=instrument_id,
-                    symbol=str(raw["symbol"]),
-                    selection_reasons=(str(raw["inclusion_reason"]),),
+                    symbol=candidate.symbol,
+                    selection_reasons=(candidate.inclusion_reason,),
                     research_status="completed" if bound is not None else "pending",
                     stance=cast(
                         Literal["buy_candidate", "reduce_candidate", "hold", "watch"] | None,
@@ -261,7 +276,10 @@ class PaperReadService:
         windows = tuple(
             await self._session.scalars(
                 select(AgentPaperMarketWindowRecord)
-                .where(AgentPaperMarketWindowRecord.cycle_id == cycle.id)
+                .where(
+                    AgentPaperMarketWindowRecord.cycle_id == cycle.id,
+                    AgentPaperMarketWindowRecord.evaluated_at <= self._request_time,
+                )
                 .order_by(AgentPaperMarketWindowRecord.created_at.desc())
                 .limit(51)
             )
@@ -270,11 +288,71 @@ class PaperReadService:
             raise NexusError(
                 ErrorCode.DATA_PARTIAL, "The Agent paper cycle is unbounded.", status_code=409
             )
-        market_status: Literal["pending", "qualified", "probe"] = "pending"
+        market_status: Literal["pending", "qualified", "probe", "unavailable"] = "pending"
         if any(row.purpose == "paper_fill" for row in windows):
             market_status = "qualified"
         elif windows:
             market_status = "probe"
+        elif projected_result_code == "PAPER_MARKET_WINDOW_UNAVAILABLE":
+            market_status = "unavailable"
+        schwab_execution = (
+            cycle.execution_price_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        )
+        expected_execution = (
+            ("schwab", "price_history", "unknown")
+            if schwab_execution
+            else ("alpaca", "iex", "real_time")
+        )
+        if any((row.source, row.feed, row.delivery_mode) != expected_execution for row in windows):
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper market binding is incomplete.",
+                status_code=409,
+            )
+        decision_market = None
+        if cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
+            if len(manifest) != 1:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent paper decision market is incomplete.",
+                    status_code=409,
+                )
+            candidate = manifest[0]
+            quote = await self._session.get(LatestQuote, candidate.decision_quote_id)
+            artifact = await self._session.get(DataArtifact, candidate.decision_artifact_id)
+            if (
+                quote is None
+                or artifact is None
+                or quote.instrument_id != candidate.instrument_id
+                or quote.data_artifact_id != artifact.id
+                or quote.source != "schwab"
+                or quote.feed != "l1"
+                or quote.delivery_mode != "real_time"
+                or quote.event_kind != "quote"
+                or quote.evidence_status != "verified"
+                or quote.bid is None
+                or quote.ask is None
+                or quote.bid <= 0
+                or quote.ask <= 0
+                or quote.bid > quote.ask
+                or quote.available_at > cycle.decision_time
+                or quote.received_at > cycle.decision_time
+                or artifact.source != "schwab"
+                or artifact.schema_version != "schwab_level_one_stream_v1"
+                or artifact.sha256 != candidate.decision_evidence_hash
+            ):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent paper decision market is incomplete.",
+                    status_code=409,
+                )
+            decision_market = AgentPaperDecisionMarketResponse(
+                source="schwab",
+                feed="l1",
+                delivery_mode="real_time",
+                delayed=False,
+                quote_at=quote.observed_at,
+            )
         return AgentPaperCycleResponse(
             cycle_id=cycle.id,
             status=cast(Any, projected_status),
@@ -286,13 +364,23 @@ class PaperReadService:
             candidate_count=len(candidates),
             candidates=tuple(candidates),
             decision=decision_response,
-            market=AgentPaperMarketResponse(
-                source="alpaca",
-                feed="iex",
-                delivery_mode="real_time",
-                coverage="IEX_EXCHANGE_SUBSET",
-                window_minutes=5,
-                status=market_status,
+            decision_market=decision_market,
+            execution_market=(
+                AgentPaperSchwabExecutionMarketResponse(
+                    source="schwab",
+                    feed="price_history",
+                    delivery_mode="unknown",
+                    window_minutes=5,
+                    status=market_status,
+                )
+                if schwab_execution
+                else AgentPaperAlpacaExecutionMarketResponse(
+                    source="alpaca",
+                    feed="iex",
+                    delivery_mode="real_time",
+                    window_minutes=5,
+                    status=market_status,
+                )
             ),
             order_ids=order_ids,
         )

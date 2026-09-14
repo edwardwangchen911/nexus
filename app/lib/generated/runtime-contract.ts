@@ -116,6 +116,50 @@ export const runtimeContractSchemas = {
     "title": "ActiveFamilyResponse",
     "type": "object"
   },
+  "AgentPaperAlpacaExecutionMarketResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "delivery_mode": {
+        "const": "real_time",
+        "title": "Delivery Mode",
+        "type": "string"
+      },
+      "feed": {
+        "const": "iex",
+        "title": "Feed",
+        "type": "string"
+      },
+      "source": {
+        "const": "alpaca",
+        "title": "Source",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "pending",
+          "qualified",
+          "probe",
+          "unavailable"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "window_minutes": {
+        "const": 5,
+        "title": "Window Minutes",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "source",
+      "feed",
+      "delivery_mode",
+      "window_minutes",
+      "status"
+    ],
+    "title": "AgentPaperAlpacaExecutionMarketResponse",
+    "type": "object"
+  },
   "AgentPaperCandidateResponse": {
     "additionalProperties": false,
     "properties": {
@@ -265,6 +309,16 @@ export const runtimeContractSchemas = {
           }
         ]
       },
+      "decision_market": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperDecisionMarketResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "decision_session": {
         "format": "date",
         "title": "Decision Session",
@@ -280,13 +334,28 @@ export const runtimeContractSchemas = {
         "title": "Execution Locked",
         "type": "boolean"
       },
+      "execution_market": {
+        "discriminator": {
+          "mapping": {
+            "alpaca": "#/components/schemas/AgentPaperAlpacaExecutionMarketResponse",
+            "schwab": "#/components/schemas/AgentPaperSchwabExecutionMarketResponse"
+          },
+          "propertyName": "source"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperAlpacaExecutionMarketResponse"
+          },
+          {
+            "$ref": "#/components/schemas/AgentPaperSchwabExecutionMarketResponse"
+          }
+        ],
+        "title": "Execution Market"
+      },
       "execution_session": {
         "format": "date",
         "title": "Execution Session",
         "type": "string"
-      },
-      "market": {
-        "$ref": "#/components/schemas/AgentPaperMarketResponse"
       },
       "order_ids": {
         "items": {
@@ -330,10 +399,50 @@ export const runtimeContractSchemas = {
       "candidate_count",
       "candidates",
       "decision",
-      "market",
+      "decision_market",
+      "execution_market",
       "order_ids"
     ],
     "title": "AgentPaperCycleResponse",
+    "type": "object"
+  },
+  "AgentPaperDecisionMarketResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "delayed": {
+        "const": false,
+        "title": "Delayed",
+        "type": "boolean"
+      },
+      "delivery_mode": {
+        "const": "real_time",
+        "title": "Delivery Mode",
+        "type": "string"
+      },
+      "feed": {
+        "const": "l1",
+        "title": "Feed",
+        "type": "string"
+      },
+      "quote_at": {
+        "format": "date-time",
+        "title": "Quote At",
+        "type": "string"
+      },
+      "source": {
+        "const": "schwab",
+        "title": "Source",
+        "type": "string"
+      }
+    },
+    "required": [
+      "source",
+      "feed",
+      "delivery_mode",
+      "delayed",
+      "quote_at"
+    ],
+    "title": "AgentPaperDecisionMarketResponse",
     "type": "object"
   },
   "AgentPaperDecisionResponse": {
@@ -378,26 +487,21 @@ export const runtimeContractSchemas = {
     "title": "AgentPaperDecisionResponse",
     "type": "object"
   },
-  "AgentPaperMarketResponse": {
+  "AgentPaperSchwabExecutionMarketResponse": {
     "additionalProperties": false,
     "properties": {
-      "coverage": {
-        "const": "IEX_EXCHANGE_SUBSET",
-        "title": "Coverage",
-        "type": "string"
-      },
       "delivery_mode": {
-        "const": "real_time",
+        "const": "unknown",
         "title": "Delivery Mode",
         "type": "string"
       },
       "feed": {
-        "const": "iex",
+        "const": "price_history",
         "title": "Feed",
         "type": "string"
       },
       "source": {
-        "const": "alpaca",
+        "const": "schwab",
         "title": "Source",
         "type": "string"
       },
@@ -405,7 +509,8 @@ export const runtimeContractSchemas = {
         "enum": [
           "pending",
           "qualified",
-          "probe"
+          "probe",
+          "unavailable"
         ],
         "title": "Status",
         "type": "string"
@@ -420,11 +525,10 @@ export const runtimeContractSchemas = {
       "source",
       "feed",
       "delivery_mode",
-      "coverage",
       "window_minutes",
       "status"
     ],
-    "title": "AgentPaperMarketResponse",
+    "title": "AgentPaperSchwabExecutionMarketResponse",
     "type": "object"
   },
   "AgentRole": {
