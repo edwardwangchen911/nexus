@@ -1,9 +1,11 @@
 """Resumable, append-only coordination for one internal Agent paper cycle."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
+from hashlib import sha256
 from typing import cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +24,7 @@ from nexus.paper.agent_cycle_authority import (
 )
 from nexus.paper.agent_cycle_models import (
     AgentPaperCycleResult,
+    AgentPaperTriggerReservation,
     CandidateManifestEntry,
     CycleStatus,
     candidate_manifest_hash,
@@ -48,7 +51,7 @@ from nexus.persistence.models.paper import (
     PaperAccountRecord,
     StrategyDecisionRecord,
 )
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.risk.authority import (
     RiskAuthorityInput,
@@ -58,11 +61,13 @@ from nexus.risk.authority import (
 
 __all__ = [
     "AgentPaperCycleResult",
+    "AgentPaperTriggerReservation",
     "CandidateManifestEntry",
     "CycleStatus",
     "AgentPaperCycleError",
     "advance_agent_paper_cycle",
-    "claim_schwab_agent_paper_trigger",
+    "finish_schwab_agent_paper_trigger",
+    "reserve_schwab_agent_paper_trigger",
     "resume_schwab_agent_paper_cycle",
     "start_schwab_agent_paper_cycle",
     "candidate_manifest_hash",
@@ -74,64 +79,116 @@ class AgentPaperCycleError(ValueError):
     """Stable fail-closed error for the internal-only cycle boundary."""
 
 
-async def claim_schwab_agent_paper_trigger(
+_TRIGGER_FAILURE_CODES = frozenset(
+    {
+        "AGENT_PAPER_ACCOUNT_INVALID",
+        "AGENT_PAPER_OUTSIDE_WINDOW",
+        "RISK_INPUT_REQUIRED",
+        "SCHWAB_L1_FRESHNESS_UNPROVEN",
+        "SCHWAB_L1_INCOMPLETE",
+    }
+)
+
+
+async def reserve_schwab_agent_paper_trigger(
     session: AsyncSession,
     *,
     account_id: UUID,
-    decision_session: date,
-    decision_slot_at: datetime,
-    idempotency_key: str,
-) -> AgentPaperCycleResult | None:
-    """Claim and lock one session before any external provider collection."""
+    client_idempotency_key: str,
+    now: datetime,
+) -> AgentPaperTriggerReservation:
+    """Reserve one database-derived decision slot before provider work begins."""
     if (
-        floor_decision_slot(decision_slot_at) != decision_slot_at
-        or not idempotency_key
-        or len(idempotency_key) > 255
+        now.tzinfo is None
+        or now.utcoffset() is None
+        or not client_idempotency_key
+        or len(client_idempotency_key) > 255
     ):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    local_time = now.astimezone(ZoneInfo("America/New_York"))
+    if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
+        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
+    decision_slot_at = floor_decision_slot(now)
     request_hash = job_input_hash(
         {
-            "schema": "agent-paper-schwab-trigger-v1",
+            "schema": "agent-paper-schwab-trigger-v2",
             "account_id": str(account_id),
-            "decision_session": decision_session.isoformat(),
+            "decision_session": local_time.date().isoformat(),
             "decision_slot_at": decision_slot_at.isoformat(),
             "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
+            "client_idempotency_hash": sha256(client_idempotency_key.encode()).hexdigest(),
         }
     )
-    claim, _ = await claim_or_lock(
+    claim, inserted = await claim_or_lock(
         session,
-        f"local-agent-paper-schwab:{account_id}:{decision_slot_at.isoformat()}",
-        "agent-paper-schwab-trigger-v1",
-        idempotency_key,
+        f"local-agent-paper-schwab:{account_id}",
+        "agent-paper-schwab-trigger-v2",
+        decision_slot_at.isoformat(),
         request_hash,
-        "agent_paper_schwab_trigger_v1",
+        "agent_paper_schwab_trigger_v2",
     )
     if claim.request_hash != request_hash:
         raise ValueError("AGENT_PAPER_IDEMPOTENCY_CONFLICT")
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
-        {"scope": f"nexus:agent-paper-cycle:{account_id}"},
+    reservation = AgentPaperTriggerReservation(
+        claim_id=claim.id,
+        decision_session=local_time.date(),
+        decision_slot_at=decision_slot_at,
     )
-    cycle = await session.scalar(
-        select(AgentPaperCycleRecord).where(
-            AgentPaperCycleRecord.account_id == account_id,
-            AgentPaperCycleRecord.decision_slot_at == decision_slot_at,
-        )
+    if inserted:
+        return reservation
+    if not claim.response_payload:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    outcome = claim.response_payload.get("outcome")
+    if outcome == "failed":
+        error_code = claim.response_payload.get("error_code")
+        if isinstance(error_code, str) and error_code in _TRIGGER_FAILURE_CODES:
+            raise ValueError(error_code)
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    if outcome != "completed" or not isinstance(claim.response_payload.get("result"), dict):
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    try:
+        replay = AgentPaperCycleResult.model_validate(claim.response_payload["result"])
+    except ValueError:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN") from None
+    return reservation.model_copy(update={"replay": replay.model_copy(update={"replayed": True})})
+
+
+async def finish_schwab_agent_paper_trigger(
+    session: AsyncSession,
+    *,
+    reservation: AgentPaperTriggerReservation,
+    result: AgentPaperCycleResult | None = None,
+    error_code: str | None = None,
+) -> None:
+    """Seal a committed trigger reservation with one fixed safe outcome."""
+    if (result is None) == (error_code is None):
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    if error_code is not None and error_code not in _TRIGGER_FAILURE_CODES:
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    claim = await session.scalar(
+        select(IdempotencyRecord)
+        .where(IdempotencyRecord.id == reservation.claim_id)
+        .with_for_update()
     )
-    if cycle is None:
-        return None
     if (
-        cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
-        or cycle.execution_price_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        claim is None
+        or claim.route != "agent-paper-schwab-trigger-v2"
+        or claim.schema_version != "agent_paper_schwab_trigger_v2"
+        or claim.idempotency_key != reservation.decision_slot_at.isoformat()
     ):
-        raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
-    events = await _events(session, cycle.id)
-    if not events:
-        raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
-    return _result(cycle.id, events, replayed=True)
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    payload: dict[str, object]
+    if result is not None:
+        payload = {"outcome": "completed", "result": result.model_dump(mode="json")}
+    else:
+        payload = {"outcome": "failed", "error_code": cast(str, error_code)}
+    if claim.response_payload and claim.response_payload != payload:
+        raise ValueError("AGENT_PAPER_IDEMPOTENCY_CONFLICT")
+    claim.response_payload = payload
+    await session.flush()
 
 
 async def start_schwab_agent_paper_cycle(
@@ -152,15 +209,26 @@ async def start_schwab_agent_paper_cycle(
     account = await session.get(PaperAccountRecord, authority.account_id)
     if account is None or account.portfolio_id != authority.portfolio_id:
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
-    replay = await claim_schwab_agent_paper_trigger(
-        session,
-        account_id=authority.account_id,
-        decision_session=authority.decision_session,
-        decision_slot_at=decision_slot_at,
-        idempotency_key=idempotency_key,
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-paper-cycle:{authority.account_id}"},
     )
-    if replay is not None:
-        return replay
+    cycle = await session.scalar(
+        select(AgentPaperCycleRecord).where(
+            AgentPaperCycleRecord.account_id == authority.account_id,
+            AgentPaperCycleRecord.decision_slot_at == decision_slot_at,
+        )
+    )
+    if cycle is not None:
+        if (
+            cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+            or cycle.execution_price_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        ):
+            raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
+        events = await _events(session, cycle.id)
+        if not events:
+            raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
+        return _result(cycle.id, events, replayed=True)
     return await _start_cycle(
         session,
         authority=authority,

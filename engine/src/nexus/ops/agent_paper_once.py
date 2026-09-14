@@ -28,12 +28,13 @@ from nexus.ops.schwab_market_stream import (
 from nexus.paper.agent_cycle import (
     AgentPaperCycleResult,
     advance_agent_paper_cycle,
-    claim_schwab_agent_paper_trigger,
+    finish_schwab_agent_paper_trigger,
+    reserve_schwab_agent_paper_trigger,
     resume_schwab_agent_paper_cycle,
     start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
-from nexus.paper.agent_cycle_models import floor_decision_slot
+from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
 from nexus.paper.agent_market import (
     PaperMarketWindowResult,
     collect_agent_paper_window,
@@ -219,6 +220,7 @@ async def trigger_in_session(
     settings: AgentPaperTriggerSettings,
     request: AgentPaperTriggerRequest,
     *,
+    reservation: AgentPaperTriggerReservation,
     repo_root: Path,
     client: httpx.AsyncClient,
 ) -> AgentPaperCycleResult:
@@ -229,17 +231,10 @@ async def trigger_in_session(
     local_time = initial_time.astimezone(ZoneInfo("America/New_York"))
     if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
-    decision_session = local_time.date()
-    decision_slot_at = floor_decision_slot(initial_time)
-    replay = await claim_schwab_agent_paper_trigger(
-        session,
-        account_id=request.account_id,
-        decision_session=decision_session,
-        decision_slot_at=decision_slot_at,
-        idempotency_key=request.idempotency_key,
-    )
-    if replay is not None:
-        return replay
+    decision_session = reservation.decision_session
+    decision_slot_at = reservation.decision_slot_at
+    if local_time.date() != decision_session:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
 
     initial_authority = await load_quasi_realtime_cycle_authority(
         session, account_id=request.account_id, now=initial_time
@@ -340,15 +335,49 @@ async def trigger_once(
     engine = create_async_engine(settings.database_url)
     try:
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
-        async with (
-            factory() as session,
-            session.begin(),
-            httpx.AsyncClient(follow_redirects=False, timeout=30) as client,
-        ):
-            return await trigger_in_session(
-                session, store, settings, request, repo_root=repo_root, client=client
+        async with factory() as claim_session, claim_session.begin():
+            now = await claim_session.scalar(select(func.clock_timestamp()))
+            if not isinstance(now, datetime):
+                raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+            reservation = await reserve_schwab_agent_paper_trigger(
+                claim_session,
+                account_id=request.account_id,
+                client_idempotency_key=request.idempotency_key,
+                now=now,
             )
+        if reservation.replay is not None:
+            return reservation.replay
+        store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+        try:
+            async with (
+                factory() as session,
+                session.begin(),
+                httpx.AsyncClient(follow_redirects=False, timeout=30) as client,
+            ):
+                result = await trigger_in_session(
+                    session,
+                    store,
+                    settings,
+                    request,
+                    reservation=reservation,
+                    repo_root=repo_root,
+                    client=client,
+                )
+                await finish_schwab_agent_paper_trigger(
+                    session, reservation=reservation, result=result
+                )
+                return result
+        except Exception as error:
+            try:
+                async with factory() as failure_session, failure_session.begin():
+                    await finish_schwab_agent_paper_trigger(
+                        failure_session,
+                        reservation=reservation,
+                        error_code=str(error),
+                    )
+            except Exception:
+                pass
+            raise
     finally:
         await engine.dispose()
 

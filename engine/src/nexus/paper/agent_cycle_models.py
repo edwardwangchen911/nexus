@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -61,6 +61,15 @@ class AgentPaperCycleResult(BaseModel):
     batch_id: UUID | None = None
     order_ids: tuple[UUID, ...] = ()
     replayed: bool
+
+
+class AgentPaperTriggerReservation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim_id: UUID
+    decision_session: date
+    decision_slot_at: datetime
+    replay: AgentPaperCycleResult | None = None
 
 
 def _canonical_json(payload: object) -> str:

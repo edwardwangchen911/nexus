@@ -18,7 +18,7 @@ from nexus.ops.agent_paper_once import (
 from nexus.ops.schwab_market_stream import SchwabMarketStreamImportResult
 from nexus.paper.agent_cycle import AgentPaperCycleError
 from nexus.paper.agent_cycle_authority import CycleAuthority
-from nexus.paper.agent_cycle_models import AgentPaperCycleResult
+from nexus.paper.agent_cycle_models import AgentPaperCycleResult, AgentPaperTriggerReservation
 from nexus.risk.query_authority_producer import RiskQueryScope, RiskSourceProof
 from nexus.settings import EngineSettings
 from pydantic import SecretStr, ValidationError
@@ -225,11 +225,11 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         calendar_authority_id=UUID(int=8),
         universe_snapshot_id=universe_id,
     )
-
-    async def claim(*_args, **kwargs):
-        assert kwargs["decision_slot_at"] == initial
-        events.append("claim")
-        return None
+    reservation = AgentPaperTriggerReservation(
+        claim_id=UUID(int=9),
+        decision_session=authority.decision_session,
+        decision_slot_at=initial,
+    )
 
     async def root(*_args, **_kwargs):
         root_number = events.count("root")
@@ -267,7 +267,6 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             replayed=False,
         )
 
-    monkeypatch.setattr(cli, "claim_schwab_agent_paper_trigger", claim)
     monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", root)
     monkeypatch.setattr(cli, "inspect_query_authority_scope", scope)
     monkeypatch.setattr(cli, "collect_source_proofs", risk)
@@ -293,6 +292,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             AgentPaperTriggerRequest(
                 action="trigger", account_id=account_id, idempotency_key="trigger-1"
             ),
+            reservation=reservation,
             repo_root=tmp_path,
             client=object(),
         )
@@ -301,7 +301,6 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     assert result.cycle_id == cycle_id
     assert events == [
         "clock-1",
-        "claim",
         "root",
         "scope",
         "risk-action-delisting-halt",
@@ -324,35 +323,68 @@ def test_trigger_replay_returns_before_any_provider_call(
         replayed=True,
     )
 
+    reservation = AgentPaperTriggerReservation(
+        claim_id=UUID(int=8),
+        decision_session=datetime(2026, 9, 14, tzinfo=UTC).date(),
+        decision_slot_at=datetime(2026, 9, 14, 14, tzinfo=UTC),
+        replay=existing,
+    )
+
+    class Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            return None
+
     class Session:
         async def scalar(self, _statement):
             return datetime(2026, 9, 14, 14, tzinfo=UTC)
 
-    async def claim(*_args, **_kwargs):
-        return existing
+        def begin(self):
+            return Transaction()
+
+    class SessionContext:
+        async def __aenter__(self):
+            return Session()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Engine:
+        async def dispose(self):
+            return None
+
+    class Factory:
+        def __call__(self):
+            return SessionContext()
+
+    async def reserve(*_args, **_kwargs):
+        return reservation
 
     async def forbidden(*_args, **_kwargs):
         raise AssertionError("provider must not be called for a persisted cycle")
 
-    monkeypatch.setattr(cli, "claim_schwab_agent_paper_trigger", claim)
-    monkeypatch.setattr(cli, "collect_source_proofs", forbidden)
-    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", forbidden)
+    monkeypatch.setattr(cli, "create_async_engine", lambda *_args, **_kwargs: Engine())
+    monkeypatch.setattr(cli, "async_sessionmaker", lambda *_args, **_kwargs: Factory())
+    monkeypatch.setattr(cli, "reserve_schwab_agent_paper_trigger", reserve, raising=False)
+    monkeypatch.setattr(cli, "trigger_in_session", forbidden)
+    monkeypatch.setattr(cli, "S3ProviderEvidenceStore", forbidden)
+    monkeypatch.setattr(cli.httpx, "AsyncClient", forbidden)
     settings = cli.AgentPaperTriggerSettings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+        object_store_endpoint="http://127.0.0.1:9000",
         alpaca_key=SecretStr("key"),
         alpaca_secret=SecretStr("secret"),
     )
 
     replay = asyncio.run(
-        trigger_in_session(
-            Session(),
-            object(),
+        cli.trigger_once(
             settings,
             AgentPaperTriggerRequest(
                 action="trigger", account_id=UUID(int=1), idempotency_key="trigger-replay"
             ),
             repo_root=Path("/unused"),
-            client=object(),
         )
     )
 
