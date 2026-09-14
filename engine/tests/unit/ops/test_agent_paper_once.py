@@ -1,15 +1,27 @@
+import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from nexus.ops import agent_paper_once as cli
 from nexus.ops.agent_paper_once import (
     AgentPaperCollectWindowRequest,
+    AgentPaperResumeRequest,
     AgentPaperRunRequest,
+    AgentPaperTriggerRequest,
     main,
     parser,
+    trigger_in_session,
 )
+from nexus.ops.schwab_market_stream import SchwabMarketStreamImportResult
 from nexus.paper.agent_cycle import AgentPaperCycleError
+from nexus.paper.agent_cycle_authority import CycleAuthority
+from nexus.paper.agent_cycle_models import AgentPaperCycleResult
+from nexus.risk.query_authority_producer import RiskQueryScope, RiskSourceProof
 from nexus.settings import EngineSettings
+from pydantic import SecretStr, ValidationError
 
 
 def test_request_requires_explicit_utc_time() -> None:
@@ -136,4 +148,259 @@ def test_collect_window_parser_has_no_provider_or_credential_override() -> None:
                 "--provider-url",
                 "https://example.invalid",
             ]
+        )
+
+
+def test_trigger_and_resume_requests_exclude_client_time_symbol_and_provider() -> None:
+    account_id = UUID(int=1)
+    cycle_id = UUID(int=2)
+
+    trigger = AgentPaperTriggerRequest(
+        action="trigger",
+        account_id=account_id,
+        idempotency_key="trigger-1",
+    )
+    resume = AgentPaperResumeRequest(
+        action="resume",
+        cycle_id=cycle_id,
+        idempotency_key="resume-1",
+    )
+
+    assert trigger.account_id == account_id
+    assert resume.cycle_id == cycle_id
+    with pytest.raises(ValidationError):
+        AgentPaperTriggerRequest.model_validate(
+            {
+                "action": "trigger",
+                "account_id": account_id,
+                "idempotency_key": "trigger-1",
+                "decision_time": datetime(2026, 8, 26, 19, tzinfo=UTC),
+            }
+        )
+    for command, identifier in (("trigger", "--account-id"), ("resume", "--cycle-id")):
+        parsed = parser().parse_args(
+            [command, identifier, str(account_id), "--idempotency-key", f"{command}-1"]
+        )
+        assert parsed.action == command
+        with pytest.raises(SystemExit):
+            parser().parse_args(
+                [
+                    command,
+                    identifier,
+                    str(account_id),
+                    "--idempotency-key",
+                    f"{command}-1",
+                    "--symbol",
+                    "AAPL",
+                ]
+            )
+
+
+def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account_id = UUID(int=1)
+    portfolio_id = UUID(int=2)
+    universe_id = UUID(int=3)
+    instrument_id = UUID(int=4)
+    artifact_id = UUID(int=5)
+    quote_id = UUID(int=6)
+    cycle_id = UUID(int=7)
+    initial = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
+    frozen = datetime(2026, 9, 14, 14, 0, 10, tzinfo=UTC)
+    events: list[str] = []
+
+    class Session:
+        calls = 0
+
+        async def scalar(self, _statement):
+            self.calls += 1
+            events.append(f"clock-{self.calls}")
+            return initial if self.calls == 1 else frozen
+
+        async def get(self, model, _identifier):
+            identifier = quote_id if model is cli.LatestQuote else artifact_id
+            return SimpleNamespace(id=identifier)
+
+    authority = CycleAuthority(
+        account_id=account_id,
+        portfolio_id=portfolio_id,
+        decision_session=initial.astimezone(cli.ZoneInfo("America/New_York")).date(),
+        decision_time=initial,
+        execution_session=initial.astimezone(cli.ZoneInfo("America/New_York")).date(),
+        calendar_authority_id=UUID(int=8),
+        universe_snapshot_id=universe_id,
+    )
+
+    async def claim(*_args, **_kwargs):
+        events.append("claim")
+        return None
+
+    async def root(*_args, **_kwargs):
+        root_number = events.count("root")
+        events.append("root")
+        return authority.model_copy(
+            update={"decision_time": initial if root_number == 0 else frozen}
+        )
+
+    async def scope(*_args, **_kwargs):
+        events.append("scope")
+        return RiskQueryScope(instrument_id, universe_id, ())
+
+    async def risk(**_kwargs):
+        events.append("risk-action-delisting-halt")
+        return tuple(
+            RiskSourceProof(kind, False, "a" * 64, initial)
+            for kind in ("corporate_action", "delisting", "suspension")
+        )
+
+    async def level_one(*_args, **_kwargs):
+        events.append("level-one")
+        return SchwabMarketStreamImportResult("b" * 64, 1, 1, artifact_id, {"AAPL": quote_id}, {})
+
+    async def persist(*_args, **_kwargs):
+        events.append("persist-risk")
+        return ()
+
+    async def start(*_args, **_kwargs):
+        events.append("cycle-job")
+        return AgentPaperCycleResult(
+            cycle_id=cycle_id,
+            status="researching",
+            result_code="RESEARCH_JOBS_PREPARED",
+            replayed=False,
+        )
+
+    monkeypatch.setattr(cli, "claim_schwab_agent_paper_trigger", claim)
+    monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", root)
+    monkeypatch.setattr(cli, "inspect_query_authority_scope", scope)
+    monkeypatch.setattr(cli, "collect_source_proofs", risk)
+    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", level_one)
+    monkeypatch.setattr(cli, "persist_query_authorities", persist)
+    monkeypatch.setattr(
+        cli,
+        "_validate_trigger_quote",
+        lambda *_args, **_kwargs: events.append("validate-l1"),
+    )
+    monkeypatch.setattr(cli, "start_schwab_agent_paper_cycle", start)
+    settings = cli.AgentPaperTriggerSettings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+        alpaca_key=SecretStr("key"),
+        alpaca_secret=SecretStr("secret"),
+    )
+
+    result = asyncio.run(
+        trigger_in_session(
+            Session(),
+            object(),
+            settings,
+            AgentPaperTriggerRequest(
+                action="trigger", account_id=account_id, idempotency_key="trigger-1"
+            ),
+            repo_root=tmp_path,
+            client=object(),
+        )
+    )
+
+    assert result.cycle_id == cycle_id
+    assert events == [
+        "clock-1",
+        "claim",
+        "root",
+        "scope",
+        "risk-action-delisting-halt",
+        "level-one",
+        "clock-2",
+        "validate-l1",
+        "persist-risk",
+        "root",
+        "cycle-job",
+    ]
+
+
+def test_trigger_replay_returns_before_any_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = AgentPaperCycleResult(
+        cycle_id=UUID(int=9),
+        status="researching",
+        result_code="RESEARCH_JOBS_PREPARED",
+        replayed=True,
+    )
+
+    class Session:
+        async def scalar(self, _statement):
+            return datetime(2026, 9, 14, 14, tzinfo=UTC)
+
+    async def claim(*_args, **_kwargs):
+        return existing
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("provider must not be called for a persisted cycle")
+
+    monkeypatch.setattr(cli, "claim_schwab_agent_paper_trigger", claim)
+    monkeypatch.setattr(cli, "collect_source_proofs", forbidden)
+    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", forbidden)
+    settings = cli.AgentPaperTriggerSettings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+        alpaca_key=SecretStr("key"),
+        alpaca_secret=SecretStr("secret"),
+    )
+
+    replay = asyncio.run(
+        trigger_in_session(
+            Session(),
+            object(),
+            settings,
+            AgentPaperTriggerRequest(
+                action="trigger", account_id=UUID(int=1), idempotency_key="trigger-replay"
+            ),
+            repo_root=Path("/unused"),
+            client=object(),
+        )
+    )
+
+    assert replay == existing
+
+
+def test_trigger_quote_distinguishes_incomplete_from_stale() -> None:
+    received = datetime(2026, 9, 14, 14, tzinfo=UTC)
+    quote_id = UUID(int=10)
+    artifact_id = UUID(int=11)
+    artifact = SimpleNamespace(
+        id=artifact_id,
+        source="schwab",
+        schema_version="schwab_level_one_stream_v1",
+        created_at=received,
+        received_at=received,
+    )
+    quote = SimpleNamespace(
+        id=quote_id,
+        data_artifact_id=artifact_id,
+        source="schwab",
+        feed="l1",
+        delivery_mode="real_time",
+        event_kind="quote",
+        evidence_status="verified",
+        bid=100,
+        ask=101,
+        created_at=received,
+        observed_at=received,
+        received_at=received,
+    )
+    imported = SchwabMarketStreamImportResult("c" * 64, 1, 1, artifact_id, {"AAPL": quote_id}, {})
+
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._validate_trigger_quote(
+            SimpleNamespace(**{**vars(quote), "ask": None}),
+            artifact,
+            imported,
+            decision_time=received,
+        )
+    with pytest.raises(ValueError, match="SCHWAB_L1_FRESHNESS_UNPROVEN"):
+        cli._validate_trigger_quote(
+            quote,
+            artifact,
+            imported,
+            decision_time=received.replace(minute=2),
         )

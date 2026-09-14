@@ -3,6 +3,7 @@ import json
 import stat
 from datetime import UTC, date, datetime, timedelta
 from email.utils import format_datetime
+from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -89,6 +90,11 @@ def test_collects_and_archives_exact_three_source_proofs(tmp_path, monkeypatch) 
         published.replace(microsecond=0)
     )
     assert len(requested) == 3
+    assert [urlsplit(url).path for url in requested] == [
+        "/v1/corporate-actions",
+        "/dynamic/SymDir/nasdaqlisted.txt",
+        "/rss.aspx",
+    ]
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
     assert stat.S_IMODE((output / "actions").stat().st_mode) == 0o700
     assert all(

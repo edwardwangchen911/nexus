@@ -194,6 +194,57 @@ async def load_cycle_authority(
     )
 
 
+async def load_recorded_schwab_cycle_authority(
+    session: AsyncSession, *, cycle: AgentPaperCycleRecord
+) -> CycleAuthority:
+    """Reconstruct the immutable authority root recorded by a same-session cycle."""
+    if (
+        cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        or cycle.execution_session != cycle.decision_session
+    ):
+        raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
+    account = await session.get(PaperAccountRecord, cycle.account_id)
+    calendar = await session.scalar(
+        select(ExchangeCalendarAuthorityRecord)
+        .join(
+            ExchangeCalendarSessionRecord,
+            ExchangeCalendarSessionRecord.calendar_authority_id
+            == ExchangeCalendarAuthorityRecord.id,
+        )
+        .where(
+            ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+            ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+            ExchangeCalendarAuthorityRecord.range_start <= cycle.decision_session,
+            ExchangeCalendarAuthorityRecord.range_end >= cycle.decision_session,
+            ExchangeCalendarAuthorityRecord.published_at <= cycle.decision_time,
+            ExchangeCalendarAuthorityRecord.created_at <= cycle.decision_time,
+            ExchangeCalendarSessionRecord.session == cycle.decision_session,
+        )
+        .order_by(
+            ExchangeCalendarAuthorityRecord.published_at.desc(),
+            ExchangeCalendarAuthorityRecord.id.desc(),
+        )
+        .limit(1)
+    )
+    if (
+        account is None
+        or account.capability != "simulation_write_internal"
+        or account.portfolio_id != cycle.portfolio_id
+        or calendar is None
+    ):
+        raise ValueError("AGENT_PAPER_ROOT_AUTHORITY_UNAVAILABLE")
+    return CycleAuthority(
+        account_id=cycle.account_id,
+        portfolio_id=cycle.portfolio_id,
+        decision_session=cycle.decision_session,
+        decision_time=cycle.decision_time,
+        execution_session=cycle.execution_session,
+        calendar_authority_id=calendar.id,
+        universe_snapshot_id=cycle.universe_snapshot_id,
+        quality_report_id=cycle.quality_report_id,
+    )
+
+
 async def prepare_candidates(
     session: AsyncSession, *, authority: CycleAuthority
 ) -> tuple[CandidateManifestEntry, ...]:

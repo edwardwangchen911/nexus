@@ -3,24 +3,48 @@
 import argparse
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.ops.agent_risk_authority import collect_source_proofs
 from nexus.ops.fosun_local import load_local_environment
-from nexus.paper.agent_cycle import AgentPaperCycleResult, advance_agent_paper_cycle
+from nexus.ops.schwab_market_stream import (
+    ProviderMarketStreamError,
+    SchwabMarketStreamImportResult,
+    capture_and_import_schwab_level_one_once,
+)
+from nexus.paper.agent_cycle import (
+    AgentPaperCycleResult,
+    advance_agent_paper_cycle,
+    claim_schwab_agent_paper_trigger,
+    resume_schwab_agent_paper_cycle,
+    start_schwab_agent_paper_cycle,
+)
+from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
 from nexus.paper.agent_market import PaperMarketWindowResult, collect_agent_paper_window
+from nexus.persistence.models.data import DataArtifact
+from nexus.persistence.models.market import LatestQuote
+from nexus.persistence.models.paper import PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider
 from nexus.providers.market.alpaca_http import AlpacaHttpTransport, SqlInstrumentSymbolResolver
+from nexus.risk.query_authority_producer import (
+    RiskSourceProof,
+    inspect_query_authority_scope,
+    persist_query_authorities,
+)
 from nexus.settings import EngineSettings
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -40,6 +64,22 @@ class AgentPaperRunRequest(BaseModel):
         if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
             raise ValueError("explicit UTC time is required")
         return value
+
+
+class AgentPaperTriggerRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    action: Literal["trigger"]
+    account_id: UUID
+    idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
+
+
+class AgentPaperResumeRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    action: Literal["resume"]
+    cycle_id: UUID
+    idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
 
 
 class AgentPaperCollectWindowRequest(BaseModel):
@@ -63,6 +103,11 @@ class AgentPaperMarketSettings(EngineSettings):
     alpaca_secret: SecretStr = Field(validation_alias="ALPACA_API_SECRET_KEY")
 
 
+class AgentPaperTriggerSettings(EngineSettings):
+    alpaca_key: SecretStr = Field(validation_alias="ALPACA_API_KEY_ID")
+    alpaca_secret: SecretStr = Field(validation_alias="ALPACA_API_SECRET_KEY")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="nexus-engine-agent-paper-once")
     commands = root.add_subparsers(dest="action", required=True)
@@ -70,6 +115,12 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--account-id", required=True)
     run.add_argument("--decision-time", required=True)
     run.add_argument("--idempotency-key", required=True)
+    trigger = commands.add_parser("trigger")
+    trigger.add_argument("--account-id", required=True)
+    trigger.add_argument("--idempotency-key", required=True)
+    resume = commands.add_parser("resume")
+    resume.add_argument("--cycle-id", required=True)
+    resume.add_argument("--idempotency-key", required=True)
     collect = commands.add_parser("collect-window")
     collect.add_argument("--cycle-id", required=True)
     collect.add_argument("--instrument-id", required=True)
@@ -106,6 +157,209 @@ async def run_once(
                 decision_time=request.decision_time,
                 idempotency_key=request.idempotency_key,
                 daily_limit_usd=settings.agent_daily_budget_usd,
+            )
+    finally:
+        await engine.dispose()
+
+
+def _validate_local_database(database_url: str | None) -> None:
+    if not database_url:
+        raise ValueError("AGENT_PAPER_DATABASE_UNCONFIGURED")
+    url = make_url(database_url)
+    if (
+        url.drivername != "postgresql+asyncpg"
+        or url.host not in _LOCAL_HOSTS
+        or bool(set(url.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise ValueError("AGENT_PAPER_DATABASE_NOT_LOCAL")
+
+
+def _validate_trigger_quote(
+    quote: LatestQuote | None,
+    artifact: DataArtifact | None,
+    result: SchwabMarketStreamImportResult,
+    *,
+    decision_time: datetime,
+) -> None:
+    if (
+        quote is None
+        or artifact is None
+        or result.quote_ids.get("AAPL") != quote.id
+        or result.artifact_id != artifact.id
+        or quote.data_artifact_id != artifact.id
+        or quote.source != "schwab"
+        or quote.feed != "l1"
+        or quote.delivery_mode != "real_time"
+        or quote.event_kind != "quote"
+        or quote.evidence_status != "verified"
+        or quote.bid is None
+        or quote.ask is None
+        or quote.bid <= 0
+        or quote.ask <= 0
+        or quote.bid > quote.ask
+        or artifact.source != "schwab"
+        or artifact.schema_version != "schwab_level_one_stream_v1"
+        or quote.created_at > decision_time
+        or artifact.created_at > decision_time
+        or quote.received_at != artifact.received_at
+        or quote.observed_at > quote.received_at
+        or quote.received_at > decision_time
+    ):
+        raise ValueError("SCHWAB_L1_INCOMPLETE")
+    if decision_time - quote.received_at > timedelta(
+        seconds=60
+    ) or quote.received_at - quote.observed_at > timedelta(seconds=60):
+        raise ValueError("SCHWAB_L1_FRESHNESS_UNPROVEN")
+
+
+async def trigger_in_session(
+    session: AsyncSession,
+    store: S3ProviderEvidenceStore,
+    settings: AgentPaperTriggerSettings,
+    request: AgentPaperTriggerRequest,
+    *,
+    repo_root: Path,
+    client: httpx.AsyncClient,
+) -> AgentPaperCycleResult:
+    """Run one bounded provider pass, freeze DB time, and create one research Job."""
+    initial_time = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(initial_time, datetime):
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    local_time = initial_time.astimezone(ZoneInfo("America/New_York"))
+    if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
+        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
+    decision_session = local_time.date()
+    replay = await claim_schwab_agent_paper_trigger(
+        session,
+        account_id=request.account_id,
+        decision_session=decision_session,
+        idempotency_key=request.idempotency_key,
+    )
+    if replay is not None:
+        return replay
+
+    initial_authority = await load_quasi_realtime_cycle_authority(
+        session, account_id=request.account_id, now=initial_time
+    )
+    scope = await inspect_query_authority_scope(
+        session,
+        decision_session=decision_session,
+        symbol="AAPL",
+        as_of=initial_time,
+        universe_snapshot_id=initial_authority.universe_snapshot_id,
+        source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    )
+    proofs: tuple[RiskSourceProof, ...] | None = None
+    if not scope.existing:
+        digest = sha256(request.idempotency_key.encode()).hexdigest()[:16]
+        output_parent = repo_root / ".secrets" / "nexus-agent-paper"
+        output_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            proofs = await collect_source_proofs(
+                symbol="AAPL",
+                instrument_id=scope.instrument_id,
+                decision_session=decision_session,
+                key_id=settings.alpaca_key,
+                secret=settings.alpaca_secret,
+                output_dir=output_parent / f"{decision_session}-{digest}",
+            )
+        except ValueError as error:
+            raise ValueError("RISK_INPUT_REQUIRED") from error
+
+    try:
+        stream = await capture_and_import_schwab_level_one_once(
+            session,
+            store,
+            repo_root=repo_root,
+            client=client,
+            instrument_id=scope.instrument_id,
+        )
+    except ProviderMarketStreamError as error:
+        raise ValueError("SCHWAB_L1_INCOMPLETE") from error
+    decision_time = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(decision_time, datetime):
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    final_local = decision_time.astimezone(ZoneInfo("America/New_York"))
+    if final_local.date() != decision_session or not time(7) <= final_local.time().replace(
+        tzinfo=None
+    ) < time(16):
+        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
+    quote_id = stream.quote_ids.get("AAPL")
+    quote = None if quote_id is None else await session.get(LatestQuote, quote_id)
+    artifact = await session.get(DataArtifact, stream.artifact_id)
+    _validate_trigger_quote(quote, artifact, stream, decision_time=decision_time)
+
+    if proofs is not None:
+        try:
+            await persist_query_authorities(
+                session,
+                universe_snapshot_id=scope.universe_snapshot_id,
+                decision_session=decision_session,
+                symbol="AAPL",
+                proofs=proofs,
+                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            )
+        except ValueError as error:
+            raise ValueError("RISK_INPUT_REQUIRED") from error
+    authority = await load_quasi_realtime_cycle_authority(
+        session, account_id=request.account_id, now=decision_time
+    )
+    return await start_schwab_agent_paper_cycle(
+        session,
+        authority=authority,
+        idempotency_key=request.idempotency_key,
+        daily_limit_usd=settings.agent_daily_budget_usd,
+    )
+
+
+async def trigger_once(
+    settings: AgentPaperTriggerSettings,
+    request: AgentPaperTriggerRequest,
+    *,
+    repo_root: Path,
+) -> AgentPaperCycleResult:
+    _validate_local_database(settings.database_url)
+    endpoint = urlsplit(settings.object_store_endpoint or "")
+    if (
+        endpoint.scheme not in {"http", "https"}
+        or endpoint.hostname not in _LOCAL_HOSTS
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or endpoint.path not in {"", "/"}
+        or endpoint.query
+        or endpoint.fragment
+        or not settings.alpaca_key.get_secret_value().strip()
+        or not settings.alpaca_secret.get_secret_value().strip()
+    ):
+        raise ValueError("AGENT_PAPER_MARKET_CONFIG_INVALID")
+    assert settings.database_url is not None
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+        async with (
+            factory() as session,
+            session.begin(),
+            httpx.AsyncClient(follow_redirects=False, timeout=30) as client,
+        ):
+            return await trigger_in_session(
+                session, store, settings, request, repo_root=repo_root, client=client
+            )
+    finally:
+        await engine.dispose()
+
+
+async def resume_once(
+    settings: EngineSettings, request: AgentPaperResumeRequest
+) -> AgentPaperCycleResult:
+    _validate_local_database(settings.database_url)
+    assert settings.database_url is not None
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session, session.begin():
+            return await resume_schwab_agent_paper_cycle(
+                session, cycle_id=request.cycle_id, idempotency_key=request.idempotency_key
             )
     finally:
         await engine.dispose()
@@ -179,6 +433,10 @@ def main(argv: list[str] | None = None) -> int:
         request = (
             AgentPaperRunRequest.model_validate(values)
             if action == "run"
+            else AgentPaperTriggerRequest.model_validate(values)
+            if action == "trigger"
+            else AgentPaperResumeRequest.model_validate(values)
+            if action == "resume"
             else AgentPaperCollectWindowRequest.model_validate(values)
         )
         environment = load_local_environment(Path.cwd(), {})
@@ -188,10 +446,13 @@ def main(argv: list[str] | None = None) -> int:
         result: AgentPaperCycleResult | PaperMarketWindowResult
         if isinstance(request, AgentPaperRunRequest):
             result = asyncio.run(run_once(settings, request))
+        elif isinstance(request, AgentPaperTriggerRequest):
+            trigger_settings = AgentPaperTriggerSettings.model_validate(environment)
+            result = asyncio.run(trigger_once(trigger_settings, request, repo_root=Path.cwd()))
+        elif isinstance(request, AgentPaperResumeRequest):
+            result = asyncio.run(resume_once(settings, request))
         else:
-            market_settings = AgentPaperMarketSettings.model_validate(
-                environment
-            )
+            market_settings = AgentPaperMarketSettings.model_validate(environment)
             result = asyncio.run(collect_window_once(market_settings, request))
     except Exception as error:
         code = str(error)
@@ -201,6 +462,12 @@ def main(argv: list[str] | None = None) -> int:
             "AGENT_PAPER_DATABASE_NOT_LOCAL",
             "AGENT_PAPER_TIME_IN_FUTURE",
             "AGENT_PAPER_MARKET_CONFIG_INVALID",
+            "AGENT_PAPER_OUTSIDE_WINDOW",
+            "RISK_INPUT_REQUIRED",
+            "SCHWAB_L1_FRESHNESS_UNPROVEN",
+            "SCHWAB_L1_INCOMPLETE",
+            "RESEARCH_ADMISSION_UNAVAILABLE",
+            "PAPER_MARKET_WINDOW_UNAVAILABLE",
         }:
             code = "AGENT_PAPER_RESULT_UNKNOWN"
         return _emit_error(code)

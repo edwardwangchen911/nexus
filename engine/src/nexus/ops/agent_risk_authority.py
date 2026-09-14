@@ -140,28 +140,6 @@ async def collect_source_proofs(
                 policy=HttpRequestPolicy(max_attempts=1, max_response_bytes=8 * 1024 * 1024),
                 client=http,
             )
-            halt_raw = await client.get_bytes(("rss.aspx",), (("feed", "tradehalts"),), ())
-            halt_received = datetime.now(UTC)
-            write_private(output_dir / "tradehalts.xml", halt_raw)
-            write_private(
-                output_dir / "tradehalts.receipt.json",
-                _receipt(
-                    source="nasdaq_trader",
-                    path="/rss.aspx?feed=tradehalts",
-                    raw=halt_raw,
-                    received_at=halt_received,
-                ),
-            )
-            halt = parse_nasdaq_halt_feed(halt_raw, symbol=symbol, fetched_at=halt_received)
-            proofs.append(
-                RiskSourceProof(
-                    "suspension",
-                    halt.blocked,
-                    sha256(halt_raw).hexdigest(),
-                    halt.published_at,
-                )
-            )
-
             listing_raw = await client.get_bytes(("dynamic", "SymDir", "nasdaqlisted.txt"), (), ())
             listing_received = datetime.now(UTC)
             write_private(output_dir / "nasdaqlisted.txt", listing_raw)
@@ -186,6 +164,28 @@ async def collect_source_proofs(
                     listing.blocked,
                     sha256(listing_raw).hexdigest(),
                     listing_received,
+                )
+            )
+
+            halt_raw = await client.get_bytes(("rss.aspx",), (("feed", "tradehalts"),), ())
+            halt_received = datetime.now(UTC)
+            write_private(output_dir / "tradehalts.xml", halt_raw)
+            write_private(
+                output_dir / "tradehalts.receipt.json",
+                _receipt(
+                    source="nasdaq_trader",
+                    path="/rss.aspx?feed=tradehalts",
+                    raw=halt_raw,
+                    received_at=halt_received,
+                ),
+            )
+            halt = parse_nasdaq_halt_feed(halt_raw, symbol=symbol, fetched_at=halt_received)
+            proofs.append(
+                RiskSourceProof(
+                    "suspension",
+                    halt.blocked,
+                    sha256(halt_raw).hexdigest(),
+                    halt.published_at,
                 )
             )
         ordered = tuple(sorted(proofs, key=lambda proof: proof.kind))
@@ -328,12 +328,10 @@ async def run_once(
                 if not 7 <= local_decision.hour < 16:
                     raise ValueError("AGENT_RISK_SESSION_INVALID")
             calendar_authority_id = await session.scalar(
-                calendar_query
-                .order_by(
+                calendar_query.order_by(
                     ExchangeCalendarAuthorityRecord.published_at.desc(),
                     ExchangeCalendarAuthorityRecord.id.desc(),
-                )
-                .limit(1)
+                ).limit(1)
             )
             if calendar_authority_id is None:
                 raise ValueError("AGENT_RISK_SESSION_INVALID")

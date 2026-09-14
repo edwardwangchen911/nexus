@@ -1,6 +1,6 @@
 """Resumable, append-only coordination for one internal Agent paper cycle."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import cast
 from uuid import UUID
@@ -16,6 +16,7 @@ from nexus.jobs.models import job_input_hash
 from nexus.paper.agent_cycle_authority import (
     CycleAuthority,
     load_cycle_authority,
+    load_recorded_schwab_cycle_authority,
     prepare_candidates,
     validate_candidate_manifest,
 )
@@ -39,6 +40,8 @@ from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     PaperAccountRecord,
@@ -46,7 +49,11 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.runtime import Job
 from nexus.reconciliation.admission_claim import claim_or_lock
-from nexus.risk.authority import RiskAuthorityInput, prepare_risk_market_snapshot
+from nexus.risk.authority import (
+    RiskAuthorityInput,
+    prepare_risk_market_snapshot,
+    prepare_schwab_realtime_risk_snapshot,
+)
 
 __all__ = [
     "AgentPaperCycleResult",
@@ -54,6 +61,9 @@ __all__ = [
     "CycleStatus",
     "AgentPaperCycleError",
     "advance_agent_paper_cycle",
+    "claim_schwab_agent_paper_trigger",
+    "resume_schwab_agent_paper_cycle",
+    "start_schwab_agent_paper_cycle",
     "candidate_manifest_hash",
     "canonical_cycle_event_hash",
 ]
@@ -61,6 +71,143 @@ __all__ = [
 
 class AgentPaperCycleError(ValueError):
     """Stable fail-closed error for the internal-only cycle boundary."""
+
+
+async def claim_schwab_agent_paper_trigger(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    decision_session: date,
+    idempotency_key: str,
+) -> AgentPaperCycleResult | None:
+    """Claim and lock one session before any external provider collection."""
+    if not idempotency_key or len(idempotency_key) > 255:
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    account = await session.get(PaperAccountRecord, account_id)
+    if account is None or account.capability != "simulation_write_internal":
+        raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
+    request_hash = job_input_hash(
+        {
+            "schema": "agent-paper-schwab-trigger-v1",
+            "account_id": str(account_id),
+            "decision_session": decision_session.isoformat(),
+            "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
+        }
+    )
+    claim, _ = await claim_or_lock(
+        session,
+        f"local-agent-paper-schwab:{account_id}:{decision_session}",
+        "agent-paper-schwab-trigger-v1",
+        idempotency_key,
+        request_hash,
+        "agent_paper_schwab_trigger_v1",
+    )
+    if claim.request_hash != request_hash:
+        raise ValueError("AGENT_PAPER_IDEMPOTENCY_CONFLICT")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-paper-cycle:{account_id}"},
+    )
+    cycle = await session.scalar(
+        select(AgentPaperCycleRecord).where(
+            AgentPaperCycleRecord.account_id == account_id,
+            AgentPaperCycleRecord.decision_session == decision_session,
+        )
+    )
+    if cycle is None:
+        return None
+    if (
+        cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        or cycle.execution_price_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+    ):
+        raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
+    events = await _events(session, cycle.id)
+    if not events:
+        raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
+    return _result(cycle.id, events, replayed=True)
+
+
+async def start_schwab_agent_paper_cycle(
+    session: AsyncSession,
+    *,
+    authority: CycleAuthority,
+    idempotency_key: str,
+    daily_limit_usd: Decimal = Decimal("3.00"),
+) -> AgentPaperCycleResult:
+    """Start one same-session cycle after its external facts are frozen."""
+    if (
+        authority.execution_session != authority.decision_session
+        or not idempotency_key
+        or len(idempotency_key) > 255
+    ):
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    account = await session.get(PaperAccountRecord, authority.account_id)
+    if account is None or account.portfolio_id != authority.portfolio_id:
+        raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
+    replay = await claim_schwab_agent_paper_trigger(
+        session,
+        account_id=authority.account_id,
+        decision_session=authority.decision_session,
+        idempotency_key=idempotency_key,
+    )
+    if replay is not None:
+        return replay
+    return await _start_cycle(
+        session,
+        authority=authority,
+        daily_limit_usd=daily_limit_usd,
+    )
+
+
+async def resume_schwab_agent_paper_cycle(
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    idempotency_key: str,
+) -> AgentPaperCycleResult:
+    """Resume only from the persisted Job/Run/Output state of a Schwab cycle."""
+    if not idempotency_key or len(idempotency_key) > 255:
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+    if (
+        cycle is None
+        or cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        or cycle.execution_price_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        or cycle.execution_session != cycle.decision_session
+    ):
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    request_hash = job_input_hash(
+        {"schema": "agent-paper-schwab-resume-v1", "cycle_id": str(cycle_id)}
+    )
+    claim, _ = await claim_or_lock(
+        session,
+        f"local-agent-paper-schwab-resume:{cycle_id}",
+        "agent-paper-schwab-resume-v1",
+        idempotency_key,
+        request_hash,
+        "agent_paper_schwab_resume_v1",
+    )
+    if claim.request_hash != request_hash:
+        raise ValueError("AGENT_PAPER_IDEMPOTENCY_CONFLICT")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
+    )
+    events = await _events(session, cycle.id)
+    if not events:
+        raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
+    if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
+        return _result(cycle.id, events, replayed=True)
+    authority = await load_recorded_schwab_cycle_authority(session, cycle=cycle)
+    manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
+    valid_manifest = await validate_candidate_manifest(
+        session, authority=authority, manifest=manifest
+    )
+    if candidate_manifest_hash(manifest) != cycle.candidate_hash or not valid_manifest:
+        raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
+    if events[-1].to_status == "researching":
+        return await _resume_research(session, cycle=cycle, authority=authority, events=events)
+    return await _resume_batch(session, cycle=cycle, events=events)
 
 
 async def advance_agent_paper_cycle(
@@ -150,6 +297,7 @@ async def _start_cycle(
     )
     has_open_order = bool(projection.open_orders)
     manifest = () if has_open_order else await prepare_candidates(session, authority=authority)
+    same_session = authority.execution_session == authority.decision_session
     cycle = AgentPaperCycleRecord(
         id=new_uuid7(),
         account_id=authority.account_id,
@@ -159,8 +307,16 @@ async def _start_cycle(
         execution_session=authority.execution_session,
         universe_snapshot_id=authority.universe_snapshot_id,
         quality_report_id=authority.quality_report_id,
-        decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
-        execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+        decision_price_policy_id=(
+            PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+            if same_session
+            else PAPER_DECISION_SOURCE_POLICY_ID
+        ),
+        execution_price_policy_id=(
+            PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+            if same_session
+            else PAPER_EXECUTION_SOURCE_POLICY_ID
+        ),
         candidate_manifest=[row.model_dump(mode="json") for row in manifest],
         candidate_hash=candidate_manifest_hash(manifest),
         sizing_policy_version=AGENT_PAPER_SIZING_V1.version,
@@ -176,10 +332,29 @@ async def _start_cycle(
             cycle,
             "prepared",
             "unavailable",
-            "OPEN_ORDER_EXISTS" if has_open_order else "NO_ELIGIBLE_CANDIDATE",
+            (
+                "OPEN_ORDER_EXISTS"
+                if has_open_order
+                else "RISK_INPUT_REQUIRED"
+                if same_session
+                else "NO_ELIGIBLE_CANDIDATE"
+            ),
             {},
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    if same_session:
+        try:
+            await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+        except ValueError:
+            await _append_event(
+                session,
+                cycle,
+                "prepared",
+                "unavailable",
+                "RISK_INPUT_REQUIRED",
+                {},
+            )
+            return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     return await _admit_cycle_research(
         session,
         cycle=cycle,
@@ -277,19 +452,22 @@ async def _resume_research(
                 key=lambda value: value.int,
             )
         )
-        market = await prepare_risk_market_snapshot(
-            session,
-            authority=RiskAuthorityInput(
-                decision_session=cycle.decision_session,
-                execution_session=cycle.execution_session,
-                decision_time=cycle.decision_time,
-                source_policy_id=cycle.decision_price_policy_id,
-                calendar_authority_id=authority.calendar_authority_id,
-                universe_snapshot_id=cycle.universe_snapshot_id,
-                quality_report_id=cycle.quality_report_id,
-            ),
-            required_instrument_ids=required,
-        )
+        if cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
+            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+        else:
+            market = await prepare_risk_market_snapshot(
+                session,
+                authority=RiskAuthorityInput(
+                    decision_session=cycle.decision_session,
+                    execution_session=cycle.execution_session,
+                    decision_time=cycle.decision_time,
+                    source_policy_id=cycle.decision_price_policy_id,
+                    calendar_authority_id=authority.calendar_authority_id,
+                    universe_snapshot_id=cycle.universe_snapshot_id,
+                    quality_report_id=cycle.quality_report_id,
+                ),
+                required_instrument_ids=required,
+            )
         decision = build_agent_paper_decision(
             cycle=cycle, actions=actions, projection=projection, market=market
         )

@@ -10,7 +10,11 @@ from nexus.agents.committee import load_prompt_assets
 from nexus.agents.execution_authority import ROLE_ORDER
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
-from nexus.paper.agent_cycle import advance_agent_paper_cycle
+from nexus.paper.agent_cycle import (
+    advance_agent_paper_cycle,
+    resume_schwab_agent_paper_cycle,
+    start_schwab_agent_paper_cycle,
+)
 from nexus.paper.agent_cycle_authority import (
     load_quasi_realtime_cycle_authority,
     prepare_candidates,
@@ -143,9 +147,7 @@ async def _seed_adjusted_authority(
                 store,
                 page,
                 commit=False,
-                source_policy_id=(
-                    PAPER_DECISION_SOURCE_POLICY_ID if adjustment == "all" else None
-                ),
+                source_policy_id=(PAPER_DECISION_SOURCE_POLICY_ID if adjustment == "all" else None),
             )
             assert result.price_authority is not None
     prior_page = ProviderPage(
@@ -353,7 +355,6 @@ async def _seed_cycle_research_authority(
         )
     await session.flush()
 
-
     await _seed_adjusted_authority(
         session,
         registered_decision,
@@ -445,9 +446,7 @@ async def test_quasi_realtime_authority_uses_database_time_window_and_same_sessi
                     )
                 )
             finally:
-                await session.execute(
-                    text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER")
-                )
+                await session.execute(text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER"))
                 await session.execute(
                     text("ALTER TABLE exchange_calendar_authorities ENABLE TRIGGER USER")
                 )
@@ -528,9 +527,7 @@ async def test_quasi_realtime_authority_observes_dst_holiday_and_session_uniquen
                     )
                 )
             finally:
-                await session.execute(
-                    text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER")
-                )
+                await session.execute(text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER"))
 
         async with sessions() as session:
             winter = await load_quasi_realtime_cycle_authority(
@@ -638,9 +635,7 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
                     {"at": published_at},
                 )
             finally:
-                await session.execute(
-                    text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER")
-                )
+                await session.execute(text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER"))
                 await session.execute(
                     text("ALTER TABLE exchange_calendar_authorities ENABLE TRIGGER USER")
                 )
@@ -706,6 +701,33 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
         assert {proof.authority_id for proof in market.query_proofs} == set(
             manifest[0].risk_query_authority_ids
         )
+
+        async with sessions.begin() as session:
+            first = await start_schwab_agent_paper_cycle(
+                session,
+                authority=authority,
+                idempotency_key="schwab-trigger-1",
+            )
+        async with sessions.begin() as session:
+            replay = await start_schwab_agent_paper_cycle(
+                session,
+                authority=authority,
+                idempotency_key="schwab-trigger-1",
+            )
+            job_count = await session.scalar(select(func.count()).select_from(Job))
+        async with sessions.begin() as session:
+            resumed = await resume_schwab_agent_paper_cycle(
+                session,
+                cycle_id=first.cycle_id,
+                idempotency_key="schwab-resume-1",
+            )
+            resumed_job_count = await session.scalar(select(func.count()).select_from(Job))
+
+        assert first.status == "researching"
+        assert replay == first.model_copy(update={"replayed": True})
+        assert resumed == first.model_copy(update={"replayed": True})
+        assert len(first.research_run_ids) == 1
+        assert job_count == resumed_job_count == 1
     finally:
         await engine.dispose()
 
