@@ -11,6 +11,11 @@ from nexus.agents.execution_authority import ROLE_ORDER
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.paper.agent_cycle import advance_agent_paper_cycle
+from nexus.paper.agent_cycle_authority import (
+    load_quasi_realtime_cycle_authority,
+    prepare_candidates,
+)
+from nexus.paper.agent_cycle_models import candidate_manifest_hash
 from nexus.paper.agent_market import collect_agent_paper_window
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.read_service import PaperReadService
@@ -21,11 +26,16 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import InstrumentAlias, LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     RiskQueryAuthorityRecord,
@@ -33,7 +43,10 @@ from nexus.persistence.models.paper import (
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
-from nexus.risk.authority import canonical_query_authority_hash
+from nexus.risk.authority import (
+    canonical_query_authority_hash,
+    prepare_schwab_realtime_risk_snapshot,
+)
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -84,8 +97,14 @@ class _IexProvider:
         )
 
 
-async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> None:
-    available_at = decision.decision_time - timedelta(minutes=30)
+async def _seed_adjusted_authority(
+    session: AsyncSession,
+    decision: object,
+    *,
+    source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
+    available_at: datetime | None = None,
+) -> None:
+    available_at = available_at or decision.decision_time - timedelta(minutes=30)
     store = _ObjectStore()
     for index, (instrument_id, close, _, _) in enumerate(INSTRUMENTS, start=1):
         for adjustment in ("raw", "all"):
@@ -124,7 +143,9 @@ async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> N
                 store,
                 page,
                 commit=False,
-                source_policy_id=(PAPER_DECISION_SOURCE_POLICY_ID if adjustment == "all" else None),
+                source_policy_id=(
+                    PAPER_DECISION_SOURCE_POLICY_ID if adjustment == "all" else None
+                ),
             )
             assert result.price_authority is not None
     prior_page = ProviderPage(
@@ -168,7 +189,7 @@ async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> N
     required = (INSTRUMENTS[0][0],)
     for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
         content_hash = canonical_query_authority_hash(
-            source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+            source_policy_id=source_policy_id,
             universe_snapshot_id=decision.universe_snapshot_id,
             decision_session=decision.decision_session,
             kind=kind,
@@ -181,7 +202,7 @@ async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> N
         session.add(
             RiskQueryAuthorityRecord(
                 id=UUID(int=0x63000000000000000000000000000500 + index),
-                source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                source_policy_id=source_policy_id,
                 universe_snapshot_id=decision.universe_snapshot_id,
                 decision_session=decision.decision_session,
                 kind=kind,
@@ -197,7 +218,12 @@ async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> N
 
 
 async def _seed_cycle_research_authority(
-    session: AsyncSession, *, registered_decision: object
+    session: AsyncSession,
+    *,
+    registered_decision: object,
+    source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
+    quote_received_at: datetime = DECISION_TIME,
+    price_available_at: datetime | None = None,
 ) -> None:
     await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
     try:
@@ -326,7 +352,14 @@ async def _seed_cycle_research_authority(
             )
         )
     await session.flush()
-    await _seed_adjusted_authority(session, registered_decision)
+
+
+    await _seed_adjusted_authority(
+        session,
+        registered_decision,
+        source_policy_id=source_policy_id,
+        available_at=price_available_at,
+    )
     artifact = DataArtifact(
         id=UUID("63000000-0000-0000-0000-000000000090"),
         uri=f"memory://raw/market/schwab/stream/{'e' * 64}.json",
@@ -335,10 +368,10 @@ async def _seed_cycle_research_authority(
         mime_type="application/json",
         schema_version="schwab_level_one_stream_v1",
         source="schwab",
-        observed_at=DECISION_TIME - timedelta(seconds=10),
-        available_at=DECISION_TIME,
-        received_at=DECISION_TIME,
-        created_at=DECISION_TIME,
+        observed_at=quote_received_at - timedelta(seconds=10),
+        available_at=quote_received_at,
+        received_at=quote_received_at,
+        created_at=quote_received_at,
     )
     quote_hash = canonical_quote_observation(
         instrument_id=INSTRUMENTS[0][0],
@@ -349,9 +382,9 @@ async def _seed_cycle_research_authority(
         bid=Decimal("99.90"),
         ask=Decimal("100.10"),
         last=None,
-        observed_at=DECISION_TIME - timedelta(seconds=10),
-        available_at=DECISION_TIME,
-        received_at=DECISION_TIME,
+        observed_at=quote_received_at - timedelta(seconds=10),
+        available_at=quote_received_at,
+        received_at=quote_received_at,
         revision="e" * 64,
     )
     session.add_all(
@@ -366,20 +399,315 @@ async def _seed_cycle_research_authority(
                 bid=Decimal("99.90"),
                 ask=Decimal("100.10"),
                 last=None,
-                observed_at=DECISION_TIME - timedelta(seconds=10),
-                available_at=DECISION_TIME,
-                received_at=DECISION_TIME,
+                observed_at=quote_received_at - timedelta(seconds=10),
+                available_at=quote_received_at,
+                received_at=quote_received_at,
                 revision="e" * 64,
                 quality_flags=[],
                 event_kind="quote",
                 content_hash=sha256(quote_hash).hexdigest(),
                 evidence_status="verified",
                 data_artifact_id=artifact.id,
-                created_at=DECISION_TIME,
+                created_at=quote_received_at,
             ),
         )
     )
     await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_quasi_realtime_authority_uses_database_time_window_and_same_session(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            await session.execute(
+                text("ALTER TABLE exchange_calendar_authorities DISABLE TRIGGER USER")
+            )
+            await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
+            try:
+                published_at = datetime(2026, 8, 25, 20, tzinfo=UTC)
+                await session.execute(
+                    text("UPDATE exchange_calendar_authorities SET published_at=:at"),
+                    {"at": published_at},
+                )
+                await session.execute(
+                    text("UPDATE universe_snapshots SET published_at=:at"),
+                    {"at": published_at},
+                )
+                await session.execute(
+                    text(
+                        "UPDATE universe_snapshots SET key='us_liquid',"
+                        "version='us_liquid_v1',source='fosun_local_read_only'"
+                    )
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER")
+                )
+                await session.execute(
+                    text("ALTER TABLE exchange_calendar_authorities ENABLE TRIGGER USER")
+                )
+
+        async with sessions() as session:
+            at_open = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=seed.account_id,
+                now=datetime(2026, 8, 26, 11, tzinfo=UTC),
+            )
+            before_close = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=seed.account_id,
+                now=datetime(2026, 8, 26, 19, 59, 59, tzinfo=UTC),
+            )
+            with pytest.raises(ValueError, match="AGENT_PAPER_MARKET_WINDOW_CLOSED"):
+                await load_quasi_realtime_cycle_authority(
+                    session,
+                    account_id=seed.account_id,
+                    now=datetime(2026, 8, 26, 20, tzinfo=UTC),
+                )
+
+        assert at_open.decision_session == date(2026, 8, 26)
+        assert at_open.execution_session == at_open.decision_session
+        assert at_open.decision_time == datetime(2026, 8, 26, 11, tzinfo=UTC)
+        assert before_close.decision_time == datetime(2026, 8, 26, 19, 59, 59, tzinfo=UTC)
+        assert at_open.quality_report_id is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_quasi_realtime_authority_observes_dst_holiday_and_session_uniqueness(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    winter_session = date(2026, 12, 1)
+    winter_open = datetime(2026, 12, 1, 14, 30, tzinfo=UTC)
+    winter_close = datetime(2026, 12, 1, 21, tzinfo=UTC)
+    calendar_id = UUID("63000000-0000-0000-0000-000000000098")
+    try:
+        async with sessions.begin() as session:
+            session.add(
+                ExchangeCalendarAuthorityRecord(
+                    id=calendar_id,
+                    exchange="XNYS",
+                    version="agent-paper-winter-test",
+                    source="fixture",
+                    range_start=winter_session,
+                    range_end=winter_session,
+                    query_parameters={},
+                    completeness_status="complete",
+                    content_hash="9" * 64,
+                    published_at=datetime(2026, 11, 30, tzinfo=UTC),
+                    created_at=datetime(2026, 11, 30, tzinfo=UTC),
+                )
+            )
+            await session.flush()
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=calendar_id,
+                    session=winter_session,
+                    decision_at=winter_close,
+                    market_open_at=winter_open,
+                    market_close_at=winter_close,
+                    created_at=datetime(2026, 11, 30, tzinfo=UTC),
+                )
+            )
+            await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE universe_snapshots SET key='us_liquid',"
+                        "version='us_liquid_v1',source='fosun_local_read_only',"
+                        "published_at='2026-11-30T00:00:00Z'"
+                    )
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER")
+                )
+
+        async with sessions() as session:
+            winter = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=seed.account_id,
+                now=datetime(2026, 12, 1, 12, tzinfo=UTC),
+            )
+            with pytest.raises(ValueError, match="AGENT_PAPER_CALENDAR_UNAVAILABLE"):
+                await load_quasi_realtime_cycle_authority(
+                    session,
+                    account_id=seed.account_id,
+                    now=datetime(2026, 11, 26, 12, tzinfo=UTC),
+                )
+        assert winter.decision_session == winter_session
+
+        async with sessions.begin() as session:
+            session.add(
+                AgentPaperCycleRecord(
+                    id=UUID("63000000-0000-0000-0000-000000000097"),
+                    account_id=winter.account_id,
+                    portfolio_id=winter.portfolio_id,
+                    decision_session=winter.decision_session,
+                    decision_time=winter.decision_time,
+                    execution_session=winter.execution_session,
+                    universe_snapshot_id=winter.universe_snapshot_id,
+                    quality_report_id=None,
+                    decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                    candidate_manifest=[],
+                    candidate_hash=candidate_manifest_hash(()),
+                    sizing_policy_version="agent_paper_sizing_v1",
+                    sizing_policy_hash="a" * 64,
+                    execution_locked=True,
+                )
+            )
+        async with sessions() as session:
+            with pytest.raises(ValueError, match="AGENT_PAPER_CYCLE_EXISTS"):
+                await load_quasi_realtime_cycle_authority(
+                    session,
+                    account_id=seed.account_id,
+                    now=datetime(2026, 12, 1, 12, tzinfo=UTC),
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    decision_time = DECISION_TIME - timedelta(minutes=90)
+    try:
+        from nexus.strategy.forward import load_forward_strategy_decision
+
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            assert registered is not None
+            await _seed_cycle_research_authority(
+                session,
+                registered_decision=registered.decision,
+                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                quote_received_at=decision_time,
+                price_available_at=decision_time,
+            )
+            historical_tables = (
+                "source_policies",
+                "instrument_aliases",
+                "price_series_manifests",
+                "price_bar_records",
+                "price_bar_set_authorities",
+                "research_evidence_refs",
+                "risk_query_authorities",
+                "sector_exposures",
+                "agent_data_snapshot_evidence",
+            )
+            for table_name in historical_tables:
+                await session.execute(text(f"ALTER TABLE {table_name} DISABLE TRIGGER USER"))
+                try:
+                    await session.execute(
+                        text(f"UPDATE {table_name} SET created_at=:at WHERE created_at>:at"),
+                        {"at": decision_time},
+                    )
+                finally:
+                    await session.execute(text(f"ALTER TABLE {table_name} ENABLE TRIGGER USER"))
+            await session.execute(
+                text("ALTER TABLE exchange_calendar_authorities DISABLE TRIGGER USER")
+            )
+            await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
+            try:
+                published_at = decision_time - timedelta(days=1)
+                await session.execute(
+                    text("UPDATE exchange_calendar_authorities SET published_at=:at"),
+                    {"at": published_at},
+                )
+                await session.execute(
+                    text("UPDATE universe_snapshots SET published_at=:at"),
+                    {"at": published_at},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER")
+                )
+                await session.execute(
+                    text("ALTER TABLE exchange_calendar_authorities ENABLE TRIGGER USER")
+                )
+
+        async with sessions() as session:
+            authority = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=seed.account_id,
+                now=decision_time,
+            )
+            selected_previous = await session.get(
+                ExchangeCalendarSessionRecord,
+                (authority.calendar_authority_id, authority.decision_session - timedelta(days=1)),
+            )
+            if selected_previous is None:
+                await session.execute(
+                    text("ALTER TABLE exchange_calendar_sessions DISABLE TRIGGER USER")
+                )
+                try:
+                    session.add(
+                        ExchangeCalendarSessionRecord(
+                            calendar_authority_id=authority.calendar_authority_id,
+                            session=authority.decision_session - timedelta(days=1),
+                            decision_at=DECISION_TIME - timedelta(days=1),
+                            market_open_at=(decision_time - timedelta(days=1)).replace(
+                                hour=13, minute=30
+                            ),
+                            market_close_at=(decision_time - timedelta(days=1)).replace(
+                                hour=20, minute=0
+                            ),
+                            created_at=decision_time - timedelta(days=1),
+                        )
+                    )
+                    await session.flush()
+                finally:
+                    await session.execute(
+                        text("ALTER TABLE exchange_calendar_sessions ENABLE TRIGGER USER")
+                    )
+            manifest = await prepare_candidates(session, authority=authority)
+            assert len(manifest) == 1
+            cycle = AgentPaperCycleRecord(
+                id=UUID("63000000-0000-0000-0000-000000000099"),
+                account_id=authority.account_id,
+                portfolio_id=authority.portfolio_id,
+                decision_session=authority.decision_session,
+                decision_time=authority.decision_time,
+                execution_session=authority.execution_session,
+                universe_snapshot_id=authority.universe_snapshot_id,
+                quality_report_id=None,
+                decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                candidate_manifest=[row.model_dump(mode="json") for row in manifest],
+                candidate_hash=candidate_manifest_hash(manifest),
+                sizing_policy_version="agent_paper_sizing_v1",
+                sizing_policy_hash="a" * 64,
+                execution_locked=True,
+            )
+            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+
+        assert market.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        assert market.execution_session == market.decision_session
+        assert market.prices[0].authority_id == manifest[0].prior_daily_price_authority_id
+        assert {proof.authority_id for proof in market.query_proofs} == set(
+            manifest[0].risk_query_authority_ids
+        )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

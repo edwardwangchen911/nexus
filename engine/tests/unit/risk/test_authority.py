@@ -3,7 +3,11 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from nexus.risk.authority import build_risk_market_snapshot, canonical_query_authority_hash
+from nexus.risk.authority import (
+    RiskAuthorityInput,
+    build_risk_market_snapshot,
+    canonical_query_authority_hash,
+)
 from nexus.risk.canonical import canonical_risk_market_authority_hash
 from nexus.risk.models import AuthorityQueryProof, RiskPrice, RiskSectorExposure
 from nexus.strategy.forward import ForwardStrategyDecision, ForwardStrategyTarget
@@ -127,6 +131,23 @@ def test_authority_builds_exact_stable_snapshot_and_hash() -> None:
 
     assert snapshot.authority_hash == canonical_risk_market_authority_hash(snapshot)
     assert reversed_snapshot.authority_hash == snapshot.authority_hash
+
+
+def test_risk_snapshot_value_allows_same_session_authority() -> None:
+    same_session = RiskAuthorityInput(
+        decision_session=date(2026, 8, 21),
+        execution_session=date(2026, 8, 21),
+        decision_time=NOW,
+        source_policy_id=UUID(int=3),
+        calendar_authority_id=UUID(int=4),
+        universe_snapshot_id=UUID(int=5),
+        quality_report_id=UUID(int=6),
+    )
+
+    snapshot = _build(decision=same_session)
+
+    assert snapshot.execution_session == snapshot.decision_session
+    assert snapshot.authority_hash == canonical_risk_market_authority_hash(snapshot)
 
 
 def test_query_authority_hash_rejects_non_utc_timestamp() -> None:

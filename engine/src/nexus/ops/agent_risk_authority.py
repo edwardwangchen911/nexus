@@ -26,6 +26,10 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+)
 from nexus.providers.corporate_actions.alpaca_http import CorporateActionsRequest
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.research.alpaca_actions_archive import load_action_collection
@@ -276,6 +280,7 @@ async def run_once(
     decision_time: datetime,
     output_dir: Path,
     now: datetime | None = None,
+    source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
 ) -> dict[str, object]:
     current = now or datetime.now(UTC)
     if (
@@ -284,6 +289,8 @@ async def run_once(
         or decision_time.tzinfo is None
         or decision_time.utcoffset() != UTC.utcoffset(decision_time)
         or decision_time.astimezone(ZoneInfo("America/New_York")).date() != decision_session
+        or source_policy_id
+        not in {PAPER_DECISION_SOURCE_POLICY_ID, PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID}
         or not settings.database_url
     ):
         raise ValueError("AGENT_RISK_SESSION_INVALID")
@@ -298,7 +305,7 @@ async def run_once(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
-            calendar_authority_id = await session.scalar(
+            calendar_query = (
                 select(ExchangeCalendarAuthorityRecord.id)
                 .join(
                     ExchangeCalendarSessionRecord,
@@ -310,8 +317,18 @@ async def run_once(
                     ExchangeCalendarAuthorityRecord.completeness_status == "complete",
                     ExchangeCalendarAuthorityRecord.published_at <= decision_time,
                     ExchangeCalendarSessionRecord.session == decision_session,
-                    ExchangeCalendarSessionRecord.decision_at == decision_time,
                 )
+            )
+            if source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID:
+                calendar_query = calendar_query.where(
+                    ExchangeCalendarSessionRecord.decision_at == decision_time
+                )
+            else:
+                local_decision = decision_time.astimezone(ZoneInfo("America/New_York"))
+                if not 7 <= local_decision.hour < 16:
+                    raise ValueError("AGENT_RISK_SESSION_INVALID")
+            calendar_authority_id = await session.scalar(
+                calendar_query
                 .order_by(
                     ExchangeCalendarAuthorityRecord.published_at.desc(),
                     ExchangeCalendarAuthorityRecord.id.desc(),
@@ -325,6 +342,7 @@ async def run_once(
                 decision_session=decision_session,
                 symbol="AAPL",
                 as_of=current,
+                source_policy_id=source_policy_id,
             )
             if scope.existing:
                 return _verified_result(
@@ -354,6 +372,7 @@ async def run_once(
                 decision_session=decision_session,
                 symbol="AAPL",
                 proofs=proofs,
+                source_policy_id=source_policy_id,
             )
         return _verified_result(
             records,

@@ -15,6 +15,8 @@ from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleRecord,
 )
 from nexus.risk.models import PaperPortfolioProjection, RiskMarketSnapshot, exact_decimal
@@ -90,16 +92,25 @@ class AgentPaperDecision(BaseModel):
             self.decision_time
         ):
             raise ValueError("decision time must use UTC")
-        if self.execution_session <= self.decision_session:
-            raise ValueError("execution session must follow decision session")
+        legacy = (
+            self.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+            and self.execution_source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+            and self.execution_session > self.decision_session
+        )
+        schwab = (
+            self.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+            and self.execution_source_policy_id
+            == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+            and self.execution_session == self.decision_session
+        )
+        if not (legacy or schwab):
+            raise ValueError("Agent decision session and source policies are invalid")
         target_ids = [target.instrument_id for target in self.targets]
         binding_ids = [binding.instrument_id for binding in self.bindings]
         if len(target_ids) != len(set(target_ids)) or len(binding_ids) != len(set(binding_ids)):
             raise ValueError("Agent decision instruments must be unique")
         if (
-            self.source_policy_id != PAPER_DECISION_SOURCE_POLICY_ID
-            or self.execution_source_policy_id != PAPER_EXECUTION_SOURCE_POLICY_ID
-            or self.quality_report_id is not None
+            self.quality_report_id is not None
             or self.sizing_policy_hash != AGENT_PAPER_SIZING_POLICY_HASH
             or not set(binding_ids) <= set(target_ids)
         ):
@@ -173,11 +184,20 @@ def _validate_inputs(
         raise AgentPaperDecisionError("OPEN_ORDER_EXISTS")
     if not actions:
         raise AgentPaperDecisionError("NO_ELIGIBLE_CANDIDATE")
+    legacy_policy = (
+        cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+        and cycle.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+        and cycle.execution_session > cycle.decision_session
+    )
+    schwab_policy = (
+        cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        and cycle.execution_price_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        and cycle.execution_session == cycle.decision_session
+    )
     if (
         cycle.account_id != projection.account_id
         or cycle.portfolio_id != projection.portfolio_id
-        or cycle.decision_price_policy_id != PAPER_DECISION_SOURCE_POLICY_ID
-        or cycle.execution_price_policy_id != PAPER_EXECUTION_SOURCE_POLICY_ID
+        or not (legacy_policy or schwab_policy)
         or cycle.sizing_policy_version != AGENT_PAPER_SIZING_V1.version
         or cycle.sizing_policy_hash != AGENT_PAPER_SIZING_POLICY_HASH
         or not cycle.execution_locked

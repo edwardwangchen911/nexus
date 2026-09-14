@@ -13,6 +13,8 @@ from nexus.paper.agent_decision import (
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleRecord,
 )
 from nexus.risk.evaluate import derive_order_candidates
@@ -208,6 +210,36 @@ def test_reduce_precedes_increase_and_weights_equal_one() -> None:
         (UUID(int=1102), "increase"),
         (UUID(int=1103), "maintain"),
     ]
+
+
+def test_same_session_schwab_policy_keeps_two_percent_sizing() -> None:
+    cycle = _cycle()
+    cycle.decision_price_policy_id = PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+    cycle.execution_price_policy_id = PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+    cycle.execution_session = cycle.decision_session
+    market = _market(((INCREASE_ID, "100", "technology"),)).model_copy(
+        update={
+            "execution_session": cycle.decision_session,
+            "source_policy_id": PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+        }
+    )
+    from nexus.risk.canonical import canonical_risk_market_authority_hash
+
+    market = market.model_copy(
+        update={"authority_hash": canonical_risk_market_authority_hash(market)}
+    )
+
+    decision = build_agent_paper_decision(
+        cycle=cycle,
+        actions=(_action(INCREASE_ID, "increase"),),
+        projection=_projection(),
+        market=market,
+    )
+
+    assert decision.execution_session == decision.decision_session
+    assert decision.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+    assert decision.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+    assert decision.targets[0].target_weight == Decimal("0.02")
 
 
 def test_turnover_cap_and_whole_share_derivation_are_deterministic() -> None:

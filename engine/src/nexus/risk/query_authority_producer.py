@@ -22,7 +22,11 @@ from nexus.persistence.models.market import (
     UniverseMember,
     UniverseSnapshot,
 )
-from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID, RiskQueryAuthorityRecord
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    RiskQueryAuthorityRecord,
+)
 from nexus.risk.authority import canonical_query_authority_hash
 
 _NASDAQ = "{http://www.nasdaqtrader.com/}"
@@ -193,6 +197,7 @@ async def inspect_query_authority_scope(
     symbol: str,
     as_of: datetime,
     universe_snapshot_id: UUID | None = None,
+    source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
 ) -> RiskQueryScope:
     """Resolve the one supported frozen AAPL universe and any persisted result."""
     if (
@@ -200,6 +205,8 @@ async def inspect_query_authority_scope(
         or type(decision_session) is not date
         or as_of.tzinfo is None
         or as_of.utcoffset() != UTC.utcoffset(as_of)
+        or source_policy_id
+        not in {PAPER_DECISION_SOURCE_POLICY_ID, PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID}
     ):
         raise ValueError("RISK_QUERY_AUTHORITY_SCOPE_INVALID")
     universe: UniverseSnapshot | None
@@ -224,14 +231,7 @@ async def inspect_query_authority_scope(
         universe_snapshot_id = universe.id
     else:
         universe = await session.get(UniverseSnapshot, universe_snapshot_id)
-    policy = await session.get(SourcePolicy, PAPER_DECISION_SOURCE_POLICY_ID)
-    members = tuple(
-        await session.scalars(
-            select(UniverseMember)
-            .where(UniverseMember.universe_snapshot_id == universe_snapshot_id)
-            .order_by(UniverseMember.instrument_id)
-        )
-    )
+    policy = await session.get(SourcePolicy, source_policy_id)
     if (
         policy is None
         or policy.created_at > as_of
@@ -242,16 +242,18 @@ async def inspect_query_authority_scope(
         or universe.published_at is None
         or universe.published_at > as_of
         or universe.created_at > as_of
-        or len(members) != 1
-        or members[0].created_at > as_of
     ):
         raise ValueError("RISK_QUERY_AUTHORITY_SCOPE_INVALID")
-    instrument_id = members[0].instrument_id
-    instrument = await session.get(Instrument, instrument_id)
     aliases = tuple(
         await session.scalars(
-            select(InstrumentAlias).where(
-                InstrumentAlias.instrument_id == instrument_id,
+            select(InstrumentAlias)
+            .join(
+                UniverseMember,
+                UniverseMember.instrument_id == InstrumentAlias.instrument_id,
+            )
+            .where(
+                UniverseMember.universe_snapshot_id == universe_snapshot_id,
+                UniverseMember.created_at <= as_of,
                 InstrumentAlias.alias_type == "ticker",
                 InstrumentAlias.symbol == symbol,
                 InstrumentAlias.valid_from <= decision_session,
@@ -261,20 +263,23 @@ async def inspect_query_authority_scope(
             )
         )
     )
+    if len(aliases) != 1:
+        raise ValueError("RISK_QUERY_AUTHORITY_SCOPE_INVALID")
+    instrument_id = aliases[0].instrument_id
+    instrument = await session.get(Instrument, instrument_id)
     if (
         instrument is None
         or instrument.created_at > as_of
         or instrument.exchange not in US_EQUITY_EXCHANGES
         or instrument.asset_type != "common_stock"
         or instrument.currency != "USD"
-        or len(aliases) != 1
     ):
         raise ValueError("RISK_QUERY_AUTHORITY_SCOPE_INVALID")
     existing = tuple(
         await session.scalars(
             select(RiskQueryAuthorityRecord)
             .where(
-                RiskQueryAuthorityRecord.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
+                RiskQueryAuthorityRecord.source_policy_id == source_policy_id,
                 RiskQueryAuthorityRecord.universe_snapshot_id == universe_snapshot_id,
                 RiskQueryAuthorityRecord.decision_session == decision_session,
             )
@@ -293,6 +298,7 @@ async def persist_query_authorities(
     decision_session: date,
     symbol: str,
     proofs: tuple[RiskSourceProof, ...],
+    source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
 ) -> tuple[RiskQueryAuthorityRecord, ...]:
     """Append or verify the exact three source-backed proofs for one AAPL scope."""
     kinds = {proof.kind for proof in proofs}
@@ -301,6 +307,8 @@ async def persist_query_authorities(
         or type(decision_session) is not date
         or len(proofs) != 3
         or kinds != {"corporate_action", "suspension", "delisting"}
+        or source_policy_id
+        not in {PAPER_DECISION_SOURCE_POLICY_ID, PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID}
     ):
         raise ValueError("RISK_QUERY_AUTHORITY_SCOPE_INVALID")
     cutoff = min(proof.available_at for proof in proofs)
@@ -310,6 +318,7 @@ async def persist_query_authorities(
         symbol=symbol,
         as_of=cutoff,
         universe_snapshot_id=universe_snapshot_id,
+        source_policy_id=source_policy_id,
     )
     instrument_id = scope.instrument_id
 
@@ -317,7 +326,7 @@ async def persist_query_authorities(
     for proof in sorted(proofs, key=lambda value: value.kind):
         blocked = [instrument_id] if proof.blocked else []
         content_hash = canonical_query_authority_hash(
-            source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+            source_policy_id=source_policy_id,
             universe_snapshot_id=universe_snapshot_id,
             decision_session=decision_session,
             kind=proof.kind,
@@ -329,7 +338,7 @@ async def persist_query_authorities(
         )
         expected.append(
             RiskQueryAuthorityRecord(
-                source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                source_policy_id=source_policy_id,
                 universe_snapshot_id=universe_snapshot_id,
                 decision_session=decision_session,
                 kind=proof.kind,

@@ -16,13 +16,18 @@ from nexus.persistence.models.market import (
     UniverseMember,
     UniverseSnapshot,
 )
-from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID, RiskQueryAuthorityRecord
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    RiskQueryAuthorityRecord,
+)
 from nexus.risk.authority import canonical_query_authority_hash
 from nexus.risk.query_authority_producer import RiskSourceProof, persist_query_authorities
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 INSTRUMENT_ID = UUID("51000000-0000-0000-0000-000000000001")
+EXTRA_INSTRUMENT_ID = UUID("51000000-0000-0000-0000-000000000005")
 UNIVERSE_ID = UUID("51000000-0000-0000-0000-000000000002")
 SESSION = date(2026, 9, 14)
 AVAILABLE_AT = datetime(2026, 9, 14, 14, 30, tzinfo=UTC)
@@ -39,7 +44,9 @@ def _proofs(*, halt: bool = False) -> tuple[RiskSourceProof, ...]:
     )
 
 
-async def _seed(url: str, *, exchange: str = "XNAS") -> None:
+async def _seed(
+    url: str, *, exchange: str = "XNAS", extra_member: bool = False
+) -> None:
     engine = create_async_engine(url)
     try:
         async with async_sessionmaker(engine).begin() as session:
@@ -64,6 +71,18 @@ async def _seed(url: str, *, exchange: str = "XNAS") -> None:
                     created_at=datetime(2026, 9, 1, tzinfo=UTC),
                 )
             )
+            if extra_member:
+                session.add(
+                    Instrument(
+                        id=EXTRA_INSTRUMENT_ID,
+                        asset_type="common_stock",
+                        exchange="XNAS",
+                        currency="USD",
+                        tick_size=Decimal("0.01"),
+                        risk_bucket="technology",
+                        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+                    )
+                )
             session.add(
                 UniverseSnapshot(
                     id=UNIVERSE_ID,
@@ -109,6 +128,15 @@ async def _seed(url: str, *, exchange: str = "XNAS") -> None:
                     created_at=datetime(2026, 9, 1, tzinfo=UTC),
                 )
             )
+            if extra_member:
+                session.add(
+                    UniverseMember(
+                        universe_snapshot_id=UNIVERSE_ID,
+                        instrument_id=EXTRA_INSTRUMENT_ID,
+                        inclusion_reason="TEST_EXTRA",
+                        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+                    )
+                )
             await session.flush()
             await session.execute(
                 text("UPDATE universe_snapshots SET published_at = :at WHERE id = :id"),
@@ -225,6 +253,32 @@ def test_normal_entry_accepts_canonical_us_equity_exchange_before_window_gate(
         )
 
 
+def test_schwab_entry_accepts_intraday_time_without_matching_calendar_decision_at(
+    migrated_database_url, tmp_path
+) -> None:
+    asyncio.run(_seed(migrated_database_url, exchange="XNYS"))
+    settings = entry.AgentRiskSettings.model_validate(
+        {
+            "DATABASE_URL": migrated_database_url,
+            "ALPACA_API_KEY_ID": "synthetic-key",
+            "ALPACA_API_SECRET_KEY": "synthetic-secret",
+        }
+    )
+    intraday_decision = datetime(2026, 9, 14, 19, 30, tzinfo=UTC)
+
+    with pytest.raises(ValueError, match="AGENT_RISK_COLLECTION_WINDOW_INVALID"):
+        asyncio.run(
+            entry.run_once(
+                settings,
+                decision_session=SESSION,
+                decision_time=intraday_decision,
+                output_dir=tmp_path / "risk",
+                now=intraday_decision - timedelta(minutes=3),
+                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            )
+        )
+
+
 def test_persists_exact_three_proofs_and_replay_returns_existing_rows(
     migrated_database_url,
 ) -> None:
@@ -253,6 +307,34 @@ def test_persists_exact_three_proofs_and_replay_returns_existing_rows(
             source_watermark_hash=row.source_watermark_hash,
             available_at=AVAILABLE_AT,
         )
+
+
+def test_persists_exact_three_proofs_for_schwab_decision_policy(
+    migrated_database_url,
+) -> None:
+    asyncio.run(_seed(migrated_database_url, extra_member=True))
+
+    async def persist() -> tuple[RiskQueryAuthorityRecord, ...]:
+        engine = create_async_engine(migrated_database_url)
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False).begin() as session:
+                return await persist_query_authorities(
+                    session,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    decision_session=SESSION,
+                    symbol="AAPL",
+                    proofs=_proofs(),
+                    source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                )
+        finally:
+            await engine.dispose()
+
+    records = asyncio.run(persist())
+
+    assert len(records) == 3
+    assert {row.source_policy_id for row in records} == {
+        PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+    }
 
 
 async def _conflicting_replay(url: str) -> None:

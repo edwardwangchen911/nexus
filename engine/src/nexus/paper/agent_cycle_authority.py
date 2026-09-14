@@ -1,7 +1,8 @@
 """Point-in-time root and candidate authority for Agent paper cycles."""
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
@@ -32,6 +33,8 @@ from nexus.persistence.models.market import (
 )
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    AgentPaperCycleRecord,
     PaperAccountRecord,
     RiskQueryAuthorityRecord,
 )
@@ -48,6 +51,88 @@ class CycleAuthority(BaseModel):
     calendar_authority_id: UUID
     universe_snapshot_id: UUID
     quality_report_id: UUID | None = None
+
+
+def _decision_source_policy_id(authority: CycleAuthority) -> UUID:
+    return (
+        PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        if authority.execution_session == authority.decision_session
+        else PAPER_DECISION_SOURCE_POLICY_ID
+    )
+
+
+async def load_quasi_realtime_cycle_authority(
+    session: AsyncSession, *, account_id: UUID, now: datetime
+) -> CycleAuthority:
+    """Load one same-session AAPL cycle root from a server-owned UTC clock."""
+    if now.tzinfo is None or now.utcoffset() != UTC.utcoffset(now):
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    local_now = now.astimezone(ZoneInfo("America/New_York"))
+    if not time(7) <= local_now.time().replace(tzinfo=None) < time(16):
+        raise ValueError("AGENT_PAPER_MARKET_WINDOW_CLOSED")
+    account = await session.get(PaperAccountRecord, account_id)
+    if account is None or account.capability != "simulation_write_internal":
+        raise ValueError("AGENT_PAPER_ACCOUNT_INVALID")
+    row = (
+        await session.execute(
+            select(ExchangeCalendarAuthorityRecord, ExchangeCalendarSessionRecord)
+            .join(
+                ExchangeCalendarSessionRecord,
+                ExchangeCalendarSessionRecord.calendar_authority_id
+                == ExchangeCalendarAuthorityRecord.id,
+            )
+            .where(
+                ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+                ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+                ExchangeCalendarAuthorityRecord.range_start <= local_now.date(),
+                ExchangeCalendarAuthorityRecord.range_end >= local_now.date(),
+                ExchangeCalendarAuthorityRecord.published_at <= now,
+                ExchangeCalendarAuthorityRecord.created_at <= now,
+                ExchangeCalendarSessionRecord.session == local_now.date(),
+            )
+            .order_by(
+                ExchangeCalendarAuthorityRecord.published_at.desc(),
+                ExchangeCalendarAuthorityRecord.id.desc(),
+            )
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
+    calendar, calendar_session = row
+    existing_cycle = await session.scalar(
+        select(AgentPaperCycleRecord.id).where(
+            AgentPaperCycleRecord.account_id == account_id,
+            AgentPaperCycleRecord.decision_session == calendar_session.session,
+        )
+    )
+    if existing_cycle is not None:
+        raise ValueError("AGENT_PAPER_CYCLE_EXISTS")
+    universe = await session.scalar(
+        select(UniverseSnapshot)
+        .where(
+            UniverseSnapshot.key == "us_liquid",
+            UniverseSnapshot.version == "us_liquid_v1",
+            UniverseSnapshot.source == "fosun_local_read_only",
+            UniverseSnapshot.effective_from <= calendar_session.session,
+            UniverseSnapshot.published_at <= now,
+            UniverseSnapshot.created_at <= now,
+        )
+        .order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id)
+        .limit(1)
+    )
+    if universe is None:
+        raise ValueError("AGENT_PAPER_ROOT_AUTHORITY_UNAVAILABLE")
+    return CycleAuthority(
+        account_id=account.id,
+        portfolio_id=account.portfolio_id,
+        decision_session=calendar_session.session,
+        decision_time=now,
+        execution_session=calendar_session.session,
+        calendar_authority_id=calendar.id,
+        universe_snapshot_id=universe.id,
+        quality_report_id=None,
+    )
 
 
 async def load_cycle_authority(
@@ -112,6 +197,7 @@ async def load_cycle_authority(
 async def prepare_candidates(
     session: AsyncSession, *, authority: CycleAuthority
 ) -> tuple[CandidateManifestEntry, ...]:
+    decision_source_policy_id = _decision_source_policy_id(authority)
     aliases = tuple(
         await session.scalars(
             select(InstrumentAlias)
@@ -210,14 +296,10 @@ async def prepare_candidates(
     risk_rows = tuple(
         await session.scalars(
             select(RiskQueryAuthorityRecord).where(
-                RiskQueryAuthorityRecord.source_policy_id
-                == PAPER_DECISION_SOURCE_POLICY_ID,
-                RiskQueryAuthorityRecord.universe_snapshot_id
-                == authority.universe_snapshot_id,
+                RiskQueryAuthorityRecord.source_policy_id == decision_source_policy_id,
+                RiskQueryAuthorityRecord.universe_snapshot_id == authority.universe_snapshot_id,
                 RiskQueryAuthorityRecord.decision_session == authority.decision_session,
-                RiskQueryAuthorityRecord.kind.in_(
-                    ("corporate_action", "suspension", "delisting")
-                ),
+                RiskQueryAuthorityRecord.kind.in_(("corporate_action", "suspension", "delisting")),
                 RiskQueryAuthorityRecord.complete.is_(True),
                 RiskQueryAuthorityRecord.available_at <= authority.decision_time,
                 RiskQueryAuthorityRecord.created_at <= authority.decision_time,
@@ -232,6 +314,11 @@ async def prepare_candidates(
         or any(
             alias.instrument_id not in row.required_instrument_ids
             or alias.instrument_id in row.blocked_instrument_ids
+            or (
+                decision_source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+                and row.kind == "suspension"
+                and authority.decision_time - row.available_at > timedelta(minutes=2)
+            )
             for row in risks.values()
         )
     ):
@@ -322,6 +409,7 @@ async def validate_candidate_manifest(
     """Read back the exact frozen authorities without selecting newer evidence."""
     if len(manifest) != 1:
         return False
+    decision_source_policy_id = _decision_source_policy_id(authority)
     candidate = manifest[0]
     instrument = await session.get(Instrument, candidate.instrument_id)
     alias_count = await session.scalar(
@@ -351,9 +439,7 @@ async def validate_candidate_manifest(
         else await session.get(LatestQuote, candidate.decision_trade_id)
     )
     artifact = await session.get(DataArtifact, candidate.decision_artifact_id)
-    prior_daily = await session.get(
-        PriceBarSetAuthority, candidate.prior_daily_price_authority_id
-    )
+    prior_daily = await session.get(PriceBarSetAuthority, candidate.prior_daily_price_authority_id)
     risk_rows = tuple(
         row
         for row in await session.scalars(
@@ -365,16 +451,14 @@ async def validate_candidate_manifest(
     snapshot = await session.get(DataSnapshot, candidate.research_snapshot_id)
     snapshot_evidence = await session.scalar(
         select(AgentDataSnapshotEvidenceRecord).where(
-            AgentDataSnapshotEvidenceRecord.data_snapshot_id
-            == candidate.research_snapshot_id,
+            AgentDataSnapshotEvidenceRecord.data_snapshot_id == candidate.research_snapshot_id,
             AgentDataSnapshotEvidenceRecord.instrument_id == candidate.instrument_id,
         )
     )
     prior_session = await session.scalar(
         select(ExchangeCalendarSessionRecord.session)
         .where(
-            ExchangeCalendarSessionRecord.calendar_authority_id
-            == authority.calendar_authority_id,
+            ExchangeCalendarSessionRecord.calendar_authority_id == authority.calendar_authority_id,
             ExchangeCalendarSessionRecord.session < authority.decision_session,
         )
         .order_by(ExchangeCalendarSessionRecord.session.desc())
@@ -422,10 +506,9 @@ async def validate_candidate_manifest(
         or artifact.received_at > authority.decision_time
         or len(risk_rows) != 3
         or {row.id for row in risk_rows} != set(candidate.risk_query_authority_ids)
-        or {row.kind for row in risk_rows}
-        != {"corporate_action", "suspension", "delisting"}
+        or {row.kind for row in risk_rows} != {"corporate_action", "suspension", "delisting"}
         or any(
-            row.source_policy_id != PAPER_DECISION_SOURCE_POLICY_ID
+            row.source_policy_id != decision_source_policy_id
             or row.universe_snapshot_id != authority.universe_snapshot_id
             or row.decision_session != authority.decision_session
             or not row.complete
@@ -433,6 +516,11 @@ async def validate_candidate_manifest(
             or row.created_at > authority.decision_time
             or candidate.instrument_id not in row.required_instrument_ids
             or candidate.instrument_id in row.blocked_instrument_ids
+            or (
+                decision_source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+                and row.kind == "suspension"
+                and authority.decision_time - row.available_at > timedelta(minutes=2)
+            )
             for row in risk_rows
         )
     ):
@@ -451,9 +539,7 @@ async def validate_candidate_manifest(
         or trade.observed_at > artifact.received_at
     ):
         return False
-    prior_manifest = await session.get(
-        PriceSeriesManifest, prior_daily.price_series_manifest_id
-    )
+    prior_manifest = await session.get(PriceSeriesManifest, prior_daily.price_series_manifest_id)
     prior_bar = await session.scalar(
         select(PriceBarRecord).where(
             PriceBarRecord.price_series_manifest_id == prior_daily.price_series_manifest_id,

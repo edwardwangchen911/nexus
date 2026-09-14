@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import func, select
@@ -23,6 +24,7 @@ from nexus.market.price_bar_authority import (
     prepare_price_bar_set,
 )
 from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.paper.agent_cycle_models import CandidateManifestEntry, candidate_manifest_hash
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -44,6 +46,9 @@ from nexus.persistence.models.market import (
 )
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCycleRecord,
     RiskQueryAuthorityRecord,
 )
 from nexus.persistence.models.research import ResearchEvidenceRef
@@ -88,6 +93,16 @@ class RiskAuthorityInput(BaseModel):
 
 
 def _valid_source_policy(policy: SourcePolicy) -> bool:
+    if policy.id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
+        return (
+            policy.key == "paper_decision_price"
+            and policy.version == "paper_schwab_l1_decision_v1"
+            and policy.schema_version == "1"
+            and policy.payload.get("market_context_source") == "schwab"
+            and policy.payload.get("fallback") == "disabled"
+            and policy.payload.get("content_hash")
+            == "fcbb81143639771e8c9228d768707cb11b720a7e69fcd0598aef2af958dba885"
+        )
     if policy.id == PAPER_DECISION_SOURCE_POLICY_ID:
         return (
             policy.key == "paper_decision_price"
@@ -307,7 +322,10 @@ async def _validate_root_authorities(
     decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[UUID, ...]:
-    agent_paper = decision.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+    agent_paper = decision.source_policy_id in {
+        PAPER_DECISION_SOURCE_POLICY_ID,
+        PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    }
     source_policy = await session.get(SourcePolicy, decision.source_policy_id)
     calendar = await session.get(ExchangeCalendarAuthorityRecord, decision.calendar_authority_id)
     universe = await session.get(UniverseSnapshot, decision.universe_snapshot_id)
@@ -363,7 +381,15 @@ async def _validate_root_authorities(
     if len(decision_indexes) != 1:
         raise ValueError("risk calendar authority is incomplete")
     index = decision_indexes[0]
-    if (
+    if decision.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
+        local_time = decision.decision_time.astimezone(ZoneInfo("America/New_York"))
+        if (
+            decision.execution_session != decision.decision_session
+            or local_time.date() != decision.decision_session
+            or not 7 <= local_time.hour < 16
+        ):
+            raise ValueError("risk execution session is not the decision session")
+    elif (
         sessions[index].decision_at != decision.decision_time
         or index + 1 >= len(sessions)
         or sessions[index + 1].session != decision.execution_session
@@ -559,19 +585,28 @@ async def _load_query_proofs(
     session: AsyncSession,
     decision: PaperDecisionAuthority | RiskAuthorityInput,
     required: set[UUID],
+    authority_ids: Sequence[UUID] | None = None,
 ) -> tuple[AuthorityQueryProof, ...]:
+    query = select(RiskQueryAuthorityRecord).where(
+        RiskQueryAuthorityRecord.source_policy_id == decision.source_policy_id,
+        RiskQueryAuthorityRecord.universe_snapshot_id == decision.universe_snapshot_id,
+        RiskQueryAuthorityRecord.decision_session == decision.decision_session,
+    )
+    if authority_ids is not None:
+        query = query.where(RiskQueryAuthorityRecord.id.in_(tuple(authority_ids)))
     records = tuple(
         (
-            await session.scalars(
-                select(RiskQueryAuthorityRecord).where(
-                    RiskQueryAuthorityRecord.source_policy_id == decision.source_policy_id,
-                    RiskQueryAuthorityRecord.universe_snapshot_id == decision.universe_snapshot_id,
-                    RiskQueryAuthorityRecord.decision_session == decision.decision_session,
-                )
-            )
+            await session.scalars(query)
         ).all()
     )
-    if {record.kind for record in records} != _QUERY_KINDS or len(records) != 3:
+    if (
+        {record.kind for record in records} != _QUERY_KINDS
+        or len(records) != 3
+        or (
+            authority_ids is not None
+            and {record.id for record in records} != set(authority_ids)
+        )
+    ):
         raise ValueError("risk query proofs are incomplete")
     proofs: list[AuthorityQueryProof] = []
     for record in records:
@@ -581,6 +616,12 @@ async def _load_query_proofs(
             or not set(record.blocked_instrument_ids) <= required
             or not record.complete
             or record.available_at > decision.decision_time
+            or (
+                decision.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+                and record.kind == "suspension"
+                and decision.decision_time - record.available_at
+                > timedelta(minutes=2)
+            )
             or canonical_query_authority_hash(
                 source_policy_id=record.source_policy_id,
                 universe_snapshot_id=record.universe_snapshot_id,
@@ -609,6 +650,168 @@ async def _load_query_proofs(
             )
         )
     return tuple(sorted(proofs, key=lambda item: item.kind))
+
+
+async def _load_frozen_prior_daily_price(
+    session: AsyncSession,
+    *,
+    authority: RiskAuthorityInput,
+    candidate: CandidateManifestEntry,
+) -> RiskPrice:
+    previous_session = await session.scalar(
+        select(ExchangeCalendarSessionRecord.session)
+        .where(
+            ExchangeCalendarSessionRecord.calendar_authority_id
+            == authority.calendar_authority_id,
+            ExchangeCalendarSessionRecord.session < authority.decision_session,
+        )
+        .order_by(ExchangeCalendarSessionRecord.session.desc())
+        .limit(1)
+    )
+    row = (
+        await session.execute(
+            select(
+                PriceBarSetAuthority,
+                PriceSeriesManifest,
+                PriceBarRecord,
+                Instrument,
+                ResearchEvidenceRef,
+            )
+            .join(
+                PriceSeriesManifest,
+                PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
+            )
+            .join(
+                PriceBarRecord,
+                PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
+            )
+            .join(Instrument, Instrument.id == PriceBarRecord.instrument_id)
+            .join(
+                ResearchEvidenceRef,
+                ResearchEvidenceRef.id == PriceBarSetAuthority.evidence_ref_id,
+            )
+            .where(
+                PriceBarSetAuthority.id == candidate.prior_daily_price_authority_id,
+                PriceBarRecord.instrument_id == candidate.instrument_id,
+            )
+        )
+    ).one_or_none()
+    if row is None or previous_session is None:
+        raise ValueError("risk price authority is invalid")
+    price_authority, manifest, bar, instrument, evidence = row
+    prepared = await prepare_price_bar_set(
+        session,
+        manifest.id,
+        as_of=authority.decision_time,
+        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    )
+    if (
+        bar.session != previous_session
+        or price_authority.first_session != previous_session
+        or price_authority.last_session != previous_session
+        or prepared is None
+        or prepared.content_hash != price_authority.content_hash
+        or prepared.byte_length != price_authority.byte_length
+        or prepared.bar_count != price_authority.bar_count
+        or prepared.first_session != price_authority.first_session
+        or prepared.last_session != price_authority.last_session
+        or prepared.available_at != price_authority.available_at
+        or not _valid_price_protocol(
+            price_authority,
+            manifest,
+            PAPER_DECISION_SOURCE_POLICY_ID,
+        )
+        or not _valid_price_evidence(price_authority, manifest, evidence)
+        or instrument.currency != "USD"
+        or instrument.asset_type not in {"ETF", "common_stock"}
+        or instrument.exchange not in US_EQUITY_EXCHANGES
+        or price_authority.available_at > authority.decision_time
+        or bar.available_at > authority.decision_time
+    ):
+        raise ValueError("risk price authority is invalid")
+    return RiskPrice(
+        instrument_id=bar.instrument_id,
+        authority_id=price_authority.id,
+        market="US",
+        currency="USD",
+        asset_type=cast(Literal["ETF", "common_stock"], instrument.asset_type),
+        close=bar.close,
+        source=manifest.source,
+        delivery_mode=manifest.delivery_mode,
+        available_at=max(price_authority.available_at, bar.available_at),
+        content_hash=price_authority.content_hash,
+    )
+
+
+async def prepare_schwab_realtime_risk_snapshot(
+    session: AsyncSession, *, cycle: AgentPaperCycleRecord
+) -> RiskMarketSnapshot:
+    """Build the same-session risk snapshot only from one cycle's frozen IDs."""
+    if (
+        cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        or cycle.execution_price_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        or cycle.execution_session != cycle.decision_session
+        or cycle.quality_report_id is not None
+    ):
+        raise ValueError("risk Schwab cycle authority is invalid")
+    manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
+    if len(manifest) != 1 or candidate_manifest_hash(manifest) != cycle.candidate_hash:
+        raise ValueError("risk Schwab candidate authority is invalid")
+    candidate = manifest[0]
+    calendar = await session.scalar(
+        select(ExchangeCalendarAuthorityRecord)
+        .join(
+            ExchangeCalendarSessionRecord,
+            ExchangeCalendarSessionRecord.calendar_authority_id
+            == ExchangeCalendarAuthorityRecord.id,
+        )
+        .where(
+            ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+            ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+            ExchangeCalendarAuthorityRecord.range_start <= cycle.decision_session,
+            ExchangeCalendarAuthorityRecord.range_end >= cycle.decision_session,
+            ExchangeCalendarAuthorityRecord.published_at <= cycle.decision_time,
+            ExchangeCalendarAuthorityRecord.created_at <= cycle.decision_time,
+            ExchangeCalendarSessionRecord.session == cycle.decision_session,
+        )
+        .order_by(
+            ExchangeCalendarAuthorityRecord.published_at.desc(),
+            ExchangeCalendarAuthorityRecord.id.desc(),
+        )
+        .limit(1)
+    )
+    if calendar is None:
+        raise ValueError("risk calendar authority is incomplete")
+    authority = RiskAuthorityInput(
+        decision_session=cycle.decision_session,
+        execution_session=cycle.execution_session,
+        decision_time=cycle.decision_time,
+        source_policy_id=cycle.decision_price_policy_id,
+        calendar_authority_id=calendar.id,
+        universe_snapshot_id=cycle.universe_snapshot_id,
+        quality_report_id=cycle.quality_report_id,
+    )
+    required = {candidate.instrument_id}
+    whitelist = await _validate_root_authorities(session, authority, required)
+    return build_risk_market_snapshot(
+        decision=authority,
+        required_instrument_ids=(candidate.instrument_id,),
+        whitelisted_instrument_ids=whitelist,
+        prices=(
+            await _load_frozen_prior_daily_price(
+                session,
+                authority=authority,
+                candidate=candidate,
+            ),
+        ),
+        sector_exposures=await _load_sectors(session, authority, required),
+        query_proofs=await _load_query_proofs(
+            session,
+            authority,
+            required,
+            candidate.risk_query_authority_ids,
+        ),
+    )
 
 
 async def load_risk_market_snapshot(

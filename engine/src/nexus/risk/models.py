@@ -135,8 +135,8 @@ class RiskMarketSnapshot(FrozenRiskModel):
 
     @model_validator(mode="after")
     def _complete_authority(self) -> RiskMarketSnapshot:
-        if self.execution_session <= self.decision_session:
-            raise ValueError("execution session must follow decision session")
+        if self.execution_session < self.decision_session:
+            raise ValueError("execution session must not precede decision session")
         required = set(self.required_instrument_ids)
         if len(required) != len(self.required_instrument_ids):
             raise ValueError("required instruments must be unique")
