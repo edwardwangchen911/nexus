@@ -1,6 +1,6 @@
 """Point-in-time root and candidate authority for Agent paper cycles."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -9,25 +9,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.market.scope import US_EQUITY_EXCHANGES
-from nexus.paper.agent_cycle_models import (
-    CandidateAuthority,
-    CandidateManifestEntry,
-    select_candidate_manifest,
-)
-from nexus.paper.projection import load_paper_projection
+from nexus.paper.agent_cycle_models import CandidateManifestEntry
+from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
-from nexus.persistence.models.data import PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest
+from nexus.persistence.models.data import (
+    DataArtifact,
+    DataSnapshot,
+    PriceBarRecord,
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
+    LatestQuote,
     SectorExposure,
     UniverseMember,
     UniverseSnapshot,
 )
-from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID, PaperAccountRecord
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PaperAccountRecord,
+    RiskQueryAuthorityRecord,
+)
 
 
 class CycleAuthority(BaseModel):
@@ -105,109 +112,370 @@ async def load_cycle_authority(
 async def prepare_candidates(
     session: AsyncSession, *, authority: CycleAuthority
 ) -> tuple[CandidateManifestEntry, ...]:
-    required = tuple(
+    aliases = tuple(
         await session.scalars(
-            select(UniverseMember.instrument_id)
-            .where(UniverseMember.universe_snapshot_id == authority.universe_snapshot_id)
-            .order_by(UniverseMember.instrument_id)
-            .limit(6)
-        )
-    )
-    if not required or len(required) > 5:
-        return ()
-    projection = await load_paper_projection(
-        session, account_id=authority.account_id, as_of=authority.decision_time
-    )
-    holdings = {row.instrument_id for row in projection.positions if row.quantity > 0}
-    if len(required) != len(set(required)) or len(set(required) - holdings) > 5:
-        return ()
-    candidates: list[CandidateAuthority] = []
-    for instrument_id in required:
-        instrument = await session.get(Instrument, instrument_id)
-        member = await session.scalar(
-            select(UniverseMember).where(
+            select(InstrumentAlias)
+            .join(
+                UniverseMember,
+                UniverseMember.instrument_id == InstrumentAlias.instrument_id,
+            )
+            .where(
                 UniverseMember.universe_snapshot_id == authority.universe_snapshot_id,
-                UniverseMember.instrument_id == instrument_id,
                 UniverseMember.created_at <= authority.decision_time,
+                InstrumentAlias.symbol == "AAPL",
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.valid_from <= authority.decision_session,
+                (InstrumentAlias.valid_to.is_(None))
+                | (InstrumentAlias.valid_to >= authority.decision_session),
+                InstrumentAlias.created_at <= authority.decision_time,
             )
+            .limit(2)
         )
-        aliases = tuple(
-            await session.scalars(
-                select(InstrumentAlias).where(
-                    InstrumentAlias.instrument_id == instrument_id,
-                    InstrumentAlias.alias_type == "ticker",
-                    InstrumentAlias.valid_from <= authority.decision_session,
-                    (InstrumentAlias.valid_to.is_(None))
-                    | (InstrumentAlias.valid_to >= authority.decision_session),
-                    InstrumentAlias.created_at <= authority.decision_time,
-                )
-            )
-        )
-        snapshot = await select_authoritative_snapshot(
-            session, instrument_id=instrument_id, as_of=authority.decision_time
-        )
-        has_price = await session.scalar(
-            select(func.count())
-            .select_from(PriceBarSetAuthority)
-            .join(
-                PriceSeriesManifest,
-                PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
-            )
-            .join(
-                PriceBarRecord,
-                PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
-            )
-            .where(
-                PriceBarSetAuthority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
-                PriceBarSetAuthority.created_at <= authority.decision_time,
-                PriceBarRecord.instrument_id == instrument_id,
-                PriceBarRecord.session == authority.decision_session,
-                PriceBarRecord.available_at <= authority.decision_time,
-                PriceBarRecord.created_at <= authority.decision_time,
-                PriceSeriesManifest.created_at <= authority.decision_time,
-                PriceSeriesManifest.source == "alpaca",
-                PriceSeriesManifest.feed == "sip",
-                PriceSeriesManifest.delivery_mode == "delayed",
-                PriceSeriesManifest.adjustment == "all",
-                PriceSeriesManifest.interval == "1Day",
-            )
-        )
-        has_sector = await session.scalar(
-            select(func.count())
-            .select_from(SectorExposure)
-            .where(
-                SectorExposure.instrument_id == instrument_id,
-                SectorExposure.as_of <= authority.decision_session,
-                SectorExposure.reviewed.is_(True),
-                SectorExposure.created_at <= authority.decision_time,
-            )
-        )
-        if (
-            instrument is None
-            or instrument.created_at > authority.decision_time
-            or instrument.currency != "USD"
-            or instrument.exchange not in US_EQUITY_EXCHANGES
-            or instrument.asset_type not in {"ETF", "common_stock"}
-            or member is None
-            or len(aliases) != 1
-            or snapshot is None
-            or snapshot.source != "nexus_research"
-            or snapshot.schema_version != "research_filings_v1"
-            or snapshot.created_at > authority.decision_time
-            or not has_price
-            or not has_sector
-        ):
-            continue
-        candidates.append(
-            CandidateAuthority(
-                instrument_id=instrument_id,
-                symbol=aliases[0].symbol,
-                inclusion_reason=member.inclusion_reason,
-                research_snapshot_id=snapshot.id,
-                paper_holding=instrument_id in holdings,
-            )
-        )
-    manifest = select_candidate_manifest(tuple(candidates))
-    if {row.instrument_id for row in manifest} | holdings != set(required):
+    )
+    if len(aliases) != 1:
         return ()
-    return manifest
+    alias = aliases[0]
+    instrument = await session.get(Instrument, alias.instrument_id)
+    member = await session.scalar(
+        select(UniverseMember).where(
+            UniverseMember.universe_snapshot_id == authority.universe_snapshot_id,
+            UniverseMember.instrument_id == alias.instrument_id,
+            UniverseMember.created_at <= authority.decision_time,
+        )
+    )
+    snapshot = await select_authoritative_snapshot(
+        session, instrument_id=alias.instrument_id, as_of=authority.decision_time
+    )
+    prior_session = await session.scalar(
+        select(ExchangeCalendarSessionRecord.session)
+        .where(
+            ExchangeCalendarSessionRecord.calendar_authority_id == authority.calendar_authority_id,
+            ExchangeCalendarSessionRecord.session < authority.decision_session,
+        )
+        .order_by(ExchangeCalendarSessionRecord.session.desc())
+        .limit(1)
+    )
+    if (
+        instrument is None
+        or instrument.created_at > authority.decision_time
+        or instrument.currency != "USD"
+        or instrument.exchange not in US_EQUITY_EXCHANGES
+        or instrument.asset_type not in {"ETF", "common_stock"}
+        or member is None
+        or snapshot is None
+        or snapshot.source != "nexus_research"
+        or snapshot.schema_version != "research_filings_v1"
+        or snapshot.created_at > authority.decision_time
+        or prior_session is None
+    ):
+        return ()
+    prior_daily = await session.scalar(
+        select(PriceBarSetAuthority)
+        .join(
+            PriceSeriesManifest,
+            PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
+        )
+        .join(
+            PriceBarRecord,
+            PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
+        )
+        .where(
+            PriceBarSetAuthority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
+            PriceBarSetAuthority.available_at <= authority.decision_time,
+            PriceBarSetAuthority.created_at <= authority.decision_time,
+            PriceBarRecord.instrument_id == alias.instrument_id,
+            PriceBarRecord.session == prior_session,
+            PriceBarRecord.available_at <= authority.decision_time,
+            PriceBarRecord.created_at <= authority.decision_time,
+            PriceSeriesManifest.created_at <= authority.decision_time,
+            PriceSeriesManifest.source == "alpaca",
+            PriceSeriesManifest.feed == "sip",
+            PriceSeriesManifest.delivery_mode == "delayed",
+            PriceSeriesManifest.adjustment == "all",
+            PriceSeriesManifest.interval == "1Day",
+        )
+        .order_by(PriceBarSetAuthority.available_at.desc(), PriceBarSetAuthority.id)
+        .limit(1)
+    )
+    has_sector = await session.scalar(
+        select(func.count())
+        .select_from(SectorExposure)
+        .where(
+            SectorExposure.instrument_id == alias.instrument_id,
+            SectorExposure.as_of <= authority.decision_session,
+            SectorExposure.reviewed.is_(True),
+            SectorExposure.created_at <= authority.decision_time,
+        )
+    )
+    risk_rows = tuple(
+        await session.scalars(
+            select(RiskQueryAuthorityRecord).where(
+                RiskQueryAuthorityRecord.source_policy_id
+                == PAPER_DECISION_SOURCE_POLICY_ID,
+                RiskQueryAuthorityRecord.universe_snapshot_id
+                == authority.universe_snapshot_id,
+                RiskQueryAuthorityRecord.decision_session == authority.decision_session,
+                RiskQueryAuthorityRecord.kind.in_(
+                    ("corporate_action", "suspension", "delisting")
+                ),
+                RiskQueryAuthorityRecord.complete.is_(True),
+                RiskQueryAuthorityRecord.available_at <= authority.decision_time,
+                RiskQueryAuthorityRecord.created_at <= authority.decision_time,
+            )
+        )
+    )
+    risks = {row.kind: row for row in risk_rows}
+    if (
+        prior_daily is None
+        or not has_sector
+        or set(risks) != {"corporate_action", "suspension", "delisting"}
+        or any(
+            alias.instrument_id not in row.required_instrument_ids
+            or alias.instrument_id in row.blocked_instrument_ids
+            for row in risks.values()
+        )
+    ):
+        return ()
+    quotes = tuple(
+        await session.scalars(
+            select(LatestQuote)
+            .where(
+                LatestQuote.instrument_id == alias.instrument_id,
+                LatestQuote.source == "schwab",
+                LatestQuote.feed == "l1",
+                LatestQuote.delivery_mode == "real_time",
+                LatestQuote.event_kind == "quote",
+                LatestQuote.evidence_status == "verified",
+                LatestQuote.received_at <= authority.decision_time,
+                LatestQuote.received_at >= authority.decision_time - timedelta(seconds=60),
+                LatestQuote.created_at <= authority.decision_time,
+            )
+            .order_by(LatestQuote.received_at.desc(), LatestQuote.id)
+            .limit(2)
+        )
+    )
+    if not quotes:
+        return ()
+    quote = quotes[0]
+    artifact = await session.get(DataArtifact, quote.data_artifact_id)
+    if (
+        artifact is None
+        or artifact.source != "schwab"
+        or artifact.schema_version != "schwab_level_one_stream_v1"
+        or artifact.created_at > authority.decision_time
+        or artifact.received_at != quote.received_at
+        or quote.observed_at > artifact.received_at
+        or artifact.received_at - quote.observed_at > timedelta(seconds=60)
+        or quote.bid is None
+        or quote.ask is None
+        or quote.bid <= 0
+        or quote.ask <= 0
+        or quote.bid > quote.ask
+    ):
+        return ()
+    trade = await session.scalar(
+        select(LatestQuote)
+        .where(
+            LatestQuote.instrument_id == alias.instrument_id,
+            LatestQuote.data_artifact_id == artifact.id,
+            LatestQuote.source == "schwab",
+            LatestQuote.feed == "l1",
+            LatestQuote.delivery_mode == "real_time",
+            LatestQuote.event_kind == "trade",
+            LatestQuote.evidence_status == "verified",
+            LatestQuote.created_at <= authority.decision_time,
+        )
+        .order_by(LatestQuote.observed_at.desc(), LatestQuote.id)
+        .limit(1)
+    )
+    if trade is not None and (
+        trade.last is None or trade.last <= 0 or trade.observed_at > artifact.received_at
+    ):
+        return ()
+    ordered_risks = (
+        risks["corporate_action"].id,
+        risks["suspension"].id,
+        risks["delisting"].id,
+    )
+    return (
+        CandidateManifestEntry(
+            instrument_id=alias.instrument_id,
+            symbol="AAPL",
+            inclusion_reason=member.inclusion_reason,
+            research_snapshot_id=snapshot.id,
+            prior_daily_price_authority_id=prior_daily.id,
+            decision_quote_id=quote.id,
+            decision_trade_id=None if trade is None else trade.id,
+            decision_artifact_id=artifact.id,
+            decision_evidence_hash=artifact.sha256,
+            risk_query_authority_ids=ordered_risks,
+        ),
+    )
+
+
+async def validate_candidate_manifest(
+    session: AsyncSession,
+    *,
+    authority: CycleAuthority,
+    manifest: tuple[CandidateManifestEntry, ...],
+) -> bool:
+    """Read back the exact frozen authorities without selecting newer evidence."""
+    if len(manifest) != 1:
+        return False
+    candidate = manifest[0]
+    instrument = await session.get(Instrument, candidate.instrument_id)
+    alias_count = await session.scalar(
+        select(func.count())
+        .select_from(InstrumentAlias)
+        .where(
+            InstrumentAlias.instrument_id == candidate.instrument_id,
+            InstrumentAlias.symbol == "AAPL",
+            InstrumentAlias.alias_type == "ticker",
+            InstrumentAlias.valid_from <= authority.decision_session,
+            (InstrumentAlias.valid_to.is_(None))
+            | (InstrumentAlias.valid_to >= authority.decision_session),
+            InstrumentAlias.created_at <= authority.decision_time,
+        )
+    )
+    member = await session.scalar(
+        select(UniverseMember).where(
+            UniverseMember.universe_snapshot_id == authority.universe_snapshot_id,
+            UniverseMember.instrument_id == candidate.instrument_id,
+            UniverseMember.created_at <= authority.decision_time,
+        )
+    )
+    quote = await session.get(LatestQuote, candidate.decision_quote_id)
+    trade = (
+        None
+        if candidate.decision_trade_id is None
+        else await session.get(LatestQuote, candidate.decision_trade_id)
+    )
+    artifact = await session.get(DataArtifact, candidate.decision_artifact_id)
+    prior_daily = await session.get(
+        PriceBarSetAuthority, candidate.prior_daily_price_authority_id
+    )
+    risk_rows = tuple(
+        row
+        for row in await session.scalars(
+            select(RiskQueryAuthorityRecord).where(
+                RiskQueryAuthorityRecord.id.in_(candidate.risk_query_authority_ids)
+            )
+        )
+    )
+    snapshot = await session.get(DataSnapshot, candidate.research_snapshot_id)
+    snapshot_evidence = await session.scalar(
+        select(AgentDataSnapshotEvidenceRecord).where(
+            AgentDataSnapshotEvidenceRecord.data_snapshot_id
+            == candidate.research_snapshot_id,
+            AgentDataSnapshotEvidenceRecord.instrument_id == candidate.instrument_id,
+        )
+    )
+    prior_session = await session.scalar(
+        select(ExchangeCalendarSessionRecord.session)
+        .where(
+            ExchangeCalendarSessionRecord.calendar_authority_id
+            == authority.calendar_authority_id,
+            ExchangeCalendarSessionRecord.session < authority.decision_session,
+        )
+        .order_by(ExchangeCalendarSessionRecord.session.desc())
+        .limit(1)
+    )
+    if (
+        instrument is None
+        or instrument.created_at > authority.decision_time
+        or instrument.currency != "USD"
+        or instrument.exchange not in US_EQUITY_EXCHANGES
+        or instrument.asset_type not in {"ETF", "common_stock"}
+        or alias_count != 1
+        or member is None
+        or member.inclusion_reason != candidate.inclusion_reason
+        or quote is None
+        or artifact is None
+        or prior_daily is None
+        or snapshot is None
+        or snapshot_evidence is None
+        or snapshot.source != "nexus_research"
+        or snapshot.schema_version != "research_filings_v1"
+        or snapshot.available_at > authority.decision_time
+        or snapshot.received_at > authority.decision_time
+        or snapshot.created_at > authority.decision_time
+        or artifact.id != quote.data_artifact_id
+        or artifact.sha256 != candidate.decision_evidence_hash
+        or artifact.source != "schwab"
+        or artifact.schema_version != "schwab_level_one_stream_v1"
+        or artifact.created_at > authority.decision_time
+        or quote.instrument_id != candidate.instrument_id
+        or quote.source != "schwab"
+        or quote.feed != "l1"
+        or quote.delivery_mode != "real_time"
+        or quote.event_kind != "quote"
+        or quote.evidence_status != "verified"
+        or quote.created_at > authority.decision_time
+        or quote.bid is None
+        or quote.ask is None
+        or quote.bid <= 0
+        or quote.ask <= 0
+        or quote.bid > quote.ask
+        or quote.received_at != artifact.received_at
+        or quote.observed_at > artifact.received_at
+        or artifact.received_at - quote.observed_at > timedelta(seconds=60)
+        or artifact.received_at > authority.decision_time
+        or len(risk_rows) != 3
+        or {row.id for row in risk_rows} != set(candidate.risk_query_authority_ids)
+        or {row.kind for row in risk_rows}
+        != {"corporate_action", "suspension", "delisting"}
+        or any(
+            row.source_policy_id != PAPER_DECISION_SOURCE_POLICY_ID
+            or row.universe_snapshot_id != authority.universe_snapshot_id
+            or row.decision_session != authority.decision_session
+            or not row.complete
+            or row.available_at > authority.decision_time
+            or row.created_at > authority.decision_time
+            or candidate.instrument_id not in row.required_instrument_ids
+            or candidate.instrument_id in row.blocked_instrument_ids
+            for row in risk_rows
+        )
+    ):
+        return False
+    if trade is not None and (
+        trade.instrument_id != candidate.instrument_id
+        or trade.data_artifact_id != artifact.id
+        or trade.source != "schwab"
+        or trade.feed != "l1"
+        or trade.delivery_mode != "real_time"
+        or trade.event_kind != "trade"
+        or trade.evidence_status != "verified"
+        or trade.created_at > authority.decision_time
+        or trade.last is None
+        or trade.last <= 0
+        or trade.observed_at > artifact.received_at
+    ):
+        return False
+    prior_manifest = await session.get(
+        PriceSeriesManifest, prior_daily.price_series_manifest_id
+    )
+    prior_bar = await session.scalar(
+        select(PriceBarRecord).where(
+            PriceBarRecord.price_series_manifest_id == prior_daily.price_series_manifest_id,
+            PriceBarRecord.instrument_id == candidate.instrument_id,
+        )
+    )
+    return bool(
+        prior_daily.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+        and prior_daily.available_at <= authority.decision_time
+        and prior_daily.created_at <= authority.decision_time
+        and prior_daily.first_session == prior_session
+        and prior_daily.last_session == prior_session
+        and prior_manifest is not None
+        and prior_manifest.source == "alpaca"
+        and prior_manifest.feed == "sip"
+        and prior_manifest.delivery_mode == "delayed"
+        and prior_manifest.adjustment == "all"
+        and prior_manifest.interval == "1Day"
+        and prior_manifest.created_at <= authority.decision_time
+        and prior_bar is not None
+        and prior_session is not None
+        and prior_bar.session == prior_session
+        and prior_bar.available_at <= authority.decision_time
+        and prior_bar.created_at <= authority.decision_time
+    )

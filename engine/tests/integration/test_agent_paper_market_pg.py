@@ -88,9 +88,15 @@ async def test_no_trade_cycle_persists_one_replayable_non_fill_probe(
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     candidate = CandidateManifestEntry(
         instrument_id=INSTRUMENTS[0][0],
-        symbol="T1",
+        symbol="AAPL",
         inclusion_reason="quality_rank",
         research_snapshot_id=DATA_SNAPSHOT_ID,
+        prior_daily_price_authority_id=UUID(int=31),
+        decision_quote_id=UUID(int=32),
+        decision_trade_id=None,
+        decision_artifact_id=UUID(int=33),
+        decision_evidence_hash="d" * 64,
+        risk_query_authority_ids=(UUID(int=34), UUID(int=35), UUID(int=36)),
     )
     provider = _Provider()
     try:

@@ -3,12 +3,12 @@
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from nexus.agents.funnel import Candidate, select_research_funnel
+Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 type CycleStatus = Literal[
     "prepared",
@@ -23,25 +23,19 @@ type CycleStatus = Literal[
 ]
 
 
-class CandidateAuthority(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    instrument_id: UUID
-    symbol: str
-    inclusion_reason: str
-    research_snapshot_id: UUID
-    paper_holding: bool = False
-    hard_risk: bool = False
-    data_exception: bool = False
-
-
 class CandidateManifestEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instrument_id: UUID
-    symbol: str
+    symbol: Literal["AAPL"]
     inclusion_reason: str
     research_snapshot_id: UUID
+    prior_daily_price_authority_id: UUID
+    decision_quote_id: UUID
+    decision_trade_id: UUID | None
+    decision_artifact_id: UUID
+    decision_evidence_hash: Hash64
+    risk_query_authority_ids: tuple[UUID, UUID, UUID]
 
 
 class AgentPaperCycleResult(BaseModel):
@@ -59,38 +53,6 @@ class AgentPaperCycleResult(BaseModel):
 
 def _canonical_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def select_candidate_manifest(
-    candidates: tuple[CandidateAuthority, ...],
-) -> tuple[CandidateManifestEntry, ...]:
-    by_id: dict[UUID, CandidateAuthority] = {}
-    for candidate in candidates:
-        prior = by_id.get(candidate.instrument_id)
-        if prior is not None and prior != candidate:
-            raise ValueError("CANDIDATE_AUTHORITY_CONFLICT")
-        by_id[candidate.instrument_id] = candidate
-    funnel = select_research_funnel(
-        tuple(
-            Candidate(
-                instrument_id=row.instrument_id,
-                hard_risk=row.hard_risk,
-                data_exception=row.data_exception,
-                paper_holding=row.paper_holding,
-            )
-            for row in by_id.values()
-        ),
-        debate_capacity=5,
-    )
-    return tuple(
-        CandidateManifestEntry(
-            instrument_id=row.instrument_id,
-            symbol=by_id[row.instrument_id].symbol,
-            inclusion_reason=by_id[row.instrument_id].inclusion_reason,
-            research_snapshot_id=by_id[row.instrument_id].research_snapshot_id,
-        )
-        for row in funnel.full_debate
-    )
 
 
 def candidate_manifest_hash(manifest: tuple[CandidateManifestEntry, ...]) -> str:

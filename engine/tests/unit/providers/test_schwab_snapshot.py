@@ -76,6 +76,7 @@ async def test_schwab_provider_collects_once_returns_raw_and_cleans_temp_directo
     assert arguments.duration == 15.0
     assert arguments.max_frames == 100
     assert arguments.repo_root == tmp_path
+    assert arguments.output_dir.name == "capture"
     assert captured_now == NOW
     assert envelope.raw_payload
     assert envelope.received_at == NOW

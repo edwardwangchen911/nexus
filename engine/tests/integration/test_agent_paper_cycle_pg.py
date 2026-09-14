@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from uuid import UUID
 
 import pytest
@@ -8,6 +9,7 @@ from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.execution_authority import ROLE_ORDER
 from nexus.market.ingestion import ingest_price_page
+from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.paper.agent_cycle import advance_agent_paper_cycle
 from nexus.paper.agent_market import collect_agent_paper_window
 from nexus.paper.execution_service import advance_internal_paper_order
@@ -19,8 +21,9 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.market import InstrumentAlias
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+from nexus.persistence.models.data import DataArtifact, DataSnapshot
+from nexus.persistence.models.market import InstrumentAlias, LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
@@ -124,7 +127,45 @@ async def _seed_adjusted_authority(session: AsyncSession, decision: object) -> N
                 source_policy_id=(PAPER_DECISION_SOURCE_POLICY_ID if adjustment == "all" else None),
             )
             assert result.price_authority is not None
-    required = tuple(item[0] for item in INSTRUMENTS)
+    prior_page = ProviderPage(
+        items=(
+            PriceBar(
+                instrument_id=INSTRUMENTS[0][0],
+                session=decision.decision_session - timedelta(days=1),
+                open=INSTRUMENTS[0][1],
+                high=INSTRUMENTS[0][1],
+                low=INSTRUMENTS[0][1],
+                close=INSTRUMENTS[0][1],
+                volume=Decimal("1000000"),
+                observed_at=available_at - timedelta(days=1),
+                available_at=available_at,
+                received_at=available_at,
+                revision="agent-prior-all-aapl",
+                quality_flags=(),
+            ),
+        ),
+        next_cursor=None,
+        raw_payload=b'{"agent_price":"prior","adjustment":"all"}',
+        source_request_id=None,
+        as_of=available_at,
+        provenance=MarketDataProvenance(
+            source="alpaca",
+            feed="sip",
+            adjustment="all",
+            interval="1Day",
+            mode="delayed",
+            delivery_mode="delayed",
+        ),
+    )
+    prior_result = await ingest_price_page(
+        session,
+        store,
+        prior_page,
+        commit=False,
+        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    )
+    assert prior_result.price_authority is not None
+    required = (INSTRUMENTS[0][0],)
     for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
         content_hash = canonical_query_authority_hash(
             source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
@@ -181,6 +222,17 @@ async def _seed_cycle_research_authority(
     finally:
         await session.execute(text("ALTER TABLE quality_reports ENABLE TRIGGER USER"))
     prompts = load_prompt_assets()
+    calendar_authority_id = await session.scalar(
+        select(ExchangeCalendarSessionRecord.calendar_authority_id).limit(1)
+    )
+    assert calendar_authority_id is not None
+    session.add(
+        ExchangeCalendarSessionRecord(
+            calendar_authority_id=calendar_authority_id,
+            session=DECISION_TIME.date() - timedelta(days=1),
+            decision_at=DECISION_TIME - timedelta(days=1),
+        )
+    )
     session.add_all(
         AgentPromptVersionRecord(
             id=UUID(int=0x63000000000000000000000000000100 + index),
@@ -233,7 +285,7 @@ async def _seed_cycle_research_authority(
                 InstrumentAlias(
                     id=UUID(int=0x63000000000000000000000000000400 + index),
                     instrument_id=instrument_id,
-                    symbol=f"T{index}",
+                    symbol="AAPL" if index == 1 else f"T{index}",
                     alias_type="ticker",
                     valid_from=date(2026, 1, 1),
                     valid_to=None,
@@ -275,6 +327,59 @@ async def _seed_cycle_research_authority(
         )
     await session.flush()
     await _seed_adjusted_authority(session, registered_decision)
+    artifact = DataArtifact(
+        id=UUID("63000000-0000-0000-0000-000000000090"),
+        uri=f"memory://raw/market/schwab/stream/{'e' * 64}.json",
+        sha256="e" * 64,
+        byte_size=100,
+        mime_type="application/json",
+        schema_version="schwab_level_one_stream_v1",
+        source="schwab",
+        observed_at=DECISION_TIME - timedelta(seconds=10),
+        available_at=DECISION_TIME,
+        received_at=DECISION_TIME,
+        created_at=DECISION_TIME,
+    )
+    quote_hash = canonical_quote_observation(
+        instrument_id=INSTRUMENTS[0][0],
+        source="schwab",
+        feed="l1",
+        delivery_mode="real_time",
+        event_kind="quote",
+        bid=Decimal("99.90"),
+        ask=Decimal("100.10"),
+        last=None,
+        observed_at=DECISION_TIME - timedelta(seconds=10),
+        available_at=DECISION_TIME,
+        received_at=DECISION_TIME,
+        revision="e" * 64,
+    )
+    session.add_all(
+        (
+            artifact,
+            LatestQuote(
+                id=UUID("63000000-0000-0000-0000-000000000091"),
+                instrument_id=INSTRUMENTS[0][0],
+                source="schwab",
+                feed="l1",
+                delivery_mode="real_time",
+                bid=Decimal("99.90"),
+                ask=Decimal("100.10"),
+                last=None,
+                observed_at=DECISION_TIME - timedelta(seconds=10),
+                available_at=DECISION_TIME,
+                received_at=DECISION_TIME,
+                revision="e" * 64,
+                quality_flags=[],
+                event_kind="quote",
+                content_hash=sha256(quote_hash).hexdigest(),
+                evidence_status="verified",
+                data_artifact_id=artifact.id,
+                created_at=DECISION_TIME,
+            ),
+        )
+    )
+    await session.flush()
 
 
 @pytest.mark.asyncio
@@ -308,7 +413,7 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
             )
         assert first.status == "researching", first.result_code
         assert first.replayed is False
-        assert len(first.research_run_ids) == 3
+        assert len(first.research_run_ids) == 1
 
         async with sessions.begin() as session:
             second = await advance_agent_paper_cycle(
@@ -318,11 +423,22 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
                 idempotency_key="agent-paper-cycle-1",
             )
             assert second == first.model_copy(update={"replayed": True})
-            assert await session.scalar(select(func.count()).select_from(Job)) == 3
+            assert await session.scalar(select(func.count()).select_from(Job)) == 1
             cycle_count = await session.scalar(
                 select(func.count()).select_from(AgentPaperCycleRecord)
             )
             assert cycle_count == 1
+            cycle = await session.scalar(select(AgentPaperCycleRecord))
+            assert cycle is not None
+            assert len(cycle.candidate_manifest) == 1
+            candidate = cycle.candidate_manifest[0]
+            assert candidate["symbol"] == "AAPL"
+            assert candidate["decision_quote_id"] == str(
+                UUID("63000000-0000-0000-0000-000000000091")
+            )
+            assert candidate["decision_evidence_hash"] == "e" * 64
+            assert candidate["decision_trade_id"] is None
+            assert len(candidate["risk_query_authority_ids"]) == 3
             assert (
                 await session.scalar(select(func.count()).select_from(AgentPaperCycleEventRecord))
                 == 2
@@ -372,7 +488,7 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
             finally:
                 await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER USER"))
             for index, (run_id, instrument) in enumerate(
-                zip(first.research_run_ids, INSTRUMENTS, strict=True), start=1
+                zip(first.research_run_ids, INSTRUMENTS[:1], strict=True), start=1
             ):
                 output = AgentResearchOutputRecord(
                     id=UUID(int=0x63000000000000000000000000000500 + index),
@@ -415,7 +531,7 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
                 decision_time=DECISION_TIME,
                 idempotency_key="agent-paper-cycle-1",
             )
-        assert completed.status == "awaiting_market"
+        assert completed.status == "awaiting_market", completed.result_code
         assert completed.strategy_decision_id is not None
         assert completed.batch_id is not None
         assert len(completed.order_ids) == 1
@@ -545,7 +661,7 @@ async def test_mixed_terminal_research_jobs_stop_without_replacement_runs(
         assert stopped.status == "unavailable"
         assert stopped.result_code == "RESEARCH_OUTPUT_NOT_ACTIONABLE"
         assert stopped.research_run_ids == first.research_run_ids
-        assert run_count == 3
-        assert job_count == 3
+        assert run_count == 1
+        assert job_count == 1
     finally:
         await engine.dispose()

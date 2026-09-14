@@ -12,6 +12,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import webbrowser
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -37,7 +38,7 @@ from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
-from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQuote
 from nexus.persistence.session import session_factory
 from nexus.providers.base import InstrumentId, MarketDataProvenance
 from nexus.providers.market.alpaca import MarketProviderPayloadError
@@ -90,6 +91,9 @@ class SchwabMarketStreamImportResult:
     raw_sha256: str
     created_observations: int
     symbols_observed: int
+    artifact_id: UUID
+    quote_ids: dict[str, UUID]
+    trade_ids: dict[str, UUID]
 
 
 class _FixedConnect(connect):
@@ -325,6 +329,39 @@ async def collect_schwab_stream(
         state=state,
         credentials=credentials,
     )
+
+
+async def capture_and_import_schwab_level_one_once(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    repo_root: Path,
+    client: httpx.AsyncClient,
+    instrument_id: UUID,
+    checked_at: datetime | None = None,
+    capture: Callable[..., Awaitable[dict[str, Any]]] = run_schwab_stream,
+) -> SchwabMarketStreamImportResult:
+    """Capture and freeze one bounded AAPL Level One decision observation."""
+    with tempfile.TemporaryDirectory(prefix="nexus-agent-schwab-") as raw_directory:
+        directory = Path(raw_directory) / "capture"
+        arguments = argparse.Namespace(
+            repo_root=repo_root,
+            symbol=["AAPL"],
+            output_dir=directory,
+            duration=15.0,
+            max_frames=100,
+        )
+        await capture(arguments, client, now=checked_at)
+        imported_at = await session.scalar(select(func.clock_timestamp()))
+        if not isinstance(imported_at, datetime):
+            raise RuntimeError("SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID")
+        return await import_schwab_market_stream(
+            session,
+            store,
+            bindings={"AAPL": instrument_id},
+            directory=directory,
+            imported_at=imported_at,
+        )
 
 
 async def _collect(
@@ -679,6 +716,8 @@ def parse_schwab_snapshot_batch(
             raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
         if any(time is not None and time > completed_at for time in (trade_time, quote_time)):
             raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
+        if quote_time is not None and completed_at - quote_time > timedelta(seconds=60):
+            raise MarketProviderPayloadError("SCHWAB_MARKET_STREAM_EVIDENCE_STALE")
         if trade is None and quote is None:
             continue
         snapshots.append(
@@ -879,10 +918,38 @@ async def import_schwab_market_stream(
                     provider_binding=None,
                 )
             )
+    observations = tuple(
+        await session.scalars(
+            select(LatestQuote).where(
+                LatestQuote.data_artifact_id == artifact.id,
+                LatestQuote.instrument_id.in_(tuple(bindings.values())),
+                LatestQuote.source == "schwab",
+                LatestQuote.feed == "l1",
+                LatestQuote.delivery_mode == "real_time",
+                LatestQuote.event_kind.in_(("quote", "trade")),
+            )
+        )
+    )
+    by_symbol = {instrument_id: symbol for symbol, instrument_id in bindings.items()}
+    quote_ids = {
+        by_symbol[row.instrument_id]: row.id
+        for row in observations
+        if row.event_kind == "quote"
+    }
+    trade_ids = {
+        by_symbol[row.instrument_id]: row.id
+        for row in observations
+        if row.event_kind == "trade"
+    }
+    if set(quote_ids) != set(bindings) or set(trade_ids) - set(bindings):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
     return SchwabMarketStreamImportResult(
         raw_sha256=raw_digest,
         created_observations=created,
         symbols_observed=len(selected),
+        artifact_id=artifact.id,
+        quote_ids=quote_ids,
+        trade_ids=trade_ids,
     )
 
 

@@ -164,6 +164,7 @@ async def test_schwab_archive_import_is_idempotent_and_visible_to_intraday_loade
 
     async with factory() as session:
         artifact = await session.scalar(select(DataArtifact))
+        observations = tuple(await session.scalars(select(LatestQuote)))
         view = await load_intraday_series(
             session,
             INSTRUMENT_ID,
@@ -172,6 +173,13 @@ async def test_schwab_archive_import_is_idempotent_and_visible_to_intraday_loade
         assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
         assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 2
     assert artifact is not None
+    assert result.artifact_id == artifact.id
+    assert result.quote_ids == {
+        "AAPL": next(row.id for row in observations if row.event_kind == "quote")
+    }
+    assert result.trade_ids == {
+        "AAPL": next(row.id for row in observations if row.event_kind == "trade")
+    }
     assert artifact.source == "schwab"
     assert artifact.schema_version == "schwab_level_one_stream_v1"
     assert view.source == "schwab"

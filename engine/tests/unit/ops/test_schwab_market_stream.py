@@ -4,11 +4,14 @@ import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 from nexus.ops.schwab_market_stream import (
+    SchwabMarketStreamImportResult,
     build_parser,
+    capture_and_import_schwab_level_one_once,
     collect_schwab_stream,
     load_provider_market_stream_archive,
     pack_provider_market_stream_archive,
@@ -150,7 +153,13 @@ def _data(symbol: str = "AAPL", **changes: object) -> dict[str, object]:
     }
 
 
-async def _packed_archive(tmp_path, symbols: tuple[str, ...], frames: list[object]) -> bytes:
+async def _packed_archive(
+    tmp_path,
+    symbols: tuple[str, ...],
+    frames: list[object],
+    *,
+    completed_at: datetime | None = None,
+) -> bytes:
     directory = tmp_path / f"archive-{len(list(tmp_path.iterdir()))}"
     await collect_schwab_stream(
         symbols=symbols,
@@ -160,6 +169,19 @@ async def _packed_archive(tmp_path, symbols: tuple[str, ...], frames: list[objec
         max_frames=len(frames),
         connector=lambda *args, **kwargs: Socket(frames),
     )
+    provider_times = [
+        datetime.fromtimestamp(item["data"][0]["timestamp"] / 1000, UTC)
+        for item in frames
+        if isinstance(item, dict) and "data" in item
+    ]
+    frozen_end = completed_at or max(provider_times) + timedelta(seconds=1)
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["started_at"] = (frozen_end - timedelta(seconds=2)).isoformat()
+    receipt["ended_at"] = frozen_end.isoformat()
+    for entry in receipt["frames"]:
+        entry["received_at"] = frozen_end.isoformat()
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True))
     return pack_provider_market_stream_archive(directory)
 
 
@@ -261,6 +283,64 @@ async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> N
     assert observation.bid_mic_id == "XNAS"
     assert observation.last_mic_id == "XNYS"
     assert not any("access-token" in item.read_text() for item in directory.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[object, object, object]] = []
+    imported: list[tuple[dict[str, UUID], Path, datetime]] = []
+
+    async def capture(arguments, client, *, now=None):
+        calls.append((arguments, client, now))
+        arguments.output_dir.mkdir(mode=0o700)
+        return {"status": "bounded_complete"}
+
+    expected = SchwabMarketStreamImportResult(
+        raw_sha256="a" * 64,
+        created_observations=2,
+        symbols_observed=1,
+        artifact_id=UUID(int=10),
+        quote_ids={"AAPL": UUID(int=11)},
+        trade_ids={"AAPL": UUID(int=12)},
+    )
+
+    async def fake_import(session, store, *, bindings, directory, imported_at):
+        del session, store
+        imported.append((bindings, directory, imported_at))
+        return expected
+
+    monkeypatch.setattr(
+        "nexus.ops.schwab_market_stream.import_schwab_market_stream", fake_import
+    )
+    captured_at = datetime(2026, 8, 28, 14, 30, tzinfo=UTC)
+
+    class Session:
+        async def scalar(self, statement):
+            del statement
+            return captured_at + timedelta(seconds=1)
+
+    result = await capture_and_import_schwab_level_one_once(
+        Session(),
+        object(),
+        repo_root=tmp_path,
+        client=object(),
+        instrument_id=AAPL_ID,
+        checked_at=captured_at,
+        capture=capture,
+    )
+
+    assert result == expected
+    assert len(calls) == 1
+    arguments, _, now = calls[0]
+    assert arguments.symbol == ["AAPL"]
+    assert arguments.duration == 15.0
+    assert arguments.max_frames == 100
+    assert now == captured_at
+    assert imported[0][0] == {"AAPL": AAPL_ID}
+    assert imported[0][2] == captured_at + timedelta(seconds=1)
+    assert not imported[0][1].exists()
 
 
 @pytest.mark.asyncio
@@ -393,6 +473,8 @@ async def test_schwab_snapshot_parser_allows_observed_requested_subset_and_trade
     ("changes", "code"),
     [
         ({"2": None}, "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID"),
+        ({"1": "0"}, "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID"),
+        ({"1": "228", "2": "227"}, "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID"),
         ({"delayed": "OMIT"}, "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID"),
         ({"delayed": True}, "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID"),
         ({"35": "bad"}, "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID"),
@@ -424,6 +506,35 @@ async def test_schwab_snapshot_parser_rejects_unsafe_observations(
         payload = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
 
     with pytest.raises(MarketProviderPayloadError, match=code):
+        parse_schwab_snapshot_batch(payload, _request("AAPL"))
+
+
+@pytest.mark.asyncio
+async def test_schwab_snapshot_parser_rejects_quote_older_than_sixty_seconds(
+    tmp_path,
+) -> None:
+    stale_millis = int((EVENT_AT - timedelta(seconds=61)).timestamp() * 1000)
+    payload = await _packed_archive(
+        tmp_path,
+        ("AAPL",),
+        [
+            SCHWAB_LOGIN,
+            SCHWAB_SUBSCRIBED,
+            _data(
+                **{
+                    "34": stale_millis,
+                    "35": stale_millis,
+                    "37": stale_millis,
+                    "38": stale_millis,
+                }
+            ),
+        ],
+        completed_at=EVENT_AT,
+    )
+
+    with pytest.raises(
+        MarketProviderPayloadError, match="SCHWAB_MARKET_STREAM_EVIDENCE_STALE"
+    ):
         parse_schwab_snapshot_batch(payload, _request("AAPL"))
 
 

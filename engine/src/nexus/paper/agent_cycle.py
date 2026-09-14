@@ -17,15 +17,14 @@ from nexus.paper.agent_cycle_authority import (
     CycleAuthority,
     load_cycle_authority,
     prepare_candidates,
+    validate_candidate_manifest,
 )
 from nexus.paper.agent_cycle_models import (
     AgentPaperCycleResult,
-    CandidateAuthority,
     CandidateManifestEntry,
     CycleStatus,
     candidate_manifest_hash,
     canonical_cycle_event_hash,
-    select_candidate_manifest,
 )
 from nexus.paper.agent_decision import (
     AGENT_PAPER_SIZING_POLICY_HASH,
@@ -51,14 +50,12 @@ from nexus.risk.authority import RiskAuthorityInput, prepare_risk_market_snapsho
 
 __all__ = [
     "AgentPaperCycleResult",
-    "CandidateAuthority",
     "CandidateManifestEntry",
     "CycleStatus",
     "AgentPaperCycleError",
     "advance_agent_paper_cycle",
     "candidate_manifest_hash",
     "canonical_cycle_event_hash",
-    "select_candidate_manifest",
 ]
 
 
@@ -120,7 +117,10 @@ async def advance_agent_paper_cycle(
     if cycle.decision_time != decision_time:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
     manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
-    if candidate_manifest_hash(manifest) != cycle.candidate_hash:
+    valid_manifest = await validate_candidate_manifest(
+        session, authority=authority, manifest=manifest
+    )
+    if candidate_manifest_hash(manifest) != cycle.candidate_hash or not valid_manifest:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
     events = await _events(session, cycle.id)
     if not events:

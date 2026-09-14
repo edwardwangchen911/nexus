@@ -61,7 +61,7 @@ class SchwabSnapshotProvider:
         self._validate_request(request)
         checked_at = self._now()
         with tempfile.TemporaryDirectory(prefix="nexus-schwab-") as raw_directory:
-            directory = Path(raw_directory)
+            directory = Path(raw_directory) / "capture"
             arguments = argparse.Namespace(
                 repo_root=self._repo_root,
                 symbol=[item.symbol for item in request.instruments],
