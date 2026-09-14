@@ -312,18 +312,15 @@ async def test_latest_agent_paper_cycle_returns_only_bounded_redacted_facts(
     migrated_database_url: str,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
-    candidate = CandidateManifestEntry(
-        instrument_id=INSTRUMENTS[0][0],
-        symbol="AAPL",
-        inclusion_reason="quality_rank",
-        research_snapshot_id=DATA_SNAPSHOT_ID,
-        prior_daily_price_authority_id=UUID(int=31),
-        decision_quote_id=UUID(int=32),
-        decision_trade_id=None,
-        decision_artifact_id=UUID(int=33),
-        decision_evidence_hash="d" * 64,
-        risk_query_authority_ids=(UUID(int=34), UUID(int=35), UUID(int=36)),
-    )
+    candidate = {
+        "instrument_id": str(INSTRUMENTS[0][0]),
+        "symbol": "AAPL",
+        "inclusion_reason": "quality_rank",
+        "research_snapshot_id": str(DATA_SNAPSHOT_ID),
+    }
+    candidate_hash = sha256(
+        json.dumps([candidate], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     cycle_id = UUID("72000000-0000-0000-0000-000000000001")
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
@@ -340,8 +337,8 @@ async def test_latest_agent_paper_cycle_returns_only_bounded_redacted_facts(
                 quality_report_id=None,
                 decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
                 execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
-                candidate_manifest=[candidate.model_dump(mode="json")],
-                candidate_hash=candidate_manifest_hash((candidate,)),
+                candidate_manifest=[candidate],
+                candidate_hash=candidate_hash,
                 sizing_policy_version="agent_paper_sizing_v1",
                 sizing_policy_hash="7" * 64,
                 execution_locked=True,

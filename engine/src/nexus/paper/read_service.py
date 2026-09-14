@@ -32,7 +32,7 @@ from nexus.api.schemas.paper import (
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
-from nexus.paper.agent_cycle_models import CandidateManifestEntry
+from nexus.paper.agent_cycle_models import CandidateManifestEntry, parse_candidate_manifest
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
@@ -46,6 +46,7 @@ from nexus.persistence.models.data import DataArtifact, PriceBarSetAuthority, Pr
 from nexus.persistence.models.evolution import StrategyRegistryEventRecord
 from nexus.persistence.models.market import InstrumentAlias, LatestQuote
 from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
@@ -198,8 +199,9 @@ class PaperReadService:
                 ErrorCode.DATA_PARTIAL, "The Agent paper cycle is incomplete.", status_code=409
             )
         try:
-            manifest = tuple(
-                CandidateManifestEntry.model_validate(raw) for raw in cycle.candidate_manifest
+            manifest = parse_candidate_manifest(
+                cycle.candidate_manifest,
+                allow_legacy=cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
             )
         except (TypeError, ValueError):
             raise NexusError(
@@ -396,7 +398,7 @@ class PaperReadService:
                     status_code=409,
                 )
             if manifest:
-                candidate = manifest[0]
+                candidate = cast(CandidateManifestEntry, manifest[0])
                 quote = await self._session.get(LatestQuote, candidate.decision_quote_id)
                 artifact = await self._session.get(DataArtifact, candidate.decision_artifact_id)
                 if (

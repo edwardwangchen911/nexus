@@ -4,9 +4,11 @@ from uuid import UUID
 import pytest
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
+    LegacyCandidateManifestEntry,
     candidate_manifest_hash,
     canonical_cycle_event_hash,
     floor_decision_slot,
+    parse_candidate_manifest,
 )
 from pydantic import ValidationError
 
@@ -65,6 +67,24 @@ def test_candidate_manifest_only_accepts_aapl_and_exactly_three_risk_authorities
         CandidateManifestEntry.model_validate(
             {**payload, "decision_evidence_hash": "not-a-hash"}
         )
+
+
+def test_legacy_candidate_manifest_preserves_its_original_hash_and_fields() -> None:
+    payload = {
+        "instrument_id": str(UUID(int=1)),
+        "symbol": "AAPL",
+        "inclusion_reason": "EXACT_US_LIQUID_V1",
+        "research_snapshot_id": str(UUID(int=2)),
+    }
+
+    manifest = parse_candidate_manifest((payload,), allow_legacy=True)
+
+    assert manifest == (LegacyCandidateManifestEntry.model_validate(payload),)
+    assert candidate_manifest_hash(manifest) == (
+        "583a06c6bc600117e77c073f62fcb3c0089cab6c596640a1004bbb3d7c794bbf"
+    )
+    with pytest.raises(ValidationError):
+        parse_candidate_manifest((payload,), allow_legacy=False)
 
 
 def test_cycle_event_hash_binds_prior_status_facts_and_time() -> None:

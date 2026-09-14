@@ -2,8 +2,9 @@
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, overload
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
@@ -50,6 +51,20 @@ class CandidateManifestEntry(BaseModel):
     risk_query_authority_ids: tuple[UUID, UUID, UUID]
 
 
+class LegacyCandidateManifestEntry(BaseModel):
+    """Original four-field manifest retained only for persisted legacy cycles."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    instrument_id: UUID
+    symbol: str
+    inclusion_reason: str
+    research_snapshot_id: UUID
+
+
+type StoredCandidateManifestEntry = CandidateManifestEntry | LegacyCandidateManifestEntry
+
+
 class AgentPaperCycleResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -76,7 +91,40 @@ def _canonical_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def candidate_manifest_hash(manifest: tuple[CandidateManifestEntry, ...]) -> str:
+@overload
+def parse_candidate_manifest(
+    rows: Sequence[object], *, allow_legacy: Literal[False]
+) -> tuple[CandidateManifestEntry, ...]: ...
+
+
+@overload
+def parse_candidate_manifest(
+    rows: Sequence[object], *, allow_legacy: Literal[True]
+) -> tuple[StoredCandidateManifestEntry, ...]: ...
+
+
+@overload
+def parse_candidate_manifest(
+    rows: Sequence[object], *, allow_legacy: bool
+) -> tuple[StoredCandidateManifestEntry, ...]: ...
+
+
+def parse_candidate_manifest(
+    rows: Sequence[object], *, allow_legacy: bool
+) -> tuple[StoredCandidateManifestEntry, ...]:
+    """Parse persisted manifests without upgrading or inventing historical evidence."""
+    parsed: list[StoredCandidateManifestEntry] = []
+    for row in rows:
+        try:
+            parsed.append(CandidateManifestEntry.model_validate(row))
+        except ValueError:
+            if not allow_legacy:
+                raise
+            parsed.append(LegacyCandidateManifestEntry.model_validate(row))
+    return tuple(parsed)
+
+
+def candidate_manifest_hash(manifest: tuple[StoredCandidateManifestEntry, ...]) -> str:
     payload = [
         row.model_dump(mode="json")
         for row in sorted(manifest, key=lambda item: item.instrument_id.int)

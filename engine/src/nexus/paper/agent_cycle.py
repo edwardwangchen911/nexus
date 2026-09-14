@@ -30,6 +30,7 @@ from nexus.paper.agent_cycle_models import (
     candidate_manifest_hash,
     canonical_cycle_event_hash,
     floor_decision_slot,
+    parse_candidate_manifest,
 )
 from nexus.paper.agent_decision import (
     AGENT_PAPER_SIZING_POLICY_HASH,
@@ -277,7 +278,7 @@ async def resume_schwab_agent_paper_cycle(
     if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
         return _result(cycle.id, events, replayed=True)
     authority = await load_recorded_schwab_cycle_authority(session, cycle=cycle)
-    manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
+    manifest = parse_candidate_manifest(cycle.candidate_manifest, allow_legacy=False)
     valid_manifest = await validate_candidate_manifest(
         session, authority=authority, manifest=manifest
     )
@@ -347,10 +348,16 @@ async def advance_agent_paper_cycle(
         )
     if cycle.decision_time != decision_time:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
-    manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
-    valid_manifest = await validate_candidate_manifest(
-        session, authority=authority, manifest=manifest
+    allow_legacy = cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
+    manifest = parse_candidate_manifest(cycle.candidate_manifest, allow_legacy=allow_legacy)
+    current_manifest = tuple(
+        candidate for candidate in manifest if isinstance(candidate, CandidateManifestEntry)
     )
+    valid_manifest = len(current_manifest) == len(manifest) and await validate_candidate_manifest(
+        session, authority=authority, manifest=current_manifest
+    )
+    if allow_legacy and not current_manifest:
+        valid_manifest = True
     if candidate_manifest_hash(manifest) != cycle.candidate_hash or not valid_manifest:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
     events = await _events(session, cycle.id)
@@ -456,7 +463,10 @@ async def _admit_cycle_research(
     authority: CycleAuthority,
     daily_limit_usd: Decimal,
 ) -> AgentPaperCycleResult:
-    manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
+    manifest = parse_candidate_manifest(
+        cycle.candidate_manifest,
+        allow_legacy=cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
+    )
     run_ids: list[UUID] = []
     try:
         async with session.begin_nested():

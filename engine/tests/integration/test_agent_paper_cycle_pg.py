@@ -19,7 +19,11 @@ from nexus.paper.agent_cycle_authority import (
     load_quasi_realtime_cycle_authority,
     prepare_candidates,
 )
-from nexus.paper.agent_cycle_models import candidate_manifest_hash, floor_decision_slot
+from nexus.paper.agent_cycle_models import (
+    LegacyCandidateManifestEntry,
+    candidate_manifest_hash,
+    floor_decision_slot,
+)
 from nexus.paper.agent_market import (
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
@@ -967,7 +971,7 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
 
 
 @pytest.mark.asyncio
-async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_duplicate(
+async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1000,6 +1004,22 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
         assert len(first.research_run_ids) == 1
 
         async with sessions.begin() as session:
+            cycle = await session.scalar(select(AgentPaperCycleRecord))
+            assert cycle is not None
+            original_candidate = cycle.candidate_manifest[0]
+            legacy_candidate = LegacyCandidateManifestEntry(
+                instrument_id=UUID(original_candidate["instrument_id"]),
+                symbol=original_candidate["symbol"],
+                inclusion_reason=original_candidate["inclusion_reason"],
+                research_snapshot_id=UUID(original_candidate["research_snapshot_id"]),
+            )
+            await session.execute(text("ALTER TABLE agent_paper_cycles DISABLE TRIGGER USER"))
+            try:
+                cycle.candidate_manifest = [legacy_candidate.model_dump(mode="json")]
+                cycle.candidate_hash = candidate_manifest_hash((legacy_candidate,))
+                await session.flush()
+            finally:
+                await session.execute(text("ALTER TABLE agent_paper_cycles ENABLE TRIGGER USER"))
             second = await advance_agent_paper_cycle(
                 session,
                 account_id=seed.account_id,
@@ -1017,12 +1037,12 @@ async def test_first_call_enqueues_existing_research_jobs_and_replay_does_not_du
             assert len(cycle.candidate_manifest) == 1
             candidate = cycle.candidate_manifest[0]
             assert candidate["symbol"] == "AAPL"
-            assert candidate["decision_quote_id"] == str(
-                UUID("63000000-0000-0000-0000-000000000091")
-            )
-            assert candidate["decision_evidence_hash"] == "e" * 64
-            assert candidate["decision_trade_id"] is None
-            assert len(candidate["risk_query_authority_ids"]) == 3
+            assert set(candidate) == {
+                "instrument_id",
+                "symbol",
+                "inclusion_reason",
+                "research_snapshot_id",
+            }
             assert (
                 await session.scalar(select(func.count()).select_from(AgentPaperCycleEventRecord))
                 == 2
