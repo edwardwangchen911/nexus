@@ -14,6 +14,13 @@ from nexus.settings import EngineSettings
 from sqlalchemy import func, select
 
 INSTRUMENT_ID = UUID("019d0000-0000-7000-8000-0000000000c1")
+
+
+class DatabaseUUID(UUID):
+    """Mirror UUID subclasses returned by database drivers such as asyncpg."""
+
+
+DATABASE_INSTRUMENT_ID = DatabaseUUID(str(INSTRUMENT_ID))
 CREDENTIALS = SchwabStreamCredentials(
     access_token="access-token",
     customer_id="customer",
@@ -112,7 +119,7 @@ def _frames(event_at: datetime) -> list[object]:
 
 
 @pytest.mark.asyncio
-async def test_schwab_archive_import_is_idempotent_and_visible_to_intraday_loader(
+async def test_schwab_archive_import_accepts_database_uuid_subclass(
     migrated_database_url: str,
     tmp_path,
 ) -> None:
@@ -156,7 +163,7 @@ async def test_schwab_archive_import_is_idempotent_and_visible_to_intraday_loade
             result = await schwab_market_stream.import_schwab_market_stream(
                 session,
                 store,
-                bindings={"AAPL": INSTRUMENT_ID},
+                bindings={"AAPL": DATABASE_INSTRUMENT_ID},
                 directory=directory,
                 imported_at=datetime.now(UTC) + timedelta(seconds=replay),
             )

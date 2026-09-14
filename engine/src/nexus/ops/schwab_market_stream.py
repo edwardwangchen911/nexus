@@ -776,7 +776,7 @@ async def import_schwab_market_stream(
     completed_at = datetime.fromisoformat(receipt["ended_at"]).astimezone(UTC)
     if (
         set(bindings) != set(symbols)
-        or any(type(value) is not UUID for value in bindings.values())
+        or any(not isinstance(value, UUID) for value in bindings.values())
         or len(set(bindings.values())) != len(bindings)
     ):
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
