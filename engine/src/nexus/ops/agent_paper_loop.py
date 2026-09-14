@@ -1,0 +1,426 @@
+"""Fail-closed foreground scheduler for Agent internal-paper cycles."""
+
+import argparse
+import asyncio
+import json
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, time, timedelta
+from enum import StrEnum
+from pathlib import Path
+from uuid import UUID
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import func, select
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from nexus.ops.agent_paper_once import (
+    AgentPaperCollectWindowRequest,
+    AgentPaperMarketSettings,
+    AgentPaperResumeRequest,
+    AgentPaperTriggerRequest,
+    AgentPaperTriggerSettings,
+    collect_window_once,
+    resume_once,
+    trigger_once,
+)
+from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.openai_local import local_settings
+from nexus.ops.paper_once import PaperAdvanceRequest
+from nexus.ops.paper_once import run_once as run_paper_once
+from nexus.paper.agent_cycle_models import floor_decision_slot
+from nexus.paper.agent_market import resolve_agent_paper_market_scope
+from nexus.paper.read_service import PaperReadService
+from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+from nexus.persistence.models.runtime import Job
+from nexus.settings import EngineSettings
+from nexus.worker import run_agent_worker_once
+
+
+class AgentPaperLoopAction(StrEnum):
+    TRIGGER = "trigger"
+    RUN_RESEARCH_JOB = "run_research_job"
+    RESUME = "resume"
+    COLLECT_WINDOW = "collect_window"
+    ADVANCE_ORDER = "advance_order"
+    WAIT_FOR_SLOT = "wait_for_slot"
+    WAIT_FOR_MARKET = "wait_for_market"
+    STOP_RESULT_UNKNOWN = "stop_result_unknown"
+    STOP_CYCLE_UNAVAILABLE = "stop_cycle_unavailable"
+    STOP_DISABLED = "stop_disabled"
+    STOP_SESSION_CLOSED = "stop_session_closed"
+
+
+@dataclass(frozen=True)
+class AgentPaperLoopSnapshot:
+    now: datetime
+    enabled: bool = True
+    cycle_id: UUID | None = None
+    cycle_status: str | None = None
+    cycle_slot_at: datetime | None = None
+    research_job_status: str | None = None
+    research_job_id: UUID | str | None = None
+    market_window_ready: bool = False
+    market_window_end_at: datetime | None = None
+    has_open_order: bool = False
+    order_id: UUID | None = None
+
+
+_TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
+_MARKET_PUBLICATION_LAG = timedelta(seconds=60)
+
+
+def resolve_cycle_research_job(
+    *, events: Sequence[object], jobs: Sequence[object]
+) -> tuple[UUID, str] | None:
+    """Resolve exactly one Job whose persisted run ID belongs to the cycle."""
+    run_ids: list[str] = []
+    for event in events:
+        fact_ids = getattr(event, "fact_ids", None)
+        raw = fact_ids.get("research_run_ids") if isinstance(fact_ids, dict) else None
+        if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
+            run_ids.extend(raw)
+    if len(run_ids) != 1 or len(jobs) != 1:
+        return None
+    job = jobs[0]
+    payload = getattr(job, "payload", None)
+    job_id = getattr(job, "id", None)
+    status = getattr(job, "status", None)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("run_id") != run_ids[0]
+        or not isinstance(job_id, UUID)
+        or not isinstance(status, str)
+    ):
+        return None
+    return job_id, status
+
+
+def snapshot_from_cycle_view(
+    *,
+    now: datetime,
+    view: object,
+    research_job: tuple[UUID, str] | None,
+    market_scope: object | None,
+) -> AgentPaperLoopSnapshot:
+    """Map the bounded read projection into the scheduler's fail-closed contract."""
+    cycle_id = getattr(view, "cycle_id", None)
+    cycle_status = getattr(view, "status", None)
+    cycle_slot_at = getattr(view, "decision_slot_at", None)
+    order_ids = getattr(view, "order_ids", ())
+    execution_market = getattr(view, "execution_market", None)
+    market_status = getattr(execution_market, "status", None)
+    if (
+        not isinstance(cycle_id, UUID)
+        or not isinstance(cycle_status, str)
+        or not isinstance(cycle_slot_at, datetime)
+        or not isinstance(order_ids, tuple)
+        or any(not isinstance(value, UUID) for value in order_ids)
+        or len(order_ids) > 1
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    order_id = order_ids[0] if order_ids else None
+    has_open_order = cycle_status == "awaiting_market" and order_id is not None
+    market_window_ready = has_open_order and market_status == "qualified"
+    market_window_end_at = None
+    if has_open_order and not market_window_ready:
+        scope_order_id = getattr(market_scope, "order_id", None)
+        market_window_end_at = getattr(market_scope, "window_end", None)
+        if scope_order_id != order_id or not isinstance(market_window_end_at, datetime):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        market_window_end_at += _MARKET_PUBLICATION_LAG
+    return AgentPaperLoopSnapshot(
+        now=now,
+        cycle_id=cycle_id,
+        cycle_status=cycle_status,
+        cycle_slot_at=cycle_slot_at,
+        research_job_status=None if research_job is None else research_job[1],
+        research_job_id=None if research_job is None else research_job[0],
+        market_window_ready=market_window_ready,
+        market_window_end_at=market_window_end_at,
+        has_open_order=has_open_order,
+        order_id=order_id,
+    )
+
+
+def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction:
+    """Choose one safe next action without performing I/O or retrying unknown work."""
+    if not snapshot.enabled:
+        return AgentPaperLoopAction.STOP_DISABLED
+
+    if snapshot.cycle_status == "researching":
+        if snapshot.research_job_status == "queued":
+            return AgentPaperLoopAction.RUN_RESEARCH_JOB
+        if snapshot.research_job_status in _TERMINAL_JOB_STATUSES:
+            return AgentPaperLoopAction.RESUME
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+
+    if (
+        snapshot.cycle_status == "awaiting_market"
+        and snapshot.has_open_order
+        and snapshot.market_window_ready
+    ):
+        return AgentPaperLoopAction.ADVANCE_ORDER
+
+    if snapshot.cycle_status == "awaiting_market" and snapshot.has_open_order:
+        if snapshot.market_window_end_at is None:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        if snapshot.now < snapshot.market_window_end_at:
+            return AgentPaperLoopAction.WAIT_FOR_MARKET
+        return AgentPaperLoopAction.COLLECT_WINDOW
+
+    if snapshot.cycle_status in {"decision_recorded", "risk_evaluated"}:
+        return AgentPaperLoopAction.RESUME
+
+    local_time = snapshot.now.astimezone(ZoneInfo("America/New_York"))
+    cycle_local_date = (
+        None
+        if snapshot.cycle_slot_at is None
+        else snapshot.cycle_slot_at.astimezone(ZoneInfo("America/New_York")).date()
+    )
+    if snapshot.cycle_status in {"unavailable", "failed"} and (
+        cycle_local_date is None or cycle_local_date == local_time.date()
+    ):
+        return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
+
+    if snapshot.cycle_status not in {None, "completed", "unavailable", "failed"}:
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+
+    if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
+        return AgentPaperLoopAction.STOP_SESSION_CLOSED
+    if snapshot.cycle_slot_at == floor_decision_slot(snapshot.now):
+        return AgentPaperLoopAction.WAIT_FOR_SLOT
+    return AgentPaperLoopAction.TRIGGER
+
+
+async def run_foreground_loop(
+    *,
+    inspect: Callable[[], Awaitable[AgentPaperLoopSnapshot]],
+    execute: Callable[[AgentPaperLoopAction, AgentPaperLoopSnapshot], Awaitable[None]],
+    sleep: Callable[[float], Awaitable[None]],
+) -> AgentPaperLoopAction:
+    """Run persisted one-step actions until a fail-closed stop condition is reached."""
+    while True:
+        snapshot = await inspect()
+        action = choose_loop_action(snapshot)
+        if action in {
+            AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
+            AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE,
+            AgentPaperLoopAction.STOP_DISABLED,
+            AgentPaperLoopAction.STOP_SESSION_CLOSED,
+        }:
+            return action
+        if action == AgentPaperLoopAction.WAIT_FOR_SLOT:
+            next_slot = floor_decision_slot(snapshot.now) + timedelta(minutes=5)
+            await sleep((next_slot - snapshot.now).total_seconds())
+            continue
+        if action == AgentPaperLoopAction.WAIT_FOR_MARKET:
+            assert snapshot.market_window_end_at is not None
+            await sleep((snapshot.market_window_end_at - snapshot.now).total_seconds())
+            continue
+        await execute(action, snapshot)
+
+
+async def run_local_agent_paper_loop(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    repo_root: Path,
+) -> AgentPaperLoopAction:
+    """Run the concrete local loop through persisted inspection and scoped actions."""
+
+    async def inspect() -> AgentPaperLoopSnapshot:
+        current = EngineSettings.model_validate(load_local_environment(repo_root, {}))
+        if not current.agent_paper_cycle_enabled:
+            return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
+        return await inspect_agent_paper_loop(current, account_id=account_id)
+
+    async def execute(
+        action: AgentPaperLoopAction, snapshot: AgentPaperLoopSnapshot
+    ) -> None:
+        await execute_agent_paper_loop_action(
+            settings,
+            account_id=account_id,
+            repo_root=repo_root,
+            action=action,
+            snapshot=snapshot,
+        )
+
+    return await run_foreground_loop(inspect=inspect, execute=execute, sleep=asyncio.sleep)
+
+
+async def execute_agent_paper_loop_action(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    repo_root: Path,
+    action: AgentPaperLoopAction,
+    snapshot: AgentPaperLoopSnapshot,
+) -> None:
+    """Execute exactly one planner-approved action through existing product services."""
+    if action == AgentPaperLoopAction.TRIGGER:
+        environment = load_local_environment(repo_root, {})
+        await trigger_once(
+            AgentPaperTriggerSettings.model_validate(environment),
+            AgentPaperTriggerRequest(
+                action="trigger",
+                account_id=account_id,
+                idempotency_key=(
+                    f"agent-paper-loop:{floor_decision_slot(snapshot.now).isoformat()}"
+                ),
+            ),
+            repo_root=repo_root,
+        )
+        return
+    if action == AgentPaperLoopAction.RUN_RESEARCH_JOB:
+        if not isinstance(snapshot.research_job_id, UUID):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        worked = await run_agent_worker_once(
+            local_settings(repo_root, backend="codex_sdk"),
+            job_ids=(snapshot.research_job_id,),
+        )
+        if not worked:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        return
+    if snapshot.cycle_id is None:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    if action == AgentPaperLoopAction.RESUME:
+        await resume_once(
+            settings,
+            AgentPaperResumeRequest(
+                action="resume",
+                cycle_id=snapshot.cycle_id,
+                idempotency_key=f"agent-paper-loop-resume:{snapshot.cycle_id}",
+            ),
+        )
+        return
+    if action == AgentPaperLoopAction.COLLECT_WINDOW:
+        environment = load_local_environment(repo_root, {})
+        await collect_window_once(
+            AgentPaperMarketSettings.model_validate(environment),
+            AgentPaperCollectWindowRequest(
+                action="collect-window", cycle_id=snapshot.cycle_id
+            ),
+            repo_root=repo_root,
+        )
+        return
+    if action == AgentPaperLoopAction.ADVANCE_ORDER and snapshot.order_id is not None:
+        await run_paper_once(
+            settings,
+            PaperAdvanceRequest(
+                action="advance",
+                account_id=account_id,
+                order_id=snapshot.order_id,
+                evaluated_at=snapshot.now,
+                idempotency_key=f"agent-paper-loop-advance:{snapshot.order_id}",
+            ),
+        )
+        return
+    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+
+
+async def inspect_agent_paper_loop(
+    settings: EngineSettings, *, account_id: UUID
+) -> AgentPaperLoopSnapshot:
+    """Read one bounded scheduler snapshot without starting or replaying work."""
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(now, datetime):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            service = PaperReadService(session, now)
+            account, _ = await service.account()
+            if account.id != account_id:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            view = await service.latest_agent_cycle()
+            if view is None:
+                return AgentPaperLoopSnapshot(now=now)
+
+            events: tuple[object, ...] = ()
+            jobs: tuple[object, ...] = ()
+            if view.status == "researching":
+                events = tuple(
+                    await session.scalars(
+                        select(AgentPaperCycleEventRecord)
+                        .where(AgentPaperCycleEventRecord.cycle_id == view.cycle_id)
+                        .order_by(AgentPaperCycleEventRecord.sequence)
+                    )
+                )
+                run_ids: list[str] = []
+                for event in events:
+                    fact_ids = getattr(event, "fact_ids", None)
+                    raw = fact_ids.get("research_run_ids") if isinstance(fact_ids, dict) else None
+                    if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
+                        run_ids.extend(raw)
+                if run_ids:
+                    jobs = tuple(
+                        await session.scalars(
+                            select(Job).where(
+                                Job.job_type == "agent.research",
+                                Job.payload["run_id"].as_string().in_(tuple(run_ids)),
+                            )
+                        )
+                    )
+            research_job = resolve_cycle_research_job(events=events, jobs=jobs)
+            market_scope = None
+            if (
+                view.status == "awaiting_market"
+                and len(view.order_ids) == 1
+                and view.execution_market.status != "qualified"
+            ):
+                market_scope = await resolve_agent_paper_market_scope(
+                    session, cycle_id=view.cycle_id
+                )
+            return snapshot_from_cycle_view(
+                now=now,
+                view=view,
+                research_job=research_job,
+                market_scope=market_scope,
+            )
+    finally:
+        await engine.dispose()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="nexus-engine-agent-paper-loop")
+    parser.add_argument("--account-id", required=True, type=UUID)
+    args = parser.parse_args(argv)
+    root = Path.cwd()
+    try:
+        settings = EngineSettings.model_validate(load_local_environment(root, {}))
+        if not settings.agent_paper_cycle_enabled:
+            print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
+            return 1
+        reason = asyncio.run(
+            run_local_agent_paper_loop(settings, account_id=args.account_id, repo_root=root)
+        )
+        if reason == AgentPaperLoopAction.STOP_RESULT_UNKNOWN:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if reason == AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE:
+            print(json.dumps({"error_code": "AGENT_PAPER_LOOP_CYCLE_UNAVAILABLE"}))
+            return 1
+    except Exception:
+        print(json.dumps({"error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN"}))
+        return 1
+    print(
+        json.dumps(
+            {"execution_locked": True, "status": "stopped", "reason": reason.value}
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

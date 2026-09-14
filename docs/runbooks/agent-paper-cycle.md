@@ -187,7 +187,27 @@ read current cycle/job/order state
 查原 `run → job → outputs` 和业务事实，不换 key、不重放。原始模型全文、token 和个人账户事实不
 进入 Git 或验收记录。
 
-## 8. Stop：默认关闭并保留现场
+## 8. Foreground loop：同一交易时段连续决策
+
+手工双槽验收完成后，可在一个纽约交易时段内以前台进程按五分钟槽连续推进。该入口没有逐日
+次数上限，但仍受现有美元日预算约束；每槽最多一个 cycle，每个 cycle 最多一个真实 Agent Job。
+它不常驻后台、不注册 LaunchAgent，也不改变 API/Web 的只读行为：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-loop \
+  --account-id "$PAPER_ACCOUNT_ID"
+```
+
+每一步都先读已持久化的 cycle、Job、Output、订单和窗口：同槽已完成则等待下一槽；queued Job 只按
+该 cycle 的精确 Job ID 领取；running、缺失或结果不明立即停止，不换 key。订单窗口到达后再额外
+等待 60 秒发布余量，只请求一次 Schwab pricehistory；窗口合格后才推进对应内部订单。
+
+只有 `completed` 允许进入同日下一槽。当前纽约交易日出现 `unavailable` 或 `failed` 时，本进程
+熔断退出，不在后续槽重复 Provider 或模型调用；下一交易日可以重新启动。16:00 ET 后若没有活动
+订单则正常退出，已有订单可完成其已冻结窗口后再退出。运行中将
+`NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
+
+## 9. Stop：默认关闭并保留现场
 
 1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`。只停止本轮自己启动的进程；一次性 worker 正常
    返回即已停止。若另有自己启动的普通/Provider worker，只各按一次 `Ctrl-C`。
@@ -198,7 +218,7 @@ read current cycle/job/order state
 4. 不删除 cycle、event、Run/Job/Output、订单、raw、window、fill、ledger 或 performance。关闭开关
    只阻止新手工调用，不改写历史事实。
 
-## 9. Rollback：应用回退与数据回退分开
+## 10. Rollback：应用回退与数据回退分开
 
 首选应用回退：保持 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`，回退应用版本但保留数据库 head 和
 所有事实。出现数据合同问题时前向修复；Git 回退不是业务数据恢复。
