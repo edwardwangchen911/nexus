@@ -317,6 +317,22 @@ def load_schwab_token(repo_root: Path) -> SchwabOAuthToken:
     return token
 
 
+def require_live_schwab_access_token(
+    token: SchwabOAuthToken,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Return one stored bearer token only while its validity is provable."""
+    checked_at = now or datetime.now(UTC)
+    if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+        raise SchwabOAuthError("SCHWAB_OAUTH_TIME_INVALID")
+    if token.expires_at.tzinfo is None or token.expires_at.utcoffset() is None:
+        raise SchwabOAuthError("SCHWAB_OAUTH_TOKEN_STORE_INVALID")
+    if checked_at >= token.expires_at:
+        raise SchwabOAuthError("SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED")
+    return token.access_token
+
+
 async def fetch_schwab_stream_preferences(
     token: SchwabOAuthToken,
     client: httpx.AsyncClient,
