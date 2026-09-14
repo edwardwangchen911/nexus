@@ -766,7 +766,7 @@ async def import_schwab_market_stream(
     directory: Path,
     imported_at: datetime,
 ) -> SchwabMarketStreamImportResult:
-    """Import the latest verified trade and two-sided quote per requested symbol."""
+    """Import each latest verified trade or two-sided quote observed in the request."""
     if imported_at.tzinfo is None or imported_at.utcoffset() != timedelta(0):
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_IMPORT_TIME_INVALID")
     raw_payload = pack_provider_market_stream_archive(directory)
@@ -941,7 +941,17 @@ async def import_schwab_market_stream(
         for row in observations
         if row.event_kind == "trade"
     }
-    if set(quote_ids) != set(bindings) or set(trade_ids) - set(bindings):
+    expected_quote_symbols = {
+        symbol
+        for symbol, (_, _, quote, quote_time) in selected.items()
+        if quote is not None and quote_time is not None
+    }
+    expected_trade_symbols = {
+        symbol
+        for symbol, (trade, trade_time, _, _) in selected.items()
+        if trade is not None and trade_time is not None
+    }
+    if set(quote_ids) != expected_quote_symbols or set(trade_ids) != expected_trade_symbols:
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EVIDENCE_INVALID")
     return SchwabMarketStreamImportResult(
         raw_sha256=raw_digest,

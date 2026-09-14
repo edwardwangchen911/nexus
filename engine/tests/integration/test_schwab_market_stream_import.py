@@ -14,6 +14,7 @@ from nexus.settings import EngineSettings
 from sqlalchemy import func, select
 
 INSTRUMENT_ID = UUID("019d0000-0000-7000-8000-0000000000c1")
+MSFT_INSTRUMENT_ID = UUID("019d0000-0000-7000-8000-0000000000c2")
 
 
 class DatabaseUUID(UUID):
@@ -195,3 +196,81 @@ async def test_schwab_archive_import_accepts_database_uuid_subclass(
     assert view.trade is not None and view.trade.last == Decimal("227.15")
     assert view.quote is not None and view.quote.bid == Decimal("227.14")
     assert view.quote.ask == Decimal("227.18")
+
+
+@pytest.mark.asyncio
+async def test_schwab_archive_import_persists_trade_only_observed_subset(
+    migrated_database_url: str,
+    tmp_path,
+) -> None:
+    event_at = datetime.now(UTC) - timedelta(seconds=1)
+    millis = int(event_at.timestamp() * 1000)
+    frames = _frames(event_at)
+    frames[2]["data"][0]["content"] = [
+        {
+            "key": "AAPL",
+            "3": 227.15,
+            "9": 1,
+            "35": millis,
+            "41": "XNYS",
+            "delayed": False,
+            "assetMainType": "EQUITY",
+        }
+    ]
+    directory = tmp_path / "schwab-trade-only-subset"
+    await schwab_market_stream.collect_schwab_stream(
+        symbols=("AAPL", "MSFT"),
+        directory=directory,
+        streamer_url="wss://streamer-api.schwab.com/ws",
+        credentials=CREDENTIALS,
+        max_frames=3,
+        connector=lambda *args, **kwargs: Socket(frames),
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        for instrument_id, symbol, exchange in (
+            (INSTRUMENT_ID, "AAPL", "XNAS"),
+            (MSFT_INSTRUMENT_ID, "MSFT", "XNAS"),
+        ):
+            session.add(
+                Instrument(
+                    id=instrument_id,
+                    asset_type="equity",
+                    exchange=exchange,
+                    currency="USD",
+                    tick_size=Decimal("0.01"),
+                    risk_bucket="us_equity",
+                    created_at=event_at - timedelta(days=1),
+                )
+            )
+            session.add(
+                InstrumentAlias(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    alias_type="ticker",
+                    valid_from=date(2020, 1, 1),
+                    valid_to=None,
+                    created_at=event_at - timedelta(days=1),
+                )
+            )
+
+    store = Store()
+    async with factory() as session, session.begin():
+        result = await schwab_market_stream.import_schwab_market_stream(
+            session,
+            store,
+            bindings={"AAPL": INSTRUMENT_ID, "MSFT": MSFT_INSTRUMENT_ID},
+            directory=directory,
+            imported_at=datetime.now(UTC),
+        )
+
+    async with factory() as session:
+        observations = tuple(await session.scalars(select(LatestQuote)))
+    assert result.created_observations == 1
+    assert result.symbols_observed == 1
+    assert result.quote_ids == {}
+    assert set(result.trade_ids) == {"AAPL"}
+    assert len(observations) == 1
+    assert observations[0].instrument_id == INSTRUMENT_ID
+    assert observations[0].event_kind == "trade"
+    assert observations[0].last == Decimal("227.15")
