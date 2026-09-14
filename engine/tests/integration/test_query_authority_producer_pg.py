@@ -28,6 +28,7 @@ SESSION = date(2026, 9, 14)
 AVAILABLE_AT = datetime(2026, 9, 14, 14, 30, tzinfo=UTC)
 DECISION_TIME = datetime(2026, 9, 14, 20, 30, tzinfo=UTC)
 CALENDAR_ID = UUID("51000000-0000-0000-0000-000000000003")
+NEWER_CALENDAR_ID = UUID("51000000-0000-0000-0000-000000000004")
 
 
 def _proofs(*, halt: bool = False) -> tuple[RiskSourceProof, ...]:
@@ -38,7 +39,7 @@ def _proofs(*, halt: bool = False) -> tuple[RiskSourceProof, ...]:
     )
 
 
-async def _seed(url: str) -> None:
+async def _seed(url: str, *, exchange: str = "XNAS") -> None:
     engine = create_async_engine(url)
     try:
         async with async_sessionmaker(engine).begin() as session:
@@ -46,7 +47,7 @@ async def _seed(url: str) -> None:
                 Instrument(
                     id=INSTRUMENT_ID,
                     asset_type="common_stock",
-                    exchange="XNAS",
+                    exchange=exchange,
                     currency="USD",
                     tick_size=Decimal("0.01"),
                     risk_bucket="technology",
@@ -141,6 +142,87 @@ async def _persist_twice(url: str):
         return first, second, count
     finally:
         await engine.dispose()
+
+
+async def _seed_newer_overlapping_calendar(url: str) -> None:
+    engine = create_async_engine(url)
+    try:
+        async with async_sessionmaker(engine).begin() as session:
+            session.add(
+                ExchangeCalendarAuthorityRecord(
+                    id=NEWER_CALENDAR_ID,
+                    exchange="XNYS",
+                    version="producer-test-newer",
+                    source="fixture",
+                    range_start=SESSION,
+                    range_end=SESSION,
+                    query_parameters={},
+                    completeness_status="complete",
+                    content_hash="f" * 64,
+                    published_at=datetime(2026, 9, 2, tzinfo=UTC),
+                    created_at=datetime(2026, 9, 2, tzinfo=UTC),
+                )
+            )
+            await session.flush()
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=NEWER_CALENDAR_ID,
+                    session=SESSION,
+                    decision_at=DECISION_TIME,
+                    created_at=datetime(2026, 9, 2, tzinfo=UTC),
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
+def test_normal_entry_selects_latest_overlapping_calendar_before_window_gate(
+    migrated_database_url, tmp_path
+) -> None:
+    asyncio.run(_seed(migrated_database_url))
+    asyncio.run(_seed_newer_overlapping_calendar(migrated_database_url))
+    settings = entry.AgentRiskSettings.model_validate(
+        {
+            "DATABASE_URL": migrated_database_url,
+            "ALPACA_API_KEY_ID": "synthetic-key",
+            "ALPACA_API_SECRET_KEY": "synthetic-secret",
+        }
+    )
+
+    with pytest.raises(ValueError, match="AGENT_RISK_COLLECTION_WINDOW_INVALID"):
+        asyncio.run(
+            entry.run_once(
+                settings,
+                decision_session=SESSION,
+                decision_time=DECISION_TIME,
+                output_dir=tmp_path / "risk",
+                now=DECISION_TIME - timedelta(minutes=3),
+            )
+        )
+
+
+def test_normal_entry_accepts_canonical_us_equity_exchange_before_window_gate(
+    migrated_database_url, tmp_path
+) -> None:
+    asyncio.run(_seed(migrated_database_url, exchange="XNYS"))
+    settings = entry.AgentRiskSettings.model_validate(
+        {
+            "DATABASE_URL": migrated_database_url,
+            "ALPACA_API_KEY_ID": "synthetic-key",
+            "ALPACA_API_SECRET_KEY": "synthetic-secret",
+        }
+    )
+
+    with pytest.raises(ValueError, match="AGENT_RISK_COLLECTION_WINDOW_INVALID"):
+        asyncio.run(
+            entry.run_once(
+                settings,
+                decision_session=SESSION,
+                decision_time=DECISION_TIME,
+                output_dir=tmp_path / "risk",
+                now=DECISION_TIME - timedelta(minutes=3),
+            )
+        )
 
 
 def test_persists_exact_three_proofs_and_replay_returns_existing_rows(

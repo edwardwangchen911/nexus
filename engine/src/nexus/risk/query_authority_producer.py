@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.data import SourcePolicy
 from nexus.persistence.models.market import (
     Instrument,
@@ -263,7 +264,7 @@ async def inspect_query_authority_scope(
     if (
         instrument is None
         or instrument.created_at > as_of
-        or instrument.exchange not in {"NASDAQ", "XNAS"}
+        or instrument.exchange not in US_EQUITY_EXCHANGES
         or instrument.asset_type != "common_stock"
         or instrument.currency != "USD"
         or len(aliases) != 1

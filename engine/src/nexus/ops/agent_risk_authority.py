@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import Field, SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -298,9 +298,8 @@ async def run_once(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
-            calendar_count = await session.scalar(
-                select(func.count())
-                .select_from(ExchangeCalendarAuthorityRecord)
+            calendar_authority_id = await session.scalar(
+                select(ExchangeCalendarAuthorityRecord.id)
                 .join(
                     ExchangeCalendarSessionRecord,
                     ExchangeCalendarSessionRecord.calendar_authority_id
@@ -313,8 +312,13 @@ async def run_once(
                     ExchangeCalendarSessionRecord.session == decision_session,
                     ExchangeCalendarSessionRecord.decision_at == decision_time,
                 )
+                .order_by(
+                    ExchangeCalendarAuthorityRecord.published_at.desc(),
+                    ExchangeCalendarAuthorityRecord.id.desc(),
+                )
+                .limit(1)
             )
-            if calendar_count != 1:
+            if calendar_authority_id is None:
                 raise ValueError("AGENT_RISK_SESSION_INVALID")
             scope = await inspect_query_authority_scope(
                 session,
