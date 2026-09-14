@@ -246,7 +246,7 @@ async def _persist_concurrently(
 ):
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    original_authority_check = forward_module._authority_is_valid
+    original_authority_check = forward_module.require_paper_decision_authority
     all_validated = asyncio.Event()
     validated = 0
 
@@ -260,7 +260,7 @@ async def _persist_concurrently(
 
     monkeypatch.setattr(
         forward_module,
-        "_authority_is_valid",
+        "require_paper_decision_authority",
         synchronized_authority_check,
     )
 
