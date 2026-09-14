@@ -411,6 +411,9 @@ def main(argv: list[str] | None = None) -> int:
         if reason == AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE:
             print(json.dumps({"error_code": "AGENT_PAPER_LOOP_CYCLE_UNAVAILABLE"}))
             return 1
+    except KeyboardInterrupt:
+        print(json.dumps({"error_code": "AGENT_PAPER_LOOP_INTERRUPTED"}))
+        return 130
     except Exception:
         print(json.dumps({"error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN"}))
         return 1

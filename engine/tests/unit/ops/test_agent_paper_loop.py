@@ -232,6 +232,27 @@ def test_loop_command_exposes_only_safe_stop_reasons(
     assert json.loads(capsys.readouterr().out) == output
 
 
+def test_loop_command_reports_interrupt_without_leaking_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
+
+    async def interrupt(_settings, *, account_id, repo_root):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", interrupt)
+    try:
+        exit_code = loop.main(["--account-id", str(UUID(int=1))])
+    except KeyboardInterrupt:
+        exit_code = None
+
+    assert exit_code == 130
+    assert json.loads(capsys.readouterr().out) == {
+        "error_code": "AGENT_PAPER_LOOP_INTERRUPTED"
+    }
+
+
 def test_research_job_resolution_accepts_only_cycle_bound_job() -> None:
     run_id, job_id = UUID(int=10), UUID(int=11)
     event = SimpleNamespace(fact_ids={"research_run_ids": [str(run_id)]})
