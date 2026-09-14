@@ -16,6 +16,7 @@ from nexus.quality.source_policy import (
     paper_execution_price_authorized,
 )
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ENGINE_ROOT = Path(__file__).parents[2]
@@ -187,3 +188,44 @@ def test_0058_empty_database_round_trip_preserves_0057(
     assert "price_history" not in downgraded["constraints"][
         "ck_agent_paper_market_windows_source_fixed"
     ]
+
+
+async def _seed_schwab_cycle_without_foreign_roots(database_url: str) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("SET LOCAL session_replication_role = replica"))
+            await connection.execute(
+                text(
+                    "INSERT INTO agent_paper_cycles "
+                    "(id,account_id,portfolio_id,decision_session,decision_time,"
+                    "execution_session,universe_snapshot_id,quality_report_id,"
+                    "decision_price_policy_id,execution_price_policy_id,candidate_manifest,"
+                    "candidate_hash,sizing_policy_version,sizing_policy_hash,execution_locked) "
+                    "VALUES ('00000000-0000-7000-8000-000000000058',"
+                    "'00000000-0000-7000-8000-000000000001',"
+                    "'00000000-0000-7000-8000-000000000002','2026-09-14',"
+                    "'2026-09-14T12:00:00Z','2026-09-14',"
+                    "'00000000-0000-7000-8000-000000000003',NULL,"
+                    "'4d24df4a-b510-541b-8a6a-fe7db5afaac4',"
+                    "'cf525f07-4e55-5f84-a839-60d845819ec5','[]',"
+                    "repeat('a',64),'agent_paper_sizing_v1',repeat('b',64),true)"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
+def test_0058_refuses_downgrade_after_a_schwab_cycle_exists(
+    monkeypatch: pytest.MonkeyPatch, temporary_database_url: str
+) -> None:
+    """Catch a rollback that would remove contracts beneath frozen Schwab facts."""
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(ENGINE_ROOT / "alembic.ini"))
+    command.upgrade(config, "0058_agent_paper_schwab_realtime")
+    asyncio.run(_seed_schwab_cycle_without_foreign_roots(temporary_database_url))
+
+    with pytest.raises(IntegrityError, match="SCHWAB_AGENT_PAPER_FACTS_EXIST"):
+        command.downgrade(config, "0057_agent_paper_market_window")
+
+    assert asyncio.run(_database_contract(temporary_database_url))["policies"]

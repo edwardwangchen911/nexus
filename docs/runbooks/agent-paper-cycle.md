@@ -1,47 +1,52 @@
 # Agent 内部模拟周期
 
-本手册只用于单一私人用户在 Mac 本地运行一个显式 Agent 模拟周期。它会产生内部模拟业务事实，
-但不会连接券商下单域、不会解除 `execution_locked=true`，也不等于券商正式模拟盘或实盘。
-页面只读已持久化结果，刷新页面不会触发模型、行情或周期推进。
+本手册用于单一私人用户在 Mac 本地手工运行一个 Agent 模拟周期。当前最小真实路径固定为
+`AAPL + Schwab Level One 决策报价 + Schwab price history 五分钟执行窗口`。它只产生内部模拟
+订单、成交和账本事实，不访问 Schwab 订单接口，不连接券商交易域，不解除
+`execution_locked=true`，也不等于券商模拟盘或实盘。
 
-## 运行前停止门
+页面和只读 API 只读取已持久化事实；刷新 `/paper` 不会触发行情、模型或周期推进。功能开关
+默认关闭，失败不自动重试。一次周期只允许一个研究 Job 和至多一次模型执行。
 
-只有以下条件同时满足才继续：当前代码、API、普通 Worker、Provider Worker、PostgreSQL、MinIO
-和 Web 来自同一 head；数据库为当前迁移 head；已有当前 `ResearchSnapshot`、完整 XNYS 日历、
-US-liquid universe、决策日调整后日线 authority、风险查询 authority；模型预算与 Alpaca IEX
-只读权限已存在。任何凭据只放受保护的 `infra/.env.local`，不得粘贴进命令、聊天或日志。
+## 1. Preflight：先查状态，不先发请求
 
-Agent 候选严格取自已发布的 `us_liquid/us_liquid_v1` 成员；当前本地只读来源
-`fosun_local_read_only` 可直接复用。Agent 路径不要求另造 `QualityReport`，但注册策略原有的
-PASS QualityReport 门槛保持不变。候选为空或超过五只时停止，不自动扩大股票池。
-
-若预检缺少候选的决策日复权日线，先按
-[Alpaca 日线手册](alpaca-prices-local.md)在私有新目录完成一次 `adjustment=all` 归档，再以
-`--purpose agent-paper-decision` 导入；历史日线采集不要求美股开市。若缺少行业 authority，
-按[行业审核手册](sector-exposure-local.md)生成单候选私有审核单，确认来源后再导入。两者都不
-创建周期、研究 Job 或订单。新收件的历史日线不得回填更早的 decision time；实际周期只能使用
-目标交易日收盘并完成收件后已可用的 authority。
-
-先读取持久化状态，顺序固定为：
-
-```text
-cycle → cycle events → research Jobs/Runs/Outputs → decision/bindings
-→ batch/orders → raw artifact/manifest/window → fills/ledger/performance → API/BFF/page
-```
-
-断流、观察超时或 worker 退出都不是重放许可。先用受保护的本地 API/数据库输出取得现有
-`CYCLE_ID`、Run/Job/Output、订单和窗口 ID；只记录脱敏 ID、数量、UTC 时间、source/feed/
-delivery、状态、hash 和固定 result code。
+只在当前代码、API、普通 Worker、PostgreSQL、MinIO 和 Web 来自同一 head，数据库位于当前
+Alembic head，且本地 BFF readiness 可解释时继续。`/health/live` 或 Compose `Up` 不足以证明
+业务就绪。
 
 ```bash
+git rev-parse HEAD
 uv run --project engine alembic -c engine/alembic.ini current
+uv run --project engine alembic -c engine/alembic.ini heads
+uv run --project engine nexus-openai-local status --backend codex_sdk
+TZ=America/New_York date
 ```
 
-若已存在相同账户和 decision session 的周期，必须用原 idempotency key 恢复，不得换 key 重建。
-若有 queued/running Job、非终态周期或订单，先恢复对应 worker；不得重复调用模型或行情。
+通过受保护的本地数据库/API 工具按以下顺序读取，不把账户、金额、凭据或完整 payload 复制到
+聊天和验收记录：
 
-首次使用前通过现有本地配置入口幂等登记 actionable v4。该命令只登记冻结的模型与提示词配置，
-不创建研究、Job 或订单，也不调用模型：
+```text
+cycle → cycle events → research Job/Run/Output → decision/bindings
+→ batch/orders → raw artifact/manifest/window → fills/ledger/performance
+→ Engine API/BFF/page
+```
+
+发现同账户、同 XNYS session 的周期时停止 `trigger`，恢复已有 `CYCLE_ID`。发现 queued/running
+Job 时先读取其状态；断流、观察超时、worker 退出或终端输出丢失都不是换 key 重放的许可。
+存在非终态订单时先对账，不删除事实、不重建周期。
+
+运行前还必须满足：
+
+- 唯一候选是已发布 `us_liquid/us_liquid_v1` 中的 AAPL，且有当前研究快照、前一完整交易日
+  Alpaca SIP delayed `all` 日线、审核行业 authority、完整 XNYS 日历和三类风险查询证据；
+- 已幂等登记 actionable v4 模型/提示词配置，模型预算可用；
+- `infra/.env.local` 保持受保护且未进入 Git；动态 Schwab OAuth token 只能位于主仓库
+  `.secrets/nexus-schwab-local/tokens.json`，目录和文件权限分别为 `0700`、`0600`；
+- `NEXUS_AGENT_PAPER_CYCLE_ENABLED=true` 仅在本轮手工窗口内启用。模板及默认值仍为 false；
+- 当前纽约时间处于合法 XNYS 交易日的 `[07:00, 16:00)`。07:00–09:30 盘前可运行；不必等
+  09:30 正式开盘。当前 MVP 不接受 07:00 前隔夜行情，也不接受 16:00 后盘后行情。
+
+首次使用 actionable v4 时只登记配置，不创建 Job、不调用模型：
 
 ```bash
 uv run --project engine nexus-openai-local setup \
@@ -54,36 +59,73 @@ uv run --project engine nexus-openai-local setup \
   --skip-key
 ```
 
-## 单次推进
+## 2. Trigger：冻结一次决策证据
 
-在 `infra/.env.local` 中显式设置 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=true`；默认模板为 false。
-ID 和时间来自上述受保护输出，不在 shell 命令中包含任何密钥：
+`trigger` 不接受 symbol 或 decision time。它先认领同账户、同 session 的唯一周期；缺少现成
+风险查询证明时，按既有只读 Alpaca 入口补齐一次，然后对 AAPL 做一次有界 Schwab Level One
+采集。Schwab 路径固定一次 LOGIN、一次订阅、最多 15 秒/100 帧/8 MiB，不重连、不重试。
 
 ```bash
-uv run --project engine nexus-engine-agent-paper-once run \
+uv run --project engine nexus-engine-agent-paper-once trigger \
   --account-id "$PAPER_ACCOUNT_ID" \
-  --decision-time "$DECISION_TIME" \
-  --idempotency-key "$CYCLE_KEY"
+  --idempotency-key "$TRIGGER_KEY"
 ```
 
-命令只推进一个持久化状态，不轮询也不执行模型。若进入 `researching`，启动项目既有普通
-Worker，让既有 Agent Job 正常完成；再用完全相同的三项参数推进。若状态已经是
-`completed`、`unavailable`、`failed` 或 `awaiting_market`，先核对事实，不得再次造新周期。
+只接受返回中冻结的 `CYCLE_ID`，并核对决策证据是 `schwab/l1/real_time`、`delayed=false`、
+双边报价完整且 quote/artifact/hash 绑定一致。命令结果不明时读取持久状态；只可使用原
+`TRIGGER_KEY` 恢复，不能换 key 再请求行情。
 
-## 真实 IEX 窗口与模拟成交
+以下任一情况立即停止本轮：`AGENT_PAPER_OUTSIDE_WINDOW`、`RISK_INPUT_REQUIRED`、
+`SCHWAB_L1_FRESHNESS_UNPROVEN`、`SCHWAB_L1_INCOMPLETE`、候选或证据绑定冲突。不得换数据源、
+放宽时间/质量门槛或借用 Shadow 路径。
 
-只在美股开市窗口进行一次、不重试。若周期产生订单，为该订单的标的采集一个精确五分钟窗口；
-若无订单，仍为候选采集一个 `acceptance_probe`，证明行情合同但绝不制造成交：
+## 3. Run existing worker once：最多消费一个 Job
+
+先确认该周期恰有一个 queued 研究 Job，且没有相同 Run 的未知调用结果，再运行现有一次性
+研究 worker：
+
+```bash
+uv run --project engine nexus-openai-local run-once --backend codex_sdk
+```
+
+该入口至多领取一个已登记 Job。`job_processed=false`、调用结果 unknown、预算不足或 worker
+退出时先查原 Job/Run/Output，不再次运行 worker。只有持久化 Output 终态明确后才继续。
+
+## 4. Resume：消费已持久化研究结果
+
+```bash
+uv run --project engine nexus-engine-agent-paper-once resume \
+  --cycle-id "$CYCLE_ID" \
+  --idempotency-key "$RESUME_KEY"
+```
+
+`resume` 不调用模型、不采集行情，只读取已持久化 Job/Run/Output，并生成确定性 sizing、硬风控、
+批次和内部模拟订单。用同一个 `RESUME_KEY` 处理结果不明；不要轮询或换 key。合法结果包括：
+
+- `NO_ORDER_REQUIRED`：maintain/none 是真实不交易结论，没有订单；
+- `PAPER_ORDERS_AWAITING_MARKET`：已有风控通过订单，等待五分钟窗口；
+- risk rejected：保留拒绝事件，不创建成交；
+- research unavailable/failed：保留终态和固定错误码，不替换 Run。
+
+## 5. Collect window：一次 Schwab 五分钟窗口
+
+窗口由周期和 Output 时间确定，CLI 不接受 instrument 或 window-start。请求固定
+`price_history/1Min/raw`、`needExtendedHoursData=true`、`[start,start+5m)`，只发一个 GET；响应
+实时性未由 Schwab price history 声明，因此持久化为 `delivery_mode=unknown`，不得展示成实时。
 
 ```bash
 uv run --project engine nexus-engine-agent-paper-once collect-window \
-  --cycle-id "$CYCLE_ID" \
-  --instrument-id "$INSTRUMENT_ID" \
-  --window-start "$WINDOW_START"
+  --cycle-id "$CYCLE_ID"
 ```
 
-有订单时，核对 raw artifact、manifest、`PriceBarSetAuthority` 和 Agent-window binding 的 hash、
-source=`alpaca`、feed=`iex`、delivery=`real_time`、raw、1Min、连续五根后，才推进内部模拟订单：
+有订单时窗口绑定该订单并用于 `paper_fill`；无订单时只保存一个 `acceptance_probe`，证明行情
+合同但绝不制造订单或成交。`PAPER_MARKET_WINDOW_UNAVAILABLE` 表示本次窗口没有形成合格
+authority：停止并保留 cycle/order 原状，不重试、不补造 bar、不用最新行情替换冻结窗口。
+
+## 6. Advance：只推进已有内部模拟订单
+
+`resume` 不执行订单。只有上一步已持久化与该订单精确绑定的五根连续分钟线时，才复用现有内部
+模拟入口推进；`EVALUATED_AT` 使用已到达窗口的实际核对时间，不伪造未来时间。
 
 ```bash
 uv run --project engine python -m nexus.ops.paper_once advance \
@@ -93,32 +135,58 @@ uv run --project engine python -m nexus.ops.paper_once advance \
   --idempotency-key "$ADVANCE_KEY"
 ```
 
-无交易且有合格 `acceptance_probe` 是有效验收；闭市抑制只是正确 no-op，不是行情验收。
-Alpaca IEX entitlement、完整五分钟 bars、当前 ResearchSnapshot 或模型预算任一不可用时立即停止，
-报告真实阻塞，不换数据源、不重试、不放宽门槛、不伪造交易，也不借用 Shadow 代码。
+该入口使用现有确定性 VWAP、容量、滑点、reservation、fill 和 ledger 逻辑。`no_data`、
+`no_capacity` 或部分成交都是诚实结果；原 `ADVANCE_KEY` 可用于查明不确定结果，但不能通过换 key
+重复成交。成交后无需再用 `resume` 推单，进入只读核对。
 
-最后读取数据库 event chain、`/internal/v1/paper/cycles/latest`、同源
-`/api/v1/paper/cycles/latest` 与 `/paper`：数据库核对精确 cycle/event hash 和关联 ID，两个 API
-核对同一 cycle ID，浏览器核对相同 decision time、result code、订单/成交事实，且页面没有创建或
-实盘下单动作。
-手工浏览器验收可在已启动的同 head 本地栈上运行：
+## 7. DB / API / BFF / page readback
+
+依次核对同一 `CYCLE_ID`：cycle/event hash 与关联 ID；唯一 Job/Run/Output；decision 和风险结果；
+订单最新事件；Schwab raw artifact/manifest/window；fill、reservation、借贷平衡 ledger 和绩效。
+不得只看 CLI 文本、HTTP 200 或页面标签。
+
+Engine `/internal/v1/paper/cycles/latest`、同源 BFF `/api/v1/paper/cycles/latest` 和 `/paper` 必须显示
+同一周期。页面应分别显示：
+
+- `决策报价 · Schwab Level One · 实时 · <冻结报价时间>`；
+- `执行分钟线 · Schwab pricehistory · 实时性未由响应声明`；
+- `execution_locked=true`，且没有创建周期、再次请求行情或券商下单按钮。
+
+同 head 本地栈的浏览器只读验收入口：
 
 ```bash
 NEXUS_REAL_AGENT_PAPER_ACCEPTANCE=1 npm run test:e2e -- \
   tests/e2e/agent-paper-cycle-real.spec.ts
 ```
 
-## 停止、回滚与保留
+## 8. Stop：默认关闭并保留现场
 
-1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`，只对本轮自己启动的 Agent/Provider worker 各按一次
-   `Ctrl-C`；观察超时后不要重复中断或重放。
-2. 只读确认没有 `prepared`、`researching`、`decision_recorded`、`risk_evaluated` 周期，也没有
-   `proposed`、`risk_approved`、`submitted`、`partially_filled` 订单。若存在，保留现场并恢复，
-   不得删除记录来通过验收。
-3. 停止不会删除 cycle、event、Run/Job/Output、订单、raw、fill、ledger 或 performance；它们是
-   审计事实。配置回滚只恢复默认关闭，不改变历史。
-4. `0056_agent_paper_cycle` 与 `0057_agent_paper_market_window` 都有业务事实降级栅栏。有任一对应
-   事实后不得降级；优先前向修复。仅在从未使用的数据库上，且已在临时数据库完成现有
-   backup/restore drill 和 downgrade/upgrade round trip 后，才可按 Alembic 正常入口降级。
-5. 不删除 MinIO bucket、volume、数据库或迁移历史。确需恢复时按
-   [备份恢复手册](backup-restore.md)从独立备份演练，不以 Git 回滚代替业务数据恢复。
+1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`。只停止本轮自己启动的进程；一次性 worker 正常
+   返回即已停止。若另有自己启动的普通/Provider worker，只各按一次 `Ctrl-C`。
+2. 只读确认没有未解释的 queued/running Job，没有结果未知的模型调用，也没有未对账的
+   `proposed`、`risk_approved`、`submitted`、`partially_filled` 订单。
+3. 对 `prepared`、`researching`、`decision_recorded`、`risk_evaluated` 或 `awaiting_market` 周期，
+   保留现场并记录精确阻塞；不得删记录来制造完成状态。
+4. 不删除 cycle、event、Run/Job/Output、订单、raw、window、fill、ledger 或 performance。关闭开关
+   只阻止新手工调用，不改写历史事实。
+
+## 9. Rollback：应用回退与数据回退分开
+
+首选应用回退：保持 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`，回退应用版本但保留数据库 head 和
+所有事实。出现数据合同问题时前向修复；Git 回退不是业务数据恢复。
+
+迁移 `0058_agent_paper_schwab_realtime` 的降级只允许在专用空临时数据库演练。先按
+[备份恢复手册](backup-restore.md)完成独立备份/恢复演练，再对临时库执行：
+
+```bash
+DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
+  uv run --project engine alembic -c engine/alembic.ini upgrade 0058_agent_paper_schwab_realtime
+DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
+  uv run --project engine alembic -c engine/alembic.ini downgrade 0057_agent_paper_market_window
+DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
+  uv run --project engine alembic -c engine/alembic.ini upgrade 0058_agent_paper_schwab_realtime
+```
+
+存在任一 Schwab Agent cycle、decision、authority 或 window 事实时，downgrade 必须以
+`SCHWAB_AGENT_PAPER_FACTS_EXIST` 失败。不得为降级删除事实，不得在当前业务库试跑，不删除 MinIO
+bucket、volume、数据库或迁移历史。

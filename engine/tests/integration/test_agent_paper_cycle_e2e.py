@@ -71,10 +71,17 @@ async def test_agent_cycle_rejects_non_internal_account_without_persisting_a_cla
 
 @pytest.mark.parametrize(
     "case",
-    ["buy_partial_then_full", "sell", "hold_no_order", "risk_reduced", "risk_rejected"],
+    [
+        "buy_partial_then_full",
+        "sell",
+        "hold_no_order",
+        "risk_reduced",
+        "risk_rejected",
+        "market_unavailable_no_fill",
+    ],
 )
 @pytest.mark.asyncio
-async def test_controlled_loop_preserves_policy_and_reaches_five_outcomes(
+async def test_controlled_loop_preserves_policy_and_reaches_honest_outcomes(
     case: str,
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -91,7 +98,27 @@ async def test_controlled_loop_preserves_policy_and_reaches_five_outcomes(
         async with sessions() as session:
             before = await _policy_fingerprint(session)
 
-        if case == "buy_partial_then_full":
+        if case == "market_unavailable_no_fill":
+            seed = await seed_paper_execution(
+                migrated_database_url,
+                window_bar_volumes=(),
+            )
+            async with sessions.begin() as session:
+                unavailable = await advance_internal_paper_order(
+                    session,
+                    order_id=seed.order_id,
+                    evaluated_at=FIRST_EVALUATION,
+                    idempotency_key="controlled-market-unavailable",
+                )
+            assert unavailable.action == "no_data"
+            assert unavailable.fill_id is None
+            async with sessions() as session:
+                assert await session.scalar(
+                    select(func.count())
+                    .select_from(PaperFillRecord)
+                    .where(PaperFillRecord.order_id == seed.order_id)
+                ) == 0
+        elif case == "buy_partial_then_full":
             seed = await seed_paper_execution(
                 migrated_database_url,
                 window_bar_volumes=(Decimal("100"), Decimal("2000")),
