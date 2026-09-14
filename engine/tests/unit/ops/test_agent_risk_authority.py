@@ -78,6 +78,7 @@ def test_collects_and_archives_exact_three_source_proofs(tmp_path, monkeypatch) 
             key_id=SecretStr("synthetic-key"),
             secret=SecretStr("synthetic-secret"),
             output_dir=output,
+            cutoff_at=None,
         )
     )
 
@@ -137,6 +138,7 @@ def test_prior_session_directory_fails_closed_and_preserves_original(tmp_path, m
                 key_id=SecretStr("synthetic-key"),
                 secret=SecretStr("synthetic-secret"),
                 output_dir=output,
+                cutoff_at=None,
             )
         )
 
@@ -144,6 +146,54 @@ def test_prior_session_directory_fails_closed_and_preserves_original(tmp_path, m
     manifest = json.loads((output / "manifest.json").read_bytes())
     assert manifest["status"] == "failed"
     assert manifest["execution_locked"] is True
+
+
+def test_halt_response_received_after_decision_cutoff_is_rejected(
+    tmp_path, monkeypatch
+) -> None:
+    cutoff = datetime(2026, 9, 14, 20, 30, tzinfo=UTC)
+    action, halt, directory = _responses(cutoff - timedelta(seconds=30))
+    received_times = iter(
+        (
+            cutoff - timedelta(seconds=10),
+            cutoff - timedelta(seconds=5),
+            cutoff + timedelta(seconds=5),
+        )
+    )
+
+    class SequencedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = next(received_times)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "data.alpaca.markets":
+            return httpx.Response(200, content=action)
+        if request.url.path == "/rss.aspx":
+            return httpx.Response(200, content=halt)
+        return httpx.Response(200, content=directory)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        cli.httpx,
+        "AsyncClient",
+        lambda **kwargs: original(**kwargs, transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.setattr(cli, "datetime", SequencedDatetime)
+
+    with pytest.raises(ValueError, match="AGENT_RISK_COLLECTION_WINDOW_INVALID"):
+        asyncio.run(
+            cli.collect_source_proofs(
+                symbol="AAPL",
+                instrument_id=UUID("51000000-0000-0000-0000-000000000001"),
+                decision_session=date(2026, 9, 14),
+                key_id=SecretStr("synthetic-key"),
+                secret=SecretStr("synthetic-secret"),
+                output_dir=tmp_path / "risk-authority",
+                cutoff_at=cutoff,
+            )
+        )
 
 
 def test_cli_emits_only_bounded_result_and_never_requires_cycle_enablement(

@@ -258,6 +258,7 @@ async def trigger_in_session(
             secret=settings.alpaca_secret,
             output_dir=output_parent
             / f"{decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}",
+            cutoff_at=None,
         )
     except ValueError as error:
         raise ValueError("RISK_INPUT_REQUIRED") from error

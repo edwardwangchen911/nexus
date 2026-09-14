@@ -92,8 +92,9 @@ async def collect_source_proofs(
     key_id: SecretStr,
     secret: SecretStr,
     output_dir: Path,
+    cutoff_at: datetime | None,
 ) -> tuple[RiskSourceProof, ...]:
-    """Archive exact provider bytes, then return three complete query proofs."""
+    """Archive exact provider bytes and reject receipts after an explicit cutoff."""
     try:
         output_dir.mkdir(mode=0o700)
         actions_dir = output_dir / "actions"
@@ -179,6 +180,8 @@ async def collect_source_proofs(
                     received_at=halt_received,
                 ),
             )
+            if cutoff_at is not None and halt_received > cutoff_at:
+                raise ValueError("AGENT_RISK_COLLECTION_WINDOW_INVALID")
             halt = parse_nasdaq_halt_feed(halt_raw, symbol=symbol, fetched_at=halt_received)
             proofs.append(
                 RiskSourceProof(
@@ -229,6 +232,8 @@ async def collect_source_proofs(
             )
         except OSError:
             pass
+        if isinstance(error, ValueError) and str(error) == "AGENT_RISK_COLLECTION_WINDOW_INVALID":
+            raise
         raise ValueError("AGENT_RISK_SOURCE_COLLECTION_FAILED") from error
 
 
@@ -357,6 +362,7 @@ async def run_once(
             key_id=settings.alpaca_key,
             secret=settings.alpaca_secret,
             output_dir=output_dir,
+            cutoff_at=decision_time,
         )
         suspension = next(proof for proof in proofs if proof.kind == "suspension")
         if any(
