@@ -87,6 +87,78 @@ async def test_latest_agent_paper_cycle_is_404_without_a_cycle(
 
 
 @pytest.mark.asyncio
+async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_result(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    cycle_id = UUID("72000000-0000-0000-0000-000000000009")
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        session.add(
+            AgentPaperCycleRecord(
+                id=cycle_id,
+                account_id=seed.account_id,
+                portfolio_id=seed.portfolio_id,
+                decision_session=DECISION_SESSION,
+                decision_time=DECISION_TIME,
+                execution_session=DECISION_SESSION,
+                universe_snapshot_id=UNIVERSE_ID,
+                quality_report_id=None,
+                decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                candidate_manifest=[],
+                candidate_hash=candidate_manifest_hash(()),
+                sizing_policy_version="agent_paper_sizing_v1",
+                sizing_policy_hash="9" * 64,
+                execution_locked=True,
+            )
+        )
+        await session.flush()
+        events = (
+            (1, None, "prepared", "CYCLE_PREPARED"),
+            (2, "prepared", "unavailable", "RISK_INPUT_REQUIRED"),
+        )
+        for sequence, from_status, to_status, result_code in events:
+            session.add(
+                AgentPaperCycleEventRecord(
+                    cycle_id=cycle_id,
+                    sequence=sequence,
+                    from_status=from_status,
+                    to_status=to_status,
+                    result_code=result_code,
+                    fact_ids={},
+                    occurred_at=DECISION_TIME,
+                    event_hash=canonical_cycle_event_hash(
+                        cycle_id=cycle_id,
+                        sequence=sequence,
+                        from_status=from_status,
+                        to_status=to_status,
+                        result_code=result_code,
+                        fact_ids={},
+                        occurred_at=DECISION_TIME,
+                    ),
+                )
+            )
+
+    path = "/internal/v1/paper/cycles/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["cycle_id"] == str(cycle_id)
+    assert data["status"] == "unavailable"
+    assert data["result_code"] == "RISK_INPUT_REQUIRED"
+    assert data["candidate_count"] == 0
+    assert data["candidates"] == []
+    assert data["decision_market"] is None
+    assert data["execution_locked"] is True
+
+
+@pytest.mark.asyncio
 async def test_latest_agent_paper_cycle_returns_only_bounded_redacted_facts(
     migrated_database_url: str,
 ) -> None:

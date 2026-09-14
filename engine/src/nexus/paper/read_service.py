@@ -311,48 +311,54 @@ class PaperReadService:
             )
         decision_market = None
         if cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
-            if len(manifest) != 1:
-                raise NexusError(
-                    ErrorCode.DATA_PARTIAL,
-                    "The Agent paper decision market is incomplete.",
-                    status_code=409,
-                )
-            candidate = manifest[0]
-            quote = await self._session.get(LatestQuote, candidate.decision_quote_id)
-            artifact = await self._session.get(DataArtifact, candidate.decision_artifact_id)
-            if (
-                quote is None
-                or artifact is None
-                or quote.instrument_id != candidate.instrument_id
-                or quote.data_artifact_id != artifact.id
-                or quote.source != "schwab"
-                or quote.feed != "l1"
-                or quote.delivery_mode != "real_time"
-                or quote.event_kind != "quote"
-                or quote.evidence_status != "verified"
-                or quote.bid is None
-                or quote.ask is None
-                or quote.bid <= 0
-                or quote.ask <= 0
-                or quote.bid > quote.ask
-                or quote.available_at > cycle.decision_time
-                or quote.received_at > cycle.decision_time
-                or artifact.source != "schwab"
-                or artifact.schema_version != "schwab_level_one_stream_v1"
-                or artifact.sha256 != candidate.decision_evidence_hash
-            ):
-                raise NexusError(
-                    ErrorCode.DATA_PARTIAL,
-                    "The Agent paper decision market is incomplete.",
-                    status_code=409,
-                )
-            decision_market = AgentPaperDecisionMarketResponse(
-                source="schwab",
-                feed="l1",
-                delivery_mode="real_time",
-                delayed=False,
-                quote_at=quote.observed_at,
+            terminal_without_candidate = (
+                not manifest
+                and projected_status == "unavailable"
+                and projected_result_code in {"RISK_INPUT_REQUIRED", "OPEN_ORDER_EXISTS"}
             )
+            if len(manifest) != 1 and not terminal_without_candidate:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent paper decision market is incomplete.",
+                    status_code=409,
+                )
+            if manifest:
+                candidate = manifest[0]
+                quote = await self._session.get(LatestQuote, candidate.decision_quote_id)
+                artifact = await self._session.get(DataArtifact, candidate.decision_artifact_id)
+                if (
+                    quote is None
+                    or artifact is None
+                    or quote.instrument_id != candidate.instrument_id
+                    or quote.data_artifact_id != artifact.id
+                    or quote.source != "schwab"
+                    or quote.feed != "l1"
+                    or quote.delivery_mode != "real_time"
+                    or quote.event_kind != "quote"
+                    or quote.evidence_status != "verified"
+                    or quote.bid is None
+                    or quote.ask is None
+                    or quote.bid <= 0
+                    or quote.ask <= 0
+                    or quote.bid > quote.ask
+                    or quote.available_at > cycle.decision_time
+                    or quote.received_at > cycle.decision_time
+                    or artifact.source != "schwab"
+                    or artifact.schema_version != "schwab_level_one_stream_v1"
+                    or artifact.sha256 != candidate.decision_evidence_hash
+                ):
+                    raise NexusError(
+                        ErrorCode.DATA_PARTIAL,
+                        "The Agent paper decision market is incomplete.",
+                        status_code=409,
+                    )
+                decision_market = AgentPaperDecisionMarketResponse(
+                    source="schwab",
+                    feed="l1",
+                    delivery_mode="real_time",
+                    delayed=False,
+                    quote_at=quote.observed_at,
+                )
         return AgentPaperCycleResponse(
             cycle_id=cycle.id,
             status=cast(Any, projected_status),
