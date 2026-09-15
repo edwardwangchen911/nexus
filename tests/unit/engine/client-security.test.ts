@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { engineFetch, sanitizeEngineResponse, timeoutForMethod } from "../../../app/lib/engine/client";
 import { ERROR_STATUSES, rebuildAllowedEngineResponse, SAFE_ENGINE_ERROR_MESSAGES } from "../../../app/lib/engine/errors";
 import { createEngineHmacHeaders } from "../../../app/lib/engine/hmac";
+import { agentPaperCycle, olderAgentPaperCycle } from "../paper/fixtures";
 
 const actor = { userId: "nexus-test-user", requestId: "0198f7a0-1111-7777-8111-111111111114" };
 const engineRequestId = "0198f7a0-1111-7777-8111-111111111115";
@@ -129,6 +130,44 @@ function portfolioDecisionEnvelope() {
       schema_version: "1",
       as_of: "2026-09-10T08:00:00Z",
     },
+  };
+}
+
+function workbenchEnvelope() {
+  return {
+    data: {
+      mode: "internal_paper",
+      execution_locked: true,
+      loop: {
+        status: "offline",
+        started_at: null,
+        last_seen_at: null,
+        stale_after_seconds: 30,
+      },
+      session: {
+        decision_session: null,
+        status: "not_started",
+        cycle_count: 0,
+        completed_count: 0,
+        latest_result_code: null,
+        last_completed_decision_at: null,
+        next_eligible_at: null,
+        next_eligible_reason: null,
+        execution_locked: true,
+      },
+      latest_cycle: null,
+      active_orders: [],
+      account: null,
+      attention: [],
+    },
+    meta: successPayload().meta,
+  };
+}
+
+function cycleDetailEnvelope() {
+  return {
+    data: { cycle: olderAgentPaperCycle, orders: [] },
+    meta: successPayload().meta,
   };
 }
 
@@ -439,6 +478,110 @@ describe("engineFetch runtime boundary", () => {
       query: `portfolio_snapshot_id=0198d500-1000-7000-8000-000000000041&diagnostic_report_id=0198d500-1000-7000-8000-000000000141`,
     }, { method: "GET", actor }));
     expect(calls).toHaveLength(3);
+  });
+
+  it("allowlists the workbench and one validated cycle detail without forwarding caller or upstream headers", async () => {
+    setEngineEnvironment();
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input: String(input), init });
+      return jsonResponse(
+        String(input).endsWith("/internal/v1/workbench") ? workbenchEnvelope() : cycleDetailEnvelope(),
+        200,
+        { etag: '"safe"', "x-upstream-secret": "discard" },
+      );
+    });
+
+    const workbench = await engineFetch("/internal/v1/workbench", {
+      method: "GET",
+      actor,
+      headers: { authorization: "must-not-forward", "x-nexus-actor-id": "attacker" },
+    });
+    const detail = await engineFetch({
+      template: "/internal/v1/paper/cycles/{cycle_id}",
+      path: `/internal/v1/paper/cycles/${olderAgentPaperCycle.cycle_id}`,
+    }, {
+      method: "GET",
+      actor,
+      headers: { cookie: "must-not-forward", "x-nexus-signature": "attacker" },
+    });
+
+    expect(workbench.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(workbench.headers.get("etag")).toBe('"safe"');
+    expect(workbench.headers.get("x-upstream-secret")).toBeNull();
+    expect(await workbench.json()).toEqual(workbenchEnvelope());
+    expect(await detail.json()).toEqual(cycleDetailEnvelope());
+    expect(calls.map((call) => call.input)).toEqual([
+      "http://127.0.0.1:8000/internal/v1/workbench",
+      `http://127.0.0.1:8000/internal/v1/paper/cycles/${olderAgentPaperCycle.cycle_id}`,
+    ]);
+    for (const call of calls) {
+      const headers = new Headers(call.init?.headers);
+      expect(headers.get("authorization")).toBeNull();
+      expect(headers.get("cookie")).toBeNull();
+      expect(headers.get("x-nexus-actor-id")).toBe(actor.userId);
+      expect(headers.get("x-nexus-signature")).not.toBe("attacker");
+    }
+  });
+
+  it("rejects malformed cycle detail paths before fetch", async () => {
+    setEngineEnvironment();
+    const fetchSpy = vi.fn(async () => jsonResponse(cycleDetailEnvelope()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    for (const path of [
+      "/internal/v1/paper/cycles/not-a-uuid",
+      `/internal/v1/paper/cycles/${olderAgentPaperCycle.cycle_id}/extra`,
+      "/internal/v1/paper/cycles/%2e%2e%2fworkbench",
+    ]) {
+      await expectSafeInternalError(await engineFetch({
+        template: "/internal/v1/paper/cycles/{cycle_id}",
+        path,
+      } as never, { method: "GET", actor } as never));
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses the bounded paper response budget for the workbench", async () => {
+    let cancelAttempted = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(64 * 1024 + 1));
+        controller.close();
+      },
+      cancel() {
+        cancelAttempted = true;
+      },
+    });
+
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      new Response(stream, { status: 200, headers: { "content-type": "application/json" } }),
+      "http://127.0.0.1:8000/internal/v1/workbench",
+      "/internal/v1/workbench",
+      "GET",
+    ));
+    expect(cancelAttempted).toBe(false);
+  });
+
+  it("sanitizes invalid workbench and cycle detail bodies", async () => {
+    const unsafeWorkbench = workbenchEnvelope();
+    Object.assign(unsafeWorkbench.data, { account_id: "must-not-escape" });
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      jsonResponse(unsafeWorkbench, 200, { "x-upstream-secret": "discard" }),
+      undefined,
+      "/internal/v1/workbench",
+      "GET",
+    ));
+
+    const wrongCycle = cycleDetailEnvelope();
+    wrongCycle.data.cycle = agentPaperCycle;
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      jsonResponse(wrongCycle),
+      `http://127.0.0.1:8000/internal/v1/paper/cycles/${olderAgentPaperCycle.cycle_id}`,
+      `/internal/v1/paper/cycles/${olderAgentPaperCycle.cycle_id}`,
+      "GET",
+    ));
   });
 
   it("sends and signs one canonical allowlisted market query", async () => {

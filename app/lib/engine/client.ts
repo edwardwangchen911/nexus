@@ -146,6 +146,7 @@ function responseLimit(requestUrl?: string, schemaPath?: string): number {
     return MAX_PORTFOLIO_RESPONSE_BYTES;
   }
   if (schemaPath && isAnalysisPath(schemaPath)) return MAX_ANALYSIS_RESPONSE_BYTES;
+  if (schemaPath === "/internal/v1/workbench") return MAX_PAPER_RESPONSE_BYTES;
   if (schemaPath?.startsWith("/internal/v1/paper/")) return MAX_PAPER_RESPONSE_BYTES;
   if (schemaPath === "/internal/v1/risk-audit") return MAX_RISK_AUDIT_RESPONSE_BYTES;
   if (requestUrl) {
@@ -158,6 +159,7 @@ function responseLimit(requestUrl?: string, schemaPath?: string): number {
         return MAX_PORTFOLIO_RESPONSE_BYTES;
       }
       if (isAnalysisPath(pathname)) return MAX_ANALYSIS_RESPONSE_BYTES;
+      if (pathname === "/api/v1/workbench" || pathname === "/internal/v1/workbench") return MAX_PAPER_RESPONSE_BYTES;
       if (pathname.startsWith("/api/v1/paper/") || pathname.startsWith("/internal/v1/paper/")) return MAX_PAPER_RESPONSE_BYTES;
       if (pathname === "/api/v1/risk-audit" || pathname === "/internal/v1/risk-audit") return MAX_RISK_AUDIT_RESPONSE_BYTES;
     } catch {
@@ -228,7 +230,7 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const news = /^\/internal\/v1\/instruments\/([^/]+)\/news$/.exec(path);
   if (news && validateUuid(news[1])) return template === "/internal/v1/instruments/{instrument_id}/news";
   if (template === "/internal/v1/optimization-proposal-drafts") return path === template;
-  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/paper/cycles", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
+  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/workbench", "/internal/v1/paper/cycles", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -248,6 +250,10 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const paperCancel = /^\/internal\/v1\/paper\/orders\/([^/]+)\/cancel$/.exec(path);
   if (paperCancel && validateUuid(paperCancel[1])) {
     return template === "/internal/v1/paper/orders/{order_id}/cancel";
+  }
+  const paperCycle = /^\/internal\/v1\/paper\/cycles\/([^/]+)$/.exec(path);
+  if (paperCycle && validateUuid(paperCycle[1])) {
+    return template === "/internal/v1/paper/cycles/{cycle_id}";
   }
   const brokerIntent = /^\/internal\/v1\/broker-simulation\/intents\/([^/]+)\/(approve|reject)$/.exec(path);
   if (brokerIntent && validateUuid(brokerIntent[1])) {

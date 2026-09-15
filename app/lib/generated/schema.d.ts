@@ -500,6 +500,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/cycles/{cycle_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Agent Paper Cycle Detail */
+        get: operations["getInternalAgentPaperCycleDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/cycles/latest": {
         parameters: {
             query?: never;
@@ -1000,6 +1017,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/workbench": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Internal Paper Workbench */
+        get: operations["getInternalPaperWorkbench"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1154,6 +1188,17 @@ export interface components {
             stance: ("buy_candidate" | "reduce_candidate" | "hold" | "watch") | null;
             /** Symbol */
             symbol: string;
+        };
+        /** AgentPaperCycleDetailEnvelope */
+        AgentPaperCycleDetailEnvelope: {
+            data: components["schemas"]["AgentPaperCycleDetailResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** AgentPaperCycleDetailResponse */
+        AgentPaperCycleDetailResponse: {
+            cycle: components["schemas"]["AgentPaperCycleResponse"];
+            /** Orders */
+            orders: components["schemas"]["PaperOrderResponse"][];
         };
         /** AgentPaperCycleEnvelope */
         AgentPaperCycleEnvelope: {
@@ -6593,6 +6638,111 @@ export interface components {
             proposal_id: string;
             result: components["schemas"]["WhatIfEvaluation"];
         };
+        /** WorkbenchAccountSummaryResponse */
+        WorkbenchAccountSummaryResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Available Cash */
+            available_cash: string | null;
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Data State
+             * @enum {string}
+             */
+            data_state: "EMPTY" | "READY" | "PARTIAL" | "STALE";
+            /** Initial Capital */
+            initial_capital: string;
+            /** Market Value */
+            market_value: string | null;
+            /** Nav */
+            nav: string | null;
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /** Realized Pnl */
+            realized_pnl: string | null;
+            /** Reserved Cash */
+            reserved_cash: string | null;
+            /** Unrealized Pnl */
+            unrealized_pnl: string | null;
+        };
+        /** WorkbenchAttentionResponse */
+        WorkbenchAttentionResponse: {
+            /** Cycle Id */
+            cycle_id?: string | null;
+            /** Href */
+            href: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "data" | "model" | "risk" | "execution" | "service";
+            /** Order Id */
+            order_id?: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Safe Action
+             * @enum {string}
+             */
+            safe_action: "view_evidence" | "view_decision" | "verify_original_result" | "wait";
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "info" | "warning" | "critical";
+            /** Title Code */
+            title_code: string;
+        };
+        /** WorkbenchEnvelope */
+        WorkbenchEnvelope: {
+            data: components["schemas"]["WorkbenchResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** WorkbenchLoopResponse */
+        WorkbenchLoopResponse: {
+            /** Last Seen At */
+            last_seen_at: string | null;
+            /**
+             * Stale After Seconds
+             * @constant
+             */
+            stale_after_seconds: 30;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "online" | "offline" | "unknown";
+        };
+        /** WorkbenchResponse */
+        WorkbenchResponse: {
+            account: components["schemas"]["WorkbenchAccountSummaryResponse"] | null;
+            /** Active Orders */
+            active_orders: components["schemas"]["PaperOrderResponse"][];
+            /** Attention */
+            attention: components["schemas"]["WorkbenchAttentionResponse"][];
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            latest_cycle: components["schemas"]["AgentPaperCycleResponse"] | null;
+            loop: components["schemas"]["WorkbenchLoopResponse"];
+            /**
+             * Mode
+             * @constant
+             */
+            mode: "internal_paper";
+            session: components["schemas"]["AgentPaperSessionSummaryResponse"];
+        };
     };
     responses: never;
     parameters: never;
@@ -8139,6 +8289,64 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentPaperCyclePageEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalAgentPaperCycleDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                cycle_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentPaperCycleDetailEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */
@@ -9884,6 +10092,53 @@ export interface operations {
             };
             /** @description Stable NEXUS error envelope. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPaperWorkbench: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkbenchEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

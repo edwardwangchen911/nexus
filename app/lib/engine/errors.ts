@@ -18,6 +18,7 @@ import {
   paperOrderPageRuntimeSchema,
   paperPortfolioRuntimeSchema,
   agentPaperCycleRuntimeSchema,
+  agentPaperCycleDetailRuntimeSchema,
   agentPaperCyclePageRuntimeSchema,
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
@@ -40,6 +41,7 @@ import {
   whatIfRuntimeSchema,
   jobRetryRuntimeSchema,
   drawdownAcknowledgeRuntimeSchema,
+  workbenchRuntimeSchema,
 } from "../generated/runtime-contract";
 import { integrationProviders } from "../integrations/providers";
 import { sameUuid } from "../optimization/uuid";
@@ -280,6 +282,38 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || data.items.length > 20
       || data.items.some((cycle) => !agentPaperCycleValid(cycle))
       || !agentPaperSessionSummaryValid(data.summary, data.items)) return INVALID_DATA;
+    return data;
+  }
+  const paperCycleDetail = /^\/internal\/v1\/paper\/cycles\/([^/]+)$/.exec(pathname);
+  if (paperCycleDetail && validateUuid(paperCycleDetail[1])) {
+    if (requestMethod?.toUpperCase() !== "GET"
+      || !matchesRuntimeSchema(data, agentPaperCycleDetailRuntimeSchema)
+      || !isPlain(data)
+      || !agentPaperCycleValid(data.cycle)
+      || !isPlain(data.cycle)
+      || !sameUuid(data.cycle.cycle_id, paperCycleDetail[1])
+      || !Array.isArray(data.orders)
+      || data.orders.length > 50
+      || data.orders.some((order) => !paperOrderValid(order))
+      || !cycleOrderIdsMatch(data.cycle.order_ids, data.orders)) return INVALID_DATA;
+    return data;
+  }
+  if (pathname === "/internal/v1/workbench") {
+    if (requestMethod?.toUpperCase() !== "GET"
+      || !matchesRuntimeSchema(data, workbenchRuntimeSchema)
+      || !isPlain(data)
+      || data.mode !== "internal_paper"
+      || data.execution_locked !== true
+      || !Array.isArray(data.active_orders)
+      || data.active_orders.length > 20
+      || data.active_orders.some((order) => !paperOrderValid(order))
+      || !Array.isArray(data.attention)
+      || data.attention.length > 10
+      || data.attention.some((item) => !isPlain(item) || typeof item.href !== "string" || item.href.startsWith("//"))
+      || data.latest_cycle !== null && !agentPaperCycleValid(data.latest_cycle)
+      || !agentPaperSessionSummaryValid(data.session, data.latest_cycle === null ? [] : [data.latest_cycle])) {
+      return INVALID_DATA;
+    }
     return data;
   }
   if (pathname === "/internal/v1/paper/orders") {
@@ -740,6 +774,19 @@ function paperOrderValid(value: unknown): boolean {
       fills.map((fill) => (fill as Record<string, unknown>).quantity),
       value.filled_quantity,
     );
+}
+
+function cycleOrderIdsMatch(orderIds: unknown, orders: unknown[]): boolean {
+  if (!Array.isArray(orderIds) || orderIds.length !== orders.length) return false;
+  const expected = orderIds.map((value) => typeof value === "string" ? value.toLowerCase() : null);
+  const actual = orders.map((value) => isPlain(value) && typeof value.order_id === "string"
+    ? value.order_id.toLowerCase()
+    : null);
+  return expected.every((value): value is string => value !== null)
+    && actual.every((value): value is string => value !== null)
+    && new Set(expected).size === expected.length
+    && new Set(actual).size === actual.length
+    && expected.every((value) => actual.includes(value));
 }
 
 function agentPaperSessionSummaryValid(value: unknown, cycles: unknown[]): boolean {
