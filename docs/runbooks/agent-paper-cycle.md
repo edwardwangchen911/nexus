@@ -5,7 +5,8 @@
 订单、成交和账本事实，不访问 Schwab 订单接口，不连接券商交易域，不解除
 `execution_locked=true`，也不等于券商模拟盘或实盘。
 
-页面和只读 API 只读取已持久化事实；刷新 `/paper` 不会触发行情、模型或周期推进。功能开关
+页面和只读 API 只读取已持久化事实；刷新 `/workspace`、`/decisions` 或 `/paper` 不会触发行情、
+模型或周期推进。功能开关
 默认关闭，失败不自动重试。每个五分钟决策槽最多一个周期；每个周期只允许一个研究 Job 和至多
 一次模型执行。同一交易日可以在前一周期及其订单都进入诚实终态后运行下一槽，不按“每天一次”限制。
 
@@ -161,12 +162,29 @@ uv run --project engine python -m nexus.ops.paper_once advance \
 订单最新事件；Schwab raw artifact/manifest/window；fill、reservation、借贷平衡 ledger 和绩效。
 不得只看 CLI 文本、HTTP 200 或页面标签。
 
-Engine `/internal/v1/paper/cycles/latest`、同源 BFF `/api/v1/paper/cycles/latest` 和 `/paper` 必须显示
-同一周期。页面应分别显示：
+Engine `/internal/v1/paper/cycles/latest`、同源 BFF `/api/v1/paper/cycles/latest`、工作台
+`/workspace`、决策详情 `/decisions/{cycleId}` 和 `/paper` 必须引用同一周期。页面应分别显示：
 
 - `决策报价 · Schwab Level One · 实时 · <冻结报价时间>`；
 - `执行分钟线 · Schwab pricehistory · 实时性未由响应声明`；
 - `execution_locked=true`，且没有创建周期、再次请求行情或券商下单按钮。
+
+工作台上“循环在线”只来自 30 秒内且版本兼容的 `agent_paper` heartbeat；“最近周期已完成”只来自
+已保存周期，二者互不替代。heartbeat 过期、缺失或版本不兼容时必须显示离线或未知，即使数据库中
+存在最近完成周期。刷新页面只重读已保存事实，不启动或重放 Agent。
+
+只读浏览器核对顺序：
+
+```text
+/workspace
+→ 一次点击最新决策
+→ /decisions/{cycleId}
+→ 对照 cycle、decision、order ID 与时间
+→ /paper 核对账户、订单和同窗结果
+```
+
+没有活动订单时，“无需下单”或“当前没有活动订单”是有效状态；没有精确关联订单且结果不能证明时
+必须显示“结果未知”，只允许进入核对原操作结果，不提供重试交易。
 
 同 head 本地栈的浏览器只读验收入口：
 
