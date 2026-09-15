@@ -752,9 +752,7 @@ def test_loop_command_reports_interrupt_without_leaking_traceback(
         exit_code = None
 
     assert exit_code == 130
-    assert json.loads(capsys.readouterr().out) == {
-        "error_code": "AGENT_PAPER_LOOP_INTERRUPTED"
-    }
+    assert json.loads(capsys.readouterr().out) == {"error_code": "AGENT_PAPER_LOOP_INTERRUPTED"}
 
 
 def test_research_job_resolution_accepts_only_cycle_bound_job() -> None:
@@ -797,6 +795,7 @@ def test_executor_claims_only_persisted_job(monkeypatch: pytest.MonkeyPatch) -> 
 def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[object] = []
     preparations: list[tuple[UUID, datetime]] = []
+    trend_preparations: list[tuple[UUID, datetime]] = []
     received_settings: list[object] = []
     environment = {
         **enabled_environment(),
@@ -813,6 +812,14 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
 
+    async def prepare_trends(settings, *, account_id, repo_root, now):
+        assert repo_root == loop.Path("/repo")
+        received_settings.append(settings)
+        trend_preparations.append((account_id, now))
+        return "ready"
+
+    monkeypatch.setattr(loop, "prepare_current_trends_once", prepare_trends, raising=False)
+
     async def trigger(settings, request, *, repo_root):
         received_settings.append(settings)
         requests.append(request)
@@ -828,10 +835,12 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
         )
     )
     request = requests[0]
-    assert len(received_settings) == 2
+    assert len(received_settings) == 3
     assert received_settings[0] is received_settings[1]
+    assert received_settings[1] is received_settings[2]
     assert isinstance(received_settings[0], loop.AgentPaperTriggerSettings)
     assert preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
+    assert trend_preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
     assert request.account_id == UUID(int=1)
     assert request.idempotency_key == "agent-paper-loop:2026-09-14T14:05:00+00:00"
 
@@ -901,6 +910,54 @@ def test_executor_stops_before_cycle_when_prior_daily_is_unavailable(
     )
 
     assert result == "stop_prerequisite_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("trend_status", "expected"),
+    [
+        ("prepared", None),
+        ("unavailable", A.STOP_PREREQUISITE_UNAVAILABLE),
+    ],
+)
+def test_executor_does_not_trigger_until_current_trends_are_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    trend_status: str,
+    expected: loop.AgentPaperLoopAction | None,
+) -> None:
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+
+    async def prepare_daily(_settings, *, account_id, repo_root, now):
+        return "ready"
+
+    async def prepare_trends(_settings, *, account_id, repo_root, now):
+        return trend_status
+
+    async def unexpected_trigger(*_args, **_kwargs):
+        raise AssertionError("research must wait for persisted current-trends readback")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare_daily)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", prepare_trends)
+    monkeypatch.setattr(loop, "trigger_once", unexpected_trigger)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=loop.AgentPaperLoopAction.TRIGGER,
+            snapshot=snapshot(),
+        )
+    )
+
+    assert result == expected
 
 
 def test_prior_daily_preparation_collects_imports_and_reads_back_once(
@@ -1058,6 +1115,234 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
     )
 
     assert result == "unavailable"
+
+
+def test_current_trends_preparation_collects_imports_and_reads_back_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    prepare = getattr(loop, "prepare_current_trends_once", None)
+    assert prepare is not None, "the loop must prepare current trends before triggering research"
+    instrument_id = UUID(int=20)
+    start_session = date(2025, 9, 12)
+    prior_session = date(2026, 9, 11)
+    scopes = iter(
+        (
+            SimpleNamespace(
+                instrument_id=instrument_id,
+                start_session=start_session,
+                prior_session=prior_session,
+                evidence_ready=False,
+            ),
+            SimpleNamespace(
+                instrument_id=instrument_id,
+                start_session=start_session,
+                prior_session=prior_session,
+                evidence_ready=True,
+            ),
+        )
+    )
+    calls: list[tuple[object, ...]] = []
+
+    async def inspect(_settings, *, account_id, now):
+        calls.append(("inspect", account_id, now))
+        return next(scopes)
+
+    def window(received_instrument_id, start, end, adjustment, *, now):
+        calls.append(("window", received_instrument_id, start, end, adjustment, now))
+        return "request", {"session": prior_session.isoformat()}
+
+    async def collect(request, **kwargs):
+        calls.append(("collect", request, kwargs["identity_asof"], kwargs["max_pages"]))
+        return {"status": "collected", "readback_verified": True}
+
+    async def import_context(_settings, **kwargs):
+        calls.append(("import", kwargs["instrument_id"], kwargs["collection_dir"]))
+        return {
+            "status": "stored_context",
+            "last_observed_on": prior_session.isoformat(),
+        }
+
+    monkeypatch.setattr(loop, "_inspect_current_trends_scope", inspect, raising=False)
+    monkeypatch.setattr(loop, "collection_window", window)
+    monkeypatch.setattr(loop, "collect_prices", collect)
+    monkeypatch.setattr(loop, "import_trends", import_context, raising=False)
+    settings = SimpleNamespace(alpaca_key=object(), alpaca_secret=object())
+
+    result = asyncio.run(
+        prepare(
+            settings,
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "prepared"
+    assert [call[0] for call in calls] == ["inspect", "window", "collect", "import", "inspect"]
+    assert calls[1] == (
+        "window",
+        instrument_id,
+        start_session,
+        prior_session,
+        "split",
+        NOW,
+    )
+    assert calls[2] == ("collect", "request", prior_session, 10)
+
+
+def test_current_trends_window_uses_a_full_year_not_the_short_execution_calendar() -> None:
+    start_session = getattr(loop, "_current_trends_start_session", None)
+    assert start_session is not None, "current trends need their own full-year calendar window"
+
+    assert start_session(date(2026, 9, 14)) == date(2025, 9, 15)
+
+
+def test_current_trends_preparation_reuses_current_evidence_without_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    prepare = getattr(loop, "prepare_current_trends_once", None)
+    assert prepare is not None, "the loop must prepare current trends before triggering research"
+
+    async def inspect(_settings, *, account_id, now):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            start_session=date(2025, 9, 12),
+            prior_session=date(2026, 9, 11),
+            evidence_ready=True,
+        )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("current evidence must not call a provider or importer")
+
+    monkeypatch.setattr(loop, "_inspect_current_trends_scope", inspect, raising=False)
+    monkeypatch.setattr(loop, "collect_prices", unexpected)
+    monkeypatch.setattr(loop, "import_trends", unexpected, raising=False)
+
+    result = asyncio.run(
+        prepare(
+            SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "ready"
+    assert not (tmp_path / ".secrets").exists()
+
+
+def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    prepare = getattr(loop, "prepare_current_trends_once", None)
+    assert prepare is not None, "the loop must prepare current trends before triggering research"
+    prior_session = date(2026, 9, 11)
+    attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "trends" / prior_session.isoformat()
+    attempt.mkdir(mode=0o700, parents=True)
+
+    async def inspect(_settings, *, account_id, now):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            start_session=date(2025, 9, 12),
+            prior_session=prior_session,
+            evidence_ready=False,
+        )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("an existing attempt directory must prevent a duplicate call")
+
+    monkeypatch.setattr(loop, "_inspect_current_trends_scope", inspect, raising=False)
+    monkeypatch.setattr(loop, "collect_prices", unexpected)
+    monkeypatch.setattr(loop, "import_trends", unexpected, raising=False)
+
+    result = asyncio.run(
+        prepare(
+            SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "unavailable"
+
+
+def test_current_trends_preparation_stops_after_known_collection_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    prior_session = date(2026, 9, 11)
+
+    async def inspect(_settings, *, account_id, now):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            start_session=date(2025, 9, 12),
+            prior_session=prior_session,
+            evidence_ready=False,
+        )
+
+    async def collect(*_args, **_kwargs):
+        return {"status": "failed", "code": "ALPACA_PRICES_STATUS_REJECTED"}
+
+    async def unexpected_import(*_args, **_kwargs):
+        raise AssertionError("a failed collection must not be imported")
+
+    monkeypatch.setattr(loop, "_inspect_current_trends_scope", inspect)
+    monkeypatch.setattr(loop, "collection_window", lambda *_args, **_kwargs: ("request", {}))
+    monkeypatch.setattr(loop, "collect_prices", collect)
+    monkeypatch.setattr(loop, "import_trends", unexpected_import)
+
+    result = asyncio.run(
+        loop.prepare_current_trends_once(
+            SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "unavailable"
+
+
+@pytest.mark.parametrize("failure_boundary", ["collector", "importer"])
+def test_current_trends_preparation_preserves_unknown_external_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: loop.Path,
+    failure_boundary: str,
+) -> None:
+    prior_session = date(2026, 9, 11)
+
+    async def inspect(_settings, *, account_id, now):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            start_session=date(2025, 9, 12),
+            prior_session=prior_session,
+            evidence_ready=False,
+        )
+
+    async def collect(*_args, **_kwargs):
+        if failure_boundary == "collector":
+            raise ValueError("collection outcome is unknown")
+        return {"status": "collected", "readback_verified": True}
+
+    async def import_context(*_args, **_kwargs):
+        if failure_boundary == "importer":
+            raise ValueError("import outcome is unknown")
+        raise AssertionError("the importer must not run after a collector exception")
+
+    monkeypatch.setattr(loop, "_inspect_current_trends_scope", inspect)
+    monkeypatch.setattr(loop, "collection_window", lambda *_args, **_kwargs: ("request", {}))
+    monkeypatch.setattr(loop, "collect_prices", collect)
+    monkeypatch.setattr(loop, "import_trends", import_context)
+
+    with pytest.raises(ValueError, match="outcome is unknown"):
+        asyncio.run(
+            loop.prepare_current_trends_once(
+                SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                now=NOW,
+            )
+        )
 
 
 @pytest.mark.parametrize(

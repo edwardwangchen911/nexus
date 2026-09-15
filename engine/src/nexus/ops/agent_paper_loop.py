@@ -12,6 +12,7 @@ from time import monotonic as monotonic_clock
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import exchange_calendars  # type: ignore[import-untyped]
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -30,6 +31,7 @@ from nexus.ops.agent_paper_once import (
     trigger_once,
 )
 from nexus.ops.alpaca_adjusted_authority_import import import_adjusted_authority
+from nexus.ops.alpaca_prices_import import import_trends
 from nexus.ops.alpaca_prices_local import collect_prices
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.openai_local import local_settings
@@ -59,6 +61,7 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.runtime import Job
 from nexus.research.alpaca_prices_archive import collection_window
+from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
@@ -103,6 +106,14 @@ class PriorDailyScope:
     instrument_id: UUID
     prior_session: date
     authority_ready: bool
+
+
+@dataclass(frozen=True)
+class CurrentTrendsScope:
+    instrument_id: UUID
+    start_session: date
+    prior_session: date
+    evidence_ready: bool
 
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
@@ -287,6 +298,108 @@ async def prepare_prior_daily_once(
     )
     if (
         not verified.authority_ready
+        or verified.instrument_id != scope.instrument_id
+        or verified.prior_session != scope.prior_session
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    return "prepared"
+
+
+async def _inspect_current_trends_scope(
+    settings: EngineSettings, *, account_id: UUID, now: datetime
+) -> CurrentTrendsScope:
+    prior = await _inspect_prior_daily_scope(settings, account_id=account_id, now=now)
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            documents = await read_current_price_trends(
+                session,
+                instrument_id=prior.instrument_id,
+                as_of=now,
+            )
+            evidence_ready = len(documents) == 1 and all(
+                document.last_observed_on == prior.prior_session
+                and all(
+                    document.features[name] is not None
+                    for name in ("sma_20", "sma_200", "rsi_14", "volatility_20")
+                )
+                for document in documents.values()
+            )
+            return CurrentTrendsScope(
+                instrument_id=prior.instrument_id,
+                start_session=_current_trends_start_session(prior.prior_session),
+                prior_session=prior.prior_session,
+                evidence_ready=evidence_ready,
+            )
+    finally:
+        await engine.dispose()
+
+
+def _current_trends_start_session(prior_session: date) -> date:
+    """Resolve the first XNYS session inside the archive's 366-day bound."""
+    calendar = exchange_calendars.get_calendar("XNYS")
+    session = calendar.date_to_session(prior_session - timedelta(days=366), direction="next")
+    return date.fromisoformat(str(session.date()))
+
+
+async def prepare_current_trends_once(
+    settings: AgentPaperTriggerSettings,
+    *,
+    account_id: UUID,
+    repo_root: Path,
+    now: datetime,
+) -> str:
+    """Create at most one current-trends evidence record for the prior session."""
+    scope = await _inspect_current_trends_scope(settings, account_id=account_id, now=now)
+    if scope.evidence_ready:
+        return "ready"
+    parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    output_dir = parent / scope.prior_session.isoformat()
+    try:
+        output_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        return "unavailable"
+    try:
+        request, calendar = collection_window(
+            scope.instrument_id,
+            scope.start_session,
+            scope.prior_session,
+            "split",
+            now=now,
+        )
+    except ValueError:
+        return "unavailable"
+    collected = await collect_prices(
+        request,
+        symbol="AAPL",
+        calendar=calendar,
+        resolved_at=now,
+        key_id=settings.alpaca_key,
+        secret=settings.alpaca_secret,
+        output_dir=output_dir,
+        max_pages=10,
+        identity_asof=scope.prior_session,
+    )
+    if collected.get("status") != "collected" or collected.get("readback_verified") is not True:
+        return "unavailable"
+    imported = await import_trends(
+        settings,
+        instrument_id=scope.instrument_id,
+        collection_dir=output_dir,
+    )
+    if imported.get("status") != "stored_context":
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    if imported.get("last_observed_on") != scope.prior_session.isoformat():
+        return "unavailable"
+    verified = await _inspect_current_trends_scope(
+        settings, account_id=account_id, now=datetime.now(UTC)
+    )
+    if (
+        not verified.evidence_ready
         or verified.instrument_id != scope.instrument_id
         or verified.prior_session != scope.prior_session
     ):
@@ -493,9 +606,7 @@ async def run_foreground_loop(
             next_heartbeat_at = monotonic() + interval_seconds
             while not action_task.done():
                 heartbeat_task = asyncio.ensure_future(
-                    wait_for_heartbeat_interval(
-                        max(0.0, next_heartbeat_at - monotonic())
-                    )
+                    wait_for_heartbeat_interval(max(0.0, next_heartbeat_at - monotonic()))
                 )
                 done, _ = await asyncio.wait(
                     {action_task, heartbeat_task},
@@ -512,11 +623,7 @@ async def run_foreground_loop(
                 next_heartbeat_at += interval_seconds
             stop = await action_task
         finally:
-            tasks = tuple(
-                task
-                for task in (action_task, heartbeat_task)
-                if task is not None
-            )
+            tasks = tuple(task for task in (action_task, heartbeat_task) if task is not None)
             pending = tuple(task for task in tasks if not task.done())
             for task in pending:
                 task.cancel()
@@ -606,6 +713,18 @@ async def execute_agent_paper_loop_action(
             return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
         if prior_daily != "ready":
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        current_trends = await prepare_current_trends_once(
+            trigger_settings,
+            account_id=account_id,
+            repo_root=repo_root,
+            now=snapshot.now,
+        )
+        if current_trends == "prepared":
+            return None
+        if current_trends == "unavailable":
+            return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+        if current_trends != "ready":
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         await trigger_once(
             trigger_settings,
             AgentPaperTriggerRequest(
@@ -655,9 +774,7 @@ async def execute_agent_paper_loop_action(
         environment = load_local_environment(repo_root, {})
         await collect_window_once(
             AgentPaperMarketSettings.model_validate(environment),
-            AgentPaperCollectWindowRequest(
-                action="collect-window", cycle_id=snapshot.cycle_id
-            ),
+            AgentPaperCollectWindowRequest(action="collect-window", cycle_id=snapshot.cycle_id),
             repo_root=repo_root,
         )
         return None
@@ -858,11 +975,7 @@ def main(argv: list[str] | None = None) -> int:
             code = "AGENT_PAPER_LOOP_RESULT_UNKNOWN"
         print(json.dumps({"error_code": code}))
         return 1
-    print(
-        json.dumps(
-            {"execution_locked": True, "status": "stopped", "reason": reason.value}
-        )
-    )
+    print(json.dumps({"execution_locked": True, "status": "stopped", "reason": reason.value}))
     return 0
 
 
