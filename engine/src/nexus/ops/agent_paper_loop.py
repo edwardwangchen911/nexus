@@ -113,6 +113,40 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+async def heartbeat_agent_paper_loop(
+    settings: EngineSettings,
+    *,
+    worker_id: str,
+    started_at: datetime,
+    seen_at: datetime,
+) -> None:
+    """Persist one Agent paper-loop liveness fact without changing business state."""
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            await upsert_worker_heartbeat(
+                session,
+                queue=QueueName.AGENT_PAPER,
+                worker_id=worker_id,
+                process_version=AGENT_PAPER_LOOP_PROCESS_VERSION,
+                migration_head=CURRENT_MIGRATION_HEAD,
+                started_at=started_at,
+                seen_at=seen_at,
+            )
+    finally:
+        await engine.dispose()
+
+
 async def _inspect_prior_daily_scope(
     settings: EngineSettings, *, account_id: UUID, now: datetime
 ) -> PriorDailyScope:
@@ -458,8 +492,6 @@ async def run_local_agent_paper_loop(
         or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-    heartbeat_engine = create_async_engine(settings.database_url)
-    heartbeat_factory = async_sessionmaker(heartbeat_engine, expire_on_commit=False)
     worker_id = f"agent-paper-loop-{new_uuid7()}"
     started_at = datetime.now(UTC)
 
@@ -481,26 +513,19 @@ async def run_local_agent_paper_loop(
         )
 
     async def heartbeat(seen_at: datetime) -> None:
-        async with heartbeat_factory.begin() as session:
-            await upsert_worker_heartbeat(
-                session,
-                queue=QueueName.AGENT_PAPER,
-                worker_id=worker_id,
-                process_version=AGENT_PAPER_LOOP_PROCESS_VERSION,
-                migration_head=CURRENT_MIGRATION_HEAD,
-                started_at=started_at,
-                seen_at=seen_at,
-            )
-
-    try:
-        return await run_foreground_loop(
-            inspect=inspect,
-            execute=execute,
-            sleep=asyncio.sleep,
-            heartbeat=heartbeat,
+        await heartbeat_agent_paper_loop(
+            settings,
+            worker_id=worker_id,
+            started_at=started_at,
+            seen_at=seen_at,
         )
-    finally:
-        await heartbeat_engine.dispose()
+
+    return await run_foreground_loop(
+        inspect=inspect,
+        execute=execute,
+        sleep=asyncio.sleep,
+        heartbeat=heartbeat,
+    )
 
 
 async def execute_agent_paper_loop_action(
