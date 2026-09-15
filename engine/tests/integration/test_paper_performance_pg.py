@@ -1,28 +1,35 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from helpers.paper_batch import CALENDAR_ID, PORTFOLIO_ID, UNIVERSE_ID
 from helpers.paper_performance import (
     MARKET_CLOSE,
     seed_paper_performance,
     seed_second_paper_close,
 )
 from nexus.market.price_bar_authority import SOURCE_POLICY_V2_ID
+from nexus.paper.agent_cycle_models import candidate_manifest_hash, floor_decision_slot
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import (
     PaperPerformanceHooks,
     _select_mark,
     publish_paper_performance_snapshot,
 )
+from nexus.persistence.models.data import PriceBarSetAuthority
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCycleRecord,
     PaperPerformanceAttributionRecord,
     PaperPerformanceSnapshotRecord,
     PaperPositionSnapshotRecord,
+    StrategyDecisionRecord,
 )
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
@@ -87,6 +94,93 @@ async def test_agent_paper_mark_requires_exact_adjusted_sip_daily_policy(
             assert mark[2].adjustment == "all"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_schwab_agent_decision_uses_existing_daily_mark_authority(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(
+        migrated_database_url,
+        source="alpaca",
+        feed="sip",
+        delivery_mode="delayed",
+        adjustment="all",
+        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    cycle_id = UUID("66200000-0000-0000-0000-000000000001")
+    decision_time = datetime(2026, 8, 27, 19, tzinfo=UTC)
+    try:
+        async with sessions.begin() as session:
+            session.add(
+                AgentPaperCycleRecord(
+                    id=cycle_id,
+                    account_id=seed.execution.account_id,
+                    portfolio_id=PORTFOLIO_ID,
+                    decision_session=decision_time.date(),
+                    decision_time=decision_time,
+                    decision_slot_at=floor_decision_slot(decision_time),
+                    execution_session=decision_time.date(),
+                    universe_snapshot_id=UNIVERSE_ID,
+                    quality_report_id=None,
+                    decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                    candidate_manifest=[],
+                    candidate_hash=candidate_manifest_hash(()),
+                    sizing_policy_version="agent_paper_sizing_v1",
+                    sizing_policy_hash="8" * 64,
+                    execution_locked=True,
+                )
+            )
+            await session.flush()
+            session.add(
+                StrategyDecisionRecord(
+                    id=UUID("66200000-0000-0000-0000-000000000002"),
+                    account_id=seed.execution.account_id,
+                    portfolio_id=PORTFOLIO_ID,
+                    strategy_id="agent_research",
+                    strategy_version="agent_paper_decision_v1",
+                    strategy_definition_id=None,
+                    registry_event_id=None,
+                    champion_generation=None,
+                    decision_origin="agent_research",
+                    agent_paper_cycle_id=cycle_id,
+                    decision_session=decision_time.date(),
+                    decision_time=decision_time,
+                    execution_session=decision_time.date(),
+                    source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    execution_source_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                    calendar_authority_id=CALENDAR_ID,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    quality_report_id=None,
+                    portfolio_projection_hash="1" * 64,
+                    authority_hash="2" * 64,
+                    strategy_parameters_hash="3" * 64,
+                    decision_hash="4" * 64,
+                    cash_weight=Decimal("1"),
+                    reason="AGENT_RESEARCH",
+                )
+            )
+
+        async with sessions.begin() as session:
+            publication = await publish_paper_performance_snapshot(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=seed.as_of,
+            )
+            mark_policy_id = await session.scalar(
+                select(PriceBarSetAuthority.source_policy_id).where(
+                    PriceBarSetAuthority.id == publication.positions[0].price_authority_id
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    assert publication.positions[0].reference_close == Decimal("110.000000000000")
+    assert publication.positions[0].price_source == "alpaca"
+    assert mark_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
 
 
 @pytest.mark.asyncio

@@ -44,6 +44,8 @@ from nexus.persistence.models.data import (
 )
 from nexus.persistence.models.market import SectorExposure
 from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PaperAccountRecord,
     PaperFillRecord,
     PaperLedgerAccountRecord,
@@ -1091,6 +1093,12 @@ async def publish_paper_performance_snapshot(
         ):
             raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
 
+    mark_source_policy_id = (
+        PAPER_DECISION_SOURCE_POLICY_ID
+        if source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        else source_policy_id
+    )
+
     marked_positions: list[MarkedPosition] = []
     published_positions: list[PublishedPaperPosition] = []
     for instrument_id, projection in sorted(projections.items(), key=lambda pair: pair[0].int):
@@ -1098,14 +1106,14 @@ async def publish_paper_performance_snapshot(
             if reserved.get(instrument_id, Decimal(0)) != 0:
                 raise PaperPerformanceError("PAPER_PERFORMANCE_PROJECTION_INVALID")
             continue
-        if source_policy_id is None:
+        if mark_source_policy_id is None:
             raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
         mark = await _select_mark(
             session,
             instrument_id=instrument_id,
             session_date=calendar.session,
             as_of=effective_at,
-            source_policy_id=source_policy_id,
+            source_policy_id=mark_source_policy_id,
         )
         if mark is None:
             raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
