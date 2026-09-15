@@ -115,6 +115,10 @@ AAPL 决策报价，以前一交易日冻结日线执行确定性 sizing 和硬�
 启用、持久状态恢复、单次模型 worker、只读核对、停止与回滚见
 [Agent 内部模拟周期手册](docs/runbooks/agent-paper-cycle.md)。
 
+关键内部模拟事实提交后，可选择启用自托管 Bark 脱敏加密通知。该出口默认关闭、只读且不参与
+业务事务；配置、一次性局域网注册、健康检查和关闭见
+[Bark 只读通知手册](docs/runbooks/bark-read-only-notifications.md)。
+
 ## 验证
 
 前端与合同：
@@ -164,6 +168,7 @@ CI 的完整门禁及发布含义见 [CI 与离线发布门禁](docs/runbooks/ci
 - [盘中市场监控](docs/runbooks/intraday-market-monitor.md)
 - [内部模拟单次运行](docs/runbooks/nexus-paper-once.md)
 - [Agent 内部模拟周期](docs/runbooks/agent-paper-cycle.md)
+- [Bark 只读通知](docs/runbooks/bark-read-only-notifications.md)
 - [券商模拟激活](docs/runbooks/broker-simulation-activation.md)
 
 任何包含凭据、外部请求或业务写入的操作，都应从对应 runbook 的正常产品入口执行；不要把密钥
