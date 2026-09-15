@@ -1,14 +1,8 @@
-import { sites } from "@openai/sites-vite-plugin";
 import vinext from "vinext";
 import { defineConfig } from "vite";
-import hostingConfig from "./.openai/hosting.json" with { type: "json" };
-
-const { r2 } = hostingConfig;
 
 const localEnvironment = Object.fromEntries(
   Object.entries({
-    NEXUS_ALLOWED_USER_ID: process.env.NEXUS_ALLOWED_USER_ID,
-    NEXUS_AUTH_MODE: process.env.NEXUS_AUTH_MODE,
     NEXUS_ENGINE_BASE_URL: process.env.NEXUS_ENGINE_BASE_URL,
     NEXUS_ENGINE_HMAC_CURRENT_KEY_ID:
       process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID,
@@ -25,14 +19,6 @@ const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
   vars: localEnvironment,
-  r2_buckets: r2
-    ? [
-        {
-          binding: r2,
-          bucket_name: "site-creator-r2",
-        },
-      ]
-    : [],
 };
 
 export default defineConfig(async () => {
@@ -46,12 +32,14 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    server: {
+      host: "127.0.0.1",
+      ...(isCodexSeatbeltSandbox
+        ? { watch: { useFsEvents: false, usePolling: true } }
+        : {}),
+    },
     plugins: [
       vinext(),
-      sites(),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,

@@ -126,6 +126,10 @@ Web 服务端需要与 Engine 相同的本地 BFF 身份配置；完成后运行
 npm run dev
 ```
 
+Web 只接受 `localhost`、`127.0.0.1` 或 `[::1]` 的本机请求，使用固定本地审计身份；不依赖
+Sites 登录，也不对局域网或公网提供页面。如需远程访问，必须先单独设计本地身份验证和
+网络边界，不得把开发服务直接绑定到 `0.0.0.0`。
+
 Compose 显示 `Up` 或 `/health/live` 返回 200 只证明进程存活。实际恢复还应核对数据库、迁移、
 对象存储、worker、BFF 和页面读取。完整流程见[本地开发手册](docs/runbooks/local-development.md)，
 普通本地使用不要启用 `broker` profile。

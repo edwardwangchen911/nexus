@@ -24,10 +24,6 @@ export default defineConfig({
     browserName: "chromium",
     serviceWorkers: "block",
     viewport: { width: 390, height: 844 },
-    extraHTTPHeaders: {
-      "oai-authenticated-user-id": "real-fixture-e2e-user",
-      "oai-authenticated-user-email": "real-fixture-e2e@example.test",
-    },
   },
   webServer: [
     {
@@ -44,7 +40,6 @@ export default defineConfig({
       env: {
         ...realFixtureEnvironment,
         DATABASE_URL: "",
-        NEXUS_ALLOWED_USER_ID: "real-fixture-e2e-user",
         NEXUS_ENGINE_BASE_URL: engineUrl,
       },
       url: `${webUrl}/__debug`,
