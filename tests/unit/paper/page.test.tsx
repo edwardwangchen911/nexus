@@ -41,6 +41,52 @@ describe("internal paper page", () => {
     expect(within(region).queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it.each([
+    [
+      "NO_ORDER_REQUIRED",
+      "completed",
+      "Agent 已完成判断，确定性仓位计算结果为不调整，因此没有创建模拟订单。",
+    ],
+    [
+      "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+      "unavailable",
+      "研究结果未通过可执行准入；本周期未创建模拟订单。",
+    ],
+    [
+      "RISK_INPUT_REQUIRED",
+      "unavailable",
+      "风险输入不足，系统已停止本周期，没有创建模拟订单。",
+    ],
+    [
+      "PAPER_ORDERS_AWAITING_MARKET",
+      "awaiting_market",
+      "Agent 已形成可执行方向并通过风控；模拟订单正在等待执行行情窗口。",
+    ],
+  ] as const)("explains the selected Agent cycle result %s in plain language", (resultCode, status, explanation) => {
+    const cycle = structuredClone(agentPaperCycle);
+    cycle.result_code = resultCode;
+    cycle.status = status;
+    if (resultCode !== "PAPER_ORDERS_AWAITING_MARKET") cycle.order_ids = [];
+
+    render(<AgentPaperCycle cycles={[cycle]} />);
+
+    const conclusion = screen.getByRole("note", { name: "Agent 运行结论" });
+    expect(conclusion).toHaveTextContent(explanation);
+    expect(conclusion).toHaveTextContent(`记录代码：${resultCode}`);
+  });
+
+  it("keeps an unknown Agent result code without inventing an explanation", () => {
+    const cycle = structuredClone(agentPaperCycle);
+    cycle.result_code = "constructor";
+    cycle.status = "failed";
+
+    render(<AgentPaperCycle cycles={[cycle]} />);
+
+    const conclusion = screen.getByRole("note", { name: "Agent 运行结论" });
+    expect(conclusion).toHaveTextContent("系统已保存本周期结果；请结合周期状态和记录代码核对详细事实。");
+    expect(conclusion).toHaveTextContent("记录代码：constructor");
+  });
+
   it("keeps portfolio and orders when the cycle read fails", async () => {
     const methods: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
