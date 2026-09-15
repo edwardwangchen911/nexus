@@ -598,6 +598,101 @@ async def test_rank_checkpoint_atomic_rollback_and_double_object_idempotency(
 
 
 @pytest.mark.asyncio
+async def test_rank_checkpoint_ignores_agent_decisions_in_registered_timeline(
+    migrated_database_url,
+    adjusted_v2_authority_available,
+):
+    from nexus.paper.agent_cycle_models import candidate_manifest_hash
+    from nexus.persistence.models.paper import (
+        PAPER_DECISION_SOURCE_POLICY_ID,
+        PAPER_EXECUTION_SOURCE_POLICY_ID,
+        AgentPaperCycleRecord,
+        StrategyDecisionRecord,
+    )
+    from nexus.strategy.rank_checkpoint import evaluate_and_persist_rank_checkpoint
+
+    await _seed_rank_authority(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory.begin() as session:
+            for index, (decision_session, decision_time, execution_session) in enumerate(
+                (
+                    (date(2026, 8, 28), RANK_TIME, date(2026, 8, 31)),
+                    (
+                        date(2026, 8, 31),
+                        datetime(2026, 8, 31, 20, tzinfo=UTC),
+                        date(2026, 9, 1),
+                    ),
+                ),
+                start=1,
+            ):
+                cycle_id = UUID(int=0x63000000000000000000000000001000 + index)
+                session.add(
+                    AgentPaperCycleRecord(
+                        id=cycle_id,
+                        account_id=PAPER_ACCOUNT_ID,
+                        portfolio_id=PORTFOLIO_ID,
+                        decision_session=decision_session,
+                        decision_time=decision_time,
+                        decision_slot_at=decision_time,
+                        execution_session=execution_session,
+                        universe_snapshot_id=UNIVERSE_ID,
+                        quality_report_id=None,
+                        decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                        execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+                        candidate_manifest=[],
+                        candidate_hash=candidate_manifest_hash(()),
+                        sizing_policy_version="agent_paper_sizing_v1",
+                        sizing_policy_hash="a" * 64,
+                        execution_locked=True,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    StrategyDecisionRecord(
+                        id=UUID(int=0x63000000000000000000000000002000 + index),
+                        account_id=PAPER_ACCOUNT_ID,
+                        portfolio_id=PORTFOLIO_ID,
+                        strategy_id="agent_research",
+                        strategy_version="agent_paper_decision_v1",
+                        strategy_definition_id=None,
+                        registry_event_id=None,
+                        champion_generation=None,
+                        decision_origin="agent_research",
+                        agent_paper_cycle_id=cycle_id,
+                        decision_session=decision_session,
+                        decision_time=decision_time,
+                        execution_session=execution_session,
+                        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                        execution_source_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+                        calendar_authority_id=CALENDAR_ID,
+                        universe_snapshot_id=UNIVERSE_ID,
+                        quality_report_id=None,
+                        portfolio_projection_hash="b" * 64,
+                        authority_hash="c" * 64,
+                        strategy_parameters_hash="d" * 64,
+                        decision_hash=f"{index + 4}" * 64,
+                        cash_weight=Decimal(1),
+                        reason="AGENT_RESEARCH",
+                    )
+                )
+            await session.flush()
+
+            snapshot, authority = await _rank_checkpoint_inputs(session)
+            persisted = await evaluate_and_persist_rank_checkpoint(
+                session, snapshot=snapshot, authority=authority
+            )
+
+            assert persisted is not None
+            stored = await session.get(StrategyDecisionRecord, persisted.forward.decision_id)
+            assert stored is not None
+            assert stored.decision_origin == "registered_strategy"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("same_session", [True, False])
 async def test_rank_checkpoint_refuses_old_decision_without_checkpoint(
     migrated_database_url,

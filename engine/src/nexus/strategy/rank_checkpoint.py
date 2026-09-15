@@ -209,6 +209,7 @@ async def evaluate_and_persist_rank_checkpoint(
             select(StrategyDecisionRecord).where(
                 StrategyDecisionRecord.account_id == authority.account_id,
                 StrategyDecisionRecord.decision_session == snapshot.decision_session,
+                StrategyDecisionRecord.decision_origin == "registered_strategy",
             )
         )
         existing_checkpoint = (await _read_checkpoint(session, existing))[0] if existing else None
@@ -258,6 +259,7 @@ async def evaluate_and_persist_rank_checkpoint(
             .where(
                 StrategyDecisionRecord.account_id == authority.account_id,
                 StrategyDecisionRecord.decision_session > snapshot.decision_session,
+                StrategyDecisionRecord.decision_origin == "registered_strategy",
             )
             .limit(1)
         )
@@ -267,6 +269,7 @@ async def evaluate_and_persist_rank_checkpoint(
             select(StrategyDecisionRecord)
             .where(
                 StrategyDecisionRecord.account_id == authority.account_id,
+                StrategyDecisionRecord.decision_origin == "registered_strategy",
                 StrategyDecisionRecord.strategy_definition_id == definition.id,
                 StrategyDecisionRecord.champion_generation == generation,
                 StrategyDecisionRecord.decision_session < snapshot.decision_session,
