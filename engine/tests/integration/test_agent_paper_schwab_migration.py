@@ -28,12 +28,15 @@ def test_0058_precedes_the_intraday_cycle_head() -> None:
     """Catch an omitted or incorrectly chained Schwab admission migration."""
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0059_agent_paper_intraday_cycles"
+    assert CURRENT_MIGRATION_HEAD == "0060_agent_paper_loop_heartbeat"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     intraday_revision = scripts.get_revision(CURRENT_MIGRATION_HEAD)
     assert intraday_revision is not None
-    assert intraday_revision.down_revision == "0058_agent_paper_schwab_realtime"
-    schwab_revision = scripts.get_revision(intraday_revision.down_revision)
+    assert intraday_revision.down_revision == "0059_agent_paper_intraday_cycles"
+    cycle_revision = scripts.get_revision(intraday_revision.down_revision)
+    assert cycle_revision is not None
+    assert cycle_revision.down_revision == "0058_agent_paper_schwab_realtime"
+    schwab_revision = scripts.get_revision(cycle_revision.down_revision)
     assert schwab_revision is not None
     assert schwab_revision.down_revision == "0057_agent_paper_market_window"
 
