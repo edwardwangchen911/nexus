@@ -403,16 +403,21 @@ async def inspect_agent_paper_loop(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexus-engine-agent-paper-loop")
-    parser.add_argument("--account-id", required=True, type=UUID)
+    parser.add_argument("--account-id", required=True)
     args = parser.parse_args(argv)
     root = Path.cwd()
     try:
+        try:
+            account_id = UUID(args.account_id)
+        except (AttributeError, TypeError, ValueError):
+            print(json.dumps({"error_code": "AGENT_PAPER_ACCOUNT_INVALID"}))
+            return 1
         settings = EngineSettings.model_validate(load_local_environment(root, {}))
         if not settings.agent_paper_cycle_enabled:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
             return 1
         reason = asyncio.run(
-            run_local_agent_paper_loop(settings, account_id=args.account_id, repo_root=root)
+            run_local_agent_paper_loop(settings, account_id=account_id, repo_root=root)
         )
         if reason == AgentPaperLoopAction.STOP_RESULT_UNKNOWN:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")

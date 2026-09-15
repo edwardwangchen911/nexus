@@ -264,6 +264,20 @@ def test_loop_command_exposes_only_safe_stop_reasons(
     assert json.loads(capsys.readouterr().out) == output
 
 
+def test_loop_command_rejects_invalid_account_without_echo(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = "private-account-canary"
+
+    exit_code = loop.main(["--account-id", canary])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == '{"error_code": "AGENT_PAPER_ACCOUNT_INVALID"}\n'
+    assert captured.err == ""
+    assert canary not in captured.out + captured.err
+
+
 def test_loop_command_reports_interrupt_without_leaking_traceback(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
