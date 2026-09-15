@@ -63,6 +63,18 @@ describe("internal-paper Engine response boundary", () => {
     const inventedBaseline = structuredClone(data);
     inventedBaseline.comparison.rows[2].nav = "100000.000000000000";
     expect((await sanitizeEngineResponse(json({ data: inventedBaseline, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(500);
+
+    const persistedBenchmark = structuredClone(data);
+    Object.assign(persistedBenchmark.comparison.rows[3], {
+      data_state: "READY",
+      nav: "99881.821590000000",
+      total_return_ratio: "-0.001181784100",
+      max_drawdown_ratio: "0.019841269800",
+      turnover_ratio: "0",
+      total_cost: "0",
+      reason_code: "PERSISTED_MARKET_BENCHMARK",
+    });
+    expect((await sanitizeEngineResponse(json({ data: persistedBenchmark, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(200);
   });
 
   it("uses the bounded paper response budget for a legal projection above the default cap", async () => {

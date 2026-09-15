@@ -35,6 +35,7 @@ from nexus.api.schemas.paper import (
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
+from nexus.market.universe import stable_instrument_id
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
     floor_decision_slot,
@@ -49,7 +50,12 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarSessionRecord,
     StrategyDefinitionRecord,
 )
-from nexus.persistence.models.data import DataArtifact, PriceBarSetAuthority, PriceSeriesManifest
+from nexus.persistence.models.data import (
+    DataArtifact,
+    PriceBarRecord,
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.evolution import StrategyRegistryEventRecord
 from nexus.persistence.models.market import InstrumentAlias, LatestQuote
 from nexus.persistence.models.paper import (
@@ -84,6 +90,39 @@ _MAX_FILLS = 128
 _MAX_AGENT_CYCLES_PER_SESSION = 108
 _MAX_AGENT_ORDERS_PER_CYCLE = 50
 _STALE_AFTER = timedelta(hours=36)
+
+
+def market_benchmark_row_from_closes(
+    *, initial_capital: Decimal, closes: Sequence[Decimal]
+) -> PaperComparisonRowResponse:
+    """Build the passive SPY row from a complete persisted close path."""
+    if len(closes) < 2 or initial_capital <= 0 or any(close <= 0 for close in closes):
+        return PaperComparisonRowResponse(
+            key="market_benchmark",
+            data_state="UNAVAILABLE",
+            nav=None,
+            total_return_ratio=None,
+            max_drawdown_ratio=None,
+            turnover_ratio=None,
+            total_cost=None,
+            reason_code="SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
+        )
+    peak = closes[0]
+    max_drawdown = Decimal(0)
+    for close in closes:
+        peak = max(peak, close)
+        max_drawdown = max(max_drawdown, Decimal(1) - close / peak)
+    total_return = closes[-1] / closes[0] - Decimal(1)
+    return PaperComparisonRowResponse(
+        key="market_benchmark",
+        data_state="READY",
+        nav=decimal_to_string(initial_capital * (Decimal(1) + total_return)),
+        total_return_ratio=decimal_to_string(total_return),
+        max_drawdown_ratio=decimal_to_string(max_drawdown),
+        turnover_ratio=decimal_to_string(Decimal(0)),
+        total_cost=decimal_to_string(Decimal(0)),
+        reason_code="PERSISTED_MARKET_BENCHMARK",
+    )
 
 
 class PaperReadService:
@@ -999,6 +1038,10 @@ class PaperReadService:
                 reason_code="PERSISTED_AGENT_PERFORMANCE",
             )
         )
+        benchmark_row = await self._market_benchmark_row(
+            account=account,
+            snapshot=snapshot,
+        )
         return PaperComparisonResponse(
             window_start=account.created_at,
             as_of=snapshot.as_of,
@@ -1024,17 +1067,100 @@ class PaperReadService:
                     total_cost=None,
                     reason_code="SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
                 ),
-                PaperComparisonRowResponse(
-                    key="market_benchmark",
-                    data_state="UNAVAILABLE",
-                    nav=None,
-                    total_return_ratio=None,
-                    max_drawdown_ratio=None,
-                    turnover_ratio=None,
-                    total_cost=None,
-                    reason_code="SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
-                ),
+                benchmark_row,
             ),
+        )
+
+    async def _market_benchmark_row(
+        self,
+        *,
+        account: PaperAccountRecord,
+        snapshot: PaperPerformanceSnapshotRecord,
+    ) -> PaperComparisonRowResponse:
+        unavailable = market_benchmark_row_from_closes(
+            initial_capital=account.initial_capital,
+            closes=(),
+        )
+        start_session = account.created_at.astimezone(ZoneInfo("America/New_York")).date()
+        end_session = snapshot.as_of.astimezone(ZoneInfo("America/New_York")).date()
+        expected_sessions = tuple(
+            await self._session.scalars(
+                select(ExchangeCalendarSessionRecord.session)
+                .join(
+                    ExchangeCalendarAuthorityRecord,
+                    ExchangeCalendarAuthorityRecord.id
+                    == ExchangeCalendarSessionRecord.calendar_authority_id,
+                )
+                .distinct()
+                .where(
+                    ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+                    ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+                    ExchangeCalendarAuthorityRecord.published_at <= self._request_time,
+                    ExchangeCalendarAuthorityRecord.created_at <= self._request_time,
+                    ExchangeCalendarSessionRecord.session >= start_session,
+                    ExchangeCalendarSessionRecord.session <= end_session,
+                )
+                .order_by(ExchangeCalendarSessionRecord.session)
+            )
+        )
+        if len(expected_sessions) < 2:
+            return unavailable
+        candidate = (
+            await self._session.execute(
+                select(PriceBarSetAuthority, PriceSeriesManifest)
+                .join(
+                    PriceSeriesManifest,
+                    PriceSeriesManifest.id
+                    == PriceBarSetAuthority.price_series_manifest_id,
+                )
+                .where(
+                    PriceBarSetAuthority.source_policy_id
+                    == PAPER_DECISION_SOURCE_POLICY_ID,
+                    PriceBarSetAuthority.first_session <= expected_sessions[0],
+                    PriceBarSetAuthority.last_session >= expected_sessions[-1],
+                    PriceBarSetAuthority.available_at <= self._request_time,
+                    PriceBarSetAuthority.created_at <= self._request_time,
+                    PriceSeriesManifest.instrument == str(stable_instrument_id("SPY")),
+                    PriceSeriesManifest.source == "alpaca",
+                    PriceSeriesManifest.feed == "sip",
+                    PriceSeriesManifest.delivery_mode == "delayed",
+                    PriceSeriesManifest.adjustment == "all",
+                    PriceSeriesManifest.interval == "1Day",
+                    PriceSeriesManifest.created_at <= self._request_time,
+                )
+                .order_by(
+                    PriceBarSetAuthority.available_at.desc(),
+                    PriceBarSetAuthority.id,
+                )
+                .limit(1)
+            )
+        ).one_or_none()
+        if candidate is None:
+            return unavailable
+        authority, manifest = candidate
+        bars = tuple(
+            await self._session.scalars(
+                select(PriceBarRecord)
+                .where(
+                    PriceBarRecord.price_series_manifest_id == manifest.id,
+                    PriceBarRecord.instrument_id == stable_instrument_id("SPY"),
+                    PriceBarRecord.session >= expected_sessions[0],
+                    PriceBarRecord.session <= expected_sessions[-1],
+                    PriceBarRecord.available_at <= self._request_time,
+                    PriceBarRecord.received_at <= self._request_time,
+                    PriceBarRecord.created_at <= self._request_time,
+                )
+                .order_by(PriceBarRecord.session, PriceBarRecord.observed_at)
+            )
+        )
+        if (
+            authority.price_series_manifest_id != manifest.id
+            or tuple(bar.session for bar in bars) != expected_sessions
+        ):
+            return unavailable
+        return market_benchmark_row_from_closes(
+            initial_capital=account.initial_capital,
+            closes=tuple(bar.close for bar in bars),
         )
 
     async def orders(

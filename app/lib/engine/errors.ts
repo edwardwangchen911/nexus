@@ -813,14 +813,20 @@ function paperComparisonValid(
   const agentValid = agent.reason_code === "MIXED_STRATEGY_FACTS_UNAVAILABLE"
     ? agent.data_state === "UNAVAILABLE"
     : agent.reason_code === "PERSISTED_AGENT_PERFORMANCE" && agent.data_state === portfolioState;
+  const baselineValid = baseline.data_state === "UNAVAILABLE"
+    && baseline.reason_code === "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE";
+  const benchmarkValid = benchmark.reason_code === "PERSISTED_MARKET_BENCHMARK"
+    ? benchmark.data_state === "READY"
+    : benchmark.data_state === "UNAVAILABLE"
+      && benchmark.reason_code === "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE";
   return agentValid
     && hold.reason_code === "CASH_HOLD_CURRENT"
     && hold.data_state === "READY"
     && decimalCompare(hold.nav, initialCapital) === 0
     && [hold.total_return_ratio, hold.max_drawdown_ratio, hold.turnover_ratio, hold.total_cost]
       .every((metric) => decimalCompare(metric, "0") === 0)
-    && [baseline, benchmark].every((row) => row.data_state === "UNAVAILABLE"
-      && row.reason_code === "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE");
+    && baselineValid
+    && benchmarkValid;
 }
 
 type ExactDecimal = { coefficient: bigint; scale: number };

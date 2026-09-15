@@ -43,6 +43,21 @@ def test_available_paper_comparison_requires_every_metric() -> None:
         )
 
 
+def test_persisted_market_benchmark_is_an_available_comparison_row() -> None:
+    row = PaperComparisonRowResponse(
+        key="market_benchmark",
+        data_state="READY",
+        nav="9988.182159",
+        total_return_ratio="-0.0011817841",
+        max_drawdown_ratio="0.0198412698",
+        turnover_ratio="0",
+        total_cost="0",
+        reason_code="PERSISTED_MARKET_BENCHMARK",
+    )
+
+    assert row.reason_code == "PERSISTED_MARKET_BENCHMARK"
+
+
 def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_creation() -> None:
     portfolio_schema = PaperPortfolioResponse.model_json_schema()
     page_schema = PaperOrderPageResponse.model_json_schema()

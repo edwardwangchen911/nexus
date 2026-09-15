@@ -68,6 +68,7 @@ class PaperComparisonRowResponse(_StrictSchema):
     total_cost: DecimalString | None
     reason_code: Literal[
         "PERSISTED_AGENT_PERFORMANCE",
+        "PERSISTED_MARKET_BENCHMARK",
         "CASH_HOLD_CURRENT",
         "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
         "MIXED_STRATEGY_FACTS_UNAVAILABLE",
