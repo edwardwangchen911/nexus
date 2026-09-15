@@ -300,6 +300,49 @@ def test_loop_command_exposes_only_safe_stop_reasons(
     assert json.loads(capsys.readouterr().out) == output
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "AGENT_PAPER_ACCOUNT_INVALID",
+        "AGENT_PAPER_OUTSIDE_WINDOW",
+        "RISK_INPUT_REQUIRED",
+        "SCHWAB_L1_FRESHNESS_UNPROVEN",
+        "SCHWAB_L1_INCOMPLETE",
+    ],
+)
+def test_loop_command_exposes_persisted_trigger_failure_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_code: str,
+) -> None:
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
+
+    async def fail(_settings, *, account_id, repo_root):
+        raise ValueError(error_code)
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", fail)
+
+    assert loop.main(["--account-id", str(UUID(int=1))]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error_code": error_code}
+
+
+def test_loop_command_masks_unknown_failure_details(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
+
+    async def fail(_settings, *, account_id, repo_root):
+        raise RuntimeError("private-failure-canary")
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", fail)
+
+    assert loop.main(["--account-id", str(UUID(int=1))]) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN"}
+    assert "private-failure-canary" not in captured.out + captured.err
+
+
 def test_loop_command_rejects_invalid_account_without_echo(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

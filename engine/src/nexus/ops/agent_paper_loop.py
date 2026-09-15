@@ -101,6 +101,15 @@ class PriorDailyScope:
 
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
+_SAFE_TRIGGER_FAILURE_CODES = frozenset(
+    {
+        "AGENT_PAPER_ACCOUNT_INVALID",
+        "AGENT_PAPER_OUTSIDE_WINDOW",
+        "RISK_INPUT_REQUIRED",
+        "SCHWAB_L1_FRESHNESS_UNPROVEN",
+        "SCHWAB_L1_INCOMPLETE",
+    }
+)
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
 
 
@@ -691,8 +700,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print(json.dumps({"error_code": "AGENT_PAPER_LOOP_INTERRUPTED"}))
         return 130
-    except Exception:
-        print(json.dumps({"error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN"}))
+    except Exception as error:
+        code = str(error)
+        if code not in _SAFE_TRIGGER_FAILURE_CODES:
+            code = "AGENT_PAPER_LOOP_RESULT_UNKNOWN"
+        print(json.dumps({"error_code": code}))
         return 1
     print(
         json.dumps(
