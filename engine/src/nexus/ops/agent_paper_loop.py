@@ -349,13 +349,9 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
         return AgentPaperLoopAction.PUBLISH_PERFORMANCE
 
     local_time = snapshot.now.astimezone(ZoneInfo("America/New_York"))
-    cycle_local_date = (
-        None
-        if snapshot.cycle_slot_at is None
-        else snapshot.cycle_slot_at.astimezone(ZoneInfo("America/New_York")).date()
-    )
+    current_slot = floor_decision_slot(snapshot.now)
     if snapshot.cycle_status in {"unavailable", "failed"} and (
-        cycle_local_date is None or cycle_local_date == local_time.date()
+        snapshot.cycle_slot_at is None or snapshot.cycle_slot_at == current_slot
     ):
         return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
 
@@ -364,7 +360,7 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
 
     if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
         return AgentPaperLoopAction.STOP_SESSION_CLOSED
-    if snapshot.cycle_slot_at == floor_decision_slot(snapshot.now):
+    if snapshot.cycle_slot_at == current_slot:
         return AgentPaperLoopAction.WAIT_FOR_SLOT
     return AgentPaperLoopAction.TRIGGER
 

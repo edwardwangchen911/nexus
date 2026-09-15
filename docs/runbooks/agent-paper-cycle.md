@@ -215,9 +215,10 @@ uv run --project engine nexus-engine-agent-paper-loop \
 该 cycle 的精确 Job ID 领取；running、缺失或结果不明立即停止，不换 key。订单窗口到达后再额外
 等待 60 秒发布余量，只请求一次 Schwab pricehistory；窗口合格后才推进对应内部订单。
 
-只有 `completed` 允许进入同日下一槽。当前纽约交易日出现 `unavailable` 或 `failed` 时，本进程
-熔断退出，不在后续槽重复 Provider 或模型调用；下一交易日可以重新启动。16:00 ET 后若没有活动
-订单则正常退出，已有订单可完成其已冻结窗口后再退出。运行中将
+当前槽出现 `unavailable` 或 `failed` 时，本进程熔断退出，不在同槽重复 Provider 或模型调用。
+该终态事实保留；到同日下一合法五分钟槽后可重新启动进程，新槽仍须从持久化状态和前置数据检查开始。
+日线补齐已有失败尝试时不会再次请求 Provider。16:00 ET 后若没有活动订单则正常退出，
+已有订单可完成其已冻结窗口后再退出。运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
 ## 9. Stop：默认关闭并保留现场

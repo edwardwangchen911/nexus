@@ -48,6 +48,22 @@ def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
         ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
         (
             {
+                "now": NOW + timedelta(minutes=5),
+                "cycle_status": "unavailable",
+                "cycle_slot_at": SLOT,
+            },
+            A.TRIGGER,
+        ),
+        (
+            {
+                "now": NOW + timedelta(minutes=5),
+                "cycle_status": "failed",
+                "cycle_slot_at": SLOT,
+            },
+            A.TRIGGER,
+        ),
+        (
+            {
                 "now": NOW + timedelta(days=1),
                 "cycle_status": "unavailable",
                 "cycle_slot_at": LAST_SLOT,
