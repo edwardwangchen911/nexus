@@ -48,6 +48,19 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 - 当前纽约时间处于合法 XNYS 交易日的 `[07:00, 16:00)`。07:00–09:30 盘前可运行；不必等
   09:30 正式开盘。当前 MVP 不接受 07:00 前隔夜行情，也不接受 16:00 后盘后行情。
 
+### 07:00 前盘前行情边界
+
+2026-09-15 约 05:45 ET 的一次 20 秒有界实测中，Schwab `LEVELONE_EQUITIES` 为 AAPL 和 NVDA
+返回了 `delayed=false` 的双边报价与最近成交；这说明 07:00 前可以做只读行情观察。该归档没有
+导入业务库。随后对 NVDA 前五个完整分钟仅请求一次 `pricehistory`，Provider 返回
+`SCHWAB_PRICE_HISTORY_RESPONSE_INVALID`，未满足现有精确 5×1 分钟执行窗口合同，且按无重试规则
+停止。
+
+因此不要把“WebSocket 有盘前报价”推导为“完整订单闭环已可运行”。当前循环仍从 07:00 ET
+开始：决策报价继续使用 Level One，订单成交权威继续使用通过合同校验的 Schwab pricehistory
+分钟线。不要临时改用 WebSocket 成交事件拼 K 线，不新增 04:00–07:00 决策专用状态机；若未来
+要提前正式窗口，应先用正常产品入口取得一次合格的精确五分钟 pricehistory 证据，再单独评审。
+
 首次使用 actionable v4 时只登记配置，不创建 Job、不调用模型：
 
 ```bash

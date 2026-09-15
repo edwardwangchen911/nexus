@@ -44,6 +44,13 @@ Schwab 决策报价、按需执行窗口、API/BFF/`/paper` 回读和前台五�
 | 券商正式模拟盘 / 实盘 | 未开始且不在当前范围 | 外部写入和实盘仍需用户单独授权；实盘继续逐笔确认 |
 | Research Shadow | 保留但暂停 | 不合并 Shadow 分支，不把它恢复为主线前置 |
 
+2026-09-15 盘前补充核验：Schwab `LEVELONE_EQUITIES` 在约 05:45 ET 的 20 秒有界采集中，
+AAPL 与 NVDA 均返回 `delayed=false` 的双边报价和最近成交，证明 07:00 前可以获得盘前决策报价；
+该次归档未导入业务库。对 NVDA 前五个完整分钟发起的一次 `pricehistory` 请求未满足现有精确
+5×1 分钟执行窗口合同，Provider 以 `SCHWAB_PRICE_HISTORY_RESPONSE_INVALID` 拒绝，且未重试。
+因此当前证据支持“07:00 前只读观察”，尚不支持把完整订单闭环提前到 04:00；MVP 继续在
+`[07:00, 16:00)` 运行，不新增盘前状态机，也不把 WebSocket 报价冒充成交分钟线。
+
 第一阶段实现已推送至 `origin/main@fc3c019b`，同一 head 的 GitHub CI 六个任务全部成功。用户现有未提交
 README、用户指南、图片和过程性计划/设计文档不属于本次路线图更新，也没有被合并或覆盖。
 
@@ -141,6 +148,10 @@ README、用户指南、图片和过程性计划/设计文档不属于本次路�
 现有代码覆盖 OAuth、token 刷新、`LEVELONE_EQUITIES` WebSocket、原始归档、导入、Provider
 Worker 调度和页面查询。一次 AAPL 有界真实采集已证明 `delayed=false`，数据库中有 1 份原始
 artifact、1 条 quote 和 1 条 trade；嘉信已进入 `intraday_monitor_policy_v5`。
+
+2026-09-15 的 07:00 前补充探针又观察到 AAPL、NVDA 的实时 Level One 盘前事件；但一次 NVDA
+精确五分钟 `pricehistory` 探针未通过现有响应合同，且没有导入该次 WebSocket 归档。因此这次
+只证明盘前报价可见，不证明 07:00 前的订单执行窗口可用，也不改变正式循环的起始时间。
 
 这些证据只接受单标的短窗口能力。当前没有真实 Schwab v3 自动 Job，也没有多标的持续运行、
 自动重连、完整五分钟成交窗口或模拟成交用途授权。嘉信当前不是账户同步或订单来源。
