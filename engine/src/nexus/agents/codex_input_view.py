@@ -108,7 +108,12 @@ def _inline_citation_payload(payload: dict[str, object]) -> dict[str, object]:
         by_id[ref_id] = indexes[key]
     annotated: dict[str, object] = {}
     for name, tool in inputs.items():
-        if not isinstance(tool, dict) or not isinstance(tool.get("items"), list):
+        if not isinstance(tool, dict):
+            raise invalid()
+        if name == "trailing_valuation" and "items" not in tool:
+            annotated[name] = tool
+            continue
+        if not isinstance(tool.get("items"), list):
             raise invalid()
         rows = []
         for row in tool["items"]:

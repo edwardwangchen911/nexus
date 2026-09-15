@@ -77,6 +77,24 @@ def test_tool_adjacent_indexes_follow_exact_identity_not_position_and_preserve_r
     assert items == before["frozen_inputs"]
 
 
+def test_derived_frozen_input_is_preserved_while_tool_rows_receive_citations():
+    raw = payload()
+    raw["frozen_inputs"]["trailing_valuation"] = {
+        "schema_version": "agent_trailing_valuation_v1",
+        "status": "available",
+        "price": {"midpoint": "329.575000000000", "evidence_ref_id": "ref-1"},
+        "metrics": {"trailing_pe": "37.795298165138"},
+    }
+    before = deepcopy(raw)
+
+    projected = project_staged_payload(raw, inline_citations=True)
+    inputs = restore(projected["frozen_inputs"])
+
+    assert inputs["trailing_valuation"] == before["frozen_inputs"]["trailing_valuation"]
+    assert inputs["financial_facts"]["items"][0]["citation_index"] == 0
+    assert raw == before
+
+
 @pytest.mark.parametrize(
     "problem", ["unknown_id", "duplicate_id", "wrong_hash", "wrong_time", "duplicate_identity"]
 )
