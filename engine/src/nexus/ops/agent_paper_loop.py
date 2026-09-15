@@ -17,6 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from nexus.agents.persistence import select_authoritative_snapshot
+from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
@@ -44,6 +46,7 @@ from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -61,6 +64,7 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.runtime import Job
 from nexus.research.alpaca_prices_archive import collection_window
+from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
@@ -114,6 +118,7 @@ class CurrentTrendsScope:
     start_session: date
     prior_session: date
     evidence_ready: bool
+    snapshot_ready: bool
 
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
@@ -328,11 +333,31 @@ async def _inspect_current_trends_scope(
                 )
                 for document in documents.values()
             )
+            snapshot_ready = False
+            if evidence_ready:
+                evidence_ref_id = next(iter(documents))
+                snapshot = await select_authoritative_snapshot(
+                    session,
+                    instrument_id=prior.instrument_id,
+                    as_of=now,
+                )
+                snapshot_ready = snapshot is not None and bool(
+                    await session.scalar(
+                        select(AgentDataSnapshotEvidenceRecord.evidence_ref_id).where(
+                            AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
+                            AgentDataSnapshotEvidenceRecord.instrument_id == prior.instrument_id,
+                            AgentDataSnapshotEvidenceRecord.authority_kind == "research",
+                            AgentDataSnapshotEvidenceRecord.source == CURRENT_TRENDS_SOURCE,
+                            AgentDataSnapshotEvidenceRecord.evidence_ref_id == evidence_ref_id,
+                        )
+                    )
+                )
             return CurrentTrendsScope(
                 instrument_id=prior.instrument_id,
                 start_session=_current_trends_start_session(prior.prior_session),
                 prior_session=prior.prior_session,
                 evidence_ready=evidence_ready,
+                snapshot_ready=snapshot_ready,
             )
     finally:
         await engine.dispose()
@@ -345,6 +370,30 @@ def _current_trends_start_session(prior_session: date) -> date:
     return date.fromisoformat(str(session.date()))
 
 
+async def _prepare_current_trends_research_snapshot(
+    settings: EngineSettings, *, instrument_id: UUID, now: datetime
+) -> None:
+    """Bind already-persisted trends into the normal authoritative research snapshot."""
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            snapshot = await prepare_research_snapshot(session, instrument_id, as_of=now)
+            if snapshot is None:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    finally:
+        await engine.dispose()
+
+
 async def prepare_current_trends_once(
     settings: AgentPaperTriggerSettings,
     *,
@@ -354,8 +403,25 @@ async def prepare_current_trends_once(
 ) -> str:
     """Create at most one current-trends evidence record for the prior session."""
     scope = await _inspect_current_trends_scope(settings, account_id=account_id, now=now)
-    if scope.evidence_ready:
+    if scope.snapshot_ready:
         return "ready"
+    if scope.evidence_ready:
+        await _prepare_current_trends_research_snapshot(
+            settings,
+            instrument_id=scope.instrument_id,
+            now=datetime.now(UTC),
+        )
+        verified = await _inspect_current_trends_scope(
+            settings, account_id=account_id, now=datetime.now(UTC)
+        )
+        if (
+            not verified.evidence_ready
+            or not verified.snapshot_ready
+            or verified.instrument_id != scope.instrument_id
+            or verified.prior_session != scope.prior_session
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        return "prepared"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     output_dir = parent / scope.prior_session.isoformat()
@@ -395,11 +461,17 @@ async def prepare_current_trends_once(
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     if imported.get("last_observed_on") != scope.prior_session.isoformat():
         return "unavailable"
+    await _prepare_current_trends_research_snapshot(
+        settings,
+        instrument_id=scope.instrument_id,
+        now=datetime.now(UTC),
+    )
     verified = await _inspect_current_trends_scope(
         settings, account_id=account_id, now=datetime.now(UTC)
     )
     if (
         not verified.evidence_ready
+        or not verified.snapshot_ready
         or verified.instrument_id != scope.instrument_id
         or verified.prior_session != scope.prior_session
     ):

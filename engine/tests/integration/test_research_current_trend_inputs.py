@@ -15,14 +15,16 @@ import pytest
 from helpers.portfolio_api import app, headers
 from helpers.research_snapshots import seed_filing
 from nexus.agents.models import ResearchRequest
-from nexus.agents.persistence import admit_research_run
+from nexus.agents.persistence import admit_research_run, select_authoritative_snapshot
 from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.api.research_inputs import read_research_inputs
+from nexus.ops import agent_paper_loop
 from nexus.ops.openai_local import prepare_database
+from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.research.current_price_trends import SOURCE
 from nexus.research.current_price_trends_storage import persist_current_price_trends
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 from sqlalchemy.engine import Engine
 
 from .test_current_price_trends import INSTRUMENT, setup_trends
@@ -166,6 +168,87 @@ async def test_trend_only_cannot_bootstrap_research(migrated_database_url, tmp_p
             )
             is None
         )
+
+
+@pytest.mark.asyncio
+async def test_agent_paper_preparation_binds_existing_trend_without_recollecting(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    settings, factory, store, _, archive = await setup_trends(
+        migrated_database_url, tmp_path / "archive", monkeypatch
+    )
+    await prepare_database(settings)
+    async with factory.begin() as session:
+        await seed_filing(session, instrument_id=INSTRUMENT, seed_instrument=False)
+        old = await prepare_research_snapshot(session, INSTRUMENT, as_of=datetime.now(UTC))
+        assert old is not None
+    async with factory.begin() as session:
+        evidence = await persist_current_price_trends(session, archive, store=store)
+    async with factory() as session:
+        documents = await agent_paper_loop.read_current_price_trends(
+            session, instrument_id=INSTRUMENT, as_of=datetime.now(UTC)
+        )
+        prior_session = documents[evidence.id].last_observed_on
+        assert prior_session is not None
+
+    async def inspect_prior(_settings, *, account_id, now):
+        return agent_paper_loop.PriorDailyScope(
+            instrument_id=INSTRUMENT,
+            prior_session=prior_session,
+            authority_ready=True,
+        )
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("existing trend evidence must not call Alpaca or import again")
+
+    monkeypatch.setattr(agent_paper_loop, "_inspect_prior_daily_scope", inspect_prior)
+    monkeypatch.setattr(agent_paper_loop, "collect_prices", forbidden)
+    monkeypatch.setattr(agent_paper_loop, "import_trends", forbidden)
+
+    first = await agent_paper_loop.prepare_current_trends_once(
+        settings,
+        account_id=UUID(int=1),
+        repo_root=tmp_path,
+        now=datetime.now(UTC),
+    )
+    assert first == "prepared"
+
+    async with factory() as session:
+        selected = await select_authoritative_snapshot(
+            session, instrument_id=INSTRUMENT, as_of=datetime.now(UTC)
+        )
+        assert selected is not None and selected.id != old.id
+        binding = await session.scalar(
+            select(AgentDataSnapshotEvidenceRecord).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == selected.id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == INSTRUMENT,
+                AgentDataSnapshotEvidenceRecord.evidence_ref_id == evidence.id,
+                AgentDataSnapshotEvidenceRecord.authority_kind == "research",
+                AgentDataSnapshotEvidenceRecord.source == SOURCE,
+            )
+        )
+        assert binding is not None
+        before = await session.scalar(
+            select(func.count())
+            .select_from(DataSnapshot)
+            .where(DataSnapshot.source == "nexus_research")
+        )
+
+    second = await agent_paper_loop.prepare_current_trends_once(
+        settings,
+        account_id=UUID(int=1),
+        repo_root=tmp_path,
+        now=datetime.now(UTC),
+    )
+    assert second == "ready"
+    async with factory() as session:
+        after = await session.scalar(
+            select(func.count())
+            .select_from(DataSnapshot)
+            .where(DataSnapshot.source == "nexus_research")
+        )
+        assert after == before
+    assert not (tmp_path / ".secrets").exists()
 
 
 @pytest.mark.asyncio

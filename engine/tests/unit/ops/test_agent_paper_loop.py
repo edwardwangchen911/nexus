@@ -1132,12 +1132,14 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
                 start_session=start_session,
                 prior_session=prior_session,
                 evidence_ready=False,
+                snapshot_ready=False,
             ),
             SimpleNamespace(
                 instrument_id=instrument_id,
                 start_session=start_session,
                 prior_session=prior_session,
                 evidence_ready=True,
+                snapshot_ready=True,
             ),
         )
     )
@@ -1162,10 +1164,16 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
             "last_observed_on": prior_session.isoformat(),
         }
 
+    async def prepare_snapshot(_settings, *, instrument_id, now):
+        calls.append(("snapshot", instrument_id, now))
+
     monkeypatch.setattr(loop, "_inspect_current_trends_scope", inspect, raising=False)
     monkeypatch.setattr(loop, "collection_window", window)
     monkeypatch.setattr(loop, "collect_prices", collect)
     monkeypatch.setattr(loop, "import_trends", import_context, raising=False)
+    monkeypatch.setattr(
+        loop, "_prepare_current_trends_research_snapshot", prepare_snapshot, raising=False
+    )
     settings = SimpleNamespace(alpaca_key=object(), alpaca_secret=object())
 
     result = asyncio.run(
@@ -1178,7 +1186,14 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
     )
 
     assert result == "prepared"
-    assert [call[0] for call in calls] == ["inspect", "window", "collect", "import", "inspect"]
+    assert [call[0] for call in calls] == [
+        "inspect",
+        "window",
+        "collect",
+        "import",
+        "snapshot",
+        "inspect",
+    ]
     assert calls[1] == (
         "window",
         instrument_id,
@@ -1209,6 +1224,7 @@ def test_current_trends_preparation_reuses_current_evidence_without_provider_cal
             start_session=date(2025, 9, 12),
             prior_session=date(2026, 9, 11),
             evidence_ready=True,
+            snapshot_ready=True,
         )
 
     async def unexpected(*_args, **_kwargs):
@@ -1231,6 +1247,60 @@ def test_current_trends_preparation_reuses_current_evidence_without_provider_cal
     assert not (tmp_path / ".secrets").exists()
 
 
+def test_current_trends_preparation_builds_missing_snapshot_without_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    instrument_id = UUID(int=20)
+    prior_session = date(2026, 9, 11)
+    scopes = iter(
+        (
+            SimpleNamespace(
+                instrument_id=instrument_id,
+                start_session=date(2025, 9, 12),
+                prior_session=prior_session,
+                evidence_ready=True,
+                snapshot_ready=False,
+            ),
+            SimpleNamespace(
+                instrument_id=instrument_id,
+                start_session=date(2025, 9, 12),
+                prior_session=prior_session,
+                evidence_ready=True,
+                snapshot_ready=True,
+            ),
+        )
+    )
+    calls: list[tuple[object, ...]] = []
+
+    async def inspect(_settings, *, account_id, now):
+        calls.append(("inspect", account_id, now))
+        return next(scopes)
+
+    async def prepare_snapshot(_settings, *, instrument_id, now):
+        calls.append(("snapshot", instrument_id, now))
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("persisted trend evidence must not be collected or imported again")
+
+    monkeypatch.setattr(loop, "_inspect_current_trends_scope", inspect)
+    monkeypatch.setattr(loop, "_prepare_current_trends_research_snapshot", prepare_snapshot)
+    monkeypatch.setattr(loop, "collect_prices", unexpected)
+    monkeypatch.setattr(loop, "import_trends", unexpected)
+
+    result = asyncio.run(
+        loop.prepare_current_trends_once(
+            SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "prepared"
+    assert [call[0] for call in calls] == ["inspect", "snapshot", "inspect"]
+    assert not (tmp_path / ".secrets").exists()
+
+
 def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
@@ -1246,6 +1316,7 @@ def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
             start_session=date(2025, 9, 12),
             prior_session=prior_session,
             evidence_ready=False,
+            snapshot_ready=False,
         )
 
     async def unexpected(*_args, **_kwargs):
@@ -1278,6 +1349,7 @@ def test_current_trends_preparation_stops_after_known_collection_failure(
             start_session=date(2025, 9, 12),
             prior_session=prior_session,
             evidence_ready=False,
+            snapshot_ready=False,
         )
 
     async def collect(*_args, **_kwargs):
@@ -1317,6 +1389,7 @@ def test_current_trends_preparation_preserves_unknown_external_outcomes(
             start_session=date(2025, 9, 12),
             prior_session=prior_session,
             evidence_ready=False,
+            snapshot_ready=False,
         )
 
     async def collect(*_args, **_kwargs):
