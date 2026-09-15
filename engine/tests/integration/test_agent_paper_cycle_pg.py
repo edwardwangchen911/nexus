@@ -51,6 +51,7 @@ from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import InstrumentAlias, LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_EXECUTION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
@@ -1417,6 +1418,15 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert len(completed.order_ids) == 1
         assert completed.replayed is False
 
+        window_start = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
+        async with sessions() as session:
+            legacy_scope = await resolve_agent_paper_market_scope(
+                session, cycle_id=completed.cycle_id
+            )
+        assert legacy_scope.execution_source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+        assert legacy_scope.window_start == window_start
+        assert legacy_scope.window_end == window_start + timedelta(minutes=5)
+
         async with sessions.begin() as session:
             replayed = await advance_agent_paper_cycle(
                 session,
@@ -1426,7 +1436,6 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             )
             assert replayed == completed.model_copy(update={"replayed": True})
 
-        window_start = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
         evaluated_at = window_start + timedelta(minutes=25, seconds=2)
         market = await collect_agent_paper_window(
             sessions,

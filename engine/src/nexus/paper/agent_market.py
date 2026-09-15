@@ -426,8 +426,12 @@ async def resolve_agent_paper_market_scope(
     output, job, calendar = row[0]
     if job.finished_at is None:
         raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
-    output_available_at = max(output.created_at, job.finished_at)
-    start, end = agent_paper_window_bounds(output_available_at, calendar.market_close_at)
+    if cycle.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID:
+        start = calendar.market_open_at
+        end = start + timedelta(minutes=5)
+    else:
+        output_available_at = max(output.created_at, job.finished_at)
+        start, end = agent_paper_window_bounds(output_available_at, calendar.market_close_at)
     return AgentPaperMarketScope(
         cycle_id=cycle.id,
         instrument_id=instrument_id,
