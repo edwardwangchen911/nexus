@@ -594,11 +594,20 @@ async def _load_query_proofs(
     )
     if authority_ids is not None:
         query = query.where(RiskQueryAuthorityRecord.id.in_(tuple(authority_ids)))
-    records = tuple(
-        (
-            await session.scalars(query)
-        ).all()
-    )
+    else:
+        query = query.where(
+            RiskQueryAuthorityRecord.available_at <= decision.decision_time
+        ).order_by(
+            RiskQueryAuthorityRecord.kind,
+            RiskQueryAuthorityRecord.available_at.desc(),
+            RiskQueryAuthorityRecord.id.desc(),
+        )
+    records = tuple((await session.scalars(query)).all())
+    if authority_ids is None:
+        latest: dict[str, RiskQueryAuthorityRecord] = {}
+        for record in records:
+            latest.setdefault(record.kind, record)
+        records = tuple(latest[kind] for kind in sorted(latest))
     if (
         {record.kind for record in records} != _QUERY_KINDS
         or len(records) != 3

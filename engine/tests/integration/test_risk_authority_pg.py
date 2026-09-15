@@ -484,6 +484,45 @@ async def _load(database_url: str, decision: ForwardStrategyDecision):
         await engine.dispose()
 
 
+async def _append_later_query_proofs(database_url: str) -> None:
+    later_at = DECISION_TIME + timedelta(minutes=1)
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            for index, kind in enumerate(
+                ("corporate_action", "suspension", "delisting"),
+                start=1,
+            ):
+                session.add(
+                    RiskQueryAuthorityRecord(
+                        id=UUID(int=0x40000000000000000000000000000100 + index),
+                        source_policy_id=SOURCE_POLICY_ID,
+                        universe_snapshot_id=UNIVERSE_ID,
+                        decision_session=DECISION_SESSION,
+                        kind=kind,
+                        required_instrument_ids=[INSTRUMENT_ID],
+                        blocked_instrument_ids=[],
+                        complete=True,
+                        source_watermark_hash=f"{index + 3}" * 64,
+                        available_at=later_at,
+                        content_hash=canonical_query_authority_hash(
+                            source_policy_id=SOURCE_POLICY_ID,
+                            universe_snapshot_id=UNIVERSE_ID,
+                            decision_session=DECISION_SESSION,
+                            kind=kind,
+                            required_instrument_ids=(INSTRUMENT_ID,),
+                            blocked_instrument_ids=(),
+                            complete=True,
+                            source_watermark_hash=f"{index + 3}" * 64,
+                            available_at=later_at,
+                        ),
+                    )
+                )
+    finally:
+        await engine.dispose()
+
+
 async def _advance_fosun_status(
     database_url: str,
     *,
@@ -518,6 +557,18 @@ def test_pg_loader_reconstructs_the_exact_bound_authority(
     assert market.prices[0].source == "fixture"
     assert market.prices[0].delivery_mode == "fixture"
     assert market.whitelisted_instrument_ids == (INSTRUMENT_ID,)
+
+
+def test_pg_loader_ignores_later_same_session_query_proof_version(
+    migrated_database_url: str,
+) -> None:
+    decision = asyncio.run(_seed_authority(migrated_database_url))
+    asyncio.run(_append_later_query_proofs(migrated_database_url))
+
+    market = asyncio.run(_load(migrated_database_url, decision))
+
+    assert market.authority_hash == decision.authority_hash
+    assert {proof.authority_id for proof in market.query_proofs} == set(QUERY_IDS.values())
 
 
 def test_pg_loader_accepts_reviewed_sector_effective_before_decision(
