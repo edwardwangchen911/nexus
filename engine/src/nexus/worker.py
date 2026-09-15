@@ -119,6 +119,7 @@ async def run_agent_worker_once(
             settings,
             responses_client=responses_client,
             tools=tools,
+            include_agent_paper=True,
         ),
         queue=QueueName.GENERAL,
         worker_id=_ONCE_WORKER_ID,
@@ -293,6 +294,7 @@ def _agent_registry(
     *,
     responses_client: object | None,
     tools: ReadOnlyToolRegistry | None,
+    include_agent_paper: bool = False,
 ) -> JobRegistry:
     runtime_mode = _require_worker_runtime(settings)
     allow_fixture_evidence = (
@@ -334,10 +336,15 @@ def _agent_registry(
         )
         return _agent_result(result.status)
 
+    job_types = (
+        (JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH)
+        if include_agent_paper
+        else (JobType.AGENT_RESEARCH,)
+    )
     return JobRegistry(
-        (
+        tuple(
             JobHandlerSpec(
-                job_type=JobType.AGENT_RESEARCH,
+                job_type=job_type,
                 schema_version=_JOB_SCHEMA,
                 payload_model=_AgentResearchJobPayload,
                 queue=QueueName.GENERAL,
@@ -346,7 +353,8 @@ def _agent_registry(
                 max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
                 idempotency_namespace="agent.research",
                 handler=handle,
-            ),
+            )
+            for job_type in job_types
         )
     )
 

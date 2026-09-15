@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from nexus.jobs.models import JobType
 from nexus.ops.agent_paper_once import (
     AgentPaperCollectWindowRequest,
     AgentPaperMarketSettings,
@@ -642,7 +643,12 @@ async def inspect_agent_paper_loop(
                     jobs = tuple(
                         await session.scalars(
                             select(Job).where(
-                                Job.job_type == "agent.research",
+                                Job.job_type.in_(
+                                    (
+                                        JobType.AGENT_RESEARCH.value,
+                                        JobType.AGENT_PAPER_RESEARCH.value,
+                                    )
+                                ),
                                 Job.payload["run_id"].as_string().in_(tuple(run_ids)),
                             )
                         )

@@ -88,7 +88,10 @@ class JobHandlerSpec:
         if self.payload_model.model_config.get("extra") != "forbid":
             raise ValueError("handler payload model must set extra='forbid'")
         maximum_timeout = (
-            120 if self.job_type is JobType.AGENT_RESEARCH and self.max_attempts == 1 else 45
+            120
+            if self.job_type in {JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH}
+            and self.max_attempts == 1
+            else 45
         )
         if not 0 < self.timeout_seconds <= maximum_timeout:
             raise ValueError("handler timeout_seconds exceeds its bounded runtime")

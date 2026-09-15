@@ -292,4 +292,5 @@ async def admit_agent_paper_research(
         model_config_id=model_config_id,
         daily_limit_usd=daily_limit_usd,
         now=now,
+        job_type=JobType.AGENT_PAPER_RESEARCH,
     )

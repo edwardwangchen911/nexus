@@ -15,7 +15,7 @@ from nexus.agents.paper_context import prepare_agent_paper_research_snapshot
 from nexus.agents.persistence import load_actionable_research_output
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_research import admit_agent_paper_research
-from nexus.jobs.models import job_input_hash
+from nexus.jobs.models import JobType, job_input_hash
 from nexus.paper.agent_cycle_authority import (
     CycleAuthority,
     load_cycle_authority,
@@ -535,7 +535,9 @@ async def _resume_research(
     jobs = tuple(
         await session.scalars(
             select(Job).where(
-                Job.job_type == "agent.research",
+                Job.job_type.in_(
+                    (JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)
+                ),
                 Job.payload["run_id"].as_string().in_(tuple(str(value) for value in run_ids)),
             )
         )

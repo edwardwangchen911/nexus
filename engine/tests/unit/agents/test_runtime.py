@@ -16,7 +16,7 @@ from nexus.agents.tools import ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
 from nexus.jobs.models import JobType
 from nexus.settings import EngineSettings, Environment
-from nexus.worker import _general_registry, run_worker
+from nexus.worker import _agent_registry, _general_registry, run_worker
 from openai.types.responses.response import Response
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
@@ -86,6 +86,24 @@ def test_general_worker_never_registers_snapshot_handler() -> None:
         tools=None,
     )
     assert registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value) is None
+
+
+def test_agent_paper_research_is_owned_only_by_explicit_worker() -> None:
+    settings = EngineSettings.for_test()
+    general = _general_registry(
+        settings,
+        responses_client=None,
+        tools=None,
+    )
+    explicit = _agent_registry(
+        settings,
+        responses_client=None,
+        tools=None,
+        include_agent_paper=True,
+    )
+
+    assert general.resolve(JobType.AGENT_PAPER_RESEARCH.value) is None
+    assert explicit.resolve(JobType.AGENT_PAPER_RESEARCH.value) is not None
 
 
 def test_general_worker_never_registers_provider_handlers_when_stages_are_enabled() -> None:

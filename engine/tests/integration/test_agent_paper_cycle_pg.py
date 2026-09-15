@@ -1069,6 +1069,7 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 idempotency_key="schwab-trigger-1",
             )
             job_count = await session.scalar(select(func.count()).select_from(Job))
+            job_type = await session.scalar(select(Job.job_type))
         async with sessions.begin() as session:
             resumed = await resume_schwab_agent_paper_cycle(
                 session,
@@ -1082,6 +1083,7 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         assert resumed == first.model_copy(update={"replayed": True})
         assert len(first.research_run_ids) == 1
         assert job_count == resumed_job_count == 1
+        assert job_type == "agent.paper.research"
 
         async with sessions() as session:
             run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])

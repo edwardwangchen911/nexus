@@ -12,6 +12,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.domain.ids import new_uuid7
+from nexus.jobs.models import JobType
 from nexus.market.ingestion import (
     MarketObjectStore,
     PreparedPricePage,
@@ -464,7 +465,9 @@ async def resolve_agent_paper_market_scope(
                 == cycle.execution_price_policy_id,
                 AgentResearchOutputRecord.status == "completed",
                 AgentResearchOutputRecord.role.is_(None),
-                Job.job_type == "agent.research",
+                Job.job_type.in_(
+                    (JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)
+                ),
                 Job.status == "succeeded",
                 Job.finished_at.is_not(None),
             )

@@ -460,6 +460,7 @@ async def admit_research_run(
     now: datetime,
     allow_fixture_price_authority: bool = False,
     after_authority: Callable[[], Awaitable[None]] | None = None,
+    job_type: JobType = JobType.AGENT_RESEARCH,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
     if now.tzinfo != UTC or request.decision_time > now:
@@ -641,7 +642,7 @@ async def admit_research_run(
     )
     job_key = canonical_job_key(
         JobKeyV1(
-            job_type=JobType.AGENT_RESEARCH,
+            job_type=job_type,
             scope_kind="instrument",
             scope_id=str(request.instrument_id),
             effective_at=request.decision_time,
@@ -695,7 +696,7 @@ async def admit_research_run(
     await enqueue_job(
         session,
         key=JobKeyV1(
-            job_type=JobType.AGENT_RESEARCH,
+            job_type=job_type,
             scope_kind="instrument",
             scope_id=str(request.instrument_id),
             effective_at=request.decision_time,
