@@ -35,6 +35,7 @@ class QueueName(StrEnum):
     PROVIDER = "provider"
     BROKER = "broker"
     STRATEGY_RND = "strategy_rnd"
+    AGENT_PAPER = "agent_paper"
 
 
 class RetryPolicy(StrEnum):

@@ -25,6 +25,7 @@ from nexus.api.routes.research import router as research_router
 from nexus.api.routes.risk_audit import router as risk_audit_router
 from nexus.api.routes.strategies import router as strategies_router
 from nexus.api.routes.system import router as system_router
+from nexus.api.routes.workbench import router as workbench_router
 from nexus.api.schemas.optimization import PortfolioScenarioRequest, WhatIfRequest
 from nexus.api.schemas.portfolio_decisions import PortfolioDecisionCreateRequest
 from nexus.diagnostics.artifacts import ArtifactByteReader
@@ -107,6 +108,7 @@ def create_engine_app(
     app.include_router(diagnostics_router)
     app.include_router(overview_router)
     app.include_router(optimization_router)
+    app.include_router(workbench_router)
     app.include_router(paper_router)
     app.include_router(portfolio_decisions_router)
     app.include_router(broker_sync_router)

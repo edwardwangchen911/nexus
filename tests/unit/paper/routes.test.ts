@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const actor = { userId: "allowed-user", requestId: "0198f7a0-1111-7777-8111-111111111111" };
+const cycleId = "0198f7a0-1111-7777-8111-111111111110";
 const orderId = "0198f7a0-1111-7777-8111-111111111112";
 const engineFetch = vi.hoisted(() => vi.fn());
 
@@ -26,6 +27,25 @@ describe("internal-paper BFF routes", () => {
       new Request("https://nexus.test/api/v1/paper/cycles/latest?account_id=secret"),
     );
     expect(rejected.status).toBe(400);
+  });
+
+  it("forwards one validated cycle detail without query parameters", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/cycles/[cycleId]/route");
+    await GET(new Request(`https://nexus.test/api/v1/paper/cycles/${cycleId}`));
+
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/paper/cycles/{cycle_id}",
+      path: `/internal/v1/paper/cycles/${cycleId}`,
+    }, { method: "GET", actor });
+
+    engineFetch.mockClear();
+    const malformed = await GET(new Request("https://nexus.test/api/v1/paper/cycles/not-a-uuid"));
+    expect(malformed.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+
+    const queried = await GET(new Request(`https://nexus.test/api/v1/paper/cycles/${cycleId}?account_id=secret`));
+    expect(queried.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
   });
 
   it("canonicalizes only the bounded Agent cycle list filters", async () => {

@@ -97,7 +97,7 @@ test("no data progresses through frozen research, diagnosis, three proposals, an
   await expect(page.getByRole("heading", { name: "委员会决策记录" })).toBeVisible();
   await expect(page.getByText("冻结研究已登记；页面只展示可追溯的研究状态，不触发交易。")).toBeVisible();
 
-  await page.getByRole("link", { name: "概览", exact: true }).click();
+  await page.goto("/overview");
   await expect(page.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible();
   await page.screenshot({ path: "test-results/decision-ledger-overview-diagnostic-desktop.png", fullPage: true });
   await expect(page.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");

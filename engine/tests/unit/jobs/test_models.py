@@ -113,6 +113,7 @@ def test_queues_priorities_and_retry_policies_are_closed() -> None:
         QueueName.PROVIDER,
         QueueName.BROKER,
         QueueName.STRATEGY_RND,
+        QueueName.AGENT_PAPER,
     }
     assert set(RetryPolicy) == {
         RetryPolicy.AUTOMATIC_SAFE,

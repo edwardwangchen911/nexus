@@ -6,13 +6,14 @@ from datetime import date, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Header, Query
+from fastapi import APIRouter, Body, Depends, Header, Query, Request
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.portfolios import _utc_now
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.api.schemas.paper import (
+    AgentPaperCycleDetailEnvelope,
     AgentPaperCycleEnvelope,
     AgentPaperCyclePageEnvelope,
     PaperCancelEnvelope,
@@ -111,6 +112,38 @@ async def get_latest_agent_paper_cycle(
             status_code=404,
         )
     return AgentPaperCycleEnvelope(
+        data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/cycles/{cycle_id}",
+    operation_id="getInternalAgentPaperCycleDetail",
+    response_model=AgentPaperCycleDetailEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_agent_paper_cycle_detail(
+    cycle_id: UUID,
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> AgentPaperCycleDetailEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR,
+            "The Agent paper cycle query is invalid.",
+            status_code=422,
+        )
+    data = await PaperReadService(session, now).agent_cycle_detail(cycle_id)
+    if data is None:
+        raise NexusError(
+            ErrorCode.NOT_FOUND,
+            "The Agent paper cycle was not found.",
+            status_code=404,
+        )
+    return AgentPaperCycleDetailEnvelope(
         data=data,
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )

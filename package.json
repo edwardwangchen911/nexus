@@ -1,5 +1,5 @@
 {
-  "name": "site-creator-vinext-starter",
+  "name": "nexus",
   "version": "0.1.0",
   "private": true,
   "engines": {
@@ -35,7 +35,6 @@
     "@cloudflare/vite-plugin": "1.54.7",
     "@eslint/js": "9.39.4",
     "@next/eslint-plugin-next": "16.2.6",
-    "@openai/sites-vite-plugin": "0.1.0",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "4.2.1",
     "@testing-library/jest-dom": "^7.0.1",

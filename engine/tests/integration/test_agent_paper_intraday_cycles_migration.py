@@ -19,12 +19,11 @@ ENGINE_ROOT = Path(__file__).parents[2]
 MIGRATION_HEAD = "0059_agent_paper_intraday_cycles"
 
 
-def test_0059_is_the_single_forward_head() -> None:
+def test_0059_precedes_the_single_forward_head() -> None:
     """Catch an omitted or incorrectly chained intraday-cycle migration."""
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == MIGRATION_HEAD
-    assert scripts.get_heads() == [MIGRATION_HEAD]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     revision = scripts.get_revision(MIGRATION_HEAD)
     assert revision is not None
     assert revision.down_revision == "0058_agent_paper_schwab_realtime"

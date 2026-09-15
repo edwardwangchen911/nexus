@@ -277,6 +277,28 @@ export const runtimeContractSchemas = {
     "title": "AgentPaperCandidateResponse",
     "type": "object"
   },
+  "AgentPaperCycleDetailResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cycle": {
+        "$ref": "#/components/schemas/AgentPaperCycleResponse"
+      },
+      "orders": {
+        "items": {
+          "$ref": "#/components/schemas/PaperOrderResponse"
+        },
+        "maxItems": 50,
+        "title": "Orders",
+        "type": "array"
+      }
+    },
+    "required": [
+      "cycle",
+      "orders"
+    ],
+    "title": "AgentPaperCycleDetailResponse",
+    "type": "object"
+  },
   "AgentPaperCyclePageResponse": {
     "additionalProperties": false,
     "properties": {
@@ -12915,6 +12937,350 @@ export const runtimeContractSchemas = {
     "title": "WhatIfResponse",
     "type": "object"
   },
+  "WorkbenchAccountSummaryResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "As Of"
+      },
+      "available_cash": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Available Cash"
+      },
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "data_state": {
+        "enum": [
+          "EMPTY",
+          "READY",
+          "PARTIAL",
+          "STALE"
+        ],
+        "title": "Data State",
+        "type": "string"
+      },
+      "initial_capital": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Initial Capital",
+        "type": "string"
+      },
+      "market_value": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Market Value"
+      },
+      "nav": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Nav"
+      },
+      "portfolio_id": {
+        "format": "uuid",
+        "title": "Portfolio Id",
+        "type": "string"
+      },
+      "realized_pnl": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Realized Pnl"
+      },
+      "reserved_cash": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reserved Cash"
+      },
+      "unrealized_pnl": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Unrealized Pnl"
+      }
+    },
+    "required": [
+      "portfolio_id",
+      "currency",
+      "initial_capital",
+      "data_state",
+      "as_of",
+      "nav",
+      "available_cash",
+      "reserved_cash",
+      "market_value",
+      "realized_pnl",
+      "unrealized_pnl"
+    ],
+    "title": "WorkbenchAccountSummaryResponse",
+    "type": "object"
+  },
+  "WorkbenchAttentionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cycle_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cycle Id"
+      },
+      "href": {
+        "maxLength": 500,
+        "minLength": 1,
+        "pattern": "^/",
+        "title": "Href",
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "data",
+          "model",
+          "risk",
+          "execution",
+          "service"
+        ],
+        "title": "Kind",
+        "type": "string"
+      },
+      "order_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Order Id"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "safe_action": {
+        "enum": [
+          "view_evidence",
+          "view_decision",
+          "verify_original_result",
+          "wait"
+        ],
+        "title": "Safe Action",
+        "type": "string"
+      },
+      "severity": {
+        "enum": [
+          "info",
+          "warning",
+          "critical"
+        ],
+        "title": "Severity",
+        "type": "string"
+      },
+      "title_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Title Code",
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "severity",
+      "title_code",
+      "reason_code",
+      "safe_action",
+      "href"
+    ],
+    "title": "WorkbenchAttentionResponse",
+    "type": "object"
+  },
+  "WorkbenchLoopResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "last_seen_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Last Seen At"
+      },
+      "stale_after_seconds": {
+        "const": 30,
+        "title": "Stale After Seconds",
+        "type": "integer"
+      },
+      "started_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Started At"
+      },
+      "status": {
+        "enum": [
+          "online",
+          "offline",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "started_at",
+      "last_seen_at",
+      "stale_after_seconds"
+    ],
+    "title": "WorkbenchLoopResponse",
+    "type": "object"
+  },
+  "WorkbenchResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "account": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/WorkbenchAccountSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "active_orders": {
+        "items": {
+          "$ref": "#/components/schemas/PaperOrderResponse"
+        },
+        "maxItems": 20,
+        "title": "Active Orders",
+        "type": "array"
+      },
+      "attention": {
+        "items": {
+          "$ref": "#/components/schemas/WorkbenchAttentionResponse"
+        },
+        "maxItems": 10,
+        "title": "Attention",
+        "type": "array"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "latest_cycle": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperCycleResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "loop": {
+        "$ref": "#/components/schemas/WorkbenchLoopResponse"
+      },
+      "mode": {
+        "const": "internal_paper",
+        "title": "Mode",
+        "type": "string"
+      },
+      "session": {
+        "$ref": "#/components/schemas/AgentPaperSessionSummaryResponse"
+      }
+    },
+    "required": [
+      "mode",
+      "execution_locked",
+      "loop",
+      "session",
+      "latest_cycle",
+      "active_orders",
+      "account",
+      "attention"
+    ],
+    "title": "WorkbenchResponse",
+    "type": "object"
+  },
   "_RunStatus": {
     "enum": [
       "completed",
@@ -12993,11 +13359,15 @@ export const paperPortfolioRuntimeSchema = runtimeContractSchemas.PaperPortfolio
 
 export const agentPaperCycleRuntimeSchema = runtimeContractSchemas.AgentPaperCycleResponse;
 
+export const agentPaperCycleDetailRuntimeSchema = runtimeContractSchemas.AgentPaperCycleDetailResponse;
+
 export const agentPaperCyclePageRuntimeSchema = runtimeContractSchemas.AgentPaperCyclePageResponse;
 
 export const paperOrderPageRuntimeSchema = runtimeContractSchemas.PaperOrderPageResponse;
 
 export const paperCancelRuntimeSchema = runtimeContractSchemas.PaperCancelResponse;
+
+export const workbenchRuntimeSchema = runtimeContractSchemas.WorkbenchResponse;
 
 export const readinessRuntimeSchema = runtimeContractSchemas.ReadinessResponse;
 

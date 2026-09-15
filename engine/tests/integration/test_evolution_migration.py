@@ -10,6 +10,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -155,7 +156,7 @@ async def _seed_legacy_decision(database_url: str) -> UUID:
 def test_0023_precedes_the_current_migration_head() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0039_issuer_nav_history"]
+    assert script.get_heads() == [CURRENT_MIGRATION_HEAD]
     revision = script.get_revision("0023_evolution_authority")
     assert revision is not None
     assert revision.down_revision == "0022_strategy_evolution"

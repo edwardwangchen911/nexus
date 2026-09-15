@@ -18,6 +18,10 @@ npm --version
 
 前两条必须同时显示可用的 client 和 server/Compose。仅安装 `docker` CLI 而没有可达 daemon 不足以运行本项目。
 
+Web 默认只监听 `127.0.0.1`，并且只接受 `localhost`、`127.0.0.1` 或 `[::1]` 作为请求主机。
+本地单用户身份固定为 `nexus-local`，仅用于审计归属；不依赖 Sites header 或登录跳转。
+不得为了手机或局域网访问而直接改为 `0.0.0.0`；这会超出当前身份边界。
+
 ## 真实本地 fixture E2E（不使用 Compose）
 
 synthetic browser E2E 可在浏览器层替换 API 响应，以覆盖页面契约；真实本地 fixture E2E

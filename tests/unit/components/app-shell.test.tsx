@@ -11,15 +11,13 @@ vi.mock("next/navigation", () => ({
   useRouter: () => navigation,
 }));
 
-const primaryHrefs = [
-  "/overview",
-  "/portfolio",
-  "/optimize",
-  "/market",
-  "/paper",
-  "/risk-audit",
+const primaryNavigation = [
+  ["交易工作台", "/workspace"],
+  ["决策记录", "/decisions"],
+  ["账户与交易", "/portfolio"],
+  ["复盘", "/paper#paper-comparison-title"],
 ];
-const systemHrefs = ["/strategies", "/integrations"];
+const systemNavigation = [["设置与运行", "/integrations"]];
 
 describe("AppShell", () => {
   beforeEach(() => {
@@ -42,24 +40,32 @@ describe("AppShell", () => {
 
     expect(container.querySelector(".app-shell")?.firstElementChild).toBe(skipLink);
     expect(skipLink).toHaveAttribute("href", "#main-content");
-    expect([...desktopPrimary.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(primaryHrefs);
-    expect([...mobilePrimary.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(primaryHrefs);
-    expect([...desktopSystem.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(systemHrefs);
-    expect([...mobileSystem.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(systemHrefs);
+    expect([...desktopPrimary.querySelectorAll("a")].map((link) => [link.textContent, link.getAttribute("href")])).toEqual(primaryNavigation);
+    expect([...mobilePrimary.querySelectorAll("a")].map((link) => [link.textContent, link.getAttribute("href")])).toEqual(primaryNavigation);
+    expect([...desktopSystem.querySelectorAll("a")].map((link) => [link.textContent, link.getAttribute("href")])).toEqual(systemNavigation);
+    expect([...mobileSystem.querySelectorAll("a")].map((link) => [link.textContent, link.getAttribute("href")])).toEqual(systemNavigation);
     expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
     expect(desktopPrimary.parentElement).toHaveClass("app-shell__navigation-groups");
     expect(desktopPrimary.querySelector("a")).toHaveClass("app-shell__navigation-control");
-    expect(container.querySelectorAll(".app-shell__navigation-control")).toHaveLength(17);
+    expect(container.querySelectorAll(".app-shell__navigation-control")).toHaveLength(11);
   });
 
   it("marks the current protected route in both navigation surfaces", () => {
     route.pathname = "/portfolio/positions";
-    render(<AppShell><p>内容</p></AppShell>);
+    const { rerender } = render(<AppShell><p>内容</p></AppShell>);
 
-    const currentLinks = screen.getAllByRole("link", { name: "组合" });
+    const currentLinks = screen.getAllByRole("link", { name: "账户与交易" });
     expect(currentLinks).toHaveLength(2);
     expect(currentLinks.every((link) => link.getAttribute("aria-current") === "page")).toBe(true);
-    expect(screen.getAllByRole("link", { name: "概览" }).every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+    expect(screen.getAllByRole("link", { name: "交易工作台" }).every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+
+    route.pathname = "/decisions/cycle-1";
+    rerender(<AppShell><p>内容</p></AppShell>);
+    expect(screen.getAllByRole("link", { name: "决策记录" }).every((link) => link.getAttribute("aria-current") === "page")).toBe(true);
+
+    route.pathname = "/paper";
+    rerender(<AppShell><p>内容</p></AppShell>);
+    expect(screen.getAllByRole("link", { name: "复盘" }).every((link) => link.getAttribute("aria-current") === "page")).toBe(true);
   });
 
   it("moves focus to main after a client-side protected-route change without stealing initial focus", () => {
@@ -85,8 +91,19 @@ describe("AppShell", () => {
   it("keeps unmodified navigation inside the client router", () => {
     render(<AppShell><p>内容</p></AppShell>);
 
-    fireEvent.click(screen.getByRole("navigation", { name: "主导航" }).querySelector('a[href="/market"]')!);
+    fireEvent.click(screen.getByRole("navigation", { name: "主导航" }).querySelector('a[href="/workspace"]')!);
 
-    expect(navigation.push).toHaveBeenCalledWith("/market");
+    expect(navigation.push).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("closes the mobile drawer after an unmodified client navigation", () => {
+    const { container } = render(<AppShell><p>内容</p></AppShell>);
+    const drawer = container.querySelector<HTMLDetailsElement>(".app-shell__drawer")!;
+    drawer.open = true;
+
+    fireEvent.click(screen.getByRole("navigation", { name: "移动主导航" }).querySelector('a[href="/decisions"]')!);
+
+    expect(navigation.push).toHaveBeenCalledWith("/decisions");
+    expect(drawer.open).toBe(false);
   });
 });

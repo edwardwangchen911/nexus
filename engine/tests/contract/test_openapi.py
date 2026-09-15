@@ -206,6 +206,16 @@ def test_openapi_exposes_distinct_closed_shadow_start_and_read_contracts() -> No
 def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct() -> None:
     document = create_engine_app(EngineSettings.for_test()).openapi()
     schemas = document["components"]["schemas"]
+    workbench = document["paths"]["/internal/v1/workbench"]["get"]
+    detail = document["paths"]["/internal/v1/paper/cycles/{cycle_id}"]["get"]
+    assert workbench["operationId"] == "getInternalPaperWorkbench"
+    assert detail["operationId"] == "getInternalAgentPaperCycleDetail"
+    assert workbench["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/WorkbenchEnvelope"
+    }
+    assert detail["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/AgentPaperCycleDetailEnvelope"
+    }
     cycle = schemas["AgentPaperCycleResponse"]
     assert {"decision_market", "decision_slot_at", "execution_market"} <= set(
         cycle["required"]

@@ -15,7 +15,9 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from nexus.jobs.models import JobType
+from nexus.domain.ids import new_uuid7
+from nexus.jobs.models import JobType, QueueName
+from nexus.jobs.repository import upsert_worker_heartbeat
 from nexus.ops.agent_paper_once import (
     AgentPaperCollectWindowRequest,
     AgentPaperMarketSettings,
@@ -38,6 +40,7 @@ from nexus.paper.agent_market import resolve_agent_paper_market_scope
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -112,6 +115,45 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
     }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
+AGENT_PAPER_LOOP_PROCESS_VERSION = "agent-paper-loop-v1"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def heartbeat_agent_paper_loop(
+    settings: EngineSettings,
+    *,
+    worker_id: str,
+    started_at: datetime,
+    seen_at: datetime,
+) -> None:
+    """Persist one Agent paper-loop liveness fact without changing business state."""
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            await upsert_worker_heartbeat(
+                session,
+                queue=QueueName.AGENT_PAPER,
+                worker_id=worker_id,
+                process_version=AGENT_PAPER_LOOP_PROCESS_VERSION,
+                migration_head=CURRENT_MIGRATION_HEAD,
+                started_at=started_at,
+                seen_at=seen_at,
+            )
+    finally:
+        await engine.dispose()
 
 
 async def _inspect_prior_daily_scope(
@@ -383,8 +425,18 @@ async def run_foreground_loop(
         Awaitable[AgentPaperLoopAction | None],
     ],
     sleep: Callable[[float], Awaitable[None]],
+    heartbeat: Callable[[datetime], Awaitable[None]],
+    heartbeat_interval: timedelta = timedelta(seconds=15),
+    clock: Callable[[], datetime] = _utc_now,
 ) -> AgentPaperLoopAction:
     """Run persisted one-step actions until a fail-closed stop condition is reached."""
+    interval_seconds = heartbeat_interval.total_seconds()
+    if interval_seconds <= 0:
+        raise ValueError("heartbeat_interval must be positive")
+    try:
+        await heartbeat(clock())
+    except Exception:
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     while True:
         snapshot = await inspect()
         action = choose_loop_action(snapshot)
@@ -397,13 +449,33 @@ async def run_foreground_loop(
             return action
         if action == AgentPaperLoopAction.WAIT_FOR_SLOT:
             next_slot = floor_decision_slot(snapshot.now) + timedelta(minutes=5)
-            await sleep((next_slot - snapshot.now).total_seconds())
+            remaining = (next_slot - snapshot.now).total_seconds()
+            while remaining > 0:
+                duration = min(remaining, interval_seconds)
+                await sleep(duration)
+                try:
+                    await heartbeat(clock())
+                except Exception:
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+                remaining -= duration
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_MARKET:
             assert snapshot.market_window_end_at is not None
-            await sleep((snapshot.market_window_end_at - snapshot.now).total_seconds())
+            remaining = (snapshot.market_window_end_at - snapshot.now).total_seconds()
+            while remaining > 0:
+                duration = min(remaining, interval_seconds)
+                await sleep(duration)
+                try:
+                    await heartbeat(clock())
+                except Exception:
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+                remaining -= duration
             continue
         stop = await execute(action, snapshot)
+        try:
+            await heartbeat(clock())
+        except Exception:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         if stop is not None:
             return stop
 
@@ -415,6 +487,18 @@ async def run_local_agent_paper_loop(
     repo_root: Path,
 ) -> AgentPaperLoopAction:
     """Run the concrete local loop through persisted inspection and scoped actions."""
+
+    if not settings.database_url:
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    worker_id = f"agent-paper-loop-{new_uuid7()}"
+    started_at = datetime.now(UTC)
 
     async def inspect() -> AgentPaperLoopSnapshot:
         current = EngineSettings.model_validate(load_local_environment(repo_root, {}))
@@ -433,7 +517,20 @@ async def run_local_agent_paper_loop(
             snapshot=snapshot,
         )
 
-    return await run_foreground_loop(inspect=inspect, execute=execute, sleep=asyncio.sleep)
+    async def heartbeat(seen_at: datetime) -> None:
+        await heartbeat_agent_paper_loop(
+            settings,
+            worker_id=worker_id,
+            started_at=started_at,
+            seen_at=seen_at,
+        )
+
+    return await run_foreground_loop(
+        inspect=inspect,
+        execute=execute,
+        sleep=asyncio.sleep,
+        heartbeat=heartbeat,
+    )
 
 
 async def execute_agent_paper_loop_action(

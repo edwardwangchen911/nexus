@@ -264,6 +264,16 @@ class AgentPaperCycleEnvelope(_StrictSchema):
     meta: SuccessMetaResponse
 
 
+class AgentPaperCycleDetailResponse(_StrictSchema):
+    cycle: AgentPaperCycleResponse
+    orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
+
+
+class AgentPaperCycleDetailEnvelope(_StrictSchema):
+    data: AgentPaperCycleDetailResponse
+    meta: SuccessMetaResponse
+
+
 class AgentPaperSessionSummaryResponse(_StrictSchema):
     decision_session: date | None
     status: Literal[

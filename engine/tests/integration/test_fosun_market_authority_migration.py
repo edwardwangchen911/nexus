@@ -14,6 +14,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from nexus.persistence.base import Base
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models import data as data_models
 from nexus.persistence.models import market as market_models
 from nexus.provider_worker import _PROVIDER_TRIGGER_FUNCTIONS
@@ -161,7 +162,7 @@ def test_alembic_downgrade_forces_read_committed_over_database_default(
 def test_market_authority_chain_has_one_current_head() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
 
-    assert scripts.get_heads() == ["0047_alpaca_market_stream"]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     alpaca_stream = scripts.get_revision("0047_alpaca_market_stream")
     assert alpaca_stream is not None
     assert alpaca_stream.down_revision == "0046_fosun_push_quote_authority"

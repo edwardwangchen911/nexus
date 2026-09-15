@@ -9,6 +9,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from nexus.persistence.base import Base
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models import data as data_models
 from nexus.persistence.models import market as market_models
 from sqlalchemy import inspect, text
@@ -38,7 +39,7 @@ INTRADAY_SOURCE_POLICY_PAYLOAD = {
 
 def test_0026_is_single_head_over_0025_and_metadata_matches() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
-    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     revision = scripts.get_revision("0026_intraday_review_hardening")
     assert revision is not None
     assert revision.down_revision == "0025_intraday_market_monitor"

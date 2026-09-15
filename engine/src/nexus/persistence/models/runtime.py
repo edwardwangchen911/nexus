@@ -31,7 +31,9 @@ class IntegrationStatus(ImmutableCreatedAt, Base):
     provider: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(50))
     last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     mode_changed_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now()
     )
@@ -122,9 +124,7 @@ class Job(ImmutableCreatedAt, Base):
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_error_code: Mapped[str | None] = mapped_column(String(100))
     result_code: Mapped[str | None] = mapped_column(String(100))
-    version: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=1, server_default="1"
-    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
 
 class JobLease(ImmutableCreatedAt, Base):
@@ -212,7 +212,8 @@ class WorkerHeartbeat(ImmutableCreatedAt, Base):
             "queue", "worker_id", name="uq_worker_heartbeats_queue_worker"
         ),
         CheckConstraint(
-            "queue IN ('general','provider','broker','strategy_rnd')", name="queue_allowed"
+            "queue IN ('general','provider','broker','strategy_rnd','agent_paper')",
+            name="queue_allowed",
         ),
         CheckConstraint("seen_at >= started_at", name="time_order"),
     )

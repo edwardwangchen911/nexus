@@ -18,6 +18,10 @@ LAST_SLOT = datetime(2026, 9, 14, 19, 55, tzinfo=UTC)
 A = loop.AgentPaperLoopAction
 
 
+async def noop_heartbeat(_seen_at: datetime) -> None:
+    return None
+
+
 def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
     return replace(loop.AgentPaperLoopSnapshot(now=NOW), **changes)
 
@@ -151,7 +155,14 @@ def test_foreground_loop_executes_persisted_action_then_stops() -> None:
     async def no_sleep(_seconds: float) -> None:
         raise AssertionError("persisted actions do not sleep")
 
-    result = asyncio.run(loop.run_foreground_loop(inspect=inspect, execute=execute, sleep=no_sleep))
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=no_sleep,
+            heartbeat=noop_heartbeat,
+        )
+    )
     assert result == loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
     assert actions == [(loop.AgentPaperLoopAction.RUN_RESEARCH_JOB, "job-1")]
 
@@ -182,7 +193,14 @@ def test_foreground_loop_honors_known_executor_stop_without_reinspection() -> No
     async def no_sleep(_seconds: float) -> None:
         raise AssertionError("a known no-trade result must stop without sleeping")
 
-    result = asyncio.run(loop.run_foreground_loop(inspect=inspect, execute=execute, sleep=no_sleep))
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=no_sleep,
+            heartbeat=noop_heartbeat,
+        )
+    )
 
     assert result == A.STOP_ORDER_UNAVAILABLE
     assert inspections == 1
@@ -233,9 +251,177 @@ def test_foreground_loop_waits_without_product_side_effects(
     async def sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
-    result = asyncio.run(loop.run_foreground_loop(inspect=inspect, execute=execute, sleep=sleep))
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=noop_heartbeat,
+        )
+    )
     assert result == loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
-    assert sleeps == [expected_sleep]
+    assert sum(sleeps) == expected_sleep
+    assert all(seconds <= 15 for seconds in sleeps)
+
+
+def test_foreground_loop_heartbeats_before_inspection_and_after_action() -> None:
+    events: list[str] = []
+    heartbeat_times: list[datetime] = []
+    times = iter((NOW, NOW + timedelta(seconds=1)))
+    states = iter(
+        (
+            snapshot(
+                cycle_status="researching",
+                research_job_status="queued",
+                research_job_id="job-1",
+            ),
+            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+        )
+    )
+
+    async def heartbeat(seen_at: datetime) -> None:
+        events.append("heartbeat")
+        heartbeat_times.append(seen_at)
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        events.append("inspect")
+        return next(states)
+
+    async def execute(_action, _state) -> None:
+        events.append("execute")
+
+    async def no_sleep(_seconds: float) -> None:
+        raise AssertionError("persisted actions do not sleep")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=no_sleep,
+            heartbeat=heartbeat,
+            clock=lambda: next(times),
+        )
+    )
+
+    assert result == A.STOP_SESSION_CLOSED
+    assert events == ["heartbeat", "inspect", "execute", "heartbeat", "inspect"]
+    assert heartbeat_times == [NOW, NOW + timedelta(seconds=1)]
+
+
+def test_foreground_loop_heartbeats_during_long_waits() -> None:
+    sleeps: list[float] = []
+    heartbeat_times: list[datetime] = []
+    times = iter(
+        (
+            NOW,
+            NOW + timedelta(seconds=15),
+            NOW + timedelta(seconds=30),
+            NOW + timedelta(seconds=31),
+        )
+    )
+    states = iter(
+        (
+            snapshot(
+                cycle_status="awaiting_market",
+                has_open_order=True,
+                market_window_end_at=NOW + timedelta(seconds=31),
+            ),
+            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+        )
+    )
+
+    async def heartbeat(seen_at: datetime) -> None:
+        heartbeat_times.append(seen_at)
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async def execute(_action, _state) -> None:
+        raise AssertionError("waiting must not execute a product action")
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: next(times),
+        )
+    )
+
+    assert result == A.STOP_SESSION_CLOSED
+    assert sleeps == [15.0, 15.0, 1.0]
+    assert heartbeat_times == list(
+        (
+            NOW,
+            NOW + timedelta(seconds=15),
+            NOW + timedelta(seconds=30),
+            NOW + timedelta(seconds=31),
+        )
+    )
+
+
+def test_foreground_loop_stops_before_inspection_when_heartbeat_fails() -> None:
+    async def heartbeat(_seen_at: datetime) -> None:
+        raise RuntimeError("database unavailable")
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        raise AssertionError("heartbeat failure must fence inspection")
+
+    async def execute(_action, _state) -> None:
+        raise AssertionError("heartbeat failure must fence product actions")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=asyncio.sleep,
+            heartbeat=heartbeat,
+            clock=lambda: NOW,
+        )
+    )
+
+    assert result == A.STOP_RESULT_UNKNOWN
+
+
+def test_foreground_loop_stops_after_action_when_followup_heartbeat_fails() -> None:
+    heartbeat_count = 0
+    inspection_count = 0
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+        if heartbeat_count == 2:
+            raise RuntimeError("database unavailable")
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        nonlocal inspection_count
+        inspection_count += 1
+        return snapshot(
+            cycle_status="researching",
+            research_job_status="queued",
+            research_job_id="job-1",
+        )
+
+    async def execute(_action, _state) -> None:
+        return None
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=asyncio.sleep,
+            heartbeat=heartbeat,
+            clock=lambda: NOW,
+        )
+    )
+
+    assert result == A.STOP_RESULT_UNKNOWN
+    assert heartbeat_count == 2
+    assert inspection_count == 1
 
 
 def enabled_environment() -> dict[str, str]:
