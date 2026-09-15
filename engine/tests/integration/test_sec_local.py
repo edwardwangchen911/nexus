@@ -151,7 +151,13 @@ async def seed_instrument(settings, *, asset_type="common_stock", exchange="XNAS
 
 
 def sec_responder(
-    requests, *, wrong_issuer=False, reject=False, ambiguous=False, wrong_submission=False
+    requests,
+    *,
+    wrong_issuer=False,
+    reject=False,
+    ambiguous=False,
+    wrong_submission=False,
+    annual_history=False,
 ):
     def respond(request):
         requests.append(request)
@@ -176,12 +182,47 @@ def sec_responder(
             payload["facts"]["us-gaap"]["EarningsPerShareDiluted"]["units"]["USD/shares"][0][
                 "val"
             ] = 1.25
+            if annual_history:
+                for tagged in payload["facts"]["us-gaap"].values():
+                    for entries in tagged["units"].values():
+                        latest = entries[0]
+                        for accession, fiscal_year, period_start, period_end in (
+                            ("0000320193-25-000079", 2025, "2024-09-29", "2025-09-27"),
+                            ("0000320193-24-000123", 2024, "2023-10-01", "2024-09-28"),
+                        ):
+                            annual = dict(latest)
+                            annual.update(
+                                {
+                                    "accn": accession,
+                                    "fy": fiscal_year,
+                                    "fp": "FY",
+                                    "form": "10-K",
+                                    "filed": f"{fiscal_year}-10-31",
+                                    "end": period_end,
+                                    "frame": f"CY{fiscal_year}",
+                                }
+                            )
+                            if annual.get("start") is not None:
+                                annual["start"] = period_start
+                            entries.append(annual)
         else:
             assert request.url.path == "/submissions/CIK0000320193.json"
             payload = json.loads((FIXTURES / "submissions.json").read_bytes())
             payload.update({"cik": "0000320193", "tickers": ["AAPL"], "exchanges": ["Nasdaq"]})
             if wrong_submission:
                 payload["tickers"] = ["MSFT"]
+            if annual_history:
+                recent = payload["filings"]["recent"]
+                for key, values in {
+                    "accessionNumber": ["0000320193-25-000079", "0000320193-24-000123"],
+                    "acceptanceDateTime": [
+                        "2025-10-31T10:01:26Z",
+                        "2024-11-01T10:01:26Z",
+                    ],
+                    "filingDate": ["2025-10-31", "2024-11-01"],
+                    "form": ["10-K", "10-K"],
+                }.items():
+                    recent[key].extend(values)
             # Real submissions also contain non-financial forms with no Company Facts.
             recent = payload["filings"]["recent"]
             for key, value in {
@@ -279,6 +320,41 @@ async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
     assert Decimal(eps["value"]) == Decimal("1.25")
     assert eps["period_start"] is not None
     assert eps["evidence_ref_id"] == inputs["filings"][0]["evidence_ref_id"]
+
+
+@pytest.mark.asyncio
+async def test_sec_only_refresh_freezes_latest_annual_and_quarterly_filings(
+    migrated_database_url,
+):
+    from nexus.ops.openai_local import prepare_database
+    from nexus.ops.sec_local import refresh_sec_research
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await prepare_database(settings)
+    await seed_instrument(settings)
+    requests = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(sec_responder(requests, annual_history=True))
+    ) as client:
+        result = await refresh_sec_research(
+            settings,
+            INSTRUMENT,
+            contact="test@example.invalid",
+            http_client=client,
+            store=InMemoryRawEvidenceStore(),
+        )
+
+    assert result["filings_created"] == 2
+    async with session_factory(settings)() as session:
+        filings = list(await session.scalars(select(Filing).order_by(Filing.accepted_at)))
+        assert [(row.accession_number, row.form) for row in filings] == [
+            ("0000320193-25-000079", "10-K"),
+            ("0000320193-26-000001", "10-Q"),
+        ]
+        assert {
+            row.accession_number
+            for row in await session.scalars(select(FinancialFactRecord))
+        } == {"0000320193-25-000079", "0000320193-26-000001"}
 
 
 @pytest.mark.asyncio

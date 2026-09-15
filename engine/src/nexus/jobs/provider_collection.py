@@ -1639,8 +1639,17 @@ async def collect_sec_filings(
             }
             if not candidates:
                 raise RuntimeError("SEC_RECENT_FINANCIAL_FILING_UNAVAILABLE")
-            latest = max(candidates, key=lambda accession: (candidates[accession][0], accession))
-            accession_metadata = {latest: candidates[latest]}
+            latest_by_form: dict[str, str] = {}
+            for accession, (accepted_at, form) in candidates.items():
+                current_accession = latest_by_form.get(form)
+                if current_accession is None or (accepted_at, accession) > (
+                    candidates[current_accession][0],
+                    current_accession,
+                ):
+                    latest_by_form[form] = accession
+            accession_metadata = {
+                accession: candidates[accession] for accession in latest_by_form.values()
+            }
         evidence_payloads = {
             accession: _sec_accession_content(
                 company_facts.raw_payload,
