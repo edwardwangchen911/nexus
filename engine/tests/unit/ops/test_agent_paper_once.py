@@ -114,7 +114,15 @@ def test_parser_rejects_provider_and_credential_overrides() -> None:
         )
 
 
-def test_collect_window_rejects_client_instrument_and_time() -> None:
+def test_collect_window_accepts_legacy_instrument_but_rejects_client_time() -> None:
+    request = AgentPaperCollectWindowRequest.model_validate(
+        {
+            "action": "collect-window",
+            "cycle_id": UUID(int=1),
+            "instrument_id": UUID(int=2),
+        }
+    )
+    assert request.instrument_id == UUID(int=2)
     with pytest.raises(ValidationError):
         AgentPaperCollectWindowRequest.model_validate(
             {
@@ -132,9 +140,12 @@ def test_collect_window_parser_has_no_provider_or_credential_override() -> None:
             "collect-window",
             "--cycle-id",
             str(UUID(int=1)),
+            "--instrument-id",
+            str(UUID(int=2)),
         ]
     )
     assert parsed.action == "collect-window"
+    assert parsed.instrument_id == str(UUID(int=2))
     with pytest.raises(SystemExit):
         parser().parse_args(
             [
@@ -181,7 +192,8 @@ def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
         def __call__(self) -> AsyncContext:
             return AsyncContext(object())
 
-    async def resolve(*_args: object, **_kwargs: object) -> AgentPaperMarketScope:
+    async def resolve(*_args: object, **kwargs: object) -> AgentPaperMarketScope:
+        assert kwargs["instrument_id"] == instrument_id
         return scope
 
     async def collect(
@@ -216,7 +228,11 @@ def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
     result = asyncio.run(
         cli.collect_window_once(
             settings,
-            AgentPaperCollectWindowRequest(action="collect-window", cycle_id=cycle_id),
+            AgentPaperCollectWindowRequest(
+                action="collect-window",
+                cycle_id=cycle_id,
+                instrument_id=instrument_id,
+            ),
             repo_root=tmp_path,
         )
     )

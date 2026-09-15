@@ -30,6 +30,7 @@ from nexus.paper.agent_cycle_models import (
     floor_decision_slot,
 )
 from nexus.paper.agent_market import (
+    PaperMarketError,
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
 )
@@ -1157,6 +1158,12 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
 
         async with sessions() as session:
             scope = await resolve_agent_paper_market_scope(session, cycle_id=first.cycle_id)
+            with pytest.raises(PaperMarketError, match="PAPER_MARKET_CYCLE_REJECTED"):
+                await resolve_agent_paper_market_scope(
+                    session,
+                    cycle_id=first.cycle_id,
+                    instrument_id=scope.instrument_id,
+                )
         assert scope.window_start == datetime(2026, 8, 26, 11, 31, tzinfo=UTC)
         assert scope.window_end == datetime(2026, 8, 26, 11, 36, tzinfo=UTC)
         loop_snapshot = await inspect_agent_paper_loop(

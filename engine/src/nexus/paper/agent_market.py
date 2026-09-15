@@ -366,22 +366,72 @@ async def collect_agent_paper_window(
 
 
 async def resolve_agent_paper_market_scope(
-    session: AsyncSession, *, cycle_id: UUID
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    instrument_id: UUID | None = None,
 ) -> AgentPaperMarketScope:
-    """Resolve the immutable candidate and sole window from persisted Agent output facts."""
+    """Resolve one persisted candidate and its database-owned execution window."""
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
     if (
         cycle is None
         or cycle.execution_price_policy_id
         not in {PAPER_EXECUTION_SOURCE_POLICY_ID, PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID}
-        or len(cycle.candidate_manifest) != 1
-        or not isinstance(cycle.candidate_manifest[0], dict)
+        or not cycle.candidate_manifest
+        or any(not isinstance(candidate, dict) for candidate in cycle.candidate_manifest)
     ):
         raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
     try:
-        instrument_id = UUID(str(cycle.candidate_manifest[0].get("instrument_id")))
+        candidate_ids = tuple(
+            UUID(str(candidate.get("instrument_id")))
+            for candidate in cycle.candidate_manifest
+        )
     except (TypeError, ValueError):
         raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED") from None
+    if cycle.execution_price_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
+        if instrument_id is not None or len(candidate_ids) != 1:
+            raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
+        instrument_id = candidate_ids[0]
+    elif instrument_id is None:
+        if len(candidate_ids) != 1:
+            raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
+        instrument_id = candidate_ids[0]
+    elif instrument_id not in candidate_ids:
+        raise PaperMarketError("PAPER_MARKET_INSTRUMENT_REJECTED")
+    if cycle.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID:
+        calendars = tuple(
+            await session.scalars(
+                select(ExchangeCalendarSessionRecord)
+                .join(
+                    StrategyDecisionRecord,
+                    (
+                        ExchangeCalendarSessionRecord.calendar_authority_id
+                        == StrategyDecisionRecord.calendar_authority_id
+                    )
+                    & (
+                        ExchangeCalendarSessionRecord.session
+                        == cycle.execution_session
+                    ),
+                )
+                .where(
+                    StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+                    StrategyDecisionRecord.decision_origin == "agent_research",
+                    StrategyDecisionRecord.execution_source_policy_id
+                    == cycle.execution_price_policy_id,
+                )
+                .limit(2)
+            )
+        )
+        if len(calendars) != 1 or calendars[0].market_open_at is None:
+            raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
+        start = calendars[0].market_open_at
+        return AgentPaperMarketScope(
+            cycle_id=cycle.id,
+            instrument_id=instrument_id,
+            execution_source_policy_id=cycle.execution_price_policy_id,
+            window_start=start,
+            window_end=start + timedelta(minutes=5),
+        )
     row = (
         await session.execute(
             select(AgentResearchOutputRecord, Job, ExchangeCalendarSessionRecord)
@@ -426,12 +476,8 @@ async def resolve_agent_paper_market_scope(
     output, job, calendar = row[0]
     if job.finished_at is None:
         raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
-    if cycle.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID:
-        start = calendar.market_open_at
-        end = start + timedelta(minutes=5)
-    else:
-        output_available_at = max(output.created_at, job.finished_at)
-        start, end = agent_paper_window_bounds(output_available_at, calendar.market_close_at)
+    output_available_at = max(output.created_at, job.finished_at)
+    start, end = agent_paper_window_bounds(output_available_at, calendar.market_close_at)
     return AgentPaperMarketScope(
         cycle_id=cycle.id,
         instrument_id=instrument_id,

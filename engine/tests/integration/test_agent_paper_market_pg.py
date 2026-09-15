@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from helpers.paper_batch import (
+    CALENDAR_ID,
     DATA_SNAPSHOT_ID,
     DECISION_SESSION,
     DECISION_TIME,
@@ -14,6 +15,7 @@ from helpers.paper_batch import (
 )
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
+    LegacyCandidateManifestEntry,
     candidate_manifest_hash,
     floor_decision_slot,
 )
@@ -21,6 +23,7 @@ from nexus.paper.agent_market import (
     AgentPaperMarketScope,
     PaperMarketError,
     collect_agent_paper_window,
+    resolve_agent_paper_market_scope,
 )
 from nexus.persistence.models.data import DataArtifact, PriceBarSetAuthority
 from nexus.persistence.models.paper import (
@@ -31,6 +34,7 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
     PaperFillRecord,
+    StrategyDecisionRecord,
 )
 from nexus.providers.base import InstrumentId, MarketDataProvenance, PriceBar, ProviderPage
 from nexus.providers.market.alpaca import MarketProviderPayloadError
@@ -123,6 +127,92 @@ class _UnavailableSchwabProvider:
     async def fetch_bars(self, request, cursor=None):  # type: ignore[no-untyped-def]
         del request, cursor
         raise MarketProviderPayloadError("SCHWAB_PRICE_HISTORY_WINDOW_INVALID")
+
+
+@pytest.mark.asyncio
+async def test_legacy_scope_selects_requested_candidate_from_multi_candidate_cycle(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(
+        migrated_database_url,
+        execution_market_close_at=datetime(2026, 8, 27, 20, tzinfo=UTC),
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    cycle_id = UUID("71000000-0000-0000-0000-000000000001")
+    candidates = tuple(
+        LegacyCandidateManifestEntry(
+            instrument_id=instrument_id,
+            symbol=f"T{index}",
+            inclusion_reason="quality_rank",
+            research_snapshot_id=UUID(int=0x71000000000000000000000000000100 + index),
+        )
+        for index, (instrument_id, *_rest) in enumerate(INSTRUMENTS[:2], start=1)
+    )
+    try:
+        async with sessions.begin() as session:
+            session.add(
+                AgentPaperCycleRecord(
+                    id=cycle_id,
+                    account_id=seed.account_id,
+                    portfolio_id=seed.portfolio_id,
+                    decision_session=DECISION_SESSION,
+                    decision_time=DECISION_TIME,
+                    decision_slot_at=floor_decision_slot(DECISION_TIME),
+                    execution_session=EXECUTION_SESSION,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    quality_report_id=None,
+                    decision_price_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                    execution_price_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+                    candidate_manifest=[row.model_dump(mode="json") for row in candidates],
+                    candidate_hash=candidate_manifest_hash(candidates),
+                    sizing_policy_version="agent_paper_sizing_v1",
+                    sizing_policy_hash="7" * 64,
+                    execution_locked=True,
+                )
+            )
+            await session.flush()
+            session.add(
+                StrategyDecisionRecord(
+                    id=UUID("71000000-0000-0000-0000-000000000002"),
+                    account_id=seed.account_id,
+                    portfolio_id=seed.portfolio_id,
+                    strategy_id="agent_research",
+                    strategy_version="agent_paper_decision_v1",
+                    strategy_definition_id=None,
+                    registry_event_id=None,
+                    champion_generation=None,
+                    decision_origin="agent_research",
+                    agent_paper_cycle_id=cycle_id,
+                    decision_session=DECISION_SESSION,
+                    decision_time=DECISION_TIME,
+                    execution_session=EXECUTION_SESSION,
+                    source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                    execution_source_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+                    calendar_authority_id=CALENDAR_ID,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    quality_report_id=None,
+                    portfolio_projection_hash="1" * 64,
+                    authority_hash="2" * 64,
+                    strategy_parameters_hash="7" * 64,
+                    decision_hash="3" * 64,
+                    cash_weight=Decimal("1"),
+                    reason="AGENT_RESEARCH",
+                )
+            )
+
+        async with sessions() as session:
+            scope = await resolve_agent_paper_market_scope(
+                session,
+                cycle_id=cycle_id,
+                instrument_id=candidates[1].instrument_id,
+            )
+    finally:
+        await engine.dispose()
+
+    assert scope.instrument_id == candidates[1].instrument_id
+    assert scope.window_start == WINDOW_START
+    assert scope.window_end == WINDOW_START + timedelta(minutes=5)
 
 
 @pytest.mark.asyncio

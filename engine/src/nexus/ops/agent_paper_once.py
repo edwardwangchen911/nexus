@@ -97,6 +97,7 @@ class AgentPaperCollectWindowRequest(BaseModel):
 
     action: Literal["collect-window"]
     cycle_id: UUID
+    instrument_id: UUID | None = None
 
 
 class AgentPaperMarketSettings(EngineSettings):
@@ -126,6 +127,7 @@ def parser() -> argparse.ArgumentParser:
     resume.add_argument("--idempotency-key", required=True)
     collect = commands.add_parser("collect-window")
     collect.add_argument("--cycle-id", required=True)
+    collect.add_argument("--instrument-id")
     return root
 
 
@@ -428,7 +430,9 @@ async def collect_window_once(
             httpx.AsyncClient(follow_redirects=False, timeout=30) as http,
         ):
             scope = await resolve_agent_paper_market_scope(
-                resolver_session, cycle_id=request.cycle_id
+                resolver_session,
+                cycle_id=request.cycle_id,
+                instrument_id=request.instrument_id,
             )
             resolver = SqlInstrumentSymbolResolver(resolver_session)
             provider: MarketDataProvider
