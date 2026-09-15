@@ -69,6 +69,22 @@ def test_enabled_worker_loads_credentials_from_environment_without_exposing_them
     assert "0123456789abcdef" not in repr(settings)
 
 
+def test_empty_optional_read_only_url_is_treated_as_unset() -> None:
+    settings = load_bark_worker_settings(
+        {
+            "NEXUS_BARK_ENABLED": "true",
+            "DATABASE_URL": "postgresql+asyncpg://nexus@postgres/nexus",
+            "NEXUS_BARK_SERVER_URL": "http://127.0.0.1:8080",
+            "NEXUS_BARK_DEVICE_KEY": "device-key",
+            "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
+            "NEXUS_BARK_ACTIVATED_AT": "2026-09-15T06:00:00Z",
+            "NEXUS_BARK_READ_ONLY_URL": "",
+        }
+    )
+
+    assert settings.read_only_url is None
+
+
 @pytest.mark.parametrize(
     ("device_key", "encryption_key", "error_code"),
     (

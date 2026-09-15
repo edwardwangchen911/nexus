@@ -105,8 +105,11 @@ class BarkCredentials:
 
 def load_bark_worker_settings(environment: Mapping[str, str]) -> BarkWorkerSettings:
     """Validate process configuration without exposing secret values in errors."""
+    normalized_environment = dict(environment)
+    if normalized_environment.get("NEXUS_BARK_READ_ONLY_URL") == "":
+        normalized_environment.pop("NEXUS_BARK_READ_ONLY_URL")
     try:
-        return BarkWorkerSettings.model_validate(dict(environment))
+        return BarkWorkerSettings.model_validate(normalized_environment)
     except (ValidationError, ValueError):
         raise BarkWorkerConfigurationError("BARK_CONFIGURATION_INVALID") from None
 
