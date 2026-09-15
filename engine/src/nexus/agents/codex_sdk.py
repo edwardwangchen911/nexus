@@ -40,6 +40,7 @@ from nexus.agents.committee import (
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.tools import ReadOnlyToolRegistry
+from nexus.agents.trailing_valuation import derive_trailing_valuation
 from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import ResearchClaim
 
@@ -524,6 +525,23 @@ class CodexCommittee:
             "as_of": request.decision_time.isoformat(),
         }
         security = await self._tools.execute("get_security_snapshot", scope)
+        financial_facts = await self._tools.execute(
+            "get_financial_facts",
+            {
+                **scope,
+                "fields": [
+                    "revenue",
+                    "gross_profit",
+                    "operating_income",
+                    "net_income",
+                    "operating_cash_flow",
+                    "capital_expenditure",
+                    "stockholders_equity",
+                    "diluted_shares",
+                    "diluted_eps",
+                ],
+            },
+        )
         result: dict[str, object] = {
             "security_snapshot": security,
             "filing_disclosures": await self._tools.execute(
@@ -535,23 +553,8 @@ class CodexCommittee:
                     "filed_to": request.decision_time.date().isoformat(),
                 },
             ),
-            "financial_facts": await self._tools.execute(
-                "get_financial_facts",
-                {
-                    **scope,
-                    "fields": [
-                        "revenue",
-                        "gross_profit",
-                        "operating_income",
-                        "net_income",
-                        "operating_cash_flow",
-                        "capital_expenditure",
-                        "stockholders_equity",
-                        "diluted_shares",
-                        "diluted_eps",
-                    ],
-                },
-            ),
+            "financial_facts": financial_facts,
+            "trailing_valuation": derive_trailing_valuation(security, financial_facts),
             # Raw close can be valid even when adjusted indicators are unavailable.
             "price_close": await self._tools.execute(
                 "get_price_features",

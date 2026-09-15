@@ -789,6 +789,11 @@ async def test_sdk_wire_preserves_current_trend_scope_separately_from_raw_close(
             "security_snapshot": security,
             "filing_disclosures": unavailable,
             "financial_facts": unavailable,
+            "trailing_valuation": {
+                "schema_version": "agent_trailing_valuation_v1",
+                "status": "unavailable",
+                "reason": "decision_quote_unavailable",
+            },
             "price_close": raw_close,
             "price_features": split_trend,
             "macro": unavailable,
@@ -864,6 +869,40 @@ async def test_sdk_wire_preserves_current_trend_scope_separately_from_raw_close(
             } == {wire_hash}
     if version > 1:
         assert {output.frozen_inputs_hash for output in outputs} == {expected_hash}
+
+
+@pytest.mark.asyncio
+async def test_sdk_derives_valuation_from_the_same_frozen_tool_results(monkeypatch):
+    request, _, prompts = _authority()
+    security = {"status": "ok", "items": [{"source": "paper-context"}]}
+    financial = {"status": "ok", "items": [{"fact": "diluted_eps"}]}
+    unavailable = {"status": "unavailable", "reason": "missing", "items": []}
+    derived = {
+        "schema_version": "agent_trailing_valuation_v1",
+        "status": "available",
+        "reason": None,
+    }
+    seen = []
+
+    def derive(security_input, financial_input):
+        seen.append((security_input, financial_input))
+        return derived
+
+    monkeypatch.setattr(codex_sdk, "derive_trailing_valuation", derive)
+    tools = ReadOnlyTools(
+        executors={
+            **{name: lambda payload: unavailable for name in ReadOnlyTools.names},
+            "get_security_snapshot": lambda payload: security,
+            "get_financial_facts": lambda payload: financial,
+        }
+    )
+
+    frozen = await codex_sdk.CodexCommittee(prompts=prompts, tools=tools)._inputs(request)
+
+    assert seen == [(security, financial)]
+    assert frozen["security_snapshot"] == security
+    assert frozen["financial_facts"] == financial
+    assert frozen["trailing_valuation"] == derived
 
 
 @pytest.mark.asyncio
