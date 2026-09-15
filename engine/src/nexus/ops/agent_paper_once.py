@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.agent_risk_authority import collect_source_proofs
 from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.local_recovery import write_private
 from nexus.ops.schwab_market_stream import (
     ProviderMarketStreamError,
     SchwabMarketStreamImportResult,
@@ -58,6 +59,24 @@ from nexus.risk.query_authority_producer import (
 from nexus.settings import EngineSettings
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_SAFE_SCHWAB_FAILURE_CODES = frozenset(
+    {
+        "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID",
+        "PROVIDER_MARKET_STREAM_BYTE_LIMIT",
+        "PROVIDER_MARKET_STREAM_FRAME_INVALID",
+        "PROVIDER_MARKET_STREAM_INCOMPLETE",
+        "PROVIDER_MARKET_STREAM_PROTOCOL_INVALID",
+        "PROVIDER_MARKET_STREAM_PROVIDER_REJECTED",
+        "PROVIDER_MARKET_STREAM_SECRET_REFLECTION",
+        "SCHWAB_MARKET_STREAM_ARTIFACT_REPLAY_CONFLICT",
+        "SCHWAB_MARKET_STREAM_BINDINGS_INVALID",
+        "SCHWAB_MARKET_STREAM_EMPTY",
+        "SCHWAB_MARKET_STREAM_EVIDENCE_INVALID",
+        "SCHWAB_MARKET_STREAM_EVIDENCE_STALE",
+        "SCHWAB_MARKET_STREAM_IDENTITY_REQUIRED",
+        "SCHWAB_MARKET_STREAM_IMPORT_TIME_INVALID",
+    }
+)
 
 
 class AgentPaperRunRequest(BaseModel):
@@ -215,6 +234,28 @@ def _validate_trigger_quote(
         raise ValueError("SCHWAB_L1_FRESHNESS_UNPROVEN")
 
 
+def _raise_schwab_l1_incomplete(
+    error: ProviderMarketStreamError, *, diagnostic_path: Path
+) -> NoReturn:
+    provider_error_code = str(error)
+    if provider_error_code not in _SAFE_SCHWAB_FAILURE_CODES:
+        provider_error_code = "SCHWAB_MARKET_STREAM_FAILURE_UNCLASSIFIED"
+    payload = {
+        "schema": "nexus_schwab_l1_failure_v1",
+        "stage": "capture_or_import",
+        "provider_error_code": provider_error_code,
+    }
+    try:
+        diagnostic_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        write_private(
+            diagnostic_path,
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(),
+        )
+    except OSError:
+        pass
+    raise ValueError("SCHWAB_L1_INCOMPLETE") from error
+
+
 async def trigger_in_session(
     session: AsyncSession,
     store: S3ProviderEvidenceStore,
@@ -251,6 +292,7 @@ async def trigger_in_session(
     digest = sha256(request.idempotency_key.encode()).hexdigest()[:16]
     output_parent = repo_root / ".secrets" / "nexus-agent-paper"
     output_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    attempt_directory = output_parent / f"{decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}"
     try:
         proofs = await collect_source_proofs(
             symbol="AAPL",
@@ -258,8 +300,7 @@ async def trigger_in_session(
             decision_session=decision_session,
             key_id=settings.alpaca_key,
             secret=settings.alpaca_secret,
-            output_dir=output_parent
-            / f"{decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}",
+            output_dir=attempt_directory,
             cutoff_at=None,
         )
     except ValueError as error:
@@ -274,7 +315,10 @@ async def trigger_in_session(
             instrument_id=scope.instrument_id,
         )
     except ProviderMarketStreamError as error:
-        raise ValueError("SCHWAB_L1_INCOMPLETE") from error
+        _raise_schwab_l1_incomplete(
+            error,
+            diagnostic_path=attempt_directory / "schwab-failure.json",
+        )
     decision_time = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(decision_time, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")

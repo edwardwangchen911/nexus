@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -411,6 +412,39 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         "cycle-job",
     ]
 
+    async def rejected_level_one(*_args, **_kwargs):
+        raise cli.ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY")
+
+    monkeypatch.setattr(
+        cli, "capture_and_import_schwab_level_one_once", rejected_level_one
+    )
+    failed_request = AgentPaperTriggerRequest(
+        action="trigger", account_id=account_id, idempotency_key="trigger-failure"
+    )
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        asyncio.run(
+            trigger_in_session(
+                Session(),
+                object(),
+                settings,
+                failed_request,
+                reservation=reservation,
+                repo_root=tmp_path,
+                client=object(),
+            )
+        )
+    digest = cli.sha256(failed_request.idempotency_key.encode()).hexdigest()[:16]
+    diagnostic = (
+        tmp_path
+        / ".secrets"
+        / "nexus-agent-paper"
+        / f"{reservation.decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}"
+        / "schwab-failure.json"
+    )
+    assert json.loads(diagnostic.read_text())["provider_error_code"] == (
+        "SCHWAB_MARKET_STREAM_EMPTY"
+    )
+
 
 def test_trigger_replay_returns_before_any_provider_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -530,4 +564,37 @@ def test_trigger_quote_distinguishes_incomplete_from_stale() -> None:
             artifact,
             imported,
             decision_time=received.replace(minute=2),
+        )
+
+
+def test_schwab_failure_preserves_only_safe_root_cause_diagnostic(tmp_path) -> None:
+    diagnostic = tmp_path / "schwab-failure.json"
+
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._raise_schwab_l1_incomplete(
+            cli.ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY"),
+            diagnostic_path=diagnostic,
+        )
+
+    assert json.loads(diagnostic.read_text()) == {
+        "provider_error_code": "SCHWAB_MARKET_STREAM_EMPTY",
+        "schema": "nexus_schwab_l1_failure_v1",
+        "stage": "capture_or_import",
+    }
+
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._raise_schwab_l1_incomplete(
+            cli.ProviderMarketStreamError("private upstream detail"),
+            diagnostic_path=tmp_path / "redacted.json",
+        )
+    assert json.loads((tmp_path / "redacted.json").read_text())["provider_error_code"] == (
+        "SCHWAB_MARKET_STREAM_FAILURE_UNCLASSIFIED"
+    )
+
+    blocked_parent = tmp_path / "blocked"
+    blocked_parent.write_text("not a directory")
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._raise_schwab_l1_incomplete(
+            cli.ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY"),
+            diagnostic_path=blocked_parent / "schwab-failure.json",
         )
