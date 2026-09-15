@@ -7,6 +7,8 @@ from uuid import UUID
 
 import pytest
 from nexus.ops import agent_paper_loop as loop
+from nexus.paper.agent_market import AgentPaperMarketScope
+from nexus.persistence.models.paper import PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
 
 NOW = datetime(2026, 9, 14, 14, 5, tzinfo=UTC)
 SLOT = datetime(2026, 9, 14, 14, 5, tzinfo=UTC)
@@ -403,20 +405,28 @@ def test_order_executor_surfaces_only_known_no_trade_stop(
     assert result == expected
 
 
-def test_cycle_view_maps_exact_order_and_delayed_collection_time() -> None:
+def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> None:
     order_id, window_end = UUID(int=3), datetime(2026, 9, 14, 14, 12, tzinfo=UTC)
+    cycle_id = UUID(int=2)
     view = SimpleNamespace(
-        cycle_id=UUID(int=2),
+        cycle_id=cycle_id,
         status="awaiting_market",
         decision_slot_at=SLOT,
         order_ids=(order_id,),
         execution_market=SimpleNamespace(status="pending"),
     )
+    market_scope = AgentPaperMarketScope(
+        cycle_id=cycle_id,
+        instrument_id=UUID(int=4),
+        execution_source_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+        window_start=window_end - timedelta(minutes=5),
+        window_end=window_end,
+    )
     result = loop.snapshot_from_cycle_view(
         now=NOW,
         view=view,
         research_job=None,
-        market_scope=SimpleNamespace(order_id=order_id, window_end=window_end),
+        market_scope=market_scope,
     )
     assert result.order_id == order_id
     assert result.market_window_end_at == window_end + timedelta(seconds=60)
@@ -426,5 +436,5 @@ def test_cycle_view_maps_exact_order_and_delayed_collection_time() -> None:
             now=NOW,
             view=view,
             research_job=None,
-            market_scope=SimpleNamespace(order_id=UUID(int=4), window_end=window_end),
+            market_scope=market_scope.model_copy(update={"cycle_id": UUID(int=5)}),
         )

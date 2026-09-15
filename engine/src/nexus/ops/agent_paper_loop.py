@@ -126,9 +126,9 @@ def snapshot_from_cycle_view(
     market_window_ready = has_open_order and market_status == "qualified"
     market_window_end_at = None
     if has_open_order and not market_window_ready:
-        scope_order_id = getattr(market_scope, "order_id", None)
+        scope_cycle_id = getattr(market_scope, "cycle_id", None)
         market_window_end_at = getattr(market_scope, "window_end", None)
-        if scope_order_id != order_id or not isinstance(market_window_end_at, datetime):
+        if scope_cycle_id != cycle_id or not isinstance(market_window_end_at, datetime):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         market_window_end_at += _MARKET_PUBLICATION_LAG
     return AgentPaperLoopSnapshot(

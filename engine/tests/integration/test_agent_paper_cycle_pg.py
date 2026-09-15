@@ -14,6 +14,7 @@ from nexus.agents.execution_authority import ROLE_ORDER
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
+from nexus.ops.agent_paper_loop import inspect_agent_paper_loop
 from nexus.paper.agent_cycle import (
     advance_agent_paper_cycle,
     resume_schwab_agent_paper_cycle,
@@ -69,6 +70,7 @@ from nexus.risk.authority import (
     canonical_query_authority_hash,
     prepare_schwab_realtime_risk_snapshot,
 )
+from nexus.settings import EngineSettings
 from nexus.strategy.intents import (
     ResearchClaim,
     ResearchCondition,
@@ -874,7 +876,7 @@ async def test_quasi_realtime_authority_observes_dst_holiday_and_allows_later_sl
 
 
 @pytest.mark.asyncio
-async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
+async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1156,6 +1158,13 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
             scope = await resolve_agent_paper_market_scope(session, cycle_id=first.cycle_id)
         assert scope.window_start == datetime(2026, 8, 26, 11, 31, tzinfo=UTC)
         assert scope.window_end == datetime(2026, 8, 26, 11, 36, tzinfo=UTC)
+        loop_snapshot = await inspect_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+        )
+        assert loop_snapshot.cycle_id == first.cycle_id
+        assert loop_snapshot.order_id == awaiting_market.order_ids[0]
+        assert loop_snapshot.market_window_end_at == scope.window_end + timedelta(seconds=60)
         evaluated_at = scope.window_end + timedelta(seconds=2)
         async with sessions.begin() as session:
             no_window = await advance_internal_paper_order(
