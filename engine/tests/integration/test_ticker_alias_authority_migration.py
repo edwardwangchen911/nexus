@@ -12,6 +12,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from nexus.jobs.daily_pipeline import assert_daily_pipeline_schema_ready
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -29,7 +30,7 @@ def _config() -> Config:
 def test_0032_precedes_cash_flow_business_date_head() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0033_cash_flow_business_date"]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     assert scripts.get_revision("0033_cash_flow_business_date").down_revision == _REVISION
     revision = scripts.get_revision(_REVISION)
     assert revision is not None

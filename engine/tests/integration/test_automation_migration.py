@@ -8,6 +8,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -227,7 +228,7 @@ async def _runtime_mutations_are_rejected(database_url: str) -> None:
 def test_0020_is_the_single_head_after_task19() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     automation = scripts.get_revision("0020_resilient_automation_audit")
     retry_allowance = scripts.get_revision("0021_manual_job_retry_allowance")
     assert automation is not None

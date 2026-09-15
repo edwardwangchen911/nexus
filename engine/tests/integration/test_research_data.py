@@ -9,6 +9,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from helpers.migration_helpers import _table_names
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
@@ -74,7 +75,7 @@ def test_0010_research_data_round_trips_from_0009_with_the_current_single_head(
         "corporate_actions",
     }
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0032_ticker_alias_authority"]
+    assert ScriptDirectory.from_config(config).get_heads() == [CURRENT_MIGRATION_HEAD]
     command.upgrade(config, "0009_optimization")
     assert research_tables.isdisjoint(_table_names(temporary_database_url))
     command.upgrade(config, "0010_research_data")

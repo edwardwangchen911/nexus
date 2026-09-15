@@ -22,6 +22,7 @@ from helpers.portfolio_api import (
 )
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -403,7 +404,7 @@ def test_0013_is_single_head_and_round_trips_from_0012(
 ) -> None:
     """The Shadow release is one reversible successor of deterministic backtests."""
     config = _config(monkeypatch, temporary_database_url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["0032_ticker_alias_authority"]
+    assert ScriptDirectory.from_config(config).get_heads() == [CURRENT_MIGRATION_HEAD]
 
     command.upgrade(config, "0012_backtests")
     assert SHADOW_TABLES.isdisjoint(_table_names(temporary_database_url))
