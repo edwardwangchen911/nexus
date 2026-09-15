@@ -5,7 +5,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
@@ -25,10 +25,13 @@ from nexus.ops.agent_paper_once import (
     resume_once,
     trigger_once,
 )
+from nexus.ops.alpaca_adjusted_authority_import import import_adjusted_authority
+from nexus.ops.alpaca_prices_local import collect_prices
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest
 from nexus.ops.paper_once import run_once as run_paper_once
+from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
 from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.agent_market import resolve_agent_paper_market_scope
 from nexus.paper.errors import PaperPerformanceError
@@ -38,11 +41,20 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
+from nexus.persistence.models.data import (
+    PriceBarRecord,
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     PaperPerformanceSnapshotRecord,
 )
 from nexus.persistence.models.runtime import Job
+from nexus.research.alpaca_prices_archive import collection_window
+from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
 
@@ -60,6 +72,7 @@ class AgentPaperLoopAction(StrEnum):
     STOP_CYCLE_UNAVAILABLE = "stop_cycle_unavailable"
     STOP_ORDER_UNAVAILABLE = "stop_order_unavailable"
     STOP_PERFORMANCE_UNAVAILABLE = "stop_performance_unavailable"
+    STOP_PREREQUISITE_UNAVAILABLE = "stop_prerequisite_unavailable"
     STOP_DISABLED = "stop_disabled"
     STOP_SESSION_CLOSED = "stop_session_closed"
 
@@ -80,8 +93,152 @@ class AgentPaperLoopSnapshot:
     performance_due_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class PriorDailyScope:
+    instrument_id: UUID
+    prior_session: date
+    authority_ready: bool
+
+
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
+
+
+async def _inspect_prior_daily_scope(
+    settings: EngineSettings, *, account_id: UUID, now: datetime
+) -> PriorDailyScope:
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            authority = await load_quasi_realtime_cycle_authority(
+                session, account_id=account_id, now=now
+            )
+            scope = await inspect_query_authority_scope(
+                session,
+                decision_session=authority.decision_session,
+                symbol="AAPL",
+                as_of=now,
+                universe_snapshot_id=authority.universe_snapshot_id,
+                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            )
+            prior_session = await session.scalar(
+                select(ExchangeCalendarSessionRecord.session)
+                .where(
+                    ExchangeCalendarSessionRecord.calendar_authority_id
+                    == authority.calendar_authority_id,
+                    ExchangeCalendarSessionRecord.session < authority.decision_session,
+                )
+                .order_by(ExchangeCalendarSessionRecord.session.desc())
+                .limit(1)
+            )
+            if not isinstance(prior_session, date):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            existing = await session.scalar(
+                select(PriceBarSetAuthority.id)
+                .join(
+                    PriceSeriesManifest,
+                    PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
+                )
+                .join(
+                    PriceBarRecord,
+                    PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
+                )
+                .where(
+                    PriceBarSetAuthority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
+                    PriceBarSetAuthority.available_at <= now,
+                    PriceBarSetAuthority.created_at <= now,
+                    PriceBarRecord.instrument_id == scope.instrument_id,
+                    PriceBarRecord.session == prior_session,
+                    PriceBarRecord.available_at <= now,
+                    PriceBarRecord.created_at <= now,
+                    PriceSeriesManifest.created_at <= now,
+                    PriceSeriesManifest.source == "alpaca",
+                    PriceSeriesManifest.feed == "sip",
+                    PriceSeriesManifest.delivery_mode == "delayed",
+                    PriceSeriesManifest.adjustment == "all",
+                    PriceSeriesManifest.interval == "1Day",
+                )
+                .order_by(PriceBarSetAuthority.available_at.desc(), PriceBarSetAuthority.id)
+                .limit(1)
+            )
+            return PriorDailyScope(
+                instrument_id=scope.instrument_id,
+                prior_session=prior_session,
+                authority_ready=existing is not None,
+            )
+    finally:
+        await engine.dispose()
+
+
+async def prepare_prior_daily_once(
+    settings: AgentPaperTriggerSettings,
+    *,
+    account_id: UUID,
+    repo_root: Path,
+    now: datetime,
+) -> str:
+    """Create at most one exact prior-session daily authority before a cycle."""
+    scope = await _inspect_prior_daily_scope(settings, account_id=account_id, now=now)
+    if scope.authority_ready:
+        return "ready"
+    parent = repo_root / ".secrets" / "nexus-agent-paper" / "daily"
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    output_dir = parent / scope.prior_session.isoformat()
+    try:
+        output_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        return "unavailable"
+    try:
+        request, calendar = collection_window(
+            scope.instrument_id,
+            scope.prior_session,
+            scope.prior_session,
+            "all",
+            now=now,
+        )
+        collected = await collect_prices(
+            request,
+            symbol="AAPL",
+            calendar=calendar,
+            resolved_at=now,
+            key_id=settings.alpaca_key,
+            secret=settings.alpaca_secret,
+            output_dir=output_dir,
+            max_pages=10,
+            identity_asof=scope.prior_session,
+        )
+        if collected.get("status") != "collected" or collected.get("readback_verified") is not True:
+            return "unavailable"
+        imported = await import_adjusted_authority(
+            settings,
+            instrument_id=scope.instrument_id,
+            collection_dir=output_dir,
+            purpose="agent-paper-decision",
+        )
+        if imported.get("status") != "stored_authority":
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    except ValueError:
+        return "unavailable"
+    verified = await _inspect_prior_daily_scope(
+        settings, account_id=account_id, now=datetime.now(UTC)
+    )
+    if (
+        not verified.authority_ready
+        or verified.instrument_id != scope.instrument_id
+        or verified.prior_session != scope.prior_session
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    return "prepared"
 
 
 def resolve_cycle_research_job(
@@ -284,8 +441,21 @@ async def execute_agent_paper_loop_action(
     """Execute exactly one planner-approved action through existing product services."""
     if action == AgentPaperLoopAction.TRIGGER:
         environment = load_local_environment(repo_root, {})
+        trigger_settings = AgentPaperTriggerSettings.model_validate(environment)
+        prior_daily = await prepare_prior_daily_once(
+            trigger_settings,
+            account_id=account_id,
+            repo_root=repo_root,
+            now=snapshot.now,
+        )
+        if prior_daily == "prepared":
+            return None
+        if prior_daily == "unavailable":
+            return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+        if prior_daily != "ready":
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         await trigger_once(
-            AgentPaperTriggerSettings.model_validate(environment),
+            trigger_settings,
             AgentPaperTriggerRequest(
                 action="trigger",
                 account_id=account_id,
@@ -518,6 +688,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if reason == AgentPaperLoopAction.STOP_PERFORMANCE_UNAVAILABLE:
             print(json.dumps({"error_code": "AGENT_PAPER_LOOP_PERFORMANCE_UNAVAILABLE"}))
+            return 1
+        if reason == AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE:
+            print(json.dumps({"error_code": "AGENT_PAPER_LOOP_PREREQUISITE_UNAVAILABLE"}))
             return 1
     except KeyboardInterrupt:
         print(json.dumps({"error_code": "AGENT_PAPER_LOOP_INTERRUPTED"}))

@@ -1,7 +1,7 @@
 import asyncio
 import json
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -260,6 +260,11 @@ def test_loop_command_is_default_off(
             1,
             {"error_code": "AGENT_PAPER_LOOP_PERFORMANCE_UNAVAILABLE"},
         ),
+        (
+            loop.AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE,
+            1,
+            {"error_code": "AGENT_PAPER_LOOP_PREREQUISITE_UNAVAILABLE"},
+        ),
     ],
 )
 def test_loop_command_exposes_only_safe_stop_reasons(
@@ -353,6 +358,8 @@ def test_executor_claims_only_persisted_job(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[object] = []
+    preparations: list[tuple[UUID, datetime]] = []
+    received_settings: list[object] = []
     environment = {
         **enabled_environment(),
         "ALPACA_API_KEY_ID": "key",
@@ -360,7 +367,16 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     }
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
-    async def trigger(_settings, request, *, repo_root):
+    async def prepare(settings, *, account_id, repo_root, now):
+        assert repo_root == loop.Path("/repo")
+        received_settings.append(settings)
+        preparations.append((account_id, now))
+        return "ready"
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
+
+    async def trigger(settings, request, *, repo_root):
+        received_settings.append(settings)
         requests.append(request)
 
     monkeypatch.setattr(loop, "trigger_once", trigger)
@@ -374,8 +390,236 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
         )
     )
     request = requests[0]
+    assert len(received_settings) == 2
+    assert received_settings[0] is received_settings[1]
+    assert isinstance(received_settings[0], loop.AgentPaperTriggerSettings)
+    assert preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
     assert request.account_id == UUID(int=1)
     assert request.idempotency_key == "agent-paper-loop:2026-09-14T14:05:00+00:00"
+
+
+def test_executor_reinspects_after_preparing_missing_prior_daily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = {
+        **enabled_environment(),
+        "ALPACA_API_KEY_ID": "key",
+        "ALPACA_API_SECRET_KEY": "secret",
+    }
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
+
+    async def prepare(_settings, *, account_id, repo_root, now):
+        return "prepared"
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
+
+    async def unexpected_trigger(*_args, **_kwargs):
+        raise AssertionError("a newly imported daily authority must be read back first")
+
+    monkeypatch.setattr(loop, "trigger_once", unexpected_trigger)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=loop.AgentPaperLoopAction.TRIGGER,
+            snapshot=snapshot(now=datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC)),
+        )
+    )
+
+    assert result is None
+
+
+def test_executor_stops_before_cycle_when_prior_daily_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+
+    async def prepare(_settings, *, account_id, repo_root, now):
+        return "unavailable"
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
+
+    async def unexpected_trigger(*_args, **_kwargs):
+        raise AssertionError("missing prior daily evidence must not create a cycle")
+
+    monkeypatch.setattr(loop, "trigger_once", unexpected_trigger)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=loop.AgentPaperLoopAction.TRIGGER,
+            snapshot=snapshot(),
+        )
+    )
+
+    assert result == "stop_prerequisite_unavailable"
+
+
+def test_prior_daily_preparation_collects_imports_and_reads_back_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    instrument_id = UUID(int=20)
+    prior_session = date(2026, 9, 11)
+    scopes = iter(
+        (
+            SimpleNamespace(
+                instrument_id=instrument_id,
+                prior_session=prior_session,
+                authority_ready=False,
+            ),
+            SimpleNamespace(
+                instrument_id=instrument_id,
+                prior_session=prior_session,
+                authority_ready=True,
+            ),
+        )
+    )
+    calls: list[tuple[object, ...]] = []
+
+    async def inspect(_settings, *, account_id, now):
+        calls.append(("inspect", account_id, now))
+        return next(scopes)
+
+    def window(received_instrument_id, start, end, adjustment, *, now):
+        calls.append(("window", received_instrument_id, start, end, adjustment, now))
+        return "request", {"session": prior_session.isoformat()}
+
+    async def collect(request, **kwargs):
+        calls.append(("collect", request, kwargs["identity_asof"], kwargs["max_pages"]))
+        return {"status": "collected", "readback_verified": True}
+
+    async def import_authority(_settings, **kwargs):
+        calls.append(("import", kwargs["instrument_id"], kwargs["purpose"]))
+        return {"status": "stored_authority"}
+
+    monkeypatch.setattr(loop, "_inspect_prior_daily_scope", inspect, raising=False)
+    monkeypatch.setattr(loop, "collection_window", window, raising=False)
+    monkeypatch.setattr(loop, "collect_prices", collect, raising=False)
+    monkeypatch.setattr(loop, "import_adjusted_authority", import_authority, raising=False)
+    settings = SimpleNamespace(alpaca_key=object(), alpaca_secret=object())
+
+    result = asyncio.run(
+        loop.prepare_prior_daily_once(
+            settings,
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "prepared"
+    assert [call[0] for call in calls] == ["inspect", "window", "collect", "import", "inspect"]
+    assert calls[1] == ("window", instrument_id, prior_session, prior_session, "all", NOW)
+    assert calls[2] == ("collect", "request", prior_session, 10)
+    assert calls[3] == ("import", instrument_id, "agent-paper-decision")
+
+
+def test_prior_daily_preparation_reuses_existing_authority_without_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    async def inspect(_settings, *, account_id, now):
+        return loop.PriorDailyScope(
+            instrument_id=UUID(int=20),
+            prior_session=date(2026, 9, 11),
+            authority_ready=True,
+        )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("existing authority must not call a provider or importer")
+
+    monkeypatch.setattr(loop, "_inspect_prior_daily_scope", inspect)
+    monkeypatch.setattr(loop, "collect_prices", unexpected)
+    monkeypatch.setattr(loop, "import_adjusted_authority", unexpected)
+
+    result = asyncio.run(
+        loop.prepare_prior_daily_once(
+            SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "ready"
+    assert not (tmp_path / ".secrets").exists()
+
+
+def test_prior_daily_preparation_does_not_repeat_an_existing_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    prior_session = date(2026, 9, 11)
+    attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "daily" / prior_session.isoformat()
+    attempt.mkdir(mode=0o700, parents=True)
+
+    async def inspect(_settings, *, account_id, now):
+        return loop.PriorDailyScope(
+            instrument_id=UUID(int=20),
+            prior_session=prior_session,
+            authority_ready=False,
+        )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("an existing attempt directory must prevent a duplicate call")
+
+    monkeypatch.setattr(loop, "_inspect_prior_daily_scope", inspect)
+    monkeypatch.setattr(loop, "collect_prices", unexpected)
+    monkeypatch.setattr(loop, "import_adjusted_authority", unexpected)
+
+    result = asyncio.run(
+        loop.prepare_prior_daily_once(
+            SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "unavailable"
+
+
+def test_prior_daily_preparation_stops_after_known_collection_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    prior_session = date(2026, 9, 11)
+
+    async def inspect(_settings, *, account_id, now):
+        return loop.PriorDailyScope(
+            instrument_id=UUID(int=20),
+            prior_session=prior_session,
+            authority_ready=False,
+        )
+
+    async def collect(*_args, **_kwargs):
+        return {"status": "failed", "code": "ALPACA_PRICES_STATUS_REJECTED"}
+
+    async def unexpected_import(*_args, **_kwargs):
+        raise AssertionError("a failed collection must not be imported")
+
+    monkeypatch.setattr(loop, "_inspect_prior_daily_scope", inspect)
+    monkeypatch.setattr(loop, "collection_window", lambda *_args, **_kwargs: ("request", {}))
+    monkeypatch.setattr(loop, "collect_prices", collect)
+    monkeypatch.setattr(loop, "import_adjusted_authority", unexpected_import)
+
+    result = asyncio.run(
+        loop.prepare_prior_daily_once(
+            SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "unavailable"
 
 
 @pytest.mark.parametrize(
