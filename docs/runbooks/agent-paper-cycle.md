@@ -96,17 +96,19 @@ uv run --project engine nexus-engine-agent-paper-once trigger \
 `SCHWAB_L1_FRESHNESS_UNPROVEN`、`SCHWAB_L1_INCOMPLETE`、候选或证据绑定冲突。不得换数据源、
 放宽时间/质量门槛或借用 Shadow 路径。
 
-## 3. Run existing worker once：最多消费一个 Job
+## 3. Run research once：只消费该周期的一个 Job
 
-先确认该周期恰有一个 queued 研究 Job，且没有相同 Run 的未知调用结果，再运行现有一次性
-研究 worker：
+使用 `trigger` 返回的 `CYCLE_ID`。入口从该周期的持久化事件解析唯一 Run，只允许领取与之绑定的
+queued `agent.paper.research` Job：
 
 ```bash
-uv run --project engine nexus-openai-local run-once --backend codex_sdk
+uv run --project engine nexus-engine-agent-paper-once run-research \
+  --cycle-id "$CYCLE_ID"
 ```
 
-该入口至多领取一个已登记 Job。`job_processed=false`、调用结果 unknown、预算不足或 worker
-退出时先查原 Job/Run/Output，不再次运行 worker。只有持久化 Output 终态明确后才继续。
+该命令最多处理一个 Job 后立即退出，不扫描普通研究 Job，不执行 `resume`，也不创建下一决策槽周期。
+如果 Job 已在运行、已终态、绑定冲突、已有 Output 或调用结果不明，命令返回
+`AGENT_PAPER_RESULT_UNKNOWN`；先查原 Cycle/Job/Run/Output，不再次运行 worker。只有持久化 Output 终态明确后才继续。
 
 ## 4. Resume：消费已持久化研究结果
 

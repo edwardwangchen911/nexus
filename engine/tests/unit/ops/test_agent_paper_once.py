@@ -43,7 +43,11 @@ def test_disabled_command_emits_only_fixed_code(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
+    monkeypatch.setattr(
+        cli,
+        "load_local_environment",
+        lambda *_args: {"NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false"},
+    )
 
     exit_code = main(
         [
@@ -159,6 +163,112 @@ def test_collect_window_parser_has_no_provider_or_credential_override() -> None:
                 datetime(2026, 8, 27, 13, 30, tzinfo=UTC).isoformat(),
             ]
         )
+
+
+def test_run_research_parser_accepts_only_cycle_id() -> None:
+    cycle_id = UUID(int=1)
+
+    parsed = parser().parse_args(["run-research", "--cycle-id", str(cycle_id)])
+
+    assert parsed.action == "run-research"
+    assert parsed.cycle_id == str(cycle_id)
+    with pytest.raises(SystemExit):
+        parser().parse_args(
+            [
+                "run-research",
+                "--cycle-id",
+                str(cycle_id),
+                "--backend",
+                "codex_sdk",
+            ]
+        )
+
+
+def test_run_research_resolves_only_one_queued_cycle_bound_paper_job() -> None:
+    run_id, job_id = UUID(int=10), UUID(int=11)
+    events = (
+        SimpleNamespace(
+            sequence=1,
+            to_status="researching",
+            fact_ids={"research_run_ids": [str(run_id)]},
+        ),
+    )
+    paper_job = SimpleNamespace(
+        id=job_id,
+        job_type="agent.paper.research",
+        status="queued",
+        attempt_count=0,
+        manual_retry_count=0,
+        max_attempts=1,
+        started_at=None,
+        finished_at=None,
+        payload={"run_id": str(run_id)},
+    )
+
+    assert (
+        cli.resolve_queued_cycle_research_job(events=events, jobs=(paper_job,), output_run_ids=())
+        == job_id
+    )
+
+    ordinary_job = SimpleNamespace(
+        id=job_id,
+        job_type="agent.research",
+        status="queued",
+        payload={"run_id": str(run_id)},
+    )
+    for jobs, outputs in (
+        ((ordinary_job,), ()),
+        ((paper_job,), (run_id,)),
+        ((paper_job, paper_job), ()),
+        ((SimpleNamespace(**{**vars(paper_job), "status": "running"}),), ()),
+        ((SimpleNamespace(**{**vars(paper_job), "attempt_count": 1}),), ()),
+    ):
+        with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
+            cli.resolve_queued_cycle_research_job(events=events, jobs=jobs, output_run_ids=outputs)
+    with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
+        cli.resolve_queued_cycle_research_job(events=(), jobs=(), output_run_ids=())
+
+
+def test_run_research_claims_only_resolved_job_and_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_id, job_id = UUID(int=20), UUID(int=21)
+    received: list[tuple[UUID, ...] | None] = []
+
+    async def resolve(_database_url: str, *, requested_cycle_id: UUID) -> UUID:
+        assert requested_cycle_id == cycle_id
+        return job_id
+
+    async def run_worker(_settings: object, *, job_ids=None) -> bool:
+        received.append(job_ids)
+        return True
+
+    monkeypatch.setattr(cli, "_resolve_queued_research_job_id", resolve)
+    monkeypatch.setattr(
+        cli,
+        "local_settings",
+        lambda *_args, **_kwargs: EngineSettings(
+            database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus"
+        ),
+    )
+    monkeypatch.setattr(cli, "run_agent_worker_once", run_worker)
+
+    result = asyncio.run(
+        cli.run_research_once(
+            EngineSettings(database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus"),
+            cli.AgentPaperRunResearchRequest(action="run-research", cycle_id=cycle_id),
+            repo_root=tmp_path,
+        )
+    )
+
+    assert received == [(job_id,)]
+    assert result.model_dump(mode="json") == {
+        "cycle_id": str(cycle_id),
+        "job_id": str(job_id),
+        "job_processed": True,
+        "execution_locked": True,
+    }
 
 
 def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(

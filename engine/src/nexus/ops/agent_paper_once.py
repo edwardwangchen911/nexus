@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -18,10 +19,12 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from nexus.jobs.models import JobType
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.agent_risk_authority import collect_source_proofs
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
+from nexus.ops.openai_local import local_settings
 from nexus.ops.schwab_market_stream import (
     ProviderMarketStreamError,
     SchwabMarketStreamImportResult,
@@ -42,12 +45,15 @@ from nexus.paper.agent_market import (
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
 )
+from nexus.persistence.models.agents import AgentResearchOutputRecord
 from nexus.persistence.models.data import DataArtifact
 from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCycleEventRecord,
 )
+from nexus.persistence.models.runtime import Job
 from nexus.providers.base import MarketDataProvider
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider
@@ -60,6 +66,7 @@ from nexus.risk.query_authority_producer import (
     persist_query_authorities,
 )
 from nexus.settings import EngineSettings
+from nexus.worker import run_agent_worker_once
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _SAFE_SCHWAB_FAILURE_CODES = frozenset(
@@ -145,6 +152,22 @@ class AgentPaperCollectWindowRequest(BaseModel):
     instrument_id: UUID | None = None
 
 
+class AgentPaperRunResearchRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    action: Literal["run-research"]
+    cycle_id: UUID
+
+
+class AgentPaperRunResearchResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cycle_id: UUID
+    job_id: UUID
+    job_processed: Literal[True] = True
+    execution_locked: Literal[True] = True
+
+
 class AgentPaperMarketSettings(EngineSettings):
     alpaca_key: SecretStr | None = Field(default=None, validation_alias="ALPACA_API_KEY_ID")
     alpaca_secret: SecretStr | None = Field(
@@ -170,6 +193,8 @@ def parser() -> argparse.ArgumentParser:
     resume = commands.add_parser("resume")
     resume.add_argument("--cycle-id", required=True)
     resume.add_argument("--idempotency-key", required=True)
+    run_research = commands.add_parser("run-research")
+    run_research.add_argument("--cycle-id", required=True)
     collect = commands.add_parser("collect-window")
     collect.add_argument("--cycle-id", required=True)
     collect.add_argument("--instrument-id")
@@ -469,6 +494,113 @@ async def resume_once(
         await engine.dispose()
 
 
+def resolve_queued_cycle_research_job(
+    *,
+    events: Sequence[object],
+    jobs: Sequence[object],
+    output_run_ids: Sequence[UUID],
+) -> UUID:
+    """Resolve one untouched paper-research Job from immutable cycle facts."""
+    if not events or getattr(events[-1], "to_status", None) != "researching":
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    raw_run_ids: list[str] = []
+    for event in events:
+        fact_ids = getattr(event, "fact_ids", None)
+        raw = fact_ids.get("research_run_ids") if isinstance(fact_ids, dict) else None
+        if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
+            raw_run_ids.extend(raw)
+    if len(raw_run_ids) != 1:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    try:
+        run_id = UUID(raw_run_ids[0])
+    except ValueError as error:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN") from error
+    if output_run_ids or len(jobs) != 1:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    job = jobs[0]
+    payload = getattr(job, "payload", None)
+    job_id = getattr(job, "id", None)
+    if (
+        getattr(job, "job_type", None) != JobType.AGENT_PAPER_RESEARCH.value
+        or getattr(job, "status", None) != "queued"
+        or getattr(job, "attempt_count", None) != 0
+        or getattr(job, "manual_retry_count", None) != 0
+        or getattr(job, "max_attempts", None) != 1
+        or getattr(job, "started_at", None) is not None
+        or getattr(job, "finished_at", None) is not None
+        or not isinstance(payload, dict)
+        or payload.get("run_id") != str(run_id)
+        or not isinstance(job_id, UUID)
+    ):
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    return job_id
+
+
+async def _resolve_queued_research_job_id(database_url: str, *, requested_cycle_id: UUID) -> UUID:
+    engine = create_async_engine(database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            events = tuple(
+                await session.scalars(
+                    select(AgentPaperCycleEventRecord)
+                    .where(AgentPaperCycleEventRecord.cycle_id == requested_cycle_id)
+                    .order_by(AgentPaperCycleEventRecord.sequence)
+                )
+            )
+            raw_run_ids: list[str] = []
+            for event in events:
+                raw = event.fact_ids.get("research_run_ids")
+                if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
+                    raw_run_ids.extend(raw)
+            jobs: tuple[object, ...] = ()
+            output_run_ids: tuple[UUID, ...] = ()
+            if raw_run_ids:
+                jobs = tuple(
+                    await session.scalars(
+                        select(Job).where(Job.payload["run_id"].as_string().in_(tuple(raw_run_ids)))
+                    )
+                )
+                output_run_ids = tuple(
+                    await session.scalars(
+                        select(AgentResearchOutputRecord.run_id).where(
+                            AgentResearchOutputRecord.run_id.in_(
+                                tuple(UUID(value) for value in raw_run_ids)
+                            )
+                        )
+                    )
+                )
+            return resolve_queued_cycle_research_job(
+                events=events, jobs=jobs, output_run_ids=output_run_ids
+            )
+    except (TypeError, ValueError) as error:
+        if str(error) == "AGENT_PAPER_RESULT_UNKNOWN":
+            raise
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN") from error
+    finally:
+        await engine.dispose()
+
+
+async def run_research_once(
+    settings: EngineSettings,
+    request: AgentPaperRunResearchRequest,
+    *,
+    repo_root: Path,
+) -> AgentPaperRunResearchResult:
+    _validate_local_database(settings.database_url)
+    assert settings.database_url is not None
+    job_id = await _resolve_queued_research_job_id(
+        settings.database_url, requested_cycle_id=request.cycle_id
+    )
+    worker_settings = local_settings(repo_root, backend="codex_sdk")
+    if worker_settings.database_url != settings.database_url:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    worked = await run_agent_worker_once(worker_settings, job_ids=(job_id,))
+    if not worked:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    return AgentPaperRunResearchResult(cycle_id=request.cycle_id, job_id=job_id)
+
+
 async def collect_window_once(
     settings: AgentPaperMarketSettings,
     request: AgentPaperCollectWindowRequest,
@@ -553,20 +685,28 @@ def main(argv: list[str] | None = None) -> int:
     try:
         values = vars(args)
         action = values.get("action")
-        request = (
-            AgentPaperRunRequest.model_validate(values)
-            if action == "run"
-            else AgentPaperTriggerRequest.model_validate(values)
-            if action == "trigger"
-            else AgentPaperResumeRequest.model_validate(values)
-            if action == "resume"
-            else AgentPaperCollectWindowRequest.model_validate(values)
+        request: (
+            AgentPaperRunRequest
+            | AgentPaperTriggerRequest
+            | AgentPaperResumeRequest
+            | AgentPaperRunResearchRequest
+            | AgentPaperCollectWindowRequest
         )
+        if action == "run":
+            request = AgentPaperRunRequest.model_validate(values)
+        elif action == "trigger":
+            request = AgentPaperTriggerRequest.model_validate(values)
+        elif action == "resume":
+            request = AgentPaperResumeRequest.model_validate(values)
+        elif action == "run-research":
+            request = AgentPaperRunResearchRequest.model_validate(values)
+        else:
+            request = AgentPaperCollectWindowRequest.model_validate(values)
         environment = load_local_environment(Path.cwd(), {})
         settings = EngineSettings.model_validate(environment)
         if not settings.agent_paper_cycle_enabled:
             return _emit_error("AGENT_PAPER_CYCLE_DISABLED")
-        result: AgentPaperCycleResult | PaperMarketWindowResult
+        result: AgentPaperCycleResult | PaperMarketWindowResult | AgentPaperRunResearchResult
         if isinstance(request, AgentPaperRunRequest):
             result = asyncio.run(run_once(settings, request))
         elif isinstance(request, AgentPaperTriggerRequest):
@@ -574,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
             result = asyncio.run(trigger_once(trigger_settings, request, repo_root=Path.cwd()))
         elif isinstance(request, AgentPaperResumeRequest):
             result = asyncio.run(resume_once(settings, request))
+        elif isinstance(request, AgentPaperRunResearchRequest):
+            result = asyncio.run(run_research_once(settings, request, repo_root=Path.cwd()))
         else:
             market_settings = AgentPaperMarketSettings.model_validate(environment)
             result = asyncio.run(
