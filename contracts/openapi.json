@@ -5842,6 +5842,149 @@
         "title": "PaperCancelResponse",
         "type": "object"
       },
+      "PaperComparisonResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "title": "As Of",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/PaperComparisonRowResponse"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Rows",
+            "type": "array"
+          },
+          "window_start": {
+            "format": "date-time",
+            "title": "Window Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "window_start",
+          "as_of",
+          "rows"
+        ],
+        "title": "PaperComparisonResponse",
+        "type": "object"
+      },
+      "PaperComparisonRowResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data_state": {
+            "enum": [
+              "READY",
+              "PARTIAL",
+              "STALE",
+              "UNAVAILABLE"
+            ],
+            "title": "Data State",
+            "type": "string"
+          },
+          "key": {
+            "enum": [
+              "agent",
+              "hold_current",
+              "baseline_v1",
+              "market_benchmark"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "max_drawdown_ratio": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Drawdown Ratio"
+          },
+          "nav": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nav"
+          },
+          "reason_code": {
+            "enum": [
+              "PERSISTED_AGENT_PERFORMANCE",
+              "CASH_HOLD_CURRENT",
+              "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
+              "MIXED_STRATEGY_FACTS_UNAVAILABLE"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "total_cost": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Cost"
+          },
+          "total_return_ratio": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Return Ratio"
+          },
+          "turnover_ratio": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turnover Ratio"
+          }
+        },
+        "required": [
+          "key",
+          "data_state",
+          "nav",
+          "total_return_ratio",
+          "max_drawdown_ratio",
+          "turnover_ratio",
+          "total_cost",
+          "reason_code"
+        ],
+        "title": "PaperComparisonRowResponse",
+        "type": "object"
+      },
       "PaperFillResponse": {
         "additionalProperties": false,
         "properties": {
@@ -6328,6 +6471,16 @@
             "title": "Attributions",
             "type": "array"
           },
+          "comparison": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaperComparisonResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "currency": {
             "const": "USD",
             "title": "Currency",
@@ -6392,6 +6545,7 @@
           "initial_capital",
           "data_state",
           "performance",
+          "comparison",
           "positions",
           "attributions"
         ],

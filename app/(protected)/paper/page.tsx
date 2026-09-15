@@ -289,6 +289,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         <PerformanceFacts portfolio={portfolio} />
+        {portfolio.comparison ? <PaperComparison comparison={portfolio.comparison} /> : null}
         <Positions portfolio={portfolio} />
         <Attributions portfolio={portfolio} />
         <section className="paper-orders" aria-labelledby="paper-orders-title">
@@ -299,6 +300,23 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
       </>}
     </section>
   );
+}
+
+function PaperComparison({ comparison }: { comparison: NonNullable<PaperPortfolio["comparison"]> }): React.ReactElement {
+  const labels: Record<(typeof comparison.rows)[number]["key"], string> = {
+    agent: "Agent",
+    hold_current: "保持不动（现金）",
+    baseline_v1: "baseline_v1",
+    market_benchmark: "市场基准（SPY）",
+  };
+  const stateLabels: Record<(typeof comparison.rows)[number]["data_state"], string> = {
+    READY: "完整",
+    PARTIAL: "资料不完整",
+    STALE: "已过期",
+    UNAVAILABLE: "缺少同窗前向事实",
+  };
+  // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- The wide comparison table needs keyboard focus for horizontal scrolling.
+  return <section className="paper-table-section paper-comparison" aria-labelledby="paper-comparison-title"><header><div><p className="eyebrow">同起点 · 同一观察窗</p><h2 id="paper-comparison-title">连续模拟对照</h2></div><p>{formatPaperTime(comparison.window_start)} 至 {formatPaperTime(comparison.as_of)}</p></header><p className="paper-comparison__note">只比较同窗持久化事实；历史回测不会填入当前前向结果。</p><div className="table-scroll" role="region" aria-label="连续模拟四方对照表，可横向滚动" tabIndex={0}><table className="paper-comparison-table numeric-data" aria-label="连续模拟四方对照"><caption>Agent、保持不动、固定策略与市场基准的统一口径。</caption><thead><tr><th scope="col">对照</th><th scope="col">数据完整性</th><th scope="col">净值</th><th scope="col">累计收益</th><th scope="col">最大回撤</th><th scope="col">换手</th><th scope="col">累计成本</th></tr></thead><tbody>{comparison.rows.map((row) => <tr key={row.key} data-state={row.data_state.toLowerCase()}><th scope="row">{labels[row.key]}</th><td><span className="paper-comparison__state">{row.reason_code === "MIXED_STRATEGY_FACTS_UNAVAILABLE" ? "账户含非 Agent 成交" : stateLabels[row.data_state]}</span></td><td>{row.nav === null ? "—" : `USD ${formatPaperDecimal(row.nav, 2)}`}</td><td>{row.total_return_ratio === null ? "—" : formatPercent(row.total_return_ratio)}</td><td>{row.max_drawdown_ratio === null ? "—" : formatPercent(row.max_drawdown_ratio)}</td><td>{row.turnover_ratio === null ? "—" : formatPercent(row.turnover_ratio)}</td><td>{row.total_cost === null ? "—" : `USD ${formatPaperDecimal(row.total_cost, 2)}`}</td></tr>)}</tbody></table></div></section>;
 }
 
 function PerformanceFacts({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {

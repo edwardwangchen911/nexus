@@ -763,10 +763,12 @@ function paperPortfolioValid(value: Record<string, unknown>): boolean {
   const positions = value.positions as unknown[];
   if (value.performance === null) {
     return value.data_state === "EMPTY" && positions.length === 0
+      && value.comparison === null
       && (value.attributions as unknown[]).length === 0;
   }
   if (value.data_state === "EMPTY" || !isPlain(value.performance)) return false;
   const performance = value.performance;
+  if (!paperComparisonValid(value.comparison, performance.as_of, value.initial_capital, value.data_state)) return false;
   if (!decimalNonnegative(performance.available_cash)
     || !decimalNonnegative(performance.reserved_cash)
     || !decimalSumEquals(performance.available_cash, performance.reserved_cash, performance.cash)
@@ -783,6 +785,42 @@ function paperPortfolioValid(value: Record<string, unknown>): boolean {
     positions.map((position) => (position as Record<string, unknown>).market_value),
     performance.market_value,
   );
+}
+
+function paperComparisonValid(
+  value: unknown,
+  performanceAsOf: unknown,
+  initialCapital: unknown,
+  portfolioState: unknown,
+): boolean {
+  if (!isPlain(value) || value.as_of !== performanceAsOf || !Array.isArray(value.rows)) return false;
+  const rows = value.rows;
+  const expectedKeys = ["agent", "hold_current", "baseline_v1", "market_benchmark"];
+  if (rows.map((row) => isPlain(row) ? row.key : null).join(":") !== expectedKeys.join(":")) return false;
+  const metricKeys = ["nav", "total_return_ratio", "max_drawdown_ratio", "turnover_ratio", "total_cost"] as const;
+  if (!rows.every((row) => {
+    if (!isPlain(row)) return false;
+    const metrics = metricKeys.map((key) => row[key]);
+    return row.data_state === "UNAVAILABLE"
+      ? metrics.every((metric) => metric === null)
+      : metrics.every((metric) => parseExactDecimal(metric) !== null)
+        && decimalPositive(row.nav)
+        && decimalNonnegative(row.max_drawdown_ratio)
+        && decimalNonnegative(row.turnover_ratio)
+        && decimalNonnegative(row.total_cost);
+  })) return false;
+  const [agent, hold, baseline, benchmark] = rows as Array<Record<string, unknown>>;
+  const agentValid = agent.reason_code === "MIXED_STRATEGY_FACTS_UNAVAILABLE"
+    ? agent.data_state === "UNAVAILABLE"
+    : agent.reason_code === "PERSISTED_AGENT_PERFORMANCE" && agent.data_state === portfolioState;
+  return agentValid
+    && hold.reason_code === "CASH_HOLD_CURRENT"
+    && hold.data_state === "READY"
+    && decimalCompare(hold.nav, initialCapital) === 0
+    && [hold.total_return_ratio, hold.max_drawdown_ratio, hold.turnover_ratio, hold.total_cost]
+      .every((metric) => decimalCompare(metric, "0") === 0)
+    && [baseline, benchmark].every((row) => row.data_state === "UNAVAILABLE"
+      && row.reason_code === "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE");
 }
 
 type ExactDecimal = { coefficient: bigint; scale: number };

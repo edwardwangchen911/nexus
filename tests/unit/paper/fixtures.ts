@@ -59,6 +59,16 @@ export const paperPortfolio: PaperPortfolio = {
     fees: "2.500000000000",
     drawdown_ratio: "0.009900990099",
   },
+  comparison: {
+    as_of: "2026-08-26T20:00:00Z",
+    window_start: "2026-08-26T13:00:00Z",
+    rows: [
+      { key: "agent", data_state: "READY", nav: "10000", total_return_ratio: "0", max_drawdown_ratio: "0.009900990099", turnover_ratio: "0.1", total_cost: "2.92", reason_code: "PERSISTED_AGENT_PERFORMANCE" },
+      { key: "hold_current", data_state: "READY", nav: "10000", total_return_ratio: "0", max_drawdown_ratio: "0", turnover_ratio: "0", total_cost: "0", reason_code: "CASH_HOLD_CURRENT" },
+      { key: "baseline_v1", data_state: "UNAVAILABLE", nav: null, total_return_ratio: null, max_drawdown_ratio: null, turnover_ratio: null, total_cost: null, reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+      { key: "market_benchmark", data_state: "UNAVAILABLE", nav: null, total_return_ratio: null, max_drawdown_ratio: null, turnover_ratio: null, total_cost: null, reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+    ],
+  },
   positions: [{
     instrument_id: instrumentId,
     symbol: "AAPL",

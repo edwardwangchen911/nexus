@@ -3297,6 +3297,49 @@ export interface components {
              */
             status: "cancelled";
         };
+        /** PaperComparisonResponse */
+        PaperComparisonResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Rows */
+            rows: components["schemas"]["PaperComparisonRowResponse"][];
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+        };
+        /** PaperComparisonRowResponse */
+        PaperComparisonRowResponse: {
+            /**
+             * Data State
+             * @enum {string}
+             */
+            data_state: "READY" | "PARTIAL" | "STALE" | "UNAVAILABLE";
+            /**
+             * Key
+             * @enum {string}
+             */
+            key: "agent" | "hold_current" | "baseline_v1" | "market_benchmark";
+            /** Max Drawdown Ratio */
+            max_drawdown_ratio: string | null;
+            /** Nav */
+            nav: string | null;
+            /**
+             * Reason Code
+             * @enum {string}
+             */
+            reason_code: "PERSISTED_AGENT_PERFORMANCE" | "CASH_HOLD_CURRENT" | "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" | "MIXED_STRATEGY_FACTS_UNAVAILABLE";
+            /** Total Cost */
+            total_cost: string | null;
+            /** Total Return Ratio */
+            total_return_ratio: string | null;
+            /** Turnover Ratio */
+            turnover_ratio: string | null;
+        };
         /** PaperFillResponse */
         PaperFillResponse: {
             /**
@@ -3466,6 +3509,7 @@ export interface components {
         PaperPortfolioResponse: {
             /** Attributions */
             attributions: components["schemas"]["PaperAttributionResponse"][];
+            comparison: components["schemas"]["PaperComparisonResponse"] | null;
             /**
              * Currency
              * @constant

@@ -617,6 +617,22 @@ async def test_paper_portfolio_returns_redacted_authoritative_performance(
     assert data["currency"] == "USD"
     assert data["data_state"] == "READY"
     assert data["performance"]["as_of"] == "2026-08-27T20:00:00Z"
+    comparison = data["comparison"]
+    assert comparison["as_of"] == data["performance"]["as_of"]
+    assert [row["key"] for row in comparison["rows"]] == [
+        "agent",
+        "hold_current",
+        "baseline_v1",
+        "market_benchmark",
+    ]
+    assert comparison["rows"][0]["data_state"] == "UNAVAILABLE"
+    assert comparison["rows"][0]["reason_code"] == "MIXED_STRATEGY_FACTS_UNAVAILABLE"
+    assert comparison["rows"][1]["nav"] == data["initial_capital"]
+    assert comparison["rows"][1]["total_return_ratio"] == "0"
+    assert all(
+        row["reason_code"] == "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE"
+        for row in comparison["rows"][2:]
+    )
     quantity = seed.execution.quantity
     cost = quantity * Decimal("100.25")
     cash = Decimal("10000") - cost

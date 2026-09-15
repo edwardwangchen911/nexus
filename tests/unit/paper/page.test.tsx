@@ -188,6 +188,19 @@ describe("internal paper page", () => {
     expect(document.body).not.toHaveTextContent(/account_id|client_order_id|provider_object/);
   });
 
+  it("compares Agent and cash hold facts without inventing missing forward baselines", () => {
+    render(<PaperPanel state="ready" portfolio={paperPortfolio} orders={[]} nextCursor={null} statusFilter="" loadingMore={false} notice={null} onRefresh={vi.fn()} onStatusFilter={vi.fn()} onLoadMore={vi.fn()} onCancel={vi.fn()} />);
+
+    const table = screen.getByRole("table", { name: "连续模拟四方对照" });
+    expect(table).toHaveTextContent("Agent");
+    expect(table).toHaveTextContent("保持不动（现金）");
+    expect(table).toHaveTextContent("baseline_v1");
+    expect(table).toHaveTextContent("市场基准（SPY）");
+    expect(table).toHaveTextContent("USD 2.92");
+    expect(within(table).getAllByText("缺少同窗前向事实")).toHaveLength(2);
+    expect(table).not.toHaveTextContent("历史回测");
+  });
+
   it("shows current drawdown declining after recovery, not the historical maximum", () => {
     const props = { state: "ready" as const, orders: [], nextCursor: null, statusFilter: "" as const, loadingMore: false, notice: null, onRefresh: vi.fn(), onStatusFilter: vi.fn(), onLoadMore: vi.fn(), onCancel: vi.fn() };
     const portfolio = structuredClone(paperPortfolio);
@@ -200,7 +213,7 @@ describe("internal paper page", () => {
     Object.assign(recovered.performance!, { nav: "9500", drawdown_ratio: "0.05" });
     view.rerender(<PaperPanel {...props} portfolio={recovered} />);
     expect(screen.getByText("当前回撤").nextElementSibling).toHaveTextContent("5%");
-    expect(screen.queryByText("最大回撤")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "账户绩效" })).queryByText("最大回撤")).not.toBeInTheDocument();
     expect(recovered.performance!.drawdown_ratio).toBe("0.05");
   });
 

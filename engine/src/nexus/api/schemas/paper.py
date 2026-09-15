@@ -9,7 +9,7 @@ from uuid import UUID
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.paper.models import InternalOrderStatus
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 class _StrictSchema(BaseModel):
@@ -58,6 +58,57 @@ class PaperAttributionResponse(_StrictSchema):
     completeness: Literal["FULL", "PARTIAL"]
 
 
+class PaperComparisonRowResponse(_StrictSchema):
+    key: Literal["agent", "hold_current", "baseline_v1", "market_benchmark"]
+    data_state: Literal["READY", "PARTIAL", "STALE", "UNAVAILABLE"]
+    nav: DecimalString | None
+    total_return_ratio: DecimalString | None
+    max_drawdown_ratio: DecimalString | None
+    turnover_ratio: DecimalString | None
+    total_cost: DecimalString | None
+    reason_code: Literal[
+        "PERSISTED_AGENT_PERFORMANCE",
+        "CASH_HOLD_CURRENT",
+        "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
+        "MIXED_STRATEGY_FACTS_UNAVAILABLE",
+    ]
+
+    @model_validator(mode="after")
+    def _metrics_match_availability(self) -> PaperComparisonRowResponse:
+        metrics = (
+            self.nav,
+            self.total_return_ratio,
+            self.max_drawdown_ratio,
+            self.turnover_ratio,
+            self.total_cost,
+        )
+        unavailable = self.data_state == "UNAVAILABLE"
+        if (unavailable and not all(value is None for value in metrics)) or (
+            not unavailable and any(value is None for value in metrics)
+        ):
+            raise ValueError("comparison metrics must match availability")
+        return self
+
+
+class PaperComparisonResponse(_StrictSchema):
+    window_start: AwareDatetime
+    as_of: AwareDatetime
+    rows: tuple[PaperComparisonRowResponse, ...] = Field(min_length=4, max_length=4)
+
+    @model_validator(mode="after")
+    def _rows_are_canonical(self) -> PaperComparisonResponse:
+        if self.window_start > self.as_of:
+            raise ValueError("comparison window must be ordered")
+        if tuple(row.key for row in self.rows) != (
+            "agent",
+            "hold_current",
+            "baseline_v1",
+            "market_benchmark",
+        ):
+            raise ValueError("comparison rows must use canonical order")
+        return self
+
+
 class PaperPortfolioResponse(_StrictSchema):
     portfolio_id: UUID
     name: str = Field(min_length=1, max_length=100)
@@ -66,6 +117,7 @@ class PaperPortfolioResponse(_StrictSchema):
     initial_capital: DecimalString
     data_state: Literal["EMPTY", "READY", "PARTIAL", "STALE"]
     performance: PaperPerformanceResponse | None
+    comparison: PaperComparisonResponse | None
     positions: tuple[PaperPositionResponse, ...] = Field(max_length=500)
     attributions: tuple[PaperAttributionResponse, ...] = Field(max_length=500)
 

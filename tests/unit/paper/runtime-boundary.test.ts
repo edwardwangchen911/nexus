@@ -59,6 +59,10 @@ describe("internal-paper Engine response boundary", () => {
     const inconsistentCash = structuredClone(data);
     inconsistentCash.performance.reserved_cash = "501.000000000000";
     expect((await sanitizeEngineResponse(json({ data: inconsistentCash, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(500);
+
+    const inventedBaseline = structuredClone(data);
+    inventedBaseline.comparison.rows[2].nav = "100000.000000000000";
+    expect((await sanitizeEngineResponse(json({ data: inventedBaseline, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(500);
   });
 
   it("uses the bounded paper response budget for a legal projection above the default cap", async () => {
@@ -197,6 +201,16 @@ function portfolio() {
       unrealized_pnl: "400.000000000000",
       fees: "2.000000000000",
       drawdown_ratio: "0.004950495050",
+    },
+    comparison: {
+      window_start: "2026-08-26T13:00:00Z",
+      as_of: "2026-08-26T20:00:00Z",
+      rows: [
+        { key: "agent" as const, data_state: "READY" as const, nav: "100500.000000000000", total_return_ratio: "0.005000000000", max_drawdown_ratio: "0.004950495050", turnover_ratio: "0.105000000000", total_cost: "7.000000000000", reason_code: "PERSISTED_AGENT_PERFORMANCE" as const },
+        { key: "hold_current" as const, data_state: "READY" as const, nav: "100000.000000000000", total_return_ratio: "0", max_drawdown_ratio: "0", turnover_ratio: "0", total_cost: "0", reason_code: "CASH_HOLD_CURRENT" as const },
+        { key: "baseline_v1" as const, data_state: "UNAVAILABLE" as const, nav: null, total_return_ratio: null, max_drawdown_ratio: null, turnover_ratio: null, total_cost: null, reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" as const },
+        { key: "market_benchmark" as const, data_state: "UNAVAILABLE" as const, nav: null, total_return_ratio: null, max_drawdown_ratio: null, turnover_ratio: null, total_cost: null, reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" as const },
+      ],
     },
     positions: [{
       instrument_id: instrumentId,

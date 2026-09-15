@@ -24,6 +24,9 @@ for (const viewport of [
     await expect(agentCycle.getByRole("button")).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Agent 模拟候选，可横向滚动" })).toContainText("AAPL");
     await expect(page.getByLabel("模拟账户绩效事实")).toContainText("USD 8,500.00");
+    const comparison = page.getByRole("table", { name: "连续模拟四方对照" });
+    await expect(comparison).toContainText("保持不动（现金）");
+    await expect(comparison.getByText("缺少同窗前向事实")).toHaveCount(2);
     await expect(page.getByRole("table", { name: "内部模拟持仓" })).toContainText("alpaca / iex");
     const activeOrder = page.locator("article.paper-order").filter({ hasText: cancellableOrder.order_id });
     await expect(activeOrder.getByRole("table", { name: "AAPL 模拟成交事实" })).toContainText("10 基点");
@@ -37,6 +40,9 @@ for (const viewport of [
     const positionScroll = page.getByRole("region", { name: "内部模拟持仓表，可横向滚动" });
     await positionScroll.focus();
     await expect(positionScroll).toBeFocused();
+    const comparisonScroll = page.getByRole("region", { name: "连续模拟四方对照表，可横向滚动" });
+    await comparisonScroll.focus();
+    await expect(comparisonScroll).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 
     const serious = (await new AxeBuilder({ page }).analyze()).violations.filter(

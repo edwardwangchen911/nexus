@@ -6,6 +6,7 @@ import pytest
 from nexus.api.schemas.paper import (
     AgentPaperCycleResponse,
     PaperCancelRequest,
+    PaperComparisonRowResponse,
     PaperOrderPageResponse,
     PaperPortfolioResponse,
 )
@@ -28,12 +29,37 @@ def test_paper_cancel_request_is_strict_and_versioned() -> None:
         PaperCancelRequest.model_validate({"expected_event_seq": 0})
 
 
+def test_available_paper_comparison_requires_every_metric() -> None:
+    with pytest.raises(ValidationError):
+        PaperComparisonRowResponse(
+            key="agent",
+            data_state="READY",
+            nav="10000",
+            total_return_ratio=None,
+            max_drawdown_ratio="0",
+            turnover_ratio="0",
+            total_cost="0",
+            reason_code="PERSISTED_AGENT_PERFORMANCE",
+        )
+
+
 def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_creation() -> None:
     portfolio_schema = PaperPortfolioResponse.model_json_schema()
     page_schema = PaperOrderPageResponse.model_json_schema()
 
     assert portfolio_schema["properties"]["positions"]["maxItems"] == 500
     assert portfolio_schema["properties"]["attributions"]["maxItems"] == 500
+    comparison = portfolio_schema["$defs"]["PaperComparisonResponse"]
+    assert comparison["properties"]["rows"]["maxItems"] == 4
+    comparison_row = portfolio_schema["$defs"]["PaperComparisonRowResponse"]
+    assert {
+        "nav",
+        "total_return_ratio",
+        "max_drawdown_ratio",
+        "turnover_ratio",
+        "total_cost",
+        "data_state",
+    } <= set(comparison_row["required"])
     performance = portfolio_schema["$defs"]["PaperPerformanceResponse"]
     assert {"cash", "available_cash", "reserved_cash"} <= set(performance["required"])
     assert page_schema["properties"]["items"]["maxItems"] == 50

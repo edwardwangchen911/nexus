@@ -23,6 +23,8 @@ from nexus.api.schemas.paper import (
     AgentPaperSchwabExecutionMarketResponse,
     AgentPaperSessionSummaryResponse,
     PaperAttributionResponse,
+    PaperComparisonResponse,
+    PaperComparisonRowResponse,
     PaperFillResponse,
     PaperOrderEventResponse,
     PaperOrderPageResponse,
@@ -790,6 +792,7 @@ class PaperReadService:
                 initial_capital=decimal_to_string(account.initial_capital),
                 data_state="EMPTY",
                 performance=None,
+                comparison=None,
                 positions=(),
                 attributions=(),
             )
@@ -918,8 +921,120 @@ class PaperReadService:
                 fees=decimal_to_string(snapshot.fees),
                 drawdown_ratio=decimal_to_string(snapshot.drawdown_ratio),
             ),
+            comparison=await self._paper_comparison(
+                account=account,
+                snapshot=snapshot,
+                data_state=state,
+            ),
             positions=positions,
             attributions=attributions,
+        )
+
+    async def _paper_comparison(
+        self,
+        *,
+        account: PaperAccountRecord,
+        snapshot: PaperPerformanceSnapshotRecord,
+        data_state: Literal["READY", "PARTIAL", "STALE"],
+    ) -> PaperComparisonResponse:
+        max_drawdown = await self._session.scalar(
+            select(func.max(PaperPerformanceSnapshotRecord.drawdown_ratio)).where(
+                PaperPerformanceSnapshotRecord.account_id == account.id,
+                PaperPerformanceSnapshotRecord.as_of <= snapshot.as_of,
+            )
+        )
+        fill_rows = (
+            await self._session.execute(
+                select(
+                    StrategyDecisionRecord.decision_origin,
+                    func.sum(PaperFillRecord.notional),
+                    func.sum(PaperFillRecord.slippage_amount),
+                )
+                .select_from(PaperFillRecord)
+                .join(PaperOrderRecord, PaperOrderRecord.id == PaperFillRecord.order_id)
+                .join(
+                    StrategyDecisionRecord,
+                    StrategyDecisionRecord.id == PaperOrderRecord.strategy_decision_id,
+                )
+                .where(
+                    PaperFillRecord.account_id == account.id,
+                    PaperFillRecord.occurred_at <= snapshot.as_of,
+                )
+                .group_by(StrategyDecisionRecord.decision_origin)
+            )
+        ).all()
+        mixed_strategy_facts = any(origin != "agent_research" for origin, _, _ in fill_rows)
+        agent_turnover = sum(
+            (notional for origin, notional, _ in fill_rows if origin == "agent_research"),
+            start=Decimal(0),
+        )
+        agent_slippage = sum(
+            (slippage for origin, _, slippage in fill_rows if origin == "agent_research"),
+            start=Decimal(0),
+        )
+        agent_row = (
+            PaperComparisonRowResponse(
+                key="agent",
+                data_state="UNAVAILABLE",
+                nav=None,
+                total_return_ratio=None,
+                max_drawdown_ratio=None,
+                turnover_ratio=None,
+                total_cost=None,
+                reason_code="MIXED_STRATEGY_FACTS_UNAVAILABLE",
+            )
+            if mixed_strategy_facts
+            else PaperComparisonRowResponse(
+                key="agent",
+                data_state=data_state,
+                nav=decimal_to_string(snapshot.nav),
+                total_return_ratio=decimal_to_string(
+                    snapshot.nav / account.initial_capital - Decimal(1)
+                ),
+                max_drawdown_ratio=decimal_to_string(
+                    snapshot.drawdown_ratio if max_drawdown is None else max_drawdown
+                ),
+                turnover_ratio=decimal_to_string(agent_turnover / account.initial_capital),
+                total_cost=decimal_to_string(snapshot.fees + agent_slippage),
+                reason_code="PERSISTED_AGENT_PERFORMANCE",
+            )
+        )
+        return PaperComparisonResponse(
+            window_start=account.created_at,
+            as_of=snapshot.as_of,
+            rows=(
+                agent_row,
+                PaperComparisonRowResponse(
+                    key="hold_current",
+                    data_state="READY",
+                    nav=decimal_to_string(account.initial_capital),
+                    total_return_ratio=decimal_to_string(Decimal(0)),
+                    max_drawdown_ratio=decimal_to_string(Decimal(0)),
+                    turnover_ratio=decimal_to_string(Decimal(0)),
+                    total_cost=decimal_to_string(Decimal(0)),
+                    reason_code="CASH_HOLD_CURRENT",
+                ),
+                PaperComparisonRowResponse(
+                    key="baseline_v1",
+                    data_state="UNAVAILABLE",
+                    nav=None,
+                    total_return_ratio=None,
+                    max_drawdown_ratio=None,
+                    turnover_ratio=None,
+                    total_cost=None,
+                    reason_code="SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
+                ),
+                PaperComparisonRowResponse(
+                    key="market_benchmark",
+                    data_state="UNAVAILABLE",
+                    nav=None,
+                    total_return_ratio=None,
+                    max_drawdown_ratio=None,
+                    turnover_ratio=None,
+                    total_cost=None,
+                    reason_code="SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
+                ),
+            ),
         )
 
     async def orders(
