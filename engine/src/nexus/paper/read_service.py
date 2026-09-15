@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -21,6 +21,7 @@ from nexus.api.schemas.paper import (
     AgentPaperDecisionMarketResponse,
     AgentPaperDecisionResponse,
     AgentPaperSchwabExecutionMarketResponse,
+    AgentPaperSessionSummaryResponse,
     PaperAttributionResponse,
     PaperFillResponse,
     PaperOrderEventResponse,
@@ -32,7 +33,11 @@ from nexus.api.schemas.paper import (
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
-from nexus.paper.agent_cycle_models import CandidateManifestEntry, parse_candidate_manifest
+from nexus.paper.agent_cycle_models import (
+    CandidateManifestEntry,
+    floor_decision_slot,
+    parse_candidate_manifest,
+)
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
@@ -138,7 +143,15 @@ class PaperReadService:
         if resolved_session is None:
             resolved_session = await self._current_xnys_session()
         if resolved_session is None:
-            return AgentPaperCyclePageResponse(items=())
+            return AgentPaperCyclePageResponse(
+                items=(),
+                summary=await self._agent_session_summary(
+                    account_id=account.id,
+                    decision_session=None,
+                    cycles=(),
+                    historical=False,
+                ),
+            )
         cycles = tuple(
             await self._session.scalars(
                 select(AgentPaperCycleRecord)
@@ -154,9 +167,167 @@ class PaperReadService:
                 .limit(limit)
             )
         )
+        items = tuple([await self._agent_cycle(cycle) for cycle in cycles])
         return AgentPaperCyclePageResponse(
-            items=tuple([await self._agent_cycle(cycle) for cycle in cycles])
+            items=items,
+            summary=await self._agent_session_summary(
+                account_id=account.id,
+                decision_session=resolved_session,
+                cycles=items,
+                historical=decision_session is not None,
+            ),
         )
+
+    async def _agent_session_summary(
+        self,
+        *,
+        account_id: UUID,
+        decision_session: date | None,
+        cycles: tuple[AgentPaperCycleResponse, ...],
+        historical: bool,
+    ) -> AgentPaperSessionSummaryResponse:
+        last_completed = await self._session.scalar(
+            select(AgentPaperCycleRecord.decision_time)
+            .join(
+                AgentPaperCycleEventRecord,
+                AgentPaperCycleEventRecord.cycle_id == AgentPaperCycleRecord.id,
+            )
+            .where(
+                AgentPaperCycleEventRecord.to_status == "completed",
+                AgentPaperCycleEventRecord.occurred_at <= self._request_time,
+                AgentPaperCycleRecord.account_id == account_id,
+                AgentPaperCycleRecord.decision_time <= self._request_time,
+            )
+            .order_by(
+                AgentPaperCycleEventRecord.occurred_at.desc(),
+                AgentPaperCycleRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        latest = cycles[0] if cycles else None
+        completed_count = sum(cycle.status == "completed" for cycle in cycles)
+        if historical:
+            return AgentPaperSessionSummaryResponse(
+                decision_session=decision_session,
+                status="historical",
+                cycle_count=len(cycles),
+                completed_count=completed_count,
+                latest_result_code=None if latest is None else latest.result_code,
+                last_completed_decision_at=last_completed,
+                next_eligible_at=None,
+                next_eligible_reason=None,
+                execution_locked=True,
+            )
+
+        local_now = self._request_time.astimezone(ZoneInfo("America/New_York"))
+        next_at: datetime | None = None
+        next_reason: Literal[
+            "CURRENT_SLOT",
+            "NEXT_SLOT",
+            "SESSION_OPEN",
+            "NEXT_SESSION",
+            "CURRENT_CYCLE_IN_PROGRESS",
+            "CALENDAR_UNAVAILABLE",
+        ] | None = None
+        status: Literal[
+            "calendar_unavailable",
+            "not_started",
+            "ready",
+            "in_progress",
+            "completed",
+            "stopped",
+            "closed",
+            "historical",
+        ] = "calendar_unavailable"
+        if decision_session is None:
+            next_session = await self._next_xnys_session(local_now.date())
+            if next_session is not None:
+                status = "closed"
+                next_at = self._paper_window_open(next_session)
+                next_reason = "NEXT_SESSION"
+        elif latest is not None and latest.status not in {
+            "completed",
+            "unavailable",
+            "failed",
+        }:
+            status = "in_progress"
+            next_reason = "CURRENT_CYCLE_IN_PROGRESS"
+        elif latest is not None and latest.status in {"unavailable", "failed"}:
+            status = "stopped"
+            next_session = await self._next_xnys_session(decision_session)
+            if next_session is None:
+                next_reason = "CALENDAR_UNAVAILABLE"
+            else:
+                next_at = self._paper_window_open(next_session)
+                next_reason = "NEXT_SESSION"
+        elif local_now.time().replace(tzinfo=None) < time(7):
+            status = "not_started" if latest is None else "completed"
+            next_at = self._paper_window_open(decision_session)
+            next_reason = "SESSION_OPEN"
+        elif local_now.time().replace(tzinfo=None) >= time(16):
+            status = "closed"
+            next_session = await self._next_xnys_session(decision_session)
+            if next_session is None:
+                next_reason = "CALENDAR_UNAVAILABLE"
+            else:
+                next_at = self._paper_window_open(next_session)
+                next_reason = "NEXT_SESSION"
+        else:
+            status = "ready" if latest is None else "completed"
+            current_slot = floor_decision_slot(self._request_time)
+            if latest is not None and latest.decision_slot_at == current_slot:
+                next_at = current_slot + timedelta(minutes=5)
+                next_reason = "NEXT_SLOT"
+            else:
+                next_at = current_slot
+                next_reason = "CURRENT_SLOT"
+
+        if next_at is None and next_reason is None:
+            next_reason = "CALENDAR_UNAVAILABLE"
+        return AgentPaperSessionSummaryResponse(
+            decision_session=decision_session,
+            status=status,
+            cycle_count=len(cycles),
+            completed_count=completed_count,
+            latest_result_code=None if latest is None else latest.result_code,
+            last_completed_decision_at=last_completed,
+            next_eligible_at=next_at,
+            next_eligible_reason=next_reason,
+            execution_locked=True,
+        )
+
+    async def _next_xnys_session(self, after: date) -> date | None:
+        value = await self._session.scalar(
+            select(ExchangeCalendarSessionRecord.session)
+            .join(
+                ExchangeCalendarAuthorityRecord,
+                ExchangeCalendarAuthorityRecord.id
+                == ExchangeCalendarSessionRecord.calendar_authority_id,
+            )
+            .where(
+                ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+                ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+                ExchangeCalendarAuthorityRecord.published_at <= self._request_time,
+                ExchangeCalendarAuthorityRecord.created_at <= self._request_time,
+                ExchangeCalendarSessionRecord.created_at <= self._request_time,
+                ExchangeCalendarSessionRecord.session > after,
+            )
+            .order_by(
+                ExchangeCalendarSessionRecord.session.asc(),
+                ExchangeCalendarAuthorityRecord.published_at.desc(),
+                ExchangeCalendarAuthorityRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        return cast(date | None, value)
+
+    @staticmethod
+    def _paper_window_open(session_date: date) -> datetime:
+        return datetime.combine(
+            session_date,
+            time(7),
+            tzinfo=ZoneInfo("America/New_York"),
+        ).astimezone(UTC)
 
     async def _current_xnys_session(self) -> date | None:
         local_date = self._request_time.astimezone(ZoneInfo("America/New_York")).date()

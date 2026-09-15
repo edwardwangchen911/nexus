@@ -3,6 +3,7 @@ import { useState } from "react";
 import { formatPaperTime } from "./order-timeline";
 
 export type AgentPaperCycleFact = components["schemas"]["AgentPaperCycleResponse"];
+export type AgentPaperSessionSummaryFact = components["schemas"]["AgentPaperSessionSummaryResponse"];
 
 const statusLabels: Record<AgentPaperCycleFact["status"], string> = {
   prepared: "已准备", researching: "研究中", decision_recorded: "决策已保存",
@@ -23,6 +24,48 @@ const resultExplanations = new Map<string, string>([
   ["RISK_INPUT_REQUIRED", "风险输入不足，系统已停止本周期，没有创建模拟订单。"],
   ["PAPER_ORDERS_AWAITING_MARKET", "Agent 已形成可执行方向并通过风控；模拟订单正在等待执行行情窗口。"],
 ]);
+
+const sessionStatusLabels: Record<AgentPaperSessionSummaryFact["status"], string> = {
+  calendar_unavailable: "交易日历不可用",
+  not_started: "今日尚未开始",
+  ready: "当前时段可运行",
+  in_progress: "周期处理中",
+  completed: "最近周期已完成",
+  stopped: "今日已停止",
+  closed: "当前不在运行时段",
+  historical: "历史交易日",
+};
+
+const nextReasonLabels: Partial<Record<NonNullable<AgentPaperSessionSummaryFact["next_eligible_reason"]>, string>> = {
+  CURRENT_SLOT: "当前五分钟槽",
+  NEXT_SLOT: "下一五分钟槽",
+  SESSION_OPEN: "本交易日开始",
+  NEXT_SESSION: "下一交易日开始",
+  CURRENT_CYCLE_IN_PROGRESS: "当前周期结束后再判断",
+  CALENDAR_UNAVAILABLE: "等待交易日历证据",
+};
+
+export function AgentPaperSessionSummary({ summary }: {
+  summary: AgentPaperSessionSummaryFact;
+}): React.ReactElement {
+  const latestExplanation = summary.latest_result_code
+    ? resultExplanations.get(summary.latest_result_code) ?? `记录代码：${summary.latest_result_code}`
+    : "今日尚无周期结果。";
+  const nextLabel = summary.next_eligible_at
+    ? `${nextReasonLabels[summary.next_eligible_reason ?? "CURRENT_SLOT"] ?? "下一可运行时段"} · ${formatPaperTime(summary.next_eligible_at)}`
+    : nextReasonLabels[summary.next_eligible_reason ?? "CALENDAR_UNAVAILABLE"] ?? "暂无";
+  return <section className="paper-performance" aria-labelledby="agent-session-summary-title">
+    <header><div><p className="eyebrow">连续模拟 · 持久化状态</p><h2 id="agent-session-summary-title">今日连续运行状态</h2></div><span className="mode-badge">实盘锁定</span></header>
+    <dl>
+      <div><dt>今日状态</dt><dd>{sessionStatusLabels[summary.status]}</dd></div>
+      <div><dt>周期进度</dt><dd>已完成 {summary.completed_count} / {summary.cycle_count} 个周期</dd></div>
+      <div><dt>最近完成周期的决策时间</dt><dd>{summary.last_completed_decision_at ? formatPaperTime(summary.last_completed_decision_at) : "暂无"}</dd></div>
+      <div><dt>下一可运行时段</dt><dd>{nextLabel}</dd></div>
+    </dl>
+    <aside className="inline-notice" role="note" aria-label="连续模拟最新结论"><strong>最新结论</strong><p>{latestExplanation}</p></aside>
+    <p>只反映已保存周期，不代表前台循环进程在线；刷新页面不会触发行情、模型或订单。</p>
+  </section>;
+}
 
 export function AgentPaperCycle({ cycles, unavailable = false }: {
   cycles: AgentPaperCycleFact[];

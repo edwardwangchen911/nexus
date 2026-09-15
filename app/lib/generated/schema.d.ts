@@ -1169,6 +1169,7 @@ export interface components {
         AgentPaperCyclePageResponse: {
             /** Items */
             items: components["schemas"]["AgentPaperCycleResponse"][];
+            summary: components["schemas"]["AgentPaperSessionSummaryResponse"];
         };
         /** AgentPaperCycleResponse */
         AgentPaperCycleResponse: {
@@ -1292,6 +1293,33 @@ export interface components {
              * @constant
              */
             window_minutes: 5;
+        };
+        /** AgentPaperSessionSummaryResponse */
+        AgentPaperSessionSummaryResponse: {
+            /** Completed Count */
+            completed_count: number;
+            /** Cycle Count */
+            cycle_count: number;
+            /** Decision Session */
+            decision_session: string | null;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /** Last Completed Decision At */
+            last_completed_decision_at: string | null;
+            /** Latest Result Code */
+            latest_result_code?: string | null;
+            /** Next Eligible At */
+            next_eligible_at: string | null;
+            /** Next Eligible Reason */
+            next_eligible_reason: ("CURRENT_SLOT" | "NEXT_SLOT" | "SESSION_OPEN" | "NEXT_SESSION" | "CURRENT_CYCLE_IN_PROGRESS" | "CALENDAR_UNAVAILABLE") | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "calendar_unavailable" | "not_started" | "ready" | "in_progress" | "completed" | "stopped" | "closed" | "historical";
         };
         /** @enum {string} */
         AgentRole: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";

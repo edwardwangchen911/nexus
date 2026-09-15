@@ -230,6 +230,17 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
     assert all(item["decision_session"] == DECISION_SESSION.isoformat() for item in items)
     assert current_session.status_code == 200
     assert current_session.json()["data"]["items"] == []
+    assert current_session.json()["data"]["summary"] == {
+        "decision_session": EXECUTION_SESSION.isoformat(),
+        "status": "closed",
+        "cycle_count": 0,
+        "completed_count": 0,
+        "latest_result_code": None,
+        "last_completed_decision_at": None,
+        "next_eligible_at": None,
+        "next_eligible_reason": "CALENDAR_UNAVAILABLE",
+        "execution_locked": True,
+    }
     assert invalid_low.status_code == invalid_high.status_code == 422
     assert "account_id" not in response.text.lower()
 

@@ -211,8 +211,37 @@ class AgentPaperCycleEnvelope(_StrictSchema):
     meta: SuccessMetaResponse
 
 
+class AgentPaperSessionSummaryResponse(_StrictSchema):
+    decision_session: date | None
+    status: Literal[
+        "calendar_unavailable",
+        "not_started",
+        "ready",
+        "in_progress",
+        "completed",
+        "stopped",
+        "closed",
+        "historical",
+    ]
+    cycle_count: int = Field(ge=0, le=20)
+    completed_count: int = Field(ge=0, le=20)
+    latest_result_code: str | None = Field(default=None, min_length=1, max_length=100)
+    last_completed_decision_at: AwareDatetime | None
+    next_eligible_at: AwareDatetime | None
+    next_eligible_reason: Literal[
+        "CURRENT_SLOT",
+        "NEXT_SLOT",
+        "SESSION_OPEN",
+        "NEXT_SESSION",
+        "CURRENT_CYCLE_IN_PROGRESS",
+        "CALENDAR_UNAVAILABLE",
+    ] | None
+    execution_locked: Literal[True]
+
+
 class AgentPaperCyclePageResponse(_StrictSchema):
     items: tuple[AgentPaperCycleResponse, ...] = Field(max_length=20)
+    summary: AgentPaperSessionSummaryResponse
 
 
 class AgentPaperCyclePageEnvelope(_StrictSchema):

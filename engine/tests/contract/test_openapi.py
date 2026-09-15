@@ -216,6 +216,13 @@ def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct(
     limit = next(item for item in cycle_list["parameters"] if item["name"] == "limit")
     assert limit["schema"]["maximum"] == 20
     assert schemas["AgentPaperCyclePageResponse"]["properties"]["items"]["maxItems"] == 20
+    assert set(schemas["AgentPaperCyclePageResponse"]["required"]) == {"items", "summary"}
+    summary = schemas["AgentPaperSessionSummaryResponse"]
+    assert summary["properties"]["execution_locked"] == {
+        "const": True,
+        "title": "Execution Locked",
+        "type": "boolean",
+    }
     execution = cycle["properties"]["execution_market"]
     assert execution["discriminator"] == {
         "propertyName": "source",

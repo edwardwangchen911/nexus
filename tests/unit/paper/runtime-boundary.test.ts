@@ -8,6 +8,11 @@ const orderId = "0198f7a0-1111-7777-8111-111111111113";
 const instrumentId = "0198f7a0-1111-7777-8111-111111111114";
 const meta = { request_id: requestId, schema_version: "1", as_of: "2026-08-26T20:00:00Z" };
 const actor = { userId: "allowed-user", requestId };
+const cycleSummary = {
+  decision_session: "2026-08-26", status: "in_progress", cycle_count: 1, completed_count: 0,
+  latest_result_code: "PAPER_ORDERS_AWAITING_MARKET", last_completed_decision_at: null,
+  next_eligible_at: null, next_eligible_reason: "CURRENT_CYCLE_IN_PROGRESS", execution_locked: true,
+};
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -37,9 +42,10 @@ describe("internal-paper Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json({ data: { ...data, execution_market: { ...data.execution_market, source: "schwab" } }, meta }), undefined, path, "GET")).status).toBe(500);
 
     const listPath = "/internal/v1/paper/cycles";
-    expect((await sanitizeEngineResponse(json({ data: { items: [data] }, meta }), undefined, listPath, "GET")).status).toBe(200);
-    expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data) }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [{ ...data, execution_locked: false }] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 0 } }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data), summary: cycleSummary }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [{ ...data, execution_locked: false }], summary: cycleSummary }, meta }), undefined, listPath, "GET")).status).toBe(500);
   });
   it("accepts the strict portfolio projection and rejects nested extras", async () => {
     const data = portfolio();
@@ -112,7 +118,7 @@ describe("internal-paper Engine response boundary", () => {
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: input.toString(), init: init ?? {} });
       if (input.toString().includes("/paper/cycles")) {
-        return json({ data: { items: [] }, meta });
+        return json({ data: { items: [], summary: { ...cycleSummary, status: "ready", cycle_count: 0, completed_count: 0, latest_result_code: null, next_eligible_at: "2026-08-26T21:00:00Z", next_eligible_reason: "CURRENT_SLOT" } }, meta });
       }
       return json({ data: { items: [order()], next_cursor: null }, meta });
     });

@@ -278,7 +278,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || !isPlain(data)
       || !Array.isArray(data.items)
       || data.items.length > 20
-      || data.items.some((cycle) => !agentPaperCycleValid(cycle))) return INVALID_DATA;
+      || data.items.some((cycle) => !agentPaperCycleValid(cycle))
+      || !agentPaperSessionSummaryValid(data.summary, data.items)) return INVALID_DATA;
     return data;
   }
   if (pathname === "/internal/v1/paper/orders") {
@@ -739,6 +740,18 @@ function paperOrderValid(value: unknown): boolean {
       fills.map((fill) => (fill as Record<string, unknown>).quantity),
       value.filled_quantity,
     );
+}
+
+function agentPaperSessionSummaryValid(value: unknown, cycles: unknown[]): boolean {
+  if (!isPlain(value)) return false;
+  const completed = cycles.filter((cycle) => isPlain(cycle) && cycle.status === "completed").length;
+  const latest = cycles[0];
+  return value.execution_locked === true
+    && value.cycle_count === cycles.length
+    && value.completed_count === completed
+    && (isPlain(latest)
+      ? value.latest_result_code === latest.result_code
+      : value.latest_result_code === null);
 }
 
 function paperPortfolioValid(value: Record<string, unknown>): boolean {

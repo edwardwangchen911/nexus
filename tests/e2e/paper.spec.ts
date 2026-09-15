@@ -177,7 +177,11 @@ async function installPaperFixtures(
   });
   await page.route("**/api/v1/paper/cycles?**", async (route) => route.fulfill({
     status: 200, contentType: "application/json",
-    body: JSON.stringify({ data: { items: [agentPaperCycle] }, meta: meta() }),
+    body: JSON.stringify({ data: { items: [agentPaperCycle], summary: {
+      decision_session: "2026-08-26", status: "completed", cycle_count: 1, completed_count: 1,
+      latest_result_code: "NO_ORDER_REQUIRED", last_completed_decision_at: "2026-08-26T19:30:00Z",
+      next_eligible_at: "2026-08-26T19:35:00Z", next_eligible_reason: "NEXT_SLOT", execution_locked: true,
+    } }, meta: meta() }),
   }));
   await page.route("**/api/v1/paper/orders?**", options.ordersHandler ?? (async (route) => route.fulfill({
     status: 200, contentType: "application/json",

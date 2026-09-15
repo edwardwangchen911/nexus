@@ -431,10 +431,14 @@
             "maxItems": 20,
             "title": "Items",
             "type": "array"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AgentPaperSessionSummaryResponse"
           }
         },
         "required": [
-          "items"
+          "items",
+          "summary"
         ],
         "title": "AgentPaperCyclePageResponse",
         "type": "object"
@@ -697,6 +701,122 @@
           "status"
         ],
         "title": "AgentPaperSchwabExecutionMarketResponse",
+        "type": "object"
+      },
+      "AgentPaperSessionSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_count": {
+            "maximum": 20,
+            "minimum": 0,
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "cycle_count": {
+            "maximum": 20,
+            "minimum": 0,
+            "title": "Cycle Count",
+            "type": "integer"
+          },
+          "decision_session": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Session"
+          },
+          "execution_locked": {
+            "const": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "last_completed_decision_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Completed Decision At"
+          },
+          "latest_result_code": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Result Code"
+          },
+          "next_eligible_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Eligible At"
+          },
+          "next_eligible_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "CURRENT_SLOT",
+                  "NEXT_SLOT",
+                  "SESSION_OPEN",
+                  "NEXT_SESSION",
+                  "CURRENT_CYCLE_IN_PROGRESS",
+                  "CALENDAR_UNAVAILABLE"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Eligible Reason"
+          },
+          "status": {
+            "enum": [
+              "calendar_unavailable",
+              "not_started",
+              "ready",
+              "in_progress",
+              "completed",
+              "stopped",
+              "closed",
+              "historical"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_session",
+          "status",
+          "cycle_count",
+          "completed_count",
+          "last_completed_decision_at",
+          "next_eligible_at",
+          "next_eligible_reason",
+          "execution_locked"
+        ],
+        "title": "AgentPaperSessionSummaryResponse",
         "type": "object"
       },
       "AgentRole": {

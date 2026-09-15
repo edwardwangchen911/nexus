@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import PaperPage, { PaperPanel } from "../../../app/(protected)/paper/page";
-import { AgentPaperCycle } from "../../../app/components/agent-paper-cycle";
+import { AgentPaperCycle, AgentPaperSessionSummary } from "../../../app/components/agent-paper-cycle";
 import type { DataStateKind } from "../../../app/components/data-state";
 import { agentPaperCycle, cancellableOrder, filledOrder, meta, olderAgentPaperCycle, paperPortfolio } from "./fixtures";
 
@@ -18,6 +18,28 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("internal paper page", () => {
+  it("shows persisted continuous-run status without implying a live scheduler", () => {
+    render(<AgentPaperSessionSummary summary={{
+      decision_session: "2026-08-26",
+      status: "completed",
+      cycle_count: 2,
+      completed_count: 2,
+      latest_result_code: "NO_ORDER_REQUIRED",
+      last_completed_decision_at: "2026-08-26T19:30:00Z",
+      next_eligible_at: "2026-08-26T19:35:00Z",
+      next_eligible_reason: "NEXT_SLOT",
+      execution_locked: true,
+    } as never} />);
+
+    const region = screen.getByRole("region", { name: "今日连续运行状态" });
+    expect(region).toHaveTextContent("已完成 2 / 2 个周期");
+    expect(region).toHaveTextContent("最近完成周期的决策时间");
+    expect(region).toHaveTextContent("Agent 已完成判断，确定性仓位计算结果为不调整");
+    expect(region).toHaveTextContent("下一五分钟槽");
+    expect(region).toHaveTextContent("只反映已保存周期，不代表前台循环进程在线");
+    expect(within(region).queryByRole("button")).not.toBeInTheDocument();
+  });
+
   it("separates realtime Schwab decision quotes from unknown-delivery execution bars", () => {
     render(<AgentPaperCycle cycles={[agentPaperCycle]} />);
 
