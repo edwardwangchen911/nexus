@@ -90,6 +90,32 @@ async def test_latest_agent_paper_cycle_is_404_without_a_cycle(
 
 
 @pytest.mark.asyncio
+async def test_workbench_endpoint_is_authenticated_read_only_and_rejects_queries(
+    migrated_database_url: str,
+) -> None:
+    await seed_paper_batch(migrated_database_url)
+    path = "/internal/v1/workbench"
+    invalid_path = f"{path}?account_id=hidden"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+        invalid = await client.get(
+            invalid_path,
+            headers=headers("GET", invalid_path),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["mode"] == "internal_paper"
+    assert response.json()["data"]["execution_locked"] is True
+    assert response.json()["data"]["loop"]["status"] == "unknown"
+    assert "account_id" not in response.text.lower()
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
 async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
     migrated_database_url: str,
 ) -> None:
@@ -217,6 +243,13 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
         invalid_high = await client.get(
             invalid_high_path, headers=headers("GET", invalid_high_path)
         )
+        detail_path = f"/internal/v1/paper/cycles/{newer_id}"
+        detail = await client.get(detail_path, headers=headers("GET", detail_path))
+        detail_invalid_path = f"{detail_path}?account_id=hidden"
+        detail_invalid = await client.get(
+            detail_invalid_path,
+            headers=headers("GET", detail_invalid_path),
+        )
 
     assert response.status_code == 200
     assert limited.status_code == 200
@@ -248,6 +281,11 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
         "execution_locked": True,
     }
     assert invalid_low.status_code == invalid_high.status_code == 422
+    assert detail.status_code == 200
+    assert detail.json()["data"]["cycle"]["cycle_id"] == str(newer_id)
+    assert detail.json()["data"]["orders"] == []
+    assert detail_invalid.status_code == 422
+    assert detail_invalid.json()["error"]["code"] == "VALIDATION_ERROR"
     assert "account_id" not in response.text.lower()
 
 
