@@ -16,7 +16,6 @@ _OUTBOX_TIME = datetime(2027, 1, 1, 0, 0, 1, tzinfo=UTC)
 @pytest.mark.asyncio
 async def test_bark_failure_is_recorded_without_changing_committed_paper_facts(
     migrated_database_url: str,
-    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -36,19 +35,13 @@ async def test_bark_failure_is_recorded_without_changing_committed_paper_facts(
                 request_time=seed.request_time,
             )
 
-        device = tmp_path / "device-key"
-        encryption = tmp_path / "encryption-key"
-        device.write_text("test-device-key")
-        encryption.write_text("0123456789abcdef")
-        device.chmod(0o600)
-        encryption.chmod(0o600)
         settings = load_bark_worker_settings(
             {
                 "NEXUS_BARK_ENABLED": "true",
                 "DATABASE_URL": migrated_database_url,
                 "NEXUS_BARK_SERVER_URL": "http://127.0.0.1:8080",
-                "NEXUS_BARK_DEVICE_KEY_FILE": str(device),
-                "NEXUS_BARK_ENCRYPTION_KEY_FILE": str(encryption),
+                "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
                 "NEXUS_BARK_ACTIVATED_AT": "2025-12-31T23:59:59Z",
             }
         )

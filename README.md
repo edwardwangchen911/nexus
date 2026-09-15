@@ -99,7 +99,7 @@ if [ ! -e infra/.env.local ]; then
 fi
 ```
 
-`infra/.env.local` 只保存非秘密配置和受保护文件路径。Provider 密钥、账户资料、签名密钥和
+`infra/.env.local` 是受保护且 Git 忽略的本机运行配置，其中可包含服务密钥；账户资料、密钥和
 证书不得进入 Git、聊天、命令参数或普通日志。
 
 本机已有 NEXUS 数据时，必须先核对 Compose project 和挂载卷；当前个人环境使用
@@ -193,8 +193,8 @@ Server 恢复为仅本机访问，iPhone 此后可在蜂窝网络或其他 Wi-Fi
 - Bark 注册产生的 `device key`，用于标识接收设备。
 - 一段恰好 16 个 ASCII 字符的 AES-128-CBC 共享密钥；Mac 和 Bark App 各保存一份相同值。
 
-两个值只能保存在 `.secrets/bark/` 的 `0600` 本地文件和 iPhone App 中，不进入 `.env.local`
-或 Git。真实验收必须同时确认业务事实已提交、outbox 和 delivery attempt 已发布，以及 iPhone
+两个值保存在受保护且 Git 忽略的 `infra/.env.local` 和 iPhone App 中，不进入 Git、聊天、命令
+参数或普通日志。真实验收必须同时确认业务事实已提交、outbox 和 delivery attempt 已发布，以及 iPhone
 实际显示解密后的通知。详细注册、健康检查、关闭和回滚步骤见
 [Bark 运行手册](docs/runbooks/bark-read-only-notifications.md)。
 

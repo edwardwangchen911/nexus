@@ -24,7 +24,7 @@ Paper 服务已在业务事务内写入真实事件。因此不新增依赖、�
    部分成交、成交和取消。仓库没有独立的“订单失败” outbox event，第一版不虚构该状态。
 4. publisher 在加密前加入稳定的 `id=<outbox event UUID>`。Bark v1.5.2+/server v2.2.5+ 会用相同
    ID 更新对应通知，从而收敛 outbox 的 at-least-once 重投。
-5. publisher 以随机 16 字节 ASCII IV 和受保护文件中的 16 字节 key 执行 AES-128-CBC/PKCS7，
+5. publisher 以随机 16 字节 ASCII IV 和本机 `.env.local` 注入的 16 字节 key 执行 AES-128-CBC/PKCS7，
    调用 Bark V2 `POST /push`。外层只包含 `device_key`、`ciphertext`、`iv`。
 6. 发送成功后 outbox 标为 published；超时、非 2xx 或 Bark 非成功响应只记录固定
    `PUBLISHER_FAILED`，按现有最多三次策略重试并最终 dead-letter。异常正文不落库、不打印。
@@ -34,8 +34,8 @@ Paper 服务已在业务事务内写入真实事件。因此不新增依赖、�
 - `NEXUS_BARK_ENABLED` 默认 false。
 - server URL 必须是无认证信息、query 或 fragment 的 `http://127.0.0.1:<port>` 或
   `http://localhost:<port>`，固定调用 `/push`。
-- device key 与加密 key 只从只读、非 group/other 可访问的本地文件读取；不接受直接环境变量值，
-  不接受 CLI 参数值，不写数据库、日志、测试快照或仓库。
+- device key 与加密 key 按项目既有本地运行约定从受保护且 Git 忽略的 `infra/.env.local` 注入；
+  不接受 CLI 参数值，不写数据库、日志、测试快照或仓库，并在配置对象和错误中隐藏值。
 - `activated_at` 必须是显式 UTC 时间，用于跳过启用前的历史 queued event。
 - 可选页面链接只接受 HTTP(S) 且路径为 `/paper`；未配置时通知不带链接。链接只打开既有只读页。
 - Compose 使用 Bark Server v2.3.5 的多架构镜像摘要

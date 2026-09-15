@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
-import stat
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
@@ -28,8 +25,7 @@ from nexus.outbox.registry import PublisherRegistry
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 
-_DEVICE_KEY = re.compile(rb"^[A-Za-z0-9_-]{1,255}$")
-_DIRECT_SECRET_NAMES = frozenset({"NEXUS_BARK_DEVICE_KEY", "NEXUS_BARK_ENCRYPTION_KEY"})
+_DEVICE_KEY = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
 
 
 class BarkWorkerConfigurationError(RuntimeError):
@@ -37,7 +33,7 @@ class BarkWorkerConfigurationError(RuntimeError):
 
 
 class BarkWorkerSettings(BaseModel):
-    """Non-secret configuration plus protected secret-file references."""
+    """Bark worker configuration with secret values hidden from representations."""
 
     model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
 
@@ -47,13 +43,13 @@ class BarkWorkerSettings(BaseModel):
         default="http://127.0.0.1:8080",
         validation_alias="NEXUS_BARK_SERVER_URL",
     )
-    device_key_file: Path | None = Field(
+    device_key: SecretStr | None = Field(
         default=None,
-        validation_alias="NEXUS_BARK_DEVICE_KEY_FILE",
+        validation_alias="NEXUS_BARK_DEVICE_KEY",
     )
-    encryption_key_file: Path | None = Field(
+    encryption_key: SecretStr | None = Field(
         default=None,
-        validation_alias="NEXUS_BARK_ENCRYPTION_KEY_FILE",
+        validation_alias="NEXUS_BARK_ENCRYPTION_KEY",
     )
     activated_at: datetime | None = Field(
         default=None,
@@ -82,8 +78,8 @@ class BarkWorkerSettings(BaseModel):
             return self
         if (
             self.database_url is None
-            or self.device_key_file is None
-            or self.encryption_key_file is None
+            or self.device_key is None
+            or self.encryption_key is None
             or self.activated_at is None
         ):
             raise ValueError("enabled Bark worker configuration is incomplete")
@@ -108,48 +104,26 @@ class BarkCredentials:
 
 
 def load_bark_worker_settings(environment: Mapping[str, str]) -> BarkWorkerSettings:
-    """Validate process configuration without accepting secret values."""
-    if _DIRECT_SECRET_NAMES.intersection(environment):
-        raise BarkWorkerConfigurationError("BARK_DIRECT_SECRET_FORBIDDEN")
+    """Validate process configuration without exposing secret values in errors."""
     try:
         return BarkWorkerSettings.model_validate(dict(environment))
     except (ValidationError, ValueError):
         raise BarkWorkerConfigurationError("BARK_CONFIGURATION_INVALID") from None
 
 
-def _read_protected_file(path: Path) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        raise BarkWorkerConfigurationError("BARK_SECRET_FILE_UNAVAILABLE") from None
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) & 0o077
-            or not 1 <= metadata.st_size <= 512
-        ):
-            raise BarkWorkerConfigurationError("BARK_SECRET_FILE_UNSAFE")
-        content = os.read(descriptor, 513)
-    finally:
-        os.close(descriptor)
-    return content.rstrip(b"\r\n")
-
-
 def load_bark_credentials(settings: BarkWorkerSettings) -> BarkCredentials:
-    """Read the two protected files without retaining paths or values in errors."""
-    if settings.device_key_file is None or settings.encryption_key_file is None:
+    """Validate the two environment-backed values without exposing them in errors."""
+    if settings.device_key is None or settings.encryption_key is None:
         raise BarkWorkerConfigurationError("BARK_CONFIGURATION_INVALID")
-    device_key = _read_protected_file(settings.device_key_file)
-    encryption_key = _read_protected_file(settings.encryption_key_file)
+    device_key = settings.device_key.get_secret_value()
+    encryption_key = settings.encryption_key.get_secret_value()
     if _DEVICE_KEY.fullmatch(device_key) is None:
         raise BarkWorkerConfigurationError("BARK_DEVICE_KEY_INVALID")
     if len(encryption_key) != 16 or not encryption_key.isascii():
         raise BarkWorkerConfigurationError("BARK_ENCRYPTION_KEY_INVALID")
     return BarkCredentials(
-        device_key=device_key.decode("ascii"),
-        encryption_key=encryption_key,
+        device_key=device_key,
+        encryption_key=encryption_key.encode("ascii"),
     )
 
 

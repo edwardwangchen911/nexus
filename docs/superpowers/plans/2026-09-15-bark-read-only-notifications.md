@@ -94,7 +94,7 @@ Use `cryptography` AES-128-CBC plus PKCS7, canonical UTF-8 JSON, `POST <localhos
 
 Run the Bark unit test file and expect all cases to pass.
 
-### Task 3: File-only settings and dedicated worker
+### Task 3: Environment settings and dedicated worker
 
 **Files:**
 - Create: `engine/src/nexus/notifications/worker.py`
@@ -105,15 +105,15 @@ Run the Bark unit test file and expect all cases to pass.
 
 **Interfaces:**
 - Consumes: database URL, localhost server URL, UTC activation timestamp, and device/encryption
-  key file paths from environment aliases.
+  values from the protected local environment.
 - Produces: `nexus-engine-bark-notifications` process; one-shot helper for deterministic tests and a
   bounded polling loop for Compose.
 
 - [ ] **Step 1: Write failing settings tests**
 
-Assert disabled-by-default, reject non-localhost server URLs, direct secret values, unsafe secret
-file modes, non-16-byte encryption keys, non-UTC activation time, and non-`/paper` links. Assert
-safe 0600 files load without exposing values in repr/errors.
+Assert disabled-by-default, reject non-localhost server URLs, invalid device keys, non-16-byte
+encryption keys, non-UTC activation time, and non-`/paper` links. Assert values load without
+appearing in repr/errors.
 
 - [ ] **Step 2: Verify RED**
 
@@ -135,7 +135,7 @@ and a repeated event ID yields the same inner Bark `id`.
 
 - [ ] **Step 5: Implement CLI composition**
 
-Load settings from environment/file paths, construct `httpx.AsyncClient(timeout=...)`, and expose the
+Load settings from environment, construct `httpx.AsyncClient(timeout=...)`, and expose the
 new project script. Do not accept secret-bearing CLI arguments.
 
 - [ ] **Step 6: Verify GREEN**
@@ -152,7 +152,7 @@ Run both new test files and expect PASS.
 - Modify: `README.md`
 
 **Interfaces:**
-- Consumes: `.secrets/bark/device-key`, `.secrets/bark/encryption-key`, and existing `DATABASE_URL`.
+- Consumes: `NEXUS_BARK_DEVICE_KEY`, `NEXUS_BARK_ENCRYPTION_KEY`, and existing `DATABASE_URL` from `infra/.env.local`.
 - Produces: default-off `notifications` profile with unexposed Bark server and notification worker;
   an explicit, temporary LAN registration override.
 
@@ -160,11 +160,11 @@ Run both new test files and expect PASS.
 
 Use `ghcr.io/finb/bark-server:v2.3.5@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4`, a named data volume,
 internal healthcheck, no steady-state `ports`, and `network_mode: service:bark-server` for the worker.
-Mount both secret files read-only at fixed `/run/secrets` paths.
+Inject the two Bark values through the same local environment convention as the existing service secrets.
 
 - [ ] **Step 2: Document activation, registration, health and rollback**
 
-Document 0600 secret creation without secret values in commands, Bark App AES-128-CBC setup,
+Document protected `.env.local` editing without secret values in commands, Bark App AES-128-CBC setup,
 temporary trusted-LAN registration, immediate return to no-port steady state, `/ping`, outbox attempt
 readback, exact stop commands, and non-destructive rollback. State that real iPhone/APNs receipt is
 unverified until the user completes local key/registration setup.
