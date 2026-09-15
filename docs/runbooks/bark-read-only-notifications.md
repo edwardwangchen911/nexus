@@ -49,7 +49,7 @@ NEXUS_BARK_READ_ONLY_URL=
 局域网地址，例如 `192.168.x.y`；不要使用示例地址原样运行。只启动 Bark Server：
 
 ```bash
-docker compose --env-file infra/.env.local \
+docker compose -p nexus-fosun-live --env-file infra/.env.local \
   -f infra/compose.yaml -f infra/compose.bark-register.yaml \
   --profile notifications up -d bark-server
 ```
@@ -62,7 +62,7 @@ docker compose --env-file infra/.env.local \
 确认后立即把 bind address 恢复为 `127.0.0.1`，再用稳态配置强制重建：
 
 ```bash
-docker compose --env-file infra/.env.local \
+docker compose -p nexus-fosun-live --env-file infra/.env.local \
   -f infra/compose.yaml --profile notifications \
   up -d --force-recreate bark-server
 ```
@@ -75,14 +75,14 @@ docker compose --env-file infra/.env.local \
 先在容器内部检查 Bark，不发送 APNs 通知：
 
 ```bash
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
+docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.yaml \
   --profile notifications exec bark-server wget -qO- http://127.0.0.1:8080/ping
 ```
 
 预期为 `pong`。随后启动专用 worker：
 
 ```bash
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
+docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.yaml \
   --profile notifications up -d bark-server bark-notifications
 ```
 
@@ -99,7 +99,7 @@ outbox event 为 published、delivery attempt 为 published、iPhone 实际显�
 先在 `infra/.env.local` 设置 `NEXUS_BARK_ENABLED=false`，再只停止本切片服务：
 
 ```bash
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
+docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.yaml \
   --profile notifications stop bark-notifications bark-server
 ```
 
