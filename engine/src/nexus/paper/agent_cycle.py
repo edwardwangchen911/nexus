@@ -11,7 +11,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.actionable_research import ActionableResearchError
-from nexus.agents.paper_context import prepare_agent_paper_research_snapshot
+from nexus.agents.paper_context import (
+    paper_contexts_match_projection,
+    prepare_agent_paper_research_snapshot,
+    read_agent_paper_research_context,
+)
 from nexus.agents.persistence import load_actionable_research_output
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_research import admit_agent_paper_research
@@ -43,6 +47,7 @@ from nexus.paper.agent_decision_store import persist_agent_paper_decision
 from nexus.paper.errors import PaperBatchError
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
+from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
@@ -572,6 +577,25 @@ async def _resume_research(
         projection = await load_paper_projection(
             session, account_id=cycle.account_id, as_of=cycle.decision_time
         )
+        if cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
+            contexts = []
+            for run_id in run_ids:
+                run = await session.get(AgentResearchRunRecord, run_id)
+                context = (
+                    None
+                    if run is None
+                    else await read_agent_paper_research_context(
+                        session,
+                        snapshot_id=run.data_snapshot_id,
+                        instrument_id=run.instrument_id,
+                        as_of=run.decision_time,
+                    )
+                )
+                if context is None:
+                    raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
+                contexts.append(context[0])
+            if not paper_contexts_match_projection(tuple(contexts), projection):
+                raise ValueError("AGENT_PAPER_PROJECTION_CONFLICT")
         required = tuple(
             sorted(
                 {

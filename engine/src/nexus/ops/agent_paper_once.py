@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import re
 from datetime import UTC, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -51,7 +52,9 @@ from nexus.providers.base import MarketDataProvider
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider
 from nexus.providers.market.alpaca_http import AlpacaHttpTransport, SqlInstrumentSymbolResolver
+from nexus.providers.market.schwab_oauth import SchwabOAuthError
 from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
+from nexus.providers.market.schwab_stream import SchwabStreamError
 from nexus.risk.query_authority_producer import (
     inspect_query_authority_scope,
     persist_query_authorities,
@@ -75,7 +78,30 @@ _SAFE_SCHWAB_FAILURE_CODES = frozenset(
         "SCHWAB_MARKET_STREAM_EVIDENCE_STALE",
         "SCHWAB_MARKET_STREAM_IDENTITY_REQUIRED",
         "SCHWAB_MARKET_STREAM_IMPORT_TIME_INVALID",
+        "SCHWAB_APP_CONFIG_INVALID",
+        "SCHWAB_APP_CONFIG_REQUIRED",
+        "SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED",
+        "SCHWAB_OAUTH_CALLBACK_INVALID",
+        "SCHWAB_OAUTH_CODE_INVALID",
+        "SCHWAB_OAUTH_REFRESH_REQUEST_FAILED",
+        "SCHWAB_OAUTH_REFRESH_RESPONSE_INVALID",
+        "SCHWAB_OAUTH_TIME_INVALID",
+        "SCHWAB_OAUTH_TOKEN_REQUEST_FAILED",
+        "SCHWAB_OAUTH_TOKEN_RESPONSE_INVALID",
+        "SCHWAB_OAUTH_TOKEN_STORE_INVALID",
+        "SCHWAB_STREAM_CREDENTIALS_INVALID",
+        "SCHWAB_STREAM_FRAME_INVALID",
+        "SCHWAB_STREAM_QUOTE_INVALID",
+        "SCHWAB_STREAM_REQUEST_INVALID",
+        "SCHWAB_STREAM_SYMBOLS_INVALID",
+        "SCHWAB_STREAM_TIME_INVALID",
+        "SCHWAB_STREAM_URL_INVALID",
+        "SCHWAB_USER_PREFERENCE_REQUEST_FAILED",
+        "SCHWAB_USER_PREFERENCE_RESPONSE_INVALID",
     }
+)
+_SAFE_SCHWAB_HTTP_FAILURE_CODE = re.compile(
+    r"SCHWAB_(?:OAUTH_(?:TOKEN|REFRESH)|USER_PREFERENCE)_HTTP_[1-5][0-9]{2}"
 )
 
 
@@ -234,11 +260,12 @@ def _validate_trigger_quote(
         raise ValueError("SCHWAB_L1_FRESHNESS_UNPROVEN")
 
 
-def _raise_schwab_l1_incomplete(
-    error: ProviderMarketStreamError, *, diagnostic_path: Path
-) -> NoReturn:
+def _raise_schwab_l1_incomplete(error: Exception, *, diagnostic_path: Path) -> NoReturn:
     provider_error_code = str(error)
-    if provider_error_code not in _SAFE_SCHWAB_FAILURE_CODES:
+    if (
+        provider_error_code not in _SAFE_SCHWAB_FAILURE_CODES
+        and _SAFE_SCHWAB_HTTP_FAILURE_CODE.fullmatch(provider_error_code) is None
+    ):
         provider_error_code = "SCHWAB_MARKET_STREAM_FAILURE_UNCLASSIFIED"
     payload = {
         "schema": "nexus_schwab_l1_failure_v1",
@@ -314,7 +341,7 @@ async def trigger_in_session(
             client=client,
             instrument_id=scope.instrument_id,
         )
-    except ProviderMarketStreamError as error:
+    except (ProviderMarketStreamError, SchwabOAuthError, SchwabStreamError) as error:
         _raise_schwab_l1_incomplete(
             error,
             diagnostic_path=attempt_directory / "schwab-failure.json",

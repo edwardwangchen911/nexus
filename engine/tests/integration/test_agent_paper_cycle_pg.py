@@ -1,11 +1,16 @@
+import asyncio
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
 import pytest
+from alembic import command
+from alembic.config import Config
 from helpers.paper_api import app, headers
 from helpers.paper_batch import DECISION_TIME, INSTRUMENTS, seed_paper_batch
 from nexus.agents.actionable_research import ActionableResearchDecision
@@ -16,6 +21,7 @@ from nexus.agents.paper_context import (
     FrozenAgentPaperContextStatus,
     revalidate_frozen_agent_paper_context,
 )
+from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
@@ -67,8 +73,10 @@ from nexus.persistence.models.paper import (
     PaperFillRecord,
     PaperLedgerEntryRecord,
     PaperOrderRecord,
+    PaperPositionAdjustmentEventRecord,
     PaperReservationEventRecord,
     RiskQueryAuthorityRecord,
+    StrategyDecisionRecord,
 )
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
@@ -86,8 +94,12 @@ from nexus.strategy.intents import (
     SynthesisAssessment,
     SynthesisClaimReview,
 )
+from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+ENGINE_ROOT = Path(__file__).parents[2]
 
 
 class _ObjectStore:
@@ -282,6 +294,7 @@ async def _seed_cycle_research_authority(
     source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
     quote_received_at: datetime = DECISION_TIME,
     price_available_at: datetime | None = None,
+    base_payload: dict[str, object] | None = None,
 ) -> None:
     authority_time = price_available_at or DECISION_TIME
     await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
@@ -363,7 +376,7 @@ async def _seed_cycle_research_authority(
             available_at=authority_time - timedelta(hours=2),
             received_at=authority_time - timedelta(hours=2),
             schema_version="research_filings_v1",
-            payload={"scope": "persisted_research_observations"},
+            payload={"scope": "persisted_research_observations", **(base_payload or {})},
         )
         session.add_all(
             (
@@ -908,6 +921,7 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
                 quote_received_at=decision_time,
                 price_available_at=decision_time,
+                base_payload={"portfolio_context": {"private_canary": "must-not-flow"}},
             )
             historical_tables = (
                 "source_policies",
@@ -1054,6 +1068,11 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             manifest[0].risk_query_authority_ids
         )
 
+        monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+        migration_config = Config(str(ENGINE_ROOT / "alembic.ini"))
+        await asyncio.to_thread(
+            command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"
+        )
         async with sessions.begin() as session:
             first = await start_schwab_agent_paper_cycle(
                 session,
@@ -1061,6 +1080,23 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 decision_slot_at=floor_decision_slot(authority.decision_time),
                 idempotency_key="schwab-trigger-1",
             )
+        async with sessions.begin() as session:
+            await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER trg_jobs_state"))
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE jobs SET job_type='agent.research',"
+                        "job_key='agent.research' || substring("
+                        "job_key FROM 21) WHERE job_type='agent.paper.research'"
+                    )
+                )
+            finally:
+                await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER trg_jobs_state"))
+        async with sessions() as session:
+            assert await session.scalar(select(Job.job_type)) == "agent.research"
+        await asyncio.to_thread(
+            command.upgrade, migration_config, "0061_agent_paper_job_isolation"
+        )
         async with sessions.begin() as session:
             replay = await start_schwab_agent_paper_cycle(
                 session,
@@ -1085,10 +1121,39 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         assert job_count == resumed_job_count == 1
         assert job_type == "agent.paper.research"
 
+        with pytest.raises(DBAPIError, match="agent paper snapshots prevent downgrade"):
+            await asyncio.to_thread(
+                command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"
+            )
+        async with sessions() as session:
+            assert await session.scalar(select(Job.job_type)) == "agent.paper.research"
+            assert (
+                await session.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0061_agent_paper_job_isolation"
+            )
+
+        assert (
+            await run_agent_worker_once(EngineSettings(database_url=migrated_database_url))
+            is False
+        )
+        async with sessions() as session:
+            queued_job_status = await session.scalar(select(Job.status))
+        assert queued_job_status == "queued"
+
         async with sessions() as session:
             run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])
             assert run is not None
             assert run.data_snapshot_id != manifest[0].research_snapshot_id
+            paper_snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+            assert paper_snapshot is not None
+            assert "portfolio_context" not in paper_snapshot.payload
+            selected = await select_authoritative_snapshot(
+                session,
+                instrument_id=run.instrument_id,
+                as_of=run.decision_time,
+            )
+            assert selected is not None
+            assert selected.id == manifest[0].research_snapshot_id
             evidence_records = await load_frozen_evidence(
                 session,
                 run,
@@ -1101,6 +1166,76 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                     evidence_records=evidence_records,
                 )
                 is FrozenAgentPaperContextStatus.VALID
+            )
+            assert paper_snapshot.source == "nexus_agent_paper"
+            assert paper_snapshot.schema_version == "agent_paper_research_v1"
+            await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE data_snapshots SET source='nexus_research',"
+                        "schema_version='research_filings_v1' WHERE id=:snapshot_id"
+                    ),
+                    {"snapshot_id": paper_snapshot.id},
+                )
+            finally:
+                await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+            session.expire(paper_snapshot)
+            assert (
+                await revalidate_frozen_agent_paper_context(
+                    session,
+                    run=run,
+                    evidence_records=evidence_records,
+                )
+                is FrozenAgentPaperContextStatus.VALID
+            )
+            tainted_payload = {
+                **paper_snapshot.payload,
+                "portfolio_context": {"private_canary": "must-fail-closed"},
+            }
+            tainted_revision = sha256(
+                json.dumps(tainted_payload, sort_keys=True).encode()
+            ).hexdigest()
+            taint_savepoint = await session.begin_nested()
+            await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE data_snapshots SET payload=CAST(:payload AS jsonb),"
+                        "revision=:revision WHERE id=:snapshot_id"
+                    ),
+                    {
+                        "payload": json.dumps(tainted_payload),
+                        "revision": tainted_revision,
+                        "snapshot_id": paper_snapshot.id,
+                    },
+                )
+            finally:
+                await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+            session.expire(paper_snapshot)
+            assert (
+                await revalidate_frozen_agent_paper_context(
+                    session,
+                    run=run,
+                    evidence_records=evidence_records,
+                )
+                is FrozenAgentPaperContextStatus.INVALID
+            )
+            await taint_savepoint.rollback()
+            session.expire(paper_snapshot)
+            wrong_run = SimpleNamespace(
+                id=UUID(int=0x63000000000000000000000000000999),
+                data_snapshot_id=run.data_snapshot_id,
+                instrument_id=run.instrument_id,
+                decision_time=run.decision_time,
+            )
+            assert (
+                await revalidate_frozen_agent_paper_context(
+                    session,
+                    run=wrong_run,
+                    evidence_records=evidence_records,
+                )
+                is FrozenAgentPaperContextStatus.INVALID
             )
             tools = await database_read_only_tools(
                 session,
@@ -1220,6 +1355,34 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             "nexus.paper.agent_decision_store.load_actionable_research_output",
             fake_load_actionable,
         )
+        async with sessions.begin() as session:
+            savepoint = await session.begin_nested()
+            session.add(
+                PaperPositionAdjustmentEventRecord(
+                    id=UUID("63000000-0000-0000-0000-000000000778"),
+                    account_id=seed.account_id,
+                    instrument_id=manifest[0].instrument_id,
+                    event_seq=1,
+                    event_type="correction",
+                    quantity_delta=Decimal("1"),
+                    cost_delta=Decimal("100"),
+                    source_fill_id=None,
+                    occurred_at=decision_time,
+                    payload_hash="8" * 64,
+                )
+            )
+            await session.flush()
+            projection_conflict = await resume_schwab_agent_paper_cycle(
+                session,
+                cycle_id=first.cycle_id,
+                idempotency_key="schwab-resume-projection-conflict",
+            )
+            assert projection_conflict.status == "unavailable"
+            assert await session.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
+            assert (
+                await session.scalar(select(func.count()).select_from(StrategyDecisionRecord)) == 0
+            )
+            await savepoint.rollback()
         async with sessions.begin() as session:
             awaiting_market = await resume_schwab_agent_paper_cycle(
                 session,

@@ -239,6 +239,9 @@ async def select_authoritative_snapshot(
                 AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
                 AgentDataSnapshotEvidenceRecord.authority_kind == "research",
                 AgentDataSnapshotEvidenceRecord.available_at <= as_of,
+                DataSnapshot.source == "nexus_research",
+                DataSnapshot.schema_version == "research_filings_v1",
+                DataSnapshot.payload["agent_paper_context"].is_(None),
                 DataSnapshot.available_at <= as_of,
                 DataSnapshot.received_at <= as_of,
             )
@@ -517,6 +520,9 @@ async def admit_research_run(
             decision_time=request.decision_time,
             allow_fixture=allow_fixture_price_authority,
         )
+    has_paper_context = snapshot is not None and "agent_paper_context" in snapshot.payload
+    if has_paper_context and job_type is not JobType.AGENT_PAPER_RESEARCH:
+        raise ValueError("Agent paper context authority is invalid")
     evidence_records = list(
         await session.scalars(
             select(AgentDataSnapshotEvidenceRecord)

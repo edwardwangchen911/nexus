@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal, localcontext
 from enum import StrEnum
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -26,10 +28,14 @@ from nexus.persistence.models.data import (
     PriceSeriesManifest,
 )
 from nexus.persistence.models.market import LatestQuote
+from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.risk.models import PaperPortfolioProjection
 
 SOURCE = "nexus_agent_paper_context"
+SNAPSHOT_SOURCE = "nexus_agent_paper"
+SNAPSHOT_SCHEMA = "agent_paper_research_v1"
+_LEGACY_SNAPSHOT_AUTHORITY = ("nexus_research", "research_filings_v1")
 
 
 class FrozenAgentPaperContextStatus(StrEnum):
@@ -149,7 +155,7 @@ async def prepare_agent_paper_research_snapshot(
         or base.available_at > decision_time
         or base.received_at > decision_time
         or not base_evidence
-        or len(base_evidence) >= 100
+        or len(base_evidence) > MAX_FROZEN_EVIDENCE - 2
         or projection.as_of != decision_time
         or projection.nav <= 0
         or projection.open_orders
@@ -236,7 +242,11 @@ async def prepare_agent_paper_research_snapshot(
     if evidence is None:
         raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
     payload = {
-        **base.payload,
+        **{
+            key: value
+            for key, value in base.payload.items()
+            if key not in {"portfolio_context", "agent_paper_context"}
+        },
         "evidence_ids": [str(item.evidence_ref_id) for item in base_evidence],
         "agent_paper_context": context.model_dump(mode="json"),
     }
@@ -244,13 +254,13 @@ async def prepare_agent_paper_research_snapshot(
     snapshot_id = await session.scalar(
         insert(DataSnapshot)
         .values(
-            source="nexus_research",
+            source=SNAPSHOT_SOURCE,
             provider_object_id=str(candidate.instrument_id),
             revision=snapshot_revision,
             observed_at=decision_time,
             available_at=decision_time,
             received_at=decision_time,
-            schema_version="research_filings_v1",
+            schema_version=SNAPSHOT_SCHEMA,
             payload=payload,
         )
         .on_conflict_do_nothing(index_elements=["source", "provider_object_id", "revision"])
@@ -261,7 +271,7 @@ async def prepare_agent_paper_research_snapshot(
         if snapshot_id is not None
         else await session.scalar(
             select(DataSnapshot).where(
-                DataSnapshot.source == "nexus_research",
+                DataSnapshot.source == SNAPSHOT_SOURCE,
                 DataSnapshot.provider_object_id == str(candidate.instrument_id),
                 DataSnapshot.revision == snapshot_revision,
             )
@@ -302,7 +312,15 @@ async def read_agent_paper_research_context(
     snapshot = await session.get(DataSnapshot, snapshot_id)
     if (
         snapshot is None
-        or snapshot.source != "nexus_research"
+        or (snapshot.source, snapshot.schema_version)
+        not in {
+            (SNAPSHOT_SOURCE, SNAPSHOT_SCHEMA),
+            _LEGACY_SNAPSHOT_AUTHORITY,
+        }
+        or (
+            (snapshot.source, snapshot.schema_version) == _LEGACY_SNAPSHOT_AUTHORITY
+            and "portfolio_context" in snapshot.payload
+        )
         or snapshot.provider_object_id != str(instrument_id)
         or snapshot.available_at > as_of
         or snapshot.received_at > as_of
@@ -314,7 +332,7 @@ async def read_agent_paper_research_context(
         context = AgentPaperResearchContext.model_validate(snapshot.payload["agent_paper_context"])
     except (KeyError, TypeError, ValidationError):
         return None
-    if context.instrument_id != instrument_id or context.decision_time > as_of:
+    if context.instrument_id != instrument_id or context.decision_time != as_of:
         return None
     content = _content(context)
     digest = hashlib.sha256(content).hexdigest()
@@ -348,6 +366,39 @@ async def revalidate_frozen_agent_paper_context(
     )
     if not context_records and context is None:
         return FrozenAgentPaperContextStatus.MISSING
-    if len(context_records) != 1 or context is None or context_records[0].id != context[1].id:
+    if context is None:
+        return FrozenAgentPaperContextStatus.INVALID
+    cycle = await session.get(AgentPaperCycleRecord, context[0].cycle_id)
+    events = tuple(
+        await session.scalars(
+            select(AgentPaperCycleEventRecord).where(
+                AgentPaperCycleEventRecord.cycle_id == context[0].cycle_id
+            )
+        )
+    )
+    run_bound = any(
+        isinstance((run_ids := event.fact_ids.get("research_run_ids")), list)
+        and str(run.id) in run_ids
+        for event in events
+        if isinstance(event.fact_ids, dict)
+    )
+    if (
+        len(context_records) != 1
+        or context_records[0].id != context[1].id
+        or cycle is None
+        or cycle.decision_time != run.decision_time
+        or context[0].decision_time != run.decision_time
+        or not run_bound
+    ):
         return FrozenAgentPaperContextStatus.INVALID
     return FrozenAgentPaperContextStatus.VALID
+
+
+def paper_contexts_match_projection(
+    contexts: Sequence[AgentPaperResearchContext], projection: PaperPortfolioProjection
+) -> bool:
+    """Bind deterministic sizing to the exact portfolio shown to every paper run."""
+    return bool(contexts) and all(
+        context.paper_portfolio.projection_hash == projection.projection_hash
+        for context in contexts
+    )

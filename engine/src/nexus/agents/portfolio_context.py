@@ -524,6 +524,7 @@ async def read_portfolio_context(
     if (
         snapshot is None
         or snapshot.source != "nexus_research"
+        or "agent_paper_context" in snapshot.payload
         or snapshot.provider_object_id != str(instrument_id)
         or snapshot.available_at > as_of
         or snapshot.received_at > as_of

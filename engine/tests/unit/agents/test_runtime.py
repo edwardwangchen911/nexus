@@ -8,6 +8,7 @@ from json import dumps
 from typing import cast
 from uuid import UUID
 
+import nexus.worker as worker_module
 import pytest
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.models import ResearchRequest
@@ -104,6 +105,25 @@ def test_agent_paper_research_is_owned_only_by_explicit_worker() -> None:
 
     assert general.resolve(JobType.AGENT_PAPER_RESEARCH.value) is None
     assert explicit.resolve(JobType.AGENT_PAPER_RESEARCH.value) is not None
+
+
+@pytest.mark.asyncio
+async def test_unscoped_agent_run_once_cannot_claim_agent_paper_research(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[bool] = []
+
+    async def inspect_registry(_factory, *, registry, **_kwargs):
+        observed.append(registry.resolve(JobType.AGENT_PAPER_RESEARCH.value) is not None)
+        return False
+
+    monkeypatch.setattr(worker_module, "run_job_worker_once", inspect_registry)
+
+    settings = EngineSettings.for_test()
+    await worker_module.run_agent_worker_once(settings)
+    await worker_module.run_agent_worker_once(settings, job_ids=(UUID(int=1),))
+
+    assert observed == [False, True]
 
 
 def test_general_worker_never_registers_provider_handlers_when_stages_are_enabled() -> None:

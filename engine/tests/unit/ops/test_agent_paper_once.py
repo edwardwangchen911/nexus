@@ -22,6 +22,8 @@ from nexus.paper.agent_cycle_authority import CycleAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult, AgentPaperTriggerReservation
 from nexus.paper.agent_market import AgentPaperMarketScope
 from nexus.persistence.models.paper import PAPER_EXECUTION_SOURCE_POLICY_ID
+from nexus.providers.market.schwab_oauth import SchwabOAuthError
+from nexus.providers.market.schwab_stream import SchwabStreamError
 from nexus.risk.query_authority_producer import RiskQueryScope, RiskSourceProof
 from nexus.settings import EngineSettings
 from pydantic import SecretStr, ValidationError
@@ -444,6 +446,48 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     assert json.loads(diagnostic.read_text())["provider_error_code"] == (
         "SCHWAB_MARKET_STREAM_EMPTY"
     )
+
+    for index, provider_error in enumerate(
+        (
+            SchwabOAuthError("SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED"),
+            SchwabOAuthError("SCHWAB_OAUTH_REFRESH_HTTP_401"),
+            SchwabStreamError("SCHWAB_STREAM_CREDENTIALS_INVALID"),
+            SchwabStreamError("SCHWAB_STREAM_FRAME_INVALID"),
+        ),
+        start=1,
+    ):
+        async def rejected_before_archive(*_args, _error=provider_error, **_kwargs):
+            raise _error
+
+        monkeypatch.setattr(
+            cli, "capture_and_import_schwab_level_one_once", rejected_before_archive
+        )
+        request = AgentPaperTriggerRequest(
+            action="trigger",
+            account_id=account_id,
+            idempotency_key=f"trigger-provider-failure-{index}",
+        )
+        with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+            asyncio.run(
+                trigger_in_session(
+                    Session(),
+                    object(),
+                    settings,
+                    request,
+                    reservation=reservation,
+                    repo_root=tmp_path,
+                    client=object(),
+                )
+            )
+        attempt = cli.sha256(request.idempotency_key.encode()).hexdigest()[:16]
+        saved = (
+            tmp_path
+            / ".secrets"
+            / "nexus-agent-paper"
+            / f"{reservation.decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{attempt}"
+            / "schwab-failure.json"
+        )
+        assert json.loads(saved.read_text())["provider_error_code"] == str(provider_error)
 
 
 def test_trigger_replay_returns_before_any_provider_call(

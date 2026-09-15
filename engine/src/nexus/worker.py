@@ -119,7 +119,7 @@ async def run_agent_worker_once(
             settings,
             responses_client=responses_client,
             tools=tools,
-            include_agent_paper=True,
+            include_agent_paper=job_ids is not None,
         ),
         queue=QueueName.GENERAL,
         worker_id=_ONCE_WORKER_ID,
