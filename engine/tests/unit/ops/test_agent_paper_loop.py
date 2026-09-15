@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -306,6 +307,198 @@ def test_foreground_loop_heartbeats_before_inspection_and_after_action() -> None
     assert result == A.STOP_SESSION_CLOSED
     assert events == ["heartbeat", "inspect", "execute", "heartbeat", "inspect"]
     assert heartbeat_times == [NOW, NOW + timedelta(seconds=1)]
+
+
+def test_foreground_loop_keeps_heartbeat_live_during_long_action() -> None:
+    heartbeat_count = 0
+    execute_started = asyncio.Event()
+    release_execute = asyncio.Event()
+    states = iter(
+        (
+            snapshot(
+                cycle_status="researching",
+                research_job_status="queued",
+                research_job_id="job-1",
+            ),
+            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+        )
+    )
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+        if heartbeat_count == 3:
+            release_execute.set()
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    async def execute(_action, _state) -> None:
+        execute_started.set()
+        await release_execute.wait()
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await execute_started.wait()
+
+    async def run() -> loop.AgentPaperLoopAction:
+        return await asyncio.wait_for(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=controlled_sleep,
+                heartbeat=heartbeat,
+                clock=lambda: NOW,
+            ),
+            timeout=1,
+        )
+
+    assert asyncio.run(run()) == A.STOP_SESSION_CLOSED
+    assert heartbeat_count == 4
+
+
+def test_foreground_loop_uses_fixed_heartbeat_cadence_during_long_action() -> None:
+    heartbeat_count = 0
+    monotonic_now = 0.0
+    release_execute = asyncio.Event()
+    sleeps: list[float] = []
+    states = iter(
+        (
+            snapshot(
+                cycle_status="researching",
+                research_job_status="queued",
+                research_job_id="job-1",
+            ),
+            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+        )
+    )
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count, monotonic_now
+        heartbeat_count += 1
+        if heartbeat_count in {2, 3}:
+            monotonic_now += 4
+        if heartbeat_count == 3:
+            release_execute.set()
+            await asyncio.sleep(0)
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    async def execute(_action, _state) -> None:
+        await release_execute.wait()
+
+    async def controlled_sleep(seconds: float) -> None:
+        nonlocal monotonic_now
+        sleeps.append(seconds)
+        monotonic_now += seconds
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=controlled_sleep,
+            heartbeat=heartbeat,
+            heartbeat_interval=timedelta(seconds=10),
+            clock=lambda: NOW,
+            monotonic=lambda: monotonic_now,
+        )
+    )
+
+    assert result == A.STOP_SESSION_CLOSED
+    assert sleeps == [10.0, 6.0]
+
+
+def test_foreground_loop_stops_long_action_when_heartbeat_fails() -> None:
+    heartbeat_count = 0
+    execute_started = asyncio.Event()
+    execute_cancelled = asyncio.Event()
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+        if heartbeat_count == 2:
+            raise RuntimeError("database unavailable")
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot(
+            cycle_status="researching",
+            research_job_status="queued",
+            research_job_id="job-1",
+        )
+
+    async def execute(_action, _state) -> None:
+        execute_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            execute_cancelled.set()
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await execute_started.wait()
+
+    async def run() -> loop.AgentPaperLoopAction:
+        return await asyncio.wait_for(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=controlled_sleep,
+                heartbeat=heartbeat,
+                clock=lambda: NOW,
+            ),
+            timeout=1,
+        )
+
+    assert asyncio.run(run()) == A.STOP_RESULT_UNKNOWN
+    assert heartbeat_count == 2
+    assert execute_cancelled.is_set()
+
+
+def test_foreground_loop_retrieves_action_failure_when_heartbeat_also_fails() -> None:
+    heartbeat_count = 0
+    execute_started = asyncio.Event()
+    release_execute = asyncio.Event()
+    unhandled: list[dict[str, object]] = []
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+        if heartbeat_count == 2:
+            release_execute.set()
+            await asyncio.sleep(0)
+            raise RuntimeError("database unavailable")
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot(
+            cycle_status="researching",
+            research_job_status="queued",
+            research_job_id="job-1",
+        )
+
+    async def execute(_action, _state) -> None:
+        execute_started.set()
+        await release_execute.wait()
+        raise RuntimeError("action failed")
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await execute_started.wait()
+
+    async def run() -> loop.AgentPaperLoopAction:
+        running_loop = asyncio.get_running_loop()
+        running_loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+        result = await loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=controlled_sleep,
+            heartbeat=heartbeat,
+            clock=lambda: NOW,
+        )
+        await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+        return result
+
+    assert asyncio.run(run()) == A.STOP_RESULT_UNKNOWN
+    assert unhandled == []
 
 
 def test_foreground_loop_heartbeats_during_long_waits() -> None:

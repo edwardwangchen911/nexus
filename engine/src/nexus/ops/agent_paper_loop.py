@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic as monotonic_clock
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -428,13 +429,25 @@ async def run_foreground_loop(
     heartbeat: Callable[[datetime], Awaitable[None]],
     heartbeat_interval: timedelta = timedelta(seconds=15),
     clock: Callable[[], datetime] = _utc_now,
+    monotonic: Callable[[], float] = monotonic_clock,
 ) -> AgentPaperLoopAction:
     """Run persisted one-step actions until a fail-closed stop condition is reached."""
     interval_seconds = heartbeat_interval.total_seconds()
     if interval_seconds <= 0:
         raise ValueError("heartbeat_interval must be positive")
+
+    async def wait_for_heartbeat_interval(
+        delay_seconds: float,
+    ) -> AgentPaperLoopAction | None:
+        await sleep(delay_seconds)
+        return None
+
+    async def persist_heartbeat() -> None:
+        async with asyncio.timeout(interval_seconds):
+            await heartbeat(clock())
+
     try:
-        await heartbeat(clock())
+        await persist_heartbeat()
     except Exception:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     while True:
@@ -454,7 +467,7 @@ async def run_foreground_loop(
                 duration = min(remaining, interval_seconds)
                 await sleep(duration)
                 try:
-                    await heartbeat(clock())
+                    await persist_heartbeat()
                 except Exception:
                     return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
                 remaining -= duration
@@ -466,14 +479,50 @@ async def run_foreground_loop(
                 duration = min(remaining, interval_seconds)
                 await sleep(duration)
                 try:
-                    await heartbeat(clock())
+                    await persist_heartbeat()
                 except Exception:
                     return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
                 remaining -= duration
             continue
-        stop = await execute(action, snapshot)
+        action_task: asyncio.Future[AgentPaperLoopAction | None] = asyncio.ensure_future(
+            execute(action, snapshot)
+        )
+        heartbeat_task: asyncio.Future[AgentPaperLoopAction | None] | None = None
         try:
-            await heartbeat(clock())
+            await asyncio.sleep(0)
+            next_heartbeat_at = monotonic() + interval_seconds
+            while not action_task.done():
+                heartbeat_task = asyncio.ensure_future(
+                    wait_for_heartbeat_interval(
+                        max(0.0, next_heartbeat_at - monotonic())
+                    )
+                )
+                done, _ = await asyncio.wait(
+                    {action_task, heartbeat_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if action_task in done:
+                    break
+                await heartbeat_task
+                heartbeat_task = None
+                try:
+                    await persist_heartbeat()
+                except Exception:
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+                next_heartbeat_at += interval_seconds
+            stop = await action_task
+        finally:
+            tasks = tuple(
+                task
+                for task in (action_task, heartbeat_task)
+                if task is not None
+            )
+            pending = tuple(task for task in tasks if not task.done())
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await persist_heartbeat()
         except Exception:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         if stop is not None:
