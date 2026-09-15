@@ -1492,10 +1492,17 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             )
         assert final_fill.action == "filled"
         async with sessions() as session:
-            projected = await PaperReadService(session, second_evaluated_at).latest_agent_cycle()
+            read_service = PaperReadService(session, second_evaluated_at)
+            projected = await read_service.latest_agent_cycle()
+            cycle_page = await read_service.agent_cycles(
+                decision_session=DECISION_TIME.date(),
+                limit=1,
+            )
         assert projected is not None
         assert projected.status == "completed"
         assert projected.result_code == "PAPER_CYCLE_COMPLETED"
+        assert cycle_page.summary.cycle_count == 1
+        assert cycle_page.summary.completed_count == 1
     finally:
         await engine.dispose()
 

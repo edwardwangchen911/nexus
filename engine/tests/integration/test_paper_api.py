@@ -197,11 +197,13 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
             )
 
     path = f"/internal/v1/paper/cycles?decision_session={DECISION_SESSION}&limit=20"
+    limited_path = f"/internal/v1/paper/cycles?decision_session={DECISION_SESSION}&limit=1"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)),
         base_url="http://testserver",
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
+        limited = await client.get(limited_path, headers=headers("GET", limited_path))
         current_session_path = "/internal/v1/paper/cycles?limit=20"
         current_session = await client.get(
             current_session_path,
@@ -217,6 +219,10 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
         )
 
     assert response.status_code == 200
+    assert limited.status_code == 200
+    assert len(limited.json()["data"]["items"]) == 1
+    assert limited.json()["data"]["summary"]["cycle_count"] == 2
+    assert limited.json()["data"]["summary"]["completed_count"] == 0
     items = response.json()["data"]["items"]
     assert [item["cycle_id"] for item in items] == [str(newer_id), str(older_id)]
     assert [item["decision"]["decision_id"] for item in items] == [

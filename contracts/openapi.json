@@ -707,13 +707,13 @@
         "additionalProperties": false,
         "properties": {
           "completed_count": {
-            "maximum": 20,
+            "maximum": 108,
             "minimum": 0,
             "title": "Completed Count",
             "type": "integer"
           },
           "cycle_count": {
-            "maximum": 20,
+            "maximum": 108,
             "minimum": 0,
             "title": "Cycle Count",
             "type": "integer"

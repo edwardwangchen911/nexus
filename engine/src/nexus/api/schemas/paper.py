@@ -223,8 +223,8 @@ class AgentPaperSessionSummaryResponse(_StrictSchema):
         "closed",
         "historical",
     ]
-    cycle_count: int = Field(ge=0, le=20)
-    completed_count: int = Field(ge=0, le=20)
+    cycle_count: int = Field(ge=0, le=108)
+    completed_count: int = Field(ge=0, le=108)
     latest_result_code: str | None = Field(default=None, min_length=1, max_length=100)
     last_completed_decision_at: AwareDatetime | None
     next_eligible_at: AwareDatetime | None

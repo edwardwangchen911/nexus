@@ -43,6 +43,7 @@ describe("internal-paper Engine response boundary", () => {
 
     const listPath = "/internal/v1/paper/cycles";
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 21 } }, meta }), undefined, listPath, "GET")).status).toBe(200);
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 0 } }, meta }), undefined, listPath, "GET")).status).toBe(500);
     expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data), summary: cycleSummary }, meta }), undefined, listPath, "GET")).status).toBe(500);
     expect((await sanitizeEngineResponse(json({ data: { items: [{ ...data, execution_locked: false }], summary: cycleSummary }, meta }), undefined, listPath, "GET")).status).toBe(500);

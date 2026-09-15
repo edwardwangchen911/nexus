@@ -79,6 +79,8 @@ _MAX_POSITIONS = 500
 _MAX_ATTRIBUTIONS = 500
 _MAX_EVENTS = 128
 _MAX_FILLS = 128
+_MAX_AGENT_CYCLES_PER_SESSION = 108
+_MAX_AGENT_ORDERS_PER_CYCLE = 50
 _STALE_AFTER = timedelta(hours=36)
 
 
@@ -168,15 +170,144 @@ class PaperReadService:
             )
         )
         items = tuple([await self._agent_cycle(cycle) for cycle in cycles])
+        cycle_count, completed_count = await self._agent_session_counts(
+            account_id=account.id,
+            decision_session=resolved_session,
+        )
         return AgentPaperCyclePageResponse(
             items=items,
             summary=await self._agent_session_summary(
                 account_id=account.id,
                 decision_session=resolved_session,
                 cycles=items,
+                cycle_count=cycle_count,
+                completed_count=completed_count,
                 historical=decision_session is not None,
             ),
         )
+
+    async def _agent_session_counts(
+        self,
+        *,
+        account_id: UUID,
+        decision_session: date,
+    ) -> tuple[int, int]:
+        session_cycle_ids = select(AgentPaperCycleRecord.id).where(
+            AgentPaperCycleRecord.account_id == account_id,
+            AgentPaperCycleRecord.decision_session == decision_session,
+            AgentPaperCycleRecord.decision_time <= self._request_time,
+        )
+        latest_cycle_events = (
+            select(
+                AgentPaperCycleEventRecord.cycle_id,
+                func.max(AgentPaperCycleEventRecord.sequence).label("sequence"),
+            )
+            .where(AgentPaperCycleEventRecord.cycle_id.in_(session_cycle_ids))
+            .group_by(AgentPaperCycleEventRecord.cycle_id)
+            .subquery()
+        )
+        session_order_ids = (
+            select(PaperOrderRecord.id)
+            .join(
+                StrategyDecisionRecord,
+                StrategyDecisionRecord.id == PaperOrderRecord.strategy_decision_id,
+            )
+            .where(
+                StrategyDecisionRecord.agent_paper_cycle_id.in_(session_cycle_ids),
+                StrategyDecisionRecord.decision_origin == "agent_research",
+            )
+        )
+        latest_order_events = (
+            select(
+                PaperOrderEventRecord.order_id,
+                func.max(PaperOrderEventRecord.event_seq).label("event_seq"),
+            )
+            .where(
+                PaperOrderEventRecord.order_id.in_(session_order_ids),
+                PaperOrderEventRecord.occurred_at <= self._request_time,
+            )
+            .group_by(PaperOrderEventRecord.order_id)
+            .subquery()
+        )
+        terminal_order_statuses = {"filled", "cancelled", "rejected", "risk_rejected"}
+        rows = (
+            await self._session.execute(
+                select(
+                    AgentPaperCycleEventRecord.to_status,
+                    func.count(PaperOrderRecord.id).label("order_count"),
+                    func.count(PaperOrderEventRecord.order_id).label("terminal_order_count"),
+                )
+                .select_from(AgentPaperCycleRecord)
+                .outerjoin(
+                    latest_cycle_events,
+                    latest_cycle_events.c.cycle_id == AgentPaperCycleRecord.id,
+                )
+                .outerjoin(
+                    AgentPaperCycleEventRecord,
+                    and_(
+                        AgentPaperCycleEventRecord.cycle_id == AgentPaperCycleRecord.id,
+                        AgentPaperCycleEventRecord.sequence
+                        == latest_cycle_events.c.sequence,
+                    ),
+                )
+                .outerjoin(
+                    StrategyDecisionRecord,
+                    and_(
+                        StrategyDecisionRecord.agent_paper_cycle_id
+                        == AgentPaperCycleRecord.id,
+                        StrategyDecisionRecord.decision_origin == "agent_research",
+                    ),
+                )
+                .outerjoin(
+                    PaperOrderRecord,
+                    PaperOrderRecord.strategy_decision_id == StrategyDecisionRecord.id,
+                )
+                .outerjoin(
+                    latest_order_events,
+                    latest_order_events.c.order_id == PaperOrderRecord.id,
+                )
+                .outerjoin(
+                    PaperOrderEventRecord,
+                    and_(
+                        PaperOrderEventRecord.order_id == PaperOrderRecord.id,
+                        PaperOrderEventRecord.event_seq == latest_order_events.c.event_seq,
+                        PaperOrderEventRecord.to_status.in_(terminal_order_statuses),
+                    ),
+                )
+                .where(
+                    AgentPaperCycleRecord.account_id == account_id,
+                    AgentPaperCycleRecord.decision_session == decision_session,
+                    AgentPaperCycleRecord.decision_time <= self._request_time,
+                )
+                .group_by(
+                    AgentPaperCycleRecord.id,
+                    AgentPaperCycleEventRecord.to_status,
+                )
+                .order_by(AgentPaperCycleRecord.id)
+                .limit(_MAX_AGENT_CYCLES_PER_SESSION + 1)
+            )
+        ).all()
+        if len(rows) > _MAX_AGENT_CYCLES_PER_SESSION or any(
+            order_count > _MAX_AGENT_ORDERS_PER_CYCLE
+            for _, order_count, _ in rows
+        ):
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper session is unbounded.",
+                status_code=409,
+            )
+        if any(status is None for status, _, _ in rows):
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper session projection is incomplete.",
+                status_code=409,
+            )
+        completed_count = sum(
+            status == "completed"
+            or (status == "awaiting_market" and order_count > 0 and order_count == terminal_count)
+            for status, order_count, terminal_count in rows
+        )
+        return len(rows), completed_count
 
     async def _agent_session_summary(
         self,
@@ -184,6 +315,8 @@ class PaperReadService:
         account_id: UUID,
         decision_session: date | None,
         cycles: tuple[AgentPaperCycleResponse, ...],
+        cycle_count: int = 0,
+        completed_count: int = 0,
         historical: bool,
     ) -> AgentPaperSessionSummaryResponse:
         last_completed = await self._session.scalar(
@@ -205,12 +338,11 @@ class PaperReadService:
             .limit(1)
         )
         latest = cycles[0] if cycles else None
-        completed_count = sum(cycle.status == "completed" for cycle in cycles)
         if historical:
             return AgentPaperSessionSummaryResponse(
                 decision_session=decision_session,
                 status="historical",
-                cycle_count=len(cycles),
+                cycle_count=cycle_count,
                 completed_count=completed_count,
                 latest_result_code=None if latest is None else latest.result_code,
                 last_completed_decision_at=last_completed,
@@ -287,7 +419,7 @@ class PaperReadService:
         return AgentPaperSessionSummaryResponse(
             decision_session=decision_session,
             status=status,
-            cycle_count=len(cycles),
+            cycle_count=cycle_count,
             completed_count=completed_count,
             latest_result_code=None if latest is None else latest.result_code,
             last_completed_decision_at=last_completed,

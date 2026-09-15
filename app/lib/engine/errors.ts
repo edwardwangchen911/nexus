@@ -747,8 +747,13 @@ function agentPaperSessionSummaryValid(value: unknown, cycles: unknown[]): boole
   const completed = cycles.filter((cycle) => isPlain(cycle) && cycle.status === "completed").length;
   const latest = cycles[0];
   return value.execution_locked === true
-    && value.cycle_count === cycles.length
-    && value.completed_count === completed
+    && Number.isSafeInteger(value.cycle_count)
+    && Number.isSafeInteger(value.completed_count)
+    && Number(value.cycle_count) >= cycles.length
+    && Number(value.cycle_count) <= 108
+    && Number(value.completed_count) >= completed
+    && Number(value.completed_count) <= Number(value.cycle_count)
+    && (cycles.length > 0 || value.cycle_count === 0)
     && (isPlain(latest)
       ? value.latest_result_code === latest.result_code
       : value.latest_result_code === null);
