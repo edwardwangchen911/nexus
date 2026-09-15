@@ -19,6 +19,8 @@ from nexus.ops.schwab_market_stream import SchwabMarketStreamImportResult
 from nexus.paper.agent_cycle import AgentPaperCycleError
 from nexus.paper.agent_cycle_authority import CycleAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult, AgentPaperTriggerReservation
+from nexus.paper.agent_market import AgentPaperMarketScope
+from nexus.persistence.models.paper import PAPER_EXECUTION_SOURCE_POLICY_ID
 from nexus.risk.query_authority_producer import RiskQueryScope, RiskSourceProof
 from nexus.settings import EngineSettings
 from pydantic import SecretStr, ValidationError
@@ -143,6 +145,83 @@ def test_collect_window_parser_has_no_provider_or_credential_override() -> None:
                 datetime(2026, 8, 27, 13, 30, tzinfo=UTC).isoformat(),
             ]
         )
+
+
+def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_id = UUID(int=1)
+    instrument_id = UUID(int=2)
+    window_start = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
+    scope = AgentPaperMarketScope(
+        cycle_id=cycle_id,
+        instrument_id=instrument_id,
+        execution_source_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+        window_start=window_start,
+        window_end=window_start.replace(minute=35),
+    )
+    expected = object()
+
+    class AsyncContext:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+        async def __aenter__(self) -> object:
+            return self.value
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class Factory:
+        def __call__(self) -> AsyncContext:
+            return AsyncContext(object())
+
+    async def resolve(*_args: object, **_kwargs: object) -> AgentPaperMarketScope:
+        return scope
+
+    async def collect(
+        _factory: object,
+        *,
+        cycle_id: UUID,
+        instrument_id: UUID | None = None,
+        window_start: datetime | None = None,
+        **_kwargs: object,
+    ) -> object:
+        assert cycle_id == scope.cycle_id
+        assert instrument_id == scope.instrument_id
+        assert window_start == scope.window_start
+        return expected
+
+    monkeypatch.setattr(cli, "create_async_engine", lambda *_args, **_kwargs: Engine())
+    monkeypatch.setattr(cli, "async_sessionmaker", lambda *_args, **_kwargs: Factory())
+    monkeypatch.setattr(cli, "S3ProviderEvidenceStore", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli.httpx, "AsyncClient", lambda *_args, **_kwargs: AsyncContext(object()))
+    monkeypatch.setattr(cli, "FixedOriginHttpClient", lambda **_kwargs: object())
+    monkeypatch.setattr(cli, "AlpacaHttpTransport", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli, "AlpacaMarketDataProvider", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli, "resolve_agent_paper_market_scope", resolve)
+    monkeypatch.setattr(cli, "collect_agent_paper_window", collect)
+
+    settings = cli.AgentPaperMarketSettings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+        object_store_endpoint="http://127.0.0.1:9000",
+        alpaca_key=SecretStr("key"),
+        alpaca_secret=SecretStr("secret"),
+    )
+    result = asyncio.run(
+        cli.collect_window_once(
+            settings,
+            AgentPaperCollectWindowRequest(action="collect-window", cycle_id=cycle_id),
+            repo_root=tmp_path,
+        )
+    )
+
+    assert result is expected
 
 
 def test_trigger_and_resume_requests_exclude_client_time_symbol_and_provider() -> None:

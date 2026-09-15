@@ -464,6 +464,8 @@ async def collect_window_once(
             return await collect_agent_paper_window(
                 factory,
                 cycle_id=request.cycle_id,
+                instrument_id=scope.instrument_id,
+                window_start=scope.window_start,
                 provider=provider,
                 object_store=store,
             )
