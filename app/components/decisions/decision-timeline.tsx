@@ -16,6 +16,11 @@ export function DecisionTimeline({ detail }: { detail: Detail }): React.ReactEle
   const risk = riskPresentation(cycle);
   const execution = executionPresentation(cycle, orders);
   const resultUnknown = execution.key === "result_unknown" || execution.key === "unknown";
+  const executionState = resultUnknown || execution.key === "rejected" || execution.key === "reconciling"
+    ? "attention"
+    : execution.key === "filled" || execution.key === "cancelled" || execution.key === "no_order"
+      ? "known"
+      : "pending";
   const marketFacts = cycle.decision_market
     ? `Schwab Level One · 实时 · ${formatDisplayTime(cycle.decision_market.quote_at)}`
     : "未知：本周期没有单独保存决策报价投影。";
@@ -42,7 +47,7 @@ export function DecisionTimeline({ detail }: { detail: Detail }): React.ReactEle
     <Stage title={stages[5]} state={orders.length || cycle.result_code === "NO_ORDER_REQUIRED" ? "known" : "unknown"} summary={orderConclusion(cycle.result_code, orders)}>
       {orders.length ? <FactDetails rows={orders.map((order) => [order.order_id, `${order.symbol ?? "未知标的"} · ${order.side} · ${order.status}`])} /> : null}
     </Stage>
-    <Stage title={stages[6]} state={resultUnknown ? "attention" : execution.key === "filled" ? "known" : "pending"} summary={resultUnknown ? "结果未知：现有周期与订单事实不能证明最终结果。" : `${execution.label}：${execution.detail}`}>
+    <Stage title={stages[6]} state={executionState} summary={resultUnknown ? "结果未知：现有周期与订单事实不能证明最终结果。" : `${execution.label}：${execution.detail}`}>
       {orders.length ? <ExecutionDetails orders={orders} /> : null}
       {resultUnknown ? <a className="button button--danger" href="/paper"><ShieldAlert aria-hidden="true" size={17} />核对原操作结果</a> : null}
     </Stage>

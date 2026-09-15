@@ -99,6 +99,18 @@ describe("decision records", () => {
     expect(screen.queryByRole("button", { name: /重试|提交|批准/ })).not.toBeInTheDocument();
   });
 
+  it("presents a completed no-order execution as a known terminal result", () => {
+    const noOrder = cycle("28", {
+      status: "completed", result_code: "NO_ORDER_REQUIRED", order_ids: [],
+      candidates: [{ ...agentPaperCycle.candidates[0], stance: "watch", sizing_action: "none" }],
+    });
+    render(<DecisionDetailPanel state="ready" detail={{ cycle: noOrder, orders: [] }} onRefresh={vi.fn()} />);
+
+    const execution = screen.getByRole("region", { name: "执行结果" });
+    expect(execution).toHaveTextContent("无需下单");
+    expect(execution).not.toHaveTextContent("处理中");
+  });
+
   it("loads list and exact detail using GET only", async () => {
     const calls: Array<{ path: string; method: string }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -113,7 +125,7 @@ describe("decision records", () => {
     expect(await screen.findByRole("list", { name: "决策记录" })).toBeVisible();
     list.unmount();
     render(<DecisionDetailPage />);
-    expect(await screen.findByRole("region", { name: "决策详情页面" })).toHaveAttribute("data-state", "ready");
+    await waitFor(() => expect(screen.getByRole("region", { name: "决策详情页面" })).toHaveAttribute("data-state", "ready"));
     expect(calls).toEqual([
       { path: "/api/v1/paper/cycles?limit=20", method: "GET" },
       { path: `/api/v1/paper/cycles/${agentPaperCycle.cycle_id}`, method: "GET" },
