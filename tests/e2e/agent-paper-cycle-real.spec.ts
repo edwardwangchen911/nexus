@@ -51,7 +51,7 @@ test("two real intraday Agent paper cycles are independent persisted facts in AP
   const region = page.getByRole("region", { name: "当日 Agent 模拟周期" });
   await expect(region).toContainText(newerCycle.result_code);
   await expect(region.locator(`time[datetime="${newerCycle.decision_time}"]`)).toHaveCount(1);
-  await page.getByLabel("当日 Agent 模拟周期").selectOption(olderCycle.cycle_id);
+  await region.locator("select").selectOption(olderCycle.cycle_id);
   await expect(region).toContainText(olderCycle.result_code);
   await expect(region.locator(`time[datetime="${olderCycle.decision_time}"]`)).toHaveCount(1);
   await expect(region).toContainText("决策报价 · Schwab Level One · 实时");
