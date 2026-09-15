@@ -231,7 +231,7 @@ async def test_structured_setup_registers_new_synthesis_prompt_without_rewriting
         ]
         assert all(r in after for r in before) and len(after) == len(before) + 1
         new = next(r for r in after if r not in before)
-        assert new["role"] == "portfolio" and new["version"] == "local-portfolio-synthesis-v2"
+        assert new["role"] == "portfolio" and new["version"] == "local-portfolio-synthesis-v3"
         model = await session.scalar(
             select(AgentModelConfigRecord).where(
                 AgentModelConfigRecord.version == "codex-sdk-chatgpt-v3"

@@ -228,13 +228,13 @@ def load_portfolio_synthesis_prompt() -> PromptAsset:
     content = (
         Path(__file__)
         .with_name("prompts")
-        .joinpath("portfolio-synthesis-v2.md")
+        .joinpath("portfolio-synthesis-v3.md")
         .read_text(encoding="utf-8")
         .strip()
     )
     return PromptAsset(
         role="portfolio",
-        version="local-portfolio-synthesis-v2",
+        version="local-portfolio-synthesis-v3",
         content=content,
         content_hash=hashlib.sha256(content.encode()).hexdigest(),
     )

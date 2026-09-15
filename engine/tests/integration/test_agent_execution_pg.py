@@ -171,7 +171,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             security = tools_view["security_snapshot"]["items"]
             refs = {item["evidence_ref_id"]: item for item in security}
             for tool in tools_view.values():
-                for row in tool["items"]:
+                for row in tool.get("items", []):
                     if "evidence_ref_id" not in row:
                         continue
                     if staged == "v3_cite1":
@@ -190,8 +190,9 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 "v3_cite1",
             }:
                 prompt = payload["prompts"][0]
-                assert prompt["version"] == "local-portfolio-synthesis-v2"
+                assert prompt["version"] == "local-portfolio-synthesis-v3"
                 assert "Confirming that a gap exists does not resolve it" in prompt["content"]
+                assert "must not by itself make a review unresolved" in prompt["content"]
                 assert "operating disclosures" in prompt["content"]
                 assert "current trends" in prompt["content"]
                 assert "supplied public issuer operating figures" in prompt["content"]

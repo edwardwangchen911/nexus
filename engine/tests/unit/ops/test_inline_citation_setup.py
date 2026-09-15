@@ -4,11 +4,22 @@ from unittest.mock import AsyncMock
 
 import pytest
 from nexus.agents import codex_versions
+from nexus.agents.committee import load_portfolio_synthesis_prompt
 from nexus.ops import openai_local
 from nexus.settings import EngineSettings
 
 VERSION = "codex-sdk-chatgpt-v3-input96k-wire64k-cite1"
 ACTIONABLE_VERSION = "codex-sdk-chatgpt-v4-actionable"
+
+
+def test_portfolio_synthesis_v3_separates_irreducible_uncertainty_from_missing_evidence():
+    prompt = load_portfolio_synthesis_prompt()
+
+    assert prompt.version == "local-portfolio-synthesis-v3"
+    assert "cannot prove future returns" in prompt.content
+    assert "irreducible uncertainty" in prompt.content
+    assert "must not by itself make a review unresolved" in prompt.content
+    assert "specific observable input" in prompt.content
 
 
 def test_citation_version_uses_existing_structured_limits():
