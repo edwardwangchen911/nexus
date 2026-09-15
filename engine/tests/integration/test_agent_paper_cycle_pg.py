@@ -1,13 +1,17 @@
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID
 
+import httpx
 import pytest
+from helpers.paper_api import app, headers
 from helpers.paper_batch import DECISION_TIME, INSTRUMENTS, seed_paper_batch
 from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.execution_authority import ROLE_ORDER
+from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.paper.agent_cycle import (
@@ -34,6 +38,7 @@ from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
+    AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
@@ -53,6 +58,7 @@ from nexus.persistence.models.paper import (
     PaperExecutionWindowMemberRecord,
     PaperFillRecord,
     PaperLedgerEntryRecord,
+    PaperOrderRecord,
     PaperReservationEventRecord,
     RiskQueryAuthorityRecord,
 )
@@ -62,6 +68,14 @@ from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 from nexus.risk.authority import (
     canonical_query_authority_hash,
     prepare_schwab_realtime_risk_snapshot,
+)
+from nexus.strategy.intents import (
+    ResearchClaim,
+    ResearchCondition,
+    ResearchIntent,
+    RoleVote,
+    SynthesisAssessment,
+    SynthesisClaimReview,
 )
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -450,6 +464,256 @@ async def _seed_cycle_research_authority(
     await session.flush()
 
 
+def _safe_no_trade_intent(
+    *,
+    run: AgentResearchRunRecord,
+    evidence: ResearchEvidenceRef,
+    valid_until: datetime,
+) -> ResearchIntent:
+    reference = EvidenceRef(
+        source=evidence.source,
+        object_id=evidence.provider_object_id,
+        available_at=evidence.available_at,
+        location=evidence.location,
+        content_hash=evidence.content_hash,
+    )
+    claim = ResearchClaim(text="现有证据不足以支持增加风险暴露。", evidence_refs=(reference,))
+    condition = ResearchCondition(
+        signal="committee.evidence_valid",
+        operator="is_true",
+        threshold=True,
+        unit="boolean",
+        evidence_refs=(reference,),
+    )
+    return ResearchIntent(
+        synthesis_assessment=SynthesisAssessment(
+            stance="watch",
+            claims=(claim,),
+            reviews=(
+                SynthesisClaimReview(
+                    claim_id="bear:0",
+                    status="unresolved",
+                    rationale="缺少足够证据，保持观察且不交易。",
+                    evidence_refs=(reference,),
+                    resolved=False,
+                    missing_evidence=("additional market evidence",),
+                    prevented_conclusion="Only watch and no trade are permitted.",
+                ),
+                SynthesisClaimReview(
+                    claim_id="evidence_audit:0",
+                    status="accepted",
+                    rationale="已核对现有冻结证据。",
+                    evidence_refs=(reference,),
+                    resolved=True,
+                    missing_evidence=(),
+                    prevented_conclusion=None,
+                ),
+            ),
+            review_conclusion="limited",
+            uncertainties=("方向证据仍不完整。",),
+        ),
+        schema_version="research_intent_v1",
+        decision_id=UUID("63000000-0000-0000-0000-000000000701"),
+        instrument_id=run.instrument_id,
+        display_symbol="AAPL",
+        decision_time=run.decision_time,
+        data_snapshot_id=run.data_snapshot_id,
+        horizon="medium_term",
+        stance="watch",
+        exposure_action="none",
+        theses=(claim,),
+        counter_theses=(
+            ResearchClaim(text="新增证据可能改变观察结论。", evidence_refs=(reference,)),
+        ),
+        uncertainties=("方向证据仍不完整。",),
+        invalidation_conditions=(condition,),
+        entry_conditions=(condition,),
+        exit_conditions=(condition,),
+        valid_until=valid_until,
+        quality_status="partial",
+        evidence_audit="partial",
+        role_votes=tuple(RoleVote(role=role, vote="abstain") for role in ROLE_ORDER),
+        disagreement="证据不足，因此不改变风险暴露。",
+        strategy_version="baseline_v1",
+        model_version="fixture-agent-paper",
+        prompt_version="agent-paper-v1",
+        data_version="research-filings-v1",
+        evidence_refs=(reference,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_api(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        from nexus.strategy.forward import load_forward_strategy_decision
+
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            assert registered is not None
+            await _seed_cycle_research_authority(session, registered_decision=registered.decision)
+
+        async with sessions.begin() as session:
+            started = await advance_agent_paper_cycle(
+                session,
+                account_id=seed.account_id,
+                decision_time=DECISION_TIME,
+                idempotency_key="agent-paper-safe-no-trade",
+            )
+        assert started.status == "researching", started.result_code
+        assert len(started.research_run_ids) == 1
+
+        output_at = datetime.now(UTC) + timedelta(seconds=5)
+        async with sessions.begin() as session:
+            run_id = started.research_run_ids[0]
+            run = await session.get(AgentResearchRunRecord, run_id)
+            assert run is not None
+            manifest = run.evidence_manifest
+            assert len(manifest) == 1
+            evidence = await session.get(ResearchEvidenceRef, UUID(manifest[0]["id"]))
+            assert evidence is not None
+            intent = _safe_no_trade_intent(
+                run=run,
+                evidence=evidence,
+                valid_until=output_at + timedelta(days=1),
+            )
+            intent_document = intent.model_dump(mode="json")
+            payload = {"quality_status": "partial"}
+            output_id = UUID("63000000-0000-0000-0000-000000000702")
+            content_hash = sha256(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "role": None,
+                        "payload": payload,
+                        "intent": intent_document,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode()
+            ).hexdigest()
+            await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
+            await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text("UPDATE agent_research_runs SET status='completed' WHERE id=:run_id"),
+                    {"run_id": run_id},
+                )
+                await session.execute(
+                    text(
+                        "UPDATE jobs SET status='succeeded',started_at=:at,finished_at=:at,"
+                        "attempt_count=1,result_code='AGENT_RESEARCH_COMPLETED',version=version+1 "
+                        "WHERE payload->>'run_id'=:run_id"
+                    ),
+                    {"at": output_at, "run_id": str(run_id)},
+                )
+            finally:
+                await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER USER"))
+                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
+            session.add(
+                AgentResearchOutputRecord(
+                    id=output_id,
+                    run_id=run_id,
+                    sequence=1,
+                    status="completed",
+                    role=None,
+                    prompt_hash=None,
+                    content_hash=content_hash,
+                    payload=payload,
+                    intent=intent_document,
+                )
+            )
+            await session.flush()
+            session.add(
+                AgentResearchOutputEvidenceRecord(
+                    output_id=output_id,
+                    evidence_ref_id=evidence.id,
+                    source=evidence.source,
+                    provider_object_id=evidence.provider_object_id,
+                    revision=evidence.revision,
+                    available_at=evidence.available_at,
+                    location=evidence.location,
+                    content_hash=evidence.content_hash,
+                )
+            )
+
+        async with sessions.begin() as session:
+            completed = await advance_agent_paper_cycle(
+                session,
+                account_id=seed.account_id,
+                decision_time=DECISION_TIME,
+                idempotency_key="agent-paper-safe-no-trade",
+            )
+            order_count = await session.scalar(
+                select(func.count())
+                .select_from(PaperOrderRecord)
+                .where(PaperOrderRecord.strategy_decision_id == completed.strategy_decision_id)
+            )
+            event_codes = tuple(
+                await session.scalars(
+                    select(AgentPaperCycleEventRecord.result_code)
+                    .where(AgentPaperCycleEventRecord.cycle_id == completed.cycle_id)
+                    .order_by(AgentPaperCycleEventRecord.sequence)
+                )
+            )
+
+        assert completed.status == "completed"
+        assert completed.result_code == "NO_ORDER_REQUIRED"
+        assert completed.strategy_decision_id is not None
+        assert completed.batch_id is not None
+        assert completed.order_ids == ()
+        assert order_count == 0
+        assert event_codes[-3:] == (
+            "AGENT_DECISION_RECORDED",
+            "PAPER_BATCH_EVALUATED",
+            "NO_ORDER_REQUIRED",
+        )
+
+        path = "/internal/v1/paper/cycles/latest"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=output_at + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["status"] == "completed"
+        assert data["result_code"] == "NO_ORDER_REQUIRED"
+        assert data["execution_locked"] is True
+        assert data["order_ids"] == []
+        assert data["decision"]["risk_outcomes"] == []
+        assert len(data["candidates"]) == 1
+        candidate = data["candidates"][0]
+        intent_hash = candidate.pop("intent_hash")
+        assert len(intent_hash) == 64
+        assert set(intent_hash) <= set("0123456789abcdef")
+        assert candidate == {
+            "instrument_id": str(INSTRUMENTS[0][0]),
+            "symbol": "AAPL",
+            "selection_reasons": ["PAPER_BATCH_TEST"],
+            "research_status": "completed",
+            "stance": "watch",
+            "sizing_action": "none",
+            "output_id": str(output_id),
+            "rejection_code": None,
+        }
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_quasi_realtime_authority_uses_database_time_window_and_same_session(
     migrated_database_url: str,
@@ -684,9 +948,7 @@ async def test_schwab_risk_snapshot_uses_cycle_frozen_prior_daily_and_proofs(
                     )
                 )
             )
-            for index, kind in enumerate(
-                ("corporate_action", "suspension", "delisting"), start=1
-            ):
+            for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
                 older_at = decision_time - timedelta(minutes=1)
                 watermark = f"{index + 3}" * 64
                 session.add(
