@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from nexus.ops import agent_risk_authority as cli
+from nexus.ops import alpaca_actions_local
 from pydantic import SecretStr
 
 
@@ -167,6 +168,12 @@ def test_halt_response_received_after_decision_cutoff_is_rejected(
             value = next(received_times)
             return value if tz is not None else value.replace(tzinfo=None)
 
+    class ActionReceiptDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cutoff - timedelta(seconds=10)
+            return value if tz is not None else value.replace(tzinfo=None)
+
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.host == "data.alpaca.markets":
             return httpx.Response(200, content=action)
@@ -181,6 +188,7 @@ def test_halt_response_received_after_decision_cutoff_is_rejected(
         lambda **kwargs: original(**kwargs, transport=httpx.MockTransport(respond)),
     )
     monkeypatch.setattr(cli, "datetime", SequencedDatetime)
+    monkeypatch.setattr(alpaca_actions_local, "datetime", ActionReceiptDatetime)
 
     with pytest.raises(ValueError, match="AGENT_RISK_COLLECTION_WINDOW_INVALID"):
         asyncio.run(
