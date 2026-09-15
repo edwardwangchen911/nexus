@@ -33,6 +33,7 @@ from nexus.agents.execution_authority import (
     load_frozen_symbol,
 )
 from nexus.agents.models import ResearchRequest
+from nexus.agents.paper_context import read_agent_paper_research_context
 from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.agents.price_authority import (
     freeze_price_authority,
@@ -569,6 +570,29 @@ async def admit_research_run(
             raise ValueError("portfolio context authority is invalid")
         context_evidence = await session.get(ResearchEvidenceRef, context.evidence_ref_id)
         assert context_evidence is not None
+        evidence_manifest.append(
+            {
+                "id": str(context_evidence.id),
+                "source": context_evidence.source,
+                "provider_object_id": context_evidence.provider_object_id,
+                "revision": context_evidence.revision,
+                "available_at": context_evidence.available_at.isoformat().replace("+00:00", "Z"),
+                "location": context_evidence.location,
+                "content_hash": context_evidence.content_hash,
+            }
+        )
+        if len(evidence_manifest) > MAX_FROZEN_EVIDENCE:
+            raise ValueError("evidence authority exceeds 100 rows")
+    if "agent_paper_context" in snapshot.payload:
+        paper_context = await read_agent_paper_research_context(
+            session,
+            snapshot_id=snapshot.id,
+            instrument_id=request.instrument_id,
+            as_of=request.decision_time,
+        )
+        if paper_context is None:
+            raise ValueError("Agent paper context authority is invalid")
+        context_evidence = paper_context[1]
         evidence_manifest.append(
             {
                 "id": str(context_evidence.id),

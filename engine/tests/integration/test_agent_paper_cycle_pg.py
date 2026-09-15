@@ -10,6 +10,7 @@ from helpers.paper_api import app, headers
 from helpers.paper_batch import DECISION_TIME, INSTRUMENTS, seed_paper_batch
 from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.agents.committee import load_prompt_assets
+from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution_authority import ROLE_ORDER
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import ingest_price_page
@@ -1077,6 +1078,59 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         assert resumed == first.model_copy(update={"replayed": True})
         assert len(first.research_run_ids) == 1
         assert job_count == resumed_job_count == 1
+
+        async with sessions() as session:
+            run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])
+            assert run is not None
+            assert run.data_snapshot_id != manifest[0].research_snapshot_id
+            tools = await database_read_only_tools(
+                session,
+                run,
+                allow_fixture_evidence=False,
+            )
+            frozen = await tools.execute(
+                "get_security_snapshot",
+                {
+                    "instrument_id": run.instrument_id,
+                    "data_snapshot_id": run.data_snapshot_id,
+                    "as_of": run.decision_time,
+                },
+            )
+        context_items = [
+            item
+            for item in frozen["items"]
+            if item["source"] == "nexus_agent_paper_context"
+        ]
+        assert len(context_items) == 1
+        context = context_items[0]["agent_paper_context"]
+        assert context["decision_quote"] == {
+            "source": "schwab",
+            "feed": "l1",
+            "delivery_mode": "real_time",
+            "delayed": False,
+            "bid": "99.900000000000",
+            "ask": "100.100000000000",
+            "observed_at": "2026-08-26T11:29:50Z",
+            "available_at": "2026-08-26T11:30:00Z",
+            "received_at": "2026-08-26T11:30:00Z",
+        }
+        assert context["prior_daily"] == {
+            "source": "alpaca",
+            "feed": "sip",
+            "delivery_mode": "delayed",
+            "adjustment": "all",
+            "session": "2026-08-25",
+            "close": "100.000000000000",
+        }
+        assert context["paper_portfolio"] == {
+            "candidate_position_weight": "0.000000000000",
+            "cash_weight": "1.000000000000",
+            "projection_hash": context["paper_portfolio"]["projection_hash"],
+        }
+        assert context["execution_locked"] is True
+        assert "account_id" not in context
+        assert "quantity" not in json.dumps(context)
+        assert "available_cash" not in json.dumps(context)
 
         output_at = decision_time + timedelta(seconds=10)
         output_id = UUID("63000000-0000-0000-0000-000000000777")

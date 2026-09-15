@@ -11,6 +11,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.actionable_research import ActionableResearchError
+from nexus.agents.paper_context import prepare_agent_paper_research_snapshot
 from nexus.agents.persistence import load_actionable_research_output
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_research import admit_agent_paper_research
@@ -59,6 +60,7 @@ from nexus.risk.authority import (
     prepare_risk_market_snapshot,
     prepare_schwab_realtime_risk_snapshot,
 )
+from nexus.risk.models import PaperPortfolioProjection
 
 __all__ = [
     "AgentPaperCycleResult",
@@ -370,6 +372,11 @@ async def advance_agent_paper_cycle(
             session,
             cycle=cycle,
             authority=authority,
+            projection=await load_paper_projection(
+                session,
+                account_id=cycle.account_id,
+                as_of=cycle.decision_time,
+            ),
             daily_limit_usd=daily_limit_usd,
         )
     if events[-1].to_status == "researching":
@@ -452,6 +459,7 @@ async def _start_cycle(
         session,
         cycle=cycle,
         authority=authority,
+        projection=projection,
         daily_limit_usd=daily_limit_usd,
     )
 
@@ -461,6 +469,7 @@ async def _admit_cycle_research(
     *,
     cycle: AgentPaperCycleRecord,
     authority: CycleAuthority,
+    projection: PaperPortfolioProjection,
     daily_limit_usd: Decimal,
 ) -> AgentPaperCycleResult:
     manifest = parse_candidate_manifest(
@@ -471,11 +480,24 @@ async def _admit_cycle_research(
     try:
         async with session.begin_nested():
             for candidate in manifest:
+                research_snapshot_id = candidate.research_snapshot_id
+                if authority.execution_session == authority.decision_session:
+                    if not isinstance(candidate, CandidateManifestEntry):
+                        raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
+                    research_snapshot_id = (
+                        await prepare_agent_paper_research_snapshot(
+                            session,
+                            cycle_id=cycle.id,
+                            decision_time=authority.decision_time,
+                            candidate=candidate,
+                            projection=projection,
+                        )
+                    ).id
                 admission = await admit_agent_paper_research(
                     session,
                     cycle_id=cycle.id,
                     instrument_id=candidate.instrument_id,
-                    research_snapshot_id=candidate.research_snapshot_id,
+                    research_snapshot_id=research_snapshot_id,
                     research_as_of=authority.decision_time,
                     daily_limit_usd=daily_limit_usd,
                     now=authority.decision_time,

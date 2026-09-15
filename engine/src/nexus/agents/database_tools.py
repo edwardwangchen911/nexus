@@ -12,6 +12,8 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
+from nexus.agents.paper_context import SOURCE as PAPER_CONTEXT_SOURCE
+from nexus.agents.paper_context import read_agent_paper_research_context
 from nexus.agents.portfolio_context import (
     ContextDiagnostic,
     PortfolioResearchContext,
@@ -205,6 +207,14 @@ class _BoundDatabaseExecutors:
             as_of=self._decision_time,
             evidence_ids=self._evidence_ids,
         )
+        paper_context = await read_agent_paper_research_context(
+            self._session,
+            snapshot_id=self._snapshot_id,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+        )
+        paper_context_value = paper_context[0] if paper_context is not None else None
+        paper_context_id = paper_context[1].id if paper_context is not None else None
         return self._result(
             "get_security_snapshot",
             [
@@ -252,6 +262,15 @@ class _BoundDatabaseExecutors:
                     **(
                         {"news_observation": news_tool_payload(news[record.id])}
                         if record.id in news
+                        else {}
+                    ),
+                    **(
+                        {
+                            "agent_paper_context": paper_context_value.model_dump(mode="json")
+                        }
+                        if record.source == PAPER_CONTEXT_SOURCE
+                        and record.id == paper_context_id
+                        and paper_context_value is not None
                         else {}
                     ),
                 }
