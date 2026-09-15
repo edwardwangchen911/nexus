@@ -19,18 +19,6 @@ def test_notifications_are_disabled_without_configuration() -> None:
 
 
 @pytest.mark.parametrize(
-    "forbidden",
-    ("NEXUS_BARK_DEVICE_KEY", "NEXUS_BARK_ENCRYPTION_KEY"),
-)
-def test_direct_secret_values_are_rejected(forbidden: str) -> None:
-    with pytest.raises(
-        BarkWorkerConfigurationError,
-        match="^BARK_DIRECT_SECRET_FORBIDDEN$",
-    ):
-        load_bark_worker_settings({forbidden: "must-not-be-accepted"})
-
-
-@pytest.mark.parametrize(
     "server_url",
     (
         "https://127.0.0.1:8080",
@@ -40,14 +28,7 @@ def test_direct_secret_values_are_rejected(forbidden: str) -> None:
         "http://127.0.0.1:8080/not-push",
     ),
 )
-def test_enabled_worker_rejects_non_localhost_server(server_url: str, tmp_path) -> None:
-    device = tmp_path / "device-key"
-    encryption = tmp_path / "encryption-key"
-    device.write_text("device-key")
-    encryption.write_text("0123456789abcdef")
-    device.chmod(0o600)
-    encryption.chmod(0o600)
-
+def test_enabled_worker_rejects_non_localhost_server(server_url: str) -> None:
     with pytest.raises(
         BarkWorkerConfigurationError,
         match="^BARK_CONFIGURATION_INVALID$",
@@ -57,27 +38,21 @@ def test_enabled_worker_rejects_non_localhost_server(server_url: str, tmp_path) 
                 "NEXUS_BARK_ENABLED": "true",
                 "DATABASE_URL": "postgresql+asyncpg://nexus@postgres/nexus",
                 "NEXUS_BARK_SERVER_URL": server_url,
-                "NEXUS_BARK_DEVICE_KEY_FILE": str(device),
-                "NEXUS_BARK_ENCRYPTION_KEY_FILE": str(encryption),
+                "NEXUS_BARK_DEVICE_KEY": "device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
                 "NEXUS_BARK_ACTIVATED_AT": "2026-09-15T06:00:00Z",
             }
         )
 
 
-def test_enabled_worker_loads_only_protected_files(tmp_path) -> None:
-    device = tmp_path / "device-key"
-    encryption = tmp_path / "encryption-key"
-    device.write_text("device-key\n")
-    encryption.write_text("0123456789abcdef\n")
-    device.chmod(0o600)
-    encryption.chmod(0o600)
+def test_enabled_worker_loads_credentials_from_environment_without_exposing_them() -> None:
     settings = load_bark_worker_settings(
         {
             "NEXUS_BARK_ENABLED": "true",
             "DATABASE_URL": "postgresql+asyncpg://nexus@postgres/nexus",
             "NEXUS_BARK_SERVER_URL": "http://127.0.0.1:8080",
-            "NEXUS_BARK_DEVICE_KEY_FILE": str(device),
-            "NEXUS_BARK_ENCRYPTION_KEY_FILE": str(encryption),
+            "NEXUS_BARK_DEVICE_KEY": "device-key",
+            "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
             "NEXUS_BARK_ACTIVATED_AT": "2026-09-15T06:00:00Z",
             "NEXUS_BARK_READ_ONLY_URL": "http://nexus.local/paper",
         }
@@ -95,32 +70,25 @@ def test_enabled_worker_loads_only_protected_files(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "key", "error_code"),
+    ("device_key", "encryption_key", "error_code"),
     (
-        (0o644, "0123456789abcdef", "BARK_SECRET_FILE_UNSAFE"),
-        (0o600, "too-short", "BARK_ENCRYPTION_KEY_INVALID"),
-        (0o600, "éééééééé", "BARK_ENCRYPTION_KEY_INVALID"),
+        ("contains space", "0123456789abcdef", "BARK_DEVICE_KEY_INVALID"),
+        ("device-key", "too-short", "BARK_ENCRYPTION_KEY_INVALID"),
+        ("device-key", "éééééééé", "BARK_ENCRYPTION_KEY_INVALID"),
     ),
 )
-def test_credentials_reject_unsafe_mode_or_invalid_key(
-    tmp_path,
-    mode: int,
-    key: str,
+def test_credentials_reject_invalid_environment_values(
+    device_key: str,
+    encryption_key: str,
     error_code: str,
 ) -> None:
-    device = tmp_path / "device-key"
-    encryption = tmp_path / "encryption-key"
-    device.write_text("device-key")
-    encryption.write_text(key)
-    device.chmod(0o600)
-    encryption.chmod(mode)
     settings = load_bark_worker_settings(
         {
             "NEXUS_BARK_ENABLED": "true",
             "DATABASE_URL": "postgresql+asyncpg://nexus@postgres/nexus",
             "NEXUS_BARK_SERVER_URL": "http://localhost:8080",
-            "NEXUS_BARK_DEVICE_KEY_FILE": str(device),
-            "NEXUS_BARK_ENCRYPTION_KEY_FILE": str(encryption),
+            "NEXUS_BARK_DEVICE_KEY": device_key,
+            "NEXUS_BARK_ENCRYPTION_KEY": encryption_key,
             "NEXUS_BARK_ACTIVATED_AT": "2026-09-15T06:00:00Z",
         }
     )
@@ -138,17 +106,9 @@ def test_credentials_reject_unsafe_mode_or_invalid_key(
     ),
 )
 def test_worker_rejects_ambiguous_time_or_non_read_only_link(
-    tmp_path,
     activated_at: str,
     read_only_url: str,
 ) -> None:
-    device = tmp_path / "device-key"
-    encryption = tmp_path / "encryption-key"
-    device.write_text("device-key")
-    encryption.write_text("0123456789abcdef")
-    device.chmod(0o600)
-    encryption.chmod(0o600)
-
     with pytest.raises(
         BarkWorkerConfigurationError,
         match="^BARK_CONFIGURATION_INVALID$",
@@ -158,8 +118,8 @@ def test_worker_rejects_ambiguous_time_or_non_read_only_link(
                 "NEXUS_BARK_ENABLED": "true",
                 "DATABASE_URL": "postgresql+asyncpg://nexus@postgres/nexus",
                 "NEXUS_BARK_SERVER_URL": "http://127.0.0.1:8080",
-                "NEXUS_BARK_DEVICE_KEY_FILE": str(device),
-                "NEXUS_BARK_ENCRYPTION_KEY_FILE": str(encryption),
+                "NEXUS_BARK_DEVICE_KEY": "device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
                 "NEXUS_BARK_ACTIVATED_AT": activated_at,
                 "NEXUS_BARK_READ_ONLY_URL": read_only_url,
             }

@@ -16,38 +16,32 @@ event ID 更新同一通知；极端的发送成功/数据库确认前崩溃会�
   `http://127.0.0.1:8080/push`。
 - 首次注册时 iPhone 必须临时访问 Mac。只在受信任局域网使用 Mac 的明确 LAN 地址，不绑定
   `0.0.0.0`，不做路由器端口转发、Cloudflare Tunnel 或公网反向代理。完成后立即恢复稳态。
-- Bark 官方加密设置选择 AES-128-CBC；key 必须与本机受保护文件一致且恰好 16 个 ASCII 字节。
-- device key 与加密 key 不写进 `infra/.env.local`、命令参数、聊天、日志、数据库或 Git。
+- Bark 官方加密设置选择 AES-128-CBC；key 必须与 `infra/.env.local` 中的值一致且恰好 16 个 ASCII 字符。
+- device key 与加密 key 只写入受保护且 Git 忽略的 `infra/.env.local` 和 Bark App，不写入命令参数、聊天、日志、数据库或 Git。
 
 官方协议依据：[Bark V2 API](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md)、
 [加密说明](https://github.com/Finb/Bark/blob/master/docs/en-us/encryption.md)、
 [稳定 ID 语义](https://github.com/Finb/Bark/blob/master/docs/en-us/tutorial.md)和
 [注册端点](https://github.com/Finb/bark-server/blob/master/route_register.go)。
 
-## 2. 准备受保护配置
+## 2. 准备本地配置
 
-在仓库根目录创建仅当前用户可访问的目录和两个文件。不要把真实值粘贴到聊天或命令参数；用本机
-受保护编辑器写入，device key 一行，加密 key 一行，然后核对权限：
+用本机受保护编辑器修改 Git 忽略的 `infra/.env.local`。不要把真实值粘贴到聊天或命令参数。
+注册前先保持通知 worker 关闭，选择一段 16 位 ASCII 共享密钥；device key 和启用时间暂时留空：
 
 ```bash
-install -d -m 0700 .secrets/bark
-chmod 0600 .secrets/bark/device-key .secrets/bark/encryption-key
-ls -ld .secrets/bark
-ls -l .secrets/bark/device-key .secrets/bark/encryption-key
+chmod 0600 infra/.env.local
 ```
 
-`infra/.env.local` 只保存非秘密配置和文件路径：
-
 ```dotenv
-NEXUS_BARK_ENABLED=true
-NEXUS_BARK_DEVICE_KEY_HOST_FILE=../.secrets/bark/device-key
-NEXUS_BARK_ENCRYPTION_KEY_HOST_FILE=../.secrets/bark/encryption-key
-NEXUS_BARK_ACTIVATED_AT=2026-09-15T07:30:00Z
+NEXUS_BARK_ENABLED=false
+NEXUS_BARK_DEVICE_KEY=
+NEXUS_BARK_ENCRYPTION_KEY=<与 Bark App 相同的 16 位 ASCII 共享密钥>
+NEXUS_BARK_ACTIVATED_AT=
 NEXUS_BARK_READ_ONLY_URL=
 ```
 
-把 `NEXUS_BARK_ACTIVATED_AT` 替换为真正启用时的 UTC 时间。它是领取下限：更早的 queued event
-不会发送、不会改状态。若 iPhone 不能只读访问 NEXUS `/paper`，保持链接为空。
+若 iPhone 不能只读访问 NEXUS `/paper`，保持链接为空。
 
 ## 3. 一次性 iPhone 注册
 
@@ -55,16 +49,20 @@ NEXUS_BARK_READ_ONLY_URL=
 局域网地址，例如 `192.168.x.y`；不要使用示例地址原样运行。只启动 Bark Server：
 
 ```bash
-docker compose --env-file infra/.env.local \
+docker compose -p nexus-fosun-live --env-file infra/.env.local \
   -f infra/compose.yaml -f infra/compose.bark-register.yaml \
   --profile notifications up -d bark-server
 ```
 
-在 Bark App 添加 `http://<Mac-LAN-IP>:8080`，完成服务器注册，并在 App 内设置与受保护文件相同
-的 AES-128-CBC key。确认后立即把 bind address 恢复为 `127.0.0.1`，再用稳态配置强制重建：
+在 Bark App 添加 `http://<Mac-LAN-IP>:8080`，完成服务器注册，并在 App 内设置与 `.env.local` 相同
+的 AES-128-CBC key。把 App 注册后显示的 device key 写入 `NEXUS_BARK_DEVICE_KEY`，将
+`NEXUS_BARK_ENABLED` 改为 `true`，并把 `NEXUS_BARK_ACTIVATED_AT` 设置为当前 UTC 时间。该时间是
+领取下限：更早的 queued event 不会发送、不会改状态。
+
+确认后立即把 bind address 恢复为 `127.0.0.1`，再用稳态配置强制重建：
 
 ```bash
-docker compose --env-file infra/.env.local \
+docker compose -p nexus-fosun-live --env-file infra/.env.local \
   -f infra/compose.yaml --profile notifications \
   up -d --force-recreate bark-server
 ```
@@ -77,14 +75,14 @@ docker compose --env-file infra/.env.local \
 先在容器内部检查 Bark，不发送 APNs 通知：
 
 ```bash
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
+docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.yaml \
   --profile notifications exec bark-server wget -qO- http://127.0.0.1:8080/ping
 ```
 
 预期为 `pong`。随后启动专用 worker：
 
 ```bash
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
+docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.yaml \
   --profile notifications up -d bark-server bark-notifications
 ```
 
@@ -101,7 +99,7 @@ outbox event 为 published、delivery attempt 为 published、iPhone 实际显�
 先在 `infra/.env.local` 设置 `NEXUS_BARK_ENABLED=false`，再只停止本切片服务：
 
 ```bash
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
+docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.yaml \
   --profile notifications stop bark-notifications bark-server
 ```
 
