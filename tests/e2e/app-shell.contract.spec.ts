@@ -1,6 +1,16 @@
 import { expect, test } from "@playwright/test";
 
+const expectedNavigation = [
+  ["交易工作台", "/workspace"],
+  ["决策记录", "/decisions"],
+  ["账户与交易", "/portfolio"],
+  ["复盘", "/paper#paper-comparison-title"],
+  ["设置与运行", "/integrations"],
+];
+
 test("mobile drawer keeps both navigation groups nested and enforces the hit-area contract", async ({ page }) => {
+  const browserErrors: string[] = [];
+  page.on("console", (message) => { if (message.type() === "error") browserErrors.push(message.text()); });
   await page.goto("/overview");
 
   const drawer = page.locator(".app-shell__drawer");
@@ -34,13 +44,26 @@ test("mobile drawer keeps both navigation groups nested and enforces the hit-are
   }));
 
   expect(geometry.groupGap).toBe("8px");
-  expect(geometry.controls).toHaveLength(8);
+  expect(geometry.controls).toHaveLength(5);
   for (const control of geometry.controls) {
     expect(control.minBlockSize).toBe("44px");
     expect(control.minInlineSize).toBe("44px");
     expect(control.height).toBeGreaterThanOrEqual(44);
     expect(control.width).toBeGreaterThanOrEqual(44);
   }
+
+  const links = await navigationGroups.getByRole("link").evaluateAll((items) => items.map((item) => [item.textContent?.trim(), item.getAttribute("href")]));
+  expect(links).toEqual(expectedNavigation);
+
+  await primaryNavigation.getByRole("link", { name: "决策记录" }).click();
+  await expect(page).toHaveURL(/\/decisions$/);
+  await expect(drawer).not.toHaveAttribute("open", "");
+  expect(browserErrors).toEqual([]);
+});
+
+test("root opens the trading workbench", async ({ page }) => {
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/workspace$/);
 });
 
 test("desktop skip link renders above the fixed sidebar", async ({ page }) => {
