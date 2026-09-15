@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime
 from decimal import Decimal, localcontext
+from enum import StrEnum
 from typing import Literal, cast
 from uuid import UUID
 
@@ -13,7 +14,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
-from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
+from nexus.persistence.models.agents import (
+    AgentDataSnapshotEvidenceRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.data import (
     DataArtifact,
     DataSnapshot,
@@ -26,6 +30,12 @@ from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.risk.models import PaperPortfolioProjection
 
 SOURCE = "nexus_agent_paper_context"
+
+
+class FrozenAgentPaperContextStatus(StrEnum):
+    MISSING = "missing"
+    VALID = "valid"
+    INVALID = "invalid"
 
 
 class AgentPaperDecisionQuote(BaseModel):
@@ -320,3 +330,24 @@ async def read_agent_paper_research_context(
         )
     )
     return (context, cast(ResearchEvidenceRef, evidence)) if evidence is not None else None
+
+
+async def revalidate_frozen_agent_paper_context(
+    session: AsyncSession,
+    *,
+    run: AgentResearchRunRecord,
+    evidence_records: tuple[ResearchEvidenceRef, ...],
+) -> FrozenAgentPaperContextStatus:
+    """Require the exact context evidence frozen into this run, if present."""
+    context_records = tuple(record for record in evidence_records if record.source == SOURCE)
+    context = await read_agent_paper_research_context(
+        session,
+        snapshot_id=run.data_snapshot_id,
+        instrument_id=run.instrument_id,
+        as_of=run.decision_time,
+    )
+    if not context_records and context is None:
+        return FrozenAgentPaperContextStatus.MISSING
+    if len(context_records) != 1 or context is None or context_records[0].id != context[1].id:
+        return FrozenAgentPaperContextStatus.INVALID
+    return FrozenAgentPaperContextStatus.VALID

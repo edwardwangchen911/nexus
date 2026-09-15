@@ -118,6 +118,7 @@ def admit_actionable_research_output(
     decision_time: datetime,
     price_authority_status: FrozenPriceAuthorityStatus,
     allow_safe_no_trade: bool = False,
+    paper_decision_context_valid: bool = False,
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
     try:
@@ -140,7 +141,7 @@ def admit_actionable_research_output(
             price_authority_status is FrozenPriceAuthorityStatus.VALID
             or (
                 price_authority_status is FrozenPriceAuthorityStatus.MISSING
-                and safe_no_trade_shape
+                and (paper_decision_context_valid or safe_no_trade_shape)
             )
         )
         if (

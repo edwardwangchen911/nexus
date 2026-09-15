@@ -1301,6 +1301,66 @@ async def test_sdk_keeps_issuer_evidence_and_close_separate_from_adjusted_featur
     assert calls == [("close",), ("sma_20", "sma_200", "rsi_14", "volatility_20")]
 
 
+@pytest.mark.asyncio
+async def test_staged_sdk_explains_frozen_paper_decision_price_context(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    unavailable = {"status": "unavailable", "items": [], "reason": "no_frozen_price_authority"}
+    paper_context = {
+        "decision_quote": {"source": "schwab", "bid": "99.9", "ask": "100.1"},
+        "prior_daily": {"source": "alpaca", "close": "100.0"},
+        "execution_locked": True,
+    }
+    security = {
+        "status": "ok",
+        "items": [
+            {
+                "source": "nexus_agent_paper_context",
+                "provider_object_id": "cycle:instrument",
+                "revision": "b" * 64,
+                "available_at": request.decision_time.isoformat(),
+                "content_hash": "b" * 64,
+                "agent_paper_context": paper_context,
+            }
+        ],
+    }
+    tools = ReadOnlyTools(
+        executors={
+            **{name: lambda payload: unavailable for name in ReadOnlyTools.names},
+            "get_security_snapshot": lambda payload: security,
+        }
+    )
+    submitted = []
+
+    async def invoke(payload, **kwargs):
+        submitted.append(payload)
+        body = (
+            _assessment_payload(payload["previous_claims"])
+            if payload["stage"] == "synthesis"
+            else _staged_batch(payload["stage"], payload["requested_roles"])
+        )
+        return (
+            json.dumps(body),
+            UsageSnapshot(input_tokens=300, output_tokens=80),
+        )
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StructuredStagedCodexCommittee(
+        prompts=prompts,
+        tools=tools,
+        inline_citations=False,
+    )
+    for role in ROLE_ORDER:
+        await model.analyze(role, request, evidence, prompts[role])
+
+    assert len(submitted) == 3
+    for payload in submitted:
+        assert payload["frozen_inputs"]["security_snapshot"] == security
+        assert "current decision-price context" in payload["instructions"]
+        assert "not execution or fill authority" in payload["instructions"]
+
+
 def test_child_environment_excludes_secrets_and_parent_app_ipc(monkeypatch):
     for key in (
         "OPENAI_API_KEY",

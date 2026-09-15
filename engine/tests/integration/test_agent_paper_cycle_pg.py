@@ -11,7 +11,11 @@ from helpers.paper_batch import DECISION_TIME, INSTRUMENTS, seed_paper_batch
 from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.database_tools import database_read_only_tools
-from nexus.agents.execution_authority import ROLE_ORDER
+from nexus.agents.execution_authority import ROLE_ORDER, load_frozen_evidence
+from nexus.agents.paper_context import (
+    FrozenAgentPaperContextStatus,
+    revalidate_frozen_agent_paper_context,
+)
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
@@ -1083,6 +1087,19 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])
             assert run is not None
             assert run.data_snapshot_id != manifest[0].research_snapshot_id
+            evidence_records = await load_frozen_evidence(
+                session,
+                run,
+                allow_fixture_evidence=False,
+            )
+            assert (
+                await revalidate_frozen_agent_paper_context(
+                    session,
+                    run=run,
+                    evidence_records=evidence_records,
+                )
+                is FrozenAgentPaperContextStatus.VALID
+            )
             tools = await database_read_only_tools(
                 session,
                 run,

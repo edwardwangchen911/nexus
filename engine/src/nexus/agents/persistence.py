@@ -33,7 +33,11 @@ from nexus.agents.execution_authority import (
     load_frozen_symbol,
 )
 from nexus.agents.models import ResearchRequest
-from nexus.agents.paper_context import read_agent_paper_research_context
+from nexus.agents.paper_context import (
+    FrozenAgentPaperContextStatus,
+    read_agent_paper_research_context,
+    revalidate_frozen_agent_paper_context,
+)
 from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.agents.price_authority import (
     freeze_price_authority,
@@ -157,6 +161,11 @@ async def load_actionable_research_output(
             evidence_records=evidence,
             allow_fixture=False,
         )
+        paper_context_status = await revalidate_frozen_agent_paper_context(
+            session,
+            run=run,
+            evidence_records=evidence,
+        )
         if (
             instrument is None
             or snapshot is None
@@ -165,6 +174,8 @@ async def load_actionable_research_output(
             or snapshot.received_at > run.decision_time
             or max(run.created_at, output.created_at) > decision_time
         ):
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        if paper_context_status is FrozenAgentPaperContextStatus.INVALID:
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         return admit_actionable_research_output(
             run=run,
@@ -175,6 +186,9 @@ async def load_actionable_research_output(
             decision_time=decision_time,
             price_authority_status=price_status,
             allow_safe_no_trade=allow_safe_no_trade,
+            paper_decision_context_valid=(
+                paper_context_status is FrozenAgentPaperContextStatus.VALID
+            ),
         )
     except ActionableResearchError:
         raise

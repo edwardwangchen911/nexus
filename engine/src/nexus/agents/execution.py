@@ -24,6 +24,10 @@ from nexus.agents.execution_authority import (
     load_frozen_symbol,
 )
 from nexus.agents.models import ResearchRequest, ResearchRunResult
+from nexus.agents.paper_context import (
+    FrozenAgentPaperContextStatus,
+    revalidate_frozen_agent_paper_context,
+)
 from nexus.agents.persistence import (
     release_daily_budget_if_reserved,
     require_reserved_daily_budget,
@@ -110,7 +114,15 @@ async def execute_research_run(
         evidence_records=evidence_records,
         allow_fixture=allow_fixture_price_authority,
     )
-    if price_authority_status is FrozenPriceAuthorityStatus.INVALID:
+    paper_context_status = await revalidate_frozen_agent_paper_context(
+        session,
+        run=run,
+        evidence_records=evidence_records,
+    )
+    if (
+        price_authority_status is FrozenPriceAuthorityStatus.INVALID
+        or paper_context_status is FrozenAgentPaperContextStatus.INVALID
+    ):
         return await _terminal_without_usage(
             session,
             run,
@@ -268,9 +280,16 @@ async def execute_research_run(
         evidence_records=evidence_records,
         allow_fixture=allow_fixture_price_authority,
     )
+    final_paper_context_status = await revalidate_frozen_agent_paper_context(
+        session,
+        run=run,
+        evidence_records=evidence_records,
+    )
     if (
         final_price_authority_status is FrozenPriceAuthorityStatus.INVALID
         or final_price_authority_status is not price_authority_status
+        or final_paper_context_status is FrozenAgentPaperContextStatus.INVALID
+        or final_paper_context_status is not paper_context_status
     ):
         return await _terminal_after_committee(
             session,
@@ -310,7 +329,10 @@ async def execute_research_run(
         model,
         evidence_refs,
         role_outputs,
-        price_authority_valid=(final_price_authority_status is FrozenPriceAuthorityStatus.VALID),
+        price_authority_valid=(
+            final_price_authority_status is FrozenPriceAuthorityStatus.VALID
+            or final_paper_context_status is FrozenAgentPaperContextStatus.VALID
+        ),
         portfolio_context=await read_portfolio_context(
             session, run.data_snapshot_id, run.instrument_id, run.decision_time
         ),

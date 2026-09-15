@@ -351,6 +351,7 @@ def test_paper_no_trade_admission_rejects_corrupt_price_authority() -> None:
         admit_actionable_research_output(
             **case,
             allow_safe_no_trade=True,
+            paper_decision_context_valid=True,
         )
 
 
@@ -362,3 +363,16 @@ def test_missing_price_authority_cannot_grant_increase() -> None:
             **case,
             allow_safe_no_trade=True,
         )
+
+
+def test_valid_paper_decision_context_can_grant_increase_without_daily_price_owner() -> None:
+    case = _case()
+    case["price_authority_status"] = FrozenPriceAuthorityStatus.MISSING
+
+    result = admit_actionable_research_output(
+        **case,
+        paper_decision_context_valid=True,
+    )
+
+    assert result.stance == "buy_candidate"
+    assert result.sizing_action == "increase"
