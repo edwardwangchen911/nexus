@@ -24,6 +24,7 @@ async def _seed(
     event_type: str = "job.test",
     schema_version: str = "outbox_test_v1",
     max_attempts: int = 3,
+    created_at: datetime | None = None,
 ) -> UUID:
     async with factory() as session, session.begin():
         event = OutboxEvent(
@@ -34,10 +35,41 @@ async def _seed(
             published_at=None,
             max_attempts=max_attempts,
             available_at=_NOW,
+            **({"created_at": created_at} if created_at is not None else {}),
         )
         session.add(event)
         await session.flush()
     return event.id
+
+
+@pytest.mark.asyncio
+async def test_dispatch_created_at_boundary_skips_historical_queued_events(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    activation = _NOW - timedelta(minutes=1)
+    historical_id = await _seed(
+        factory,
+        created_at=activation - timedelta(microseconds=1),
+    )
+    current_id = await _seed(factory, created_at=activation)
+    seen: list[UUID] = []
+
+    async def publisher(message: OutboxMessage) -> None:
+        seen.append(message.event_id)
+
+    assert await dispatch_outbox_once(
+        factory,
+        registry=_registry(publisher),
+        worker_id="outbox-activated",
+        clock=lambda: _NOW + timedelta(seconds=1),
+        created_at_or_after=activation,
+    )
+    assert seen == [current_id]
+    async with factory() as session:
+        historical = await session.get(OutboxEvent, historical_id)
+    assert historical is not None
+    assert (historical.status, historical.attempt_count) == ("queued", 0)
 
 
 def _registry(publisher, *, event_type: str = "job.test") -> PublisherRegistry:

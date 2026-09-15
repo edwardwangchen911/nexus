@@ -99,6 +99,7 @@ async def _claim(
     now: datetime,
     lease_seconds: int,
     event_keys: Sequence[tuple[str, str]] | None,
+    created_at_or_after: datetime | None,
 ) -> _ClaimedOutbox | None:
     conditions = [
         OutboxEvent.status == "queued",
@@ -117,6 +118,8 @@ async def _claim(
                 )
             )
         )
+    if created_at_or_after is not None:
+        conditions.append(OutboxEvent.created_at >= created_at_or_after)
     event = await session.scalar(
         select(OutboxEvent)
         .where(*conditions)
@@ -236,12 +239,18 @@ async def dispatch_outbox_once(
     after_publish: AfterPublish | None = None,
     claim_registered_only: bool = False,
     raise_publisher_errors: bool = False,
+    created_at_or_after: datetime | None = None,
 ) -> bool:
     """Dispatch at most one event and durably record its delivery attempt."""
     worker_id = _worker_id(worker_id)
     if not 1 <= lease_seconds <= 60:
         raise ValueError("lease_seconds must be between 1 and 60")
     claim_time = _utc(clock(), field="clock")
+    if created_at_or_after is not None:
+        created_at_or_after = _utc(
+            created_at_or_after,
+            field="created_at_or_after",
+        )
     async with factory() as session, session.begin():
         await _reclaim_expired(session, now=claim_time)
         claim = await _claim(
@@ -249,9 +258,8 @@ async def dispatch_outbox_once(
             worker_id=worker_id,
             now=claim_time,
             lease_seconds=lease_seconds,
-            event_keys=(
-                tuple(sorted(registry.keys)) if claim_registered_only else None
-            ),
+            event_keys=(tuple(sorted(registry.keys)) if claim_registered_only else None),
+            created_at_or_after=created_at_or_after,
         )
     if claim is None:
         return False
