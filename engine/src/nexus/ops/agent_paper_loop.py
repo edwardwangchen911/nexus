@@ -31,8 +31,17 @@ from nexus.ops.paper_once import PaperAdvanceRequest
 from nexus.ops.paper_once import run_once as run_paper_once
 from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.agent_market import resolve_agent_paper_market_scope
+from nexus.paper.errors import PaperPerformanceError
+from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
-from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
+from nexus.persistence.models.paper import (
+    AgentPaperCycleEventRecord,
+    PaperPerformanceSnapshotRecord,
+)
 from nexus.persistence.models.runtime import Job
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
@@ -44,11 +53,13 @@ class AgentPaperLoopAction(StrEnum):
     RESUME = "resume"
     COLLECT_WINDOW = "collect_window"
     ADVANCE_ORDER = "advance_order"
+    PUBLISH_PERFORMANCE = "publish_performance"
     WAIT_FOR_SLOT = "wait_for_slot"
     WAIT_FOR_MARKET = "wait_for_market"
     STOP_RESULT_UNKNOWN = "stop_result_unknown"
     STOP_CYCLE_UNAVAILABLE = "stop_cycle_unavailable"
     STOP_ORDER_UNAVAILABLE = "stop_order_unavailable"
+    STOP_PERFORMANCE_UNAVAILABLE = "stop_performance_unavailable"
     STOP_DISABLED = "stop_disabled"
     STOP_SESSION_CLOSED = "stop_session_closed"
 
@@ -66,6 +77,7 @@ class AgentPaperLoopSnapshot:
     market_window_end_at: datetime | None = None
     has_open_order: bool = False
     order_id: UUID | None = None
+    performance_due_at: datetime | None = None
 
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
@@ -104,6 +116,7 @@ def snapshot_from_cycle_view(
     view: object,
     research_job: tuple[UUID, str] | None,
     market_scope: object | None,
+    performance_due_at: datetime | None = None,
 ) -> AgentPaperLoopSnapshot:
     """Map the bounded read projection into the scheduler's fail-closed contract."""
     cycle_id = getattr(view, "cycle_id", None)
@@ -142,6 +155,7 @@ def snapshot_from_cycle_view(
         market_window_end_at=market_window_end_at,
         has_open_order=has_open_order,
         order_id=order_id,
+        performance_due_at=performance_due_at,
     )
 
 
@@ -173,6 +187,9 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
 
     if snapshot.cycle_status in {"decision_recorded", "risk_evaluated"}:
         return AgentPaperLoopAction.RESUME
+
+    if snapshot.performance_due_at is not None:
+        return AgentPaperLoopAction.PUBLISH_PERFORMANCE
 
     local_time = snapshot.now.astimezone(ZoneInfo("America/New_York"))
     cycle_local_date = (
@@ -289,6 +306,17 @@ async def execute_agent_paper_loop_action(
         if not worked:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return None
+    if action == AgentPaperLoopAction.PUBLISH_PERFORMANCE:
+        if snapshot.performance_due_at is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        published = await publish_due_performance_once(
+            settings,
+            account_id=account_id,
+            as_of=snapshot.performance_due_at,
+        )
+        if not published:
+            return AgentPaperLoopAction.STOP_PERFORMANCE_UNAVAILABLE
+        return None
     if snapshot.cycle_id is None:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     if action == AgentPaperLoopAction.RESUME:
@@ -328,6 +356,41 @@ async def execute_agent_paper_loop_action(
     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
 
 
+async def publish_due_performance_once(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    as_of: datetime,
+) -> bool:
+    """Publish one exact close, stopping cleanly when its price facts are incomplete."""
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory.begin() as session:
+                await publish_paper_performance_snapshot(
+                    session,
+                    account_id=account_id,
+                    as_of=as_of,
+                )
+        except PaperPerformanceError as error:
+            if error.code == "PAPER_PERFORMANCE_PRICE_INCOMPLETE":
+                return False
+            raise
+        return True
+    finally:
+        await engine.dispose()
+
+
 async def inspect_agent_paper_loop(
     settings: EngineSettings, *, account_id: UUID
 ) -> AgentPaperLoopSnapshot:
@@ -352,9 +415,37 @@ async def inspect_agent_paper_loop(
             account, _ = await service.account()
             if account.id != account_id:
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            latest_completed_close = await session.scalar(
+                select(func.max(ExchangeCalendarSessionRecord.market_close_at))
+                .join(
+                    ExchangeCalendarAuthorityRecord,
+                    ExchangeCalendarAuthorityRecord.id
+                    == ExchangeCalendarSessionRecord.calendar_authority_id,
+                )
+                .where(
+                    ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+                    ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+                    ExchangeCalendarAuthorityRecord.published_at
+                    <= ExchangeCalendarSessionRecord.market_close_at,
+                    ExchangeCalendarSessionRecord.market_close_at <= now,
+                )
+            )
+            performance_due_at = None
+            if isinstance(latest_completed_close, datetime):
+                existing_performance = await session.scalar(
+                    select(PaperPerformanceSnapshotRecord.id).where(
+                        PaperPerformanceSnapshotRecord.account_id == account_id,
+                        PaperPerformanceSnapshotRecord.as_of == latest_completed_close,
+                    )
+                )
+                if existing_performance is None:
+                    performance_due_at = latest_completed_close
             view = await service.latest_agent_cycle()
             if view is None:
-                return AgentPaperLoopSnapshot(now=now)
+                return AgentPaperLoopSnapshot(
+                    now=now,
+                    performance_due_at=performance_due_at,
+                )
 
             events: tuple[object, ...] = ()
             jobs: tuple[object, ...] = ()
@@ -396,6 +487,7 @@ async def inspect_agent_paper_loop(
                 view=view,
                 research_job=research_job,
                 market_scope=market_scope,
+                performance_due_at=performance_due_at,
             )
     finally:
         await engine.dispose()
@@ -423,6 +515,9 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         if reason == AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE:
             print(json.dumps({"error_code": "AGENT_PAPER_LOOP_CYCLE_UNAVAILABLE"}))
+            return 1
+        if reason == AgentPaperLoopAction.STOP_PERFORMANCE_UNAVAILABLE:
+            print(json.dumps({"error_code": "AGENT_PAPER_LOOP_PERFORMANCE_UNAVAILABLE"}))
             return 1
     except KeyboardInterrupt:
         print(json.dumps({"error_code": "AGENT_PAPER_LOOP_INTERRUPTED"}))

@@ -36,6 +36,14 @@ def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
             A.WAIT_FOR_SLOT,
         ),
         ({"cycle_status": "completed", "cycle_slot_at": PREVIOUS_SLOT}, A.TRIGGER),
+        (
+            {
+                "cycle_status": "completed",
+                "cycle_slot_at": PREVIOUS_SLOT,
+                "performance_due_at": datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+            },
+            A.PUBLISH_PERFORMANCE,
+        ),
         ({"cycle_status": "unavailable", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
         ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
         (
@@ -247,6 +255,11 @@ def test_loop_command_is_default_off(
             1,
             {"error_code": "AGENT_PAPER_LOOP_CYCLE_UNAVAILABLE"},
         ),
+        (
+            loop.AgentPaperLoopAction.STOP_PERFORMANCE_UNAVAILABLE,
+            1,
+            {"error_code": "AGENT_PAPER_LOOP_PERFORMANCE_UNAVAILABLE"},
+        ),
     ],
 )
 def test_loop_command_exposes_only_safe_stop_reasons(
@@ -363,6 +376,37 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     request = requests[0]
     assert request.account_id == UUID(int=1)
     assert request.idempotency_key == "agent-paper-loop:2026-09-14T14:05:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("published", "expected"),
+    [(True, None), (False, A.STOP_PERFORMANCE_UNAVAILABLE)],
+)
+def test_performance_executor_publishes_exact_due_close_once(
+    monkeypatch: pytest.MonkeyPatch,
+    published: bool,
+    expected: loop.AgentPaperLoopAction | None,
+) -> None:
+    close_at = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)
+    received: list[tuple[UUID, datetime]] = []
+
+    async def publish(_settings, *, account_id, as_of):
+        received.append((account_id, as_of))
+        return published
+
+    monkeypatch.setattr(loop, "publish_due_performance_once", publish)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=A.PUBLISH_PERFORMANCE,
+            snapshot=snapshot(performance_due_at=close_at),
+        )
+    )
+
+    assert result == expected
+    assert received == [(UUID(int=1), close_at)]
 
 
 @pytest.mark.parametrize(
