@@ -466,10 +466,17 @@ async def admit_research_run(
     after_authority: Callable[[], Awaitable[None]] | None = None,
     job_type: JobType = JobType.AGENT_RESEARCH,
     reuse_latest_actor_agent_version: bool = False,
+    version_source_run_id: UUID | None = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
     if now.tzinfo != UTC or request.decision_time > now:
         raise ValueError("point-in-time data authority is invalid")
+    if version_source_run_id is not None and (
+        reuse_latest_actor_agent_version
+        or prompt_version_id is not None
+        or model_config_id is not None
+    ):
+        raise ValueError("Agent version authority is ambiguous")
     if after_authority is not None:
         await after_authority()
     claim, owner = await claim_or_lock(
@@ -500,8 +507,10 @@ async def admit_research_run(
         )
     instrument = await session.get(Instrument, request.instrument_id)
     snapshot = await session.get(DataSnapshot, request.data_snapshot_id)
-    prior_run = (
-        await session.scalar(
+    if version_source_run_id is not None:
+        prior_run = await session.get(AgentResearchRunRecord, version_source_run_id)
+    elif reuse_latest_actor_agent_version:
+        prior_run = await session.scalar(
             select(AgentResearchRunRecord)
             .where(AgentResearchRunRecord.actor_id == actor_id)
             .order_by(
@@ -511,9 +520,8 @@ async def admit_research_run(
             )
             .limit(1)
         )
-        if reuse_latest_actor_agent_version
-        else None
-    )
+    else:
+        prior_run = None
     if prior_run is not None:
         prompts = await load_frozen_prompts(session, prior_run)
     else:

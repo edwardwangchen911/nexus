@@ -47,6 +47,136 @@ _RUN_IDS = tuple(UUID(f"0198d500-1000-7000-8000-0000000015{index:02d}") for inde
 
 
 @pytest.mark.asyncio
+async def test_admission_pins_exact_version_source_run(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    request = ResearchRequest(
+        instrument_id=_INSTRUMENT_ID,
+        data_snapshot_id=_SNAPSHOT_ID,
+        decision_time=_NOW,
+    )
+    async with factory() as session, session.begin():
+        source = await admit_research_run(
+            session,
+            actor_id="version-source",
+            route="/internal/v1/research-runs",
+            idempotency_key="version-source",
+            request_hash="6" * 64,
+            request=request,
+            prompt_version_id=_PROMPT_ID,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("100"),
+            now=_NOW,
+        )
+        source_run_id = source.run_id
+        source_prompt_hash = source.run.prompt_hash
+        source_model_hash = source.run.model_hash
+
+    newer_model_id = UUID("0198d500-1000-7000-8000-000000001580")
+    newer_prompt_ids = {
+        role: UUID(f"0198d500-1000-7000-8000-0000000017{index:02d}")
+        for index, role in enumerate(ROLE_ORDER)
+    }
+    prompt_assets = load_prompt_assets()
+    async with factory() as session, session.begin():
+        session.add(
+            AgentModelConfigRecord(
+                id=newer_model_id,
+                model_id="unrelated-newer-model",
+                version="fixture-pricing-v2",
+                config_hash="3" * 64,
+                max_input_tokens=1_000_000,
+                max_tool_calls=8,
+                max_output_tokens=10_000,
+                input_usd_per_million=Decimal("1"),
+                output_usd_per_million=Decimal("2"),
+                pricing_available_at=_NOW - timedelta(days=1),
+                pricing_expires_at=_NOW + timedelta(days=1),
+            )
+        )
+        session.add_all(
+            AgentPromptVersionRecord(
+                id=newer_prompt_ids[role],
+                role=role,
+                version="unrelated-newer-v2",
+                content_hash=hashlib.sha256(
+                    f"{prompt_assets[role].content}\nunrelated newer".encode()
+                ).hexdigest(),
+                content=f"{prompt_assets[role].content}\nunrelated newer",
+            )
+            for role in ROLE_ORDER
+        )
+        await session.flush()
+        newer = await admit_research_run(
+            session,
+            actor_id="unrelated-newer-actor",
+            route="/internal/v1/research-runs",
+            idempotency_key="unrelated-newer",
+            request_hash="9" * 64,
+            request=request,
+            prompt_version_id=newer_prompt_ids["orchestrator"],
+            model_config_id=newer_model_id,
+            daily_limit_usd=Decimal("100"),
+            now=_NOW,
+        )
+
+    async with factory() as session, session.begin():
+        pinned = await admit_research_run(
+            session,
+            actor_id="local-agent-version-incumbent",
+            route="agent-version-evaluation-v1",
+            idempotency_key="pinned-incumbent",
+            request_hash="7" * 64,
+            request=request,
+            prompt_version_id=None,
+            model_config_id=None,
+            daily_limit_usd=Decimal("100"),
+            now=_NOW,
+            version_source_run_id=source_run_id,
+        )
+
+    assert pinned.replayed is False
+    assert pinned.run_id != source_run_id
+    assert pinned.run.prompt_hash == source_prompt_hash
+    assert pinned.run.model_hash == source_model_hash
+    assert pinned.run.prompt_hash != newer.run.prompt_hash
+    assert pinned.run.model_hash != newer.run.model_hash
+    assert pinned.run.prompt_manifest == source.run.prompt_manifest
+    assert pinned.run.model_config_id == source.run.model_config_id
+
+
+@pytest.mark.asyncio
+async def test_admission_rejects_ambiguous_version_authority(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    request = ResearchRequest(
+        instrument_id=_INSTRUMENT_ID,
+        data_snapshot_id=_SNAPSHOT_ID,
+        decision_time=_NOW,
+    )
+    with pytest.raises(ValueError, match="Agent version authority is ambiguous"):
+        async with factory() as session, session.begin():
+            await admit_research_run(
+                session,
+                actor_id="local-agent-version-incumbent",
+                route="agent-version-evaluation-v1",
+                idempotency_key="ambiguous-incumbent",
+                request_hash="8" * 64,
+                request=request,
+                prompt_version_id=_PROMPT_ID,
+                model_config_id=_MODEL_ID,
+                daily_limit_usd=Decimal("100"),
+                now=_NOW,
+                reuse_latest_actor_agent_version=True,
+                version_source_run_id=_RUN_IDS[0],
+            )
+
+
+@pytest.mark.asyncio
 async def test_single_security_admission_rejects_explicit_portfolio_model(
     migrated_database_url: str,
 ) -> None:
