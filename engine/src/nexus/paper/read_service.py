@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.errors import ErrorCode, NexusError
@@ -23,6 +23,7 @@ from nexus.api.schemas.paper import (
     AgentPaperDecisionResponse,
     AgentPaperSchwabExecutionMarketResponse,
     AgentPaperSessionSummaryResponse,
+    AgentPaperVersionObservationResponse,
     PaperAttributionResponse,
     PaperComparisonResponse,
     PaperComparisonRowResponse,
@@ -216,6 +217,9 @@ class PaperReadService:
                     cycles=(),
                     historical=False,
                 ),
+                version_observation=await self._agent_version_observation(
+                    account_id=account.id
+                ),
             )
         cycles = tuple(
             await self._session.scalars(
@@ -248,6 +252,227 @@ class PaperReadService:
                 completed_count=completed_count,
                 historical=decision_session is not None,
             ),
+            version_observation=await self._agent_version_observation(
+                account_id=account.id
+            ),
+        )
+
+    async def _agent_version_observation(
+        self, *, account_id: UUID
+    ) -> AgentPaperVersionObservationResponse | None:
+        row = (
+            await self._session.execute(
+                text(
+                    """
+                    WITH scoped_cycles AS (
+                        SELECT id, decision_session, decision_time
+                        FROM agent_paper_cycles
+                        WHERE account_id = :account_id
+                          AND decision_time <= :cutoff
+                          AND created_at <= :cutoff
+                    ),
+                    research_runs AS (
+                        SELECT DISTINCT
+                            cycle.id AS cycle_id,
+                            cycle.decision_session,
+                            cycle.decision_time,
+                            run_id.value::uuid AS run_id
+                        FROM scoped_cycles AS cycle
+                        JOIN agent_paper_cycle_events AS event
+                          ON event.cycle_id = cycle.id
+                        CROSS JOIN LATERAL jsonb_array_elements_text(
+                            event.fact_ids -> 'research_run_ids'
+                        ) AS run_id(value)
+                        WHERE event.result_code = 'RESEARCH_JOBS_PREPARED'
+                          AND event.occurred_at <= :cutoff
+                          AND event.created_at <= :cutoff
+                    ),
+                    cycle_version_counts AS (
+                        SELECT
+                            research.cycle_id,
+                            count(DISTINCT (run.prompt_hash, run.model_hash)) AS version_count
+                        FROM research_runs AS research
+                        JOIN agent_research_runs AS run ON run.id = research.run_id
+                        WHERE run.decision_time <= :cutoff
+                          AND run.created_at <= :cutoff
+                        GROUP BY research.cycle_id
+                    ),
+                    latest_events AS (
+                        SELECT DISTINCT ON (event.cycle_id)
+                            event.cycle_id,
+                            event.to_status
+                        FROM agent_paper_cycle_events AS event
+                        JOIN scoped_cycles AS cycle ON cycle.id = event.cycle_id
+                        WHERE event.occurred_at <= :cutoff
+                          AND event.created_at <= :cutoff
+                        ORDER BY event.cycle_id, event.sequence DESC
+                    ),
+                    cycle_orders AS (
+                        SELECT
+                            decision.agent_paper_cycle_id AS cycle_id,
+                            count(paper_order.id) AS order_count
+                        FROM strategy_decisions AS decision
+                        JOIN scoped_cycles AS cycle
+                          ON cycle.id = decision.agent_paper_cycle_id
+                        JOIN paper_orders AS paper_order
+                          ON paper_order.strategy_decision_id = decision.id
+                         AND paper_order.created_at <= :cutoff
+                        WHERE decision.decision_origin = 'agent_research'
+                          AND decision.created_at <= :cutoff
+                        GROUP BY decision.agent_paper_cycle_id
+                    ),
+                    latest_order_events AS (
+                        SELECT DISTINCT ON (order_event.order_id)
+                            order_event.order_id,
+                            order_event.to_status
+                        FROM paper_order_events AS order_event
+                        JOIN paper_orders AS paper_order ON paper_order.id = order_event.order_id
+                        JOIN strategy_decisions AS decision
+                          ON decision.id = paper_order.strategy_decision_id
+                        JOIN scoped_cycles AS cycle
+                          ON cycle.id = decision.agent_paper_cycle_id
+                        WHERE order_event.occurred_at <= :cutoff
+                          AND order_event.created_at <= :cutoff
+                          AND paper_order.created_at <= :cutoff
+                          AND decision.created_at <= :cutoff
+                        ORDER BY order_event.order_id, order_event.event_seq DESC
+                    ),
+                    cycle_terminal_orders AS (
+                        SELECT
+                            decision.agent_paper_cycle_id AS cycle_id,
+                            count(latest_order.order_id) FILTER (
+                                WHERE latest_order.to_status IN (
+                                    'filled', 'cancelled', 'rejected', 'risk_rejected'
+                                )
+                            ) AS terminal_order_count
+                        FROM strategy_decisions AS decision
+                        JOIN scoped_cycles AS cycle
+                          ON cycle.id = decision.agent_paper_cycle_id
+                        JOIN paper_orders AS paper_order
+                          ON paper_order.strategy_decision_id = decision.id
+                         AND paper_order.created_at <= :cutoff
+                        LEFT JOIN latest_order_events AS latest_order
+                          ON latest_order.order_id = paper_order.id
+                        WHERE decision.decision_origin = 'agent_research'
+                          AND decision.created_at <= :cutoff
+                        GROUP BY decision.agent_paper_cycle_id
+                    ),
+                    version_rows AS (
+                        SELECT
+                            research.cycle_id,
+                            research.decision_session,
+                            research.decision_time,
+                            prompt.version AS prompt_version,
+                            model.model_id,
+                            model.version AS model_version,
+                            run.prompt_hash,
+                            run.model_hash,
+                            latest.to_status,
+                            coalesce(cycle_orders.order_count, 0) AS cycle_order_count,
+                            coalesce(cycle_terminal_orders.terminal_order_count, 0)
+                                AS terminal_order_count,
+                            decision.id AS decision_id,
+                            paper_order.id AS order_id,
+                            fill.id AS fill_id
+                        FROM research_runs AS research
+                        JOIN agent_research_runs AS run ON run.id = research.run_id
+                        JOIN cycle_version_counts AS cycle_version
+                          ON cycle_version.cycle_id = research.cycle_id
+                         AND cycle_version.version_count = 1
+                        JOIN agent_prompt_versions AS prompt ON prompt.id = run.prompt_version_id
+                        JOIN agent_model_configs AS model ON model.id = run.model_config_id
+                        LEFT JOIN latest_events AS latest ON latest.cycle_id = research.cycle_id
+                        LEFT JOIN cycle_orders ON cycle_orders.cycle_id = research.cycle_id
+                        LEFT JOIN cycle_terminal_orders
+                          ON cycle_terminal_orders.cycle_id = research.cycle_id
+                        LEFT JOIN strategy_decisions AS decision
+                          ON decision.agent_paper_cycle_id = research.cycle_id
+                         AND decision.created_at <= :cutoff
+                        LEFT JOIN paper_orders AS paper_order
+                          ON paper_order.strategy_decision_id = decision.id
+                         AND paper_order.created_at <= :cutoff
+                        LEFT JOIN paper_fills AS fill
+                          ON fill.order_id = paper_order.id
+                         AND fill.created_at <= :cutoff
+                         AND fill.occurred_at <= :cutoff
+                         AND fill.evaluated_at <= :cutoff
+                        WHERE run.decision_time <= :cutoff
+                          AND run.created_at <= :cutoff
+                          AND prompt.created_at <= :cutoff
+                          AND model.created_at <= :cutoff
+                    ),
+                    version_stats AS (
+                        SELECT
+                            prompt_version,
+                            model_id,
+                            model_version,
+                            prompt_hash,
+                            model_hash,
+                            min(decision_time) AS first_decision_at,
+                            max(decision_time) AS last_decision_at,
+                            count(DISTINCT decision_session) AS observed_sessions,
+                            count(DISTINCT cycle_id) AS cycle_count,
+                            count(DISTINCT cycle_id) FILTER (
+                                WHERE to_status = 'completed'
+                                   OR (
+                                       to_status = 'awaiting_market'
+                                       AND cycle_order_count > 0
+                                       AND cycle_order_count = terminal_order_count
+                                   )
+                            )
+                                AS completed_count,
+                            count(DISTINCT cycle_id) FILTER (WHERE to_status = 'unavailable')
+                                AS unavailable_count,
+                            count(DISTINCT order_id) AS order_count,
+                            count(DISTINCT fill_id) AS fill_count
+                        FROM version_rows
+                        GROUP BY
+                            prompt_version,
+                            model_id,
+                            model_version,
+                            prompt_hash,
+                            model_hash
+                    )
+                    SELECT
+                        version_stats.*,
+                        (
+                            SELECT count(*)
+                            FROM cycle_version_counts
+                            WHERE version_count > 1
+                        ) AS mixed_cycle_count
+                    FROM version_stats
+                    ORDER BY last_decision_at DESC, prompt_version, model_id, model_version
+                    LIMIT 1
+                    """
+                ),
+                {"account_id": account_id, "cutoff": self._request_time},
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            return None
+        if int(row["mixed_cycle_count"]) > 0:
+            return None
+        reason_codes = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+        if int(row["order_count"]) == 0 or int(row["fill_count"]) == 0:
+            reason_codes.append("VERSION_ORDER_PATH_UNOBSERVED")
+        reason_codes.append("VERSION_CHALLENGER_UNAVAILABLE")
+        return AgentPaperVersionObservationResponse(
+            prompt_version=cast(str, row["prompt_version"]),
+            prompt_hash=cast(str, row["prompt_hash"]),
+            model_id=cast(str, row["model_id"]),
+            model_version=cast(str, row["model_version"]),
+            model_hash=cast(str, row["model_hash"]),
+            first_decision_at=cast(datetime, row["first_decision_at"]),
+            last_decision_at=cast(datetime, row["last_decision_at"]),
+            observed_sessions=int(row["observed_sessions"]),
+            cycle_count=int(row["cycle_count"]),
+            completed_count=int(row["completed_count"]),
+            unavailable_count=int(row["unavailable_count"]),
+            order_count=int(row["order_count"]),
+            fill_count=int(row["fill_count"]),
+            challenger_available=False,
+            verdict="continue_observing",
+            reason_codes=cast(Any, tuple(reason_codes)),
         )
 
     async def _agent_session_counts(

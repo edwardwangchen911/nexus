@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 from nexus.api.schemas.integrations import IntegrationStatusResponse
+from nexus.api.schemas.paper import AgentPaperVersionObservationResponse
 from nexus.main import create_engine_app
 from nexus.settings import EngineSettings
 from pydantic import ValidationError
@@ -226,7 +227,19 @@ def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct(
     limit = next(item for item in cycle_list["parameters"] if item["name"] == "limit")
     assert limit["schema"]["maximum"] == 20
     assert schemas["AgentPaperCyclePageResponse"]["properties"]["items"]["maxItems"] == 20
-    assert set(schemas["AgentPaperCyclePageResponse"]["required"]) == {"items", "summary"}
+    assert set(schemas["AgentPaperCyclePageResponse"]["required"]) == {
+        "items",
+        "summary",
+        "version_observation",
+    }
+    observation = schemas["AgentPaperVersionObservationResponse"]
+    assert observation["properties"]["verdict"] == {
+        "const": "continue_observing",
+        "title": "Verdict",
+        "type": "string",
+    }
+    assert observation["properties"]["reason_codes"]["maxItems"] == 4
+    assert observation["properties"]["reason_codes"]["minItems"] == 1
     summary = schemas["AgentPaperSessionSummaryResponse"]
     assert summary["properties"]["execution_locked"] == {
         "const": True,
@@ -255,6 +268,40 @@ def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct(
     )
 
 
+def test_agent_version_observation_rejects_internally_inconsistent_facts() -> None:
+    payload = {
+        "prompt_version": "local-openai-v1",
+        "prompt_hash": "a" * 64,
+        "model_id": "gpt-5.6-terra",
+        "model_version": "codex-sdk-chatgpt-v4-actionable",
+        "model_hash": "b" * 64,
+        "first_decision_at": "2026-09-14T15:32:03Z",
+        "last_decision_at": "2026-09-16T18:12:07Z",
+        "observed_sessions": 3,
+        "cycle_count": 48,
+        "completed_count": 39,
+        "unavailable_count": 9,
+        "order_count": 0,
+        "fill_count": 0,
+        "challenger_available": False,
+        "verdict": "continue_observing",
+        "reason_codes": (
+            "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+            "VERSION_ORDER_PATH_UNOBSERVED",
+            "VERSION_CHALLENGER_UNAVAILABLE",
+        ),
+    }
+    AgentPaperVersionObservationResponse.model_validate(payload)
+    for changes in (
+        {"completed_count": 49},
+        {"unavailable_count": 10},
+        {"first_decision_at": "2026-09-17T00:00:00Z"},
+        {"prompt_hash": "not-a-hash"},
+        {"challenger_available": True},
+        {"reason_codes": ("VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",)},
+    ):
+        with pytest.raises(ValidationError):
+            AgentPaperVersionObservationResponse.model_validate(payload | changes)
 def test_openapi_exposes_closed_strategy_evolution_surface() -> None:
     document = create_engine_app(EngineSettings.for_test()).openapi()
     paths = document["paths"]

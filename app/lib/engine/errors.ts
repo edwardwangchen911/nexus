@@ -281,7 +281,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || !Array.isArray(data.items)
       || data.items.length > 20
       || data.items.some((cycle) => !agentPaperCycleValid(cycle))
-      || !agentPaperSessionSummaryValid(data.summary, data.items)) return INVALID_DATA;
+      || !agentPaperSessionSummaryValid(data.summary, data.items)
+      || !agentPaperVersionObservationValid(data.version_observation)) return INVALID_DATA;
     return data;
   }
   const paperCycleDetail = /^\/internal\/v1\/paper\/cycles\/([^/]+)$/.exec(pathname);
@@ -804,6 +805,29 @@ function agentPaperSessionSummaryValid(value: unknown, cycles: unknown[]): boole
     && (isPlain(latest)
       ? value.latest_result_code === latest.result_code
       : value.latest_result_code === null);
+}
+
+function agentPaperVersionObservationValid(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isPlain(value)) return false;
+  const first = typeof value.first_decision_at === "string" ? Date.parse(value.first_decision_at) : NaN;
+  const last = typeof value.last_decision_at === "string" ? Date.parse(value.last_decision_at) : NaN;
+  if (!Number.isFinite(first) || !Number.isFinite(last) || first > last
+    || !Number.isSafeInteger(value.observed_sessions)
+    || !Number.isSafeInteger(value.cycle_count)
+    || !Number.isSafeInteger(value.completed_count)
+    || !Number.isSafeInteger(value.unavailable_count)
+    || Number(value.observed_sessions) > Number(value.cycle_count)
+    || Number(value.completed_count) + Number(value.unavailable_count) > Number(value.cycle_count)
+    || value.challenger_available !== false
+    || !Array.isArray(value.reason_codes)) return false;
+  const expectedReasons = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"];
+  if (Number(value.order_count) === 0 || Number(value.fill_count) === 0) {
+    expectedReasons.push("VERSION_ORDER_PATH_UNOBSERVED");
+  }
+  expectedReasons.push("VERSION_CHALLENGER_UNAVAILABLE");
+  return value.reason_codes.length === expectedReasons.length
+    && value.reason_codes.every((reason, index) => reason === expectedReasons[index]);
 }
 
 function paperPortfolioValid(value: Record<string, unknown>): boolean {

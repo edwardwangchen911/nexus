@@ -473,11 +473,22 @@
           },
           "summary": {
             "$ref": "#/components/schemas/AgentPaperSessionSummaryResponse"
+          },
+          "version_observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperVersionObservationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "items",
-          "summary"
+          "summary",
+          "version_observation"
         ],
         "title": "AgentPaperCyclePageResponse",
         "type": "object"
@@ -857,6 +868,129 @@
           "execution_locked"
         ],
         "title": "AgentPaperSessionSummaryResponse",
+        "type": "object"
+      },
+      "AgentPaperVersionObservationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "challenger_available": {
+            "const": false,
+            "title": "Challenger Available",
+            "type": "boolean"
+          },
+          "completed_count": {
+            "maximum": 100000,
+            "minimum": 0,
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "cycle_count": {
+            "maximum": 100000,
+            "minimum": 1,
+            "title": "Cycle Count",
+            "type": "integer"
+          },
+          "fill_count": {
+            "maximum": 100000,
+            "minimum": 0,
+            "title": "Fill Count",
+            "type": "integer"
+          },
+          "first_decision_at": {
+            "format": "date-time",
+            "title": "First Decision At",
+            "type": "string"
+          },
+          "last_decision_at": {
+            "format": "date-time",
+            "title": "Last Decision At",
+            "type": "string"
+          },
+          "model_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Hash",
+            "type": "string"
+          },
+          "model_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Model Id",
+            "type": "string"
+          },
+          "model_version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Model Version",
+            "type": "string"
+          },
+          "observed_sessions": {
+            "maximum": 100000,
+            "minimum": 1,
+            "title": "Observed Sessions",
+            "type": "integer"
+          },
+          "order_count": {
+            "maximum": 100000,
+            "minimum": 0,
+            "title": "Order Count",
+            "type": "integer"
+          },
+          "prompt_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Prompt Hash",
+            "type": "string"
+          },
+          "prompt_version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Prompt Version",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "enum": [
+                "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+                "VERSION_ORDER_PATH_UNOBSERVED",
+                "VERSION_CHALLENGER_UNAVAILABLE"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "unavailable_count": {
+            "maximum": 100000,
+            "minimum": 0,
+            "title": "Unavailable Count",
+            "type": "integer"
+          },
+          "verdict": {
+            "const": "continue_observing",
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt_version",
+          "prompt_hash",
+          "model_id",
+          "model_version",
+          "model_hash",
+          "first_decision_at",
+          "last_decision_at",
+          "observed_sessions",
+          "cycle_count",
+          "completed_count",
+          "unavailable_count",
+          "order_count",
+          "fill_count",
+          "challenger_available",
+          "verdict",
+          "reason_codes"
+        ],
+        "title": "AgentPaperVersionObservationResponse",
         "type": "object"
       },
       "AgentRole": {

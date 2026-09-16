@@ -4,6 +4,7 @@ import { formatPaperTime } from "./order-timeline";
 
 export type AgentPaperCycleFact = components["schemas"]["AgentPaperCycleResponse"];
 export type AgentPaperSessionSummaryFact = components["schemas"]["AgentPaperSessionSummaryResponse"];
+export type AgentPaperVersionObservationFact = components["schemas"]["AgentPaperVersionObservationResponse"];
 
 const statusLabels: Record<AgentPaperCycleFact["status"], string> = {
   prepared: "已准备", researching: "研究中", decision_recorded: "决策已保存",
@@ -44,6 +45,38 @@ const nextReasonLabels: Partial<Record<NonNullable<AgentPaperSessionSummaryFact[
   CURRENT_CYCLE_IN_PROGRESS: "当前周期结束后再判断",
   CALENDAR_UNAVAILABLE: "等待交易日历证据",
 };
+
+const versionReasonLabels: Record<AgentPaperVersionObservationFact["reason_codes"][number], string> = {
+  VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE: "尚无 Agent 版本级绩效归因",
+  VERSION_ORDER_PATH_UNOBSERVED: "尚无模拟订单与成交的持久化路径事实",
+  VERSION_CHALLENGER_UNAVAILABLE: "尚无并行 challenger 版本",
+};
+
+export function AgentPaperVersionObservation({ observation }: {
+  observation: AgentPaperVersionObservationFact;
+}): React.ReactElement {
+  return <section className="paper-performance" aria-labelledby="agent-version-observation-title">
+    <header><div><p className="eyebrow">冻结身份 · 跨交易日只读聚合</p><h2 id="agent-version-observation-title">Agent 版本观察</h2></div><span className="mode-badge">继续观察</span></header>
+    <dl>
+      <div><dt>Prompt 版本</dt><dd>{observation.prompt_version}</dd></div>
+      <div><dt>模型</dt><dd>{observation.model_id}</dd></div>
+      <div><dt>模型配置</dt><dd>{observation.model_version}</dd></div>
+      <div><dt>版本指纹</dt><dd className="numeric-data" title={`prompt ${observation.prompt_hash} · model ${observation.model_hash}`}>prompt {shortHash(observation.prompt_hash)} · model {shortHash(observation.model_hash)}</dd></div>
+      <div><dt>观察进度</dt><dd>{observation.completed_count} / {observation.cycle_count} 个周期完成</dd></div>
+      <div><dt>交易日覆盖</dt><dd>{observation.observed_sessions} 个交易日</dd></div>
+      <div><dt>订单 / 成交</dt><dd>{observation.order_count} / {observation.fill_count}</dd></div>
+    </dl>
+    <aside className="inline-notice" role="note" aria-label="Agent 版本观察结论">
+      <strong>继续观察</strong>
+      <ul>{observation.reason_codes.map((reason) => <li key={reason}>{versionReasonLabels[reason]}</li>)}</ul>
+    </aside>
+    <p>同名标签可能包含不同冻结配置；本统计仅属于当前指纹，不触发任何版本变更或自动创建 challenger。</p>
+  </section>;
+}
+
+function shortHash(value: string): string {
+  return `${value.slice(0, 12)}…`;
+}
 
 export function AgentPaperSessionSummary({ summary }: {
   summary: AgentPaperSessionSummaryFact;

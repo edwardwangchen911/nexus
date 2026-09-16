@@ -3332,12 +3332,21 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             )
         assert advanced.action == "partially_filled"
         async with sessions() as session:
-            historical = await PaperReadService(
-                session, evaluated_at - timedelta(seconds=1)
-            ).latest_agent_cycle()
+            historical_service = PaperReadService(session, evaluated_at - timedelta(seconds=1))
+            historical = await historical_service.latest_agent_cycle()
+            historical_page = await historical_service.agent_cycles(
+                decision_session=DECISION_TIME.date(),
+                limit=1,
+            )
             projected = await PaperReadService(session, evaluated_at).latest_agent_cycle()
         assert historical is not None
         assert historical.status == "awaiting_market"
+        assert historical_page.version_observation is not None
+        assert historical_page.version_observation.order_count == 1
+        assert historical_page.version_observation.fill_count == 0
+        assert "VERSION_ORDER_PATH_UNOBSERVED" in (
+            historical_page.version_observation.reason_codes
+        )
         assert projected is not None
         assert projected.status == "partially_filled"
         assert projected.result_code == "PAPER_ORDERS_PARTIALLY_FILLED"
@@ -3372,6 +3381,25 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert projected.result_code == "PAPER_CYCLE_COMPLETED"
         assert cycle_page.summary.cycle_count == 1
         assert cycle_page.summary.completed_count == 1
+        assert cycle_page.version_observation is not None
+        assert cycle_page.version_observation.prompt_version == "agent-paper-orchestrator-v1"
+        assert cycle_page.version_observation.model_id == "fixture-agent-paper"
+        assert (
+            cycle_page.version_observation.model_version
+            == "codex-sdk-chatgpt-v4-actionable"
+        )
+        assert cycle_page.version_observation.observed_sessions == 1
+        assert cycle_page.version_observation.cycle_count == 1
+        assert cycle_page.version_observation.completed_count == 1
+        assert cycle_page.version_observation.unavailable_count == 0
+        assert cycle_page.version_observation.order_count == 1
+        assert cycle_page.version_observation.fill_count == 2
+        assert cycle_page.version_observation.challenger_available is False
+        assert cycle_page.version_observation.verdict == "continue_observing"
+        assert cycle_page.version_observation.reason_codes == (
+            "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+            "VERSION_CHALLENGER_UNAVAILABLE",
+        )
     finally:
         await engine.dispose()
 

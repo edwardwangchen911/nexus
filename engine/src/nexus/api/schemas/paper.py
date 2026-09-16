@@ -304,9 +304,52 @@ class AgentPaperSessionSummaryResponse(_StrictSchema):
     execution_locked: Literal[True]
 
 
+class AgentPaperVersionObservationResponse(_StrictSchema):
+    prompt_version: str = Field(min_length=1, max_length=100)
+    prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_id: str = Field(min_length=1, max_length=100)
+    model_version: str = Field(min_length=1, max_length=100)
+    model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    first_decision_at: AwareDatetime
+    last_decision_at: AwareDatetime
+    observed_sessions: int = Field(ge=1, le=100_000)
+    cycle_count: int = Field(ge=1, le=100_000)
+    completed_count: int = Field(ge=0, le=100_000)
+    unavailable_count: int = Field(ge=0, le=100_000)
+    order_count: int = Field(ge=0, le=100_000)
+    fill_count: int = Field(ge=0, le=100_000)
+    challenger_available: Literal[False]
+    verdict: Literal["continue_observing"]
+    reason_codes: tuple[
+        Literal[
+            "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+            "VERSION_ORDER_PATH_UNOBSERVED",
+            "VERSION_CHALLENGER_UNAVAILABLE",
+        ],
+        ...,
+    ] = Field(min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def _facts_are_consistent(self) -> AgentPaperVersionObservationResponse:
+        if self.first_decision_at > self.last_decision_at:
+            raise ValueError("version observation window must be ordered")
+        if self.observed_sessions > self.cycle_count:
+            raise ValueError("version observation sessions exceed cycles")
+        if self.completed_count + self.unavailable_count > self.cycle_count:
+            raise ValueError("version observation terminal counts exceed cycles")
+        expected_reasons = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+        if self.order_count == 0 or self.fill_count == 0:
+            expected_reasons.append("VERSION_ORDER_PATH_UNOBSERVED")
+        expected_reasons.append("VERSION_CHALLENGER_UNAVAILABLE")
+        if self.reason_codes != tuple(expected_reasons):
+            raise ValueError("version observation reasons do not match facts")
+        return self
+
+
 class AgentPaperCyclePageResponse(_StrictSchema):
     items: tuple[AgentPaperCycleResponse, ...] = Field(max_length=20)
     summary: AgentPaperSessionSummaryResponse
+    version_observation: AgentPaperVersionObservationResponse | None
 
 
 class AgentPaperCyclePageEnvelope(_StrictSchema):

@@ -1215,6 +1215,7 @@ export interface components {
             /** Items */
             items: components["schemas"]["AgentPaperCycleResponse"][];
             summary: components["schemas"]["AgentPaperSessionSummaryResponse"];
+            version_observation: components["schemas"]["AgentPaperVersionObservationResponse"] | null;
         };
         /** AgentPaperCycleResponse */
         AgentPaperCycleResponse: {
@@ -1365,6 +1366,53 @@ export interface components {
              * @enum {string}
              */
             status: "calendar_unavailable" | "not_started" | "ready" | "in_progress" | "completed" | "stopped" | "closed" | "historical";
+        };
+        /** AgentPaperVersionObservationResponse */
+        AgentPaperVersionObservationResponse: {
+            /**
+             * Challenger Available
+             * @constant
+             */
+            challenger_available: false;
+            /** Completed Count */
+            completed_count: number;
+            /** Cycle Count */
+            cycle_count: number;
+            /** Fill Count */
+            fill_count: number;
+            /**
+             * First Decision At
+             * Format: date-time
+             */
+            first_decision_at: string;
+            /**
+             * Last Decision At
+             * Format: date-time
+             */
+            last_decision_at: string;
+            /** Model Hash */
+            model_hash: string;
+            /** Model Id */
+            model_id: string;
+            /** Model Version */
+            model_version: string;
+            /** Observed Sessions */
+            observed_sessions: number;
+            /** Order Count */
+            order_count: number;
+            /** Prompt Hash */
+            prompt_hash: string;
+            /** Prompt Version */
+            prompt_version: string;
+            /** Reason Codes */
+            reason_codes: ("VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE" | "VERSION_ORDER_PATH_UNOBSERVED" | "VERSION_CHALLENGER_UNAVAILABLE")[];
+            /** Unavailable Count */
+            unavailable_count: number;
+            /**
+             * Verdict
+             * @constant
+             */
+            verdict: "continue_observing";
         };
         /** @enum {string} */
         AgentRole: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";

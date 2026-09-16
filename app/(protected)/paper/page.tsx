@@ -10,7 +10,7 @@ import { AlertTriangle, Check, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
-import { AgentPaperCycle, AgentPaperSessionSummary, type AgentPaperCycleFact, type AgentPaperSessionSummaryFact } from "../../components/agent-paper-cycle";
+import { AgentPaperCycle, AgentPaperSessionSummary, AgentPaperVersionObservation, type AgentPaperCycleFact, type AgentPaperSessionSummaryFact, type AgentPaperVersionObservationFact } from "../../components/agent-paper-cycle";
 import { DecisionPath } from "../../components/decision-path";
 import { formatPaperDecimal, formatPaperTime, OrderTimeline, type PaperOrder } from "../../components/order-timeline";
 import type { components } from "../../lib/generated/schema";
@@ -29,6 +29,7 @@ type PaperPanelProps = {
   notice: Notice;
   cycles?: AgentPaperCycleFact[];
   cycleSummary?: AgentPaperSessionSummaryFact | null;
+  versionObservation?: AgentPaperVersionObservationFact | null;
   cycleUnavailable?: boolean;
   onRefresh: () => void;
   onStatusFilter: (status: "" | OrderStatus) => void;
@@ -54,6 +55,7 @@ export default function PaperPage(): React.ReactElement {
   const [orders, setOrders] = useState<PaperOrder[]>([]);
   const [cycles, setCycles] = useState<AgentPaperCycleFact[]>([]);
   const [cycleSummary, setCycleSummary] = useState<AgentPaperSessionSummaryFact | null>(null);
+  const [versionObservation, setVersionObservation] = useState<AgentPaperVersionObservationFact | null>(null);
   const [cycleUnavailable, setCycleUnavailable] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"" | OrderStatus>("");
@@ -77,6 +79,7 @@ export default function PaperPage(): React.ReactElement {
     setOrders([]);
     setCycles([]);
     setCycleSummary(null);
+    setVersionObservation(null);
     setCycleUnavailable(false);
     setNextCursor(null);
   }, []);
@@ -120,12 +123,13 @@ export default function PaperPage(): React.ReactElement {
       ordersRef.current = page.items; setOrders(page.items); setNextCursor(page.next_cursor);
       cursorHistory.current = new Set(page.next_cursor ? [page.next_cursor] : []);
       if (cycleResponse.ok) {
-        const cyclePayload = await cycleResponse.json() as { data?: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact } };
+        const cyclePayload = await cycleResponse.json() as { data?: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact; version_observation?: AgentPaperVersionObservationFact | null } };
         const nextCycles = validCyclePage(cyclePayload.data);
         if (!nextCycles) throw new Error("paper cycles invalid");
         setCycles(nextCycles.items); setCycleSummary(nextCycles.summary); setCycleUnavailable(false);
+        setVersionObservation(nextCycles.version_observation);
       } else {
-        setCycles([]); setCycleSummary(null); setCycleUnavailable(true);
+        setCycles([]); setCycleSummary(null); setVersionObservation(null); setCycleUnavailable(true);
       }
       setState(portfolioState(nextPortfolio.data_state));
       return true;
@@ -259,6 +263,7 @@ export default function PaperPage(): React.ReactElement {
     <PaperPanel state={state} portfolio={portfolio} orders={orders} nextCursor={nextCursor}
       cycles={cycles} cycleUnavailable={cycleUnavailable}
       cycleSummary={cycleSummary}
+      versionObservation={versionObservation}
       statusFilter={statusFilter} loadingMore={loadingMore} notice={notice}
       onRefresh={() => void refresh()} onStatusFilter={(value) => void changeStatusFilter(value)}
       onLoadMore={() => void loadMoreOrders()} onCancel={openCancel} />
@@ -267,7 +272,7 @@ export default function PaperPage(): React.ReactElement {
   </>;
 }
 
-export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
+export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
   const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
@@ -286,6 +291,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
           <span className="mode-badge">不是实盘</span>
         </section>
         {cycleSummary ? <AgentPaperSessionSummary summary={cycleSummary} /> : null}
+        {versionObservation ? <AgentPaperVersionObservation observation={versionObservation} /> : null}
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         <PerformanceFacts portfolio={portfolio} />
@@ -370,7 +376,7 @@ function orderPath(status: "" | OrderStatus, cursor: string | null): string {
 }
 function validPortfolio(value: PaperPortfolio | undefined): PaperPortfolio | null { return value?.mode === "internal_paper" && value.currency === "USD" && Array.isArray(value.positions) && Array.isArray(value.attributions) ? value : null; }
 function validOrderPage(value: { items?: PaperOrder[]; next_cursor?: string | null } | undefined): { items: PaperOrder[]; next_cursor: string | null } | null { return value && Array.isArray(value.items) && value.items.length <= ORDER_PAGE_SIZE && (value.next_cursor === null || typeof value.next_cursor === "string" && value.next_cursor.length > 0 && value.next_cursor.length <= 2048) ? { items: value.items, next_cursor: value.next_cursor } : null; }
-function validCyclePage(value: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact } | undefined): { items: AgentPaperCycleFact[]; summary: AgentPaperSessionSummaryFact } | null { return value && Array.isArray(value.items) && value.items.length <= 20 && value.summary?.execution_locked === true ? { items: value.items, summary: value.summary } : null; }
+function validCyclePage(value: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact; version_observation?: AgentPaperVersionObservationFact | null } | undefined): { items: AgentPaperCycleFact[]; summary: AgentPaperSessionSummaryFact; version_observation: AgentPaperVersionObservationFact | null } | null { return value && Array.isArray(value.items) && value.items.length <= 20 && value.summary?.execution_locked === true ? { items: value.items, summary: value.summary, version_observation: value.version_observation ?? null } : null; }
 function portfolioState(state: PaperPortfolio["data_state"]): DataStateKind { return ({ EMPTY: "empty", READY: "ready", PARTIAL: "partial", STALE: "stale" })[state] as DataStateKind; }
 function paperStateDetail(state: DataStateKind): string { return ({ loading: "正在读取冻结绩效、持仓和订单事实。", empty: "尚无已发布的内部模拟绩效快照。", ready: "模拟盘事实已就绪。", partial: "部分归因证据不完整；保留已发布事实，不猜测缺失值。", stale: "显示最后已知快照；新的取消操作需先核对订单版本。", error: "读取失败；没有触发任何模拟或真实订单动作。", forbidden: "当前身份无权读取内部模拟盘。" })[state]; }
 function attributionLabel(value: PaperPortfolio["attributions"][number]["dimension"]): string { return ({ cash: "现金", instrument: "标的", sector: "行业" })[value]; }
