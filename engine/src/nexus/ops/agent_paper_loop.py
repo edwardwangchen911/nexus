@@ -2148,8 +2148,63 @@ async def inspect_agent_paper_loop(
         await engine.dispose()
 
 
+def _safe_agent_paper_worker_id(value: object) -> bool:
+    if not isinstance(value, str) or not value.startswith("agent-paper-loop-"):
+        return False
+    suffix = value.removeprefix("agent-paper-loop-")
+    try:
+        return str(UUID(suffix)) == suffix
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _classify_agent_paper_service_heartbeat(
+    now: object,
+    heartbeat: object,
+    *,
+    freshness: timedelta = timedelta(seconds=30),
+) -> dict[str, object]:
+    if freshness <= timedelta(0) or not _safe_agent_paper_worker_id(
+        getattr(heartbeat, "worker_id", None)
+    ):
+        return {"status": "unavailable"}
+    seen_at = getattr(heartbeat, "seen_at", None)
+    started_at = getattr(heartbeat, "started_at", None)
+    if (
+        not isinstance(now, datetime)
+        or now.tzinfo is None
+        or now.utcoffset() is None
+        or not isinstance(seen_at, datetime)
+        or seen_at.tzinfo is None
+        or seen_at.utcoffset() is None
+        or not isinstance(started_at, datetime)
+        or started_at.tzinfo is None
+        or started_at.utcoffset() is None
+        or seen_at < started_at
+    ):
+        return {"status": "unavailable"}
+    process_version = getattr(heartbeat, "process_version", None)
+    migration_head = getattr(heartbeat, "migration_head", None)
+    if (
+        process_version != AGENT_PAPER_LOOP_PROCESS_VERSION
+        or migration_head != CURRENT_MIGRATION_HEAD
+    ):
+        return {"status": "incompatible"}
+    if seen_at > now:
+        return {"status": "unavailable"}
+    if now - seen_at > freshness:
+        return {"status": "stale"}
+    return {
+        "status": "fresh",
+        "seen_at": seen_at.isoformat(),
+        "started_at": started_at.isoformat(),
+        "process_version": process_version,
+        "migration_head": migration_head,
+    }
+
+
 async def read_agent_paper_service_heartbeat(database_url: str | None) -> dict[str, object]:
-    """Read one persisted liveness fact; do not infer that an observed Worker is still alive."""
+    """Read one persisted liveness fact and classify it against the database clock."""
     if not database_url:
         return {"status": "unavailable"}
     database = make_url(database_url)
@@ -2159,27 +2214,27 @@ async def read_agent_paper_service_heartbeat(database_url: str | None) -> dict[s
         or database.query
     ):
         return {"status": "unavailable"}
-    engine = create_async_engine(database_url)
     try:
-        async with async_sessionmaker(engine).begin() as session:
-            await session.execute(text("SET TRANSACTION READ ONLY"))
-            heartbeat = await session.scalar(
-                select(WorkerHeartbeat)
-                .where(WorkerHeartbeat.queue == QueueName.AGENT_PAPER.value)
-                .order_by(WorkerHeartbeat.seen_at.desc(), WorkerHeartbeat.id.desc())
-                .limit(1)
-            )
-            if heartbeat is None:
-                return {"status": "missing"}
-            return {
-                "status": "observed",
-                "seen_at": heartbeat.seen_at.isoformat(),
-                "started_at": heartbeat.started_at.isoformat(),
-                "process_version": heartbeat.process_version,
-                "migration_head": heartbeat.migration_head,
-            }
-    finally:
-        await engine.dispose()
+        engine = create_async_engine(database_url)
+        try:
+            async with async_sessionmaker(engine).begin() as session:
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+                row = (
+                    await session.execute(
+                        select(func.clock_timestamp(), WorkerHeartbeat)
+                        .where(WorkerHeartbeat.queue == QueueName.AGENT_PAPER.value)
+                        .order_by(WorkerHeartbeat.seen_at.desc(), WorkerHeartbeat.id.desc())
+                        .limit(1)
+                    )
+                ).one_or_none()
+                if row is None:
+                    return {"status": "missing"}
+                now, heartbeat = row
+                return _classify_agent_paper_service_heartbeat(now, heartbeat)
+        finally:
+            await engine.dispose()
+    except Exception:
+        return {"status": "unavailable"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2239,7 +2294,7 @@ def main(argv: list[str] | None = None) -> int:
                         sort_keys=True,
                     )
                 )
-                return 0 if result["status"] == "ready" and heartbeat["status"] == "observed" else 1
+                return 0 if result["status"] == "ready" and heartbeat["status"] == "fresh" else 1
             print(json.dumps(result, sort_keys=True))
             return 0 if result["status"] == "ready" else 1
         account_id: UUID | None = None

@@ -471,7 +471,9 @@ def _parse_service_status_results(
     heartbeat_details: tuple[tuple[str, object], ...] = ()
     heartbeat_code = "AGENT_PAPER_HEARTBEAT_OUTPUT_INVALID"
     if isinstance(heartbeat, dict) and heartbeat.get("status") in {
-        "observed",
+        "fresh",
+        "stale",
+        "incompatible",
         "missing",
         "unavailable",
     }:
@@ -516,7 +518,7 @@ def _parse_service_status_results(
             action=action,
             ordinal=first_ordinal,
             exit_code=(
-                0 if heartbeat_details and dict(heartbeat_details)["status"] == "observed" else 1
+                0 if heartbeat_details and dict(heartbeat_details)["status"] == "fresh" else 1
             ),
             result_code=heartbeat_code,
             fact="heartbeat",

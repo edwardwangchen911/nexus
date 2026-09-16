@@ -121,26 +121,29 @@ def test_service_status_reads_one_heartbeat_without_producers_or_business_writes
 ):
     from sqlalchemy import event
 
-    seen_at = datetime(2026, 9, 16, 12, tzinfo=UTC)
+    worker_id = f"agent-paper-loop-{uuid4()}"
 
-    async def seed():
+    async def seed() -> datetime:
         engine = create_async_engine(migrated_database_url)
         try:
             async with async_sessionmaker(engine).begin() as session:
+                seen_at = await session.scalar(select(func.clock_timestamp()))
+                assert isinstance(seen_at, datetime)
                 session.add(
                     WorkerHeartbeat(
                         queue="agent_paper",
-                        worker_id="private-worker-canary",
+                        worker_id=worker_id,
                         process_version=agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
                         migration_head=agent_paper_loop.CURRENT_MIGRATION_HEAD,
                         started_at=seen_at - timedelta(minutes=5),
                         seen_at=seen_at,
                     )
                 )
+                return seen_at
         finally:
             await engine.dispose()
 
-    asyncio.run(seed())
+    seen_at = asyncio.run(seed())
     (tmp_path / "infra").mkdir()
     (tmp_path / "infra/compose.yaml").touch()
     (tmp_path / ".gitignore").write_text("infra/.env.service\n")
@@ -186,7 +189,7 @@ def test_service_status_reads_one_heartbeat_without_producers_or_business_writes
     output = capsys.readouterr().out
     result = json.loads(output)
     assert result["heartbeat"] == {
-        "status": "observed",
+        "status": "fresh",
         "seen_at": seen_at.isoformat(),
         "started_at": (seen_at - timedelta(minutes=5)).isoformat(),
         "process_version": agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
@@ -195,12 +198,73 @@ def test_service_status_reads_one_heartbeat_without_producers_or_business_writes
     assert result["preflight"]["status"] == "blocked"
     assert result["preflight"]["external_requests"] == 0
     assert result["execution_locked"] is True
-    assert "private-worker-canary" not in output
+    assert worker_id not in output
     selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
     assert len(selects) == 1 and "worker_heartbeats" in selects[0]
     assert not any(
         sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql in statements
     )
+
+
+@pytest.mark.parametrize(
+    ("worker_id", "process_version", "seen_offset", "expected"),
+    [
+        (
+            f"agent-paper-loop-{uuid4()}",
+            agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
+            timedelta(seconds=-31),
+            "stale",
+        ),
+        (
+            f"agent-paper-loop-{uuid4()}",
+            "old-agent-paper-loop",
+            timedelta(0),
+            "incompatible",
+        ),
+        (
+            "malformed-worker",
+            agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
+            timedelta(0),
+            "unavailable",
+        ),
+        (
+            f"agent-paper-loop-{uuid4()}",
+            agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
+            timedelta(seconds=1),
+            "unavailable",
+        ),
+    ],
+)
+def test_service_heartbeat_rejects_stale_incompatible_or_malformed_liveness(
+    migrated_database_url,
+    worker_id,
+    process_version,
+    seen_offset,
+    expected,
+):
+    async def scenario() -> dict[str, object]:
+        engine = create_async_engine(migrated_database_url)
+        try:
+            async with async_sessionmaker(engine).begin() as session:
+                now = await session.scalar(select(func.clock_timestamp()))
+                assert isinstance(now, datetime)
+                session.add(
+                    WorkerHeartbeat(
+                        queue="agent_paper",
+                        worker_id=worker_id,
+                        process_version=process_version,
+                        migration_head=agent_paper_loop.CURRENT_MIGRATION_HEAD,
+                        started_at=now - timedelta(minutes=5),
+                        seen_at=now + seen_offset,
+                    )
+                )
+            return await agent_paper_loop.read_agent_paper_service_heartbeat(
+                migrated_database_url
+            )
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(scenario()) == {"status": expected}
 
 
 class _ObjectStore:

@@ -2010,7 +2010,7 @@ def test_service_status_keeps_heartbeat_independent_of_runtime_validation(
 
     async def heartbeat(database_url: str | None) -> dict[str, object]:
         observed_database_urls.append(database_url)
-        return {"status": "observed", "seen_at": NOW.isoformat()}
+        return {"status": "fresh", "seen_at": NOW.isoformat()}
 
     monkeypatch.setattr(loop, "read_agent_paper_service_heartbeat", heartbeat)
 
@@ -2027,9 +2027,40 @@ def test_service_status_keeps_heartbeat_independent_of_runtime_validation(
         == 1
     )
     payload = json.loads(capsys.readouterr().out)
-    assert payload["heartbeat"]["status"] == "observed"
+    assert payload["heartbeat"]["status"] == "fresh"
     assert payload["preflight"]["blocking_codes"] == ["AGENT_PAPER_RUNTIME_CONFIG_INVALID"]
     assert observed_database_urls == [environment["DATABASE_URL"]]
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, "fresh"),
+        ({"seen_at": NOW - timedelta(seconds=31)}, "stale"),
+        ({"process_version": "old-agent-paper-loop"}, "incompatible"),
+        ({"worker_id": "malformed-worker"}, "unavailable"),
+        ({"seen_at": NOW + timedelta(seconds=1)}, "unavailable"),
+    ],
+)
+def test_service_heartbeat_classification_requires_current_canonical_evidence(
+    changes: dict[str, object], expected: str
+) -> None:
+    heartbeat = SimpleNamespace(
+        worker_id=f"agent-paper-loop-{UUID(int=1)}",
+        process_version=loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
+        migration_head=loop.CURRENT_MIGRATION_HEAD,
+        started_at=NOW - timedelta(minutes=5),
+        seen_at=NOW,
+    )
+    for name, value in changes.items():
+        setattr(heartbeat, name, value)
+
+    result = loop._classify_agent_paper_service_heartbeat(NOW, heartbeat)
+
+    assert result["status"] == expected
+    assert "worker_id" not in result
+    if expected == "fresh":
+        assert result["seen_at"] == NOW.isoformat()
 
 
 def test_loop_command_reads_account_and_runtime_settings_from_process_environment(

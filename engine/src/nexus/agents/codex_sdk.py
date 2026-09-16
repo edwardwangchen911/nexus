@@ -178,7 +178,20 @@ def runtime_environment() -> dict[str, str]:
     """Allow only OS discovery/login paths; never inherit app credentials or IPC."""
     return {
         key: value
-        for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME")
+        for key in (
+            "HOME",
+            "PATH",
+            "TMPDIR",
+            "LANG",
+            "LANGUAGE",
+            "LC_ALL",
+            "LC_CTYPE",
+            "CODEX_HOME",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+        )
         if (value := os.environ.get(key))
     }
 

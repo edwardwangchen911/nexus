@@ -1404,6 +1404,16 @@ async def test_staged_sdk_explains_frozen_paper_decision_price_context(monkeypat
 
 
 def test_child_environment_excludes_secrets_and_parent_app_ipc(monkeypatch):
+    safe_runtime = {
+        "LANGUAGE": "zh_CN:en",
+        "LC_CTYPE": "UTF-8",
+        "SSL_CERT_FILE": "/private/runtime/cert.pem",
+        "SSL_CERT_DIR": "/private/runtime/certs",
+        "REQUESTS_CA_BUNDLE": "/private/runtime/requests.pem",
+        "NODE_EXTRA_CA_CERTS": "/private/runtime/node.pem",
+    }
+    for key, value in safe_runtime.items():
+        monkeypatch.setenv(key, value)
     for key in (
         "OPENAI_API_KEY",
         "CODEX_API_KEY",
@@ -1414,7 +1424,9 @@ def test_child_environment_excludes_secrets_and_parent_app_ipc(monkeypatch):
         "PYTHONPATH",
     ):
         monkeypatch.setenv(key, "secret-canary")
-    assert "secret-canary" not in json.dumps(codex_sdk.runtime_environment())
+    environment = codex_sdk.runtime_environment()
+    assert "secret-canary" not in json.dumps(environment)
+    assert {key: environment.get(key) for key in safe_runtime} == safe_runtime
     command = codex_sdk.sdk_config(Path("/tmp/isolated")).launch_args_override
     assert command[:2] == ("/usr/bin/env", "-i")
     assert "secret-canary" not in " ".join(command)

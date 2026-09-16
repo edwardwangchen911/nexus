@@ -207,7 +207,7 @@ def test_status_reports_four_independent_facts_after_compose_failure(repo_root: 
             return subprocess.CompletedProcess(argv, 0, '{"status":"running"}', "private")
         payload = {
             "heartbeat": {
-                "status": "observed",
+                "status": "fresh",
                 "seen_at": "2026-09-16T10:00:00+00:00",
                 "started_at": "2026-09-16T09:00:00+00:00",
                 "process_version": "agent-paper-loop-v1",
@@ -240,7 +240,7 @@ def test_status_reports_four_independent_facts_after_compose_failure(repo_root: 
     ]
     assert results[0].result_code == "LOCAL_STACK_STEP_FAILED"
     assert results[1].details == (("status", "running"),)
-    assert results[2].details[0] == ("status", "observed")
+    assert results[2].details[0] == ("status", "fresh")
     assert results[3].details == (
         ("status", "blocked"),
         ("execution_locked", True),
@@ -255,6 +255,47 @@ def test_status_reports_four_independent_facts_after_compose_failure(repo_root: 
     )
     assert "--service-status" in calls[2]
     assert "private" not in repr(results)
+
+
+@pytest.mark.parametrize("heartbeat_status", ("stale", "incompatible"))
+def test_status_preserves_nonfresh_heartbeat_classification(
+    repo_root: Path, heartbeat_status: str
+) -> None:
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        if argv[-2:] == ("ps", "-a"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, '{"status":"running"}', "")
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            json.dumps(
+                {
+                    "heartbeat": {"status": heartbeat_status},
+                    "preflight": {
+                        "status": "ready",
+                        "execution_locked": True,
+                        "external_requests": 0,
+                        "blocking_codes": [],
+                        "optional_codes": [],
+                    },
+                }
+            ),
+            "",
+        )
+
+    results = run_local_stack(
+        LocalStackAction.STATUS,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    heartbeat = results[2]
+    assert heartbeat.result_code == f"AGENT_PAPER_HEARTBEAT_{heartbeat_status.upper()}"
+    assert heartbeat.details == (("status", heartbeat_status),)
+    assert heartbeat.exit_code == 1
 
 
 def test_status_continues_when_compose_executable_is_unavailable(repo_root: Path) -> None:
@@ -443,7 +484,7 @@ def test_status_rejects_non_fail_closed_preflight_shapes(
             0,
             json.dumps(
                 {
-                    "heartbeat": {"status": "observed"},
+                    "heartbeat": {"status": "fresh"},
                     "preflight": {
                         "status": "ready",
                         "execution_locked": locked,
