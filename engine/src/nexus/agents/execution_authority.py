@@ -100,6 +100,8 @@ async def load_frozen_prompts(
             prompt_ids.append(UUID(cast(str, item.get("id"))))
     except (TypeError, ValueError, AttributeError):
         return None
+    if run.prompt_version_id != prompt_ids[0]:
+        return None
     records = list(
         await session.scalars(
             select(AgentPromptVersionRecord).where(AgentPromptVersionRecord.id.in_(prompt_ids))

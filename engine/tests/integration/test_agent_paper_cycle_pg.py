@@ -791,6 +791,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
             assert first_run is not None
             first_manifest = dict(first_run.prompt_manifest)
             first_model_config_id = first_run.model_config_id
+            first_model_hash = first_run.model_hash
             newer_content = "newer portfolio prompt must not replace the paper champion"
             session.add_all(
                 (
@@ -874,6 +875,39 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
                         "WHERE id=:run_id"
                     ),
                     {"model_hash": "e" * 64, "run_id": third.run_id},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
+                )
+        with pytest.raises(ValueError, match="point-in-time data authority is invalid"):
+            async with sessions.begin() as session:
+                await admit_agent_paper_research(
+                    session,
+                    cycle_id=uuid4(),
+                    instrument_id=first_run.instrument_id,
+                    research_snapshot_id=first_run.data_snapshot_id,
+                    research_as_of=first_run.decision_time,
+                    daily_limit_usd=Decimal("1"),
+                    now=first_run.decision_time,
+                )
+        async with sessions.begin() as session:
+            await session.execute(
+                text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_research_runs SET model_hash=:model_hash,"
+                        "prompt_version_id=:prompt_version_id WHERE id=:run_id"
+                    ),
+                    {
+                        "model_hash": first_model_hash,
+                        "prompt_version_id": UUID(
+                            "f3000000-0000-0000-0000-000000000001"
+                        ),
+                        "run_id": third.run_id,
+                    },
                 )
             finally:
                 await session.execute(
