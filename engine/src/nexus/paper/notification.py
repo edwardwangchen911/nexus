@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
@@ -85,6 +85,27 @@ class PaperNotificationDecisionContext(_FrozenNotificationModel):
     agent_cycle_id: UUID | None
     agent_reason: str | None = Field(default=None, min_length=1, max_length=500)
     invalidation: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class PaperNotificationFill(_FrozenNotificationModel):
+    """Minimal immutable fill facts needed by a terminal notification."""
+
+    quantity: Decimal
+    notional: Decimal
+    fee: Decimal
+
+    @field_validator("quantity", "notional", "fee", mode="before")
+    @classmethod
+    def _exact_values(cls, value: object, info: ValidationInfo) -> Decimal:
+        return _exact_notification_decimal(value, field=info.field_name or "fill value")
+
+    @model_validator(mode="after")
+    def _valid_values(self) -> PaperNotificationFill:
+        if self.quantity <= 0 or self.quantity != self.quantity.to_integral_value():
+            raise ValueError("fill quantity must be positive whole shares")
+        if self.notional <= 0 or self.fee < 0:
+            raise ValueError("fill notional and fee must be valid")
+        return self
 
 
 class PaperNotificationPrice(_FrozenNotificationModel):
@@ -477,6 +498,78 @@ def build_risk_rejected_snapshot(
     )
 
 
+_CANCELLATION_REASONS = {
+    "paper_user_cancelled": "用户取消了订单。",
+    "paper_eod_remainder": "交易时段结束，未成交部分已取消。",
+    "missing_fill_data": "执行窗口缺少合格行情，订单已取消。",
+    "paper_reservation_insufficient": "剩余预留资金或持仓不足以继续成交。",
+    "paper_execution_price_authority_unavailable": "执行价格数据不可用，订单已取消。",
+}
+
+
+def build_terminal_execution_snapshot(
+    *,
+    order: PaperOrderRecord,
+    requested_quantity: Decimal,
+    approved_quantity: Decimal,
+    fills: tuple[PaperNotificationFill, ...],
+    available_cash: Decimal,
+    position_quantity: Decimal,
+    context: PaperNotificationDecisionContext,
+    status: Literal["filled", "cancelled"],
+    cancellation_reason_code: str | None,
+    occurred_at: datetime,
+) -> PaperOrderNotificationSnapshot:
+    """Freeze aggregate fills and post-transaction account values for one terminal order."""
+    filled_quantity = sum((fill.quantity for fill in fills), start=Decimal(0))
+    notional = sum((fill.notional for fill in fills), start=Decimal(0))
+    fee = sum((fill.fee for fill in fills), start=Decimal(0)) if fills else None
+    if filled_quantity > 0:
+        price_kind: NotificationPriceKind = "average_fill"
+        price_value = (notional / filled_quantity).quantize(
+            Decimal("0.000000000001"),
+            rounding=ROUND_HALF_EVEN,
+        )
+    else:
+        price_kind = "reference"
+        price_value = order.reference_close
+    reason = None
+    if status == "cancelled":
+        reason = _CANCELLATION_REASONS.get(
+            cancellation_reason_code or "",
+            "订单已取消。",
+        )
+
+    return PaperOrderNotificationSnapshot(
+        schema_version="paper_notification_v1",
+        mode="internal_paper",
+        order_id=order.id,
+        agent_cycle_id=context.agent_cycle_id,
+        occurred_at=occurred_at,
+        symbol=context.symbol,
+        side=cast(Literal["buy", "sell"], order.side),
+        status=status,
+        requested_quantity=requested_quantity,
+        approved_quantity=approved_quantity,
+        filled_quantity=filled_quantity,
+        remaining_quantity=approved_quantity - filled_quantity,
+        price=PaperNotificationPrice(
+            kind=price_kind,
+            value=price_value,
+            currency="USD",
+        ),
+        notional=notional,
+        fee=fee,
+        cash=PaperNotificationCash(kind="actual_after", available=available_cash),
+        position=PaperNotificationPosition(
+            kind="actual_after",
+            quantity=position_quantity,
+            portfolio_ratio=None,
+        ),
+        agent_reason=context.agent_reason,
+        invalidation=context.invalidation,
+        risk_reason=reason,
+    )
 def notification_snapshot_payload(snapshot: PaperOrderNotificationSnapshot) -> dict[str, object]:
     """Serialize a validated snapshot for the existing outbox payload."""
     return {"notification_snapshot": snapshot.model_dump(mode="json")}

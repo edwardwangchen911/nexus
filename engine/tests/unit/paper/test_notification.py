@@ -8,8 +8,10 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.paper.notification import (
     PaperNotificationDecisionContext,
     PaperNotificationError,
+    PaperNotificationFill,
     PaperOrderNotificationSnapshot,
     build_risk_rejected_snapshot,
+    build_terminal_execution_snapshot,
     decision_context_from_research_intent,
     notification_snapshot_payload,
     parse_notification_snapshot,
@@ -256,6 +258,96 @@ def test_cancelled_snapshot_binds_notional_to_fill_facts(
 
     with pytest.raises(ValidationError):
         PaperOrderNotificationSnapshot.model_validate(payload)
+
+
+def test_terminal_snapshot_aggregates_weighted_fills_and_actual_account_state() -> None:
+    order = PaperOrderRecord(
+        id=ORDER_ID,
+        account_id=UUID("0199d500-1000-7000-8000-000000000105"),
+        batch_id=UUID("0199d500-1000-7000-8000-000000000106"),
+        instrument_id=INSTRUMENT_ID,
+        strategy_decision_id=UUID("0199d500-1000-7000-8000-000000000107"),
+        side="buy",
+        quantity=Decimal("12"),
+        reference_close=Decimal("100"),
+        worst_price=Decimal("102"),
+        risk_outcome="approved",
+        created_at=datetime(2026, 9, 16, 2, tzinfo=UTC),
+    )
+    context = PaperNotificationDecisionContext(
+        symbol="AAPL",
+        agent_cycle_id=CYCLE_ID,
+        agent_reason="Agent 判断基本面改善。",
+        invalidation="研究证据不再有效。",
+    )
+
+    snapshot = build_terminal_execution_snapshot(
+        order=order,
+        requested_quantity=Decimal("15"),
+        approved_quantity=Decimal("12"),
+        fills=(
+            PaperNotificationFill(
+                quantity=Decimal("5"),
+                notional=Decimal("501.25"),
+                fee=Decimal("0.50"),
+            ),
+            PaperNotificationFill(
+                quantity=Decimal("7"),
+                notional=Decimal("707.00"),
+                fee=Decimal("0.70"),
+            ),
+        ),
+        available_cash=Decimal("18790.55"),
+        position_quantity=Decimal("42"),
+        context=context,
+        status="filled",
+        cancellation_reason_code=None,
+        occurred_at=datetime(2026, 9, 16, 2, 15, tzinfo=UTC),
+    )
+
+    assert snapshot.requested_quantity == 15
+    assert snapshot.approved_quantity == 12
+    assert snapshot.filled_quantity == 12
+    assert snapshot.price.value == Decimal("100.6875")
+    assert snapshot.notional == Decimal("1208.25")
+    assert snapshot.fee == Decimal("1.20")
+    assert snapshot.cash.available == Decimal("18790.55")
+    assert snapshot.position.quantity == 42
+
+
+def test_unfilled_cancel_snapshot_uses_reference_price_and_fixed_reason() -> None:
+    order = PaperOrderRecord(
+        id=ORDER_ID,
+        account_id=UUID("0199d500-1000-7000-8000-000000000105"),
+        batch_id=UUID("0199d500-1000-7000-8000-000000000106"),
+        instrument_id=INSTRUMENT_ID,
+        strategy_decision_id=UUID("0199d500-1000-7000-8000-000000000107"),
+        side="buy",
+        quantity=Decimal("12"),
+        reference_close=Decimal("100"),
+        worst_price=Decimal("102"),
+        risk_outcome="approved",
+        created_at=datetime(2026, 9, 16, 2, tzinfo=UTC),
+    )
+
+    snapshot = build_terminal_execution_snapshot(
+        order=order,
+        requested_quantity=Decimal("12"),
+        approved_quantity=Decimal("12"),
+        fills=(),
+        available_cash=Decimal("20000"),
+        position_quantity=Decimal("0"),
+        context=PaperNotificationDecisionContext(symbol="AAPL", agent_cycle_id=None),
+        status="cancelled",
+        cancellation_reason_code="paper_user_cancelled",
+        occurred_at=datetime(2026, 9, 16, 2, 15, tzinfo=UTC),
+    )
+
+    assert snapshot.price.kind == "reference"
+    assert snapshot.price.value == Decimal("100")
+    assert snapshot.notional == 0
+    assert snapshot.fee is None
+    assert snapshot.risk_reason == "用户取消了订单。"
 
 
 @pytest.mark.parametrize(

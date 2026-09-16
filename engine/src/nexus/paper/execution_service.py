@@ -59,6 +59,13 @@ from nexus.paper.models import (
     Reservation,
     ReservationEvent,
 )
+from nexus.paper.notification import (
+    PaperNotificationFill,
+    PaperOrderNotificationSnapshot,
+    build_order_decision_context,
+    build_terminal_execution_snapshot,
+    notification_snapshot_payload,
+)
 from nexus.paper.orders import current_order_status, fold_reservation_events
 from nexus.paper.performance import (
     PositionAdjustment,
@@ -90,6 +97,7 @@ from nexus.persistence.models.paper import (
     PaperRequestIdempotencyRecord,
     PaperReservationEventRecord,
     PaperReservationRecord,
+    RiskEvaluationRecord,
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import OutboxEvent
@@ -879,17 +887,37 @@ async def _insert_idempotency(
         if isinstance(result, PaperAdvanceResult)
         else "paper.execution.cancelled"
     )
-    payload = {
+    notification_snapshot = await _terminal_notification_snapshot(
+        session,
+        order_id=order_id,
+        result=result,
+        occurred_at=occurred_at,
+        operation=operation,
+    )
+    audit_payload = {
         **result.model_dump(mode="json"),
         "operation": operation,
         "request_hash": request_hash,
+    }
+    notification_expected = operation == "cancel" or (
+        isinstance(result, PaperAdvanceResult) and result.action in {"filled", "cancelled"}
+    )
+    outbox_payload = {
+        **audit_payload,
+        **(
+            notification_snapshot_payload(notification_snapshot)
+            if notification_snapshot is not None
+            else {"notification_delivery": "unavailable"}
+            if notification_expected
+            else {}
+        ),
     }
     await append_audit_event(
         session,
         actor_id=("system:task19" if operation == "advance" else "user:internal-paper"),
         action=action,
         schema_version="paper_execution_v1",
-        payload=payload,
+        payload=audit_payload,
         occurred_at=occurred_at,
     )
     if operation == "cancel" or (
@@ -902,10 +930,143 @@ async def _insert_idempotency(
                 event_type=action,
                 aggregate_id=order_id,
                 schema_version="paper_execution_v1",
-                payload=payload,
+                payload=outbox_payload,
                 published_at=None,
             )
         )
+
+
+async def _terminal_notification_snapshot(
+    session: AsyncSession,
+    *,
+    order_id: UUID,
+    result: PaperAdvanceResult | PaperCancelResult,
+    occurred_at: datetime,
+    operation: Literal["advance", "cancel"],
+) -> PaperOrderNotificationSnapshot | None:
+    is_terminal_advance = isinstance(result, PaperAdvanceResult) and result.action in {
+        "filled",
+        "cancelled",
+    }
+    if not is_terminal_advance and operation != "cancel":
+        return None
+
+    order = await session.get(PaperOrderRecord, order_id, populate_existing=True)
+    evaluation = await session.scalar(
+        select(RiskEvaluationRecord).where(RiskEvaluationRecord.order_id == order_id)
+    )
+    if order is None:
+        raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
+    if evaluation is not None and evaluation.approved_quantity != order.quantity:
+        raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
+    decision = await session.get(
+        StrategyDecisionRecord,
+        order.strategy_decision_id,
+        populate_existing=True,
+    )
+    if decision is None:
+        raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
+    try:
+        context = await build_order_decision_context(
+            session,
+            strategy_decision_id=order.strategy_decision_id,
+            instrument_id=order.instrument_id,
+            decision_session=decision.decision_session,
+        )
+    except ValueError:
+        # Notification context is supplementary and must not roll back a
+        # reconciled fill/cancellation for legacy or incomplete metadata.
+        return None
+    fill_rows = tuple(
+        (
+            await session.scalars(
+                select(PaperFillRecord)
+                .where(PaperFillRecord.order_id == order_id)
+                .order_by(PaperFillRecord.fill_seq)
+            )
+        ).all()
+    )
+    position_rows = tuple(
+        (
+            await session.scalars(
+                select(PaperPositionAdjustmentEventRecord)
+                .where(
+                    PaperPositionAdjustmentEventRecord.account_id == order.account_id,
+                    PaperPositionAdjustmentEventRecord.instrument_id == order.instrument_id,
+                )
+                .order_by(PaperPositionAdjustmentEventRecord.event_seq)
+            )
+        ).all()
+    )
+    position_quantity = Decimal(0)
+    if position_rows:
+        position_quantity = fold_position_adjustments(
+            tuple(
+                PositionAdjustment(
+                    event_id=row.id,
+                    account_id=row.account_id,
+                    instrument_id=row.instrument_id,
+                    event_seq=row.event_seq,
+                    event_type=cast(
+                        Literal["fill", "split", "dividend", "delisting", "correction"],
+                        row.event_type,
+                    ),
+                    quantity_delta=row.quantity_delta,
+                    cost_delta=row.cost_delta,
+                    occurred_at=row.occurred_at,
+                    payload_hash=row.payload_hash,
+                )
+                for row in position_rows
+            )
+        ).quantity
+    balances = balance_ledger(await _ledger(session, order.account_id))
+    event = await session.scalar(
+        select(PaperOrderEventRecord).where(
+            PaperOrderEventRecord.order_id == order_id,
+            PaperOrderEventRecord.event_seq == result.result_event_seq,
+        )
+    )
+    status: Literal["filled", "cancelled"]
+    if operation == "cancel":
+        status = "cancelled"
+    elif isinstance(result, PaperAdvanceResult) and result.action == "filled":
+        status = "filled"
+    else:
+        status = "cancelled"
+    snapshot = build_terminal_execution_snapshot(
+        order=order,
+        requested_quantity=(
+            order.quantity if evaluation is None else evaluation.desired_quantity
+        ),
+        approved_quantity=(
+            order.quantity if evaluation is None else evaluation.approved_quantity
+        ),
+        fills=tuple(
+            PaperNotificationFill(
+                quantity=fill.quantity,
+                notional=fill.notional,
+                fee=fill.fee,
+            )
+            for fill in fill_rows
+        ),
+        available_cash=balances["asset.cash.available.usd"],
+        position_quantity=position_quantity,
+        context=context,
+        status=status,
+        cancellation_reason_code=None if event is None else event.reason_code,
+        occurred_at=occurred_at,
+    )
+    result_remaining = (
+        result.unfilled_quantity
+        if isinstance(result, PaperCancelResult)
+        else result.remaining_quantity
+    )
+    if (
+        snapshot.filled_quantity != result.filled_quantity
+        or snapshot.remaining_quantity != result_remaining
+    ):
+        raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
+    return snapshot
 
 
 async def _existing_idempotency(

@@ -15,6 +15,7 @@ from nexus.paper.execution_service import (
     advance_internal_paper_order,
     cancel_internal_paper_order,
 )
+from nexus.paper.notification import parse_notification_snapshot
 from nexus.persistence.models.data import (
     PriceBarRecord,
     PriceBarSetAuthority,
@@ -24,6 +25,7 @@ from nexus.persistence.models.paper import (
     PaperExecutionWindowAuthorityRecord,
     PaperExecutionWindowMemberRecord,
     PaperFillRecord,
+    PaperLedgerAccountRecord,
     PaperLedgerEntryRecord,
     PaperLedgerTransactionRecord,
     PaperOrderEventRecord,
@@ -213,9 +215,26 @@ async def test_first_unquoted_window_fills_and_atomically_reconciles_all_facts(
             audit_action = await session.scalar(
                 select(AuditEvent.action).where(AuditEvent.schema_version == "paper_execution_v1")
             )
-            outbox_action = await session.scalar(
-                select(OutboxEvent.event_type).where(
+            outbox = await session.scalar(
+                select(OutboxEvent).where(
                     OutboxEvent.schema_version == "paper_execution_v1"
+                )
+            )
+            actual_cash = await session.scalar(
+                select(
+                    func.sum(
+                        PaperLedgerEntryRecord.debit_amount
+                        - PaperLedgerEntryRecord.credit_amount
+                    )
+                )
+                .join(
+                    PaperLedgerAccountRecord,
+                    PaperLedgerAccountRecord.id
+                    == PaperLedgerEntryRecord.ledger_account_id,
+                )
+                .where(
+                    PaperLedgerAccountRecord.paper_account_id == seed.account_id,
+                    PaperLedgerAccountRecord.code == "asset.cash.available.usd",
                 )
             )
 
@@ -249,7 +268,16 @@ async def test_first_unquoted_window_fills_and_atomically_reconciles_all_facts(
             entry.credit_amount for entry in entries
         )
         assert audit_action == "paper.execution.advance.filled"
-        assert outbox_action == audit_action
+        assert outbox is not None and outbox.event_type == audit_action
+        snapshot = parse_notification_snapshot(outbox.payload)
+        assert snapshot.status == "filled"
+        assert snapshot.symbol == "TST1"
+        assert snapshot.filled_quantity == fill.quantity
+        assert snapshot.price.value == fill.price
+        assert snapshot.notional == fill.notional
+        assert snapshot.fee == fill.fee
+        assert snapshot.cash.available == actual_cash
+        assert snapshot.position.quantity == position_event.quantity_delta
     finally:
         await factory.kw["bind"].dispose()
 
@@ -480,12 +508,62 @@ async def test_half_day_calendar_close_cancels_only_the_unfilled_remainder(
                     PaperReservationEventRecord.event_type.in_(("consumed", "released")),
                 )
             )
+            fills = tuple(
+                await session.scalars(
+                    select(PaperFillRecord)
+                    .where(PaperFillRecord.order_id == seed.order_id)
+                    .order_by(PaperFillRecord.fill_seq)
+                )
+            )
+            outbox = await session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.aggregate_id == seed.order_id,
+                    OutboxEvent.event_type == "paper.execution.advance.cancelled",
+                )
+            )
+            actual_cash = await session.scalar(
+                select(
+                    func.sum(
+                        PaperLedgerEntryRecord.debit_amount
+                        - PaperLedgerEntryRecord.credit_amount
+                    )
+                )
+                .join(
+                    PaperLedgerAccountRecord,
+                    PaperLedgerAccountRecord.id
+                    == PaperLedgerEntryRecord.ledger_account_id,
+                )
+                .where(
+                    PaperLedgerAccountRecord.paper_account_id == seed.account_id,
+                    PaperLedgerAccountRecord.code == "asset.cash.available.usd",
+                )
+            )
+            actual_position = await session.scalar(
+                select(func.sum(PaperPositionAdjustmentEventRecord.quantity_delta)).where(
+                    PaperPositionAdjustmentEventRecord.account_id == seed.account_id,
+                    PaperPositionAdjustmentEventRecord.instrument_id == seed.instrument_id,
+                )
+            )
         assert partial.action == "partially_filled"
         assert cancelled.action == "cancelled"
         assert cancelled.filled_quantity == partial.filled_quantity
         assert last_event is not None
         assert last_event.reason_code == "paper_eod_remainder"
         assert closed_amount == reservation.amount
+        assert outbox is not None
+        snapshot = parse_notification_snapshot(outbox.payload)
+        total_quantity = sum((fill.quantity for fill in fills), start=Decimal(0))
+        total_notional = sum((fill.notional for fill in fills), start=Decimal(0))
+        total_fee = sum((fill.fee for fill in fills), start=Decimal(0))
+        assert snapshot.status == "cancelled"
+        assert snapshot.filled_quantity == total_quantity
+        assert snapshot.remaining_quantity == seed.quantity - total_quantity
+        assert snapshot.price.value == total_notional / total_quantity
+        assert snapshot.notional == total_notional
+        assert snapshot.fee == total_fee
+        assert snapshot.cash.available == actual_cash
+        assert snapshot.position.quantity == actual_position
+        assert snapshot.risk_reason == "交易时段结束，未成交部分已取消。"
     finally:
         await factory.kw["bind"].dispose()
 
@@ -716,6 +794,12 @@ async def test_user_cancel_replays_and_releases_the_whole_reservation(
                 .order_by(PaperOrderEventRecord.event_seq.desc())
                 .limit(1)
             )
+            outbox = await session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.aggregate_id == seed.order_id,
+                    OutboxEvent.event_type == "paper.execution.cancelled",
+                )
+            )
         assert first.replayed is False
         assert replay.replayed is True
         assert replay.result_hash == first.result_hash
@@ -730,6 +814,15 @@ async def test_user_cancel_replays_and_releases_the_whole_reservation(
         assert last_event is not None
         assert last_event.actor_kind == "user"
         assert last_event.reason_code == "paper_user_cancelled"
+        assert outbox is not None
+        snapshot = parse_notification_snapshot(outbox.payload)
+        assert snapshot.status == "cancelled"
+        assert snapshot.filled_quantity == 0
+        assert snapshot.remaining_quantity == seed.quantity
+        assert snapshot.price.kind == "reference"
+        assert snapshot.notional == 0
+        assert snapshot.fee is None
+        assert snapshot.risk_reason == "用户取消了订单。"
     finally:
         await factory.kw["bind"].dispose()
 
