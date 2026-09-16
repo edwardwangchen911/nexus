@@ -927,6 +927,37 @@ def test_schwab_failure_preserves_only_safe_root_cause_diagnostic(tmp_path) -> N
         "stage": "capture_or_import",
     }
 
+    summarized = tmp_path / "summarized.json"
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._raise_schwab_l1_incomplete(
+            cli.ProviderMarketStreamError(
+                "PROVIDER_MARKET_STREAM_INCOMPLETE",
+                capture_summary={
+                    "status": "partial",
+                    "stop_reason": "DISCONNECTED",
+                    "authenticated": True,
+                    "subscription_confirmed": True,
+                    "observation_count": 0,
+                    "frame_count": 2,
+                    "origin": "must-not-be-persisted",
+                },
+            ),
+            diagnostic_path=summarized,
+        )
+    assert json.loads(summarized.read_text()) == {
+        "capture_summary": {
+            "authenticated": True,
+            "frame_count": 2,
+            "observation_count": 0,
+            "status": "partial",
+            "stop_reason": "DISCONNECTED",
+            "subscription_confirmed": True,
+        },
+        "provider_error_code": "PROVIDER_MARKET_STREAM_INCOMPLETE",
+        "schema": "nexus_schwab_l1_failure_v1",
+        "stage": "capture_or_import",
+    }
+
     with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
         cli._raise_schwab_l1_incomplete(
             cli.ProviderMarketStreamError("private upstream detail"),

@@ -84,6 +84,17 @@ TOKEN_REFRESH_WINDOW = timedelta(minutes=5)
 class ProviderMarketStreamError(ValueError):
     """Stable, value-free bounded market stream error."""
 
+    def __init__(
+        self,
+        code: str,
+        *,
+        capture_summary: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.capture_summary = (
+            None if capture_summary is None else dict(capture_summary)
+        )
+
 
 @dataclass(frozen=True)
 class SchwabMarketStreamImportResult:
@@ -351,10 +362,10 @@ async def capture_and_import_schwab_level_one_once(
             repo_root=repo_root,
             symbol=["AAPL"],
             output_dir=directory,
-            duration=15.0,
+            duration=30.0,
             max_frames=100,
         )
-        await capture(
+        capture_summary = await capture(
             arguments,
             client,
             now=checked_at,
@@ -364,6 +375,11 @@ async def capture_and_import_schwab_level_one_once(
                 else {}
             ),
         )
+        if capture_summary.get("status") != "bounded_complete":
+            raise ProviderMarketStreamError(
+                "PROVIDER_MARKET_STREAM_INCOMPLETE",
+                capture_summary=capture_summary,
+            )
         imported_at = await session.scalar(select(func.clock_timestamp()))
         if not isinstance(imported_at, datetime):
             raise RuntimeError("SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID")

@@ -116,6 +116,13 @@ _SAFE_SCHWAB_FAILURE_CODES = frozenset(
 _SAFE_SCHWAB_HTTP_FAILURE_CODE = re.compile(
     r"SCHWAB_(?:OAUTH_(?:TOKEN|REFRESH)|USER_PREFERENCE)_HTTP_[1-5][0-9]{2}"
 )
+_SAFE_SCHWAB_CAPTURE_STOP_REASONS = _SAFE_SCHWAB_FAILURE_CODES | {
+    "CANCELLED",
+    "CONNECT_FAILED",
+    "DISCONNECTED",
+    "DURATION_LIMIT",
+    "FRAME_LIMIT",
+}
 
 
 class AgentPaperRunRequest(BaseModel):
@@ -296,11 +303,32 @@ def _raise_schwab_l1_incomplete(error: Exception, *, diagnostic_path: Path) -> N
         and _SAFE_SCHWAB_HTTP_FAILURE_CODE.fullmatch(provider_error_code) is None
     ):
         provider_error_code = "SCHWAB_MARKET_STREAM_FAILURE_UNCLASSIFIED"
-    payload = {
+    payload: dict[str, object] = {
         "schema": "nexus_schwab_l1_failure_v1",
         "stage": "capture_or_import",
         "provider_error_code": provider_error_code,
     }
+    capture_summary = getattr(error, "capture_summary", None)
+    if isinstance(capture_summary, Mapping):
+        safe_capture_summary = {
+            "status": capture_summary.get("status"),
+            "stop_reason": capture_summary.get("stop_reason"),
+            "authenticated": capture_summary.get("authenticated"),
+            "subscription_confirmed": capture_summary.get("subscription_confirmed"),
+            "observation_count": capture_summary.get("observation_count"),
+            "frame_count": capture_summary.get("frame_count"),
+        }
+        if (
+            safe_capture_summary["status"] in {"bounded_complete", "partial", "failed"}
+            and safe_capture_summary["stop_reason"] in _SAFE_SCHWAB_CAPTURE_STOP_REASONS
+            and type(safe_capture_summary["authenticated"]) is bool
+            and type(safe_capture_summary["subscription_confirmed"]) is bool
+            and type(safe_capture_summary["observation_count"]) is int
+            and safe_capture_summary["observation_count"] >= 0
+            and type(safe_capture_summary["frame_count"]) is int
+            and safe_capture_summary["frame_count"] >= 0
+        ):
+            payload["capture_summary"] = safe_capture_summary
     try:
         diagnostic_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         write_private(

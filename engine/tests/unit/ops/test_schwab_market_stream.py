@@ -335,12 +335,60 @@ async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
     assert len(calls) == 1
     arguments, _, now = calls[0]
     assert arguments.symbol == ["AAPL"]
-    assert arguments.duration == 15.0
+    assert arguments.duration == 30.0
     assert arguments.max_frames == 100
     assert now == captured_at
     assert imported[0][0] == {"AAPL": AAPL_ID}
     assert imported[0][2] == captured_at + timedelta(seconds=1)
     assert not imported[0][1].exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_decision_capture_preserves_safe_incomplete_summary(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    imported = False
+
+    async def capture(arguments, client, *, now=None):
+        del client, now
+        arguments.output_dir.mkdir(mode=0o700)
+        return {
+            "status": "partial",
+            "stop_reason": "DISCONNECTED",
+            "authenticated": True,
+            "subscription_confirmed": True,
+            "observation_count": 0,
+            "frame_count": 2,
+        }
+
+    async def fake_import(*args, **kwargs):
+        nonlocal imported
+        del args, kwargs
+        imported = True
+        raise AssertionError("an incomplete capture must not reach import")
+
+    monkeypatch.setattr("nexus.ops.schwab_market_stream.import_schwab_market_stream", fake_import)
+
+    with pytest.raises(ValueError, match="PROVIDER_MARKET_STREAM_INCOMPLETE") as caught:
+        await capture_and_import_schwab_level_one_once(
+            object(),
+            object(),
+            repo_root=tmp_path,
+            client=object(),
+            instrument_id=AAPL_ID,
+            checked_at=EVENT_AT,
+            capture=capture,
+        )
+
+    assert caught.value.capture_summary == {
+        "status": "partial",
+        "stop_reason": "DISCONNECTED",
+        "authenticated": True,
+        "subscription_confirmed": True,
+        "observation_count": 0,
+        "frame_count": 2,
+    }
+    assert imported is False
 
 
 @pytest.mark.asyncio
