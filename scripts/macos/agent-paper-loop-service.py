@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -138,6 +139,33 @@ def _start(root: Path) -> int:
         )
         _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
         return 1
+    last_exit_code: int | None = None
+    inspection_failed = False
+    for attempt in range(2):
+        try:
+            _, last_exit_code = _launchctl_inspection(launchctl)
+        except RuntimeError:
+            inspection_failed = True
+            break
+        if last_exit_code == 78:
+            break
+        if attempt == 0:
+            time.sleep(0.25)
+    if inspection_failed or last_exit_code == 78:
+        subprocess.run(
+            [launchctl, "bootout", f"{domain}/{LABEL}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        plist_path.unlink(missing_ok=True)
+        code = (
+            "AGENT_PAPER_SERVICE_START_FAILED"
+            if inspection_failed
+            else "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED"
+        )
+        _emit({"error_code": code})
+        return 1
     _emit({"label": LABEL, "status": "started"})
     return 0
 
@@ -164,7 +192,7 @@ def _run(root: Path) -> int:
     return 1
 
 
-def _launchctl_state(launchctl: str) -> str:
+def _launchctl_inspection(launchctl: str) -> tuple[str, int | None]:
     inspected = subprocess.run(
         [launchctl, "print", f"gui/{os.getuid()}/{LABEL}"],
         check=False,
@@ -172,10 +200,18 @@ def _launchctl_state(launchctl: str) -> str:
         text=True,
     )
     if inspected.returncode == 113:
-        return "stopped"
+        return "stopped", None
     if inspected.returncode != 0:
         raise RuntimeError("AGENT_PAPER_SERVICE_STATUS_UNAVAILABLE")
-    return "running" if "state = running" in inspected.stdout else "inactive"
+    match = re.search(r"^\s*last exit code = (\d+)(?::|$)", inspected.stdout, re.MULTILINE)
+    last_exit_code = int(match.group(1)) if match is not None else None
+    state = "running" if "state = running" in inspected.stdout else "inactive"
+    return state, last_exit_code
+
+
+def _launchctl_state(launchctl: str) -> str:
+    state, _ = _launchctl_inspection(launchctl)
+    return state
 
 
 def _status() -> int:

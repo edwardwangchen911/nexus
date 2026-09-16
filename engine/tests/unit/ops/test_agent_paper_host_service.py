@@ -43,11 +43,23 @@ def _service_root(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "#!/bin/sh\nprintf 'launchctl:%s\\n' \"$*\" >> \"$NEXUS_TEST_RECORD\"\n"
         "case \"$1\" in\n"
         "  bootstrap) printf 'inactive' > \"$NEXUS_TEST_LAUNCH_STATE\"; exit 0;;\n"
-        "  kickstart) printf 'running' > \"$NEXUS_TEST_LAUNCH_STATE\"; exit 0;;\n"
+        "  kickstart)\n"
+        "    printf '%s' \"${NEXUS_TEST_KICKSTART_STATE:-running}\" "
+        "> \"$NEXUS_TEST_LAUNCH_STATE\"\n"
+        "    exit 0;;\n"
         "  print)\n"
         "    state=$(cat \"$NEXUS_TEST_LAUNCH_STATE\")\n"
         "    [ \"$state\" = absent ] && exit 113\n"
         "    [ \"$state\" = error ] && exit 64\n"
+        "    if [ \"$state\" = delayed_config_error ]; then\n"
+        "      printf 'config_error' > \"$NEXUS_TEST_LAUNCH_STATE\"\n"
+        "      printf 'state = running\\n'\n"
+        "      exit 0\n"
+        "    fi\n"
+        "    if [ \"$state\" = config_error ]; then\n"
+        "      printf 'state = not running\\nlast exit code = 78: EX_CONFIG\\n'\n"
+        "      exit 0\n"
+        "    fi\n"
         "    printf 'state = %s\\n' \"$state\"\n"
         "    [ \"$state\" = running ] && printf 'pid = 123\\n'\n"
         "    exit 0;;\n"
@@ -119,6 +131,52 @@ def test_start_does_not_submit_when_product_preflight_fails(tmp_path: Path) -> N
     }
     calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
     assert calls == ["engine:--service-preflight"]
+
+
+def test_start_reports_background_access_blocker_and_cleans_registration(
+    tmp_path: Path,
+) -> None:
+    root, environment = _service_root(tmp_path)
+    environment["NEXUS_TEST_KICKSTART_STATE"] = "delayed_config_error"
+
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "error_code": "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED"
+    }
+    private_plist = root / ".secrets" / "nexus-agent-paper" / "service.plist"
+    assert not private_plist.exists()
+    calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
+    assert calls[-2:] == [
+        f"launchctl:print gui/{os.getuid()}/com.nexus.agent-paper-loop",
+        f"launchctl:bootout gui/{os.getuid()}/com.nexus.agent-paper-loop",
+    ]
+
+
+def test_start_fails_closed_when_launchd_state_cannot_be_confirmed(tmp_path: Path) -> None:
+    root, environment = _service_root(tmp_path)
+    environment["NEXUS_TEST_KICKSTART_STATE"] = "error"
+
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_START_FAILED"}
+    assert not (root / ".secrets" / "nexus-agent-paper" / "service.plist").exists()
 
 
 def test_start_rejects_symlinked_private_parent_before_preflight(tmp_path: Path) -> None:
