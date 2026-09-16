@@ -63,17 +63,25 @@ log('launchctl', sys.argv[1:])
 if action == 'bootstrap':
     with open(sys.argv[3], 'rb') as f: job = plistlib.load(f)
     job['state'] = 'inactive'
-elif action == 'kickstart': job['state'] = options.get('kickstart_state', 'running')
+elif action == 'kickstart':
+    job['state'] = options.get('kickstart_state', 'running')
+    for field in ('exit', 'pid'):
+        if field in options: job[field] = options[field]
+    state.write_text(json.dumps(job))
+    sys.exit(options.get('kickstart_exit', 0))
 elif action == 'print':
     if not job: sys.exit(113)
     if job['state'] == 'error': sys.exit(64)
     display_state = {'delayed_config_error': 'running', 'config_error': 'not running'}
     print('state = ' + display_state.get(job['state'], job['state']))
     if 'pid' in job: print('pid = ' + str(job['pid']))
-    print('working directory = ' + job['WorkingDirectory'])
-    print('arguments = {')
-    for arg in job['ProgramArguments']: print('\\t' + arg)
-    print('}')
+    indent = options.get('indent', '')
+    print(indent + 'working directory = ' + job['WorkingDirectory'])
+    print(indent + 'arguments = {')
+    for arg in job['ProgramArguments']: print(indent + '\\t' + arg)
+    print(indent + '}')
+    if options.get('duplicate_owner'):
+        print(indent + 'working directory = ' + job['WorkingDirectory'])
     print('environment = {\\n\\tCANARY => private-launchctl-canary\\n}')
     if 'exit' in job: print('last exit code = ' + str(job['exit']))
     if job['state'] == 'config_error': print('last exit code = 78: EX_CONFIG')
@@ -306,7 +314,6 @@ def test_start_checks_existing_owner_before_local_runtime_availability(tmp_path)
             {"kickstart_state": "delayed_config_error"},
             "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED",
         ),
-        ({"kickstart_state": "error"}, "AGENT_PAPER_SERVICE_START_FAILED"),
     ],
 )
 def test_start_fails_closed_without_leaving_failed_plist(tmp_path, options, code):
@@ -318,6 +325,68 @@ def test_start_fails_closed_without_leaving_failed_plist(tmp_path, options, code
     assert not (root / ".secrets/nexus-agent-paper/service.plist").exists()
     if "preflight_exit" in options:
         assert not any(call[1] == "bootstrap" for call in _calls(root))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"kickstart_state": "error"},
+        {"kickstart_state": "starting", "exit": 75},
+        {"kickstart_state": "running", "pid": 123, "exit": 78},
+        {"kickstart_state": "running", "pid": 123, "exit": 1, "kickstart_exit": 1},
+    ],
+)
+def test_start_retains_registration_and_plist_without_positive_inactive_proof(tmp_path, options):
+    root, env = _service_root(tmp_path)
+    (root.parent / "control").write_text(json.dumps(options))
+    result = _invoke(root, env, "start")
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error_code"] in {
+        "AGENT_PAPER_SERVICE_START_FAILED",
+        "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED",
+        "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED",
+    }
+    job = json.loads((root.parent / "state").read_text())
+    assert job["state"] == options["kickstart_state"]
+    if "exit" in options:
+        assert job["exit"] == options["exit"]
+    assert (root / ".secrets/nexus-agent-paper/service.plist").is_file()
+    assert not any(
+        call[0] == "launchctl" and call[1] in {"kill", "bootout"} for call in _calls(root)
+    )
+
+
+@pytest.mark.parametrize("action", ["start", "status", "stop"])
+@pytest.mark.parametrize("field", ["env", "cwd", "script"])
+def test_owner_comparison_preserves_trailing_space_content(tmp_path, action, field):
+    root, env = _service_root(tmp_path)
+    job = _register(root)
+    if field == "cwd":
+        job["WorkingDirectory"] += " "
+    else:
+        job["ProgramArguments"][6 if field == "env" else 1] += " "
+    state = root.parent / "state"
+    state.write_text(json.dumps(job))
+    before = state.read_bytes()
+    result = _invoke(root, env, action)
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_OWNER_MISMATCH"}
+    assert _calls(root) == [["launchctl", "print", LABEL]]
+    assert state.read_bytes() == before
+    assert not (root / ".secrets").exists()
+
+
+def test_owner_parser_accepts_only_unambiguous_launchctl_indentation(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root)
+    control = root.parent / "control"
+    control.write_text(json.dumps({"indent": "\t"}))
+    assert _invoke(root, env, "status").returncode == 0
+    control.write_text(json.dumps({"indent": "\t", "duplicate_owner": True}))
+    result = _invoke(root, env, "stop")
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_OWNER_MISMATCH"}
+    assert _calls(root) == [["launchctl", "print", LABEL]] * 2
 
 
 @pytest.mark.parametrize("unsafe", ["parent_symlink", "log_symlink", "log_hardlink", "plist"])

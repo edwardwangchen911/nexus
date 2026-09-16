@@ -210,48 +210,41 @@ def _start(root: Path, env_file: Path, project: str) -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    if started.returncode != 0:
-        subprocess.run(
-            [launchctl, "bootout", f"{domain}/{LABEL}"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
-        return 1
-    last_exit_code = None
-    inspection_failed = False
     for attempt in range(2):
         try:
-            _, last_exit_code = _launchctl_inspection(launchctl, root, env_file, project)
+            state, last_exit_code = _launchctl_inspection(launchctl, root, env_file, project)
         except RuntimeError as error:
-            if str(error) == "AGENT_PAPER_SERVICE_OWNER_MISMATCH":
-                _emit({"error_code": str(error)})
-                return 1
-            inspection_failed = True
-            break
+            code = (
+                str(error)
+                if str(error) == "AGENT_PAPER_SERVICE_OWNER_MISMATCH"
+                else "AGENT_PAPER_SERVICE_START_FAILED"
+            )
+            _emit({"error_code": code})
+            return 1
         if last_exit_code == 75:
             _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
             return 1
-        if last_exit_code == 78:
-            break
+        if started.returncode != 0 or last_exit_code == 78:
+            # Only fresh exact-owner inspection with positive inactivity permits cleanup.
+            # Never erase an unknown/live registration or its last-exit evidence.
+            if state == "inactive":
+                removed = subprocess.run(
+                    [launchctl, "bootout", f"{domain}/{LABEL}"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if removed.returncode == 0:
+                    plist_path.unlink(missing_ok=True)
+            code = (
+                "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED"
+                if state == "inactive" and last_exit_code == 78
+                else "AGENT_PAPER_SERVICE_START_FAILED"
+            )
+            _emit({"error_code": code})
+            return 1
         if attempt == 0:
             time.sleep(0.25)
-    if inspection_failed or last_exit_code == 78:
-        subprocess.run(
-            [launchctl, "bootout", f"{domain}/{LABEL}"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        plist_path.unlink(missing_ok=True)
-        code = (
-            "AGENT_PAPER_SERVICE_START_FAILED"
-            if inspection_failed
-            else "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED"
-        )
-        _emit({"error_code": code})
-        return 1
     _emit({"label": LABEL, "status": "started"})
     return 0
 
@@ -285,30 +278,39 @@ def _launchctl_inspection(
         [launchctl, "print", f"gui/{os.getuid()}/{LABEL}"],
         check=False,
         capture_output=True,
-        text=True,
     )
     if inspected.returncode == 113:
         return "stopped", None
     if inspected.returncode != 0:
         raise RuntimeError("AGENT_PAPER_SERVICE_STATUS_UNAVAILABLE")
-    arguments = re.search(
-        r"^\s*arguments = \{\n(.*?)^\s*\}", inspected.stdout, re.MULTILINE | re.DOTALL
-    )
-    working_directory = re.search(r"^\s*working directory = (.+)$", inspected.stdout, re.MULTILINE)
-    registered = [line.strip() for line in arguments.group(1).splitlines()] if arguments else []
+    try:
+        output = inspected.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH") from None
+    arguments = list(re.finditer(r"^(\t*)arguments = \{\n", output, re.MULTILINE))
+    working_directories = re.findall(r"^\t*working directory = ([^\n]*)$", output, re.MULTILINE)
+    if len(arguments) != 1 or len(working_directories) != 1 or "\r" in output:
+        raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
+    indent = arguments[0].group(1)
+    argument_prefix = indent + "\t"
+    registered = []
+    for line in output[arguments[0].end() :].split("\n"):
+        if line == indent + "}":
+            break
+        if not line.startswith(argument_prefix):
+            raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
+        registered.append(line[len(argument_prefix) :])
+    else:
+        raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
     expected = _program_arguments(root, env_file, project)
     legacy = allow_legacy and len(registered) == 3 and registered[1:] == expected[1:3]
-    if (
-        not working_directory
-        or working_directory.group(1).strip() != str(root)
-        or (registered != expected and not legacy)
-    ):
+    if working_directories[0] != str(root) or (registered != expected and not legacy):
         raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
-    match = re.search(r"^\s*last exit code = (\d+)(?::|$)", inspected.stdout, re.MULTILINE)
+    match = re.search(r"^\s*last exit code = (\d+)(?::|$)", output, re.MULTILINE)
     last_exit_code = int(match.group(1)) if match is not None else None
-    state_match = re.search(r"^\s*state = ([^\n]+)$", inspected.stdout, re.MULTILINE)
+    state_match = re.search(r"^\s*state = ([^\n]+)$", output, re.MULTILINE)
     raw_state = state_match.group(1).strip() if state_match else None
-    has_pid = re.search(r"^\s*pid = [1-9][0-9]*\s*$", inspected.stdout, re.MULTILINE)
+    has_pid = re.search(r"^\s*pid = [1-9][0-9]*\s*$", output, re.MULTILINE)
     if raw_state == "running" or has_pid:
         state = "running"
     elif raw_state in {"inactive", "not running", "exited"}:
