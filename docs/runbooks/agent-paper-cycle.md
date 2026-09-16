@@ -42,6 +42,8 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 
 - 唯一候选是已发布 `us_liquid/us_liquid_v1` 中的 AAPL，且有当前研究快照、前一完整交易日
   Alpaca SIP delayed `all` 日线、审核行业 authority、完整 XNYS 日历和三类风险查询证据；
+- 宏观工具只读取当前时点可见的 `DFF`、`DGS2`、`DGS10`、`CPIAUCSL`、`UNRATE`
+  和 `VIXCLS` 严格 FRED vintage；宏观证据不是价格、风控或下单权威；
 - 已幂等登记 actionable v4 模型/提示词配置，模型预算可用；
 - `infra/.env.local` 保持受保护且未进入 Git；动态 Schwab OAuth token 只能位于主仓库
   `.secrets/nexus-schwab-local/tokens.json`，目录和文件权限分别为 `0700`、`0600`；
@@ -235,9 +237,19 @@ uv run --project engine nexus-engine-agent-paper-loop \
 该 cycle 的精确 Job ID 领取；running、缺失或结果不明立即停止，不换 key。订单窗口到达后再额外
 等待 60 秒发布余量，只请求一次 Schwab pricehistory；窗口合格后才推进对应内部订单。
 
+新槽在创建 cycle 前依次准备：前一完整交易日日线权威 → 六项 FRED 宏观证据及
+研究快照绑定 → 当前价格趋势。每个生产者成功写入后都返回 `prepared`，循环结束当前动作并
+从数据库重新读取，不在同一调用链直接消费刚写入的结果。
+
+FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNYS 交易日保留一个幂等
+尝试目录。六项已完整且当前快照已绑定时不请求 Provider。缺失时只采集缺失序列；
+已知配置或 Provider 失败使宏观工具保持 unavailable，Agent 仍可依其他已冻结证据作出诚实
+决策；导入、数据库或回读结果不明则立即 fail closed。不删除失败尝试目录来重试，不切换
+数据源，不用当天后来发布的 vintage 回填已有决策。
+
 当前槽出现 `unavailable` 或 `failed` 时，本进程熔断退出，不在同槽重复 Provider 或模型调用。
 该终态事实保留；到同日下一合法五分钟槽后可重新启动进程，新槽仍须从持久化状态和前置数据检查开始。
-日线补齐已有失败尝试时不会再次请求 Provider。16:00 ET 后若没有活动订单则正常退出，
+日线、宏观或趋势补齐已有失败尝试时不会删目录或换 key 重放 Provider。16:00 ET 后若没有活动订单则正常退出，
 已有订单可完成其已冻结窗口后再退出。运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
@@ -255,7 +267,8 @@ uv run --project engine nexus-engine-agent-paper-loop \
 ## 10. Rollback：应用回退与数据回退分开
 
 首选应用回退：保持 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`，回退应用版本但保留数据库 head 和
-所有事实。出现数据合同问题时前向修复；Git 回退不是业务数据恢复。
+所有事实。FRED 自动准备没有新迁移或新表；回退应用时保留已导入的原件、宏观观察和
+研究快照，不删数据来伪造“未运行”状态。出现数据合同问题时前向修复；Git 回退不是业务数据恢复。
 
 迁移 `0058_agent_paper_schwab_realtime` 与 `0059_agent_paper_intraday_cycles` 的降级只允许在专用
 空临时数据库演练。先按
