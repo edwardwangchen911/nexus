@@ -71,6 +71,38 @@ def _write_raw_descriptor(path: Path, payload: dict[str, object] | bytes) -> Non
     path.chmod(0o600)
 
 
+def _swap_private_directory_during_open(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    *,
+    watched_prefix: str,
+) -> tuple[Path, Path]:
+    original_open = runtime.os.open
+    moved = runtime_paths.private_directory.with_name("nexus-agent-paper-original")
+    outside = runtime_paths.private_directory.with_name("outside-runtime")
+    outside.mkdir(mode=0o700)
+    swapped = False
+
+    def swapping_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if not swapped and Path(path).name.startswith(watched_prefix):
+            swapped = True
+            runtime_paths.private_directory.rename(moved)
+            runtime_paths.private_directory.symlink_to(outside, target_is_directory=True)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runtime.os, "open", swapping_open)
+    return moved, outside
+
+
 def test_prepare_runtime_paths_creates_private_directories(tmp_path: Path) -> None:
     paths = prepare_runtime_paths(tmp_path)
 
@@ -247,6 +279,44 @@ def test_descriptor_read_rejects_secret_field_without_echoing_value(
     assert secret not in str(captured.value)
 
 
+def test_descriptor_read_rejects_parent_replacement(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_runtime_descriptor(runtime_paths.worker_descriptor, _descriptor())
+    _, outside = _swap_private_directory_during_open(
+        monkeypatch,
+        runtime_paths,
+        watched_prefix=runtime_paths.worker_descriptor.name,
+    )
+    _write_raw_descriptor(
+        outside / runtime_paths.worker_descriptor.name,
+        _descriptor().model_dump(mode="json"),
+    )
+
+    with pytest.raises(RuntimeSafetyError, match="AGENT_PAPER_RUNTIME_UNSAFE"):
+        read_runtime_descriptor(runtime_paths.worker_descriptor)
+
+
+def test_descriptor_write_does_not_follow_replaced_parent(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moved, outside = _swap_private_directory_during_open(
+        monkeypatch,
+        runtime_paths,
+        watched_prefix=f".{runtime_paths.worker_descriptor.name}.",
+    )
+
+    with pytest.raises(RuntimeSafetyError, match="AGENT_PAPER_RUNTIME_UNSAFE"):
+        write_runtime_descriptor(runtime_paths.worker_descriptor, _descriptor())
+
+    assert not (outside / runtime_paths.worker_descriptor.name).exists()
+    assert not list(outside.glob("*.tmp"))
+    assert not (moved / runtime_paths.worker_descriptor.name).exists()
+    assert not list(moved.glob("*.tmp"))
+
+
 def test_read_missing_descriptor_returns_none(runtime_paths: RuntimePaths) -> None:
     assert read_runtime_descriptor(runtime_paths.worker_descriptor) is None
 
@@ -278,6 +348,39 @@ def test_lock_rejects_unsafe_existing_target(
 
     with pytest.raises(RuntimeSafetyError, match="AGENT_PAPER_RUNTIME_UNSAFE"):
         acquire_runtime_lock(runtime_paths.worker_lock)
+
+
+def test_lock_rejects_parent_replacement_without_locking_outside(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, outside = _swap_private_directory_during_open(
+        monkeypatch,
+        runtime_paths,
+        watched_prefix=runtime_paths.worker_lock.name,
+    )
+
+    with pytest.raises(RuntimeSafetyError, match="AGENT_PAPER_RUNTIME_UNSAFE"):
+        acquire_runtime_lock(runtime_paths.worker_lock)
+
+    assert not (outside / runtime_paths.worker_lock.name).exists()
+
+
+def test_held_lock_detects_later_parent_replacement(runtime_paths: RuntimePaths) -> None:
+    lock = acquire_runtime_lock(runtime_paths.worker_lock)
+    moved = runtime_paths.private_directory.with_name("nexus-agent-paper-original")
+    outside = runtime_paths.private_directory.with_name("outside-runtime")
+    outside.mkdir(mode=0o700)
+    runtime_paths.private_directory.rename(moved)
+    runtime_paths.private_directory.symlink_to(outside, target_is_directory=True)
+
+    try:
+        with pytest.raises(RuntimeSafetyError, match="AGENT_PAPER_RUNTIME_UNSAFE"):
+            _ = lock.held
+    finally:
+        lock.close()
+
+    assert not (outside / runtime_paths.worker_lock.name).exists()
 
 
 def probe_lock_in_child(path: Path, sender: Connection) -> None:
@@ -326,9 +429,21 @@ def test_worker_lock_blocks_a_second_process(runtime_paths: RuntimePaths) -> Non
             "/repo/.venv/bin/nexus-engine-agent-paper-loop --parent-fd 7",
             RuntimeEntrypoint.WORKER,
         ),
+        (
+            "/repo/.venv/bin/python /repo/.venv/bin/nexus-local-stack serve",
+            RuntimeEntrypoint.SUPERVISOR,
+        ),
+        (
+            "/repo/.venv/bin/python /repo/.venv/bin/nexus-engine-agent-paper-loop "
+            "--parent-fd 7",
+            RuntimeEntrypoint.WORKER,
+        ),
         ("python harmless.py --label 'nexus-local-stack serve'", None),
+        ("python -c 'print(1)' nexus-engine-agent-paper-loop", None),
+        ("python /tmp/nexus-engine-agent-paper-loop-evil", None),
         ("/tmp/nexus-engine-agent-paper-loop-evil", None),
         ("/repo/.venv/bin/nexus-local-stack status", None),
+        ("python /repo/.venv/bin/nexus-local-stack status", None),
         ("", None),
     ],
 )
@@ -361,6 +476,40 @@ def test_process_identity_returns_only_normalized_facts(
 
 
 @pytest.mark.parametrize(
+    ("command", "entrypoint"),
+    [
+        (
+            "/repo/.venv/bin/python /repo/.venv/bin/nexus-local-stack serve",
+            RuntimeEntrypoint.SUPERVISOR,
+        ),
+        (
+            "/repo/.venv/bin/python /repo/.venv/bin/nexus-engine-agent-paper-loop "
+            "--parent-fd 7",
+            RuntimeEntrypoint.WORKER,
+        ),
+    ],
+)
+def test_process_identity_accepts_python_console_script_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    entrypoint: RuntimeEntrypoint,
+) -> None:
+    completed = subprocess.CompletedProcess(
+        args=(),
+        returncode=0,
+        stdout=f"Wed Sep 16 12:34:56 2026 {command}\n",
+        stderr="",
+    )
+    monkeypatch.setattr(runtime.subprocess, "run", lambda *args, **kwargs: completed)
+
+    assert process_identity(321) == ProcessIdentity(
+        pid=321,
+        started_at="Wed Sep 16 12:34:56 2026",
+        entrypoint=entrypoint,
+    )
+
+
+@pytest.mark.parametrize(
     "completed",
     [
         subprocess.CompletedProcess(
@@ -381,8 +530,9 @@ def test_process_identity_fails_closed_without_emitting_process_output(
     completed: subprocess.CompletedProcess[str],
 ) -> None:
     monkeypatch.setattr(runtime.subprocess, "run", lambda *args, **kwargs: completed)
+    monkeypatch.setattr(runtime.os, "kill", lambda pid, signal_number: None)
 
-    assert process_identity(321) is None
+    assert process_identity(321) is runtime.ProcessProbeState.UNKNOWN
     captured = capsys.readouterr()
     assert "very-secret" not in captured.out
     assert "very-secret" not in captured.err
@@ -404,7 +554,7 @@ def test_process_identity_timeout_does_not_emit_process_output(
 
     monkeypatch.setattr(runtime.subprocess, "run", time_out)
 
-    assert process_identity(321) is None
+    assert process_identity(321) is runtime.ProcessProbeState.UNKNOWN
     captured = capsys.readouterr()
     assert "very-secret" not in captured.out
     assert "very-secret" not in captured.err
@@ -464,6 +614,90 @@ def test_pid_reuse_is_unconfirmed(runtime_paths: RuntimePaths) -> None:
         ),
     )
 
+    assert status.code == "unconfirmed"
+
+
+def test_process_probe_confirms_absence_separately_from_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = subprocess.CompletedProcess(
+        args=(),
+        returncode=1,
+        stdout="",
+        stderr="",
+    )
+
+    def absent(pid: int, signal_number: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(runtime.subprocess, "run", lambda *args, **kwargs: completed)
+    monkeypatch.setattr(runtime.os, "kill", absent)
+
+    assert process_identity(321) is runtime.ProcessProbeState.ABSENT
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["timeout", "nonzero", "permission", "malformed", "entrypoint_mismatch"],
+)
+def test_stopped_classification_rejects_unknown_process_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    if scenario == "timeout":
+
+        def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd=("ps",), timeout=2)
+
+    elif scenario in {"nonzero", "permission"}:
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=1, stdout="", stderr="private"
+        )
+
+        def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return completed
+
+        if scenario == "permission":
+
+            def probe(pid: int, signal_number: int) -> None:
+                raise PermissionError
+
+            monkeypatch.setattr(runtime.os, "kill", probe)
+        else:
+            monkeypatch.setattr(runtime.os, "kill", lambda pid, signal_number: None)
+    elif scenario == "malformed":
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout="malformed", stderr="private"
+        )
+
+        def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return completed
+
+    else:
+        completed = subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout="Wed Sep 16 12:34:56 2026 python harmless.py\n",
+            stderr="private",
+        )
+
+        def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return completed
+
+    monkeypatch.setattr(runtime.subprocess, "run", run)
+    observation = process_identity(321)
+
+    status = classify_runtime(
+        _descriptor(
+            state=RuntimeState.STOPPED,
+            exit_reason=RuntimeExitReason.STOP_REQUESTED,
+        ),
+        lock_held=False,
+        heartbeat_fresh=False,
+        process_identity=observation,
+    )
+
+    assert observation is runtime.ProcessProbeState.UNKNOWN
     assert status.code == "unconfirmed"
 
 
@@ -540,7 +774,7 @@ def test_stopped_runtime_requires_all_observed_facts_to_be_stopped() -> None:
         descriptor,
         lock_held=False,
         heartbeat_fresh=False,
-        process_identity=None,
+        process_identity=runtime.ProcessProbeState.ABSENT,
     )
     stale_identity = classify_runtime(
         descriptor,
@@ -555,6 +789,28 @@ def test_stopped_runtime_requires_all_observed_facts_to_be_stopped() -> None:
 
     assert confirmed.code == "stopped"
     assert stale_identity.code == "unconfirmed"
+
+
+@pytest.mark.parametrize(
+    "exit_reason",
+    [
+        None,
+        RuntimeExitReason.STOP_UNCONFIRMED,
+        RuntimeExitReason.WORKER_EXIT_REASON_UNKNOWN,
+        RuntimeExitReason.RUNTIME_ABSENT_UNCONFIRMED,
+    ],
+)
+def test_stopped_runtime_rejects_uncertain_exit_reason(
+    exit_reason: RuntimeExitReason | None,
+) -> None:
+    status = classify_runtime(
+        _descriptor(state=RuntimeState.STOPPED, exit_reason=exit_reason),
+        lock_held=False,
+        heartbeat_fresh=False,
+        process_identity=runtime.ProcessProbeState.ABSENT,
+    )
+
+    assert status.code == "unconfirmed"
 
 
 def test_missing_descriptor_is_unconfirmed() -> None:
