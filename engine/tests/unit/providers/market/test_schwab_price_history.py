@@ -140,6 +140,12 @@ async def test_provider_refreshes_expiring_token_once_before_price_history_reque
     monkeypatch,
     explicit: bool,
 ) -> None:
+    for name in (
+        "NEXUS_SCHWAB_APP_KEY",
+        "NEXUS_SCHWAB_APP_SECRET",
+        "NEXUS_SCHWAB_CALLBACK_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
     module = import_module("nexus.providers.market.schwab_price_history")
     _write_schwab_app_config(tmp_path)
     _save_live_token(tmp_path, expires_at=RECEIVED_AT + timedelta(minutes=4))
@@ -157,6 +163,7 @@ async def test_provider_refreshes_expiring_token_once_before_price_history_reque
         environment = load_agent_paper_service_environment(tmp_path, {}, env_file=env_file)
         monkeypatch.setenv("NEXUS_SCHWAB_APP_KEY", "process-key")
         monkeypatch.setenv("NEXUS_SCHWAB_APP_SECRET", "process-secret")
+        monkeypatch.setenv("NEXUS_SCHWAB_CALLBACK_URL", "https://process.invalid")
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
