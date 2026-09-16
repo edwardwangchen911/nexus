@@ -235,6 +235,7 @@ def test_run_research_claims_only_resolved_job_and_exits(
 ) -> None:
     cycle_id, job_id = UUID(int=20), UUID(int=21)
     received: list[tuple[UUID, ...] | None] = []
+    selected_backends: list[str] = []
 
     async def resolve(_database_url: str, *, requested_cycle_id: UUID) -> UUID:
         assert requested_cycle_id == cycle_id
@@ -245,24 +246,36 @@ def test_run_research_claims_only_resolved_job_and_exits(
         return True
 
     monkeypatch.setattr(cli, "_resolve_queued_research_job_id", resolve)
-    monkeypatch.setattr(
-        cli,
-        "local_settings",
-        lambda *_args, **_kwargs: EngineSettings(
-            database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus"
-        ),
-    )
+
+    def settings(_root: Path, *, backend: str) -> EngineSettings:
+        selected_backends.append(backend)
+        return EngineSettings(
+            database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+            AGENT_RUNTIME_MODE=backend,
+            OPENAI_API_KEY="test-key" if backend == "responses" else None,
+            OPENAI_EXTRACTION_MODEL="test-model" if backend == "responses" else None,
+            OPENAI_REASONING_MODEL="test-model" if backend == "responses" else None,
+        )
+
+    monkeypatch.setattr(cli, "local_settings", settings)
     monkeypatch.setattr(cli, "run_agent_worker_once", run_worker)
 
     result = asyncio.run(
         cli.run_research_once(
-            EngineSettings(database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus"),
+            EngineSettings(
+                database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+                AGENT_RUNTIME_MODE="responses",
+                OPENAI_API_KEY="test-key",
+                OPENAI_EXTRACTION_MODEL="test-model",
+                OPENAI_REASONING_MODEL="test-model",
+            ),
             cli.AgentPaperRunResearchRequest(action="run-research", cycle_id=cycle_id),
             repo_root=tmp_path,
         )
     )
 
     assert received == [(job_id,)]
+    assert selected_backends == ["responses"]
     assert result.model_dump(mode="json") == {
         "cycle_id": str(cycle_id),
         "job_id": str(job_id),
@@ -527,9 +540,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     async def rejected_level_one(*_args, **_kwargs):
         raise cli.ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY")
 
-    monkeypatch.setattr(
-        cli, "capture_and_import_schwab_level_one_once", rejected_level_one
-    )
+    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", rejected_level_one)
     failed_request = AgentPaperTriggerRequest(
         action="trigger", account_id=account_id, idempotency_key="trigger-failure"
     )
@@ -566,6 +577,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         ),
         start=1,
     ):
+
         async def rejected_before_archive(*_args, _error=provider_error, **_kwargs):
             raise _error
 

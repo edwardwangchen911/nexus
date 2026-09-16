@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
@@ -625,10 +626,50 @@ def enabled_environment() -> dict[str, str]:
     }
 
 
+def test_loop_command_reads_account_and_runtime_settings_from_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    account_id = UUID(int=1)
+    captured_process_environment: list[dict[str, str]] = []
+
+    def load(_root, process_environment):
+        captured_process_environment.append(dict(process_environment))
+        return enabled_environment()
+
+    async def stop(_settings, *, account_id: UUID, repo_root):
+        assert account_id == UUID(int=1)
+        return loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
+
+    monkeypatch.setenv("NEXUS_AGENT_PAPER_ACCOUNT_ID", str(account_id))
+    monkeypatch.setattr(loop, "load_local_environment", load)
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", stop)
+
+    assert loop.main([]) == 0
+    assert captured_process_environment == [dict(os.environ)]
+    assert json.loads(capsys.readouterr().out)["reason"] == "stop_session_closed"
+
+
 def test_loop_command_is_default_off(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: {})
+    assert loop.main(["--account-id", str(UUID(int=1))]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error_code": "AGENT_PAPER_CYCLE_DISABLED"}
+
+
+def test_loop_command_stays_disabled_before_optional_model_config_validation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {
+            "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false",
+            "AGENT_RUNTIME_MODE": "responses",
+        },
+    )
+
     assert loop.main(["--account-id", str(UUID(int=1))]) == 1
     assert json.loads(capsys.readouterr().out) == {"error_code": "AGENT_PAPER_CYCLE_DISABLED"}
 

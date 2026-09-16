@@ -65,7 +65,7 @@ from nexus.risk.query_authority_producer import (
     inspect_query_authority_scope,
     persist_query_authorities,
 )
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 from nexus.worker import run_agent_worker_once
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -170,9 +170,7 @@ class AgentPaperRunResearchResult(BaseModel):
 
 class AgentPaperMarketSettings(EngineSettings):
     alpaca_key: SecretStr | None = Field(default=None, validation_alias="ALPACA_API_KEY_ID")
-    alpaca_secret: SecretStr | None = Field(
-        default=None, validation_alias="ALPACA_API_SECRET_KEY"
-    )
+    alpaca_secret: SecretStr | None = Field(default=None, validation_alias="ALPACA_API_SECRET_KEY")
 
 
 class AgentPaperTriggerSettings(EngineSettings):
@@ -592,7 +590,10 @@ async def run_research_once(
     job_id = await _resolve_queued_research_job_id(
         settings.database_url, requested_cycle_id=request.cycle_id
     )
-    worker_settings = local_settings(repo_root, backend="codex_sdk")
+    backend = (
+        "responses" if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES else "codex_sdk"
+    )
+    worker_settings = local_settings(repo_root, backend=backend)
     if worker_settings.database_url != settings.database_url:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     worked = await run_agent_worker_once(worker_settings, job_ids=(job_id,))
@@ -640,9 +641,7 @@ async def collect_window_once(
             resolver = SqlInstrumentSymbolResolver(resolver_session)
             provider: MarketDataProvider
             if scope.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
-                provider = SchwabPriceHistoryProvider(
-                    repo_root, http, symbol_resolver=resolver
-                )
+                provider = SchwabPriceHistoryProvider(repo_root, http, symbol_resolver=resolver)
             else:
                 if (
                     settings.alpaca_key is None

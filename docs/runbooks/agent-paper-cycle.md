@@ -253,6 +253,23 @@ FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNY
 已有订单可完成其已冻结窗口后再退出。运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
+需要连续观察时可显式启动同一入口的独立 Compose profile。它默认关闭、不自动重启，并继续通过
+host networking 使用既有 loopback 数据库和对象存储边界；不会取得 broker 或 Shadow 能力：
+
+```bash
+mkdir -p .secrets/nexus-agent-paper
+chmod 700 .secrets/nexus-agent-paper
+docker compose --env-file infra/.env.local -f infra/compose.yaml \
+  --profile app --profile agent-paper up -d postgres minio object-store-init api worker
+docker compose --env-file infra/.env.local -f infra/compose.yaml \
+  --profile agent-paper up --build agent-paper-loop
+```
+
+先在 `infra/.env.local` 明确配置账户 ID、当前 Mac 的非秘密 UID/GID，并保持功能开关为 true；模型
+运行固定使用现有 Responses worker，动态 Schwab token 目录只读挂载，循环自己的诊断目录可写。
+容器退出后先读取数据库终态和日志中的固定错误码，不直接重启。回滚只需将开关恢复为 false，并
+停止 `agent-paper-loop` 服务；不会删除或改写 cycle、Job、Output、订单、成交、账本和心跳事实。
+
 ## 9. Stop：默认关闭并保留现场
 
 1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`。只停止本轮自己启动的进程；一次性 worker 正常

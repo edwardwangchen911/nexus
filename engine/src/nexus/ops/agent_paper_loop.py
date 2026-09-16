@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -951,7 +952,7 @@ async def run_local_agent_paper_loop(
     started_at = datetime.now(UTC)
 
     async def inspect() -> AgentPaperLoopSnapshot:
-        current = EngineSettings.model_validate(load_local_environment(repo_root, {}))
+        current = EngineSettings.model_validate(load_local_environment(repo_root, os.environ))
         if not current.agent_paper_cycle_enabled:
             return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
         return await inspect_agent_paper_loop(current, account_id=account_id)
@@ -993,7 +994,7 @@ async def execute_agent_paper_loop_action(
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
     if action == AgentPaperLoopAction.TRIGGER:
-        environment = load_local_environment(repo_root, {})
+        environment = load_local_environment(repo_root, os.environ)
         trigger_settings = AgentPaperTriggerSettings.model_validate(environment)
         macro_settings = DailyOnceSettings.model_validate(environment)
         prior_daily = await prepare_prior_daily_once(
@@ -1077,7 +1078,7 @@ async def execute_agent_paper_loop_action(
         )
         return None
     if action == AgentPaperLoopAction.COLLECT_WINDOW:
-        environment = load_local_environment(repo_root, {})
+        environment = load_local_environment(repo_root, os.environ)
         await collect_window_once(
             AgentPaperMarketSettings.model_validate(environment),
             AgentPaperCollectWindowRequest(action="collect-window", cycle_id=snapshot.cycle_id),
@@ -1245,16 +1246,21 @@ async def inspect_agent_paper_loop(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexus-engine-agent-paper-loop")
-    parser.add_argument("--account-id", required=True)
+    parser.add_argument("--account-id")
     args = parser.parse_args(argv)
     root = Path.cwd()
     try:
         try:
-            account_id = UUID(args.account_id)
+            account_id = UUID(args.account_id or os.environ.get("NEXUS_AGENT_PAPER_ACCOUNT_ID", ""))
         except (AttributeError, TypeError, ValueError):
             print(json.dumps({"error_code": "AGENT_PAPER_ACCOUNT_INVALID"}))
             return 1
-        settings = EngineSettings.model_validate(load_local_environment(root, {}))
+        environment = load_local_environment(root, os.environ)
+        requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
+        if requested.strip().lower() in {"", "0", "false", "no", "off"}:
+            print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
+            return 1
+        settings = EngineSettings.model_validate(environment)
         if not settings.agent_paper_cycle_enabled:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
             return 1
