@@ -1,12 +1,14 @@
 import asyncio
 from collections import defaultdict
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
 from helpers.paper_batch import NO_CHANGE_INSTRUMENT, seed_paper_batch
 from nexus.market.price_bar_authority import SOURCE_POLICY_ID
 from nexus.paper.errors import PaperBatchError
+from nexus.paper.notification import parse_notification_snapshot
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.paper import (
     PaperFillRecord,
@@ -96,6 +98,13 @@ async def _create_and_inspect(database_url: str):
                     .order_by(OutboxEvent.event_type)
                 )
             )
+            rejected_outbox = await session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.event_type == "paper.order.risk_rejected",
+                    OutboxEvent.schema_version == "paper_event_v1",
+                )
+            )
+            assert rejected_outbox is not None
             unpublished = await session.scalar(
                 select(func.count())
                 .select_from(OutboxEvent)
@@ -120,6 +129,7 @@ async def _create_and_inspect(database_url: str):
             outbox_types,
             unpublished,
             fill_count,
+            rejected_outbox.payload,
         )
     finally:
         await engine.dispose()
@@ -143,6 +153,7 @@ def test_complete_fixture_creates_one_atomic_deterministic_paper_batch(
         outbox_types,
         unpublished,
         fill_count,
+        rejected_payload,
     ) = asyncio.run(_create_and_inspect(migrated_database_url))
 
     assert {evaluation.instrument_id: evaluation.outcome for evaluation in result.evaluations} == (
@@ -197,6 +208,27 @@ def test_complete_fixture_creates_one_atomic_deterministic_paper_batch(
     )
     assert unpublished == len(outbox_types)
     assert fill_count == 0
+    rejected_order = next(order for order in orders if order.risk_outcome == "rejected")
+    snapshot = parse_notification_snapshot(rejected_payload)
+    assert snapshot.order_id == rejected_order.id
+    assert snapshot.symbol == "TST3"
+    assert snapshot.side == rejected_order.side
+    assert snapshot.requested_quantity == rejected_order.quantity
+    assert snapshot.cash.kind == "unchanged"
+    assert snapshot.cash.available == Decimal("10000")
+    assert snapshot.position.kind == "unchanged"
+    assert snapshot.position.quantity == Decimal("0")
+    assert snapshot.position.portfolio_ratio == Decimal("0")
+    assert snapshot.agent_reason is None
+    assert snapshot.risk_reason == "订单金额低于最小金额 $100。"
+    frozen = rejected_payload["notification_snapshot"]
+    assert isinstance(frozen, dict)
+    assert not {
+        "account_id",
+        "strategy_decision_id",
+        "result_hash",
+        "evidence",
+    }.intersection(frozen)
 
 
 async def _create_batch_with_no_change(database_url: str):

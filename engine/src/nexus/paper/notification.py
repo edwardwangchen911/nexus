@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from pydantic import (
@@ -20,18 +20,30 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.paper.models import exact_decimal
+from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
+from nexus.persistence.models.market import InstrumentAlias
+from nexus.persistence.models.paper import (
+    PaperOrderRecord,
+    StrategyDecisionAgentOutputRecord,
+    StrategyDecisionRecord,
+)
+from nexus.risk.models import PaperPortfolioProjection, RiskEvaluation
+from nexus.strategy.intents import ResearchCondition, ResearchIntent
 
 NotificationStatus = Literal["risk_rejected", "filled", "cancelled"]
 NotificationPriceKind = Literal["reference", "worst_case", "average_fill"]
 NotificationBalanceKind = Literal["projected_after", "actual_after", "unchanged"]
 NotificationSymbol = Annotated[
     str,
-    StringConstraints(pattern=r"^[A-Z0-9][A-Z0-9.\-]{0,19}$"),
+    StringConstraints(pattern=r"^[A-Z0-9][A-Z0-9.\-]{0,31}$"),
 ]
 
 _CANONICAL_DECIMAL = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{1,12})?$")
+_SAFE_RULE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
 
 
 class PaperNotificationError(ValueError):
@@ -64,6 +76,15 @@ def _decimal_text(value: Decimal) -> str:
 
 class _FrozenNotificationModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+
+class PaperNotificationDecisionContext(_FrozenNotificationModel):
+    """User-visible decision facts linked to one order instrument."""
+
+    symbol: NotificationSymbol
+    agent_cycle_id: UUID | None
+    agent_reason: str | None = Field(default=None, min_length=1, max_length=500)
+    invalidation: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class PaperNotificationPrice(_FrozenNotificationModel):
@@ -246,6 +267,214 @@ class PaperOrderNotificationSnapshot(_FrozenNotificationModel):
             ):
                 raise ValueError("unfilled cancellation requires reference values")
         return self
+
+
+def _bounded_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized[:500] or None
+
+
+def _render_invalidation(condition: ResearchCondition | None) -> str | None:
+    if condition is None or not isinstance(condition.threshold, bool):
+        return None
+    fixed = {
+        ("committee.evidence_valid", "is_false", True, "boolean"): "研究证据不再有效。",
+        ("committee.support_ready", "is_false", True, "boolean"): "研究支持条件不再成立。",
+        ("committee.risk_triggered", "is_true", True, "boolean"): "研究风险条件已触发。",
+        (
+            "portfolio.top1_warning_exceeded",
+            "is_true",
+            True,
+            "boolean",
+        ): "单一标的仓位已超过预警阈值。",
+        (
+            "portfolio.top1_critical_exceeded",
+            "is_true",
+            True,
+            "boolean",
+        ): "单一标的仓位已超过严重阈值。",
+    }
+    return fixed.get((condition.signal, condition.operator, condition.threshold, condition.unit))
+
+
+def decision_context_from_research_intent(
+    intent: ResearchIntent,
+    *,
+    agent_cycle_id: UUID,
+) -> PaperNotificationDecisionContext:
+    """Extract bounded copy from an already validated frozen research intent."""
+    assessment = intent.synthesis_assessment
+    reason = (
+        assessment.claims[0].text
+        if assessment is not None and assessment.claims
+        else intent.theses[0].text
+        if intent.theses
+        else None
+    )
+    condition = intent.invalidation_conditions[0] if intent.invalidation_conditions else None
+    return PaperNotificationDecisionContext(
+        symbol=intent.display_symbol,
+        agent_cycle_id=agent_cycle_id,
+        agent_reason=_bounded_text(reason),
+        invalidation=_render_invalidation(condition),
+    )
+
+
+async def build_order_decision_context(
+    session: AsyncSession,
+    *,
+    strategy_decision_id: UUID,
+    instrument_id: UUID,
+    decision_session: date,
+) -> PaperNotificationDecisionContext:
+    """Load the exact symbol and optional Agent explanation bound to a decision."""
+    decision = await session.get(
+        StrategyDecisionRecord,
+        strategy_decision_id,
+        populate_existing=True,
+    )
+    if decision is None or decision.decision_session != decision_session:
+        raise ValueError("paper notification decision context is invalid")
+
+    if decision.decision_origin == "agent_research":
+        outputs = tuple(
+            await session.scalars(
+                select(AgentResearchOutputRecord)
+                .join(
+                    StrategyDecisionAgentOutputRecord,
+                    StrategyDecisionAgentOutputRecord.agent_research_output_id
+                    == AgentResearchOutputRecord.id,
+                )
+                .join(
+                    AgentResearchRunRecord,
+                    AgentResearchRunRecord.id == AgentResearchOutputRecord.run_id,
+                )
+                .where(
+                    StrategyDecisionAgentOutputRecord.strategy_decision_id == strategy_decision_id,
+                    AgentResearchRunRecord.instrument_id == instrument_id,
+                )
+            )
+        )
+        if len(outputs) != 1 or outputs[0].intent is None:
+            raise ValueError("paper notification Agent context is invalid")
+        intent = ResearchIntent.model_validate(outputs[0].intent)
+        if intent.instrument_id != instrument_id:
+            raise ValueError("paper notification Agent context is invalid")
+        if decision.agent_paper_cycle_id is None:
+            raise ValueError("paper notification Agent cycle is missing")
+        return decision_context_from_research_intent(
+            intent,
+            agent_cycle_id=decision.agent_paper_cycle_id,
+        )
+
+    if decision.decision_origin != "registered_strategy":
+        raise ValueError("paper notification decision origin is invalid")
+    aliases = tuple(
+        await session.scalars(
+            select(InstrumentAlias)
+            .where(
+                InstrumentAlias.instrument_id == instrument_id,
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.valid_from <= decision_session,
+                (
+                    InstrumentAlias.valid_to.is_(None)
+                    | (InstrumentAlias.valid_to >= decision_session)
+                ),
+                InstrumentAlias.created_at <= decision.decision_time,
+            )
+            .order_by(InstrumentAlias.valid_from.desc(), InstrumentAlias.id.desc())
+        )
+    )
+    if len(aliases) != 1:
+        raise ValueError("paper notification ticker context is invalid")
+    return PaperNotificationDecisionContext(
+        symbol=aliases[0].symbol,
+        agent_cycle_id=None,
+        agent_reason=None,
+        invalidation=None,
+    )
+
+
+def _percentage(value: Decimal) -> str:
+    return _decimal_text(value * Decimal(100))
+
+
+def _risk_rejection_reason(evaluation: RiskEvaluation) -> str:
+    failed = next((rule for rule in evaluation.rules if not rule.passed), None)
+    if failed is None:
+        return "风控规则未通过。"
+    if failed.rule_code == "DRAWDOWN_LOCKED":
+        return "账户处于回撤锁定状态。"
+    if failed.rule_code == "INSUFFICIENT_POSITION":
+        return "可卖持仓不足。"
+    if failed.rule_code == "SINGLE_NAME_LIMIT" and failed.limit is not None:
+        return f"成交后单一标的仓位将超过 {_percentage(failed.limit)}% 上限。"
+    if failed.rule_code == "SECTOR_LIMIT" and failed.limit is not None:
+        return f"成交后行业暴露将超过 {_percentage(failed.limit)}% 上限。"
+    if failed.rule_code == "CASH_FLOOR" and failed.limit is not None:
+        return f"成交后可用现金比例将低于 {_percentage(failed.limit)}% 下限。"
+    if failed.rule_code == "BELOW_MINIMUM_ORDER" and failed.limit is not None:
+        return f"订单金额低于最小金额 ${_decimal_text(failed.limit)}。"
+    if _SAFE_RULE_CODE.fullmatch(failed.rule_code) is not None:
+        return f"风控规则未通过（{failed.rule_code}）。"
+    return "风控规则未通过。"
+
+
+def build_risk_rejected_snapshot(
+    *,
+    order: PaperOrderRecord,
+    evaluation: RiskEvaluation,
+    portfolio: PaperPortfolioProjection,
+    context: PaperNotificationDecisionContext,
+    occurred_at: datetime,
+) -> PaperOrderNotificationSnapshot:
+    """Freeze a rejected order and the unchanged account state in one snapshot."""
+    if (
+        evaluation.outcome != "rejected"
+        or order.risk_outcome != "rejected"
+        or order.instrument_id != evaluation.instrument_id
+        or order.account_id != portfolio.account_id
+    ):
+        raise ValueError("risk rejection notification inputs do not match")
+    position = next(
+        (item for item in portfolio.positions if item.instrument_id == evaluation.instrument_id),
+        None,
+    )
+    return PaperOrderNotificationSnapshot(
+        schema_version="paper_notification_v1",
+        mode="internal_paper",
+        order_id=order.id,
+        agent_cycle_id=context.agent_cycle_id,
+        occurred_at=occurred_at,
+        symbol=context.symbol,
+        side=cast(Literal["buy", "sell"], order.side),
+        status="risk_rejected",
+        requested_quantity=evaluation.desired_quantity,
+        approved_quantity=Decimal(0),
+        filled_quantity=Decimal(0),
+        remaining_quantity=Decimal(0),
+        price=PaperNotificationPrice(
+            kind="reference",
+            value=evaluation.reference_close,
+            currency=portfolio.currency,
+        ),
+        notional=evaluation.desired_quantity * evaluation.reference_close,
+        fee=None,
+        cash=PaperNotificationCash(
+            kind="unchanged",
+            available=portfolio.available_cash,
+        ),
+        position=PaperNotificationPosition(
+            kind="unchanged",
+            quantity=Decimal(0) if position is None else position.quantity,
+            portfolio_ratio=evaluation.projected_name_ratio,
+        ),
+        agent_reason=context.agent_reason,
+        invalidation=context.invalidation,
+        risk_reason=_risk_rejection_reason(evaluation),
+    )
 
 
 def notification_snapshot_payload(snapshot: PaperOrderNotificationSnapshot) -> dict[str, object]:

@@ -23,6 +23,7 @@ from nexus.persistence.models.data import (
 from nexus.persistence.models.evolution import StrategyRegistryHeadRecord
 from nexus.persistence.models.market import (
     Instrument,
+    InstrumentAlias,
     SectorExposure,
     UniverseMember,
     UniverseSnapshot,
@@ -216,6 +217,17 @@ async def seed_paper_batch(
                         currency="USD",
                         tick_size=Decimal("0.01"),
                         risk_bucket=sector,
+                    )
+                )
+                session.add(
+                    InstrumentAlias(
+                        id=UUID(int=0x51000000000000000000000000000080 + index),
+                        instrument_id=instrument_id,
+                        symbol=f"TST{index}",
+                        alias_type="ticker",
+                        valid_from=date(2026, 8, 1),
+                        valid_to=None,
+                        created_at=AVAILABLE_AT - timedelta(hours=1),
                     )
                 )
                 session.add(

@@ -1,19 +1,39 @@
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from nexus.domain.evidence import EvidenceRef
 from nexus.paper.notification import (
+    PaperNotificationDecisionContext,
     PaperNotificationError,
     PaperOrderNotificationSnapshot,
+    build_risk_rejected_snapshot,
+    decision_context_from_research_intent,
     notification_snapshot_payload,
     parse_notification_snapshot,
+)
+from nexus.persistence.models.paper import PaperOrderRecord
+from nexus.risk.models import (
+    PaperPortfolioProjection,
+    PaperPositionBalance,
+    RiskEvaluation,
+    RiskRuleEvidence,
+)
+from nexus.strategy.intents import (
+    ResearchClaim,
+    ResearchCondition,
+    ResearchIntent,
+    RoleVote,
+    SynthesisAssessment,
+    SynthesisClaimReview,
 )
 from pydantic import ValidationError
 
 ORDER_ID = UUID("0199d500-1000-7000-8000-000000000101")
 CYCLE_ID = UUID("0199d500-1000-7000-8000-000000000102")
+INSTRUMENT_ID = UUID("0199d500-1000-7000-8000-000000000103")
 
 FILLED_PAYLOAD: dict[str, object] = {
     "schema_version": "paper_notification_v1",
@@ -251,3 +271,181 @@ def test_snapshot_parser_returns_value_free_error(payload: dict[str, object]) ->
         parse_notification_snapshot(payload)
 
     assert "AAPL" not in str(caught.value)
+
+
+def _research_intent() -> ResearchIntent:
+    decision_time = datetime(2026, 9, 16, 2, tzinfo=UTC)
+    evidence = EvidenceRef(
+        source="fixture",
+        object_id="research-1",
+        available_at=decision_time - timedelta(minutes=5),
+        location="memory://research-1",
+        content_hash="a" * 64,
+    )
+    synthesis_claim = ResearchClaim(
+        text="综合证据支持增加风险暴露。",
+        evidence_refs=(evidence,),
+    )
+    thesis = ResearchClaim(
+        text="这是仅在缺少综合结论时使用的备选理由。",
+        evidence_refs=(evidence,),
+    )
+    condition = ResearchCondition(
+        signal="committee.evidence_valid",
+        operator="is_false",
+        threshold=True,
+        unit="boolean",
+        evidence_refs=(evidence,),
+    )
+    return ResearchIntent(
+        synthesis_assessment=SynthesisAssessment(
+            stance="buy_candidate",
+            claims=(synthesis_claim,),
+            reviews=(
+                SynthesisClaimReview(
+                    claim_id="evidence_audit:0",
+                    status="accepted",
+                    rationale="冻结证据已完成核对。",
+                    evidence_refs=(evidence,),
+                    resolved=True,
+                    missing_evidence=(),
+                    prevented_conclusion=None,
+                ),
+            ),
+            review_conclusion="sufficient",
+            uncertainties=(),
+        ),
+        schema_version="research_intent_v1",
+        decision_id=UUID("0199d500-1000-7000-8000-000000000104"),
+        instrument_id=INSTRUMENT_ID,
+        display_symbol="AAPL",
+        decision_time=decision_time,
+        data_snapshot_id=UUID("0199d500-1000-7000-8000-000000000105"),
+        horizon="medium_term",
+        stance="buy_candidate",
+        exposure_action="eligible_for_increase",
+        theses=(thesis,),
+        counter_theses=(),
+        uncertainties=(),
+        invalidation_conditions=(condition,),
+        entry_conditions=(condition,),
+        exit_conditions=(condition,),
+        valid_until=decision_time + timedelta(days=1),
+        quality_status="complete",
+        evidence_audit="complete",
+        role_votes=(RoleVote(role="orchestrator", vote="support"),),
+        disagreement="无重大分歧。",
+        strategy_version="agent-v1",
+        model_version="fixture",
+        prompt_version="fixture-v1",
+        data_version="fixture-v1",
+        evidence_refs=(evidence,),
+    )
+
+
+def test_agent_decision_context_prefers_synthesis_and_renders_known_invalidation() -> None:
+    context = decision_context_from_research_intent(
+        _research_intent(),
+        agent_cycle_id=CYCLE_ID,
+    )
+
+    assert context == PaperNotificationDecisionContext(
+        symbol="AAPL",
+        agent_cycle_id=CYCLE_ID,
+        agent_reason="综合证据支持增加风险暴露。",
+        invalidation="研究证据不再有效。",
+    )
+
+
+def test_agent_decision_context_falls_back_to_first_thesis() -> None:
+    intent = _research_intent().model_copy(update={"synthesis_assessment": None})
+
+    context = decision_context_from_research_intent(intent, agent_cycle_id=CYCLE_ID)
+
+    assert context.agent_reason == "这是仅在缺少综合结论时使用的备选理由。"
+
+
+def test_rejected_snapshot_freezes_unchanged_projection_and_first_failed_rule() -> None:
+    context = decision_context_from_research_intent(
+        _research_intent(),
+        agent_cycle_id=CYCLE_ID,
+    )
+    order = PaperOrderRecord(
+        id=ORDER_ID,
+        batch_id=UUID("0199d500-1000-7000-8000-000000000106"),
+        account_id=UUID("0199d500-1000-7000-8000-000000000107"),
+        strategy_decision_id=UUID("0199d500-1000-7000-8000-000000000108"),
+        client_order_id="paper-test",
+        instrument_id=INSTRUMENT_ID,
+        side="buy",
+        quantity=Decimal("20"),
+        target_weight=Decimal("0.2"),
+        reference_close=Decimal("187"),
+        worst_price=Decimal("188"),
+        risk_outcome="rejected",
+    )
+    evaluation = RiskEvaluation(
+        instrument_id=INSTRUMENT_ID,
+        side="buy",
+        outcome="rejected",
+        desired_quantity=Decimal("20"),
+        approved_quantity=Decimal("0"),
+        target_weight=Decimal("0.2"),
+        strategy_priority=2,
+        reference_close=Decimal("187"),
+        worst_price=Decimal("188"),
+        reserve_amount=Decimal("0"),
+        projected_available_cash=Decimal("23654.50"),
+        projected_cash_ratio=Decimal("0.47"),
+        projected_name_ratio=Decimal("0.18"),
+        projected_sector_ratios=(),
+        rules=(
+            RiskRuleEvidence(
+                rule_code="SINGLE_NAME_LIMIT",
+                passed=False,
+                limit=Decimal("0.20"),
+                observed=Decimal("0.25"),
+            ),
+        ),
+        result_hash="b" * 64,
+    )
+    portfolio = PaperPortfolioProjection(
+        account_id=order.account_id,
+        portfolio_id=UUID("0199d500-1000-7000-8000-000000000109"),
+        as_of=datetime(2026, 9, 16, 2, tzinfo=UTC),
+        currency="USD",
+        account_model="cash",
+        position_model="long_only",
+        available_cash=Decimal("23654.50"),
+        reserved_cash=Decimal("0"),
+        positions=(
+            PaperPositionBalance(
+                instrument_id=INSTRUMENT_ID,
+                quantity=Decimal("30"),
+                reserved_quantity=Decimal("0"),
+                cost_basis=Decimal("5000"),
+                reference_close=Decimal("187"),
+            ),
+        ),
+        open_orders=(),
+        nav=Decimal("31182.50"),
+        peak_nav=Decimal("31182.50"),
+        drawdown_state="unlocked",
+        source_facts_hash="c" * 64,
+        projection_hash="d" * 64,
+    )
+
+    snapshot = build_risk_rejected_snapshot(
+        order=order,
+        evaluation=evaluation,
+        portfolio=portfolio,
+        context=context,
+        occurred_at=datetime(2026, 9, 16, 2, 15, tzinfo=UTC),
+    )
+
+    assert snapshot.status == "risk_rejected"
+    assert snapshot.notional == Decimal("3740")
+    assert snapshot.cash.available == Decimal("23654.50")
+    assert snapshot.position.quantity == Decimal("30")
+    assert snapshot.position.portfolio_ratio == Decimal("0.18")
+    assert snapshot.risk_reason == "成交后单一标的仓位将超过 20% 上限。"
