@@ -313,6 +313,14 @@ export const runtimeContractSchemas = {
       "summary": {
         "$ref": "#/components/schemas/AgentPaperSessionSummaryResponse"
       },
+      "version_history": {
+        "items": {
+          "$ref": "#/components/schemas/AgentPaperVersionObservationResponse"
+        },
+        "maxItems": 20,
+        "title": "Version History",
+        "type": "array"
+      },
       "version_observation": {
         "anyOf": [
           {
@@ -327,7 +335,8 @@ export const runtimeContractSchemas = {
     "required": [
       "items",
       "summary",
-      "version_observation"
+      "version_observation",
+      "version_history"
     ],
     "title": "AgentPaperCyclePageResponse",
     "type": "object"

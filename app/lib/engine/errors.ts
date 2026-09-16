@@ -282,7 +282,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || data.items.length > 20
       || data.items.some((cycle) => !agentPaperCycleValid(cycle))
       || !agentPaperSessionSummaryValid(data.summary, data.items)
-      || !agentPaperVersionObservationValid(data.version_observation)) return INVALID_DATA;
+      || !agentPaperVersionHistoryValid(data.version_observation, data.version_history)) return INVALID_DATA;
     return data;
   }
   const paperCycleDetail = /^\/internal\/v1\/paper\/cycles\/([^/]+)$/.exec(pathname);
@@ -828,6 +828,41 @@ function agentPaperVersionObservationValid(value: unknown): boolean {
   expectedReasons.push("VERSION_CHALLENGER_UNAVAILABLE");
   return value.reason_codes.length === expectedReasons.length
     && value.reason_codes.every((reason, index) => reason === expectedReasons[index]);
+}
+
+function agentPaperVersionHistoryValid(observation: unknown, history: unknown): boolean {
+  if (!Array.isArray(history) || history.length > 20
+    || history.some((item) => !agentPaperVersionObservationValid(item))) return false;
+  if (observation === null) return history.length === 0;
+  if (!agentPaperVersionObservationValid(observation) || history.length === 0
+    || !sameAgentPaperVersionObservation(observation, history[0])) return false;
+  const identities = new Set<string>();
+  let previousLast = Number.POSITIVE_INFINITY;
+  for (const item of history) {
+    if (!isPlain(item)) return false;
+    const identity = `${String(item.prompt_hash)}:${String(item.model_hash)}`;
+    const last = Date.parse(String(item.last_decision_at));
+    if (identities.has(identity) || !Number.isFinite(last) || last > previousLast) return false;
+    identities.add(identity);
+    previousLast = last;
+  }
+  return true;
+}
+
+function sameAgentPaperVersionObservation(left: unknown, right: unknown): boolean {
+  if (!isPlain(left) || !isPlain(right)) return false;
+  const leftReasons = left.reason_codes;
+  const rightReasons = right.reason_codes;
+  if (!Array.isArray(leftReasons) || !Array.isArray(rightReasons)) return false;
+  const scalarFields = [
+    "prompt_version", "prompt_hash", "model_id", "model_version", "model_hash",
+    "first_decision_at", "last_decision_at", "observed_sessions", "cycle_count",
+    "completed_count", "unavailable_count", "order_count", "fill_count",
+    "challenger_available", "verdict",
+  ];
+  return scalarFields.every((field) => left[field] === right[field])
+    && leftReasons.length === rightReasons.length
+    && leftReasons.every((reason, index) => reason === rightReasons[index]);
 }
 
 function paperPortfolioValid(value: Record<string, unknown>): boolean {

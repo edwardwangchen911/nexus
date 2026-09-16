@@ -40,7 +40,31 @@ describe("internal paper page", () => {
     expect(within(region).queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("shows the persisted Agent version observation without inventing promotion evidence", async () => {
+  it("shows sequential Agent version history without inventing challenger or promotion evidence", async () => {
+    const currentVersion = {
+      prompt_version: "local-openai-v1", prompt_hash: "a".repeat(64), model_id: "gpt-5.6-terra",
+      model_version: "codex-sdk-chatgpt-v4-actionable",
+      model_hash: "b".repeat(64),
+      first_decision_at: "2026-09-14T15:32:03Z", last_decision_at: "2026-09-16T18:12:07Z",
+      observed_sessions: 3, cycle_count: 48, completed_count: 39, unavailable_count: 9,
+      order_count: 0, fill_count: 0, challenger_available: false as const,
+      verdict: "continue_observing" as const,
+      reason_codes: [
+        "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+        "VERSION_ORDER_PATH_UNOBSERVED",
+        "VERSION_CHALLENGER_UNAVAILABLE",
+      ] as const,
+    };
+    const historicalVersion = {
+      ...currentVersion,
+      prompt_hash: "c".repeat(64),
+      first_decision_at: "2026-09-13T15:32:03Z",
+      last_decision_at: "2026-09-13T18:12:07Z",
+      observed_sessions: 1,
+      cycle_count: 4,
+      completed_count: 4,
+      unavailable_count: 0,
+    };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/v1/paper/portfolio") return Response.json({ data: paperPortfolio, meta: meta() });
@@ -52,38 +76,29 @@ describe("internal paper page", () => {
           latest_result_code: "NO_ORDER_REQUIRED", last_completed_decision_at: "2026-08-26T19:30:00Z",
           next_eligible_at: "2026-08-26T19:35:00Z", next_eligible_reason: "NEXT_SLOT", execution_locked: true,
         },
-        version_observation: {
-          prompt_version: "local-openai-v1", prompt_hash: "a".repeat(64), model_id: "gpt-5.6-terra",
-          model_version: "codex-sdk-chatgpt-v4-actionable",
-          model_hash: "b".repeat(64),
-          first_decision_at: "2026-09-14T15:32:03Z", last_decision_at: "2026-09-16T18:12:07Z",
-          observed_sessions: 3, cycle_count: 48, completed_count: 39, unavailable_count: 9,
-          order_count: 0, fill_count: 0, challenger_available: false,
-          verdict: "continue_observing",
-          reason_codes: [
-            "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
-            "VERSION_ORDER_PATH_UNOBSERVED",
-            "VERSION_CHALLENGER_UNAVAILABLE",
-          ],
-        },
+        version_observation: currentVersion,
+        version_history: [currentVersion, historicalVersion],
       }, meta: meta() });
       throw new Error(`unexpected request: ${url}`);
     }));
 
     render(<PaperPage />);
 
-    const region = await screen.findByRole("region", { name: "Agent 版本观察" });
+    const region = await screen.findByRole("region", { name: "Agent 版本历史" });
     expect(region).toHaveTextContent("local-openai-v1");
     expect(region).toHaveTextContent("gpt-5.6-terra");
     expect(region).toHaveTextContent("prompt aaaaaaaaaaaa… · model bbbbbbbbbbbb…");
+    expect(region).toHaveTextContent("prompt cccccccccccc… · model bbbbbbbbbbbb…");
     expect(region).toHaveTextContent("39 / 48 个周期完成");
     expect(region).toHaveTextContent("3 个交易日");
     expect(region).toHaveTextContent("继续观察");
     expect(region).toHaveTextContent("尚无 Agent 版本级绩效归因");
     expect(region).toHaveTextContent("尚无模拟订单与成交的持久化路径事实");
     expect(region).toHaveTextContent("尚无并行 challenger 版本");
-    expect(region).toHaveTextContent("同名标签可能包含不同冻结配置");
-    expect(region).not.toHaveTextContent(/晋级|淘汰/);
+    expect(region).toHaveTextContent("当前运行版本");
+    expect(region).toHaveTextContent("历史冻结版本");
+    expect(region).toHaveTextContent("顺序历史不是并行 challenger");
+    expect(region).toHaveTextContent("没有正式晋升或淘汰结论");
     expect(within(region).queryByRole("button")).not.toBeInTheDocument();
   });
 

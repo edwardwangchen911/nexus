@@ -230,8 +230,12 @@ def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct(
     assert set(schemas["AgentPaperCyclePageResponse"]["required"]) == {
         "items",
         "summary",
+        "version_history",
         "version_observation",
     }
+    assert schemas["AgentPaperCyclePageResponse"]["properties"]["version_history"][
+        "maxItems"
+    ] == 20
     observation = schemas["AgentPaperVersionObservationResponse"]
     assert observation["properties"]["verdict"] == {
         "const": "continue_observing",

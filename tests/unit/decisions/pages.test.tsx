@@ -42,7 +42,7 @@ const summary: CyclePage["summary"] = {
 
 describe("decision records", () => {
   it("renders one semantic row per cycle and keeps distinct product outcomes", () => {
-    render(<DecisionsPanel state="ready" page={{ items: cycles(), summary, version_observation: null }} onRefresh={vi.fn()} />);
+    render(<DecisionsPanel state="ready" page={{ items: cycles(), summary, version_observation: null, version_history: [] }} onRefresh={vi.fn()} />);
 
     const records = screen.getByRole("list", { name: "决策记录" });
     expect(within(records).getAllByRole("listitem")).toHaveLength(7);
@@ -53,7 +53,7 @@ describe("decision records", () => {
   });
 
   it("filters only the bounded loaded page without changing cycle identity", () => {
-    render(<DecisionsPanel state="ready" page={{ items: cycles(), summary, version_observation: null }} onRefresh={vi.fn()} />);
+    render(<DecisionsPanel state="ready" page={{ items: cycles(), summary, version_observation: null, version_history: [] }} onRefresh={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("决策类型"), { target: { value: "hold" } });
 
     const rows = screen.getByRole("list", { name: "决策记录" });

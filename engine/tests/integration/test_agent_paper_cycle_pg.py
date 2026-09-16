@@ -3526,6 +3526,9 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert historical is not None
         assert historical.status == "awaiting_market"
         assert historical_page.version_observation is not None
+        assert historical_page.version_history == (
+            historical_page.version_observation,
+        )
         assert historical_page.version_observation.order_count == 1
         assert historical_page.version_observation.fill_count == 0
         assert "VERSION_ORDER_PATH_UNOBSERVED" in (
@@ -3566,6 +3569,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert cycle_page.summary.cycle_count == 1
         assert cycle_page.summary.completed_count == 1
         assert cycle_page.version_observation is not None
+        assert cycle_page.version_history == (cycle_page.version_observation,)
         assert cycle_page.version_observation.prompt_version == "agent-paper-orchestrator-v1"
         assert cycle_page.version_observation.model_id == "fixture-agent-paper"
         assert (

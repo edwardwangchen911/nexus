@@ -1215,6 +1215,8 @@ export interface components {
             /** Items */
             items: components["schemas"]["AgentPaperCycleResponse"][];
             summary: components["schemas"]["AgentPaperSessionSummaryResponse"];
+            /** Version History */
+            version_history: components["schemas"]["AgentPaperVersionObservationResponse"][];
             version_observation: components["schemas"]["AgentPaperVersionObservationResponse"] | null;
         };
         /** AgentPaperCycleResponse */

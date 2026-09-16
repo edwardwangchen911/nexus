@@ -42,7 +42,7 @@ describe("internal-paper Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json({ data: { ...data, execution_market: { ...data.execution_market, source: "schwab" } }, meta }), undefined, path, "GET")).status).toBe(500);
 
     const listPath = "/internal/v1/paper/cycles";
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(200);
     const versionObservation = {
       prompt_version: "local-openai-v1", prompt_hash: "a".repeat(64), model_id: "gpt-5.6-terra",
       model_version: "codex-sdk-chatgpt-v4-actionable",
@@ -53,16 +53,31 @@ describe("internal-paper Engine response boundary", () => {
       verdict: "continue_observing",
       reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE", "VERSION_ORDER_PATH_UNOBSERVED", "VERSION_CHALLENGER_UNAVAILABLE"],
     };
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation }, meta }), undefined, listPath, "GET")).status).toBe(200);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PROMOTED"] } }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, completed_count: 49 } }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, first_decision_at: "2026-08-29T00:00:00Z" } }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, prompt_hash: "not-a-hash" } }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"] } }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 21 }, version_observation: null }, meta }), undefined, listPath, "GET")).status).toBe(200);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 0 }, version_observation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data), summary: cycleSummary, version_observation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [{ ...data, execution_locked: false }], summary: cycleSummary, version_observation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    const olderVersion = {
+      ...versionObservation,
+      prompt_hash: "c".repeat(64),
+      first_decision_at: "2026-08-25T19:30:00Z",
+      last_decision_at: "2026-08-25T20:00:00Z",
+      observed_sessions: 1,
+      cycle_count: 4,
+      completed_count: 4,
+      unavailable_count: 0,
+    };
+    const versionHistory = [versionObservation, olderVersion];
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [olderVersion, versionObservation] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [versionObservation, versionObservation] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: olderVersion, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PROMOTED"] }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, completed_count: 49 }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, first_decision_at: "2026-08-29T00:00:00Z" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, prompt_hash: "not-a-hash" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"] }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 21 }, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 0 }, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data), summary: cycleSummary, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [{ ...data, execution_locked: false }], summary: cycleSummary, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);
   });
   it("accepts the strict portfolio projection and rejects nested extras", async () => {
     const data = portfolio();
@@ -151,7 +166,7 @@ describe("internal-paper Engine response boundary", () => {
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: input.toString(), init: init ?? {} });
       if (input.toString().includes("/paper/cycles")) {
-        return json({ data: { items: [], summary: { ...cycleSummary, status: "ready", cycle_count: 0, completed_count: 0, latest_result_code: null, next_eligible_at: "2026-08-26T21:00:00Z", next_eligible_reason: "CURRENT_SLOT" }, version_observation: null }, meta });
+        return json({ data: { items: [], summary: { ...cycleSummary, status: "ready", cycle_count: 0, completed_count: 0, latest_result_code: null, next_eligible_at: "2026-08-26T21:00:00Z", next_eligible_reason: "CURRENT_SLOT" }, version_observation: null, version_history: [] }, meta });
       }
       return json({ data: { items: [order()], next_cursor: null }, meta });
     });

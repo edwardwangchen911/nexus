@@ -350,6 +350,33 @@ class AgentPaperCyclePageResponse(_StrictSchema):
     items: tuple[AgentPaperCycleResponse, ...] = Field(max_length=20)
     summary: AgentPaperSessionSummaryResponse
     version_observation: AgentPaperVersionObservationResponse | None
+    version_history: tuple[AgentPaperVersionObservationResponse, ...] = Field(
+        max_length=20
+    )
+
+    @model_validator(mode="after")
+    def _version_history_is_consistent(self) -> AgentPaperCyclePageResponse:
+        if self.version_observation is None:
+            if self.version_history:
+                raise ValueError("version history requires a current observation")
+            return self
+        if not self.version_history or self.version_history[0] != self.version_observation:
+            raise ValueError("current version observation must lead version history")
+        identities = [
+            (item.prompt_hash, item.model_hash) for item in self.version_history
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("version history identities must be unique")
+        if any(
+            current.last_decision_at < following.last_decision_at
+            for current, following in zip(
+                self.version_history,
+                self.version_history[1:],
+                strict=False,
+            )
+        ):
+            raise ValueError("version history must be newest first")
+        return self
 
 
 class AgentPaperCyclePageEnvelope(_StrictSchema):

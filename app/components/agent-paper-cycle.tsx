@@ -52,12 +52,15 @@ const versionReasonLabels: Record<AgentPaperVersionObservationFact["reason_codes
   VERSION_CHALLENGER_UNAVAILABLE: "尚无并行 challenger 版本",
 };
 
-export function AgentPaperVersionObservation({ observation }: {
-  observation: AgentPaperVersionObservationFact;
+export function AgentPaperVersionHistory({ history }: {
+  history: AgentPaperVersionObservationFact[];
 }): React.ReactElement {
-  return <section className="paper-performance" aria-labelledby="agent-version-observation-title">
-    <header><div><p className="eyebrow">冻结身份 · 跨交易日只读聚合</p><h2 id="agent-version-observation-title">Agent 版本观察</h2></div><span className="mode-badge">继续观察</span></header>
-    <dl>
+  return <section className="paper-performance" aria-labelledby="agent-version-history-title">
+    <header><div><p className="eyebrow">冻结身份 · 跨交易日只读聚合</p><h2 id="agent-version-history-title">Agent 版本历史</h2></div><span className="mode-badge">继续观察</span></header>
+    <p>这里只记录依次运行过的冻结版本。顺序历史不是并行 challenger；当前没有正式晋升或淘汰结论。</p>
+    {history.map((observation, index) => <article key={`${observation.prompt_hash}:${observation.model_hash}`}>
+      <h3>{index === 0 ? "当前运行版本" : "历史冻结版本"}</h3>
+      <dl>
       <div><dt>Prompt 版本</dt><dd>{observation.prompt_version}</dd></div>
       <div><dt>模型</dt><dd>{observation.model_id}</dd></div>
       <div><dt>模型配置</dt><dd>{observation.model_version}</dd></div>
@@ -65,12 +68,13 @@ export function AgentPaperVersionObservation({ observation }: {
       <div><dt>观察进度</dt><dd>{observation.completed_count} / {observation.cycle_count} 个周期完成</dd></div>
       <div><dt>交易日覆盖</dt><dd>{observation.observed_sessions} 个交易日</dd></div>
       <div><dt>订单 / 成交</dt><dd>{observation.order_count} / {observation.fill_count}</dd></div>
-    </dl>
-    <aside className="inline-notice" role="note" aria-label="Agent 版本观察结论">
+      </dl>
+      <aside className="inline-notice" role="note" aria-label={`Agent 版本观察结论 ${index + 1}`}>
       <strong>继续观察</strong>
       <ul>{observation.reason_codes.map((reason) => <li key={reason}>{versionReasonLabels[reason]}</li>)}</ul>
-    </aside>
-    <p>同名标签可能包含不同冻结配置；本统计仅属于当前指纹，不触发任何版本变更或自动创建 challenger。</p>
+      </aside>
+    </article>)}
+    <p>同名标签可能包含不同冻结配置；每项统计只属于对应指纹，不触发任何版本变更或自动创建 challenger。</p>
   </section>;
 }
 

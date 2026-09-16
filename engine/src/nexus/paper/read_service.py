@@ -205,6 +205,7 @@ class PaperReadService:
         if not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
         account, _ = await self.account()
+        version_history = await self._agent_version_history(account_id=account.id)
         resolved_session = decision_session
         if resolved_session is None:
             resolved_session = await self._current_xnys_session()
@@ -217,9 +218,8 @@ class PaperReadService:
                     cycles=(),
                     historical=False,
                 ),
-                version_observation=await self._agent_version_observation(
-                    account_id=account.id
-                ),
+                version_observation=version_history[0] if version_history else None,
+                version_history=version_history,
             )
         cycles = tuple(
             await self._session.scalars(
@@ -252,15 +252,14 @@ class PaperReadService:
                 completed_count=completed_count,
                 historical=decision_session is not None,
             ),
-            version_observation=await self._agent_version_observation(
-                account_id=account.id
-            ),
+            version_observation=version_history[0] if version_history else None,
+            version_history=version_history,
         )
 
-    async def _agent_version_observation(
+    async def _agent_version_history(
         self, *, account_id: UUID
-    ) -> AgentPaperVersionObservationResponse | None:
-        row = (
+    ) -> tuple[AgentPaperVersionObservationResponse, ...]:
+        rows = (
             await self._session.execute(
                 text(
                     """
@@ -441,39 +440,48 @@ class PaperReadService:
                             WHERE version_count > 1
                         ) AS mixed_cycle_count
                     FROM version_stats
-                    ORDER BY last_decision_at DESC, prompt_version, model_id, model_version
-                    LIMIT 1
+                    ORDER BY
+                        last_decision_at DESC,
+                        prompt_hash,
+                        model_hash,
+                        prompt_version,
+                        model_id,
+                        model_version
+                    LIMIT 20
                     """
                 ),
                 {"account_id": account_id, "cutoff": self._request_time},
             )
-        ).mappings().one_or_none()
-        if row is None:
-            return None
-        if int(row["mixed_cycle_count"]) > 0:
-            return None
-        reason_codes = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
-        if int(row["order_count"]) == 0 or int(row["fill_count"]) == 0:
-            reason_codes.append("VERSION_ORDER_PATH_UNOBSERVED")
-        reason_codes.append("VERSION_CHALLENGER_UNAVAILABLE")
-        return AgentPaperVersionObservationResponse(
-            prompt_version=cast(str, row["prompt_version"]),
-            prompt_hash=cast(str, row["prompt_hash"]),
-            model_id=cast(str, row["model_id"]),
-            model_version=cast(str, row["model_version"]),
-            model_hash=cast(str, row["model_hash"]),
-            first_decision_at=cast(datetime, row["first_decision_at"]),
-            last_decision_at=cast(datetime, row["last_decision_at"]),
-            observed_sessions=int(row["observed_sessions"]),
-            cycle_count=int(row["cycle_count"]),
-            completed_count=int(row["completed_count"]),
-            unavailable_count=int(row["unavailable_count"]),
-            order_count=int(row["order_count"]),
-            fill_count=int(row["fill_count"]),
-            challenger_available=False,
-            verdict="continue_observing",
-            reason_codes=cast(Any, tuple(reason_codes)),
-        )
+        ).mappings().all()
+        if not rows or any(int(row["mixed_cycle_count"]) > 0 for row in rows):
+            return ()
+        observations: list[AgentPaperVersionObservationResponse] = []
+        for row in rows:
+            reason_codes = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+            if int(row["order_count"]) == 0 or int(row["fill_count"]) == 0:
+                reason_codes.append("VERSION_ORDER_PATH_UNOBSERVED")
+            reason_codes.append("VERSION_CHALLENGER_UNAVAILABLE")
+            observations.append(
+                AgentPaperVersionObservationResponse(
+                    prompt_version=cast(str, row["prompt_version"]),
+                    prompt_hash=cast(str, row["prompt_hash"]),
+                    model_id=cast(str, row["model_id"]),
+                    model_version=cast(str, row["model_version"]),
+                    model_hash=cast(str, row["model_hash"]),
+                    first_decision_at=cast(datetime, row["first_decision_at"]),
+                    last_decision_at=cast(datetime, row["last_decision_at"]),
+                    observed_sessions=int(row["observed_sessions"]),
+                    cycle_count=int(row["cycle_count"]),
+                    completed_count=int(row["completed_count"]),
+                    unavailable_count=int(row["unavailable_count"]),
+                    order_count=int(row["order_count"]),
+                    fill_count=int(row["fill_count"]),
+                    challenger_available=False,
+                    verdict="continue_observing",
+                    reason_codes=cast(Any, tuple(reason_codes)),
+                )
+            )
+        return tuple(observations)
 
     async def _agent_session_counts(
         self,
