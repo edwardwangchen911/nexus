@@ -4,21 +4,29 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_research import (
     AGENT_VERSION_CHALLENGER_ACTOR,
     AGENT_VERSION_INCUMBENT_ACTOR,
 )
-from nexus.paper.agent_cycle import start_schwab_agent_paper_cycle
+from nexus.paper.agent_cycle import (
+    resume_schwab_agent_paper_cycle,
+    start_schwab_agent_paper_cycle,
+)
 from nexus.paper.agent_cycle_authority import CycleAuthority
-from nexus.paper.agent_version_models import AgentVersionSlotResult
+from nexus.paper.agent_version_models import (
+    AgentVersionSlotResult,
+    FrozenAgentVersionSelection,
+    agent_version_market_evidence_hash,
+)
 from nexus.paper.models import LedgerEntry, LedgerTransaction
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agent_versions import (
@@ -29,12 +37,14 @@ from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.market import UniverseSnapshot
 from nexus.persistence.models.paper import (
+    AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     PaperAccountRecord,
     PaperDrawdownLockEventRecord,
     PaperLedgerAccountRecord,
     PaperLedgerEntryRecord,
     PaperLedgerTransactionRecord,
+    StrategyDecisionRecord,
 )
 from nexus.risk.canonical import canonical_paper_ledger_transaction_hash
 from nexus.risk.models import PaperPortfolioProjection
@@ -197,6 +207,202 @@ async def advance_agent_version_slot(
     )
 
 
+async def resume_agent_version_slot(
+    session: AsyncSession,
+    *,
+    evaluation_id: UUID,
+    decision_slot_at: datetime,
+    now: datetime,
+) -> AgentVersionSlotResult:
+    """Resume both exact persisted lanes and pair completed decisions without new Jobs."""
+    if (
+        decision_slot_at.tzinfo is None
+        or decision_slot_at.utcoffset() != UTC.utcoffset(decision_slot_at)
+        or now.tzinfo is None
+        or now.utcoffset() != UTC.utcoffset(now)
+        or now < decision_slot_at
+    ):
+        raise ValueError("AGENT_VERSION_SLOT_INVALID")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-version-evaluation:{evaluation_id}"},
+    )
+    evaluation = await session.get(
+        AgentVersionEvaluationRecord,
+        evaluation_id,
+        populate_existing=True,
+    )
+    if evaluation is None:
+        raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    phase = _phase(evaluation, decision_slot_at)
+    existing_pair = await _pair(session, evaluation.id, decision_slot_at)
+    if existing_pair is not None:
+        return _paired_result(existing_pair, phase=phase, replayed=True)
+    cycles = await _slot_cycles(session, evaluation=evaluation, slot=decision_slot_at)
+    if cycles is None:
+        return _incomparable(
+            evaluation=evaluation,
+            decision_slot_at=decision_slot_at,
+            phase=phase,
+            replayed=True,
+            reason_code="PAIR_CYCLES_UNAVAILABLE",
+        )
+    incumbent_run_id = await _cycle_run_id(session, cycles[0].id)
+    challenger_run_id = await _cycle_run_id(session, cycles[1].id)
+    if incumbent_run_id is None or challenger_run_id is None:
+        return _incomparable(
+            evaluation=evaluation,
+            decision_slot_at=decision_slot_at,
+            phase=phase,
+            replayed=True,
+            reason_code="PAIR_RUN_BINDING_INVALID",
+        )
+    try:
+        await _validate_prepared_pair(
+            session,
+            evaluation=evaluation,
+            incumbent_cycle_id=cycles[0].id,
+            challenger_cycle_id=cycles[1].id,
+            incumbent_run_id=incumbent_run_id,
+            challenger_run_id=challenger_run_id,
+        )
+    except _PairPreparationUnavailable:
+        return _incomparable(
+            evaluation=evaluation,
+            decision_slot_at=decision_slot_at,
+            phase=phase,
+            replayed=True,
+            reason_code="PAIR_EVIDENCE_MISMATCH",
+        )
+    incumbent = await resume_schwab_agent_paper_cycle(
+        session,
+        cycle_id=cycles[0].id,
+        idempotency_key=f"agent-version:{evaluation.id}:incumbent:resume",
+    )
+    challenger = await resume_schwab_agent_paper_cycle(
+        session,
+        cycle_id=cycles[1].id,
+        idempotency_key=f"agent-version:{evaluation.id}:challenger:resume",
+    )
+    terminal_failure = {"unavailable", "failed"}
+    if incumbent.status in terminal_failure or challenger.status in terminal_failure:
+        return _incomparable(
+            evaluation=evaluation,
+            decision_slot_at=decision_slot_at,
+            phase=phase,
+            replayed=incumbent.replayed and challenger.replayed,
+            reason_code="PAIR_LANE_TERMINAL_FAILURE",
+        )
+    decisions = tuple(
+        await session.scalars(
+            select(StrategyDecisionRecord).where(
+                StrategyDecisionRecord.agent_paper_cycle_id.in_((cycles[0].id, cycles[1].id))
+            )
+        )
+    )
+    decision_by_cycle = {row.agent_paper_cycle_id: row for row in decisions}
+    if set(decision_by_cycle) != {cycles[0].id, cycles[1].id}:
+        return AgentVersionSlotResult(
+            evaluation_id=evaluation.id,
+            decision_slot_at=decision_slot_at,
+            phase=phase,
+            incumbent_cycle_id=cycles[0].id,
+            challenger_cycle_id=cycles[1].id,
+            incumbent_run_id=incumbent_run_id,
+            challenger_run_id=challenger_run_id,
+            status="running",
+            reason_code="PAIR_OUTPUTS_PENDING",
+            replayed=incumbent.replayed and challenger.replayed,
+        )
+    if not await _previous_slot_is_paired(
+        session,
+        evaluation=evaluation,
+        decision_slot_at=decision_slot_at,
+    ):
+        return _incomparable(
+            evaluation=evaluation,
+            decision_slot_at=decision_slot_at,
+            phase=phase,
+            replayed=True,
+            reason_code="PAIR_PREVIOUS_SLOT_INCOMPLETE",
+        )
+    incumbent_decision = decision_by_cycle[cycles[0].id]
+    challenger_decision = decision_by_cycle[cycles[1].id]
+    starting_projection_hash = _hash(
+        "agent_version_starting_projection_pair_v1|"
+        f"{incumbent_decision.portfolio_projection_hash}|"
+        f"{challenger_decision.portfolio_projection_hash}"
+    )
+    market_evidence_hash = agent_version_market_evidence_hash(cycles[0].candidate_hash)
+    pair_hash = _pair_hash(
+        evaluation_id=evaluation.id,
+        phase=phase,
+        decision_slot_at=decision_slot_at,
+        incumbent_cycle_id=cycles[0].id,
+        challenger_cycle_id=cycles[1].id,
+        incumbent_run_id=incumbent_run_id,
+        challenger_run_id=challenger_run_id,
+        market_evidence_hash=market_evidence_hash,
+        starting_projection_hash=starting_projection_hash,
+    )
+    pair = AgentVersionCyclePairRecord(
+        id=new_uuid7(),
+        evaluation_id=evaluation.id,
+        phase=phase,
+        decision_slot_at=decision_slot_at,
+        incumbent_cycle_id=cycles[0].id,
+        challenger_cycle_id=cycles[1].id,
+        incumbent_run_id=incumbent_run_id,
+        challenger_run_id=challenger_run_id,
+        market_evidence_hash=market_evidence_hash,
+        starting_projection_hash=starting_projection_hash,
+        pair_hash=pair_hash,
+    )
+    session.add(pair)
+    await session.flush()
+    return _paired_result(pair, phase=phase, replayed=False)
+
+
+async def resolve_internal_agent_version_source(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    decision_slot_at: datetime,
+) -> FrozenAgentVersionSelection:
+    """Resolve the exact immutable source run for one evaluation lane."""
+    evaluation = await session.scalar(
+        select(AgentVersionEvaluationRecord).where(
+            (AgentVersionEvaluationRecord.incumbent_account_id == account_id)
+            | (AgentVersionEvaluationRecord.challenger_account_id == account_id)
+        )
+    )
+    if evaluation is None:
+        raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    run_id: UUID | None
+    if account_id == evaluation.incumbent_account_id:
+        run_id = evaluation.incumbent_version_source_run_id
+    else:
+        run_id = await session.scalar(
+            select(AgentVersionCyclePairRecord.challenger_run_id)
+            .where(
+                AgentVersionCyclePairRecord.evaluation_id == evaluation.id,
+                AgentVersionCyclePairRecord.decision_slot_at < decision_slot_at,
+            )
+            .order_by(AgentVersionCyclePairRecord.decision_slot_at.desc())
+            .limit(1)
+        )
+        if run_id is None:
+            raise ValueError("AGENT_VERSION_SOURCE_UNAVAILABLE")
+    run = await session.get(AgentResearchRunRecord, run_id)
+    if run is None:
+        raise ValueError("AGENT_VERSION_SOURCE_UNAVAILABLE")
+    return FrozenAgentVersionSelection(
+        source_run_id=run.id,
+        prompt_hash=run.prompt_hash,
+        model_hash=run.model_hash,
+    )
+
+
 def _phase(
     evaluation: AgentVersionEvaluationRecord, slot: datetime
 ) -> Literal["train", "oos"]:
@@ -222,6 +428,136 @@ def _incomparable(
         status="incomparable",
         reason_code=reason_code,
         replayed=replayed,
+    )
+
+
+async def _pair(
+    session: AsyncSession, evaluation_id: UUID, slot: datetime
+) -> AgentVersionCyclePairRecord | None:
+    return cast(
+        AgentVersionCyclePairRecord | None,
+        await session.scalar(
+            select(AgentVersionCyclePairRecord).where(
+                AgentVersionCyclePairRecord.evaluation_id == evaluation_id,
+                AgentVersionCyclePairRecord.decision_slot_at == slot,
+            )
+        )
+    )
+
+
+def _paired_result(
+    pair: AgentVersionCyclePairRecord,
+    *,
+    phase: Literal["train", "oos"],
+    replayed: bool,
+) -> AgentVersionSlotResult:
+    return AgentVersionSlotResult(
+        evaluation_id=pair.evaluation_id,
+        decision_slot_at=pair.decision_slot_at,
+        phase=phase,
+        incumbent_cycle_id=pair.incumbent_cycle_id,
+        challenger_cycle_id=pair.challenger_cycle_id,
+        incumbent_run_id=pair.incumbent_run_id,
+        challenger_run_id=pair.challenger_run_id,
+        status="paired",
+        reason_code="PAIR_RECORDED",
+        replayed=replayed,
+    )
+
+
+async def _slot_cycles(
+    session: AsyncSession,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+    slot: datetime,
+) -> tuple[AgentPaperCycleRecord, AgentPaperCycleRecord] | None:
+    rows = tuple(
+        await session.scalars(
+            select(AgentPaperCycleRecord).where(
+                AgentPaperCycleRecord.account_id.in_(
+                    (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+                ),
+                AgentPaperCycleRecord.decision_slot_at == slot,
+            )
+        )
+    )
+    by_account = {row.account_id: row for row in rows}
+    if set(by_account) != {
+        evaluation.incumbent_account_id,
+        evaluation.challenger_account_id,
+    }:
+        return None
+    return (
+        by_account[evaluation.incumbent_account_id],
+        by_account[evaluation.challenger_account_id],
+    )
+
+
+async def _cycle_run_id(session: AsyncSession, cycle_id: UUID) -> UUID | None:
+    events = tuple(
+        await session.scalars(
+            select(AgentPaperCycleEventRecord)
+            .where(AgentPaperCycleEventRecord.cycle_id == cycle_id)
+            .order_by(AgentPaperCycleEventRecord.sequence)
+        )
+    )
+    run_ids: list[UUID] = []
+    for event in events:
+        values = event.fact_ids.get("research_run_ids")
+        if isinstance(values, list):
+            try:
+                run_ids.extend(UUID(value) for value in values if isinstance(value, str))
+            except ValueError:
+                return None
+    unique = tuple(dict.fromkeys(run_ids))
+    return unique[0] if len(unique) == 1 else None
+
+
+async def _previous_slot_is_paired(
+    session: AsyncSession,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+    decision_slot_at: datetime,
+) -> bool:
+    slots = tuple(evaluation.train_slots) + tuple(evaluation.oos_slots)
+    try:
+        index = slots.index(decision_slot_at)
+    except ValueError:
+        return False
+    if index == 0:
+        return True
+    return (
+        await _pair(session, evaluation.id, slots[index - 1])
+    ) is not None
+
+
+def _pair_hash(
+    *,
+    evaluation_id: UUID,
+    phase: Literal["train", "oos"],
+    decision_slot_at: datetime,
+    incumbent_cycle_id: UUID,
+    challenger_cycle_id: UUID,
+    incumbent_run_id: UUID,
+    challenger_run_id: UUID,
+    market_evidence_hash: str,
+    starting_projection_hash: str,
+) -> str:
+    return _hash(
+        canonical_json(
+            {
+                "schema": "agent_version_cycle_pair_v1",
+                "evaluation_id": str(evaluation_id),
+                "phase": phase,
+                "decision_slot_at": decision_slot_at.astimezone(UTC).isoformat(),
+                "incumbent_cycle_id": str(incumbent_cycle_id),
+                "challenger_cycle_id": str(challenger_cycle_id),
+                "incumbent_run_id": str(incumbent_run_id),
+                "challenger_run_id": str(challenger_run_id),
+                "market_evidence_hash": market_evidence_hash,
+                "starting_projection_hash": starting_projection_hash,
+            }
+        )
     )
 
 

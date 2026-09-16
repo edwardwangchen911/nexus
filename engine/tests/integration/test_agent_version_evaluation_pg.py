@@ -19,7 +19,11 @@ from nexus.paper.agent_version_models import (
     AgentVersionEvaluationRegistration,
     AgentVersionEvaluationRequest,
 )
-from nexus.paper.agent_version_runner import advance_agent_version_slot
+from nexus.paper.agent_version_runner import (
+    advance_agent_version_slot,
+    resolve_internal_agent_version_source,
+    resume_agent_version_slot,
+)
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
 from nexus.persistence.models.agents import (
@@ -492,6 +496,29 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
         assert replay.model_copy(update={"replayed": False}) == first
         assert replay.replayed is True
         assert replay_counts == {**counts, "cycles": 0, "jobs": 0, "orders": 0}
+
+        async with factory.begin() as session:
+            resumed = await resume_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=slot,
+                now=slot,
+            )
+            incumbent_source = await resolve_internal_agent_version_source(
+                session,
+                account_id=registration.incumbent_account_id,
+                decision_slot_at=slot,
+            )
+            with pytest.raises(ValueError, match="AGENT_VERSION_SOURCE_UNAVAILABLE"):
+                await resolve_internal_agent_version_source(
+                    session,
+                    account_id=registration.challenger_account_id,
+                    decision_slot_at=slot,
+                )
+        assert resumed.status == "incomparable"
+        assert resumed.reason_code == "PAIR_CYCLES_UNAVAILABLE"
+        assert resumed.replayed is True
+        assert incumbent_source.source_run_id == INCUMBENT_RUN_ID
     finally:
         await engine.dispose()
 
