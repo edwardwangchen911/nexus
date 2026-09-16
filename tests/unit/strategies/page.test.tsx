@@ -117,6 +117,42 @@ describe("strategy evolution workbench", () => {
     expect(screen.getByText(/不使用浏览器默认值/)).not.toHaveTextContent(/权威|门禁|Shadow/);
   });
 
+  it("keeps the verified champion and registry history visible before the first experiment", () => {
+    renderPanel("empty", {
+      overview: {
+        ...overview,
+        status: "empty",
+        active_family: null,
+        experiments: [],
+        experiment_start_enabled: false,
+        experiment_start_reason: "LINEAGE_AUTHORITY_INCOMPLETE",
+      },
+      detail: null,
+      etag: '"g1-v1"',
+    });
+
+    expect(screen.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "冠军历史" })).toBeVisible();
+    expect(screen.getByText("当前没有活动实验组；Agent 不会为空证据生成默认候选。")).toBeVisible();
+    expect(screen.getByText(
+      "暂不能启动实验：缺少已核验的研究版本来源，暂不能生成策略实验（LINEAGE_AUTHORITY_INCOMPLETE）",
+    )).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "策略进化证据暂不可用" })).not.toBeInTheDocument();
+
+    const start = screen.getByRole("button", { name: "启动实验" });
+    const pause = screen.getByRole("button", { name: "暂停自动晋级" });
+    const rollback = screen.getByRole("button", { name: "回滚上一个冠军" });
+    expect(start).toBeDisabled();
+    expect(pause).toBeDisabled();
+    expect(rollback).toBeDisabled();
+    fireEvent.click(start);
+    fireEvent.click(pause);
+    fireEvent.click(rollback);
+    expect(callbacks.onStartExperiment).not.toHaveBeenCalled();
+    expect(callbacks.onControlRegistry).not.toHaveBeenCalled();
+    expect(callbacks.onRollbackRegistry).not.toHaveBeenCalled();
+  });
+
   it.each(["partial", "stale"] as const)("disables every mutation when evidence is %s", (state) => {
     renderPanel(state);
     for (const button of screen.getAllByRole("button")) {

@@ -37,6 +37,7 @@ export function statusLabel(value: string | null | undefined): string {
 
 const reasons: Record<string, string> = {
   ACTIVE_FAMILY_EXISTS: "已有实验组正在进行，请先查看当前实验",
+  LINEAGE_AUTHORITY_INCOMPLETE: "缺少已核验的研究版本来源，暂不能生成策略实验",
   REGISTRY_AUTHORITY_INVALID: "策略登记记录未通过核验",
   EXPERIMENT_PROJECTION_INVALID: "实验记录未通过核验",
   PROVIDER_UNAVAILABLE: "数据源暂不可用",

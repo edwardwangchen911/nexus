@@ -313,7 +313,7 @@ export function StrategiesPanel(props: Props): React.ReactElement {
   const rollbackDialogRef = useRef<HTMLDialogElement>(null);
   const rollbackConfirmRef = useRef<HTMLButtonElement>(null);
   const restoreRollbackFocusAfterActionRef = useRef(false);
-  const hasEvidence = overview !== null && ["ready", "partial", "stale"].includes(state);
+  const hasEvidence = overview !== null && ["empty", "ready", "partial", "stale"].includes(state);
   const canWrite = state === "ready" && Boolean(etag) && overview?.write_enabled === true && busyAction === null && !unknownResult;
 
   useEffect(() => {
