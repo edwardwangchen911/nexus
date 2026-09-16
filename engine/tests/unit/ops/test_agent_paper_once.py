@@ -453,11 +453,16 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     )
 
     async def root(*_args, **_kwargs):
+        assert _kwargs["expected_calendar_authority_id"] == authority.calendar_authority_id
         root_number = events.count("root")
         events.append("root")
         return authority.model_copy(
             update={"decision_time": initial if root_number == 0 else frozen}
         )
+
+    async def select_calendar(*_args, **_kwargs):
+        events.append("select-calendar")
+        return SimpleNamespace(calendar_authority_id=authority.calendar_authority_id)
 
     async def scope(*_args, **_kwargs):
         events.append("scope")
@@ -493,6 +498,11 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         )
 
     monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", root)
+    monkeypatch.setattr(
+        cli,
+        "select_agent_paper_service_calendar_authority",
+        select_calendar,
+    )
     monkeypatch.setattr(cli, "inspect_query_authority_scope", scope)
     monkeypatch.setattr(cli, "collect_source_proofs", risk)
     monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", level_one)
@@ -526,6 +536,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     assert result.cycle_id == cycle_id
     assert events == [
         "clock-1",
+        "select-calendar",
         "root",
         "scope",
         "risk-action-delisting-halt",
@@ -541,6 +552,15 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         raise cli.ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY")
 
     monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", rejected_level_one)
+
+    async def forbidden_calendar_reselection(*_args, **_kwargs):
+        raise AssertionError("service-bound calendar authority must not be reselected")
+
+    monkeypatch.setattr(
+        cli,
+        "select_agent_paper_service_calendar_authority",
+        forbidden_calendar_reselection,
+    )
     failed_request = AgentPaperTriggerRequest(
         action="trigger", account_id=account_id, idempotency_key="trigger-failure"
     )
@@ -554,6 +574,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
                 reservation=reservation,
                 repo_root=tmp_path,
                 client=object(),
+                expected_calendar_authority_id=authority.calendar_authority_id,
             )
         )
     digest = cli.sha256(failed_request.idempotency_key.encode()).hexdigest()[:16]
@@ -599,6 +620,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
                     reservation=reservation,
                     repo_root=tmp_path,
                     client=object(),
+                    expected_calendar_authority_id=authority.calendar_authority_id,
                 )
             )
         attempt = cli.sha256(request.idempotency_key.encode()).hexdigest()[:16]

@@ -38,7 +38,10 @@ from nexus.paper.agent_cycle import (
     resume_schwab_agent_paper_cycle,
     start_schwab_agent_paper_cycle,
 )
-from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
+from nexus.paper.agent_cycle_authority import (
+    load_quasi_realtime_cycle_authority,
+    select_agent_paper_service_calendar_authority,
+)
 from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
 from nexus.paper.agent_market import (
     PaperMarketWindowResult,
@@ -315,6 +318,7 @@ async def trigger_in_session(
     reservation: AgentPaperTriggerReservation,
     repo_root: Path,
     client: httpx.AsyncClient,
+    expected_calendar_authority_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Run one bounded provider pass, freeze DB time, and create one research Job."""
     initial_time = await session.scalar(select(func.clock_timestamp()))
@@ -328,8 +332,23 @@ async def trigger_in_session(
     if local_time.date() != decision_session:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
 
+    selected = (
+        await select_agent_paper_service_calendar_authority(session, now=initial_time)
+        if expected_calendar_authority_id is None
+        else None
+    )
+    calendar_authority_id = (
+        selected.calendar_authority_id
+        if selected is not None
+        else expected_calendar_authority_id
+    )
+    assert calendar_authority_id is not None
+
     initial_authority = await load_quasi_realtime_cycle_authority(
-        session, account_id=request.account_id, now=initial_time
+        session,
+        account_id=request.account_id,
+        now=initial_time,
+        expected_calendar_authority_id=calendar_authority_id,
     )
     scope = await inspect_query_authority_scope(
         session,
@@ -394,7 +413,10 @@ async def trigger_in_session(
     except ValueError as error:
         raise ValueError("RISK_INPUT_REQUIRED") from error
     authority = await load_quasi_realtime_cycle_authority(
-        session, account_id=request.account_id, now=decision_time
+        session,
+        account_id=request.account_id,
+        now=decision_time,
+        expected_calendar_authority_id=calendar_authority_id,
     )
     return await start_schwab_agent_paper_cycle(
         session,
@@ -410,6 +432,7 @@ async def trigger_once(
     request: AgentPaperTriggerRequest,
     *,
     repo_root: Path,
+    expected_calendar_authority_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     _validate_local_database(settings.database_url)
     endpoint = urlsplit(settings.object_store_endpoint or "")
@@ -456,6 +479,7 @@ async def trigger_once(
                     reservation=reservation,
                     repo_root=repo_root,
                     client=client,
+                    expected_calendar_authority_id=expected_calendar_authority_id,
                 )
                 await finish_schwab_agent_paper_trigger(
                     session, reservation=reservation, result=result

@@ -49,7 +49,10 @@ from nexus.ops.fred_local import validate_local_import
 from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest
 from nexus.ops.paper_once import run_once as run_paper_once
-from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
+from nexus.paper.agent_cycle_authority import (
+    load_quasi_realtime_cycle_authority,
+    select_agent_paper_service_calendar_authority,
+)
 from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.agent_market import resolve_agent_paper_market_scope
 from nexus.paper.errors import PaperPerformanceError
@@ -447,8 +450,12 @@ async def _inspect_prior_daily_scope(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
+            selected = await select_agent_paper_service_calendar_authority(session, now=now)
             authority = await load_quasi_realtime_cycle_authority(
-                session, account_id=account_id, now=now
+                session,
+                account_id=account_id,
+                now=now,
+                expected_calendar_authority_id=selected.calendar_authority_id,
             )
             scope = await inspect_query_authority_scope(
                 session,
