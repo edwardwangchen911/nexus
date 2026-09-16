@@ -146,7 +146,6 @@ services:
       - type: bind
         source: ../.secrets/nexus-schwab-local
         target: /app/.secrets/nexus-schwab-local
-        read_only: true
       - type: bind
         source: ../.secrets/nexus-agent-paper
         target: /app/.secrets/nexus-agent-paper

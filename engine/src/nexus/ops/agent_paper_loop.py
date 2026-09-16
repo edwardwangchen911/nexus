@@ -260,11 +260,26 @@ def _agent_paper_output_directory_valid(repo_root: Path) -> bool:
         return False
 
 
+def _schwab_token_store_writable(repo_root: Path) -> bool:
+    directory = repo_root.resolve() / ".secrets" / "nexus-schwab-local"
+    try:
+        filesystem = os.statvfs(directory)
+        return (
+            directory.is_dir()
+            and not directory.is_symlink()
+            and not filesystem.f_flag & os.ST_RDONLY
+            and os.access(directory, os.W_OK | os.X_OK)
+        )
+    except OSError:
+        return False
+
+
 def agent_paper_service_preflight(
     environment: Mapping[str, str], *, repo_root: Path, now: datetime | None = None
 ) -> dict[str, object]:
     """Validate local service prerequisites without network or persistence access."""
     blocking_codes: set[str] = set()
+    optional_codes: list[str] = []
     requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
     requested_normalized = requested.strip().lower()
     if requested_normalized in {"", "0", "false", "no", "off"}:
@@ -301,17 +316,21 @@ def agent_paper_service_preflight(
         blocking_codes.add("AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID")
     try:
         token = load_schwab_token(repo_root)
+        if not _schwab_token_store_writable(repo_root):
+            blocking_codes.add("AGENT_PAPER_SCHWAB_TOKEN_STORE_READ_ONLY")
         require_live_schwab_access_token(token, now=now)
     except SchwabOAuthError as error:
         code = str(error)
-        blocking_codes.add(
-            code if code in _SAFE_SCHWAB_PREFLIGHT_CODES else "AGENT_PAPER_SCHWAB_TOKEN_INVALID"
-        )
+        if code == "SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED":
+            optional_codes.append("SCHWAB_OAUTH_ACCESS_TOKEN_REFRESH_REQUIRED")
+        else:
+            blocking_codes.add(
+                code if code in _SAFE_SCHWAB_PREFLIGHT_CODES else "AGENT_PAPER_SCHWAB_TOKEN_INVALID"
+            )
     except OSError:
         blocking_codes.add("AGENT_PAPER_SCHWAB_TOKEN_INVALID")
     if not _agent_paper_output_directory_valid(repo_root):
         blocking_codes.add("AGENT_PAPER_OUTPUT_DIRECTORY_INVALID")
-    optional_codes = []
     if not _nonempty_environment_values(environment, ("FRED_API_KEY",)):
         optional_codes.append("AGENT_PAPER_FRED_OPTIONAL_UNCONFIGURED")
     return {

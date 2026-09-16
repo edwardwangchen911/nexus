@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import json
 import os
 import secrets
 import stat
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +29,7 @@ _USER_PREFERENCE_URL = "https://api.schwabapi.com/trader/v1/userPreference"
 _MAX_TOKEN_RESPONSE_BYTES = 256 * 1024
 _TOKEN_SCHEMA = "nexus_schwab_oauth_token_v1"
 _MAX_TOKEN_FILE_BYTES = 32 * 1024
+_TOKEN_REFRESH_LOCK = ".refresh.lock"
 
 
 class SchwabOAuthError(ValueError):
@@ -61,9 +65,7 @@ def load_schwab_app_config(
     """Load static app credentials from the ignored project configuration."""
     values = {
         name: value
-        for name, value in dotenv_values(
-            repo_root.resolve() / "infra" / ".env.local"
-        ).items()
+        for name, value in dotenv_values(repo_root.resolve() / "infra" / ".env.local").items()
         if isinstance(value, str) and value
     }
     values.update({name: value for name, value in process_environment.items() if value})
@@ -78,9 +80,7 @@ def load_schwab_app_config(
 
 
 def build_schwab_authorization_url(config: SchwabAppConfig) -> str:
-    query = urlencode(
-        {"client_id": config.app_key, "redirect_uri": config.callback_url}
-    )
+    query = urlencode({"client_id": config.app_key, "redirect_uri": config.callback_url})
     return f"https://api.schwabapi.com/v1/oauth/authorize?{query}"
 
 
@@ -333,6 +333,73 @@ def require_live_schwab_access_token(
     return token.access_token
 
 
+@asynccontextmanager
+async def _exclusive_schwab_token_refresh(repo_root: Path) -> AsyncIterator[None]:
+    directory = repo_root.resolve() / ".secrets" / "nexus-schwab-local"
+    path = directory / _TOKEN_REFRESH_LOCK
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+            0o600,
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.geteuid()
+        ):
+            raise SchwabOAuthError("SCHWAB_OAUTH_TOKEN_STORE_INVALID")
+        await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_EX)
+        yield
+    except OSError:
+        raise SchwabOAuthError("SCHWAB_OAUTH_TOKEN_STORE_INVALID") from None
+    finally:
+        if descriptor is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+async def load_or_refresh_schwab_token(
+    repo_root: Path,
+    client: httpx.AsyncClient,
+    *,
+    process_environment: Mapping[str, str],
+    now: datetime,
+    refresh_window: timedelta,
+    force: bool = False,
+) -> SchwabOAuthToken:
+    """Refresh at most once under a cross-process lock and return the current token."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise SchwabOAuthError("SCHWAB_OAUTH_TIME_INVALID")
+    token = load_schwab_token(repo_root)
+    if not force and token.expires_at - now > refresh_window:
+        return token
+    async with _exclusive_schwab_token_refresh(repo_root):
+        token = load_schwab_token(repo_root)
+        if not force and token.expires_at - now > refresh_window:
+            return token
+        config = load_schwab_app_config(repo_root, process_environment)
+
+        async def refresh_and_commit() -> SchwabOAuthToken:
+            refreshed = await refresh_schwab_access_token(config, token, client, now=now)
+            save_schwab_token(repo_root, refreshed)
+            return refreshed
+
+        commit = asyncio.create_task(refresh_and_commit())
+        try:
+            return await asyncio.shield(commit)
+        except asyncio.CancelledError:
+            try:
+                await commit
+            except Exception:
+                pass
+            raise
+
+
 async def fetch_schwab_stream_preferences(
     token: SchwabOAuthToken,
     client: httpx.AsyncClient,
@@ -360,9 +427,7 @@ async def fetch_schwab_stream_preferences(
     except httpx.HTTPError:
         raise SchwabOAuthError("SCHWAB_USER_PREFERENCE_REQUEST_FAILED") from None
     if response.status_code != 200:
-        raise SchwabOAuthError(
-            f"SCHWAB_USER_PREFERENCE_HTTP_{response.status_code}"
-        )
+        raise SchwabOAuthError(f"SCHWAB_USER_PREFERENCE_HTTP_{response.status_code}")
     if len(response.content) > _MAX_TOKEN_RESPONSE_BYTES:
         raise SchwabOAuthError("SCHWAB_USER_PREFERENCE_RESPONSE_INVALID")
     try:

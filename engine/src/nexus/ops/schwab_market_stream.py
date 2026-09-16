@@ -47,10 +47,9 @@ from nexus.providers.market.schwab_oauth import (
     build_schwab_authorization_url,
     exchange_schwab_authorization_code,
     fetch_schwab_stream_preferences,
+    load_or_refresh_schwab_token,
     load_schwab_app_config,
-    load_schwab_token,
     parse_schwab_callback,
-    refresh_schwab_access_token,
     save_schwab_token,
 )
 from nexus.providers.market.schwab_stream import (
@@ -170,9 +169,7 @@ async def authorize_schwab(
     config = load_schwab_app_config(repo_root, process_environment or {})
     if not opener(build_schwab_authorization_url(config)):
         raise ProviderMarketStreamError("SCHWAB_OAUTH_BROWSER_OPEN_FAILED")
-    callback = callback_reader(
-        "完成嘉信授权后，粘贴浏览器地址栏中的完整回调 URL："
-    )
+    callback = callback_reader("完成嘉信授权后，粘贴浏览器地址栏中的完整回调 URL：")
     code = parse_schwab_callback(config, callback)
     token = await exchange_schwab_authorization_code(config, code, client, now=now)
     token_path = save_schwab_token(repo_root, token)
@@ -191,19 +188,17 @@ async def run_schwab_stream(
     collector: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    token = load_schwab_token(arguments.repo_root)
     checked_at = now or datetime.now(UTC)
     if checked_at.tzinfo is None or checked_at.utcoffset() is None:
         raise SchwabOAuthError("SCHWAB_OAUTH_TIME_INVALID")
-    if token.expires_at - checked_at <= TOKEN_REFRESH_WINDOW:
-        config = load_schwab_app_config(arguments.repo_root, {})
-        token = await refresh_schwab_access_token(
-            config, token, client, now=checked_at
-        )
-        save_schwab_token(arguments.repo_root, token)
-    streamer_url, credentials = await fetch_schwab_stream_preferences(
-        token, client, now=checked_at
+    token = await load_or_refresh_schwab_token(
+        arguments.repo_root,
+        client,
+        process_environment=os.environ,
+        now=checked_at,
+        refresh_window=TOKEN_REFRESH_WINDOW,
     )
+    streamer_url, credentials = await fetch_schwab_stream_preferences(token, client, now=checked_at)
     collect = collector or collect_schwab_stream
     return await collect(
         symbols=tuple(arguments.symbol),
@@ -222,10 +217,16 @@ async def refresh_schwab(
     process_environment: Mapping[str, str] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    config = load_schwab_app_config(repo_root, process_environment or {})
-    token = load_schwab_token(repo_root)
-    refreshed = await refresh_schwab_access_token(config, token, client, now=now)
-    token_path = save_schwab_token(repo_root, refreshed)
+    checked_at = now or datetime.now(UTC)
+    refreshed = await load_or_refresh_schwab_token(
+        repo_root,
+        client,
+        process_environment=process_environment or {},
+        now=checked_at,
+        refresh_window=TOKEN_REFRESH_WINDOW,
+        force=True,
+    )
+    token_path = repo_root.resolve() / ".secrets" / "nexus-schwab-local" / "tokens.json"
     return {
         "status": "refreshed",
         "token_path": str(token_path),
@@ -932,14 +933,10 @@ async def import_schwab_market_stream(
     )
     by_symbol = {instrument_id: symbol for symbol, instrument_id in bindings.items()}
     quote_ids = {
-        by_symbol[row.instrument_id]: row.id
-        for row in observations
-        if row.event_kind == "quote"
+        by_symbol[row.instrument_id]: row.id for row in observations if row.event_kind == "quote"
     }
     trade_ids = {
-        by_symbol[row.instrument_id]: row.id
-        for row in observations
-        if row.event_kind == "trade"
+        by_symbol[row.instrument_id]: row.id for row in observations if row.event_kind == "trade"
     }
     expected_quote_symbols = {
         symbol

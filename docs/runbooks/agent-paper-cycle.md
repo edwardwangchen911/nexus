@@ -271,10 +271,13 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml \
 预检只读取本地配置、受保护 token 文件和私有目录权限，不连接数据库、不请求券商、不调用模型；
 它一次返回全部固定阻塞码，`status=ready` 才允许进入启动步骤。输出中的
 `execution_locked=true` 不代表会解锁交易，`external_requests=0` 表示本次预检没有外部调用。
-FRED 未配置只作为可选提示，其他必需项缺失均 fail closed。
+FRED 未配置只作为可选提示；Schwab access token 已过期时提示首次行情请求需要刷新，其他必需项
+缺失均 fail closed。行情请求发现 token 已过期或将在五分钟内到期时，只调用一次既有 refresh
+端点；成功后原子替换私密文件并继续，失败则保留旧文件、不重试且不请求 K 线。
 
 先在 `infra/.env.local` 明确配置账户 ID、当前 Mac 的非秘密 UID/GID，并保持功能开关为 true；模型
-运行固定使用现有 Responses worker，动态 Schwab token 目录只读挂载，循环自己的诊断目录可写。
+运行固定使用现有 Responses worker；仅动态 Schwab token 目录和循环自己的诊断目录可写，前者只用于
+一次刷新后的原子替换。预检发现 token 挂载只读时拒绝启动。
 容器退出后先读取数据库终态和日志中的固定错误码，不直接重启。回滚只需将开关恢复为 false，并
 停止 `agent-paper-loop` 服务；不会删除或改写 cycle、Job、Output、订单、成交、账本和心跳事实。
 

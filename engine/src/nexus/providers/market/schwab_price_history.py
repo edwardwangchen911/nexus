@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -18,13 +19,14 @@ from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpReque
 from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.alpaca_http import InstrumentSymbolResolver
 from nexus.providers.market.schwab_oauth import (
-    load_schwab_token,
+    load_or_refresh_schwab_token,
     require_live_schwab_access_token,
 )
 
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 _NEW_YORK = ZoneInfo("America/New_York")
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_TOKEN_REFRESH_WINDOW = timedelta(minutes=5)
 
 
 class SchwabPriceHistoryProvider:
@@ -39,6 +41,7 @@ class SchwabPriceHistoryProvider:
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._repo_root = repo_root
+        self._client = client
         self._symbol_resolver = symbol_resolver
         self._now = now or (lambda: datetime.now(UTC))
         self._http = FixedOriginHttpClient(
@@ -65,9 +68,14 @@ class SchwabPriceHistoryProvider:
             raise MarketProviderPayloadError("SCHWAB_PRICE_HISTORY_RANGE_INVALID")
 
         checked_at = require_utc(self._now())
-        access_token = require_live_schwab_access_token(
-            load_schwab_token(self._repo_root), now=checked_at
+        token = await load_or_refresh_schwab_token(
+            self._repo_root,
+            self._client,
+            process_environment=os.environ,
+            now=checked_at,
+            refresh_window=_TOKEN_REFRESH_WINDOW,
         )
+        access_token = require_live_schwab_access_token(token, now=checked_at)
         symbol = await self._symbol_resolver.resolve(
             request.instrument_id, request.end.astimezone(_NEW_YORK).date()
         )
@@ -183,9 +191,7 @@ def _decimal(value: object, field: str) -> Decimal:
     try:
         result = value if isinstance(value, Decimal) else Decimal(value)
     except InvalidOperation:
-        raise MarketProviderPayloadError(
-            f"SCHWAB_PRICE_HISTORY_{field.upper()}_INVALID"
-        ) from None
+        raise MarketProviderPayloadError(f"SCHWAB_PRICE_HISTORY_{field.upper()}_INVALID") from None
     if not result.is_finite():
         raise MarketProviderPayloadError(f"SCHWAB_PRICE_HISTORY_{field.upper()}_INVALID")
     return result

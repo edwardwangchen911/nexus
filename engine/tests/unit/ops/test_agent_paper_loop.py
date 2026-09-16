@@ -752,6 +752,7 @@ def test_service_preflight_accepts_complete_local_configuration(
         "require_live_schwab_access_token",
         lambda *_args, **_kwargs: "access-token-canary",
     )
+    monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
     environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
 
     assert loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW) == {
@@ -777,6 +778,7 @@ def test_service_preflight_rejects_runtime_configuration_startup_would_reject(
         "require_live_schwab_access_token",
         lambda *_args, **_kwargs: "access-token-canary",
     )
+    monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
     environment = service_ready_environment() | {
         "AGENT_DAILY_BUDGET_USD": "0",
         "FRED_API_KEY": "fred-secret",
@@ -786,6 +788,59 @@ def test_service_preflight_rejects_runtime_configuration_startup_would_reject(
 
     assert result["status"] == "blocked"
     assert result["blocking_codes"] == ["AGENT_PAPER_RUNTIME_CONFIG_INVALID"]
+
+
+def test_service_preflight_treats_expired_access_token_as_refreshable_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    output_directory = tmp_path / ".secrets" / "nexus-agent-paper"
+    output_directory.mkdir(parents=True, mode=0o700)
+    output_directory.chmod(0o700)
+    monkeypatch.setattr(loop, "load_schwab_app_config", lambda *_args: object())
+    monkeypatch.setattr(loop, "load_schwab_token", lambda *_args: object())
+    monkeypatch.setattr(
+        loop,
+        "require_live_schwab_access_token",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            loop.SchwabOAuthError("SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED")
+        ),
+    )
+    monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
+    environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
+
+    result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
+
+    assert result == {
+        "status": "ready",
+        "execution_locked": True,
+        "external_requests": 0,
+        "blocking_codes": [],
+        "optional_codes": ["SCHWAB_OAUTH_ACCESS_TOKEN_REFRESH_REQUIRED"],
+    }
+
+
+def test_service_preflight_blocks_read_only_schwab_token_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    output_directory = tmp_path / ".secrets" / "nexus-agent-paper"
+    output_directory.mkdir(parents=True, mode=0o700)
+    output_directory.chmod(0o700)
+    monkeypatch.setattr(loop, "load_schwab_app_config", lambda *_args: object())
+    monkeypatch.setattr(loop, "load_schwab_token", lambda *_args: object())
+    monkeypatch.setattr(
+        loop,
+        "require_live_schwab_access_token",
+        lambda *_args, **_kwargs: "access-token-canary",
+    )
+    monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: False)
+    environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
+
+    result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
+
+    assert result["status"] == "blocked"
+    assert result["blocking_codes"] == ["AGENT_PAPER_SCHWAB_TOKEN_STORE_READ_ONLY"]
 
 
 def test_service_preflight_cli_masks_configuration_values(

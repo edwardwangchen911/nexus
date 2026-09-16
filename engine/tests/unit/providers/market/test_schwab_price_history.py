@@ -1,5 +1,6 @@
 """Bounded Schwab price-history provider contracts."""
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
@@ -32,15 +33,26 @@ def _request(**updates: object) -> BarsRequest:
     return BarsRequest.model_validate(values)
 
 
-def _save_live_token(repo_root: Path) -> None:
+def _save_live_token(repo_root: Path, *, expires_at: datetime | None = None) -> None:
     schwab_oauth.save_schwab_token(
         repo_root,
         schwab_oauth.SchwabOAuthToken(
             access_token="access-canary",
             refresh_token="refresh-canary",
             obtained_at=RECEIVED_AT - timedelta(minutes=10),
-            expires_at=RECEIVED_AT + timedelta(minutes=10),
+            expires_at=expires_at or RECEIVED_AT + timedelta(minutes=10),
         ),
+    )
+
+
+def _write_schwab_app_config(repo_root: Path) -> None:
+    infra = repo_root / "infra"
+    infra.mkdir(exist_ok=True)
+    (infra / ".env.local").write_text(
+        "NEXUS_SCHWAB_APP_KEY=app-key-canary\n"
+        "NEXUS_SCHWAB_APP_SECRET=app-secret-canary\n"
+        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n",
+        encoding="utf-8",
     )
 
 
@@ -116,10 +128,179 @@ def test_live_access_token_is_returned_only_before_expiry() -> None:
     )
 
     assert require_token(live, now=now) == "access-canary"
-    with pytest.raises(
-        schwab_oauth.SchwabOAuthError, match="^SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED$"
-    ):
+    with pytest.raises(schwab_oauth.SchwabOAuthError, match="^SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED$"):
         require_token(expired, now=now)
+
+
+@pytest.mark.asyncio
+async def test_provider_refreshes_expiring_token_once_before_price_history_request(
+    tmp_path: Path,
+) -> None:
+    module = import_module("nexus.providers.market.schwab_price_history")
+    _write_schwab_app_config(tmp_path)
+    _save_live_token(tmp_path, expires_at=RECEIVED_AT + timedelta(minutes=4))
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "refreshed-access-canary",
+                    "refresh_token": "rotated-refresh-canary",
+                    "expires_in": 1800,
+                    "token_type": "Bearer",
+                },
+            )
+        assert request.url.path == "/marketdata/v1/pricehistory"
+        assert request.headers["Authorization"] == "Bearer refreshed-access-canary"
+        return httpx.Response(200, content=_valid_payload())
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), follow_redirects=False
+    ) as client:
+        provider = module.SchwabPriceHistoryProvider(
+            tmp_path,
+            client,
+            symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+            now=lambda: RECEIVED_AT,
+        )
+        page = await provider.fetch_bars(_request())
+
+    stored = schwab_oauth.load_schwab_token(tmp_path)
+    assert [request.method for request in requests] == ["POST", "GET"]
+    assert stored.access_token == "refreshed-access-canary"
+    assert stored.refresh_token == "rotated-refresh-canary"
+    assert len(page.items) == 5
+
+
+@pytest.mark.asyncio
+async def test_provider_refresh_failure_keeps_token_and_skips_price_history(
+    tmp_path: Path,
+) -> None:
+    module = import_module("nexus.providers.market.schwab_price_history")
+    _write_schwab_app_config(tmp_path)
+    _save_live_token(tmp_path, expires_at=RECEIVED_AT)
+    token_path = tmp_path / ".secrets" / "nexus-schwab-local" / "tokens.json"
+    original = token_path.read_bytes()
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(401, content=b"private-provider-body-canary")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), follow_redirects=False
+    ) as client:
+        provider = module.SchwabPriceHistoryProvider(
+            tmp_path,
+            client,
+            symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+            now=lambda: RECEIVED_AT,
+        )
+        with pytest.raises(
+            schwab_oauth.SchwabOAuthError,
+            match="^SCHWAB_OAUTH_REFRESH_HTTP_401$",
+        ):
+            await provider.fetch_bars(_request())
+
+    assert [request.method for request in requests] == ["POST"]
+    assert token_path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_concurrent_providers_serialize_refresh_token_rotation(
+    tmp_path: Path,
+) -> None:
+    module = import_module("nexus.providers.market.schwab_price_history")
+    _write_schwab_app_config(tmp_path)
+    _save_live_token(tmp_path, expires_at=RECEIVED_AT + timedelta(minutes=4))
+    refresh_requests = 0
+    price_requests = 0
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal price_requests, refresh_requests
+        if request.url.path == "/v1/oauth/token":
+            refresh_requests += 1
+            await asyncio.sleep(0.05)
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "refreshed-access-canary",
+                    "refresh_token": "rotated-refresh-canary",
+                    "expires_in": 1800,
+                    "token_type": "Bearer",
+                },
+            )
+        price_requests += 1
+        assert request.headers["Authorization"] == "Bearer refreshed-access-canary"
+        return httpx.Response(200, content=_valid_payload())
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), follow_redirects=False
+    ) as client:
+        providers = [
+            module.SchwabPriceHistoryProvider(
+                tmp_path,
+                client,
+                symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+                now=lambda: RECEIVED_AT,
+            )
+            for _ in range(2)
+        ]
+        await asyncio.gather(*(provider.fetch_bars(_request()) for provider in providers))
+
+    assert refresh_requests == 1
+    assert price_requests == 2
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_refresh_commit_before_stopping(
+    tmp_path: Path,
+) -> None:
+    module = import_module("nexus.providers.market.schwab_price_history")
+    _write_schwab_app_config(tmp_path)
+    _save_live_token(tmp_path, expires_at=RECEIVED_AT)
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    requests: list[httpx.Request] = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/v1/oauth/token"
+        refresh_started.set()
+        await release_refresh.wait()
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "refreshed-access-canary",
+                "refresh_token": "rotated-refresh-canary",
+                "expires_in": 1800,
+                "token_type": "Bearer",
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), follow_redirects=False
+    ) as client:
+        provider = module.SchwabPriceHistoryProvider(
+            tmp_path,
+            client,
+            symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+            now=lambda: RECEIVED_AT,
+        )
+        task = asyncio.create_task(provider.fetch_bars(_request()))
+        await refresh_started.wait()
+        task.cancel()
+        release_refresh.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    stored = schwab_oauth.load_schwab_token(tmp_path)
+    assert [request.method for request in requests] == ["POST"]
+    assert stored.access_token == "refreshed-access-canary"
+    assert stored.refresh_token == "rotated-refresh-canary"
 
 
 @pytest.mark.asyncio
@@ -136,10 +317,7 @@ async def test_provider_issues_one_frozen_request_and_normalizes_only_the_window
         "previousCloseDate": int((START - timedelta(days=1)).timestamp() * 1000),
         "candles": [
             _candle(START - timedelta(minutes=1)),
-            *[
-                _candle(START + timedelta(minutes=index), close=100 + index)
-                for index in range(5)
-            ],
+            *[_candle(START + timedelta(minutes=index), close=100 + index) for index in range(5)],
             _candle(END),
         ],
     }
@@ -269,9 +447,7 @@ async def test_unsupported_request_shapes_fail_before_credentials_are_sent(
                 "candles": [
                     {
                         **_candle(START + timedelta(minutes=index)),
-                        "datetime": str(
-                            int((START + timedelta(minutes=index)).timestamp() * 1000)
-                        ),
+                        "datetime": str(int((START + timedelta(minutes=index)).timestamp() * 1000)),
                     }
                     for index in range(5)
                 ],
@@ -335,9 +511,7 @@ async def test_invalid_ohlcv_is_rejected(
     module = import_module("nexus.providers.market.schwab_price_history")
     candles = [_candle(START + timedelta(minutes=index)) for index in range(5)]
     candles[2].update(overrides)
-    raw = json.dumps(
-        {"symbol": "AAPL", "empty": False, "candles": candles}
-    ).encode()
+    raw = json.dumps({"symbol": "AAPL", "empty": False, "candles": candles}).encode()
 
     with pytest.raises(module.MarketProviderPayloadError):
         await _fetch_raw(tmp_path, raw)
