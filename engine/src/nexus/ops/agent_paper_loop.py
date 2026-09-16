@@ -1324,13 +1324,14 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
         or snapshot.next_decision_window_start_at is None
     ):
         return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+
+    if snapshot.performance_due_at is not None:
+        return AgentPaperLoopAction.PUBLISH_PERFORMANCE
+
     if snapshot.now < snapshot.decision_window_start_at:
         return AgentPaperLoopAction.WAIT_FOR_SESSION
     if snapshot.now >= snapshot.decision_window_end_at:
         return AgentPaperLoopAction.WAIT_FOR_SESSION
-
-    if snapshot.performance_due_at is not None:
-        return AgentPaperLoopAction.PUBLISH_PERFORMANCE
 
     current_slot = floor_decision_slot(snapshot.now)
     if snapshot.cycle_status in {"unavailable", "failed"} and (

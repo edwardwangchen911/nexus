@@ -347,6 +347,15 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
         (
             {
                 "now": AFTER_CLOSE,
+                "cycle_status": "completed",
+                "cycle_slot_at": LAST_SLOT,
+                "performance_due_at": datetime(2026, 9, 16, 20, 0, tzinfo=UTC),
+            },
+            A.PUBLISH_PERFORMANCE,
+        ),
+        (
+            {
+                "now": AFTER_CLOSE,
                 "cycle_status": "awaiting_market",
                 "has_open_order": True,
                 "market_window_ready": True,
