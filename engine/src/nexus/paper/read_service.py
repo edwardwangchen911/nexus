@@ -359,6 +359,7 @@ class PaperReadService:
                     version_rows AS (
                         SELECT
                             research.cycle_id,
+                            research.run_id,
                             research.decision_session,
                             research.decision_time,
                             prompt.version AS prompt_version,
@@ -402,9 +403,18 @@ class PaperReadService:
                     ),
                     version_stats AS (
                         SELECT
-                            prompt_version,
-                            model_id,
-                            model_version,
+                            (array_agg(
+                                prompt_version
+                                ORDER BY decision_time DESC, cycle_id DESC, run_id DESC
+                            ))[1] AS prompt_version,
+                            (array_agg(
+                                model_id
+                                ORDER BY decision_time DESC, cycle_id DESC, run_id DESC
+                            ))[1] AS model_id,
+                            (array_agg(
+                                model_version
+                                ORDER BY decision_time DESC, cycle_id DESC, run_id DESC
+                            ))[1] AS model_version,
                             prompt_hash,
                             model_hash,
                             min(decision_time) AS first_decision_at,
@@ -425,12 +435,7 @@ class PaperReadService:
                             count(DISTINCT order_id) AS order_count,
                             count(DISTINCT fill_id) AS fill_count
                         FROM version_rows
-                        GROUP BY
-                            prompt_version,
-                            model_id,
-                            model_version,
-                            prompt_hash,
-                            model_hash
+                        GROUP BY prompt_hash, model_hash
                     )
                     SELECT
                         version_stats.*,

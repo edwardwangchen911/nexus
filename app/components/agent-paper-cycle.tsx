@@ -57,9 +57,9 @@ export function AgentPaperVersionHistory({ history }: {
 }): React.ReactElement {
   return <section className="paper-performance" aria-labelledby="agent-version-history-title">
     <header><div><p className="eyebrow">冻结身份 · 跨交易日只读聚合</p><h2 id="agent-version-history-title">Agent 版本历史</h2></div><span className="mode-badge">继续观察</span></header>
-    <p>这里只记录依次运行过的冻结版本。顺序历史不是并行 challenger；当前没有正式晋升或淘汰结论。</p>
+    <p>这里只记录依次出现过的冻结版本。顺序历史不是并行 challenger；当前没有正式晋升或淘汰结论。最近观察版本不代表当前进程在线或当前配置仍选中该版本。</p>
     {history.map((observation, index) => <article key={`${observation.prompt_hash}:${observation.model_hash}`}>
-      <h3>{index === 0 ? "当前运行版本" : "历史冻结版本"}</h3>
+      <h3>{index === 0 ? "最近观察版本" : "历史冻结版本"}</h3>
       <dl>
       <div><dt>Prompt 版本</dt><dd>{observation.prompt_version}</dd></div>
       <div><dt>模型</dt><dd>{observation.model_id}</dd></div>

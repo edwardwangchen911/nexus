@@ -95,7 +95,8 @@ describe("internal paper page", () => {
     expect(region).toHaveTextContent("尚无 Agent 版本级绩效归因");
     expect(region).toHaveTextContent("尚无模拟订单与成交的持久化路径事实");
     expect(region).toHaveTextContent("尚无并行 challenger 版本");
-    expect(region).toHaveTextContent("当前运行版本");
+    expect(region).toHaveTextContent("最近观察版本");
+    expect(region).toHaveTextContent("不代表当前进程在线或当前配置仍选中该版本");
     expect(region).toHaveTextContent("历史冻结版本");
     expect(region).toHaveTextContent("顺序历史不是并行 challenger");
     expect(region).toHaveTextContent("没有正式晋升或淘汰结论");

@@ -3593,6 +3593,201 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
 
 
 @pytest.mark.asyncio
+async def test_agent_version_history_groups_exact_identity_and_keeps_latest_twenty(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        from nexus.strategy.forward import load_forward_strategy_decision
+
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            assert registered is not None
+            await _seed_cycle_research_authority(
+                session,
+                registered_decision=registered.decision,
+            )
+
+        async with sessions.begin() as session:
+            started = await advance_agent_paper_cycle(
+                session,
+                account_id=seed.account_id,
+                decision_time=DECISION_TIME,
+                idempotency_key="agent-paper-version-history-source",
+            )
+        assert len(started.research_run_ids) == 1
+        source_run_id = started.research_run_ids[0]
+
+        expected_latest_prompt_hash = ""
+        expected_latest_model_hash = ""
+        async with sessions.begin() as session:
+            for index in range(1, 22):
+                identity_index = min(index, 20)
+                prompt_hash = sha256(
+                    f"agent-paper-history-prompt-{identity_index}".encode()
+                ).hexdigest()
+                model_hash = sha256(
+                    f"agent-paper-history-model-{identity_index}".encode()
+                ).hexdigest()
+                if index == 21:
+                    expected_latest_prompt_hash = prompt_hash
+                    expected_latest_model_hash = model_hash
+                prompt_id = UUID(int=0xF4000000000000000000000000000100 + index)
+                model_id = UUID(int=0xF4000000000000000000000000000200 + index)
+                cycle_id = UUID(int=0xF4000000000000000000000000000300 + index)
+                run_id = UUID(int=0xF4000000000000000000000000000400 + index)
+                decision_time = DECISION_TIME + timedelta(minutes=5 * index)
+                session.add(
+                    AgentPromptVersionRecord(
+                        id=prompt_id,
+                        role="orchestrator",
+                        version=f"history-prompt-label-{index}",
+                        content_hash=prompt_hash,
+                        content=f"history prompt label {index}",
+                    )
+                )
+                session.add(
+                    AgentModelConfigRecord(
+                        id=model_id,
+                        model_id=f"history-model-label-{index}",
+                        version="history-config-v1",
+                        config_hash=model_hash,
+                        max_input_tokens=100,
+                        max_tool_calls=1,
+                        max_output_tokens=100,
+                        input_usd_per_million=Decimal("1"),
+                        output_usd_per_million=Decimal("1"),
+                        pricing_available_at=DECISION_TIME - timedelta(days=1),
+                        pricing_expires_at=DECISION_TIME + timedelta(days=2),
+                    )
+                )
+                await session.flush()
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_paper_cycles (
+                            id, account_id, portfolio_id, decision_session,
+                            decision_time, decision_slot_at, execution_session,
+                            universe_snapshot_id, quality_report_id,
+                            decision_price_policy_id, execution_price_policy_id,
+                            candidate_manifest, candidate_hash, sizing_policy_version,
+                            sizing_policy_hash, execution_locked, created_at
+                        )
+                        SELECT
+                            :cycle_id, account_id, portfolio_id, decision_session,
+                            :decision_time, :decision_time, execution_session,
+                            universe_snapshot_id, quality_report_id,
+                            decision_price_policy_id, execution_price_policy_id,
+                            candidate_manifest, candidate_hash, sizing_policy_version,
+                            sizing_policy_hash, execution_locked, created_at
+                        FROM agent_paper_cycles
+                        WHERE id = :source_cycle_id
+                        """
+                    ),
+                    {
+                        "cycle_id": cycle_id,
+                        "decision_time": decision_time,
+                        "source_cycle_id": started.cycle_id,
+                    },
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_research_runs (
+                            id, instrument_id, data_snapshot_id, prompt_version_id,
+                            model_config_id, decision_time, actor_id, idempotency_key,
+                            status, retry_count, schema_hash, model_hash, prompt_hash,
+                            prompt_manifest, evidence_hash, evidence_manifest, tool_hash,
+                            input_hash, reserved_cost_usd, settled_cost_usd,
+                            pricing_version, input_tokens, output_tokens, created_at
+                        )
+                        SELECT
+                            :run_id, instrument_id, data_snapshot_id, :prompt_id,
+                            :model_id, :decision_time, actor_id, :idempotency_key,
+                            status, retry_count, schema_hash, :model_hash, :prompt_hash,
+                            prompt_manifest, evidence_hash, evidence_manifest, tool_hash,
+                            input_hash, reserved_cost_usd, settled_cost_usd,
+                            pricing_version, input_tokens, output_tokens, created_at
+                        FROM agent_research_runs
+                        WHERE id = :source_run_id
+                        """
+                    ),
+                    {
+                        "run_id": run_id,
+                        "prompt_id": prompt_id,
+                        "model_id": model_id,
+                        "decision_time": decision_time,
+                        "idempotency_key": f"agent-paper-version-history-run-{index}",
+                        "model_hash": model_hash,
+                        "prompt_hash": prompt_hash,
+                        "source_run_id": source_run_id,
+                    },
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_paper_cycle_events (
+                            cycle_id, sequence, from_status, to_status, result_code,
+                            fact_ids, event_hash, occurred_at, created_at
+                        )
+                        SELECT
+                            :cycle_id, sequence, from_status, to_status, result_code,
+                            CASE
+                                WHEN result_code = 'RESEARCH_JOBS_PREPARED'
+                                THEN jsonb_build_object(
+                                    'research_run_ids',
+                                    jsonb_build_array(CAST(:run_id AS text))
+                                )
+                                ELSE fact_ids
+                            END,
+                            event_hash, :decision_time, created_at
+                        FROM agent_paper_cycle_events
+                        WHERE cycle_id = :source_cycle_id
+                        ORDER BY sequence
+                        """
+                    ),
+                    {
+                        "cycle_id": cycle_id,
+                        "run_id": str(run_id),
+                        "decision_time": decision_time,
+                        "source_cycle_id": started.cycle_id,
+                    },
+                )
+
+        async with sessions() as session:
+            page = await PaperReadService(
+                session,
+                datetime(2099, 1, 1, tzinfo=UTC),
+            ).agent_cycles(decision_session=DECISION_TIME.date(), limit=1)
+
+        assert page.version_observation is not None
+        assert page.version_observation == page.version_history[0]
+        assert len(page.version_history) == 20
+        assert len(
+            {(item.prompt_hash, item.model_hash) for item in page.version_history}
+        ) == 20
+        assert [item.last_decision_at for item in page.version_history] == sorted(
+            (item.last_decision_at for item in page.version_history),
+            reverse=True,
+        )
+        assert page.version_history[0].prompt_hash == expected_latest_prompt_hash
+        assert page.version_history[0].model_hash == expected_latest_model_hash
+        assert page.version_history[0].prompt_version == "history-prompt-label-21"
+        assert page.version_history[0].model_id == "history-model-label-21"
+        assert page.version_history[0].cycle_count == 2
+        assert page.version_history[-1].prompt_version == "history-prompt-label-1"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_mixed_terminal_research_jobs_stop_without_replacement_runs(
     migrated_database_url: str,
 ) -> None:
