@@ -1,5 +1,5 @@
 import asyncio
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -194,7 +194,15 @@ def test_complete_fixture_creates_one_atomic_deterministic_paper_batch(
         == sum(entry.credit_amount for entry in entries_by_transaction[row.id])
         for row in new_transactions
     )
-    assert audit_actions == outbox_types
+    assert Counter(audit_actions) == Counter(outbox_types) + Counter(
+        {
+            "strategy_decision.persisted": 1,
+            "paper.order_batch.evaluated": 1,
+        }
+    )
+    assert "strategy_decision.persisted" not in outbox_types
+    assert "paper.order_batch.evaluated" not in outbox_types
+    assert "paper.order.risk_rejected" in outbox_types
     assert "strategy_decision.persisted" in audit_actions
     assert {
         payload["transaction_hash"]
