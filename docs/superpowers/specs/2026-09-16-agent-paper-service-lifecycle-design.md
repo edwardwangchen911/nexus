@@ -1,6 +1,6 @@
 # Agent Paper 独立 Worker 服务设计
 
-**状态：** 待用户审阅
+**状态：** 已批准
 
 **日期：** 2026-09-16
 
@@ -60,8 +60,9 @@ Compose 中的 `agent-paper-loop` 服务不能获得宿主机 Codex 登录，应
 
 ### 4.1 单实例
 
-Worker 在任何心跳、周期检查或业务动作前取得一把进程生命周期 `flock`，持有到退出。锁不可
-用时返回固定错误码，且不产生业务写入。
+Worker 在任何心跳、周期检查或业务动作前，从当前 macOS 用户固定的本地运行目录取得一把进程
+生命周期 `flock`，持有到退出。所有 worktree 和前台诊断入口共用该锁；锁不可用时返回固定
+错误码，且不产生业务写入。
 
 锁只解决前台诊断入口与后台服务并发启动的问题。不新增运行描述符、Supervisor 锁、PID
 启动时间校验、命令归一化、父子管道或运行状态数据库。
@@ -95,9 +96,9 @@ authority 回退。数据库出现更新的日历不会使运行中 Worker 热�
 展示最近周期状态、固定停止原因和下一持久化交易窗口。现有 heartbeat 没有 phase 字段，因此
 页面不猜测 `waiting`，也不把陈旧 heartbeat 猜成操作系统进程已停止。
 
-`nexus-local-stack status` 分开输出托管器观察到的 `running`、`inactive`、`stopped` 或
-`unconfirmed`，以及数据库 heartbeat 状态和零外部请求 preflight 结果。三类事实不合并成新的
-总状态，也不写入新表。任何状态输出都不得包含账户、证券、订单、提示词、原始异常、命令行或
+`nexus-local-stack status` 分开输出 Compose、托管器观察到的 `running`、`inactive`、`stopped`
+或 `unconfirmed`、数据库 heartbeat 状态和零外部请求 preflight 结果。四组事实不合并成新的总
+状态，也不写入新表。任何状态输出都不得包含账户、证券、订单、提示词、原始异常、命令行或
 环境变量。
 
 ## 5. 安全停止和恢复
@@ -107,6 +108,10 @@ authority 回退。数据库出现更新的日历不会使运行中 Worker 热�
 - 活动动作继续使用自身已有的有界超时；完成后只回读一次精确持久化事实。
 - 回读为已知终态时正常退出；回读失败或结果冲突时以固定 `STOP_UNCONFIRMED` 退出。
 - 停止等待有界超时时，托管器报告停止未确认，不强杀、不删记录、不自动重启。
+- `STOP_UNCONFIRMED` 使用固定非零进程退出码；托管适配器保留 launchd 的 last-exit 事实。正常
+  `down` 始终报告停止未确认且不移除注册，因为新进程无法重新获得原动作的内存上下文。用户在
+  核对持久化事实后，可显式确认清理已退出的注册；该动作不发信号、不改业务事实，也不由正常
+  `down` 自动调用。
 - `nexus-local-stack down` 遇到停止未确认时立即返回失败，不继续停止 API、PostgreSQL、MinIO
   或其他当前动作可能仍需使用的依赖；核对持久化事实后再显式重试 `down`。
 - 进程意外退出时 heartbeat 自然过期；恢复前先检查原 `cycle → job → outputs`，禁止换 key
@@ -135,8 +140,8 @@ authority 回退。数据库出现更新的日历不会使运行中 Worker 热�
 4. 冻结时钟覆盖正常日、周末、假日、半日市和 DST；日历缺失或 authority 不一致 fail closed。
 5. 非交易时段且不存在已冻结待完成订单窗口时，只等待和 heartbeat，外部调用计数为零。
 6. 停止发生在活动动作期间时，动作不被取消；结束后只做一次确认回读。
-7. CLI 分开输出托管、heartbeat 和 preflight 事实；页面只展示数据库可证明的 online/offline、
-   最近周期和下一窗口，不跨层猜测。
+7. CLI 分开输出 Compose、托管、heartbeat 和 preflight 四组事实；页面只展示数据库可证明的
+   online/offline、最近周期和下一窗口，不跨层猜测。
 8. 从另一个 worktree 或配置调用 start/status/stop 时返回 ownership mismatch，且不影响已有服务。
 9. 停止未确认时 `down` 返回失败，API、PostgreSQL 和 MinIO 保持当前状态。
 10. Web/API 在 Agent Paper disabled、blocked、stopped 时仍正常只读。
