@@ -20,7 +20,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -81,7 +81,12 @@ from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
+    AgentPaperMarketWindowRecord,
+    PaperExecutionWindowAuthorityRecord,
+    PaperFillRecord,
+    PaperOrderEventRecord,
     PaperPerformanceSnapshotRecord,
+    PaperRequestIdempotencyRecord,
 )
 from nexus.persistence.models.runtime import Job
 from nexus.providers.http import HttpPolicyError
@@ -139,7 +144,9 @@ class AgentPaperLoopSnapshot:
     research_job_status: str | None = None
     research_job_id: UUID | str | None = None
     market_window_ready: bool = False
+    market_window_start_at: datetime | None = None
     market_window_end_at: datetime | None = None
+    market_window_id: UUID | None = None
     has_open_order: bool = False
     order_id: UUID | None = None
     performance_due_at: datetime | None = None
@@ -1159,6 +1166,7 @@ def snapshot_from_cycle_view(
     research_job: tuple[UUID, str] | None,
     market_scope: object | None,
     calendar: ServiceCalendarAuthority,
+    market_window: object | None = None,
     performance_due_at: datetime | None = None,
 ) -> AgentPaperLoopSnapshot:
     """Map the bounded read projection into the scheduler's fail-closed contract."""
@@ -1180,13 +1188,34 @@ def snapshot_from_cycle_view(
     order_id = order_ids[0] if order_ids else None
     has_open_order = cycle_status == "awaiting_market" and order_id is not None
     market_window_ready = has_open_order and market_status == "qualified"
+    market_window_start_at = None
     market_window_end_at = None
+    market_window_id = None
     if has_open_order and not market_window_ready:
         scope_cycle_id = getattr(market_scope, "cycle_id", None)
+        market_window_start_at = getattr(market_scope, "window_start", None)
         market_window_end_at = getattr(market_scope, "window_end", None)
-        if scope_cycle_id != cycle_id or not isinstance(market_window_end_at, datetime):
+        if (
+            scope_cycle_id != cycle_id
+            or not isinstance(market_window_start_at, datetime)
+            or not isinstance(market_window_end_at, datetime)
+        ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         market_window_end_at += _MARKET_PUBLICATION_LAG
+    elif has_open_order:
+        market_window_id = getattr(market_window, "id", None)
+        market_cycle_id = getattr(market_window, "cycle_id", None)
+        market_order_id = getattr(market_window, "order_id", None)
+        market_window_start_at = getattr(market_window, "window_start_at", None)
+        market_window_end_at = getattr(market_window, "window_end_at", None)
+        if (
+            not isinstance(market_window_id, UUID)
+            or market_cycle_id != cycle_id
+            or market_order_id != order_id
+            or not isinstance(market_window_start_at, datetime)
+            or not isinstance(market_window_end_at, datetime)
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     return AgentPaperLoopSnapshot(
         now=now,
         calendar_authority_id=calendar.calendar_authority_id,
@@ -1199,7 +1228,9 @@ def snapshot_from_cycle_view(
         research_job_status=None if research_job is None else research_job[1],
         research_job_id=None if research_job is None else research_job[0],
         market_window_ready=market_window_ready,
+        market_window_start_at=market_window_start_at,
         market_window_end_at=market_window_end_at,
+        market_window_id=market_window_id,
         has_open_order=has_open_order,
         order_id=order_id,
         performance_due_at=performance_due_at,
@@ -1307,6 +1338,8 @@ async def run_foreground_loop(
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
         snapshot = await inspect()
+        if shutdown_requested():
+            return AgentPaperLoopAction.STOP_REQUESTED
         action = choose_loop_action(snapshot)
         if action in {
             AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
@@ -1368,6 +1401,7 @@ async def run_foreground_loop(
         )
         heartbeat_task: asyncio.Future[AgentPaperLoopAction | None] | None = None
         heartbeat_failed = False
+        action_error: Exception | None = None
         try:
             await asyncio.sleep(0)
             next_heartbeat_at = monotonic() + interval_seconds
@@ -1391,10 +1425,9 @@ async def run_foreground_loop(
                 next_heartbeat_at += interval_seconds
             try:
                 stop = await action_task
-            except Exception:
-                if heartbeat_failed:
-                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-                raise
+            except Exception as error:
+                action_error = error
+                stop = AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         finally:
             if heartbeat_task is not None:
                 if not heartbeat_task.done() and action_task.done():
@@ -1405,9 +1438,11 @@ async def run_foreground_loop(
                 confirmed = await confirm_shutdown(action, snapshot, stop)
             except Exception:
                 confirmed = False
-            if heartbeat_failed or not confirmed:
+            if action_error is not None or heartbeat_failed or not confirmed:
                 return AgentPaperLoopAction.STOP_UNCONFIRMED
             return AgentPaperLoopAction.STOP_REQUESTED
+        if action_error is not None:
+            raise action_error
         if heartbeat_failed:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         try:
@@ -1461,27 +1496,6 @@ def _shutdown_postcondition_matches(
                 "unavailable",
             }
         )
-    if action == AgentPaperLoopAction.COLLECT_WINDOW:
-        return (
-            before.cycle_id is not None
-            and after.cycle_id == before.cycle_id
-            and before.order_id is not None
-            and after.order_id == before.order_id
-            and after.market_window_ready
-        )
-    if action == AgentPaperLoopAction.ADVANCE_ORDER:
-        return (
-            before.cycle_id is not None
-            and after.cycle_id == before.cycle_id
-            and before.order_id is not None
-            and after.order_id == before.order_id
-            and after.cycle_status in {"partially_filled", "completed"}
-        )
-    if action == AgentPaperLoopAction.PUBLISH_PERFORMANCE:
-        return (
-            before.performance_due_at is not None
-            and after.performance_due_at != before.performance_due_at
-        )
     return False
 
 
@@ -1495,6 +1509,116 @@ async def confirm_agent_paper_shutdown(
     action_result: AgentPaperLoopAction | None,
 ) -> bool:
     """Read once and verify the exact action's persisted shutdown postcondition."""
+    exact_actions = {
+        AgentPaperLoopAction.COLLECT_WINDOW,
+        AgentPaperLoopAction.ADVANCE_ORDER,
+        AgentPaperLoopAction.PUBLISH_PERFORMANCE,
+    }
+    if action in exact_actions:
+        if (
+            before_snapshot.calendar_authority_id != expected_calendar_authority_id
+            or not settings.database_url
+        ):
+            return False
+        database = make_url(settings.database_url)
+        if (
+            database.drivername != "postgresql+asyncpg"
+            or database.host not in {"localhost", "127.0.0.1", "::1"}
+            or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+        ):
+            return False
+        engine = create_async_engine(settings.database_url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                if action == AgentPaperLoopAction.PUBLISH_PERFORMANCE:
+                    if before_snapshot.performance_due_at is None:
+                        return False
+                    persisted = await session.scalar(
+                        select(PaperPerformanceSnapshotRecord.id).where(
+                            PaperPerformanceSnapshotRecord.account_id == account_id,
+                            PaperPerformanceSnapshotRecord.as_of
+                            == before_snapshot.performance_due_at,
+                        )
+                    )
+                elif action == AgentPaperLoopAction.COLLECT_WINDOW:
+                    if (
+                        before_snapshot.cycle_id is None
+                        or before_snapshot.order_id is None
+                        or before_snapshot.market_window_start_at is None
+                        or before_snapshot.market_window_end_at is None
+                    ):
+                        return False
+                    persisted = await session.scalar(
+                        select(AgentPaperMarketWindowRecord.id).where(
+                            AgentPaperMarketWindowRecord.cycle_id == before_snapshot.cycle_id,
+                            AgentPaperMarketWindowRecord.order_id == before_snapshot.order_id,
+                            AgentPaperMarketWindowRecord.purpose == "paper_fill",
+                            AgentPaperMarketWindowRecord.window_start_at
+                            == before_snapshot.market_window_start_at,
+                            AgentPaperMarketWindowRecord.window_end_at
+                            == before_snapshot.market_window_end_at - _MARKET_PUBLICATION_LAG,
+                        )
+                    )
+                else:
+                    if (
+                        before_snapshot.cycle_id is None
+                        or before_snapshot.order_id is None
+                        or before_snapshot.market_window_id is None
+                    ):
+                        return False
+                    persisted = await session.scalar(
+                        select(PaperRequestIdempotencyRecord.id)
+                        .join(
+                            PaperOrderEventRecord,
+                            and_(
+                                PaperOrderEventRecord.order_id
+                                == PaperRequestIdempotencyRecord.order_id,
+                                PaperOrderEventRecord.account_id
+                                == PaperRequestIdempotencyRecord.account_id,
+                                PaperOrderEventRecord.event_seq
+                                == PaperRequestIdempotencyRecord.result_event_seq,
+                            ),
+                        )
+                        .join(
+                            PaperFillRecord,
+                            PaperFillRecord.id == PaperOrderEventRecord.source_fill_id,
+                        )
+                        .join(
+                            PaperExecutionWindowAuthorityRecord,
+                            PaperExecutionWindowAuthorityRecord.id
+                            == PaperFillRecord.execution_window_authority_id,
+                        )
+                        .join(
+                            AgentPaperMarketWindowRecord,
+                            AgentPaperMarketWindowRecord.id == before_snapshot.market_window_id,
+                        )
+                        .where(
+                            PaperRequestIdempotencyRecord.account_id == account_id,
+                            PaperRequestIdempotencyRecord.order_id == before_snapshot.order_id,
+                            PaperRequestIdempotencyRecord.operation == "advance",
+                            PaperRequestIdempotencyRecord.idempotency_key
+                            == f"agent-paper-loop-advance:{before_snapshot.order_id}",
+                            PaperOrderEventRecord.to_status.in_(("partially_filled", "filled")),
+                            AgentPaperMarketWindowRecord.cycle_id == before_snapshot.cycle_id,
+                            AgentPaperMarketWindowRecord.order_id == before_snapshot.order_id,
+                            AgentPaperMarketWindowRecord.purpose == "paper_fill",
+                            PaperExecutionWindowAuthorityRecord.order_id
+                            == before_snapshot.order_id,
+                            PaperExecutionWindowAuthorityRecord.account_id == account_id,
+                            PaperExecutionWindowAuthorityRecord.window_start_at
+                            == AgentPaperMarketWindowRecord.window_start_at,
+                            PaperExecutionWindowAuthorityRecord.window_end_at
+                            == AgentPaperMarketWindowRecord.window_end_at,
+                            PaperExecutionWindowAuthorityRecord.source_authority_id
+                            == AgentPaperMarketWindowRecord.source_authority_id,
+                        )
+                    )
+                return persisted is not None and action_result is None
+        except Exception:
+            return False
+        finally:
+            await engine.dispose()
     try:
         after_snapshot = await inspect_agent_paper_loop(
             settings,
@@ -1877,6 +2001,7 @@ async def inspect_agent_paper_loop(
                     )
             research_job = resolve_cycle_research_job(events=events, jobs=jobs)
             market_scope = None
+            market_window = None
             if (
                 view.status == "awaiting_market"
                 and len(view.order_ids) == 1
@@ -1885,12 +2010,47 @@ async def inspect_agent_paper_loop(
                 market_scope = await resolve_agent_paper_market_scope(
                     session, cycle_id=view.cycle_id
                 )
+            elif (
+                view.status == "awaiting_market"
+                and len(view.order_ids) == 1
+                and view.execution_market.status == "qualified"
+            ):
+                unused_windows = tuple(
+                    await session.scalars(
+                        select(AgentPaperMarketWindowRecord)
+                        .outerjoin(
+                            PaperExecutionWindowAuthorityRecord,
+                            and_(
+                                PaperExecutionWindowAuthorityRecord.order_id
+                                == AgentPaperMarketWindowRecord.order_id,
+                                PaperExecutionWindowAuthorityRecord.window_start_at
+                                == AgentPaperMarketWindowRecord.window_start_at,
+                                PaperExecutionWindowAuthorityRecord.window_end_at
+                                == AgentPaperMarketWindowRecord.window_end_at,
+                                PaperExecutionWindowAuthorityRecord.source_authority_id
+                                == AgentPaperMarketWindowRecord.source_authority_id,
+                            ),
+                        )
+                        .where(
+                            AgentPaperMarketWindowRecord.cycle_id == view.cycle_id,
+                            AgentPaperMarketWindowRecord.order_id == view.order_ids[0],
+                            AgentPaperMarketWindowRecord.purpose == "paper_fill",
+                            PaperExecutionWindowAuthorityRecord.id.is_(None),
+                        )
+                        .order_by(AgentPaperMarketWindowRecord.window_start_at)
+                        .limit(2)
+                    )
+                )
+                if len(unused_windows) != 1:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                market_window = unused_windows[0]
             return snapshot_from_cycle_view(
                 now=now,
                 view=view,
                 research_job=research_job,
                 market_scope=market_scope,
                 calendar=calendar,
+                market_window=market_window,
                 performance_due_at=performance_due_at,
             )
     finally:

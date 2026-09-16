@@ -454,6 +454,53 @@ def test_foreground_loop_stops_idle_wait_after_signal_without_reinspection() -> 
     assert heartbeat_count == 1
 
 
+def test_foreground_loop_stop_during_inspection_fences_all_new_actions() -> None:
+    async def scenario() -> tuple[loop.AgentPaperLoopAction, int, int]:
+        shutdown = asyncio.Event()
+        inspection_started = asyncio.Event()
+        release_inspection = asyncio.Event()
+        execution_attempts = 0
+        confirmations = 0
+
+        async def inspect() -> loop.AgentPaperLoopSnapshot:
+            inspection_started.set()
+            await release_inspection.wait()
+            return snapshot()
+
+        async def execute(*_args) -> None:
+            nonlocal execution_attempts
+            execution_attempts += 1
+            raise AssertionError("stop must fence trigger, model, provider, and collection work")
+
+        async def confirm_shutdown(*_args) -> bool:
+            nonlocal confirmations
+            confirmations += 1
+            raise AssertionError("inspection is an idle boundary and needs no confirmation")
+
+        running = asyncio.create_task(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=noop_heartbeat,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
+            )
+        )
+        await inspection_started.wait()
+        shutdown.set()
+        release_inspection.set()
+        async with asyncio.timeout(1):
+            result = await running
+        return result, execution_attempts, confirmations
+
+    result, execution_attempts, confirmations = asyncio.run(scenario())
+
+    assert result is A.STOP_REQUESTED
+    assert execution_attempts == 0
+    assert confirmations == 0
+
+
 @pytest.mark.parametrize(
     ("before", "expected_action"),
     [
@@ -659,55 +706,12 @@ def test_foreground_loop_fails_closed_when_shutdown_confirmation_fails(
             ),
             True,
         ),
-        (
-            A.COLLECT_WINDOW,
-            snapshot(
-                cycle_id=UUID(int=2),
-                cycle_status="awaiting_market",
-                order_id=UUID(int=4),
-                has_open_order=True,
-                market_window_end_at=NOW,
-            ),
-            snapshot(
-                cycle_id=UUID(int=2),
-                cycle_status="awaiting_market",
-                order_id=UUID(int=4),
-                has_open_order=True,
-                market_window_ready=True,
-            ),
-            True,
-        ),
-        (
-            A.ADVANCE_ORDER,
-            snapshot(
-                cycle_id=UUID(int=2),
-                cycle_status="awaiting_market",
-                order_id=UUID(int=4),
-                has_open_order=True,
-                market_window_ready=True,
-            ),
-            snapshot(
-                cycle_id=UUID(int=2),
-                cycle_status="completed",
-                order_id=UUID(int=4),
-            ),
-            True,
-        ),
-        (
-            A.PUBLISH_PERFORMANCE,
-            snapshot(performance_due_at=NOW - timedelta(hours=1)),
-            snapshot(performance_due_at=None),
-            True,
-        ),
     ],
     ids=(
         "trigger-exact-slot",
         "trigger-slot-conflict",
         "research-exact-job",
         "resume-exact-cycle",
-        "collect-exact-window",
-        "advance-exact-order",
-        "performance-exact-close",
     ),
 )
 def test_shutdown_confirmation_reads_once_and_matches_exact_persisted_action(
@@ -1153,7 +1157,71 @@ def test_foreground_loop_does_not_cancel_active_action_when_heartbeat_fails() ->
     assert confirmation_reads == 1
 
 
-def test_foreground_loop_retrieves_action_failure_when_heartbeat_also_fails() -> None:
+@pytest.mark.parametrize("heartbeat_fails", [False, True])
+def test_foreground_loop_confirms_once_after_stopped_action_failure(
+    heartbeat_fails: bool,
+) -> None:
+    heartbeat_count = 0
+    execute_started = asyncio.Event()
+    release_execute = asyncio.Event()
+    shutdown = asyncio.Event()
+    action_cancelled = False
+    confirmations: list[tuple[object, ...]] = []
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+        if heartbeat_count == 2:
+            release_execute.set()
+            await asyncio.sleep(0)
+            if heartbeat_fails:
+                raise RuntimeError("database unavailable")
+
+    before = snapshot(
+        cycle_status="researching",
+        research_job_status="queued",
+        research_job_id="job-1",
+    )
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return before
+
+    async def execute(_action, _state) -> None:
+        nonlocal action_cancelled
+        execute_started.set()
+        shutdown.set()
+        try:
+            await release_execute.wait()
+        except asyncio.CancelledError:
+            action_cancelled = True
+            raise
+        raise RuntimeError("action failed")
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await execute_started.wait()
+
+    async def confirm_shutdown(*args) -> bool:
+        confirmations.append(args)
+        return True
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=controlled_sleep,
+            heartbeat=heartbeat,
+            clock=lambda: NOW,
+            shutdown_requested=shutdown.is_set,
+            confirm_shutdown=confirm_shutdown,
+        )
+    )
+
+    assert result is A.STOP_UNCONFIRMED
+    assert action_cancelled is False
+    assert confirmations == [(A.RUN_RESEARCH_JOB, before, A.STOP_RESULT_UNKNOWN)]
+
+
+def test_foreground_loop_preserves_action_failure_when_heartbeat_also_fails() -> None:
     heartbeat_count = 0
     execute_started = asyncio.Event()
     release_execute = asyncio.Event()
@@ -1185,19 +1253,21 @@ def test_foreground_loop_retrieves_action_failure_when_heartbeat_also_fails() ->
     async def run() -> loop.AgentPaperLoopAction:
         running_loop = asyncio.get_running_loop()
         running_loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
-        result = await loop.run_foreground_loop(
-            inspect=inspect,
-            execute=execute,
-            sleep=controlled_sleep,
-            heartbeat=heartbeat,
-            clock=lambda: NOW,
-        )
-        await asyncio.sleep(0)
-        gc.collect()
-        await asyncio.sleep(0)
-        return result
+        try:
+            return await loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=controlled_sleep,
+                heartbeat=heartbeat,
+                clock=lambda: NOW,
+            )
+        finally:
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
 
-    assert asyncio.run(run()) == A.STOP_RESULT_UNKNOWN
+    with pytest.raises(RuntimeError, match="action failed"):
+        asyncio.run(run())
     assert unhandled == []
 
 
@@ -3284,6 +3354,7 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
         calendar=calendar,
     )
     assert result.order_id == order_id
+    assert result.market_window_start_at == window_end - timedelta(minutes=5)
     assert result.market_window_end_at == window_end + timedelta(seconds=60)
     assert result.has_open_order is True
     with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):

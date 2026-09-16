@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -17,6 +18,7 @@ from alembic import command
 from alembic.config import Config
 from helpers.paper_api import app, headers
 from helpers.paper_batch import CALENDAR_ID, DECISION_TIME, INSTRUMENTS, seed_paper_batch
+from helpers.paper_performance import seed_paper_performance, seed_second_paper_close
 from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.database_tools import database_read_only_tools
@@ -52,6 +54,7 @@ from nexus.paper.agent_market import (
     resolve_agent_paper_market_scope,
 )
 from nexus.paper.execution_service import advance_internal_paper_order
+from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -2738,22 +2741,67 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         )
         assert window_replay == window.model_copy(update={"replayed": True})
         assert provider.calls == 1
+        wrong_collect_window = replace(
+            loop_snapshot,
+            market_window_start_at=scope.window_start + timedelta(minutes=5),
+            market_window_end_at=scope.window_end + timedelta(minutes=5, seconds=60),
+        )
+        assert not await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=inspection_calendar_id,
+            action=agent_paper_loop.AgentPaperLoopAction.COLLECT_WINDOW,
+            before_snapshot=wrong_collect_window,
+            action_result=None,
+        )
+        assert await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=inspection_calendar_id,
+            action=agent_paper_loop.AgentPaperLoopAction.COLLECT_WINDOW,
+            before_snapshot=loop_snapshot,
+            action_result=None,
+        )
+        advance_snapshot = await inspect_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=inspection_calendar_id,
+        )
+        assert advance_snapshot.market_window_id == window.authority_id
+        assert advance_snapshot.market_window_start_at == window.window_start
+        assert advance_snapshot.market_window_end_at == window.window_end
         async with sessions.begin() as session:
             filled = await advance_internal_paper_order(
                 session,
                 order_id=awaiting_market.order_ids[0],
                 evaluated_at=evaluated_at,
-                idempotency_key="schwab-paper-fill-1",
+                idempotency_key=(f"agent-paper-loop-advance:{awaiting_market.order_ids[0]}"),
             )
         async with sessions.begin() as session:
             fill_replay = await advance_internal_paper_order(
                 session,
                 order_id=awaiting_market.order_ids[0],
                 evaluated_at=evaluated_at,
-                idempotency_key="schwab-paper-fill-1",
+                idempotency_key=(f"agent-paper-loop-advance:{awaiting_market.order_ids[0]}"),
             )
         assert filled.action == "filled"
         assert fill_replay == filled
+        assert await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=inspection_calendar_id,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=advance_snapshot,
+            action_result=None,
+        )
+        assert not await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=inspection_calendar_id,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=replace(advance_snapshot, market_window_id=UUID(int=404)),
+            action_result=None,
+        )
         async with sessions() as session:
             debits = await session.scalar(select(func.sum(PaperLedgerEntryRecord.debit_amount)))
             credits = await session.scalar(select(func.sum(PaperLedgerEntryRecord.credit_amount)))
@@ -3153,6 +3201,63 @@ async def test_shutdown_confirmation_reads_back_exact_trigger_slot_from_postgres
             account_id=seed.account_id,
             expected_calendar_authority_id=CALENDAR_ID,
             action=agent_paper_loop.AgentPaperLoopAction.TRIGGER,
+            before_snapshot=before,
+            action_result=None,
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_confirmation_rejects_newer_performance_close_when_original_missing(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url)
+    newer_close = await seed_second_paper_close(
+        migrated_database_url,
+        execution=seed.execution,
+        close=Decimal("112"),
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=CALENDAR_ID,
+                    session=date(2026, 8, 31),
+                    decision_at=datetime(2026, 8, 31, 21, tzinfo=UTC),
+                )
+            )
+            monkeypatch.setattr(
+                "nexus.paper.performance.current_paper_performance_price_authority_available",
+                lambda: True,
+            )
+            await publish_paper_performance_snapshot(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=newer_close,
+            )
+        monkeypatch.setattr(
+            agent_paper_loop,
+            "func",
+            SimpleNamespace(
+                clock_timestamp=lambda: literal(newer_close + timedelta(seconds=1)),
+                max=func.max,
+            ),
+        )
+        before = agent_paper_loop.AgentPaperLoopSnapshot(
+            now=seed.as_of,
+            calendar_authority_id=CALENDAR_ID,
+            performance_due_at=seed.as_of,
+        )
+
+        assert not await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.execution.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+            action=agent_paper_loop.AgentPaperLoopAction.PUBLISH_PERFORMANCE,
             before_snapshot=before,
             action_result=None,
         )
