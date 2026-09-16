@@ -670,6 +670,7 @@ class _BoundDatabaseExecutors:
         evidence_id = evidence_ids[0]
         document = documents[evidence_id]
         item = document.model_dump(mode="json", exclude={"originals", "calendar", "purpose_policy"})
+        item["research_trend_eligible"] = True
         item["evidence_ref_id"] = str(evidence_id)
         item["revision"] = item["content_hash"] = document.content_hash
         item["as_of_session"] = item["last_observed_on"]

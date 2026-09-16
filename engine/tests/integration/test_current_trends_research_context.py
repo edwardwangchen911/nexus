@@ -80,6 +80,7 @@ async def test_normal_prepare_and_exact_price_tool_preserve_supplement_and_old_s
             assert item["as_of_session"] == item["last_observed_on"]
             assert item["historical_backtest_eligible"] is False
             assert item["market_price_eligible"] is False
+            assert item["research_trend_eligible"] is True
             assert item["total_return_eligible"] is False
             assert item["execution_locked"] is True
         assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 0
