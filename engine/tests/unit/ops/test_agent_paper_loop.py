@@ -172,8 +172,10 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
     elapsed = 0.0
     sleeps: list[float] = []
     business_actions: list[loop.AgentPaperLoopAction] = []
+    inspections_at: list[float] = []
 
     async def inspect() -> loop.AgentPaperLoopSnapshot:
+        inspections_at.append(elapsed)
         return next(states)
 
     async def execute(
@@ -202,6 +204,9 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
     )
 
     assert result == A.STOP_DISABLED
+    inspection_delay = inspections_at[1] - inspections_at[0]
+    assert inspection_delay <= 31.0 + 10.0
+    assert inspection_delay == 41.0
     assert sleeps == [15.0, 6.0]
     assert business_actions == []
 

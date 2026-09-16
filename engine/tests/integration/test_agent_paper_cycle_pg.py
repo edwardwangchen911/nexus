@@ -1327,14 +1327,16 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         session_date: date,
         *,
         created_at: datetime,
+        market_close_at: datetime | None = None,
     ) -> ExchangeCalendarSessionRecord:
         day_start = datetime.combine(session_date, datetime.min.time(), tzinfo=UTC)
+        close_at = market_close_at or day_start + timedelta(hours=20)
         return ExchangeCalendarSessionRecord(
             calendar_authority_id=authority_id,
             session=session_date,
-            decision_at=day_start + timedelta(hours=20),
+            decision_at=close_at,
             market_open_at=day_start + timedelta(hours=13, minutes=30),
-            market_close_at=day_start + timedelta(hours=20),
+            market_close_at=close_at,
             created_at=created_at,
         )
 
@@ -1430,7 +1432,16 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
             )
             await session.flush()
             session.add_all(
-                calendar_session(newer_id, session_date, created_at=newer_published_at)
+                calendar_session(
+                    newer_id,
+                    session_date,
+                    created_at=newer_published_at,
+                    market_close_at=(
+                        datetime(2026, 8, 28, 20, 30, tzinfo=UTC)
+                        if session_date == friday
+                        else None
+                    ),
+                )
                 for session_date in (history_start, friday, monday, tuesday)
             )
 
