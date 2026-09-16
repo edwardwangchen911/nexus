@@ -15,6 +15,7 @@ from nexus.paper.agent_version_models import (
     POLICY_VERSION,
     TRAIN_SLOT_COUNT,
     AgentVersionEvaluationRequest,
+    agent_version_market_evidence_hash,
     evaluation_policy_hash,
     evaluation_request_hash,
 )
@@ -73,6 +74,14 @@ def test_request_hash_is_stable_for_decimal_and_utc_slots() -> None:
         request.model_copy(update={"initial_capital": Decimal("10000.000")})
     )
     assert len(evaluation_request_hash(request)) == 64
+
+
+def test_market_evidence_hash_is_account_neutral_and_domain_separated() -> None:
+    assert agent_version_market_evidence_hash("a" * 64) == (
+        "297387ed7a079d973bc7e37938f69c3f9136cc38c385b12135d181b665885a88"
+    )
+    with pytest.raises(ValueError, match="AGENT_VERSION_MARKET_EVIDENCE_INVALID"):
+        agent_version_market_evidence_hash("not-a-hash")
 
 
 @pytest.mark.parametrize(

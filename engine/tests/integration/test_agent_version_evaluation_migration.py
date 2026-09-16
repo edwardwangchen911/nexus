@@ -20,18 +20,19 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ENGINE_ROOT = Path(__file__).parents[2]
-MIGRATION_HEAD = "0062_agent_version_evaluation"
+MIGRATION_HEAD = "0063_agent_version_pair_context"
+EVALUATION_HEAD = "0062_agent_version_evaluation"
 PREVIOUS_HEAD = "0061_agent_paper_job_isolation"
 
 
-def test_0062_is_the_single_head_and_declares_agent_version_authority() -> None:
+def test_0063_is_the_single_head_and_declares_agent_version_authority() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
     assert CURRENT_MIGRATION_HEAD == MIGRATION_HEAD
     assert scripts.get_heads() == [MIGRATION_HEAD]
     revision = scripts.get_revision(MIGRATION_HEAD)
     assert revision is not None
-    assert revision.down_revision == PREVIOUS_HEAD
+    assert revision.down_revision == EVALUATION_HEAD
     assert {
         AgentVersionEvaluationRecord.__tablename__,
         AgentVersionCyclePairRecord.__tablename__,
@@ -46,7 +47,7 @@ def test_0062_is_the_single_head_and_declares_agent_version_authority() -> None:
 def test_0062_offline_sql_contains_fail_closed_guards_and_empty_only_downgrade() -> None:
     output = StringIO()
     config = Config(str(ENGINE_ROOT / "alembic.ini"), output_buffer=output)
-    command.upgrade(config, f"{PREVIOUS_HEAD}:{MIGRATION_HEAD}", sql=True)
+    command.upgrade(config, f"{PREVIOUS_HEAD}:{EVALUATION_HEAD}", sql=True)
 
     sql = output.getvalue()
     assert "nexus_agent_version_evaluation_valid" in sql
@@ -65,10 +66,23 @@ def test_0062_offline_sql_contains_fail_closed_guards_and_empty_only_downgrade()
 
     rollback = StringIO()
     rollback_config = Config(str(ENGINE_ROOT / "alembic.ini"), output_buffer=rollback)
-    command.downgrade(rollback_config, f"{MIGRATION_HEAD}:{PREVIOUS_HEAD}", sql=True)
+    command.downgrade(rollback_config, f"{EVALUATION_HEAD}:{PREVIOUS_HEAD}", sql=True)
     rollback_sql = rollback.getvalue()
     assert "agent version evaluation facts prevent downgrade" in rollback_sql
     assert "ERRCODE='P3D01'" in rollback_sql
+
+
+def test_0063_pair_guard_uses_account_neutral_market_authority() -> None:
+    output = StringIO()
+    config = Config(str(ENGINE_ROOT / "alembic.ini"), output_buffer=output)
+    command.upgrade(config, f"{EVALUATION_HEAD}:{MIGRATION_HEAD}", sql=True)
+
+    sql = output.getvalue()
+    assert "agent_version_market_evidence_v1|" in sql
+    assert "incumbent_cycle.candidate_hash" in sql
+    assert "NEW.market_evidence_hash IS DISTINCT FROM" in sql
+    assert "incumbent_run.data_snapshot_id <> challenger_run.data_snapshot_id" not in sql
+    assert "incumbent_run.evidence_hash <> challenger_run.evidence_hash" not in sql
 
 
 async def _tables(database_url: str) -> set[str]:

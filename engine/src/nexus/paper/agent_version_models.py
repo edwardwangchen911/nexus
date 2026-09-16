@@ -1,6 +1,7 @@
 """Frozen contracts and hashes for paired Agent-version evaluation."""
 
 import hashlib
+import re
 from collections import Counter
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -138,6 +139,15 @@ def evaluation_request_hash(request: AgentVersionEvaluationRequest) -> str:
             "train_slots": [_timestamp(slot) for slot in request.train_slots],
         }
     )
+
+
+def agent_version_market_evidence_hash(candidate_hash: str) -> str:
+    """Hash the shared account-neutral candidate authority for one paired slot."""
+    if re.fullmatch(r"[0-9a-f]{64}", candidate_hash) is None:
+        raise ValueError("AGENT_VERSION_MARKET_EVIDENCE_INVALID")
+    return hashlib.sha256(
+        f"agent_version_market_evidence_v1|{candidate_hash}".encode()
+    ).hexdigest()
 
 
 def _session(value: datetime) -> date:
