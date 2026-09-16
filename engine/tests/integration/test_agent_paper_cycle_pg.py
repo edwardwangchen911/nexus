@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
+import nexus.ops.agent_paper_once as agent_paper_once
 import nexus.paper.agent_cycle_authority as agent_cycle_authority
 import pytest
 from alembic import command
@@ -29,6 +30,7 @@ from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.ops.agent_paper_loop import inspect_agent_paper_loop
 from nexus.paper.agent_cycle import (
     advance_agent_paper_cycle,
+    reserve_schwab_agent_paper_trigger,
     resume_schwab_agent_paper_cycle,
     start_schwab_agent_paper_cycle,
 )
@@ -80,7 +82,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 from nexus.risk.authority import (
     canonical_query_authority_hash,
@@ -872,6 +874,145 @@ async def test_cycle_loader_rejects_authority_switch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        "AGENT_PAPER_CALENDAR_UNAVAILABLE",
+        "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
+        "AGENT_PAPER_MARKET_WINDOW_CLOSED",
+    ],
+)
+async def test_trigger_once_persists_and_replays_calendar_failure(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    fixed_now = datetime(2026, 8, 26, 13, tzinfo=UTC)
+    provider_calls = 0
+
+    async def reserve_with_fixed_time(
+        session: AsyncSession,
+        *,
+        account_id: UUID,
+        client_idempotency_key: str,
+        now: datetime,
+    ):
+        del now
+        return await reserve_schwab_agent_paper_trigger(
+            session,
+            account_id=account_id,
+            client_idempotency_key=client_idempotency_key,
+            now=fixed_now,
+        )
+
+    async def reject_calendar(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise ValueError(failure_code)
+
+    monkeypatch.setattr(
+        agent_paper_once,
+        "reserve_schwab_agent_paper_trigger",
+        reserve_with_fixed_time,
+    )
+    monkeypatch.setattr(agent_paper_once, "trigger_in_session", reject_calendar)
+    monkeypatch.setattr(agent_paper_once, "S3ProviderEvidenceStore", lambda *_a, **_k: object())
+    settings = agent_paper_once.AgentPaperTriggerSettings(
+        database_url=migrated_database_url,
+        object_store_endpoint="http://127.0.0.1:9000",
+        alpaca_key="key",
+        alpaca_secret="secret",
+    )
+    request = agent_paper_once.AgentPaperTriggerRequest(
+        action="trigger",
+        account_id=seed.account_id,
+        idempotency_key=failure_code.lower(),
+    )
+
+    with pytest.raises(ValueError, match=failure_code):
+        await agent_paper_once.trigger_once(settings, request, repo_root=ENGINE_ROOT.parent)
+
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                    IdempotencyRecord.idempotency_key
+                    == floor_decision_slot(fixed_now).isoformat(),
+                )
+            )
+        assert claim is not None
+        assert claim.response_payload == {
+            "outcome": "failed",
+            "error_code": failure_code,
+        }
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(ValueError, match=failure_code):
+        await agent_paper_once.trigger_once(settings, request, repo_root=ENGINE_ROOT.parent)
+    assert provider_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    fixed_now = datetime(2026, 8, 26, 13, 5, tzinfo=UTC)
+    provider_calls = 0
+
+    async def reserve_with_fixed_time(
+        session: AsyncSession,
+        *,
+        account_id: UUID,
+        client_idempotency_key: str,
+        now: datetime,
+    ):
+        del now
+        return await reserve_schwab_agent_paper_trigger(
+            session,
+            account_id=account_id,
+            client_idempotency_key=client_idempotency_key,
+            now=fixed_now,
+        )
+
+    async def reject_provider(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("private-provider-failure")
+
+    monkeypatch.setattr(
+        agent_paper_once,
+        "reserve_schwab_agent_paper_trigger",
+        reserve_with_fixed_time,
+    )
+    monkeypatch.setattr(agent_paper_once, "trigger_in_session", reject_provider)
+    monkeypatch.setattr(agent_paper_once, "S3ProviderEvidenceStore", lambda *_a, **_k: object())
+    settings = agent_paper_once.AgentPaperTriggerSettings(
+        database_url=migrated_database_url,
+        object_store_endpoint="http://127.0.0.1:9000",
+        alpaca_key="key",
+        alpaca_secret="secret",
+    )
+    request = agent_paper_once.AgentPaperTriggerRequest(
+        action="trigger",
+        account_id=seed.account_id,
+        idempotency_key="unknown-provider-failure",
+    )
+
+    with pytest.raises(RuntimeError, match="private-provider-failure"):
+        await agent_paper_once.trigger_once(settings, request, repo_root=ENGINE_ROOT.parent)
+    with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
+        await agent_paper_once.trigger_once(settings, request, repo_root=ENGINE_ROOT.parent)
+    assert provider_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_service_calendar_selector_observes_half_day_dst_and_weekend(
     migrated_database_url: str,
 ) -> None:
@@ -949,6 +1090,12 @@ async def test_service_calendar_selector_observes_half_day_dst_and_weekend(
                 session,
                 now=datetime(2026, 11, 27, 12, tzinfo=UTC),
             )
+            after_half_day = (
+                await agent_cycle_authority.select_agent_paper_service_calendar_authority(
+                    session,
+                    now=datetime(2026, 11, 27, 18, tzinfo=UTC),
+                )
+            )
             weekend = await agent_cycle_authority.select_agent_paper_service_calendar_authority(
                 session,
                 now=datetime(2026, 11, 28, 15, tzinfo=UTC),
@@ -959,6 +1106,8 @@ async def test_service_calendar_selector_observes_half_day_dst_and_weekend(
             )
 
         assert half_day.market_close_at == datetime(2026, 11, 27, 18, tzinfo=UTC)
+        assert after_half_day.session == date(2026, 11, 30)
+        assert after_half_day.next_session == date(2026, 12, 1)
         assert summer.decision_window_start_at == datetime(2026, 7, 6, 11, tzinfo=UTC)
         assert winter.decision_window_start_at == datetime(2026, 12, 1, 12, tzinfo=UTC)
         assert summer.market_open_at == datetime(2026, 7, 6, 13, 30, tzinfo=UTC)
@@ -969,7 +1118,7 @@ async def test_service_calendar_selector_observes_half_day_dst_and_weekend(
 
 
 @pytest.mark.asyncio
-async def test_service_calendar_selector_requires_strict_following_session(
+async def test_service_calendar_selector_requires_two_future_sessions_after_close(
     migrated_database_url: str,
 ) -> None:
     calendar_id = UUID("63000000-0000-0000-0000-000000000092")
@@ -984,7 +1133,7 @@ async def test_service_calendar_selector_requires_strict_following_session(
                     version="agent-paper-no-following-session",
                     source="fixture",
                     range_start=date(2026, 8, 26),
-                    range_end=date(2026, 8, 27),
+                    range_end=date(2026, 8, 28),
                     query_parameters={},
                     completeness_status="complete",
                     content_hash="7" * 64,
@@ -993,14 +1142,24 @@ async def test_service_calendar_selector_requires_strict_following_session(
                 )
             )
             await session.flush()
-            session.add(
-                ExchangeCalendarSessionRecord(
-                    calendar_authority_id=calendar_id,
-                    session=date(2026, 8, 26),
-                    decision_at=datetime(2026, 8, 26, 20, tzinfo=UTC),
-                    market_open_at=datetime(2026, 8, 26, 13, 30, tzinfo=UTC),
-                    market_close_at=datetime(2026, 8, 26, 20, tzinfo=UTC),
-                    created_at=datetime(2026, 8, 25, tzinfo=UTC),
+            session.add_all(
+                (
+                    ExchangeCalendarSessionRecord(
+                        calendar_authority_id=calendar_id,
+                        session=date(2026, 8, 26),
+                        decision_at=datetime(2026, 8, 26, 20, tzinfo=UTC),
+                        market_open_at=datetime(2026, 8, 26, 13, 30, tzinfo=UTC),
+                        market_close_at=datetime(2026, 8, 26, 20, tzinfo=UTC),
+                        created_at=datetime(2026, 8, 25, tzinfo=UTC),
+                    ),
+                    ExchangeCalendarSessionRecord(
+                        calendar_authority_id=calendar_id,
+                        session=date(2026, 8, 27),
+                        decision_at=datetime(2026, 8, 27, 20, tzinfo=UTC),
+                        market_open_at=datetime(2026, 8, 27, 13, 30, tzinfo=UTC),
+                        market_close_at=datetime(2026, 8, 27, 20, tzinfo=UTC),
+                        created_at=datetime(2026, 8, 25, tzinfo=UTC),
+                    ),
                 )
             )
 
@@ -1008,7 +1167,7 @@ async def test_service_calendar_selector_requires_strict_following_session(
             with pytest.raises(ValueError, match="AGENT_PAPER_CALENDAR_UNAVAILABLE"):
                 await agent_cycle_authority.select_agent_paper_service_calendar_authority(
                     session,
-                    now=datetime(2026, 8, 26, 9, tzinfo=UTC),
+                    now=datetime(2026, 8, 26, 20, tzinfo=UTC),
                 )
     finally:
         await engine.dispose()
@@ -1024,11 +1183,18 @@ async def test_service_calendar_selector_does_not_fallback_from_newer_malformed_
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         async with sessions.begin() as session:
-            for authority_id, version, published_at, content_hash in (
-                (older_id, "agent-paper-valid-older", datetime(2026, 8, 24, tzinfo=UTC), "5" * 64),
+            for authority_id, version, range_end, published_at, content_hash in (
+                (
+                    older_id,
+                    "agent-paper-valid-older",
+                    date(2026, 8, 28),
+                    datetime(2026, 8, 24, tzinfo=UTC),
+                    "5" * 64,
+                ),
                 (
                     newer_id,
                     "agent-paper-malformed-newer",
+                    date(2026, 8, 27),
                     datetime(2026, 8, 25, tzinfo=UTC),
                     "6" * 64,
                 ),
@@ -1040,7 +1206,7 @@ async def test_service_calendar_selector_does_not_fallback_from_newer_malformed_
                         version=version,
                         source="fixture",
                         range_start=date(2026, 8, 26),
-                        range_end=date(2026, 8, 28),
+                        range_end=range_end,
                         query_parameters={},
                         completeness_status="complete",
                         content_hash=content_hash,
@@ -1080,7 +1246,15 @@ async def test_service_calendar_selector_does_not_fallback_from_newer_malformed_
                         market_open_at=datetime(2026, 8, 26, 13, 30, tzinfo=UTC),
                         market_close_at=datetime(2026, 8, 26, 20, tzinfo=UTC),
                         created_at=datetime(2026, 8, 25, tzinfo=UTC),
-                    )
+                    ),
+                    ExchangeCalendarSessionRecord(
+                        calendar_authority_id=newer_id,
+                        session=date(2026, 8, 28),
+                        decision_at=datetime(2026, 8, 28, 20, tzinfo=UTC),
+                        market_open_at=datetime(2026, 8, 28, 13, 30, tzinfo=UTC),
+                        market_close_at=datetime(2026, 8, 28, 20, tzinfo=UTC),
+                        created_at=datetime(2026, 8, 25, tzinfo=UTC),
+                    ),
                 ]
             )
 
@@ -1220,6 +1394,70 @@ async def test_cycle_loader_uses_persisted_half_day_close(
                     session,
                     account_id=seed.account_id,
                     now=datetime(2026, 8, 26, 18, tzinfo=UTC),
+                    expected_calendar_authority_id=CALENDAR_ID,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cycle_loader_rejects_session_created_after_pinned_time(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    now = datetime(2026, 8, 26, 13, tzinfo=UTC)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            await session.execute(
+                text("ALTER TABLE exchange_calendar_authorities DISABLE TRIGGER USER")
+            )
+            await session.execute(
+                text("ALTER TABLE exchange_calendar_sessions DISABLE TRIGGER USER")
+            )
+            await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text("UPDATE exchange_calendar_authorities SET published_at=:at"),
+                    {"at": now - timedelta(hours=1)},
+                )
+                await session.execute(
+                    text(
+                        "UPDATE exchange_calendar_sessions SET created_at=:created_at "
+                        "WHERE calendar_authority_id=:calendar_id AND session=:session"
+                    ),
+                    {
+                        "created_at": now + timedelta(seconds=1),
+                        "calendar_id": CALENDAR_ID,
+                        "session": date(2026, 8, 26),
+                    },
+                )
+                await session.execute(
+                    text(
+                        "UPDATE universe_snapshots SET key='us_liquid',"
+                        "version='us_liquid_v1',source='fosun_local_read_only',published_at=:at"
+                    ),
+                    {"at": now - timedelta(hours=1)},
+                )
+            finally:
+                await session.execute(text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER"))
+                await session.execute(
+                    text("ALTER TABLE exchange_calendar_sessions ENABLE TRIGGER USER")
+                )
+                await session.execute(
+                    text("ALTER TABLE exchange_calendar_authorities ENABLE TRIGGER USER")
+                )
+
+        async with sessions() as session:
+            with pytest.raises(
+                ValueError,
+                match="AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
+            ):
+                await load_quasi_realtime_cycle_authority(
+                    session,
+                    account_id=seed.account_id,
+                    now=now,
                     expected_calendar_authority_id=CALENDAR_ID,
                 )
     finally:

@@ -95,6 +95,50 @@ def test_non_internal_account_emits_stable_boundary_code(
     assert capsys.readouterr().out == '{"error_code":"AGENT_PAPER_ACCOUNT_INVALID"}\n'
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "AGENT_PAPER_CALENDAR_UNAVAILABLE",
+        "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
+        "AGENT_PAPER_MARKET_WINDOW_CLOSED",
+    ],
+)
+def test_trigger_command_exposes_persisted_calendar_failure_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_code: str,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "load_local_environment",
+        lambda *_args: {
+            "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+            "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
+            "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+
+    async def reject(*_args, **_kwargs):
+        raise ValueError(error_code)
+
+    monkeypatch.setattr(cli, "trigger_once", reject)
+
+    exit_code = main(
+        [
+            "trigger",
+            "--account-id",
+            str(UUID(int=1)),
+            "--idempotency-key",
+            "calendar-failure",
+        ]
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {"error_code": error_code}
+
+
 def test_feature_flag_is_disabled_by_default_and_can_be_explicitly_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

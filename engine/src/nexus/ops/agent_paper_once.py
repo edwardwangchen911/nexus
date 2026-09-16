@@ -748,8 +748,11 @@ def main(argv: list[str] | None = None) -> int:
         code = str(error)
         if code not in {
             "AGENT_PAPER_ACCOUNT_INVALID",
+            "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
+            "AGENT_PAPER_CALENDAR_UNAVAILABLE",
             "AGENT_PAPER_DATABASE_UNCONFIGURED",
             "AGENT_PAPER_DATABASE_NOT_LOCAL",
+            "AGENT_PAPER_MARKET_WINDOW_CLOSED",
             "AGENT_PAPER_TIME_IN_FUTURE",
             "AGENT_PAPER_MARKET_CONFIG_INVALID",
             "AGENT_PAPER_OUTSIDE_WINDOW",

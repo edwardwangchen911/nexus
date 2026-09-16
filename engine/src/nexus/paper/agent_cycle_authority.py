@@ -108,6 +108,7 @@ async def load_quasi_realtime_cycle_authority(
                 ExchangeCalendarAuthorityRecord.published_at <= now,
                 ExchangeCalendarAuthorityRecord.created_at <= now,
                 ExchangeCalendarSessionRecord.session == local_now.date(),
+                ExchangeCalendarSessionRecord.created_at <= now,
             )
             .order_by(
                 ExchangeCalendarAuthorityRecord.published_at.desc(),
@@ -193,7 +194,14 @@ async def select_agent_paper_service_calendar_authority(
     )
     if rows and rows[0].session == local_date and now >= rows[0].market_close_at:
         rows = rows[1:]
-    if len(rows) < 2 or rows[1].session <= rows[0].session:
+    if (
+        len(rows) < 2
+        or rows[1].session <= rows[0].session
+        or any(
+            row.session < authority.range_start or row.session > authority.range_end
+            for row in rows[:2]
+        )
+    ):
         raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
     calendar_session, next_session = rows[:2]
     return ServiceCalendarAuthority(

@@ -1111,6 +1111,9 @@ def test_loop_command_exposes_only_safe_stop_reasons(
     "error_code",
     [
         "AGENT_PAPER_ACCOUNT_INVALID",
+        "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
+        "AGENT_PAPER_CALENDAR_UNAVAILABLE",
+        "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
