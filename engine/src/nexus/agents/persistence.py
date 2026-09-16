@@ -490,6 +490,14 @@ async def admit_research_run(
         if run is None:
             raise RuntimeError("Agent idempotency run is missing")
         return ResearchAdmission(run=run, replayed=True)
+    if reuse_latest_actor_agent_version:
+        await session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(:scope, 1415))"
+            ),
+            {"scope": f"agent-version:{actor_id}"},
+        )
     instrument = await session.get(Instrument, request.instrument_id)
     snapshot = await session.get(DataSnapshot, request.data_snapshot_id)
     prior_run = (
@@ -512,6 +520,11 @@ async def admit_research_run(
         prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
     if prior_run is not None:
         model = await session.get(AgentModelConfigRecord, prior_run.model_config_id)
+        if model is not None and (
+            model.config_hash != prior_run.model_hash
+            or model.version != prior_run.pricing_version
+        ):
+            model = None
     elif model_config_id is not None:
         model = await session.get(AgentModelConfigRecord, model_config_id)
     else:

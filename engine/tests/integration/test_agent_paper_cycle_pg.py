@@ -114,6 +114,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 ENGINE_ROOT = Path(__file__).parents[2]
 
 
+async def _wait_for_advisory_wait(
+    sessions: async_sessionmaker[AsyncSession], backend_pid: int
+) -> None:
+    async with asyncio.timeout(2):
+        while True:
+            async with sessions() as observer:
+                wait_event = await observer.scalar(
+                    text("SELECT wait_event FROM pg_stat_activity WHERE pid=:backend_pid"),
+                    {"backend_pid": backend_pid},
+                )
+            if wait_event == "advisory":
+                return
+            await asyncio.sleep(0)
+
+
 def test_service_status_reads_one_heartbeat_without_producers_or_business_writes(
     migrated_database_url,
     monkeypatch,
@@ -814,6 +829,67 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
 
         assert second.run.prompt_manifest == first_manifest
         assert second.run.model_config_id == first_model_config_id
+        assert second.replayed is False
+        assert second.run_id != first_run.id
+
+        backend_pid = asyncio.get_running_loop().create_future()
+
+        async def admit_while_locked():
+            async with sessions.begin() as session:
+                backend_pid.set_result(
+                    int(await session.scalar(text("SELECT pg_backend_pid()")))
+                )
+                return await admit_agent_paper_research(
+                    session,
+                    cycle_id=uuid4(),
+                    instrument_id=first_run.instrument_id,
+                    research_snapshot_id=first_run.data_snapshot_id,
+                    research_as_of=first_run.decision_time,
+                    daily_limit_usd=Decimal("1"),
+                    now=first_run.decision_time,
+                )
+
+        async with sessions.begin() as lock_session:
+            await lock_session.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtextextended(:scope, 1415))"
+                ),
+                {"scope": "agent-version:local-agent-paper-cycle"},
+            )
+            locked_admission = asyncio.create_task(admit_while_locked())
+            await _wait_for_advisory_wait(sessions, await backend_pid)
+        third = await locked_admission
+        assert third.run.prompt_manifest == first_manifest
+        assert third.run.model_config_id == first_model_config_id
+
+        async with sessions.begin() as session:
+            await session.execute(
+                text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_research_runs SET model_hash=:model_hash "
+                        "WHERE id=:run_id"
+                    ),
+                    {"model_hash": "e" * 64, "run_id": third.run_id},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
+                )
+        with pytest.raises(ValueError, match="point-in-time data authority is invalid"):
+            async with sessions.begin() as session:
+                await admit_agent_paper_research(
+                    session,
+                    cycle_id=uuid4(),
+                    instrument_id=first_run.instrument_id,
+                    research_snapshot_id=first_run.data_snapshot_id,
+                    research_as_of=first_run.decision_time,
+                    daily_limit_usd=Decimal("1"),
+                    now=first_run.decision_time,
+                )
     finally:
         await engine.dispose()
 
