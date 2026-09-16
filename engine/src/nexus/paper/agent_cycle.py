@@ -18,7 +18,11 @@ from nexus.agents.paper_context import (
 )
 from nexus.agents.persistence import load_actionable_research_output
 from nexus.domain.ids import new_uuid7
-from nexus.jobs.daily_research import admit_agent_paper_research
+from nexus.jobs.daily_research import (
+    AGENT_VERSION_CHALLENGER_ACTOR,
+    AGENT_VERSION_INCUMBENT_ACTOR,
+    admit_agent_paper_research,
+)
 from nexus.jobs.models import JobType, job_input_hash
 from nexus.paper.agent_cycle_authority import (
     CycleAuthority,
@@ -306,6 +310,11 @@ async def advance_agent_paper_cycle(
     decision_time: datetime,
     idempotency_key: str,
     daily_limit_usd: Decimal = Decimal("3.00"),
+    version_evaluation_id: UUID | None = None,
+    version_lane: str | None = None,
+    version_source_run_id: UUID | None = None,
+    version_prompt_id: UUID | None = None,
+    version_model_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Advance one persisted cycle without polling or executing model work."""
     if (
@@ -318,13 +327,42 @@ async def advance_agent_paper_cycle(
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
-    request_hash = job_input_hash(
-        {
-            "schema": "agent-paper-cycle-v1",
-            "account_id": str(account_id),
-            "decision_time": decision_time.isoformat(),
-        }
-    )
+    explicit_version = version_prompt_id is not None or version_model_id is not None
+    if version_evaluation_id is None:
+        if (
+            version_lane is not None
+            or version_source_run_id is not None
+            or explicit_version
+        ):
+            raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
+    elif (
+        version_lane not in {"incumbent", "challenger"}
+        or (version_prompt_id is None) != (version_model_id is None)
+        or (version_source_run_id is None) == (not explicit_version)
+    ):
+        raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
+    request_payload: dict[str, object] = {
+        "schema": "agent-paper-cycle-v1",
+        "account_id": str(account_id),
+        "decision_time": decision_time.isoformat(),
+    }
+    if version_evaluation_id is not None:
+        request_payload.update(
+            {
+                "version_evaluation_id": str(version_evaluation_id),
+                "version_lane": version_lane,
+                "version_source_run_id": (
+                    str(version_source_run_id) if version_source_run_id is not None else None
+                ),
+                "version_prompt_id": (
+                    str(version_prompt_id) if version_prompt_id is not None else None
+                ),
+                "version_model_id": (
+                    str(version_model_id) if version_model_id is not None else None
+                ),
+            }
+        )
+    request_hash = job_input_hash(request_payload)
     claim, _ = await claim_or_lock(
         session,
         f"local-agent-paper-cycle:{account_id}",
@@ -355,6 +393,11 @@ async def advance_agent_paper_cycle(
             authority=authority,
             decision_slot_at=decision_slot_at,
             daily_limit_usd=daily_limit_usd,
+            version_evaluation_id=version_evaluation_id,
+            version_lane=version_lane,
+            version_source_run_id=version_source_run_id,
+            version_prompt_id=version_prompt_id,
+            version_model_id=version_model_id,
         )
     if cycle.decision_time != decision_time:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
@@ -386,6 +429,11 @@ async def advance_agent_paper_cycle(
                 as_of=cycle.decision_time,
             ),
             daily_limit_usd=daily_limit_usd,
+            version_evaluation_id=version_evaluation_id,
+            version_lane=version_lane,
+            version_source_run_id=version_source_run_id,
+            version_prompt_id=version_prompt_id,
+            version_model_id=version_model_id,
         )
     if events[-1].to_status == "researching":
         return await _resume_research(session, cycle=cycle, authority=authority, events=events)
@@ -398,6 +446,11 @@ async def _start_cycle(
     authority: CycleAuthority,
     decision_slot_at: datetime,
     daily_limit_usd: Decimal,
+    version_evaluation_id: UUID | None = None,
+    version_lane: str | None = None,
+    version_source_run_id: UUID | None = None,
+    version_prompt_id: UUID | None = None,
+    version_model_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time
@@ -469,6 +522,11 @@ async def _start_cycle(
         authority=authority,
         projection=projection,
         daily_limit_usd=daily_limit_usd,
+        version_evaluation_id=version_evaluation_id,
+        version_lane=version_lane,
+        version_source_run_id=version_source_run_id,
+        version_prompt_id=version_prompt_id,
+        version_model_id=version_model_id,
     )
 
 
@@ -479,6 +537,11 @@ async def _admit_cycle_research(
     authority: CycleAuthority,
     projection: PaperPortfolioProjection,
     daily_limit_usd: Decimal,
+    version_evaluation_id: UUID | None = None,
+    version_lane: str | None = None,
+    version_source_run_id: UUID | None = None,
+    version_prompt_id: UUID | None = None,
+    version_model_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     manifest = parse_candidate_manifest(
         cycle.candidate_manifest,
@@ -501,15 +564,39 @@ async def _admit_cycle_research(
                             projection=projection,
                         )
                     ).id
-                admission = await admit_agent_paper_research(
-                    session,
-                    cycle_id=cycle.id,
-                    instrument_id=candidate.instrument_id,
-                    research_snapshot_id=research_snapshot_id,
-                    research_as_of=authority.decision_time,
-                    daily_limit_usd=daily_limit_usd,
-                    now=authority.decision_time,
-                )
+                if version_evaluation_id is None:
+                    admission = await admit_agent_paper_research(
+                        session,
+                        cycle_id=cycle.id,
+                        instrument_id=candidate.instrument_id,
+                        research_snapshot_id=research_snapshot_id,
+                        research_as_of=authority.decision_time,
+                        daily_limit_usd=daily_limit_usd,
+                        now=authority.decision_time,
+                    )
+                else:
+                    admission = await admit_agent_paper_research(
+                        session,
+                        cycle_id=cycle.id,
+                        instrument_id=candidate.instrument_id,
+                        research_snapshot_id=research_snapshot_id,
+                        research_as_of=authority.decision_time,
+                        daily_limit_usd=daily_limit_usd,
+                        now=authority.decision_time,
+                        actor_id=(
+                            AGENT_VERSION_INCUMBENT_ACTOR
+                            if version_lane == "incumbent"
+                            else AGENT_VERSION_CHALLENGER_ACTOR
+                        ),
+                        admission_idempotency_key=(
+                            f"agent-version:{version_evaluation_id}:{version_lane}:"
+                            f"{cycle.decision_slot_at.isoformat()}:"
+                            f"{candidate.instrument_id}"
+                        ),
+                        version_source_run_id=version_source_run_id,
+                        prompt_version_id=version_prompt_id,
+                        model_config_id=version_model_id,
+                    )
                 run_ids.append(admission.run_id)
     except ValueError:
         await _append_event(

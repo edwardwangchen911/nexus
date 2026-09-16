@@ -781,14 +781,34 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
 
         async with sessions.begin() as session:
+            version_source = await admit_agent_paper_research(
+                session,
+                cycle_id=uuid4(),
+                instrument_id=INSTRUMENTS[0][0],
+                research_snapshot_id=UUID(
+                    int=0x63000000000000000000000000000301
+                ),
+                research_as_of=DECISION_TIME,
+                daily_limit_usd=Decimal("1"),
+                now=DECISION_TIME,
+            )
+
+        evaluation_id = uuid4()
+        async with sessions.begin() as session:
             started = await advance_agent_paper_cycle(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
                 idempotency_key="agent-paper-frozen-champion",
+                version_evaluation_id=evaluation_id,
+                version_lane="incumbent",
+                version_source_run_id=version_source.run_id,
             )
             first_run = await session.get(AgentResearchRunRecord, started.research_run_ids[0])
             assert first_run is not None
+            assert first_run.actor_id == "local-agent-version-incumbent"
+            assert first_run.prompt_hash == version_source.run.prompt_hash
+            assert first_run.model_hash == version_source.run.model_hash
             first_manifest = dict(first_run.prompt_manifest)
             first_model_config_id = first_run.model_config_id
             first_model_hash = first_run.model_hash
@@ -832,6 +852,60 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
         assert second.run.model_config_id == first_model_config_id
         assert second.replayed is False
         assert second.run_id != first_run.id
+
+        pinned_cycle_id = uuid4()
+        pinned_key = f"agent-version:test:incumbent:{first_run.decision_time.isoformat()}"
+        async with sessions.begin() as session:
+            pinned = await admit_agent_paper_research(
+                session,
+                cycle_id=pinned_cycle_id,
+                instrument_id=first_run.instrument_id,
+                research_snapshot_id=first_run.data_snapshot_id,
+                research_as_of=first_run.decision_time,
+                daily_limit_usd=Decimal("1"),
+                now=first_run.decision_time,
+                actor_id="local-agent-version-incumbent",
+                admission_idempotency_key=pinned_key,
+                version_source_run_id=first_run.id,
+            )
+            pinned_job = await session.scalar(
+                select(Job).where(Job.payload["run_id"].as_string() == str(pinned.run_id))
+            )
+        assert pinned.run.actor_id == "local-agent-version-incumbent"
+        assert pinned.run.prompt_hash == first_run.prompt_hash
+        assert pinned.run.model_hash == first_run.model_hash
+        assert pinned_job is not None
+        assert pinned_job.job_type == "agent.paper.research"
+
+        async with sessions.begin() as session:
+            pinned_replay = await admit_agent_paper_research(
+                session,
+                cycle_id=pinned_cycle_id,
+                instrument_id=first_run.instrument_id,
+                research_snapshot_id=first_run.data_snapshot_id,
+                research_as_of=first_run.decision_time,
+                daily_limit_usd=Decimal("1"),
+                now=first_run.decision_time,
+                actor_id="local-agent-version-incumbent",
+                admission_idempotency_key=pinned_key,
+                version_source_run_id=first_run.id,
+            )
+        assert pinned_replay.run_id == pinned.run_id
+        assert pinned_replay.replayed is True
+
+        async with sessions.begin() as session:
+            versioned_replay = await advance_agent_paper_cycle(
+                session,
+                account_id=seed.account_id,
+                decision_time=DECISION_TIME,
+                idempotency_key="agent-paper-frozen-champion",
+                version_evaluation_id=evaluation_id,
+                version_lane="incumbent",
+                version_source_run_id=version_source.run_id,
+            )
+        assert versioned_replay.cycle_id == started.cycle_id
+        assert versioned_replay.research_run_ids == started.research_run_ids
+        assert versioned_replay.replayed is True
 
         backend_pid = asyncio.get_running_loop().create_future()
 

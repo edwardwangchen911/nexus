@@ -29,6 +29,9 @@ _ROUTE = "manual-daily-research-v1"
 _BINDING_ERROR = "MANUAL_DAILY_RESEARCH_BINDING_INVALID"
 _AGENT_PAPER_ACTOR = "local-agent-paper-cycle"
 _AGENT_PAPER_ROUTE = "agent-paper-cycle-v1"
+AGENT_VERSION_INCUMBENT_ACTOR = "local-agent-version-incumbent"
+AGENT_VERSION_CHALLENGER_ACTOR = "local-agent-version-challenger"
+_AGENT_VERSION_ROUTE = "agent-version-evaluation-v1"
 
 
 async def _diagnosis(
@@ -255,32 +258,76 @@ async def admit_agent_paper_research(
     research_as_of: datetime,
     daily_limit_usd: Decimal,
     now: datetime,
+    actor_id: str = _AGENT_PAPER_ACTOR,
+    admission_idempotency_key: str | None = None,
+    version_source_run_id: UUID | None = None,
+    prompt_version_id: UUID | None = None,
+    model_config_id: UUID | None = None,
 ) -> ResearchAdmission:
     """Admit one already-frozen candidate through the native research Job path."""
-    idempotency_key = f"agent-paper:{cycle_id}:{instrument_id}"
-    request_hash = job_input_hash(
-        {
-            "schema": _AGENT_PAPER_ROUTE,
-            "cycle_id": str(cycle_id),
-            "instrument_id": str(instrument_id),
-            "research_snapshot_id": str(research_snapshot_id),
-            "research_as_of": research_as_of.isoformat(),
-        }
-    )
-    model_config_id = await session.scalar(
-        select(AgentModelConfigRecord.id)
-        .where(
-            AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION,
-            AgentModelConfigRecord.pricing_available_at <= now,
-            AgentModelConfigRecord.pricing_expires_at > now,
+    evaluation_actor = actor_id in {
+        AGENT_VERSION_INCUMBENT_ACTOR,
+        AGENT_VERSION_CHALLENGER_ACTOR,
+    }
+    explicit_version = prompt_version_id is not None or model_config_id is not None
+    if evaluation_actor:
+        if (
+            admission_idempotency_key is None
+            or (prompt_version_id is None) != (model_config_id is None)
+            or (version_source_run_id is None) == (not explicit_version)
+        ):
+            raise ValueError("Agent version authority is ambiguous")
+    elif (
+        actor_id != _AGENT_PAPER_ACTOR
+        or admission_idempotency_key is not None
+        or version_source_run_id is not None
+        or explicit_version
+    ):
+        raise ValueError("Agent version authority is ambiguous")
+
+    route = _AGENT_VERSION_ROUTE if evaluation_actor else _AGENT_PAPER_ROUTE
+    idempotency_key = admission_idempotency_key or f"agent-paper:{cycle_id}:{instrument_id}"
+    request_payload: dict[str, object] = {
+        "schema": route,
+        "cycle_id": str(cycle_id),
+        "instrument_id": str(instrument_id),
+        "research_snapshot_id": str(research_snapshot_id),
+        "research_as_of": research_as_of.isoformat(),
+    }
+    if evaluation_actor:
+        request_payload.update(
+            {
+                "actor_id": actor_id,
+                "version_source_run_id": (
+                    str(version_source_run_id) if version_source_run_id is not None else None
+                ),
+                "prompt_version_id": (
+                    str(prompt_version_id) if prompt_version_id is not None else None
+                ),
+                "model_config_id": (
+                    str(model_config_id) if model_config_id is not None else None
+                ),
+            }
         )
-        .order_by(AgentModelConfigRecord.created_at.desc(), AgentModelConfigRecord.id.desc())
-        .limit(1)
-    )
+    request_hash = job_input_hash(request_payload)
+    reuse_latest_actor_agent_version = not evaluation_actor
+    if not evaluation_actor:
+        model_config_id = await session.scalar(
+            select(AgentModelConfigRecord.id)
+            .where(
+                AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION,
+                AgentModelConfigRecord.pricing_available_at <= now,
+                AgentModelConfigRecord.pricing_expires_at > now,
+            )
+            .order_by(
+                AgentModelConfigRecord.created_at.desc(), AgentModelConfigRecord.id.desc()
+            )
+            .limit(1)
+        )
     return await admit_research_run(
         session,
-        actor_id=_AGENT_PAPER_ACTOR,
-        route=_AGENT_PAPER_ROUTE,
+        actor_id=actor_id,
+        route=route,
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         request=ResearchRequest(
@@ -293,5 +340,6 @@ async def admit_agent_paper_research(
         daily_limit_usd=daily_limit_usd,
         now=now,
         job_type=JobType.AGENT_PAPER_RESEARCH,
-        reuse_latest_actor_agent_version=True,
+        reuse_latest_actor_agent_version=reuse_latest_actor_agent_version,
+        version_source_run_id=version_source_run_id,
     )
