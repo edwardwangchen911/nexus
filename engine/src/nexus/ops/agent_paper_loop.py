@@ -849,13 +849,21 @@ async def _inspect_current_trends_scope(
                 now=database_now,
                 expected_calendar_authority_id=expected_calendar_authority_id,
             )
+            required_start = prior.prior_session - timedelta(days=366)
+            authority_range_start = await session.scalar(
+                select(ExchangeCalendarAuthorityRecord.range_start).where(
+                    ExchangeCalendarAuthorityRecord.id == expected_calendar_authority_id,
+                    ExchangeCalendarAuthorityRecord.range_start <= required_start,
+                )
+            )
+            if not isinstance(authority_range_start, date):
+                raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
             start_session = await session.scalar(
                 select(ExchangeCalendarSessionRecord.session)
                 .where(
                     ExchangeCalendarSessionRecord.calendar_authority_id
                     == expected_calendar_authority_id,
-                    ExchangeCalendarSessionRecord.session
-                    >= prior.prior_session - timedelta(days=366),
+                    ExchangeCalendarSessionRecord.session >= required_start,
                     ExchangeCalendarSessionRecord.session <= prior.prior_session,
                     ExchangeCalendarSessionRecord.created_at <= database_now,
                 )
@@ -1239,15 +1247,14 @@ async def run_foreground_loop(
                 wait_until = snapshot.decision_window_start_at
             else:
                 wait_until = snapshot.next_decision_window_start_at
-            remaining = (wait_until - snapshot.now).total_seconds()
-            while remaining > 0:
+            deadline = monotonic() + (wait_until - snapshot.now).total_seconds()
+            while (remaining := deadline - monotonic()) > 0:
                 duration = min(remaining, interval_seconds)
                 await sleep(duration)
                 try:
                     await persist_heartbeat()
                 except Exception:
                     return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-                remaining -= duration
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_MARKET:
             assert snapshot.market_window_end_at is not None

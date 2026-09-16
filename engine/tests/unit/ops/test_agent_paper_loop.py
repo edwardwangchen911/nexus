@@ -123,6 +123,7 @@ def test_foreground_loop_waits_for_session_without_product_side_effects() -> Non
     )
     sleeps: list[float] = []
     heartbeats: list[datetime] = []
+    elapsed = 0.0
 
     async def inspect() -> loop.AgentPaperLoopSnapshot:
         return next(states)
@@ -131,7 +132,9 @@ def test_foreground_loop_waits_for_session_without_product_side_effects() -> Non
         raise AssertionError("session waiting must not run provider, model, or trigger actions")
 
     async def sleep(seconds: float) -> None:
+        nonlocal elapsed
         sleeps.append(seconds)
+        elapsed += seconds
 
     async def heartbeat(seen_at: datetime) -> None:
         heartbeats.append(seen_at)
@@ -143,12 +146,64 @@ def test_foreground_loop_waits_for_session_without_product_side_effects() -> Non
             sleep=sleep,
             heartbeat=heartbeat,
             clock=lambda: start,
+            monotonic=lambda: elapsed,
         )
     )
 
     assert result == A.STOP_DISABLED
     assert sleeps == [15.0, 15.0, 1.0]
     assert len(heartbeats) == 4
+
+
+def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() -> None:
+    start = datetime(2026, 7, 6, 11, tzinfo=UTC)
+    states = iter(
+        (
+            loop.AgentPaperLoopSnapshot(
+                now=start - timedelta(seconds=31),
+                calendar_authority_id=UUID(int=9),
+                decision_window_start_at=start,
+                decision_window_end_at=datetime(2026, 7, 6, 20, tzinfo=UTC),
+                next_decision_window_start_at=datetime(2026, 7, 7, 11, tzinfo=UTC),
+            ),
+            loop.AgentPaperLoopSnapshot(now=start, enabled=False),
+        )
+    )
+    elapsed = 0.0
+    sleeps: list[float] = []
+    business_actions: list[loop.AgentPaperLoopAction] = []
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    async def execute(
+        action: loop.AgentPaperLoopAction, _state: loop.AgentPaperLoopSnapshot
+    ) -> None:
+        business_actions.append(action)
+
+    async def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal elapsed
+        elapsed += 10
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: start,
+            monotonic=lambda: elapsed,
+        )
+    )
+
+    assert result == A.STOP_DISABLED
+    assert sleeps == [15.0, 6.0]
+    assert business_actions == []
 
 
 @pytest.mark.parametrize(
