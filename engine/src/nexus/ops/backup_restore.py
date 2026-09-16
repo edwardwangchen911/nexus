@@ -45,6 +45,9 @@ _RUN_ID = re.compile(r"^[0-9a-f]{32}$")
 
 VERIFICATION_TABLES = (
     "paper_accounts",
+    "agent_version_evaluations",
+    "agent_version_cycle_pairs",
+    "agent_version_evaluation_decisions",
     "paper_ledger_transactions",
     "paper_ledger_entries",
     "paper_performance_snapshots",

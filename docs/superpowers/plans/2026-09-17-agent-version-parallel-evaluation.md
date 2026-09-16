@@ -56,6 +56,7 @@
 - Modify: `engine/src/nexus/persistence/migrations.py`
 - Modify: `engine/src/nexus/ops/backup_restore.py`
 - Modify: `engine/tests/unit/ops/test_backup_restore.py`
+- Modify: `engine/tests/helpers/migration_schema_expectations.py`
 
 **Interfaces:**
 - Produces `AgentVersionEvaluationRecord`, `AgentVersionCyclePairRecord`, and `AgentVersionEvaluationDecisionRecord`.
@@ -83,8 +84,7 @@ Add clean `0061 -> 0062 -> 0061` round-trip coverage and assert downgrade raises
 - [ ] **Step 2: Run focused tests and verify RED**
 
 ```bash
-cd engine
-uv run pytest tests/integration/test_agent_version_evaluation_migration.py tests/unit/ops/test_backup_restore.py -q
+uv run --project engine pytest engine/tests/integration/test_agent_version_evaluation_migration.py engine/tests/unit/ops/test_backup_restore.py -q
 ```
 
 Expected: failure because revision 0062, ORM records, and backup order do not exist.
@@ -107,6 +107,9 @@ class AgentVersionEvaluationRecord(ImmutableCreatedAt, Base):
     challenger_model_config_id: Mapped[UUID] = mapped_column(
         ForeignKey("agent_model_configs.id")
     )
+    calendar_authority_id: Mapped[UUID] = mapped_column(
+        ForeignKey("exchange_calendar_authorities.id")
+    )
     incumbent_prompt_hash: Mapped[str] = mapped_column(String(64))
     incumbent_model_hash: Mapped[str] = mapped_column(String(64))
     challenger_prompt_hash: Mapped[str] = mapped_column(String(64))
@@ -125,19 +128,20 @@ Add pair and decision records with the spec fields. Enforce `phase IN ('train','
 The migration must:
 
 1. advisory-lock registration and reject a second evaluation lacking a final decision;
-2. require two distinct internal paper accounts with identical initial capital and no `broker_account_bindings`;
+2. require two distinct internal paper accounts with identical initial capital and permanently deny external-ID or broker-intent attachment;
 3. verify AAPL through point-in-time alias authority;
-4. verify train/OOS order and session counts;
-5. verify pair cycles/runs match registered accounts, slot, phase, instrument, frozen hashes, and `execution_locked=true`;
-6. verify PASS selects the earliest OOS challenger run and FAIL/UNKNOWN selects the registered incumbent run;
-7. make all three tables immutable;
-8. refuse downgrade unless all three are empty.
+4. freeze one complete XNYS calendar authority and verify every train/OOS slot is an in-session timestamp;
+5. reject evaluation-account cycles outside the frozen slots or after finalization;
+6. verify pair cycles/runs match registered accounts, slot, phase, instrument, frozen hashes, and `execution_locked=true`;
+7. verify PASS selects the earliest OOS challenger run and FAIL/UNKNOWN selects the registered incumbent run;
+8. make all three tables immutable;
+9. refuse downgrade unless all three are empty.
 
 - [ ] **Step 5: Update backup order and run GREEN**
 
 ```bash
+uv run --project engine pytest engine/tests/integration/test_agent_version_evaluation_migration.py engine/tests/unit/ops/test_backup_restore.py -q
 cd engine
-uv run pytest tests/integration/test_agent_version_evaluation_migration.py tests/unit/ops/test_backup_restore.py -q
 uv run ruff check src/nexus/persistence/models/agent_versions.py alembic/versions/0062_agent_version_evaluation.py tests/integration/test_agent_version_evaluation_migration.py
 uv run mypy src/nexus/persistence/models/agent_versions.py
 ```

@@ -1,6 +1,7 @@
 """SQLAlchemy models grouped by persistence domain."""
 
 from nexus.persistence.models import (
+    agent_versions,
     agents,
     backtest,
     broker_simulation,
@@ -17,6 +18,7 @@ from nexus.persistence.models import (
 )
 
 __all__ = [
+    "agent_versions",
     "agents",
     "backtest",
     "broker_simulation",

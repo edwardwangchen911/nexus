@@ -139,6 +139,12 @@ PAPER_TABLES = {
     "paper_performance_attributions",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | PAPER_TABLES
+AGENT_VERSION_EVALUATION_TABLES = {
+    "agent_version_evaluations",
+    "agent_version_cycle_pairs",
+    "agent_version_evaluation_decisions",
+}
+EXPECTED_TABLES = EXPECTED_TABLES | AGENT_VERSION_EVALUATION_TABLES
 AUTOMATION_TABLES = {
     "job_attempts",
     "job_dependencies",
@@ -283,6 +289,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     ),
     frozenset(SHADOW_TABLES),
     frozenset(PAPER_TABLES),
+    frozenset(AGENT_VERSION_EVALUATION_TABLES),
     frozenset(AUTOMATION_TABLES),
     frozenset(EVOLUTION_TABLES),
     frozenset(BROKER_SIMULATION_TABLES),
@@ -305,6 +312,7 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_strategy_decision_agent_outputs_output",
     },
     "strategy_decisions": {
+        "fk_strategy_decisions_agent_paper_cycle",
         "fk_strategy_decisions_paper_account",
         "fk_strategy_decisions_source_policy",
         "fk_strategy_decisions_execution_source_policy",
@@ -487,6 +495,26 @@ EXPECTED_FOREIGN_KEYS["intraday_bar_set_authorities"] = {
     "fk_intraday_bar_set_authorities_manifest",
     "fk_intraday_bar_set_authorities_evidence_owner",
     "fk_intraday_bar_set_authorities_source_policy",
+}
+EXPECTED_FOREIGN_KEYS["agent_version_evaluations"] = {
+    "fk_agent_version_evaluations_incumbent_account_id_paper_12b1",
+    "fk_agent_version_evaluations_challenger_account_id_pape_9353",
+    "fk_agent_version_evaluations_instrument_id_instruments",
+    "fk_agent_version_evaluations_calendar_authority_id_exch_f493",
+    "fk_agent_version_evaluations_incumbent_version_source_r_6ab1",
+    "fk_agent_version_evaluations_challenger_prompt_version__6aa1",
+    "fk_agent_version_evaluations_challenger_model_config_id_8930",
+}
+EXPECTED_FOREIGN_KEYS["agent_version_cycle_pairs"] = {
+    "fk_agent_version_cycle_pairs_evaluation_id_agent_versio_d258",
+    "fk_agent_version_cycle_pairs_incumbent_cycle_id_agent_p_9884",
+    "fk_agent_version_cycle_pairs_challenger_cycle_id_agent__e203",
+    "fk_agent_version_cycle_pairs_incumbent_run_id_agent_res_a0c3",
+    "fk_agent_version_cycle_pairs_challenger_run_id_agent_re_267d",
+}
+EXPECTED_FOREIGN_KEYS["agent_version_evaluation_decisions"] = {
+    "fk_agent_version_evaluation_decisions_evaluation_id_age_47af",
+    "fk_agent_version_evaluation_decisions_selected_version__c59d",
 }
 EXPECTED_FOREIGN_KEYS.update(
     {

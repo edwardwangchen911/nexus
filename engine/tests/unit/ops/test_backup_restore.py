@@ -170,6 +170,9 @@ async def test_every_subprocess_has_a_bounded_timeout(
 def test_verification_set_covers_authority_roots_and_balanced_ledger() -> None:
     assert VERIFICATION_TABLES == (
         "paper_accounts",
+        "agent_version_evaluations",
+        "agent_version_cycle_pairs",
+        "agent_version_evaluation_decisions",
         "paper_ledger_transactions",
         "paper_ledger_entries",
         "paper_performance_snapshots",
