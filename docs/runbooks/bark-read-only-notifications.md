@@ -1,15 +1,35 @@
 # 自托管 Bark 只读通知
 
-本入口只消费已经提交的 NEXUS Paper outbox 事实并发送脱敏通知。通知不能批准或拒绝订单，
+本入口只消费已经提交的 NEXUS Paper outbox 事实并发送加密的可行动通知。通知不能批准或拒绝订单，
 不能改变业务状态，不能触发行情采集、模型调用、模拟盘或实盘写入，也不能修改
 `execution_locked=true`。页面刷新仍只读取持久化事实。
 
-第一版只接受仓库已有事件：Agent 决策持久化、批次评估、风控拒绝、订单提交、部分成交、成交和
-取消。当前没有独立的订单失败 outbox event，因此不会制造“失败”通知。Bark 使用相同 outbox
-event ID 更新同一通知；极端的发送成功/数据库确认前崩溃会重投，但不会堆出不同 ID 的通知。
-该更新语义要求 Bark App 不低于 1.5.2；自托管 server 已固定为 2.3.5。
+第一阶段即时领取的白名单只有以下已闭合事件：
 
-## 1. 边界和前置条件
+- `paper.order.risk_rejected@paper_event_v1`：风控拒绝；
+- `paper.execution.advance.filled@paper_execution_v1`：最终成交；
+- `paper.execution.advance.cancelled@paper_execution_v1` 与
+  `paper.execution.cancelled@paper_execution_v1`：最终取消。
+
+Agent 决策持久化、批次评估、订单提交和部分成交不会被 Bark 领取，保持给其余 outbox 消费者。
+待处理/部分成交的延迟合并，以及每日摘要，仍是第二阶段能力，当前不会发送。历史或无法形成完整
+`notification_snapshot` 的终态事件会以 `notification_delivery=unavailable` 明确跳过，不回查账户或
+制造补充通知。当前没有独立的订单失败 outbox event，因此不会制造“失败”通知。Bark 使用订单 ID
+更新同一通知；极端的发送成功/数据库确认前崩溃会重投，但不会堆出不同 ID 的通知。该更新语义要求
+Bark App 不低于 1.5.2；自托管 server 已固定为 2.3.5。
+
+## 1. 通知内容与隐私
+
+每条即时通知从对应 outbox 的事件时 `notification_snapshot` 渲染：标题显示内部模拟、代码、买卖方向、
+股数和结果；正文按结果显示参考价或成交均价、计划/成交金额、费用、拒绝或取消原因、成交后或未变化的
+持仓与可用现金，以及可用时的 Agent 理由和失效条件。`id` 始终是该订单 ID，链接（若配置）只会打开只读
+`/paper`。
+
+这些字段足以让用户在不下单的前提下判断是否需要打开页面，因此内容并非完全移除代码、持仓或金额。
+在 iPhone 的锁屏通知预览中建议选择“解锁时”或“从不”，并避免在共享设备上显示预览。Bark 和 NEXUS
+不会在发送时查询当前价格、持仓、账户或研究结论；后续变化不得回填既有通知。
+
+## 2. 边界和前置条件
 
 - Bark App 与自托管 server 的注册会把 APNs device token 写入 Bark 自己的 `bark-data` 卷。
 - 稳态 Compose 不发布 Bark 端口；NEXUS worker 与 Bark Server 共用网络命名空间，只调用
@@ -24,7 +44,7 @@ event ID 更新同一通知；极端的发送成功/数据库确认前崩溃会�
 [稳定 ID 语义](https://github.com/Finb/Bark/blob/master/docs/en-us/tutorial.md)和
 [注册端点](https://github.com/Finb/bark-server/blob/master/route_register.go)。
 
-## 2. 准备本地配置
+## 3. 准备本地配置
 
 用本机受保护编辑器修改 Git 忽略的 `infra/.env.local`。不要把真实值粘贴到聊天或命令参数。
 注册前先保持通知 worker 关闭，选择一段 16 位 ASCII 共享密钥；device key 和启用时间暂时留空：
@@ -43,7 +63,7 @@ NEXUS_BARK_READ_ONLY_URL=
 
 若 iPhone 不能只读访问 NEXUS `/paper`，保持链接为空。
 
-## 3. 一次性 iPhone 注册
+## 4. 一次性 iPhone 注册
 
 先在 `infra/.env.local` 把 `NEXUS_BARK_REGISTRATION_BIND_ADDRESS` 临时设置为 Mac 当前受信任
 局域网地址，例如 `192.168.x.y`；不要使用示例地址原样运行。只启动 Bark Server：
@@ -70,7 +90,7 @@ docker compose -p nexus-fosun-live --env-file infra/.env.local \
 稳态 `docker compose ps` 的 Bark Server 不应显示宿主机 published port。不要在聊天中发送 App
 显示的 device key 或加密 key。
 
-## 4. 健康检查与启动
+## 5. 健康检查与启动
 
 先在容器内部检查 Bark，不发送 APNs 通知：
 
@@ -91,10 +111,10 @@ worker 只领取 `activated_at` 之后、白名单内的 Paper outbox。通知�
 不是投递成功，先按 `outbox_events → outbox_delivery_attempts` 核对状态，不重复触发决策或订单。
 
 真实验收必须使用启用后自然产生的一条已批准内部模拟事实，并同时核对：业务事实已提交、对应
-outbox event 为 published、delivery attempt 为 published、iPhone 实际显示解密后的脱敏内容。
+outbox event 为 published、delivery attempt 为 published、iPhone 实际显示解密后的通知内容。
 缺少任何一项都不能宣称真实 iPhone/APNs 验收完成。
 
-## 5. 关闭与回滚
+## 6. 关闭与回滚
 
 先在 `infra/.env.local` 设置 `NEXUS_BARK_ENABLED=false`，再只停止本切片服务：
 
