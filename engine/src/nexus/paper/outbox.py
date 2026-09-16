@@ -16,8 +16,6 @@ PaperOutboxMessage = OutboxMessage
 PaperOutboxPublisher = Callable[[PaperOutboxMessage], Awaitable[None]]
 
 _PAPER_EVENT_SCHEMAS = (
-    ("strategy_decision.persisted", "paper_event_v1"),
-    ("paper.order_batch.evaluated", "paper_event_v1"),
     ("paper.order.risk_rejected", "paper_event_v1"),
     ("paper.order.submitted", "paper_event_v1"),
     ("paper.reservation.created", "paper_event_v1"),

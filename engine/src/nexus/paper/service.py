@@ -633,11 +633,10 @@ def _event_pairs(
     )
 
 
-async def _add_event_pair(
+async def _add_audit_event(
     session: AsyncSession,
     *,
     action: str,
-    aggregate_id: UUID,
     payload: dict[str, object],
     occurred_at: datetime,
 ) -> None:
@@ -646,6 +645,22 @@ async def _add_event_pair(
         actor_id=_ACTOR,
         action=action,
         schema_version="paper_event_v1",
+        payload=payload,
+        occurred_at=occurred_at,
+    )
+
+
+async def _add_event_pair(
+    session: AsyncSession,
+    *,
+    action: str,
+    aggregate_id: UUID,
+    payload: dict[str, object],
+    occurred_at: datetime,
+) -> None:
+    await _add_audit_event(
+        session,
+        action=action,
         payload=payload,
         occurred_at=occurred_at,
     )
@@ -958,17 +973,15 @@ async def _persist_new_batch(
         "batch_id": str(batch_id),
         "batch_hash": batch_hash,
     }
-    await _add_event_pair(
+    await _add_audit_event(
         session,
         action="strategy_decision.persisted",
-        aggregate_id=account_id,
         payload={**common, "decision_hash": decision_hash},
         occurred_at=request_time,
     )
-    await _add_event_pair(
+    await _add_audit_event(
         session,
         action="paper.order_batch.evaluated",
-        aggregate_id=account_id,
         payload={
             **common,
             "request_hash": request_hash,

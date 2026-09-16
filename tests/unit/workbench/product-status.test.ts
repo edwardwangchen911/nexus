@@ -42,11 +42,15 @@ const watch: Candidate = {
   sizing_action: "none",
 };
 
-function cycle(patch: Partial<Cycle> & { risk_outcomes?: Array<"approved" | "reduced" | "rejected"> } = {}): Cycle {
+function cycle(patch: Partial<Cycle> & {
+  risk_outcomes?: NonNullable<Cycle["decision"]>["risk_outcomes"];
+} = {}): Cycle {
   const { risk_outcomes, ...cyclePatch } = patch;
   const value = structuredClone(agentPaperCycle);
   Object.assign(value, cyclePatch);
-  if (risk_outcomes !== undefined && value.decision) value.decision.risk_outcomes = risk_outcomes;
+  if (risk_outcomes !== undefined && value.decision) {
+    value.decision.risk_outcomes = risk_outcomes;
+  }
   value.candidate_count = value.candidates.length;
   return value;
 }
@@ -128,8 +132,17 @@ describe("central product-state vocabulary", () => {
     [["rejected"], "risk_rejected", "风控拒绝"],
     [["reduced"], "risk_reduced", "风控缩减"],
     [["approved"], "risk_approved", "风控通过"],
+    [["no_change"], "risk_no_change", "无需调整"],
     [[], "not_evaluated", "尚未评估"],
   ] as const)("maps deterministic risk outcome %j", (riskOutcomes, key, label) => {
+    expect(riskPresentation(cycle({ risk_outcomes: [...riskOutcomes] }))).toMatchObject({ key, label });
+  });
+
+  it.each([
+    [["no_change", "approved"], "risk_approved", "风控通过"],
+    [["no_change", "reduced"], "risk_reduced", "风控缩减"],
+    [["no_change", "rejected"], "risk_rejected", "风控拒绝"],
+  ] as const)("keeps material risk outcome priority for %j", (riskOutcomes, key, label) => {
     expect(riskPresentation(cycle({ risk_outcomes: [...riskOutcomes] }))).toMatchObject({ key, label });
   });
 

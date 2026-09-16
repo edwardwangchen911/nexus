@@ -7,7 +7,7 @@ from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -70,7 +70,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarSessionRecord,
 )
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
-from nexus.persistence.models.market import LatestQuote
+from nexus.persistence.models.market import Instrument, LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
@@ -85,6 +85,7 @@ from nexus.persistence.models.paper import (
     PaperOrderRecord,
     PaperPositionAdjustmentEventRecord,
     PaperReservationEventRecord,
+    RiskNoChangeEvaluationRecord,
     RiskQueryAuthorityRecord,
     StrategyDecisionRecord,
 )
@@ -397,6 +398,14 @@ async def _seed_cycle_research_authority(
     base_payload: dict[str, object] | None = None,
 ) -> None:
     authority_time = price_available_at or DECISION_TIME
+    await session.execute(text("ALTER TABLE instrument_aliases DISABLE TRIGGER USER"))
+    try:
+        await session.execute(
+            text("UPDATE instrument_aliases SET symbol='AAPL' WHERE instrument_id=:instrument_id"),
+            {"instrument_id": INSTRUMENTS[0][0]},
+        )
+    finally:
+        await session.execute(text("ALTER TABLE instrument_aliases ENABLE TRIGGER USER"))
     await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
     try:
         await session.execute(
@@ -808,10 +817,48 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             "NO_ORDER_REQUIRED",
         )
 
+        async with sessions.begin() as session:
+            no_change = await session.scalar(
+                select(RiskNoChangeEvaluationRecord).where(
+                    RiskNoChangeEvaluationRecord.strategy_decision_id
+                    == completed.strategy_decision_id
+                )
+            )
+            assert no_change is not None
+            await session.execute(
+                text("ALTER TABLE risk_no_change_evaluations DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE risk_no_change_evaluations SET created_at=:created_at "
+                        "WHERE id=:evaluation_id"
+                    ),
+                    {
+                        "created_at": output_at + timedelta(seconds=2),
+                        "evaluation_id": no_change.id,
+                    },
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE risk_no_change_evaluations ENABLE TRIGGER USER")
+                )
+
         path = "/internal/v1/paper/cycles/latest"
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(
                 app=app(migrated_database_url, now=output_at + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            historical_response = await client.get(path, headers=headers("GET", path))
+
+        assert historical_response.status_code == 200
+        assert historical_response.json()["data"]["decision"]["risk_outcomes"] == []
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=output_at + timedelta(seconds=3))
             ),
             base_url="http://testserver",
         ) as client:
@@ -823,7 +870,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
         assert data["result_code"] == "NO_ORDER_REQUIRED"
         assert data["execution_locked"] is True
         assert data["order_ids"] == []
-        assert data["decision"]["risk_outcomes"] == []
+        assert data["decision"]["risk_outcomes"] == ["no_change"]
         assert len(data["candidates"]) == 1
         candidate = data["candidates"][0]
         intent_hash = candidate.pop("intent_hash")
@@ -839,6 +886,88 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             "output_id": str(output_id),
             "rejection_code": None,
         }
+
+        async with sessions.begin() as session:
+            for _ in range(49):
+                instrument_id = uuid4()
+                session.add(
+                    Instrument(
+                        id=instrument_id,
+                        asset_type="equity",
+                        exchange="XNAS",
+                        currency="USD",
+                        tick_size=Decimal("0.01"),
+                        risk_bucket="large_cap",
+                    )
+                )
+                session.add(
+                    RiskNoChangeEvaluationRecord(
+                        batch_id=no_change.batch_id,
+                        account_id=no_change.account_id,
+                        strategy_decision_id=no_change.strategy_decision_id,
+                        instrument_id=instrument_id,
+                        current_quantity=no_change.current_quantity,
+                        target_quantity=no_change.target_quantity,
+                        target_weight=no_change.target_weight,
+                        strategy_priority=no_change.strategy_priority,
+                        reference_close=no_change.reference_close,
+                        price_authority_id=no_change.price_authority_id,
+                        authority_ids=no_change.authority_ids,
+                        reason_code=no_change.reason_code,
+                        input_hash=no_change.input_hash,
+                        evidence_hash=no_change.evidence_hash,
+                    )
+                )
+
+        boundary_time = output_at + timedelta(minutes=1)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=boundary_time)),
+            base_url="http://testserver",
+        ) as client:
+            bounded_response = await client.get(path, headers=headers("GET", path))
+
+        assert bounded_response.status_code == 200
+        assert len(bounded_response.json()["data"]["decision"]["risk_outcomes"]) == 50
+
+        async with sessions.begin() as session:
+            instrument_id = uuid4()
+            session.add(
+                Instrument(
+                    id=instrument_id,
+                    asset_type="equity",
+                    exchange="XNAS",
+                    currency="USD",
+                    tick_size=Decimal("0.01"),
+                    risk_bucket="large_cap",
+                )
+            )
+            session.add(
+                RiskNoChangeEvaluationRecord(
+                    batch_id=no_change.batch_id,
+                    account_id=no_change.account_id,
+                    strategy_decision_id=no_change.strategy_decision_id,
+                    instrument_id=instrument_id,
+                    current_quantity=no_change.current_quantity,
+                    target_quantity=no_change.target_quantity,
+                    target_weight=no_change.target_weight,
+                    strategy_priority=no_change.strategy_priority,
+                    reference_close=no_change.reference_close,
+                    price_authority_id=no_change.price_authority_id,
+                    authority_ids=no_change.authority_ids,
+                    reason_code=no_change.reason_code,
+                    input_hash=no_change.input_hash,
+                    evidence_hash=no_change.evidence_hash,
+                )
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=boundary_time)),
+            base_url="http://testserver",
+        ) as client:
+            unbounded_response = await client.get(path, headers=headers("GET", path))
+
+        assert unbounded_response.status_code == 409
+        assert unbounded_response.json()["error"]["code"] == "DATA_PARTIAL"
     finally:
         await engine.dispose()
 

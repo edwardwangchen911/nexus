@@ -508,7 +508,8 @@ export const runtimeContractSchemas = {
           "enum": [
             "approved",
             "reduced",
-            "rejected"
+            "rejected",
+            "no_change"
           ],
           "type": "string"
         },

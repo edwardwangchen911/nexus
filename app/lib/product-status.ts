@@ -19,7 +19,7 @@ export type ProductPresentation<Key extends string> = {
 
 type CandidateKey = "buy" | "sell" | "hold" | "watch" | "data_insufficient";
 type DecisionSummaryKey = "in_progress" | "decision_recorded" | "data_insufficient" | "model_failed";
-type RiskKey = "not_evaluated" | "risk_approved" | "risk_reduced" | "risk_rejected";
+type RiskKey = "not_evaluated" | "risk_no_change" | "risk_approved" | "risk_reduced" | "risk_rejected";
 type ExecutionKey = "no_order" | "waiting_market" | "submitted" | "partially_filled" | "filled"
   | "cancelled" | "rejected" | "reconciling" | "result_unknown" | "unknown";
 type LoopKey = "online" | "offline" | "unknown";
@@ -69,6 +69,9 @@ export function riskPresentation(cycle: Cycle): ProductPresentation<RiskKey> {
   }
   if (outcomes.includes("approved")) {
     return presentation("risk_approved", "风控通过", "本次决策已通过确定性风控。", "positive", cycle.result_code);
+  }
+  if (outcomes.includes("no_change")) {
+    return presentation("risk_no_change", "无需调整", "确定性风控已核对，当前仓位无需调整。", "neutral", cycle.result_code);
   }
   return presentation("not_evaluated", "尚未评估", "当前没有已保存的风控结论。", "neutral", cycle.result_code);
 }

@@ -78,6 +78,7 @@ from nexus.persistence.models.paper import (
     PaperReservationEventRecord,
     PaperReservationRecord,
     RiskEvaluationRecord,
+    RiskNoChangeEvaluationRecord,
     RiskPolicyRecord,
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
@@ -695,15 +696,40 @@ class PaperReadService:
                         PaperOrderRecord.created_at <= self._request_time,
                     )
                     .order_by(PaperOrderRecord.id)
-                    .limit(50)
+                    .limit(51)
                 )
             )
+            remaining_risk_outcomes = 50 - len(risk_outcomes)
+            no_change_ids = tuple(
+                await self._session.scalars(
+                    select(RiskNoChangeEvaluationRecord.id)
+                    .join(
+                        PaperOrderBatchRecord,
+                        PaperOrderBatchRecord.id == RiskNoChangeEvaluationRecord.batch_id,
+                    )
+                    .where(
+                        PaperOrderBatchRecord.account_id == decision.account_id,
+                        PaperOrderBatchRecord.strategy_decision_id == decision.id,
+                        RiskNoChangeEvaluationRecord.created_at <= self._request_time,
+                    )
+                    .order_by(RiskNoChangeEvaluationRecord.instrument_id)
+                    .limit(remaining_risk_outcomes + 1)
+                )
+            )
+            if len(no_change_ids) > remaining_risk_outcomes:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent paper risk projection is unbounded.",
+                    status_code=409,
+                )
+            risk_outcomes += ("no_change",) * len(no_change_ids)
             decision_response = AgentPaperDecisionResponse(
                 decision_id=decision.id,
                 sizing_policy_version="agent_paper_sizing_v1",
                 target_cash_weight=decimal_to_string(decision.cash_weight),
                 risk_outcomes=cast(
-                    tuple[Literal["approved", "reduced", "rejected"], ...], risk_outcomes
+                    tuple[Literal["approved", "reduced", "rejected", "no_change"], ...],
+                    risk_outcomes,
                 ),
             )
         projected_status = event.to_status
@@ -920,7 +946,8 @@ class PaperReadService:
                 )
                 .join(
                     PriceSeriesManifest,
-                    PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
+                    PriceSeriesManifest.id
+                    == PriceBarSetAuthority.price_series_manifest_id,
                 )
                 .where(
                     PaperPositionSnapshotRecord.account_id == account.id,
@@ -1169,8 +1196,7 @@ class PaperReadService:
                 select(PriceBarSetAuthority, PriceSeriesManifest)
                 .join(
                     PriceSeriesManifest,
-                    PriceSeriesManifest.id
-                    == PriceBarSetAuthority.price_series_manifest_id,
+                    PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
                 )
                 .where(
                     PriceBarSetAuthority.source_policy_id

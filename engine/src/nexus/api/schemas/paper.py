@@ -199,7 +199,9 @@ class AgentPaperDecisionResponse(_StrictSchema):
     decision_id: UUID
     sizing_policy_version: Literal["agent_paper_sizing_v1"]
     target_cash_weight: DecimalString
-    risk_outcomes: tuple[Literal["approved", "reduced", "rejected"], ...] = Field(max_length=50)
+    risk_outcomes: tuple[Literal["approved", "reduced", "rejected", "no_change"], ...] = Field(
+        max_length=50
+    )
 
 
 class AgentPaperDecisionMarketResponse(_StrictSchema):
