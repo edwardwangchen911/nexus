@@ -293,4 +293,5 @@ async def admit_agent_paper_research(
         daily_limit_usd=daily_limit_usd,
         now=now,
         job_type=JobType.AGENT_PAPER_RESEARCH,
+        reuse_latest_actor_agent_version=True,
     )

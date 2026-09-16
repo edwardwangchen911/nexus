@@ -30,6 +30,7 @@ from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.agents.execution_authority import (
     MAX_FROZEN_EVIDENCE,
     load_frozen_evidence,
+    load_frozen_prompts,
     load_frozen_symbol,
 )
 from nexus.agents.models import ResearchRequest
@@ -464,6 +465,7 @@ async def admit_research_run(
     allow_fixture_price_authority: bool = False,
     after_authority: Callable[[], Awaitable[None]] | None = None,
     job_type: JobType = JobType.AGENT_RESEARCH,
+    reuse_latest_actor_agent_version: bool = False,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
     if now.tzinfo != UTC or request.decision_time > now:
@@ -490,11 +492,30 @@ async def admit_research_run(
         return ResearchAdmission(run=run, replayed=True)
     instrument = await session.get(Instrument, request.instrument_id)
     snapshot = await session.get(DataSnapshot, request.data_snapshot_id)
-    prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
-    model = (
-        await session.get(AgentModelConfigRecord, model_config_id)
-        if model_config_id is not None
-        else await session.scalar(
+    prior_run = (
+        await session.scalar(
+            select(AgentResearchRunRecord)
+            .where(AgentResearchRunRecord.actor_id == actor_id)
+            .order_by(
+                AgentResearchRunRecord.decision_time.desc(),
+                AgentResearchRunRecord.created_at.desc(),
+                AgentResearchRunRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        if reuse_latest_actor_agent_version
+        else None
+    )
+    if prior_run is not None:
+        prompts = await load_frozen_prompts(session, prior_run)
+    else:
+        prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
+    if prior_run is not None:
+        model = await session.get(AgentModelConfigRecord, prior_run.model_config_id)
+    elif model_config_id is not None:
+        model = await session.get(AgentModelConfigRecord, model_config_id)
+    else:
+        model = await session.scalar(
             select(AgentModelConfigRecord)
             .where(
                 AgentModelConfigRecord.pricing_available_at <= now,
@@ -511,7 +532,6 @@ async def admit_research_run(
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)
         )
-    )
     if instrument is not None and snapshot is not None:
         await freeze_price_authority(
             session,

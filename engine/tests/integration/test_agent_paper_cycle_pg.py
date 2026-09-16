@@ -30,6 +30,7 @@ from nexus.agents.paper_context import (
 )
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.domain.evidence import EvidenceRef
+from nexus.jobs.daily_research import admit_agent_paper_research
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.ops.agent_paper_loop import inspect_agent_paper_loop
@@ -742,6 +743,79 @@ def _safe_no_trade_intent(
         data_version="research-filings-v1",
         evidence_refs=(reference,),
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exists(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        from nexus.strategy.forward import load_forward_strategy_decision
+
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            assert registered is not None
+            await _seed_cycle_research_authority(session, registered_decision=registered.decision)
+
+        async with sessions.begin() as session:
+            started = await advance_agent_paper_cycle(
+                session,
+                account_id=seed.account_id,
+                decision_time=DECISION_TIME,
+                idempotency_key="agent-paper-frozen-champion",
+            )
+            first_run = await session.get(AgentResearchRunRecord, started.research_run_ids[0])
+            assert first_run is not None
+            first_manifest = dict(first_run.prompt_manifest)
+            first_model_config_id = first_run.model_config_id
+            newer_content = "newer portfolio prompt must not replace the paper champion"
+            session.add_all(
+                (
+                    AgentPromptVersionRecord(
+                        id=UUID("f3000000-0000-0000-0000-000000000001"),
+                        role="portfolio",
+                        version="agent-paper-portfolio-v2",
+                        content_hash=sha256(newer_content.encode()).hexdigest(),
+                        content=newer_content,
+                    ),
+                    AgentModelConfigRecord(
+                        id=UUID("f3000000-0000-0000-0000-000000000002"),
+                        model_id="newer-fixture-agent-paper",
+                        version="codex-sdk-chatgpt-v4-actionable",
+                        config_hash="f" * 64,
+                        max_input_tokens=100,
+                        max_tool_calls=1,
+                        max_output_tokens=100,
+                        input_usd_per_million=Decimal("1"),
+                        output_usd_per_million=Decimal("1"),
+                        pricing_available_at=first_run.decision_time - timedelta(days=1),
+                        pricing_expires_at=first_run.decision_time + timedelta(days=1),
+                    ),
+                )
+            )
+            await session.flush()
+            second = await admit_agent_paper_research(
+                session,
+                cycle_id=uuid4(),
+                instrument_id=first_run.instrument_id,
+                research_snapshot_id=first_run.data_snapshot_id,
+                research_as_of=first_run.decision_time,
+                daily_limit_usd=Decimal("1"),
+                now=first_run.decision_time,
+            )
+
+        assert second.run.prompt_manifest == first_manifest
+        assert second.run.model_config_id == first_model_config_id
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
