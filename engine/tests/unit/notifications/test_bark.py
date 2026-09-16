@@ -1,5 +1,6 @@
 import base64
 import json
+from dataclasses import replace
 from uuid import UUID
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from nexus.notifications.bark import (
+    BARK_EVENT_SCHEMAS,
     BarkPublisher,
     BarkPublishError,
     map_bark_notification,
@@ -14,7 +16,7 @@ from nexus.notifications.bark import (
 from nexus.outbox.models import OutboxMessage
 
 _EVENT_ID = UUID("0199d500-1000-7000-8000-000000000001")
-_AGGREGATE_ID = UUID("0199d500-1000-7000-8000-000000000002")
+_ORDER_ID = UUID("0199d500-1000-7000-8000-000000000003")
 _KEY = b"0123456789abcdef"
 _IV = b"abcdefghijklmnop"
 _SENSITIVE_VALUES = (
@@ -26,15 +28,99 @@ _SENSITIVE_VALUES = (
 
 
 def _message(
-    event_type: str = "strategy_decision.persisted",
-    schema_version: str = "paper_event_v1",
+    event_type: str = "paper.execution.advance.filled",
+    schema_version: str = "paper_execution_v1",
+    *,
+    status: str = "filled",
 ) -> OutboxMessage:
+    if status == "risk_rejected":
+        snapshot = {
+            "schema_version": "paper_notification_v1",
+            "mode": "internal_paper",
+            "order_id": str(_ORDER_ID),
+            "agent_cycle_id": None,
+            "occurred_at": "2026-09-16T02:15:00Z",
+            "symbol": "AAPL",
+            "side": "buy",
+            "status": "risk_rejected",
+            "requested_quantity": "20",
+            "approved_quantity": "0",
+            "filled_quantity": "0",
+            "remaining_quantity": "0",
+            "price": {"kind": "reference", "value": "187", "currency": "USD"},
+            "notional": "3740",
+            "fee": None,
+            "cash": {"kind": "unchanged", "available": "23654.50"},
+            "position": {
+                "kind": "unchanged",
+                "quantity": "30",
+                "portfolio_ratio": "0.18",
+            },
+            "agent_reason": "盈利预期上修，但确定性仓位限制不允许本次增仓。",
+            "invalidation": None,
+            "risk_reason": "成交后单一标的仓位将超过 20% 上限。",
+        }
+    elif status == "cancelled":
+        snapshot = {
+            "schema_version": "paper_notification_v1",
+            "mode": "internal_paper",
+            "order_id": str(_ORDER_ID),
+            "agent_cycle_id": None,
+            "occurred_at": "2026-09-16T02:15:00Z",
+            "symbol": "AAPL",
+            "side": "sell",
+            "status": "cancelled",
+            "requested_quantity": "12",
+            "approved_quantity": "12",
+            "filled_quantity": "5",
+            "remaining_quantity": "7",
+            "price": {"kind": "average_fill", "value": "188.125", "currency": "USD"},
+            "notional": "940.625",
+            "fee": "0.25",
+            "cash": {"kind": "actual_after", "available": "24595.125"},
+            "position": {
+                "kind": "actual_after",
+                "quantity": "25",
+                "portfolio_ratio": None,
+            },
+            "agent_reason": None,
+            "invalidation": None,
+            "risk_reason": None,
+        }
+    else:
+        snapshot = {
+            "schema_version": "paper_notification_v1",
+            "mode": "internal_paper",
+            "order_id": str(_ORDER_ID),
+            "agent_cycle_id": None,
+            "occurred_at": "2026-09-16T02:15:00Z",
+            "symbol": "AAPL",
+            "side": "buy",
+            "status": "filled",
+            "requested_quantity": "12",
+            "approved_quantity": "12",
+            "filled_quantity": "12",
+            "remaining_quantity": "0",
+            "price": {"kind": "average_fill", "value": "187.36", "currency": "USD"},
+            "notional": "2248.32",
+            "fee": "0",
+            "cash": {"kind": "actual_after", "available": "21406.18"},
+            "position": {
+                "kind": "actual_after",
+                "quantity": "42",
+                "portfolio_ratio": None,
+            },
+            "agent_reason": "盈利预期上修，价格突破近期区间。",
+            "invalidation": "价格跌破既定阈值。",
+            "risk_reason": None,
+        }
     return OutboxMessage(
         event_id=_EVENT_ID,
         event_type=event_type,
-        aggregate_id=_AGGREGATE_ID,
+        aggregate_id=_ORDER_ID,
         schema_version=schema_version,
         payload={
+            "notification_snapshot": snapshot,
             "account_id": _SENSITIVE_VALUES[0],
             "amount": _SENSITIVE_VALUES[1],
             "evidence": _SENSITIVE_VALUES[2],
@@ -43,37 +129,102 @@ def _message(
     )
 
 
-@pytest.mark.parametrize(
-    ("event_type", "schema_version"),
-    (
-        ("strategy_decision.persisted", "paper_event_v1"),
-        ("paper.order_batch.evaluated", "paper_event_v1"),
-        ("paper.order.risk_rejected", "paper_event_v1"),
-        ("paper.order.submitted", "paper_event_v1"),
-        ("paper.execution.advance.partially_filled", "paper_execution_v1"),
-        ("paper.execution.advance.filled", "paper_execution_v1"),
-        ("paper.execution.advance.cancelled", "paper_execution_v1"),
-        ("paper.execution.cancelled", "paper_execution_v1"),
-    ),
-)
-def test_notification_mapping_never_copies_outbox_payload(
-    event_type: str,
-    schema_version: str,
-) -> None:
+def test_filled_notification_renders_actionable_frozen_facts() -> None:
     notification = map_bark_notification(
-        _message(event_type, schema_version),
+        _message(),
         read_only_url="http://nexus.local/paper",
     )
 
     rendered = json.dumps(notification, ensure_ascii=False)
     assert all(value not in rendered for value in _SENSITIVE_VALUES)
     assert notification["url"] == "http://nexus.local/paper"
-    assert notification["id"] == str(_EVENT_ID)
+    assert notification["id"] == str(_ORDER_ID)
+    assert notification["title"] == "[内部模拟] AAPL 买入 12 股 · 已成交"
+    assert notification["body"] == (
+        "成交均价：$187.36｜成交额 $2,248.32｜费用 $0.00\n"
+        "成交后：AAPL 42 股｜可用现金 $21,406.18\n"
+        "Agent：盈利预期上修，价格突破近期区间。\n"
+        "失效：价格跌破既定阈值。"
+    )
+
+
+def test_risk_rejected_notification_distinguishes_unchanged_account() -> None:
+    notification = map_bark_notification(
+        _message(
+            "paper.order.risk_rejected",
+            "paper_event_v1",
+            status="risk_rejected",
+        ),
+        read_only_url=None,
+    )
+
+    assert notification["id"] == str(_ORDER_ID)
+    assert notification["title"] == "[内部模拟] AAPL 买入 20 股 · 风控拒绝"
+    assert notification["body"] == (
+        "参考价：$187.00｜计划金额 $3,740.00\n"
+        "原因：成交后单一标的仓位将超过 20% 上限。\n"
+        "账户未变化：AAPL 30 股｜可用现金 $23,654.50\n"
+        "Agent：盈利预期上修，但确定性仓位限制不允许本次增仓。\n"
+        "失效：暂不可用"
+    )
+
+
+def test_first_delivery_consumes_only_meaningful_terminal_order_outcomes() -> None:
+    assert BARK_EVENT_SCHEMAS == (
+        ("paper.order.risk_rejected", "paper_event_v1"),
+        ("paper.execution.advance.filled", "paper_execution_v1"),
+        ("paper.execution.advance.cancelled", "paper_execution_v1"),
+        ("paper.execution.cancelled", "paper_execution_v1"),
+    )
+
+
+def test_cancelled_notification_reports_filled_and_unfilled_quantities() -> None:
+    notification = map_bark_notification(
+        _message(
+            "paper.execution.advance.cancelled",
+            "paper_execution_v1",
+            status="cancelled",
+        ),
+        read_only_url=None,
+    )
+
+    assert notification["title"] == "[内部模拟] AAPL 卖出 12 股 · 已取消"
+    assert notification["body"] == (
+        "执行结果：已成交 5 股｜未成交 7 股\n"
+        "成交均价：$188.125｜成交额 $940.625｜费用 $0.25\n"
+        "取消后：AAPL 25 股｜可用现金 $24,595.125\n"
+        "原因：暂不可用\n"
+        "Agent：暂不可用\n"
+        "失效：暂不可用"
+    )
 
 
 def test_notification_mapping_rejects_unregistered_event() -> None:
     with pytest.raises(BarkPublishError, match="^BARK_EVENT_UNSUPPORTED$"):
-        map_bark_notification(_message("paper.order.failed"), read_only_url=None)
+        map_bark_notification(
+            _message("strategy_decision.persisted", "paper_event_v1"),
+            read_only_url=None,
+        )
+
+
+def test_notification_mapping_rejects_missing_or_invalid_snapshot_without_values() -> None:
+    message = _message()
+    message.payload.clear()
+
+    with pytest.raises(BarkPublishError, match="^BARK_NOTIFICATION_INVALID$") as caught:
+        map_bark_notification(message, read_only_url=None)
+
+    assert "AAPL" not in str(caught.value)
+
+
+def test_notification_mapping_rejects_snapshot_for_another_order() -> None:
+    message = replace(
+        _message(),
+        aggregate_id=UUID("0199d500-1000-7000-8000-000000000099"),
+    )
+
+    with pytest.raises(BarkPublishError, match="^BARK_NOTIFICATION_INVALID$"):
+        map_bark_notification(message, read_only_url=None)
 
 
 def test_notification_mapping_rejects_non_paper_link() -> None:
@@ -132,7 +283,7 @@ async def test_publisher_encrypts_all_notification_content_and_uses_stable_id() 
     assert requests[0]["device_key"] == "device-key-only-outside"
     inner = _decrypt(str(requests[0]["ciphertext"]), str(requests[0]["iv"]))
     assert set(inner) == {"title", "body", "group", "id", "url"}
-    assert inner["id"] == str(_EVENT_ID)
+    assert inner["id"] == str(_ORDER_ID)
     assert all(value not in json.dumps(inner, ensure_ascii=False) for value in _SENSITIVE_VALUES)
 
 
