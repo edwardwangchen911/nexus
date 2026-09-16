@@ -41,6 +41,7 @@ from nexus.ops.daily_once import DailyOnceSettings
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.fred_local import collect as collect_fred
 from nexus.ops.fred_local import import_collection as import_fred_collection
+from nexus.ops.fred_local import validate_local_import
 from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest
 from nexus.ops.paper_once import run_once as run_paper_once
@@ -74,7 +75,7 @@ from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fred_collection import load_fred_collection
 from nexus.research.fred_observations import FredVintageRequest
-from nexus.research.fred_storage import read_fred_observations
+from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
@@ -152,6 +153,20 @@ _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
 AGENT_PAPER_LOOP_PROCESS_VERSION = "agent-paper-loop-v1"
 _PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
 _PAPER_MONTHLY_MACRO_SERIES = frozenset({"CPIAUCSL", "UNRATE"})
+
+
+def _macro_snapshot_contains_required_observations(
+    observations: Sequence[FredResearchObservation], *, bound_ids: set[UUID]
+) -> bool:
+    return all(
+        any(
+            observation.series == series
+            and observation.evidence_ref_id in bound_ids
+            and observation.calendar_evidence_ref_id in bound_ids
+            for observation in observations
+        )
+        for series in _PAPER_MACRO_SERIES
+    )
 
 
 def _utc_now() -> datetime:
@@ -364,16 +379,18 @@ async def _inspect_macro_scope(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
             vintage = latest_visible_macro_vintage(now)
-            observations = await read_fred_observations(session, as_of=now)
+            observations = await read_fred_observations(
+                session,
+                as_of=now,
+                series=_PAPER_MACRO_SERIES,
+                vintage=vintage,
+            )
             matching = tuple(
                 observation
                 for observation in observations.values()
-                if observation.vintage == vintage
-                and observation.series in _PAPER_MACRO_SERIES
+                if observation.vintage == vintage and observation.series in _PAPER_MACRO_SERIES
             )
-            ready_series = frozenset(
-                observation.series for observation in matching
-            )
+            ready_series = frozenset(observation.series for observation in matching)
             snapshot_ready = False
             if ready_series == _PAPER_MACRO_SERIES:
                 snapshot = await select_authoritative_snapshot(
@@ -389,17 +406,12 @@ async def _inspect_macro_scope(
                                 AgentDataSnapshotEvidenceRecord.instrument_id
                                 == prior.instrument_id,
                                 AgentDataSnapshotEvidenceRecord.authority_kind == "research",
-                                AgentDataSnapshotEvidenceRecord.source == "fred",
                             )
                         )
                     )
-                    snapshot_ready = all(
-                        any(
-                            observation.series == series
-                            and observation.evidence_ref_id in bound_ids
-                            for observation in matching
-                        )
-                        for series in _PAPER_MACRO_SERIES
+                    snapshot_ready = _macro_snapshot_contains_required_observations(
+                        matching,
+                        bound_ids=bound_ids,
                     )
             return MacroScope(
                 instrument_id=prior.instrument_id,
@@ -443,6 +455,7 @@ async def prepare_macro_once(
             settings,
             instrument_id=scope.instrument_id,
             now=datetime.now(UTC),
+            macro_vintage=scope.vintage,
         )
         verified = await _inspect_macro_scope(
             settings,
@@ -457,6 +470,10 @@ async def prepare_macro_once(
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return "prepared"
+    try:
+        validate_local_import(settings)
+    except ValueError:
+        return "unavailable"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "macro"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     output_dir = parent / _macro_attempt_session(now).isoformat()
@@ -482,14 +499,13 @@ async def prepare_macro_once(
             settings,
             collection=load_fred_collection(series_dir),
         )
-        if imported.get("status") != "imported" or not imported.get(
-            "visible_observation_count"
-        ):
+        if imported.get("status") != "imported" or not imported.get("visible_observation_count"):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     await _prepare_current_trends_research_snapshot(
         settings,
         instrument_id=scope.instrument_id,
         now=datetime.now(UTC),
+        macro_vintage=scope.vintage,
     )
     verified = await _inspect_macro_scope(
         settings,
@@ -567,7 +583,11 @@ def _current_trends_start_session(prior_session: date) -> date:
 
 
 async def _prepare_current_trends_research_snapshot(
-    settings: EngineSettings, *, instrument_id: UUID, now: datetime
+    settings: EngineSettings,
+    *,
+    instrument_id: UUID,
+    now: datetime,
+    macro_vintage: date | None = None,
 ) -> None:
     """Bind already-persisted trends into the normal authoritative research snapshot."""
     if not settings.database_url:
@@ -583,7 +603,13 @@ async def _prepare_current_trends_research_snapshot(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory.begin() as session:
-            snapshot = await prepare_research_snapshot(session, instrument_id, as_of=now)
+            snapshot = await prepare_research_snapshot(
+                session,
+                instrument_id,
+                as_of=now,
+                macro_series=(_PAPER_MACRO_SERIES if macro_vintage is not None else frozenset()),
+                macro_vintage=macro_vintage,
+            )
             if snapshot is None:
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     finally:

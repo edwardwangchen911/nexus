@@ -851,9 +851,7 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     assert received_settings[1] is received_settings[2]
     assert isinstance(received_settings[0], loop.AgentPaperTriggerSettings)
     assert preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
-    assert macro_preparations == [
-        (UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))
-    ]
+    assert macro_preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
     assert trend_preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
     assert request.account_id == UUID(int=1)
     assert request.idempotency_key == "agent-paper-loop:2026-09-14T14:05:00+00:00"
@@ -1231,9 +1229,7 @@ def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
-            ready_series=frozenset(
-                {"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"}
-            ),
+            ready_series=frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"}),
             snapshot_ready=True,
         )
 
@@ -1256,6 +1252,23 @@ def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call
 
     assert result == "ready"
     assert not (tmp_path / ".secrets").exists()
+
+
+def test_macro_snapshot_is_not_ready_without_bound_calendar_evidence() -> None:
+    observations = tuple(
+        SimpleNamespace(
+            series=series,
+            evidence_ref_id=UUID(int=index),
+            calendar_evidence_ref_id=UUID(int=index + 100),
+        )
+        for index, series in enumerate(sorted(loop._PAPER_MACRO_SERIES), start=1)
+    )
+    observation_evidence_ids = {observation.evidence_ref_id for observation in observations}
+
+    assert not loop._macro_snapshot_contains_required_observations(
+        observations,
+        bound_ids=observation_evidence_ids,
+    )
 
 
 def test_macro_preparation_binds_complete_evidence_without_provider_call(
@@ -1283,8 +1296,9 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
     async def inspect(_settings, *, account_id, now):
         return next(scopes)
 
-    async def prepare_snapshot(_settings, *, instrument_id, now):
+    async def prepare_snapshot(_settings, *, instrument_id, now, macro_vintage):
         snapshots.append(instrument_id)
+        assert macro_vintage == date(2026, 9, 13)
 
     async def unexpected(*_args, **_kwargs):
         raise AssertionError("persisted macro evidence must not call the provider")
@@ -1305,6 +1319,36 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
 
     assert result == "prepared"
     assert snapshots == [UUID(int=20)]
+    assert not (tmp_path / ".secrets").exists()
+
+
+def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    async def inspect(_settings, *, account_id, now):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            vintage=date(2026, 9, 13),
+            ready_series=frozenset(),
+        )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("invalid archive config must not call FRED")
+
+    monkeypatch.setattr(loop, "_inspect_macro_scope", inspect)
+    monkeypatch.setattr(loop, "collect_fred", unexpected)
+
+    result = asyncio.run(
+        loop.prepare_macro_once(
+            loop.DailyOnceSettings(database_url="postgresql+asyncpg://test:test@127.0.0.1/test"),
+            fred_key=loop.SecretStr("test-key"),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+        )
+    )
+
+    assert result == "unavailable"
     assert not (tmp_path / ".secrets").exists()
 
 
@@ -1362,13 +1406,15 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
         imported.append(collection.series)
         return {"status": "imported", "visible_observation_count": 1}
 
-    async def prepare_snapshot(_settings, *, instrument_id, now):
+    async def prepare_snapshot(_settings, *, instrument_id, now, macro_vintage):
         snapshots.append(instrument_id)
+        assert macro_vintage == vintage
 
     monkeypatch.setattr(loop, "_inspect_macro_scope", inspect, raising=False)
     monkeypatch.setattr(loop, "collect_fred", collect, raising=False)
     monkeypatch.setattr(loop, "load_fred_collection", load, raising=False)
     monkeypatch.setattr(loop, "import_fred_collection", import_collection, raising=False)
+    monkeypatch.setattr(loop, "validate_local_import", lambda _settings: None)
     monkeypatch.setattr(loop, "_prepare_current_trends_research_snapshot", prepare_snapshot)
 
     result = asyncio.run(
@@ -1428,6 +1474,7 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
         raise ValueError("known provider failure")
 
     monkeypatch.setattr(loop, "_inspect_macro_scope", inspect)
+    monkeypatch.setattr(loop, "validate_local_import", lambda _settings: None)
     monkeypatch.setattr(loop, "collect_fred", collect)
 
     for _ in range(2):
@@ -1459,6 +1506,7 @@ def test_macro_preparation_degrades_only_known_provider_failure(
         raise HttpPolicyError("RETRY_BUDGET_EXHAUSTED")
 
     monkeypatch.setattr(loop, "_inspect_macro_scope", inspect)
+    monkeypatch.setattr(loop, "validate_local_import", lambda _settings: None)
     monkeypatch.setattr(loop, "collect_fred", collect)
 
     result = asyncio.run(
@@ -1472,6 +1520,78 @@ def test_macro_preparation_degrades_only_known_provider_failure(
     )
 
     assert result == "unavailable"
+
+
+def test_macro_preparation_propagates_unknown_provider_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    async def inspect(_settings, *, account_id, now):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            vintage=date(2026, 9, 13),
+            ready_series=frozenset(),
+        )
+
+    async def collect(request, *, key, directory):
+        raise RuntimeError("unknown provider result")
+
+    monkeypatch.setattr(loop, "_inspect_macro_scope", inspect)
+    monkeypatch.setattr(loop, "validate_local_import", lambda _settings: None)
+    monkeypatch.setattr(loop, "collect_fred", collect)
+
+    with pytest.raises(RuntimeError, match="unknown provider result"):
+        asyncio.run(
+            loop.prepare_macro_once(
+                SimpleNamespace(),
+                fred_key=object(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                now=NOW,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "imported",
+    (
+        {"status": "rejected", "visible_observation_count": 0},
+        {"status": "imported", "visible_observation_count": 0},
+    ),
+)
+def test_macro_preparation_fails_closed_on_import_or_readback_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: loop.Path,
+    imported: dict[str, object],
+) -> None:
+    async def inspect(_settings, *, account_id, now):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            vintage=date(2026, 9, 13),
+            ready_series=frozenset(),
+        )
+
+    async def collect(request, *, key, directory):
+        return {"status": "collected", "observation_count": 1}
+
+    async def import_collection(_settings, *, collection):
+        return imported
+
+    monkeypatch.setattr(loop, "_inspect_macro_scope", inspect)
+    monkeypatch.setattr(loop, "validate_local_import", lambda _settings: None)
+    monkeypatch.setattr(loop, "collect_fred", collect)
+    monkeypatch.setattr(loop, "load_fred_collection", lambda directory: object())
+    monkeypatch.setattr(loop, "import_fred_collection", import_collection)
+
+    with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):
+        asyncio.run(
+            loop.prepare_macro_once(
+                SimpleNamespace(),
+                fred_key=object(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                now=NOW,
+            )
+        )
 
 
 def test_current_trends_preparation_collects_imports_and_reads_back_once(

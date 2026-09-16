@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import cast
 from uuid import UUID
 
@@ -37,6 +37,8 @@ async def prepare_research_snapshot(
     as_of: datetime,
     portfolio_snapshot_id: UUID | None = None,
     news_evidence_id: UUID | None = None,
+    macro_series: frozenset[str] | None = None,
+    macro_vintage: date | None = None,
 ) -> DataSnapshot | None:
     """Bind real filing references; the caller owns the transaction.
 
@@ -161,7 +163,14 @@ async def prepare_research_snapshot(
         sec_refs = [item for item in evidence if item.source == "sec"]
         keep = MAX_FROZEN_EVIDENCE - 2 - len(profile_refs) - len(retained)
         evidence = sec_refs[:keep] + retained + profile_refs
-    macro_ids = _macro_context_ids(await read_fred_observations(session, as_of=as_of))
+    macro_ids = _macro_context_ids(
+        await read_fred_observations(
+            session,
+            as_of=as_of,
+            series=macro_series,
+            vintage=macro_vintage,
+        )
+    )
     if macro_ids:
         macro_refs = list(
             await session.scalars(

@@ -24,7 +24,7 @@ from nexus.research.fred_observations import (
     FredVintageRequest,
     parse_collected_vintage,
 )
-from nexus.research.fred_storage import import_fred_vintage
+from nexus.research.fred_storage import import_fred_vintage, read_fred_observations
 from pydantic import SecretStr
 from sqlalchemy import select
 from unit.market.test_object_store import FakeS3Client
@@ -267,6 +267,23 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
                 ),
                 store=store,
             )
+        scoped = await read_fred_observations(
+            session,
+            as_of=fixed_now,
+            series=loop._PAPER_MACRO_SERIES,
+            vintage=vintage,
+        )
+        assert {row.series for row in scoped.values()} == loop._PAPER_MACRO_SERIES
+
+    async def prepare_scoped_snapshot(session, instrument_id, *, as_of, **kwargs):
+        assert kwargs["macro_series"] == loop._PAPER_MACRO_SERIES
+        assert kwargs["macro_vintage"] == vintage
+        return await prepare_research_snapshot(
+            session,
+            instrument_id,
+            as_of=as_of,
+            **kwargs,
+        )
 
     async def inspect_prior(_settings, *, account_id, now):
         return loop.PriorDailyScope(
@@ -280,6 +297,7 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
 
     monkeypatch.setattr(loop, "_inspect_prior_daily_scope", inspect_prior)
     monkeypatch.setattr(loop, "collect_fred", unexpected_provider)
+    monkeypatch.setattr(loop, "prepare_research_snapshot", prepare_scoped_snapshot)
 
     result = await loop.prepare_macro_once(
         settings,
@@ -308,3 +326,129 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
         assert current is not None and current.id != original.id
         assert persisted_original is not None
         assert persisted_original.payload == original_payload
+        admitted = await admit_research_run(
+            session,
+            actor_id="test",
+            route="/internal/v1/research-runs",
+            idempotency_key="agent-paper-complete-macro",
+            request_hash="a" * 64,
+            request=ResearchRequest(
+                instrument_id=INSTRUMENT,
+                data_snapshot_id=current.id,
+                decision_time=fixed_now,
+            ),
+            prompt_version_id=None,
+            model_config_id=None,
+            daily_limit_usd=Decimal("3"),
+            now=fixed_now,
+        )
+        tools = await database_read_only_tools(
+            session,
+            admitted.run,
+            allow_fixture_evidence=False,
+        )
+        result = await tools.execute(
+            "get_macro_snapshot",
+            {
+                "data_snapshot_id": str(current.id),
+                "as_of": fixed_now.isoformat(),
+                "series": sorted(loop._PAPER_MACRO_SERIES),
+            },
+        )
+        assert {row["series"] for row in result["items"]} == loop._PAPER_MACRO_SERIES
+        assert {row["vintage"] for row in result["items"]} == {vintage.isoformat()}
+
+
+@pytest.mark.asyncio
+async def test_current_trends_snapshot_does_not_bind_partial_macro_vintage(
+    migrated_database_url, monkeypatch: pytest.MonkeyPatch
+):
+    settings = DailyOnceSettings.model_validate(
+        {
+            "DATABASE_URL": migrated_database_url,
+            "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
+            "OBJECT_STORE_REGION": "us-east-1",
+            "OBJECT_STORE_BUCKET": "synthetic-agent-paper-partial-macro",
+            "OBJECT_STORE_PREFIX": "synthetic-agent-paper-partial-macro",
+            "OBJECT_STORE_ACCESS_KEY_ID": "synthetic-access",
+            "OBJECT_STORE_SECRET_ACCESS_KEY": "synthetic-secret",
+        }
+    )
+    await prepare_database(settings)
+    factory = session_factory(settings)
+    fixed_now = datetime(2026, 9, 16, 15, tzinfo=UTC)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.replace(tzinfo=None) if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(snapshot_module, "datetime", FixedDateTime)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    old_vintage = date(2026, 9, 14)
+    new_vintage = date(2026, 9, 15)
+    async with factory() as session, session.begin():
+        await seed_filing(session)
+        for series in loop._PAPER_MACRO_SERIES:
+            await import_fred_vintage(
+                session,
+                collection=_macro_collection(
+                    series,
+                    vintage=old_vintage,
+                    received_at=datetime(2026, 9, 14, 14, tzinfo=UTC),
+                ),
+                store=store,
+            )
+        await import_fred_vintage(
+            session,
+            collection=_macro_collection(
+                "DFF",
+                vintage=new_vintage,
+                received_at=datetime(2026, 9, 15, 14, tzinfo=UTC),
+            ),
+            store=store,
+        )
+
+    await loop._prepare_current_trends_research_snapshot(
+        settings,
+        instrument_id=INSTRUMENT,
+        now=fixed_now,
+    )
+
+    async with factory() as session:
+        snapshot = await select_authoritative_snapshot(
+            session,
+            instrument_id=INSTRUMENT,
+            as_of=fixed_now,
+        )
+        assert snapshot is not None
+        admitted = await admit_research_run(
+            session,
+            actor_id="test",
+            route="/internal/v1/research-runs",
+            idempotency_key="agent-paper-partial-macro",
+            request_hash="b" * 64,
+            request=ResearchRequest(
+                instrument_id=INSTRUMENT,
+                data_snapshot_id=snapshot.id,
+                decision_time=fixed_now,
+            ),
+            prompt_version_id=None,
+            model_config_id=None,
+            daily_limit_usd=Decimal("3"),
+            now=fixed_now,
+        )
+        tools = await database_read_only_tools(
+            session,
+            admitted.run,
+            allow_fixture_evidence=False,
+        )
+        result = await tools.execute(
+            "get_macro_snapshot",
+            {
+                "data_snapshot_id": str(snapshot.id),
+                "as_of": fixed_now.isoformat(),
+                "series": sorted(loop._PAPER_MACRO_SERIES),
+            },
+        )
+        assert result["items"] == []

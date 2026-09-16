@@ -406,11 +406,17 @@ async def _read_one(
 
 
 async def read_fred_observations(
-    session: AsyncSession, *, as_of: datetime, evidence_ids: tuple[UUID, ...] | None = None
+    session: AsyncSession,
+    *,
+    as_of: datetime,
+    evidence_ids: tuple[UUID, ...] | None = None,
+    observation_ids: tuple[UUID, ...] | None = None,
+    series: frozenset[str] | None = None,
+    vintage: date | None = None,
 ) -> dict[UUID, FredResearchObservation]:
     """Exact optional evidence scope; invalid optional originals never hide unrelated research."""
     require_utc(as_of)
-    if evidence_ids == ():
+    if evidence_ids == () or observation_ids == () or series == frozenset():
         return {}
     query = (
         select(MacroObservation, ResearchEvidenceRef, DataSnapshot)
@@ -434,6 +440,15 @@ async def read_fred_observations(
     )
     if evidence_ids is not None:
         query = query.where(ResearchEvidenceRef.id.in_(evidence_ids))
+    if observation_ids is not None:
+        query = query.where(MacroObservation.id.in_(observation_ids))
+    if series is not None:
+        query = query.where(MacroObservation.series.in_(series))
+    if vintage is not None:
+        query = query.where(
+            MacroObservation.real_time_start == vintage,
+            MacroObservation.real_time_end == vintage,
+        )
     rows = (await session.execute(query.limit(512))).all()
     result = {}
     for row, ref, snapshot in rows:

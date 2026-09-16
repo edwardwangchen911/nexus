@@ -94,7 +94,11 @@ async def import_collection(
                 settings, disable_environment_proxies=True
             )
             ids = await import_fred_vintage(session, collection=collection, store=actual_store)
-            visible = await read_fred_observations(session, as_of=datetime.now(UTC))
+            visible = await read_fred_observations(
+                session,
+                as_of=datetime.now(UTC),
+                observation_ids=ids,
+            )
             visible_ids = {row.observation_id for row in visible.values()}
         return {
             "status": "imported",
