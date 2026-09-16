@@ -21,14 +21,17 @@ from helpers.paper_api import app, headers
 from helpers.paper_batch import CALENDAR_ID, DECISION_TIME, INSTRUMENTS, seed_paper_batch
 from helpers.paper_performance import seed_paper_performance, seed_second_paper_close
 from nexus.agents.actionable_research import ActionableResearchDecision
+from nexus.agents.codex_sdk import MODEL_ID
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION, aggregate_input_limit
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution_authority import ROLE_ORDER, load_frozen_evidence
+from nexus.agents.models import ResearchRequest
 from nexus.agents.paper_context import (
     FrozenAgentPaperContextStatus,
     revalidate_frozen_agent_paper_context,
 )
-from nexus.agents.persistence import select_authoritative_snapshot
+from nexus.agents.persistence import admit_research_run, select_authoritative_snapshot
 from nexus.domain.evidence import EvidenceRef
 from nexus.jobs.daily_research import admit_agent_paper_research
 from nexus.market.ingestion import ingest_price_page
@@ -55,9 +58,16 @@ from nexus.paper.agent_market import (
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
 )
+from nexus.paper.agent_version_evaluation import register_agent_version_evaluation
+from nexus.paper.agent_version_models import AgentVersionEvaluationRequest
+from nexus.paper.agent_version_runner import (
+    advance_agent_version_slot,
+    resume_agent_version_slot,
+)
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
+from nexus.persistence.models.agent_versions import AgentVersionCyclePairRecord
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
@@ -274,9 +284,7 @@ def test_service_heartbeat_rejects_stale_incompatible_or_malformed_liveness(
                         seen_at=now + seen_offset,
                     )
                 )
-            return await agent_paper_loop.read_agent_paper_service_heartbeat(
-                migrated_database_url
-            )
+            return await agent_paper_loop.read_agent_paper_service_heartbeat(migrated_database_url)
         finally:
             await engine.dispose()
 
@@ -785,9 +793,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
                 session,
                 cycle_id=uuid4(),
                 instrument_id=INSTRUMENTS[0][0],
-                research_snapshot_id=UUID(
-                    int=0x63000000000000000000000000000301
-                ),
+                research_snapshot_id=UUID(int=0x63000000000000000000000000000301),
                 research_as_of=DECISION_TIME,
                 daily_limit_usd=Decimal("1"),
                 now=DECISION_TIME,
@@ -911,9 +917,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
 
         async def admit_while_locked():
             async with sessions.begin() as session:
-                backend_pid.set_result(
-                    int(await session.scalar(text("SELECT pg_backend_pid()")))
-                )
+                backend_pid.set_result(int(await session.scalar(text("SELECT pg_backend_pid()"))))
                 return await admit_agent_paper_research(
                     session,
                     cycle_id=uuid4(),
@@ -926,10 +930,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
 
         async with sessions.begin() as lock_session:
             await lock_session.execute(
-                text(
-                    "SELECT pg_advisory_xact_lock("
-                    "hashtextextended(:scope, 1415))"
-                ),
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1415))"),
                 {"scope": "agent-version:local-agent-paper-cycle"},
             )
             locked_admission = asyncio.create_task(admit_while_locked())
@@ -939,21 +940,14 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
         assert third.run.model_config_id == first_model_config_id
 
         async with sessions.begin() as session:
-            await session.execute(
-                text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
-            )
+            await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             try:
                 await session.execute(
-                    text(
-                        "UPDATE agent_research_runs SET model_hash=:model_hash "
-                        "WHERE id=:run_id"
-                    ),
+                    text("UPDATE agent_research_runs SET model_hash=:model_hash WHERE id=:run_id"),
                     {"model_hash": "e" * 64, "run_id": third.run_id},
                 )
             finally:
-                await session.execute(
-                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
-                )
+                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
         with pytest.raises(ValueError, match="point-in-time data authority is invalid"):
             async with sessions.begin() as session:
                 await admit_agent_paper_research(
@@ -966,9 +960,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
                     now=first_run.decision_time,
                 )
         async with sessions.begin() as session:
-            await session.execute(
-                text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
-            )
+            await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             try:
                 await session.execute(
                     text(
@@ -977,16 +969,12 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
                     ),
                     {
                         "model_hash": first_model_hash,
-                        "prompt_version_id": UUID(
-                            "f3000000-0000-0000-0000-000000000001"
-                        ),
+                        "prompt_version_id": UUID("f3000000-0000-0000-0000-000000000001"),
                         "run_id": third.run_id,
                     },
                 )
             finally:
-                await session.execute(
-                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
-                )
+                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
         with pytest.raises(ValueError, match="point-in-time data authority is invalid"):
             async with sessions.begin() as session:
                 await admit_agent_paper_research(
@@ -1290,6 +1278,367 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
 
         assert unbounded_response.status_code == 409
         assert unbounded_response.json()["error"]["code"] == "DATA_PARTIAL"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_version_pair_resumes_original_outputs_without_duplicate_work(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    evaluation_calendar_id = UUID("63000000-0000-0000-0000-000000000810")
+    compatible_model_id = UUID("63000000-0000-0000-0000-000000000811")
+    evaluation_actor = "test-agent-version-pair"
+    evaluation_start = datetime(2026, 8, 26, 19, tzinfo=UTC)
+    train_dates = (date(2026, 8, 26), date(2026, 8, 27))
+    oos_dates = (
+        date(2026, 8, 28),
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+        date(2026, 9, 4),
+        date(2026, 9, 7),
+        date(2026, 9, 8),
+        date(2026, 9, 9),
+        date(2026, 9, 10),
+    )
+
+    def slots(dates: tuple[date, ...]) -> tuple[datetime, ...]:
+        return tuple(
+            datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+            + timedelta(hours=19, minutes=minute)
+            for day in dates
+            for minute in (0, 5)
+        )
+
+    train_slots = slots(train_dates)
+    oos_slots = slots(oos_dates)
+    try:
+        from nexus.strategy.forward import load_forward_strategy_decision
+
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            assert registered is not None
+            await _seed_cycle_research_authority(
+                session,
+                registered_decision=registered.decision,
+                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                quote_received_at=evaluation_start,
+                price_available_at=evaluation_start,
+            )
+            await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text("UPDATE universe_snapshots SET published_at=:at"),
+                    {"at": evaluation_start - timedelta(seconds=1)},
+                )
+            finally:
+                await session.execute(text("ALTER TABLE universe_snapshots ENABLE TRIGGER USER"))
+            base_snapshot = await select_authoritative_snapshot(
+                session,
+                instrument_id=INSTRUMENTS[0][0],
+                as_of=evaluation_start,
+            )
+            orchestrator = await session.scalar(
+                select(AgentPromptVersionRecord)
+                .where(AgentPromptVersionRecord.role == "orchestrator")
+                .order_by(AgentPromptVersionRecord.id.desc())
+                .limit(1)
+            )
+            assert base_snapshot is not None
+            assert orchestrator is not None
+            session.add(
+                AgentModelConfigRecord(
+                    id=compatible_model_id,
+                    model_id=MODEL_ID,
+                    version=ACTIONABLE_CONFIG_VERSION,
+                    config_hash="9" * 64,
+                    max_input_tokens=aggregate_input_limit(ACTIONABLE_CONFIG_VERSION),
+                    max_tool_calls=1,
+                    max_output_tokens=8192,
+                    input_usd_per_million=Decimal("0"),
+                    output_usd_per_million=Decimal("0"),
+                    pricing_available_at=evaluation_start - timedelta(days=1),
+                    pricing_expires_at=oos_slots[-1] + timedelta(days=1),
+                )
+            )
+            await session.flush()
+            source = await admit_research_run(
+                session,
+                actor_id="agent-version-incumbent-source",
+                route="agent-version-source-v1",
+                idempotency_key="agent-version-incumbent-source",
+                request_hash="8" * 64,
+                request=ResearchRequest(
+                    instrument_id=INSTRUMENTS[0][0],
+                    data_snapshot_id=base_snapshot.id,
+                    decision_time=evaluation_start,
+                ),
+                prompt_version_id=orchestrator.id,
+                model_config_id=compatible_model_id,
+                daily_limit_usd=Decimal("3"),
+                now=evaluation_start,
+            )
+            await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text("UPDATE agent_research_runs SET status='completed' WHERE id=:run_id"),
+                    {"run_id": source.run_id},
+                )
+            finally:
+                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
+
+            prompts = load_prompt_assets()
+            challenger_orchestrator_id: UUID | None = None
+            for index, role in enumerate(ROLE_ORDER, start=1):
+                content = f"{prompts[role].content}\nchallenger version"
+                prompt_id = UUID(int=0x63000000000000000000000000000820 + index)
+                if role == "orchestrator":
+                    challenger_orchestrator_id = prompt_id
+                session.add(
+                    AgentPromptVersionRecord(
+                        id=prompt_id,
+                        role=role,
+                        version="agent-version-challenger-v1",
+                        content_hash=sha256(content.encode()).hexdigest(),
+                        content=content,
+                    )
+                )
+            assert challenger_orchestrator_id is not None
+            session.add(
+                ExchangeCalendarAuthorityRecord(
+                    id=evaluation_calendar_id,
+                    exchange="XNYS",
+                    version="agent-version-pair-v1",
+                    source="exchange_calendars",
+                    range_start=date(2026, 8, 25),
+                    range_end=oos_dates[-1],
+                    query_parameters={},
+                    completeness_status="complete",
+                    content_hash="8" * 64,
+                    published_at=evaluation_start - timedelta(seconds=1),
+                )
+            )
+            session.add_all(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=evaluation_calendar_id,
+                    session=session_date,
+                    decision_at=datetime.combine(session_date, datetime.min.time(), tzinfo=UTC)
+                    + timedelta(hours=20),
+                    market_open_at=datetime.combine(session_date, datetime.min.time(), tzinfo=UTC)
+                    + timedelta(hours=13, minutes=30),
+                    market_close_at=datetime.combine(session_date, datetime.min.time(), tzinfo=UTC)
+                    + timedelta(hours=20),
+                )
+                for session_date in (date(2026, 8, 25),) + train_dates + oos_dates
+            )
+            await session.flush()
+            registration = await register_agent_version_evaluation(
+                session,
+                request=AgentVersionEvaluationRequest(
+                    instrument_id=INSTRUMENTS[0][0],
+                    incumbent_version_source_run_id=source.run_id,
+                    challenger_prompt_version_id=challenger_orchestrator_id,
+                    challenger_model_config_id=compatible_model_id,
+                    initial_capital=Decimal("10000"),
+                    train_slots=train_slots,
+                    oos_slots=oos_slots,
+                ),
+                actor_id=evaluation_actor,
+                idempotency_key="agent-version-pair-registration",
+                now=evaluation_start,
+            )
+
+        async with sessions.begin() as session:
+            prepared = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[0],
+                daily_limit_usd=Decimal("3"),
+                now=train_slots[0],
+            )
+        assert prepared.status == "running", prepared.reason_code
+        assert prepared.incumbent_run_id is not None
+        assert prepared.challenger_run_id is not None
+
+        output_at = evaluation_start + timedelta(seconds=5)
+        async with sessions.begin() as session:
+            for index, run_id in enumerate(
+                (prepared.incumbent_run_id, prepared.challenger_run_id), start=1
+            ):
+                run = await session.get(AgentResearchRunRecord, run_id)
+                assert run is not None
+                research_manifest = next(
+                    row
+                    for row in run.evidence_manifest
+                    if row["source"] != "nexus_agent_paper_context"
+                )
+                evidence = await session.get(ResearchEvidenceRef, UUID(research_manifest["id"]))
+                assert evidence is not None
+                frozen_evidence_rows: list[ResearchEvidenceRef] = []
+                for row in run.evidence_manifest:
+                    frozen = await session.get(ResearchEvidenceRef, UUID(row["id"]))
+                    assert frozen is not None
+                    frozen_evidence_rows.append(frozen)
+                frozen_evidence = tuple(frozen_evidence_rows)
+                intent = _safe_no_trade_intent(
+                    run=run,
+                    evidence=evidence,
+                    valid_until=output_at + timedelta(days=1),
+                )
+                intent = intent.model_copy(
+                    update={
+                        "evidence_refs": tuple(
+                            EvidenceRef(
+                                source=row.source,
+                                object_id=row.provider_object_id,
+                                available_at=row.available_at,
+                                location=row.location,
+                                content_hash=row.content_hash,
+                            )
+                            for row in frozen_evidence
+                        )
+                    }
+                )
+                intent_document = intent.model_dump(mode="json")
+                payload = {"quality_status": "partial"}
+                output_id = UUID(int=0x63000000000000000000000000000900 + index)
+                content_hash = sha256(
+                    json.dumps(
+                        {
+                            "status": "completed",
+                            "role": None,
+                            "payload": payload,
+                            "intent": intent_document,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    ).encode()
+                ).hexdigest()
+                await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
+                await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER USER"))
+                try:
+                    await session.execute(
+                        text("UPDATE agent_research_runs SET status='completed' WHERE id=:run_id"),
+                        {"run_id": run_id},
+                    )
+                    await session.execute(
+                        text(
+                            "UPDATE jobs SET status='succeeded',started_at=:at,finished_at=:at,"
+                            "attempt_count=1,result_code='AGENT_RESEARCH_COMPLETED',"
+                            "version=version+1 WHERE payload->>'run_id'=:run_id"
+                        ),
+                        {"at": output_at, "run_id": str(run_id)},
+                    )
+                finally:
+                    await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER USER"))
+                    await session.execute(
+                        text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
+                    )
+                session.add(
+                    AgentResearchOutputRecord(
+                        id=output_id,
+                        run_id=run_id,
+                        sequence=1,
+                        status="completed",
+                        role=None,
+                        prompt_hash=None,
+                        content_hash=content_hash,
+                        payload=payload,
+                        intent=intent_document,
+                    )
+                )
+                await session.flush()
+                session.add_all(
+                    AgentResearchOutputEvidenceRecord(
+                        output_id=output_id,
+                        evidence_ref_id=row.id,
+                        source=row.source,
+                        provider_object_id=row.provider_object_id,
+                        revision=row.revision,
+                        available_at=row.available_at,
+                        location=row.location,
+                        content_hash=row.content_hash,
+                    )
+                    for row in frozen_evidence
+                )
+
+        async with sessions.begin() as session:
+            paired = await resume_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[0],
+                now=output_at,
+            )
+            pair_count = int(
+                await session.scalar(select(func.count()).select_from(AgentVersionCyclePairRecord))
+                or 0
+            )
+            version_job_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.payload["run_id"]
+                        .as_string()
+                        .in_((str(prepared.incumbent_run_id), str(prepared.challenger_run_id)))
+                    )
+                )
+                or 0
+            )
+            order_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaperOrderRecord)
+                    .where(
+                        PaperOrderRecord.account_id.in_(
+                            (
+                                registration.incumbent_account_id,
+                                registration.challenger_account_id,
+                            )
+                        )
+                    )
+                )
+                or 0
+            )
+            broker_intent_count = int(
+                await session.scalar(text("SELECT count(*) FROM broker_execution_intents")) or 0
+            )
+        assert paired.status == "paired", paired.reason_code
+        assert paired.reason_code == "PAIR_RECORDED"
+        assert pair_count == 1
+        assert version_job_count == 2
+        assert order_count == 0
+        assert broker_intent_count == 0
+
+        async with sessions.begin() as session:
+            replay = await resume_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[0],
+                now=output_at,
+            )
+            assert (
+                int(
+                    await session.scalar(
+                        select(func.count()).select_from(AgentVersionCyclePairRecord)
+                    )
+                    or 0
+                )
+                == 1
+            )
+        assert replay.model_copy(update={"replayed": False}) == paired
+        assert replay.replayed is True
     finally:
         await engine.dispose()
 
@@ -3600,14 +3949,10 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert historical is not None
         assert historical.status == "awaiting_market"
         assert historical_page.version_observation is not None
-        assert historical_page.version_history == (
-            historical_page.version_observation,
-        )
+        assert historical_page.version_history == (historical_page.version_observation,)
         assert historical_page.version_observation.order_count == 1
         assert historical_page.version_observation.fill_count == 0
-        assert "VERSION_ORDER_PATH_UNOBSERVED" in (
-            historical_page.version_observation.reason_codes
-        )
+        assert "VERSION_ORDER_PATH_UNOBSERVED" in (historical_page.version_observation.reason_codes)
         assert projected is not None
         assert projected.status == "partially_filled"
         assert projected.result_code == "PAPER_ORDERS_PARTIALLY_FILLED"
@@ -3646,10 +3991,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert cycle_page.version_history == (cycle_page.version_observation,)
         assert cycle_page.version_observation.prompt_version == "agent-paper-orchestrator-v1"
         assert cycle_page.version_observation.model_id == "fixture-agent-paper"
-        assert (
-            cycle_page.version_observation.model_version
-            == "codex-sdk-chatgpt-v4-actionable"
-        )
+        assert cycle_page.version_observation.model_version == "codex-sdk-chatgpt-v4-actionable"
         assert cycle_page.version_observation.observed_sessions == 1
         assert cycle_page.version_observation.cycle_count == 1
         assert cycle_page.version_observation.completed_count == 1
@@ -3845,9 +4187,7 @@ async def test_agent_version_history_groups_exact_identity_and_keeps_latest_twen
         assert page.version_observation is not None
         assert page.version_observation == page.version_history[0]
         assert len(page.version_history) == 20
-        assert len(
-            {(item.prompt_hash, item.model_hash) for item in page.version_history}
-        ) == 20
+        assert len({(item.prompt_hash, item.model_hash) for item in page.version_history}) == 20
         assert [item.last_decision_at for item in page.version_history] == sorted(
             (item.last_decision_at for item in page.version_history),
             reverse=True,
