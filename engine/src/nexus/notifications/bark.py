@@ -7,6 +7,7 @@ import json
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from urllib.parse import urlsplit
 
 import httpx
@@ -14,51 +15,24 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from nexus.outbox.models import OutboxMessage
+from nexus.paper.notification import (
+    PaperNotificationError,
+    PaperOrderNotificationSnapshot,
+    parse_notification_snapshot,
+)
 
 BARK_EVENT_SCHEMAS: tuple[tuple[str, str], ...] = (
-    ("strategy_decision.persisted", "paper_event_v1"),
-    ("paper.order_batch.evaluated", "paper_event_v1"),
     ("paper.order.risk_rejected", "paper_event_v1"),
-    ("paper.order.submitted", "paper_event_v1"),
-    ("paper.execution.advance.partially_filled", "paper_execution_v1"),
     ("paper.execution.advance.filled", "paper_execution_v1"),
     ("paper.execution.advance.cancelled", "paper_execution_v1"),
     ("paper.execution.cancelled", "paper_execution_v1"),
 )
 
-_COPY: dict[tuple[str, str], tuple[str, str]] = {
-    ("strategy_decision.persisted", "paper_event_v1"): (
-        "NEXUS · Agent 决策",
-        "Agent 决策已持久化，可在 NEXUS 查看。",
-    ),
-    ("paper.order_batch.evaluated", "paper_event_v1"): (
-        "NEXUS · 模拟批次",
-        "模拟订单批次已完成风控评估。",
-    ),
-    ("paper.order.risk_rejected", "paper_event_v1"): (
-        "NEXUS · 风控拒绝",
-        "一项内部模拟订单被确定性风控拒绝。",
-    ),
-    ("paper.order.submitted", "paper_event_v1"): (
-        "NEXUS · 待处理订单",
-        "一项内部模拟订单已提交，等待后续处理。",
-    ),
-    ("paper.execution.advance.partially_filled", "paper_execution_v1"): (
-        "NEXUS · 部分成交",
-        "一项内部模拟订单发生部分成交。",
-    ),
-    ("paper.execution.advance.filled", "paper_execution_v1"): (
-        "NEXUS · 已成交",
-        "一项内部模拟订单已全部成交。",
-    ),
-    ("paper.execution.advance.cancelled", "paper_execution_v1"): (
-        "NEXUS · 已取消",
-        "一项内部模拟订单已取消。",
-    ),
-    ("paper.execution.cancelled", "paper_execution_v1"): (
-        "NEXUS · 已取消",
-        "一项内部模拟订单已取消。",
-    ),
+_EVENT_STATUS: dict[tuple[str, str], str] = {
+    ("paper.order.risk_rejected", "paper_event_v1"): "risk_rejected",
+    ("paper.execution.advance.filled", "paper_execution_v1"): "filled",
+    ("paper.execution.advance.cancelled", "paper_execution_v1"): "cancelled",
+    ("paper.execution.cancelled", "paper_execution_v1"): "cancelled",
 }
 
 
@@ -106,21 +80,113 @@ def map_bark_notification(
     *,
     read_only_url: str | None,
 ) -> dict[str, str]:
-    """Map an exact event contract to fixed copy without reading its payload."""
-    copy = _COPY.get((message.event_type, message.schema_version))
-    if copy is None:
+    """Render one validated event-time order outcome without later data lookups."""
+    expected_status = _EVENT_STATUS.get((message.event_type, message.schema_version))
+    if expected_status is None:
         raise BarkPublishError("BARK_EVENT_UNSUPPORTED")
-    title, body = copy
+    try:
+        snapshot = parse_notification_snapshot(message.payload)
+    except PaperNotificationError:
+        raise BarkPublishError("BARK_NOTIFICATION_INVALID") from None
+    if snapshot.status != expected_status or snapshot.order_id != message.aggregate_id:
+        raise BarkPublishError("BARK_NOTIFICATION_INVALID")
+    title, body = _render_order_outcome(snapshot)
     notification = {
         "title": title,
         "body": body,
         "group": "NEXUS",
-        "id": str(message.event_id),
+        "id": str(snapshot.order_id),
     }
     if read_only_url is not None:
         validate_bark_read_only_url(read_only_url)
         notification["url"] = read_only_url
     return notification
+
+
+def _quantity(value: Decimal) -> str:
+    return str(int(value))
+
+
+def _money(value: Decimal, currency: str) -> str:
+    rendered = f"{value:f}"
+    whole, _, fraction = rendered.partition(".")
+    fraction = fraction.rstrip("0")
+    if len(fraction) < 2:
+        fraction = fraction.ljust(2, "0")
+    grouped = f"{int(whole):,}.{fraction}"
+    return f"${grouped}" if currency == "USD" else f"{grouped} {currency}"
+
+
+def _render_order_outcome(snapshot: PaperOrderNotificationSnapshot) -> tuple[str, str]:
+    side = {"buy": "买入", "sell": "卖出"}[snapshot.side]
+    currency = snapshot.price.currency
+    agent_reason = snapshot.agent_reason or "暂不可用"
+    invalidation = snapshot.invalidation or "暂不可用"
+    account = (
+        f"{snapshot.symbol} {_quantity(snapshot.position.quantity)} 股｜"
+        f"可用现金 {_money(snapshot.cash.available, currency)}"
+    )
+
+    if snapshot.status == "filled":
+        assert snapshot.fee is not None
+        title = (
+            f"[内部模拟] {snapshot.symbol} {side} {_quantity(snapshot.filled_quantity)} 股 · 已成交"
+        )
+        body = "\n".join(
+            (
+                f"成交均价：{_money(snapshot.price.value, currency)}｜"
+                f"成交额 {_money(snapshot.notional, currency)}｜"
+                f"费用 {_money(snapshot.fee, currency)}",
+                f"成交后：{account}",
+                f"Agent：{agent_reason}",
+                f"失效：{invalidation}",
+            )
+        )
+        return title, body
+
+    if snapshot.status == "risk_rejected":
+        price_label = "参考价" if snapshot.price.kind == "reference" else "最坏价格"
+        title = (
+            f"[内部模拟] {snapshot.symbol} {side} "
+            f"{_quantity(snapshot.requested_quantity)} 股 · 风控拒绝"
+        )
+        body = "\n".join(
+            (
+                f"{price_label}：{_money(snapshot.price.value, currency)}｜"
+                f"计划金额 {_money(snapshot.notional, currency)}",
+                f"原因：{snapshot.risk_reason or '暂不可用'}",
+                f"账户未变化：{account}",
+                f"Agent：{agent_reason}",
+                f"失效：{invalidation}",
+            )
+        )
+        return title, body
+
+    title = (
+        f"[内部模拟] {snapshot.symbol} {side} {_quantity(snapshot.approved_quantity)} 股 · 已取消"
+    )
+    if snapshot.filled_quantity > 0:
+        assert snapshot.fee is not None
+        price_line = (
+            f"成交均价：{_money(snapshot.price.value, currency)}｜"
+            f"成交额 {_money(snapshot.notional, currency)}｜"
+            f"费用 {_money(snapshot.fee, currency)}"
+        )
+    else:
+        price_label = "参考价" if snapshot.price.kind == "reference" else "最坏价格"
+        price_line = f"{price_label}：{_money(snapshot.price.value, currency)}｜未成交"
+    body = "\n".join(
+        (
+            f"执行结果：已成交 {_quantity(snapshot.filled_quantity)} 股｜"
+            f"未成交 {_quantity(snapshot.remaining_quantity)} 股",
+            price_line,
+            f"取消后：{account}",
+            f"原因：{snapshot.risk_reason or '暂不可用'}",
+            f"Agent：{agent_reason}",
+            f"失效：{invalidation}",
+        )
+    )
+    return title, body
 
 
 def _random_iv() -> bytes:
@@ -163,6 +229,15 @@ class BarkPublisher:
         await self.publish(message)
 
     async def publish(self, message: OutboxMessage) -> None:
+        if (
+            "notification_snapshot" not in message.payload
+            and "notification_delivery" not in message.payload
+        ):
+            return
+        if message.payload.get("notification_delivery") == "unavailable":
+            if "notification_snapshot" in message.payload:
+                raise BarkPublishError("BARK_NOTIFICATION_INVALID")
+            return
         notification = map_bark_notification(
             message,
             read_only_url=self.read_only_url,

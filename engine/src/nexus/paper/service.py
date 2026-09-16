@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
@@ -26,6 +26,11 @@ from nexus.paper.agent_decision_store import (
 )
 from nexus.paper.errors import PaperBatchError, PaperBatchErrorCode
 from nexus.paper.ledger import make_buy_reservation_transaction
+from nexus.paper.notification import (
+    build_order_decision_context,
+    build_risk_rejected_snapshot,
+    notification_snapshot_payload,
+)
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.paper import (
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
@@ -670,7 +675,9 @@ async def _persist_new_batch(
     risk_input_hash: str,
     result_hash: str,
     batch_hash: str,
+    decision_session: date,
     market: RiskMarketSnapshot,
+    portfolio: PaperPortfolioProjection,
     no_changes: Sequence[_NoChangeEvidence],
     evaluations: Sequence[RiskEvaluation],
     ledger_accounts: Sequence[PaperLedgerAccountRecord],
@@ -971,20 +978,40 @@ async def _persist_new_batch(
         occurred_at=request_time,
     )
     for order, evaluation in order_pairs:
+        action = (
+            "paper.order.risk_rejected"
+            if evaluation.outcome == "rejected"
+            else "paper.order.submitted"
+        )
+        order_event_payload: dict[str, object] = {
+            **common,
+            "order_id": str(order.id),
+            "instrument_id": str(order.instrument_id),
+            "result_hash": evaluation.result_hash,
+        }
+        if evaluation.outcome == "rejected":
+            try:
+                context = await build_order_decision_context(
+                    session,
+                    strategy_decision_id=strategy_decision_id,
+                    instrument_id=order.instrument_id,
+                    decision_session=decision_session,
+                )
+                snapshot = build_risk_rejected_snapshot(
+                    order=order,
+                    evaluation=evaluation,
+                    portfolio=portfolio,
+                    context=context,
+                    occurred_at=request_time,
+                )
+                order_event_payload.update(notification_snapshot_payload(snapshot))
+            except ValueError:
+                order_event_payload["notification_delivery"] = "unavailable"
         await _add_event_pair(
             session,
-            action=(
-                "paper.order.risk_rejected"
-                if evaluation.outcome == "rejected"
-                else "paper.order.submitted"
-            ),
+            action=action,
             aggregate_id=order.id,
-            payload={
-                **common,
-                "order_id": str(order.id),
-                "instrument_id": str(order.instrument_id),
-                "result_hash": evaluation.result_hash,
-            },
+            payload=order_event_payload,
             occurred_at=request_time,
         )
         if evaluation.outcome != "rejected":
@@ -1198,7 +1225,9 @@ async def create_paper_order_batch(
         risk_input_hash=risk_input_hash,
         result_hash=result_hash,
         batch_hash=batch_hash,
+        decision_session=decision.decision_session,
         market=market,
+        portfolio=projection,
         no_changes=no_changes,
         evaluations=evaluations,
         ledger_accounts=ledger_accounts,
