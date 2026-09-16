@@ -2,10 +2,14 @@
 
 import argparse
 import asyncio
+import errno
+import fcntl
 import json
 import os
+import signal
 import stat
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -117,6 +121,8 @@ class AgentPaperLoopAction(StrEnum):
     STOP_CALENDAR_AUTHORITY_MISMATCH = "stop_calendar_authority_mismatch"
     STOP_DISABLED = "stop_disabled"
     STOP_SESSION_CLOSED = "stop_session_closed"
+    STOP_REQUESTED = "stop_requested"
+    STOP_UNCONFIRMED = "stop_unconfirmed"
 
 
 @dataclass(frozen=True)
@@ -171,11 +177,14 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
         "AGENT_PAPER_ACCOUNT_INVALID",
         "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
+        "AGENT_PAPER_CODEX_STATUS_UNAVAILABLE",
+        "AGENT_PAPER_LOOP_ALREADY_RUNNING",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
+        "CODEX_CHATGPT_LOGIN_REQUIRED",
     }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
@@ -189,6 +198,73 @@ _SAFE_SCHWAB_PREFLIGHT_CODES = frozenset(
         "SCHWAB_OAUTH_TOKEN_STORE_INVALID",
     }
 )
+
+
+def acquire_agent_paper_lock(*, runtime_root: Path | None = None) -> AbstractContextManager[None]:
+    """Hold the single per-user Agent paper process lock for one runner lifetime."""
+
+    @contextmanager
+    def locked() -> Iterator[None]:
+        root = (
+            runtime_root
+            if runtime_root is not None
+            else Path.home() / "Library" / "Application Support" / "NEXUS" / "runtime"
+        )
+        try:
+            root.mkdir(mode=0o700, parents=True)
+        except FileExistsError:
+            pass
+        except OSError:
+            raise RuntimeError("AGENT_PAPER_LOOP_RUNTIME_INVALID") from None
+
+        directory_fd = -1
+        lock_fd = -1
+        locked_fd = False
+        try:
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory_fd = os.open(root, directory_flags)
+            directory = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(directory.st_mode)
+                or directory.st_uid != os.getuid()
+                or stat.S_IMODE(directory.st_mode) != 0o700
+            ):
+                raise RuntimeError("AGENT_PAPER_LOOP_RUNTIME_INVALID")
+            lock_fd = os.open(
+                "agent-paper.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            lock_file = os.fstat(lock_fd)
+            if (
+                not stat.S_ISREG(lock_file.st_mode)
+                or lock_file.st_uid != os.getuid()
+                or stat.S_IMODE(lock_file.st_mode) != 0o600
+                or lock_file.st_nlink != 1
+            ):
+                raise RuntimeError("AGENT_PAPER_LOOP_RUNTIME_INVALID")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise RuntimeError("AGENT_PAPER_LOOP_ALREADY_RUNNING") from None
+                raise RuntimeError("AGENT_PAPER_LOOP_RUNTIME_INVALID") from None
+            locked_fd = True
+            yield
+        except RuntimeError:
+            raise
+        except OSError:
+            raise RuntimeError("AGENT_PAPER_LOOP_RUNTIME_INVALID") from None
+        finally:
+            if locked_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            if lock_fd >= 0:
+                os.close(lock_fd)
+            if directory_fd >= 0:
+                os.close(directory_fd)
+
+    return locked()
 
 
 def _nonempty_environment_values(environment: Mapping[str, str], names: Sequence[str]) -> bool:
@@ -291,10 +367,10 @@ def _schwab_token_store_writable(repo_root: Path) -> bool:
         return False
 
 
-def _codex_sdk_preflight_blocker() -> str | None:
+async def _codex_sdk_preflight_blocker_async() -> str | None:
     """Read local ChatGPT login state without refreshing auth or invoking a model."""
     try:
-        result = asyncio.run(sdk_status())
+        result = await sdk_status()
     except Exception:
         return "AGENT_PAPER_CODEX_STATUS_UNAVAILABLE"
     if result.get("ready_for_model_requests") is True:
@@ -302,6 +378,10 @@ def _codex_sdk_preflight_blocker() -> str | None:
     if result.get("blocker") == "CODEX_CHATGPT_LOGIN_REQUIRED":
         return "CODEX_CHATGPT_LOGIN_REQUIRED"
     return "AGENT_PAPER_CODEX_STATUS_UNAVAILABLE"
+
+
+def _codex_sdk_preflight_blocker() -> str | None:
+    return asyncio.run(_codex_sdk_preflight_blocker_async())
 
 
 def agent_paper_service_preflight(
@@ -1193,6 +1273,11 @@ async def run_foreground_loop(
     ],
     sleep: Callable[[float], Awaitable[None]],
     heartbeat: Callable[[datetime], Awaitable[None]],
+    shutdown_requested: Callable[[], bool] = lambda: False,
+    confirm_shutdown: Callable[
+        [AgentPaperLoopAction, AgentPaperLoopSnapshot, AgentPaperLoopAction | None],
+        Awaitable[bool],
+    ] = lambda _action, _snapshot, _result: asyncio.sleep(0, result=False),
     heartbeat_interval: timedelta = timedelta(seconds=15),
     clock: Callable[[], datetime] = _utc_now,
     monotonic: Callable[[], float] = monotonic_clock,
@@ -1212,11 +1297,15 @@ async def run_foreground_loop(
         async with asyncio.timeout(interval_seconds):
             await heartbeat(clock())
 
+    if shutdown_requested():
+        return AgentPaperLoopAction.STOP_REQUESTED
     try:
         await persist_heartbeat()
     except Exception:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     while True:
+        if shutdown_requested():
+            return AgentPaperLoopAction.STOP_REQUESTED
         snapshot = await inspect()
         action = choose_loop_action(snapshot)
         if action in {
@@ -1234,6 +1323,8 @@ async def run_foreground_loop(
             while remaining > 0:
                 duration = min(remaining, interval_seconds)
                 await sleep(duration)
+                if shutdown_requested():
+                    return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
                 except Exception:
@@ -1251,6 +1342,8 @@ async def run_foreground_loop(
             while (remaining := deadline - monotonic()) > 0:
                 duration = min(remaining, interval_seconds)
                 await sleep(duration)
+                if shutdown_requested():
+                    return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
                 except Exception:
@@ -1262,6 +1355,8 @@ async def run_foreground_loop(
             while remaining > 0:
                 duration = min(remaining, interval_seconds)
                 await sleep(duration)
+                if shutdown_requested():
+                    return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
                 except Exception:
@@ -1272,6 +1367,7 @@ async def run_foreground_loop(
             execute(action, snapshot)
         )
         heartbeat_task: asyncio.Future[AgentPaperLoopAction | None] | None = None
+        heartbeat_failed = False
         try:
             await asyncio.sleep(0)
             next_heartbeat_at = monotonic() + interval_seconds
@@ -1290,21 +1386,129 @@ async def run_foreground_loop(
                 try:
                     await persist_heartbeat()
                 except Exception:
-                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+                    heartbeat_failed = True
+                    break
                 next_heartbeat_at += interval_seconds
-            stop = await action_task
+            try:
+                stop = await action_task
+            except Exception:
+                if heartbeat_failed:
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+                raise
         finally:
-            tasks = tuple(task for task in (action_task, heartbeat_task) if task is not None)
-            pending = tuple(task for task in tasks if not task.done())
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            if heartbeat_task is not None:
+                if not heartbeat_task.done() and action_task.done():
+                    heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+        if shutdown_requested():
+            try:
+                confirmed = await confirm_shutdown(action, snapshot, stop)
+            except Exception:
+                confirmed = False
+            if heartbeat_failed or not confirmed:
+                return AgentPaperLoopAction.STOP_UNCONFIRMED
+            return AgentPaperLoopAction.STOP_REQUESTED
+        if heartbeat_failed:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         try:
             await persist_heartbeat()
         except Exception:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         if stop is not None:
             return stop
+
+
+def _shutdown_postcondition_matches(
+    *,
+    action: AgentPaperLoopAction,
+    before: AgentPaperLoopSnapshot,
+    result: AgentPaperLoopAction | None,
+    after: AgentPaperLoopSnapshot,
+) -> bool:
+    if result is not None or after.calendar_authority_id != before.calendar_authority_id:
+        return False
+    if action == AgentPaperLoopAction.TRIGGER:
+        return (
+            after.cycle_id is not None
+            and after.cycle_slot_at == floor_decision_slot(before.now)
+            and after.cycle_status
+            in {
+                "researching",
+                "decision_recorded",
+                "risk_evaluated",
+                "awaiting_market",
+                "completed",
+            }
+        )
+    if action == AgentPaperLoopAction.RUN_RESEARCH_JOB:
+        return (
+            before.cycle_id is not None
+            and after.cycle_id == before.cycle_id
+            and before.research_job_id is not None
+            and after.research_job_id == before.research_job_id
+            and after.research_job_status in _TERMINAL_JOB_STATUSES
+        )
+    if action == AgentPaperLoopAction.RESUME:
+        return (
+            before.cycle_id is not None
+            and after.cycle_id == before.cycle_id
+            and after.cycle_status
+            in {
+                "decision_recorded",
+                "risk_evaluated",
+                "awaiting_market",
+                "completed",
+                "unavailable",
+            }
+        )
+    if action == AgentPaperLoopAction.COLLECT_WINDOW:
+        return (
+            before.cycle_id is not None
+            and after.cycle_id == before.cycle_id
+            and before.order_id is not None
+            and after.order_id == before.order_id
+            and after.market_window_ready
+        )
+    if action == AgentPaperLoopAction.ADVANCE_ORDER:
+        return (
+            before.cycle_id is not None
+            and after.cycle_id == before.cycle_id
+            and before.order_id is not None
+            and after.order_id == before.order_id
+            and after.cycle_status in {"partially_filled", "completed"}
+        )
+    if action == AgentPaperLoopAction.PUBLISH_PERFORMANCE:
+        return (
+            before.performance_due_at is not None
+            and after.performance_due_at != before.performance_due_at
+        )
+    return False
+
+
+async def confirm_agent_paper_shutdown(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    expected_calendar_authority_id: UUID,
+    action: AgentPaperLoopAction,
+    before_snapshot: AgentPaperLoopSnapshot,
+    action_result: AgentPaperLoopAction | None,
+) -> bool:
+    """Read once and verify the exact action's persisted shutdown postcondition."""
+    try:
+        after_snapshot = await inspect_agent_paper_loop(
+            settings,
+            account_id=account_id,
+            expected_calendar_authority_id=expected_calendar_authority_id,
+        )
+    except Exception:
+        return False
+    return _shutdown_postcondition_matches(
+        action=action,
+        before=before_snapshot,
+        result=action_result,
+        after=after_snapshot,
+    )
 
 
 async def run_local_agent_paper_loop(
@@ -1326,59 +1530,90 @@ async def run_local_agent_paper_loop(
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     worker_id = f"agent-paper-loop-{new_uuid7()}"
     started_at = datetime.now(UTC)
-    try:
-        calendar_authority_id = await _select_initial_service_calendar_authority_id(settings)
-    except ValueError as error:
-        if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
-            return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
-        if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
-            return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
-        raise
+    with acquire_agent_paper_lock():
+        shutdown = asyncio.Event()
+        event_loop = asyncio.get_running_loop()
+        installed_signals: list[signal.Signals] = []
+        try:
+            for item in (signal.SIGINT, signal.SIGTERM):
+                event_loop.add_signal_handler(item, shutdown.set)
+                installed_signals.append(item)
+            if model_blocker := await _codex_sdk_preflight_blocker_async():
+                raise RuntimeError(model_blocker)
+            try:
+                calendar_authority_id = await _select_initial_service_calendar_authority_id(
+                    settings
+                )
+            except ValueError as error:
+                if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
+                    return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+                if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
+                    return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
+                raise
 
-    async def inspect() -> AgentPaperLoopSnapshot:
-        current = EngineSettings.model_validate(
-            load_agent_paper_service_environment(repo_root, os.environ)
-        )
-        if not current.agent_paper_cycle_enabled:
-            return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
-        return await inspect_agent_paper_loop(
-            current,
-            account_id=account_id,
-            expected_calendar_authority_id=calendar_authority_id,
-        )
+            async def inspect() -> AgentPaperLoopSnapshot:
+                current = EngineSettings.model_validate(
+                    load_agent_paper_service_environment(repo_root, os.environ)
+                )
+                if not current.agent_paper_cycle_enabled:
+                    return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
+                return await inspect_agent_paper_loop(
+                    current,
+                    account_id=account_id,
+                    expected_calendar_authority_id=calendar_authority_id,
+                )
 
-    async def execute(
-        action: AgentPaperLoopAction, snapshot: AgentPaperLoopSnapshot
-    ) -> AgentPaperLoopAction | None:
-        return await execute_agent_paper_loop_action(
-            settings,
-            account_id=account_id,
-            repo_root=repo_root,
-            action=action,
-            snapshot=snapshot,
-        )
+            async def execute(
+                action: AgentPaperLoopAction, snapshot: AgentPaperLoopSnapshot
+            ) -> AgentPaperLoopAction | None:
+                return await execute_agent_paper_loop_action(
+                    settings,
+                    account_id=account_id,
+                    repo_root=repo_root,
+                    action=action,
+                    snapshot=snapshot,
+                )
 
-    async def heartbeat(seen_at: datetime) -> None:
-        await heartbeat_agent_paper_loop(
-            settings,
-            worker_id=worker_id,
-            started_at=started_at,
-            seen_at=seen_at,
-        )
+            async def heartbeat(seen_at: datetime) -> None:
+                await heartbeat_agent_paper_loop(
+                    settings,
+                    worker_id=worker_id,
+                    started_at=started_at,
+                    seen_at=seen_at,
+                )
 
-    try:
-        return await run_foreground_loop(
-            inspect=inspect,
-            execute=execute,
-            sleep=asyncio.sleep,
-            heartbeat=heartbeat,
-        )
-    except ValueError as error:
-        if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
-            return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
-        if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
-            return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
-        raise
+            async def confirm_shutdown(
+                action: AgentPaperLoopAction,
+                before_snapshot: AgentPaperLoopSnapshot,
+                action_result: AgentPaperLoopAction | None,
+            ) -> bool:
+                return await confirm_agent_paper_shutdown(
+                    settings,
+                    account_id=account_id,
+                    expected_calendar_authority_id=calendar_authority_id,
+                    action=action,
+                    before_snapshot=before_snapshot,
+                    action_result=action_result,
+                )
+
+            try:
+                return await run_foreground_loop(
+                    inspect=inspect,
+                    execute=execute,
+                    sleep=asyncio.sleep,
+                    heartbeat=heartbeat,
+                    shutdown_requested=shutdown.is_set,
+                    confirm_shutdown=confirm_shutdown,
+                )
+            except ValueError as error:
+                if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
+                    return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+                if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
+                    return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
+                raise
+        finally:
+            for installed_signal in installed_signals:
+                event_loop.remove_signal_handler(installed_signal)
 
 
 async def execute_agent_paper_loop_action(
@@ -1702,12 +1937,12 @@ def main(argv: list[str] | None = None) -> int:
         if not settings.agent_paper_cycle_enabled:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
             return 1
-        if model_blocker := _codex_sdk_preflight_blocker():
-            print(json.dumps({"error_code": model_blocker}))
-            return 1
         reason = asyncio.run(
             run_local_agent_paper_loop(settings, account_id=account_id, repo_root=root)
         )
+        if reason == AgentPaperLoopAction.STOP_UNCONFIRMED:
+            print(json.dumps({"error_code": "AGENT_PAPER_LOOP_STOP_UNCONFIRMED"}))
+            return 75
         if reason == AgentPaperLoopAction.STOP_RESULT_UNKNOWN:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         if reason == AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE:

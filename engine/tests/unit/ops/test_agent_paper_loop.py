@@ -1,9 +1,15 @@
 import asyncio
 import gc
 import json
+import multiprocessing
 import os
+import signal
+import subprocess
+import sys
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -24,6 +30,46 @@ CALENDAR_AUTHORITY_ID = UUID(int=9)
 
 async def noop_heartbeat(_seen_at: datetime) -> None:
     return None
+
+
+def test_agent_paper_lock_is_shared_across_spawned_worktrees(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "shared-runtime"
+    side_effect_path = tmp_path / "loser-side-effects"
+    result_path = tmp_path / "loser-result"
+    context = multiprocessing.get_context("spawn")
+    child = """
+from pathlib import Path
+import sys
+from nexus.ops.agent_paper_loop import acquire_agent_paper_lock
+try:
+    with acquire_agent_paper_lock(runtime_root=Path(sys.argv[1])):
+        Path(sys.argv[2]).write_text("heartbeat\\ninspection\\nprovider\\nmodel\\n")
+        Path(sys.argv[3]).write_text("LOCK_ACQUIRED")
+except Exception as error:
+    Path(sys.argv[3]).write_text(str(error))
+"""
+
+    with loop.acquire_agent_paper_lock(runtime_root=runtime_root):
+        contender = context.Process(
+            target=subprocess.run,
+            args=(
+                (
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(runtime_root),
+                    str(side_effect_path),
+                    str(result_path),
+                ),
+            ),
+            kwargs={"check": False},
+        )
+        contender.start()
+        contender.join(timeout=5)
+
+    assert contender.exitcode == 0
+    assert result_path.read_text(encoding="utf-8") == "AGENT_PAPER_LOOP_ALREADY_RUNNING"
+    assert not side_effect_path.exists()
 
 
 @pytest.fixture
@@ -348,6 +394,468 @@ def test_foreground_loop_executes_persisted_action_then_stops() -> None:
     assert actions == [(loop.AgentPaperLoopAction.RUN_RESEARCH_JOB, "job-1")]
 
 
+def test_foreground_loop_stops_at_idle_boundary_without_side_effects() -> None:
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("idle shutdown must not heartbeat, inspect, execute, or confirm")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=unexpected,
+            execute=unexpected,
+            sleep=unexpected,
+            heartbeat=unexpected,
+            shutdown_requested=lambda: True,
+            confirm_shutdown=unexpected,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+
+
+def test_foreground_loop_stops_idle_wait_after_signal_without_reinspection() -> None:
+    shutdown = asyncio.Event()
+    inspections = 0
+    heartbeat_count = 0
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        nonlocal inspections
+        inspections += 1
+        return snapshot(
+            cycle_status="completed",
+            cycle_slot_at=SLOT,
+        )
+
+    async def unexpected_execute(*_args) -> None:
+        raise AssertionError("idle shutdown must not execute an action")
+
+    async def sleep(_seconds: float) -> None:
+        shutdown.set()
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+
+    async def unexpected_confirmation(*_args) -> bool:
+        raise AssertionError("idle shutdown has no action to confirm")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=unexpected_execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            shutdown_requested=shutdown.is_set,
+            confirm_shutdown=unexpected_confirmation,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+    assert inspections == 1
+    assert heartbeat_count == 1
+
+
+@pytest.mark.parametrize(
+    ("before", "expected_action"),
+    [
+        (snapshot(), A.TRIGGER),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_status="queued",
+                research_job_id=UUID(int=3),
+            ),
+            A.RUN_RESEARCH_JOB,
+        ),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_status="succeeded",
+                research_job_id=UUID(int=3),
+            ),
+            A.RESUME,
+        ),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                has_open_order=True,
+                order_id=UUID(int=4),
+                market_window_end_at=NOW,
+            ),
+            A.COLLECT_WINDOW,
+        ),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                has_open_order=True,
+                order_id=UUID(int=4),
+                market_window_ready=True,
+            ),
+            A.ADVANCE_ORDER,
+        ),
+        (
+            snapshot(
+                cycle_status="completed",
+                cycle_slot_at=PREVIOUS_SLOT,
+                performance_due_at=NOW - timedelta(hours=1),
+            ),
+            A.PUBLISH_PERFORMANCE,
+        ),
+    ],
+    ids=("trigger", "research-job", "resume", "collect-window", "advance", "performance"),
+)
+def test_foreground_loop_drains_action_then_confirms_exact_frozen_context_once(
+    before: loop.AgentPaperLoopSnapshot,
+    expected_action: loop.AgentPaperLoopAction,
+) -> None:
+    async def scenario() -> tuple[loop.AgentPaperLoopAction, bool, int, list[tuple[object, ...]]]:
+        shutdown = asyncio.Event()
+        action_started = asyncio.Event()
+        release_action = asyncio.Event()
+        action_cancelled = False
+        heartbeat_count = 0
+        confirmations: list[tuple[object, ...]] = []
+
+        async def inspect() -> loop.AgentPaperLoopSnapshot:
+            return before
+
+        async def execute(
+            action: loop.AgentPaperLoopAction,
+            state: loop.AgentPaperLoopSnapshot,
+        ) -> None:
+            nonlocal action_cancelled
+            assert action is expected_action
+            assert state is before
+            action_started.set()
+            shutdown.set()
+            try:
+                await release_action.wait()
+            except asyncio.CancelledError:
+                action_cancelled = True
+                raise
+
+        async def controlled_sleep(_seconds: float) -> None:
+            await action_started.wait()
+
+        async def heartbeat(_seen_at: datetime) -> None:
+            nonlocal heartbeat_count
+            heartbeat_count += 1
+            if heartbeat_count == 2:
+                release_action.set()
+                await asyncio.sleep(0)
+
+        async def confirm_shutdown(
+            action: loop.AgentPaperLoopAction,
+            state: loop.AgentPaperLoopSnapshot,
+            action_result: loop.AgentPaperLoopAction | None,
+        ) -> bool:
+            confirmations.append((action, state, action_result))
+            return True
+
+        async with asyncio.timeout(1):
+            result = await loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=controlled_sleep,
+                heartbeat=heartbeat,
+                clock=lambda: NOW,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
+            )
+        return result, action_cancelled, heartbeat_count, confirmations
+
+    result, action_cancelled, heartbeat_count, confirmations = asyncio.run(scenario())
+
+    assert result is A.STOP_REQUESTED
+    assert action_cancelled is False
+    assert heartbeat_count == 2
+    assert confirmations == [(expected_action, before, None)]
+
+
+@pytest.mark.parametrize("confirmation", [False, RuntimeError("read failed")])
+def test_foreground_loop_fails_closed_when_shutdown_confirmation_fails(
+    confirmation: bool | RuntimeError,
+) -> None:
+    shutdown = asyncio.Event()
+    confirmation_reads = 0
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot()
+
+    async def execute(*_args) -> None:
+        shutdown.set()
+
+    async def no_sleep(_seconds: float) -> None:
+        raise AssertionError("an immediate action must not sleep")
+
+    async def confirm_shutdown(*_args) -> bool:
+        nonlocal confirmation_reads
+        confirmation_reads += 1
+        if isinstance(confirmation, RuntimeError):
+            raise confirmation
+        return confirmation
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=no_sleep,
+            heartbeat=noop_heartbeat,
+            shutdown_requested=shutdown.is_set,
+            confirm_shutdown=confirm_shutdown,
+        )
+    )
+
+    assert result is A.STOP_UNCONFIRMED
+    assert confirmation_reads == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "before", "after", "expected"),
+    [
+        (
+            A.TRIGGER,
+            snapshot(),
+            snapshot(cycle_id=UUID(int=2), cycle_status="researching", cycle_slot_at=SLOT),
+            True,
+        ),
+        (
+            A.TRIGGER,
+            snapshot(),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                cycle_slot_at=PREVIOUS_SLOT,
+            ),
+            False,
+        ),
+        (
+            A.RUN_RESEARCH_JOB,
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_id=UUID(int=3),
+                research_job_status="queued",
+            ),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_id=UUID(int=3),
+                research_job_status="succeeded",
+            ),
+            True,
+        ),
+        (
+            A.RESUME,
+            snapshot(cycle_id=UUID(int=2), cycle_status="researching"),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                order_id=UUID(int=4),
+                has_open_order=True,
+            ),
+            True,
+        ),
+        (
+            A.COLLECT_WINDOW,
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                order_id=UUID(int=4),
+                has_open_order=True,
+                market_window_end_at=NOW,
+            ),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                order_id=UUID(int=4),
+                has_open_order=True,
+                market_window_ready=True,
+            ),
+            True,
+        ),
+        (
+            A.ADVANCE_ORDER,
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                order_id=UUID(int=4),
+                has_open_order=True,
+                market_window_ready=True,
+            ),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="completed",
+                order_id=UUID(int=4),
+            ),
+            True,
+        ),
+        (
+            A.PUBLISH_PERFORMANCE,
+            snapshot(performance_due_at=NOW - timedelta(hours=1)),
+            snapshot(performance_due_at=None),
+            True,
+        ),
+    ],
+    ids=(
+        "trigger-exact-slot",
+        "trigger-slot-conflict",
+        "research-exact-job",
+        "resume-exact-cycle",
+        "collect-exact-window",
+        "advance-exact-order",
+        "performance-exact-close",
+    ),
+)
+def test_shutdown_confirmation_reads_once_and_matches_exact_persisted_action(
+    monkeypatch: pytest.MonkeyPatch,
+    action: loop.AgentPaperLoopAction,
+    before: loop.AgentPaperLoopSnapshot,
+    after: loop.AgentPaperLoopSnapshot,
+    expected: bool,
+) -> None:
+    inspections: list[tuple[UUID, UUID]] = []
+
+    async def inspect(_settings, *, account_id, expected_calendar_authority_id):
+        inspections.append((account_id, expected_calendar_authority_id))
+        return after
+
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    result = asyncio.run(
+        loop.confirm_agent_paper_shutdown(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            action=action,
+            before_snapshot=before,
+            action_result=None,
+        )
+    )
+
+    assert result is expected
+    assert inspections == [(UUID(int=1), CALENDAR_AUTHORITY_ID)]
+
+
+def test_shutdown_confirmation_masks_persisted_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def inspect(*_args, **_kwargs):
+        raise RuntimeError("private-database-canary")
+
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+
+    assert (
+        asyncio.run(
+            loop.confirm_agent_paper_shutdown(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+                action=A.TRIGGER,
+                before_snapshot=snapshot(),
+                action_result=None,
+            )
+        )
+        is False
+    )
+
+
+def test_local_runner_holds_lock_and_coalesces_signals_before_calendar_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[object] = []
+    handlers: dict[signal.Signals, object] = {}
+
+    @contextmanager
+    def acquire_lock(*, runtime_root=None):
+        assert runtime_root is None
+        events.append("lock-enter")
+        yield
+        events.append("lock-exit")
+
+    class SignalLoop:
+        def add_signal_handler(self, item, callback) -> None:
+            handlers[item] = callback
+            events.append(("add", item))
+
+        def remove_signal_handler(self, item) -> bool:
+            events.append(("remove", item))
+            return handlers.pop(item, None) is not None
+
+    async def select_calendar(_settings) -> UUID:
+        events.append("calendar")
+        return CALENDAR_AUTHORITY_ID
+
+    async def run_loop(**kwargs) -> loop.AgentPaperLoopAction:
+        events.append("loop")
+        for item in (signal.SIGINT, signal.SIGTERM, signal.SIGTERM):
+            callback = handlers[item]
+            assert callable(callback)
+            callback()
+        assert kwargs["shutdown_requested"]() is True
+        return A.STOP_REQUESTED
+
+    async def model_ready() -> None:
+        return None
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", acquire_lock)
+    monkeypatch.setattr(loop.asyncio, "get_running_loop", lambda: SignalLoop())
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_calendar)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+    assert events == [
+        "lock-enter",
+        ("add", signal.SIGINT),
+        ("add", signal.SIGTERM),
+        "calendar",
+        "loop",
+        ("remove", signal.SIGINT),
+        ("remove", signal.SIGTERM),
+        "lock-exit",
+    ]
+
+
+def test_local_runner_lock_contention_stops_before_calendar_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def reject_lock(*, runtime_root=None):
+        assert runtime_root is None
+        raise RuntimeError("AGENT_PAPER_LOOP_ALREADY_RUNNING")
+        yield
+
+    async def unexpected_calendar(_settings):
+        raise AssertionError("the losing process must not select or inspect the calendar")
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", reject_lock)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", unexpected_calendar)
+
+    with pytest.raises(RuntimeError, match="^AGENT_PAPER_LOOP_ALREADY_RUNNING$"):
+        asyncio.run(
+            loop.run_local_agent_paper_loop(
+                loop.EngineSettings(
+                    database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"
+                ),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+            )
+        )
+
+
 def test_foreground_loop_honors_known_executor_stop_without_reinspection() -> None:
     inspections = 0
 
@@ -584,15 +1092,20 @@ def test_foreground_loop_uses_fixed_heartbeat_cadence_during_long_action() -> No
     assert sleeps == [10.0, 6.0]
 
 
-def test_foreground_loop_stops_long_action_when_heartbeat_fails() -> None:
+def test_foreground_loop_does_not_cancel_active_action_when_heartbeat_fails() -> None:
     heartbeat_count = 0
     execute_started = asyncio.Event()
-    execute_cancelled = asyncio.Event()
+    release_execute = asyncio.Event()
+    shutdown = asyncio.Event()
+    action_cancelled = False
+    confirmation_reads = 0
 
     async def heartbeat(_seen_at: datetime) -> None:
         nonlocal heartbeat_count
         heartbeat_count += 1
         if heartbeat_count == 2:
+            release_execute.set()
+            await asyncio.sleep(0)
             raise RuntimeError("database unavailable")
 
     async def inspect() -> loop.AgentPaperLoopSnapshot:
@@ -603,14 +1116,22 @@ def test_foreground_loop_stops_long_action_when_heartbeat_fails() -> None:
         )
 
     async def execute(_action, _state) -> None:
+        nonlocal action_cancelled
         execute_started.set()
+        shutdown.set()
         try:
-            await asyncio.Event().wait()
-        finally:
-            execute_cancelled.set()
+            await release_execute.wait()
+        except asyncio.CancelledError:
+            action_cancelled = True
+            raise
 
     async def controlled_sleep(_seconds: float) -> None:
         await execute_started.wait()
+
+    async def confirm_shutdown(*_args) -> bool:
+        nonlocal confirmation_reads
+        confirmation_reads += 1
+        return True
 
     async def run() -> loop.AgentPaperLoopAction:
         return await asyncio.wait_for(
@@ -620,13 +1141,16 @@ def test_foreground_loop_stops_long_action_when_heartbeat_fails() -> None:
                 sleep=controlled_sleep,
                 heartbeat=heartbeat,
                 clock=lambda: NOW,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
             ),
             timeout=1,
         )
 
-    assert asyncio.run(run()) == A.STOP_RESULT_UNKNOWN
+    assert asyncio.run(run()) == A.STOP_UNCONFIRMED
     assert heartbeat_count == 2
-    assert execute_cancelled.is_set()
+    assert action_cancelled is False
+    assert confirmation_reads == 1
 
 
 def test_foreground_loop_retrieves_action_failure_when_heartbeat_also_fails() -> None:
@@ -868,6 +1392,9 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         await inspect()
         return A.STOP_SESSION_CLOSED
 
+    async def model_ready() -> None:
+        return None
+
     monkeypatch.setattr(loop, "load_agent_paper_service_environment", load_service)
     monkeypatch.setattr(
         loop,
@@ -877,6 +1404,7 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         ),
     )
     monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
     monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_initial)
     monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
 
@@ -1235,6 +1763,16 @@ def test_loop_command_rejects_responses_runtime_before_running(
     ("reason", "exit_code", "output"),
     [
         (
+            loop.AgentPaperLoopAction.STOP_REQUESTED,
+            0,
+            {"execution_locked": True, "status": "stopped", "reason": "stop_requested"},
+        ),
+        (
+            loop.AgentPaperLoopAction.STOP_UNCONFIRMED,
+            75,
+            {"error_code": "AGENT_PAPER_LOOP_STOP_UNCONFIRMED"},
+        ),
+        (
             loop.AgentPaperLoopAction.STOP_SESSION_CLOSED,
             0,
             {"execution_locked": True, "status": "stopped", "reason": "stop_session_closed"},
@@ -1335,6 +1873,30 @@ def test_loop_command_masks_unknown_failure_details(
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN"}
     assert "private-failure-canary" not in captured.out + captured.err
+
+
+def test_loop_command_reports_lock_contention_without_running_or_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
+) -> None:
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
+    model_status_reads = 0
+
+    def model_status() -> None:
+        nonlocal model_status_reads
+        model_status_reads += 1
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", model_status)
+
+    async def contend(*_args, **_kwargs):
+        raise RuntimeError("AGENT_PAPER_LOOP_ALREADY_RUNNING")
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", contend)
+
+    assert loop.main(["--account-id", str(UUID(int=1))]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error_code": "AGENT_PAPER_LOOP_ALREADY_RUNNING"}
+    assert model_status_reads == 0
 
 
 def test_loop_command_rejects_invalid_account_without_echo(

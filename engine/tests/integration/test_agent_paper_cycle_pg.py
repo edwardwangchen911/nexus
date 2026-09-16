@@ -3099,3 +3099,62 @@ async def test_mixed_terminal_research_jobs_stop_without_replacement_runs(
         assert job_count == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_confirmation_reads_back_exact_trigger_slot_from_postgres(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        from nexus.strategy.forward import load_forward_strategy_decision
+
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            assert registered is not None
+            await _seed_cycle_research_authority(session, registered_decision=registered.decision)
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=CALENDAR_ID,
+                    session=date(2026, 8, 28),
+                    decision_at=datetime(2026, 8, 28, 21, tzinfo=UTC),
+                )
+            )
+        async with sessions.begin() as session:
+            created = await advance_agent_paper_cycle(
+                session,
+                account_id=seed.account_id,
+                decision_time=DECISION_TIME,
+                idempotency_key="shutdown-confirm-trigger",
+            )
+        assert created.status == "researching"
+
+        inspection_time = DECISION_TIME + timedelta(seconds=1)
+        monkeypatch.setattr(
+            agent_paper_loop,
+            "func",
+            SimpleNamespace(clock_timestamp=lambda: literal(inspection_time), max=func.max),
+        )
+        before = agent_paper_loop.AgentPaperLoopSnapshot(
+            now=DECISION_TIME,
+            calendar_authority_id=CALENDAR_ID,
+        )
+
+        assert await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+            action=agent_paper_loop.AgentPaperLoopAction.TRIGGER,
+            before_snapshot=before,
+            action_result=None,
+        )
+    finally:
+        await engine.dispose()
