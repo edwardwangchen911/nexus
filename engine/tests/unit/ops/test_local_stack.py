@@ -328,6 +328,70 @@ def test_down_aborts_before_compose_when_host_stop_is_unconfirmed(
     assert all("agent-paper-loop-service.py" in " ".join(call) for call in calls)
 
 
+@pytest.mark.parametrize(
+    "host_output",
+    (
+        '{"status":"running"}',
+        '{"status":"started"}',
+        '{"error_code":"AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"}',
+        '{"error_code":"AGENT_PAPER_SERVICE_STOP_FAILED"}',
+        "not-json",
+    ),
+)
+def test_down_requires_explicit_stopped_status_before_compose(
+    repo_root: Path, host_output: str
+) -> None:
+    """Even exit zero cannot authorize dependency shutdown without explicit stopped proof."""
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, host_output, "private")
+
+    results = run_local_stack(
+        LocalStackAction.DOWN,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert len(calls) == 1
+    assert [result.fact for result in results] == ["host_service"]
+
+
+@pytest.mark.parametrize(
+    "host_output",
+    (
+        '{"status":"inactive"}',
+        '{"status":"stopped"}',
+        '{"error_code":"AGENT_PAPER_SERVICE_START_FAILED"}',
+    ),
+)
+def test_enabled_up_accepts_only_started_or_running_host_status(
+    repo_root: Path, host_output: str
+) -> None:
+    """An exit-zero host response must still prove that start reached a live state."""
+    env_file = repo_root / "infra/.env.local"
+    env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=true\n", encoding="utf-8")
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        stdout = host_output if "agent-paper-loop-service.py" in " ".join(argv) else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "private")
+
+    results = run_local_stack(
+        LocalStackAction.UP,
+        repo_root=repo_root,
+        env_file=env_file,
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert len(results) == 7
+    assert results[-1].fact == "host_service"
+    assert results[-1].exit_code != 0
+
+
 def test_down_stops_host_before_exact_compose_project(repo_root: Path) -> None:
     """Confirmed host stop is the only path that permits dependency shutdown."""
     calls: list[tuple[str, ...]] = []
@@ -352,6 +416,57 @@ def test_down_stops_host_before_exact_compose_project(repo_root: Path) -> None:
     assert calls[1][-3:] == ("stop", "api", "worker")
     assert calls[2][-1] == "down"
     assert [result.fact for result in results] == ["host_service", "compose", "compose"]
+
+
+@pytest.mark.parametrize(
+    ("locked", "external"),
+    ((False, 0), (True, False), (True, 1), (True, -1)),
+)
+def test_status_rejects_non_fail_closed_preflight_shapes(
+    repo_root: Path, locked: bool, external: object
+) -> None:
+    """Only locked, exact-zero external-request evidence may be accepted as preflight."""
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        if argv[-2:] == ("ps", "-a"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, '{"status":"running"}', "")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "heartbeat": {"status": "observed"},
+                    "preflight": {
+                        "status": "ready",
+                        "execution_locked": locked,
+                        "external_requests": external,
+                        "blocking_codes": [],
+                        "optional_codes": [],
+                    },
+                }
+            ),
+            "",
+        )
+
+    results = run_local_stack(
+        LocalStackAction.STATUS,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert [result.fact for result in results] == [
+        "compose",
+        "host_service",
+        "heartbeat",
+        "preflight",
+    ]
+    assert results[-1].result_code == "AGENT_PAPER_PREFLIGHT_OUTPUT_INVALID"
+    assert results[-1].details == ()
+    assert results[-1].exit_code == 1
 
 
 def test_doctor_needs_no_env_and_checks_exact_local_dependencies(repo_root: Path) -> None:

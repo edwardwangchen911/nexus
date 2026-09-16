@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -229,7 +229,18 @@ def run_local_stack(
         if exit_code == -1:
             return False
         results[-1] = _parse_host_service_result(results[-1], stdout)
-        return exit_code == 0 and results[-1].result_code != "AGENT_PAPER_SERVICE_OUTPUT_INVALID"
+        status = dict(results[-1].details).get("status")
+        if action_name == "start":
+            accepted = status in {"started", "running"}
+        elif action_name == "stop":
+            accepted = status == "stopped"
+        else:
+            accepted = status in _HOST_STATUSES
+        if exit_code != 0 or not accepted:
+            if results[-1].exit_code == 0:
+                results[-1] = replace(results[-1], exit_code=1)
+            return False
+        return True
 
     if action is LocalStackAction.DOWN:
         if not run_host("stop"):
@@ -488,8 +499,9 @@ def _parse_service_status_results(
         if (
             blocking is not None
             and optional is not None
-            and isinstance(locked, bool)
-            and isinstance(external, int)
+            and locked is True
+            and type(external) is int
+            and external == 0
         ):
             preflight_details = (
                 ("status", preflight["status"]),
