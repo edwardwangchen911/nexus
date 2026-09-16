@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from helpers.paper_batch import seed_paper_batch
 from helpers.paper_execution import seed_paper_execution
+from nexus.domain.ids import new_uuid7
 from nexus.notifications.worker import load_bark_worker_settings, run_bark_worker
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.service import create_paper_order_batch
@@ -105,6 +106,74 @@ async def test_bark_failure_is_recorded_without_changing_committed_paper_facts(
             "failed",
             "PUBLISHER_FAILED",
         )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bark_worker_acknowledges_legacy_terminal_event_without_transport_or_retry(
+    migrated_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        legacy_event_id = new_uuid7()
+        async with sessions.begin() as session:
+            session.add(
+                OutboxEvent(
+                    id=legacy_event_id,
+                    event_type="paper.order.risk_rejected",
+                    aggregate_id=new_uuid7(),
+                    schema_version="paper_event_v1",
+                    payload={"legacy_order_id": "not-a-notification-snapshot"},
+                    published_at=None,
+                )
+            )
+
+        requests: list[httpx.Request] = []
+
+        async def accepted(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"code": 200})
+
+        settings = load_bark_worker_settings(
+            {
+                "NEXUS_BARK_ENABLED": "true",
+                "DATABASE_URL": migrated_database_url,
+                "NEXUS_BARK_SERVER_URL": "http://127.0.0.1:8080",
+                "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": _BARK_ENCRYPTION_KEY.decode("ascii"),
+                "NEXUS_BARK_ACTIVATED_AT": "2025-12-31T23:59:59Z",
+            }
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(accepted)) as client:
+            assert (
+                await run_bark_worker(
+                    settings,
+                    run_forever=False,
+                    client=client,
+                    clock=lambda: _OUTBOX_TIME,
+                )
+                == 1
+            )
+
+        async with sessions() as session:
+            event = await session.get(OutboxEvent, legacy_event_id)
+            attempt = await session.scalar(
+                select(OutboxDeliveryAttempt).where(
+                    OutboxDeliveryAttempt.outbox_event_id == legacy_event_id
+                )
+            )
+
+        assert requests == []
+        assert event is not None
+        assert (event.status, event.attempt_count, event.last_error_code) == (
+            "published",
+            1,
+            None,
+        )
+        assert attempt is not None
+        assert (attempt.outcome, attempt.error_code) == ("published", None)
     finally:
         await engine.dispose()
 

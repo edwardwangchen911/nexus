@@ -229,6 +229,11 @@ class BarkPublisher:
         await self.publish(message)
 
     async def publish(self, message: OutboxMessage) -> None:
+        if (
+            "notification_snapshot" not in message.payload
+            and "notification_delivery" not in message.payload
+        ):
+            return
         if message.payload.get("notification_delivery") == "unavailable":
             if "notification_snapshot" in message.payload:
                 raise BarkPublishError("BARK_NOTIFICATION_INVALID")

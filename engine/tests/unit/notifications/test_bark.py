@@ -270,6 +270,45 @@ async def test_publisher_acknowledges_explicitly_unavailable_legacy_notification
     assert requests == []
 
 
+@pytest.mark.asyncio
+async def test_publisher_acknowledges_unmarked_legacy_notification_without_transport() -> None:
+    requests: list[httpx.Request] = []
+
+    async def endpoint(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"code": 200})
+
+    message = _message()
+    message.payload.clear()
+    message.payload["legacy_order_id"] = "not-a-notification-snapshot"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
+        publisher = BarkPublisher(
+            client=client,
+            server_url="http://127.0.0.1:8080",
+            device_key="device-key",
+            encryption_key=_KEY,
+        )
+        await publisher.publish(message)
+
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_publisher_rejects_malformed_new_notification_snapshot() -> None:
+    message = _message()
+    message.payload["notification_snapshot"] = {"status": "filled"}
+
+    async with httpx.AsyncClient() as client:
+        publisher = BarkPublisher(
+            client=client,
+            server_url="http://127.0.0.1:8080",
+            device_key="device-key",
+            encryption_key=_KEY,
+        )
+        with pytest.raises(BarkPublishError, match="^BARK_NOTIFICATION_INVALID$"):
+            await publisher.publish(message)
+
+
 def _decrypt(ciphertext: str, iv: str) -> dict[str, object]:
     decryptor = Cipher(algorithms.AES(_KEY), modes.CBC(iv.encode("ascii"))).decryptor()
     padded = decryptor.update(base64.b64decode(ciphertext)) + decryptor.finalize()

@@ -103,6 +103,7 @@ async def seed_paper_batch(
     omit_persisted_query_kind: str | None = None,
     include_no_change: bool = False,
     execution_market_close_at: datetime | None = None,
+    expired_ticker_instrument_id: UUID | None = None,
 ) -> PaperBatchSeed:
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -226,7 +227,11 @@ async def seed_paper_batch(
                         symbol=f"TST{index}",
                         alias_type="ticker",
                         valid_from=date(2026, 8, 1),
-                        valid_to=None,
+                        valid_to=(
+                            date(2026, 8, 25)
+                            if instrument_id == expired_ticker_instrument_id
+                            else None
+                        ),
                         created_at=AVAILABLE_AT - timedelta(hours=1),
                     )
                 )

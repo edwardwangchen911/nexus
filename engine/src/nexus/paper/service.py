@@ -990,20 +990,23 @@ async def _persist_new_batch(
             "result_hash": evaluation.result_hash,
         }
         if evaluation.outcome == "rejected":
-            context = await build_order_decision_context(
-                session,
-                strategy_decision_id=strategy_decision_id,
-                instrument_id=order.instrument_id,
-                decision_session=decision_session,
-            )
-            snapshot = build_risk_rejected_snapshot(
-                order=order,
-                evaluation=evaluation,
-                portfolio=portfolio,
-                context=context,
-                occurred_at=request_time,
-            )
-            order_event_payload.update(notification_snapshot_payload(snapshot))
+            try:
+                context = await build_order_decision_context(
+                    session,
+                    strategy_decision_id=strategy_decision_id,
+                    instrument_id=order.instrument_id,
+                    decision_session=decision_session,
+                )
+                snapshot = build_risk_rejected_snapshot(
+                    order=order,
+                    evaluation=evaluation,
+                    portfolio=portfolio,
+                    context=context,
+                    occurred_at=request_time,
+                )
+                order_event_payload.update(notification_snapshot_payload(snapshot))
+            except ValueError:
+                order_event_payload["notification_delivery"] = "unavailable"
         await _add_event_pair(
             session,
             action=action,

@@ -5,7 +5,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from helpers.paper_batch import NO_CHANGE_INSTRUMENT, seed_paper_batch
+from helpers.paper_batch import INSTRUMENTS, NO_CHANGE_INSTRUMENT, seed_paper_batch
 from nexus.market.price_bar_authority import SOURCE_POLICY_ID
 from nexus.paper.errors import PaperBatchError
 from nexus.paper.notification import parse_notification_snapshot
@@ -229,6 +229,50 @@ def test_complete_fixture_creates_one_atomic_deterministic_paper_batch(
         "result_hash",
         "evidence",
     }.intersection(frozen)
+
+
+@pytest.mark.asyncio
+async def test_missing_historical_ticker_marks_rejection_unavailable_without_rolling_back_batch(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(
+        migrated_database_url,
+        expired_ticker_instrument_id=INSTRUMENTS[2][0],
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            result = await create_paper_order_batch(
+                session,
+                account_id=seed.account_id,
+                strategy_decision_id=seed.decision_id,
+                idempotency_key="paper-missing-ticker-notification",
+                request_time=seed.request_time,
+            )
+
+        async with sessions() as session:
+            orders = tuple(await session.scalars(select(PaperOrderRecord)))
+            reservations = tuple(await session.scalars(select(PaperReservationRecord)))
+            rejected_outbox = await session.scalar(
+                select(OutboxEvent).where(OutboxEvent.event_type == "paper.order.risk_rejected")
+            )
+            rejected_audit = await session.scalar(
+                select(AuditEvent).where(AuditEvent.action == "paper.order.risk_rejected")
+            )
+
+        assert {
+            evaluation.instrument_id: evaluation.outcome for evaluation in result.evaluations
+        } == seed.expected_outcomes
+        assert len(orders) == 3
+        assert len(reservations) == 2
+        assert rejected_outbox is not None
+        assert rejected_audit is not None
+        assert rejected_outbox.payload == rejected_audit.payload
+        assert rejected_outbox.payload["notification_delivery"] == "unavailable"
+        assert "notification_snapshot" not in rejected_outbox.payload
+    finally:
+        await engine.dispose()
 
 
 async def _create_batch_with_no_change(database_url: str):
