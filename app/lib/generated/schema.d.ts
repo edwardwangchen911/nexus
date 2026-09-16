@@ -1302,7 +1302,7 @@ export interface components {
              */
             decision_id: string;
             /** Risk Outcomes */
-            risk_outcomes: ("approved" | "reduced" | "rejected")[];
+            risk_outcomes: ("approved" | "reduced" | "rejected" | "no_change")[];
             /**
              * Sizing Policy Version
              * @constant
