@@ -62,6 +62,12 @@ def _runtime_environment() -> dict[str, str]:
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
     }
     return {name: value for name, value in os.environ.items() if name in allowed}
 

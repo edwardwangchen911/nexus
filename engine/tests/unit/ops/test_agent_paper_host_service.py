@@ -444,7 +444,17 @@ def test_start_rejects_unsafe_private_paths(tmp_path, unsafe):
 def test_run_uses_exact_config_and_only_runtime_environment(tmp_path):
     root, env = _service_root(tmp_path)
     env.update(
-        AGENT_RUNTIME_MODE="responses", DATABASE_URL="private-canary", OPENAI_API_KEY="secret"
+        AGENT_RUNTIME_MODE="responses",
+        DATABASE_URL="private-canary",
+        OPENAI_API_KEY="secret",
+        HTTP_PROXY="http://proxy.invalid:8080",
+        HTTPS_PROXY="http://proxy.invalid:8080",
+        NO_PROXY="localhost,127.0.0.1",
+        http_proxy="http://proxy.invalid:8081",
+        https_proxy="http://proxy.invalid:8081",
+        no_proxy="localhost,127.0.0.1",
+        ALL_PROXY="socks5h://proxy.invalid:1080",
+        all_proxy="socks5h://proxy.invalid:1081",
     )
     result = _invoke(root, env, "run")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -452,8 +462,23 @@ def test_run_uses_exact_config_and_only_runtime_environment(tmp_path):
     calls = _calls(root)
     assert calls[:2] == [["engine", "--service-preflight", *explicit], ["engine", *explicit]]
     names = set(calls[2][1:])
-    assert {"PATH", "HOME"} <= names
-    assert not names & {"AGENT_RUNTIME_MODE", "DATABASE_URL", "OPENAI_API_KEY"}
+    assert {
+        "PATH",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    } <= names
+    assert not names & {
+        "AGENT_RUNTIME_MODE",
+        "DATABASE_URL",
+        "OPENAI_API_KEY",
+        "ALL_PROXY",
+        "all_proxy",
+    }
 
 
 @pytest.mark.parametrize("action", ["start", "run"])
