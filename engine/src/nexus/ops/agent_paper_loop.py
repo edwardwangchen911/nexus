@@ -2148,18 +2148,18 @@ async def inspect_agent_paper_loop(
         await engine.dispose()
 
 
-async def read_agent_paper_service_heartbeat(settings: EngineSettings) -> dict[str, object]:
+async def read_agent_paper_service_heartbeat(database_url: str | None) -> dict[str, object]:
     """Read one persisted liveness fact; do not infer that an observed Worker is still alive."""
-    if not settings.database_url:
+    if not database_url:
         return {"status": "unavailable"}
-    database = make_url(settings.database_url)
+    database = make_url(database_url)
     if (
         database.drivername != "postgresql+asyncpg"
         or database.host not in _LOOPBACK_HOSTS
         or database.query
     ):
         return {"status": "unavailable"}
-    engine = create_async_engine(settings.database_url)
+    engine = create_async_engine(database_url)
     try:
         async with async_sessionmaker(engine).begin() as session:
             await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -2229,9 +2229,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.service_status:
                 try:
                     heartbeat = asyncio.run(
-                        read_agent_paper_service_heartbeat(
-                            _FileEngineSettings.model_validate(environment)
-                        )
+                        read_agent_paper_service_heartbeat(environment.get("DATABASE_URL"))
                     )
                 except Exception:
                     heartbeat = {"status": "unavailable"}

@@ -104,21 +104,23 @@ fi
 
 本机已有 NEXUS 数据时，必须先核对 Compose project 和挂载卷；当前个人环境使用
 `nexus-fosun-live`。不要省略 `-p nexus-fosun-live` 后误启默认 `infra` project 和空数据卷。
-确认配置后启动基础服务：
+确认配置后通过统一入口启动、检查或停止本地后端。该入口保持原有 Compose project 精确绑定，
+并只在受保护配置明确启用 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=true` 时，在基础组件成功后启动宿主机
+Agent Paper 服务：
 
 ```bash
-docker compose -p nexus-fosun-live --env-file infra/.env.local \
-  -f infra/compose.yaml --profile app config --quiet
-docker compose -p nexus-fosun-live --env-file infra/.env.local \
-  -f infra/compose.yaml --profile app up -d postgres minio
-docker compose -p nexus-fosun-live --env-file infra/.env.local \
-  -f infra/compose.yaml --profile app run --rm object-store-init
-docker compose -p nexus-fosun-live --env-file infra/.env.local \
-  -f infra/compose.yaml --profile app run --rm --no-deps api \
-  alembic -c engine/alembic.ini upgrade head
-docker compose -p nexus-fosun-live --env-file infra/.env.local \
-  -f infra/compose.yaml --profile app up -d api worker
+uv run --project engine nexus-local-stack up \
+  --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
+uv run --project engine nexus-local-stack status \
+  --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
+uv run --project engine nexus-local-stack down \
+  --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
 ```
+
+`status` 分别报告 Compose、宿主机托管状态、数据库 heartbeat 和零外部请求预检，不把四项合成
+“整体正常”。Agent Paper 离线不会把仍可读取的 Web/API 判成离线；页面循环状态仍只来自数据库
+heartbeat。停止未确认时 `down` 会保留 Compose 依赖并返回失败，恢复步骤见
+[Agent 内部模拟周期](docs/runbooks/agent-paper-cycle.md)。
 
 Web 服务端需要与 Engine 相同的本地 BFF 身份配置；完成后运行：
 

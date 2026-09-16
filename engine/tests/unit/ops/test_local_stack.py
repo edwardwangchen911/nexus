@@ -1,5 +1,6 @@
 """Behavior contracts for the redacted local-stack controller."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -117,8 +118,240 @@ def test_runner_returns_only_safe_step_metadata(repo_root: Path) -> None:
     )
 
     assert captured_argv[0][-2:] == ("ps", "-a")
-    assert [result.result_code for result in results] == ["LOCAL_STACK_STEP_OK"]
+    assert [result.fact for result in results] == [
+        "compose",
+        "host_service",
+        "heartbeat",
+        "preflight",
+    ]
     assert "fixture-secret" not in repr(results)
+
+
+def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path) -> None:
+    """The host service must never get ahead of the app dependencies it consumes."""
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, '{"status":"started"}', "private")
+        return subprocess.CompletedProcess(argv, 0, "private", "private")
+
+    env_file = repo_root / "infra/.env.local"
+    env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=true\n", encoding="utf-8")
+    results = run_local_stack(
+        LocalStackAction.UP,
+        repo_root=repo_root,
+        env_file=env_file,
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert [call[-1] for call in calls[:6]] == [
+        "--quiet",
+        "minio",
+        "worker",
+        "object-store-init",
+        "head",
+        "worker",
+    ]
+    assert calls[6][1:3] == (
+        str(repo_root / "scripts/macos/agent-paper-loop-service.py"),
+        "start",
+    )
+    assert [result.fact for result in results] == ["compose"] * 6 + ["host_service"]
+
+    calls.clear()
+    env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=false\n", encoding="utf-8")
+    results = run_local_stack(
+        LocalStackAction.UP,
+        repo_root=repo_root,
+        env_file=env_file,
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+    assert len(calls) == 6
+    assert [result.fact for result in results] == ["compose"] * 6
+
+
+def test_up_rejects_invalid_agent_paper_flag_before_compose(repo_root: Path) -> None:
+    """A malformed opt-in value must not be interpreted as either enabled or disabled."""
+    env_file = repo_root / "infra/.env.local"
+    env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=sometimes\n", encoding="utf-8")
+
+    with pytest.raises(LocalStackConfigurationError, match="AGENT_PAPER_CYCLE_FLAG_INVALID"):
+        run_local_stack(
+            LocalStackAction.UP,
+            repo_root=repo_root,
+            env_file=env_file,
+            project_name="nexus-phase3-local",
+            runner=lambda *_args, **_kwargs: pytest.fail("invalid config must precede Compose"),
+        )
+
+
+def test_status_reports_four_independent_facts_after_compose_failure(repo_root: Path) -> None:
+    """A failed Compose probe must not hide host, heartbeat, or preflight evidence."""
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[-2:] == ("ps", "-a"):
+            return subprocess.CompletedProcess(argv, 19, "private-compose", "private")
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, '{"status":"running"}', "private")
+        payload = {
+            "heartbeat": {
+                "status": "observed",
+                "seen_at": "2026-09-16T10:00:00+00:00",
+                "started_at": "2026-09-16T09:00:00+00:00",
+                "process_version": "agent-paper-loop-v1",
+                "migration_head": "0059_agent_paper_intraday_cycles",
+            },
+            "preflight": {
+                "status": "blocked",
+                "execution_locked": True,
+                "external_requests": 0,
+                "blocking_codes": ["AGENT_PAPER_CYCLE_DISABLED"],
+                "optional_codes": [],
+            },
+            "execution_locked": True,
+        }
+        return subprocess.CompletedProcess(argv, 1, json.dumps(payload), "private")
+
+    results = run_local_stack(
+        LocalStackAction.STATUS,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert [result.fact for result in results] == [
+        "compose",
+        "host_service",
+        "heartbeat",
+        "preflight",
+    ]
+    assert results[0].result_code == "LOCAL_STACK_STEP_FAILED"
+    assert results[1].details == (("status", "running"),)
+    assert results[2].details[0] == ("status", "observed")
+    assert results[3].details == (
+        ("status", "blocked"),
+        ("execution_locked", True),
+        ("external_requests", 0),
+        ("blocking_codes", ("AGENT_PAPER_CYCLE_DISABLED",)),
+        ("optional_codes", ()),
+    )
+    assert calls[0][-2:] == ("ps", "-a")
+    assert calls[1][1:3] == (
+        str(repo_root / "scripts/macos/agent-paper-loop-service.py"),
+        "status",
+    )
+    assert "--service-status" in calls[2]
+    assert "private" not in repr(results)
+
+
+def test_status_continues_when_compose_executable_is_unavailable(repo_root: Path) -> None:
+    """An unavailable Compose executable is one failed fact, not a status-wide exception."""
+    calls = 0
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise FileNotFoundError("private-path-canary")
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, '{"status":"stopped"}', "")
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            json.dumps(
+                {
+                    "heartbeat": {"status": "missing"},
+                    "preflight": {
+                        "status": "blocked",
+                        "execution_locked": True,
+                        "external_requests": 0,
+                        "blocking_codes": ["AGENT_PAPER_CYCLE_DISABLED"],
+                        "optional_codes": [],
+                    },
+                }
+            ),
+            "",
+        )
+
+    results = run_local_stack(
+        LocalStackAction.STATUS,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert [result.fact for result in results] == [
+        "compose",
+        "host_service",
+        "heartbeat",
+        "preflight",
+    ]
+    assert results[0].result_code == "LOCAL_STACK_STEP_UNAVAILABLE"
+    assert "private-path-canary" not in repr(results)
+
+
+@pytest.mark.parametrize("attempt", (1, 2))
+def test_down_aborts_before_compose_when_host_stop_is_unconfirmed(
+    repo_root: Path, attempt: int
+) -> None:
+    """Repeated ordinary down must preserve dependencies needed to inspect uncertain work."""
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            '{"error_code":"AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"}',
+            "private",
+        )
+
+    for _ in range(attempt):
+        results = run_local_stack(
+            LocalStackAction.DOWN,
+            repo_root=repo_root,
+            env_file=repo_root / "infra/.env.local",
+            project_name="nexus-phase3-local",
+            runner=runner,
+        )
+        assert [result.fact for result in results] == ["host_service"]
+        assert results[0].result_code == "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"
+
+    assert all("agent-paper-loop-service.py" in " ".join(call) for call in calls)
+
+
+def test_down_stops_host_before_exact_compose_project(repo_root: Path) -> None:
+    """Confirmed host stop is the only path that permits dependency shutdown."""
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        stdout = '{"status":"stopped"}' if "agent-paper-loop-service.py" in " ".join(argv) else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "private")
+
+    results = run_local_stack(
+        LocalStackAction.DOWN,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert calls[0][1:3] == (
+        str(repo_root / "scripts/macos/agent-paper-loop-service.py"),
+        "stop",
+    )
+    assert calls[1][-3:] == ("stop", "api", "worker")
+    assert calls[2][-1] == "down"
+    assert [result.fact for result in results] == ["host_service", "compose", "compose"]
 
 
 def test_doctor_needs_no_env_and_checks_exact_local_dependencies(repo_root: Path) -> None:
@@ -187,6 +420,7 @@ def test_runner_stops_after_first_nonzero_exit(repo_root: Path) -> None:
 
 def test_runner_converts_timeout_to_safe_failure(repo_root: Path) -> None:
     """A timeout must not leak the command output or escape without a safe result."""
+
     def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(argv, 30, output="sensitive-output", stderr="sensitive")
 
@@ -209,6 +443,7 @@ def test_main_prints_only_safe_codes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """CLI output must remain safe even when underlying tooling had sensitive output."""
+
     def fixture_run(*_: object, **__: object) -> tuple[LocalStackStepResult, ...]:
         return (
             LocalStackStepResult(

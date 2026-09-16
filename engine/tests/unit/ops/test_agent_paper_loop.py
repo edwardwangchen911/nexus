@@ -1983,6 +1983,53 @@ def test_service_preflight_cli_masks_configuration_values(
     assert json.loads(output)["status"] == "blocked"
 
 
+def test_service_status_keeps_heartbeat_independent_of_runtime_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unrelated invalid runtime field must not erase an available DB heartbeat fact."""
+    env_file = explicit_service_config(tmp_path)
+    environment = service_ready_environment() | {"AGENT_DAILY_BUDGET_USD": "0"}
+    env_file.write_text("\n".join(f"{name}={value}" for name, value in environment.items()))
+    observed_database_urls: list[str | None] = []
+
+    monkeypatch.setattr(
+        loop,
+        "agent_paper_service_preflight",
+        lambda *_args, **_kwargs: {
+            "status": "blocked",
+            "execution_locked": True,
+            "external_requests": 0,
+            "blocking_codes": ["AGENT_PAPER_RUNTIME_CONFIG_INVALID"],
+            "optional_codes": [],
+        },
+    )
+
+    async def heartbeat(database_url: str | None) -> dict[str, object]:
+        observed_database_urls.append(database_url)
+        return {"status": "observed", "seen_at": NOW.isoformat()}
+
+    monkeypatch.setattr(loop, "read_agent_paper_service_heartbeat", heartbeat)
+
+    assert (
+        loop.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--env-file",
+                str(env_file),
+                "--service-status",
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["heartbeat"]["status"] == "observed"
+    assert payload["preflight"]["blocking_codes"] == ["AGENT_PAPER_RUNTIME_CONFIG_INVALID"]
+    assert observed_database_urls == [environment["DATABASE_URL"]]
+
+
 def test_loop_command_reads_account_and_runtime_settings_from_process_environment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
