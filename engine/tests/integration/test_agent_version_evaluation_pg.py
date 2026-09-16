@@ -7,10 +7,13 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
+import nexus.paper.agent_version_runner as agent_version_runner
 import pytest
 from nexus.agents.codex_sdk import MODEL_ID
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION, aggregate_input_limit
 from nexus.agents.committee import ROLE_ORDER
+from nexus.paper.agent_cycle_authority import CycleAuthority
+from nexus.paper.agent_cycle_models import AgentPaperCycleResult
 from nexus.paper.agent_version_evaluation import register_agent_version_evaluation
 from nexus.paper.agent_version_models import (
     AgentVersionEvaluationRegistration,
@@ -29,7 +32,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarSessionRecord,
 )
 from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.persistence.models.market import Instrument, InstrumentAlias, UniverseSnapshot
 from nexus.persistence.models.paper import (
     AgentPaperCycleRecord,
     PaperAccountRecord,
@@ -489,6 +492,91 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
         assert replay.model_copy(update={"replayed": False}) == first
         assert replay.replayed is True
         assert replay_counts == {**counts, "cycles": 0, "jobs": 0, "orders": 0}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    slot = _slots(TRAIN_DATES)[0]
+    calls: list[dict[str, object]] = []
+    incumbent_cycle_id = UUID("72000000-0000-0000-0000-000000000801")
+    challenger_cycle_id = UUID("72000000-0000-0000-0000-000000000802")
+    incumbent_run_id = UUID("72000000-0000-0000-0000-000000000803")
+    challenger_run_id = UUID("72000000-0000-0000-0000-000000000804")
+
+    async def fake_start(_session: AsyncSession, **kwargs: object) -> AgentPaperCycleResult:
+        calls.append(kwargs)
+        incumbent = kwargs["version_lane"] == "incumbent"
+        return AgentPaperCycleResult(
+            cycle_id=incumbent_cycle_id if incumbent else challenger_cycle_id,
+            status="researching",
+            result_code="RESEARCH_JOBS_PREPARED",
+            research_run_ids=(incumbent_run_id if incumbent else challenger_run_id,),
+            replayed=False,
+        )
+
+    async def fake_validate(_session: AsyncSession, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(agent_version_runner, "start_schwab_agent_paper_cycle", fake_start)
+    monkeypatch.setattr(agent_version_runner, "_validate_prepared_pair", fake_validate)
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            session.add(
+                UniverseSnapshot(
+                    id=UUID("72000000-0000-0000-0000-000000000805"),
+                    key="us_liquid",
+                    version="us_liquid_v1",
+                    effective_from=TRAIN_DATES[0],
+                    source="fosun_local_read_only",
+                    content_hash="8" * 64,
+                    published_at=NOW,
+                )
+            )
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-runner-wiring-v1",
+                now=NOW,
+            )
+
+        async with factory.begin() as session:
+            result = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=slot,
+                daily_limit_usd=Decimal("3"),
+                now=slot,
+            )
+
+        assert result.status == "running"
+        assert result.reason_code == "PAIR_JOBS_PREPARED"
+        assert result.incumbent_cycle_id == incumbent_cycle_id
+        assert result.challenger_cycle_id == challenger_cycle_id
+        assert result.incumbent_run_id == incumbent_run_id
+        assert result.challenger_run_id == challenger_run_id
+        assert result.replayed is False
+        assert [call["version_lane"] for call in calls] == ["incumbent", "challenger"]
+        assert calls[0]["version_source_run_id"] == INCUMBENT_RUN_ID
+        assert calls[0].get("version_prompt_id") is None
+        assert calls[1].get("version_source_run_id") is None
+        assert calls[1]["version_prompt_id"] == prompt_id
+        assert calls[1]["version_model_id"] == model_id
+        incumbent_authority = calls[0]["authority"]
+        challenger_authority = calls[1]["authority"]
+        assert isinstance(incumbent_authority, CycleAuthority)
+        assert isinstance(challenger_authority, CycleAuthority)
+        assert incumbent_authority.calendar_authority_id == CALENDAR_ID
+        assert challenger_authority.universe_snapshot_id == UUID(
+            "72000000-0000-0000-0000-000000000805"
+        )
     finally:
         await engine.dispose()
 

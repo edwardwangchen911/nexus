@@ -213,6 +213,11 @@ async def start_schwab_agent_paper_cycle(
     decision_slot_at: datetime,
     idempotency_key: str,
     daily_limit_usd: Decimal = Decimal("3.00"),
+    version_evaluation_id: UUID | None = None,
+    version_lane: str | None = None,
+    version_source_run_id: UUID | None = None,
+    version_prompt_id: UUID | None = None,
+    version_model_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
     if (
@@ -221,6 +226,20 @@ async def start_schwab_agent_paper_cycle(
         or len(idempotency_key) > 255
     ):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    explicit_version = version_prompt_id is not None or version_model_id is not None
+    if version_evaluation_id is None:
+        if (
+            version_lane is not None
+            or version_source_run_id is not None
+            or explicit_version
+        ):
+            raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
+    elif (
+        version_lane not in {"incumbent", "challenger"}
+        or (version_prompt_id is None) != (version_model_id is None)
+        or (version_source_run_id is None) == (not explicit_version)
+    ):
+        raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
     account = await session.get(PaperAccountRecord, authority.account_id)
     if account is None or account.portfolio_id != authority.portfolio_id:
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
@@ -249,6 +268,11 @@ async def start_schwab_agent_paper_cycle(
         authority=authority,
         decision_slot_at=decision_slot_at,
         daily_limit_usd=daily_limit_usd,
+        version_evaluation_id=version_evaluation_id,
+        version_lane=version_lane,
+        version_source_run_id=version_source_run_id,
+        version_prompt_id=version_prompt_id,
+        version_model_id=version_model_id,
     )
 
 
