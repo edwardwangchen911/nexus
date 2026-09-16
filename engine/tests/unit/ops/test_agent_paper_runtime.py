@@ -383,6 +383,39 @@ def test_held_lock_detects_later_parent_replacement(runtime_paths: RuntimePaths)
     assert not (outside / runtime_paths.worker_lock.name).exists()
 
 
+def test_context_entry_failure_releases_lock_before_reraise(
+    runtime_paths: RuntimePaths,
+) -> None:
+    lock = acquire_runtime_lock(runtime_paths.worker_lock)
+    moved = runtime_paths.private_directory.with_name("nexus-agent-paper-original")
+    outside = runtime_paths.private_directory.with_name("outside-runtime")
+    outside.mkdir(mode=0o700)
+    runtime_paths.private_directory.rename(moved)
+    runtime_paths.private_directory.symlink_to(outside, target_is_directory=True)
+    recovered_lock = None
+
+    try:
+        with pytest.raises(RuntimeSafetyError) as captured:
+            with lock:
+                pytest.fail("unsafe runtime lock context was entered")
+        assert str(captured.value) == "AGENT_PAPER_RUNTIME_UNSAFE"
+
+        runtime_paths.private_directory.unlink()
+        moved.rename(runtime_paths.private_directory)
+        recovered_lock = acquire_runtime_lock(runtime_paths.worker_lock)
+        with recovered_lock:
+            assert recovered_lock.held is True
+
+        lock.close()
+        lock.close()
+        recovered_lock.close()
+        recovered_lock.close()
+    finally:
+        lock.close()
+        if recovered_lock is not None:
+            recovered_lock.close()
+
+
 def probe_lock_in_child(path: Path, sender: Connection) -> None:
     try:
         with acquire_runtime_lock(path):

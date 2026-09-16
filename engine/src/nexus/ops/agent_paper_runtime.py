@@ -348,8 +348,12 @@ class RuntimeLock:
         return True
 
     def __enter__(self) -> Self:
-        if not self.held:
-            raise RuntimeSafetyError("AGENT_PAPER_RUNTIME_LOCK_RELEASED")
+        try:
+            if not self.held:
+                raise RuntimeSafetyError("AGENT_PAPER_RUNTIME_LOCK_RELEASED")
+        except RuntimeSafetyError:
+            self.close()
+            raise
         return self
 
     def __exit__(
