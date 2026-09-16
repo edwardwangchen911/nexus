@@ -114,10 +114,9 @@ def test_compose_separates_api_model_selection_from_worker_credentials() -> None
         in _service_block(compose, "api")
     )
     assert "OPENAI_API_KEY" not in _service_block(compose, "api")
-    assert (
-        "- AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}"
-        in _service_block(compose, "worker")
-    )
+    worker = _service_block(compose, "worker")
+    assert "- AGENT_RUNTIME_MODE=fixture" in worker
+    assert "- AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}" not in worker
 
 
 def test_compose_host_ports_are_loopback_only_and_overridable() -> None:
