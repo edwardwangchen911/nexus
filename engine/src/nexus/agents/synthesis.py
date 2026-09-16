@@ -141,6 +141,12 @@ def synthesize_intent(
     if structured:
         if assessment is None:
             raise ValueError("STRUCTURED_SYNTHESIS_ASSESSMENT_MISSING")
+        if (
+            actionable
+            and by_role["evidence_audit"].vote != "support"
+            and assessment.review_conclusion == "sufficient"
+        ):
+            assessment = assessment.model_copy(update={"review_conclusion": "limited"})
         review_roles: tuple[AgentRole, ...] = ("bear", "evidence_audit")
         required = {
             f"{role}:{index}"

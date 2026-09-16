@@ -190,9 +190,10 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 "v3_cite1",
             }:
                 prompt = payload["prompts"][0]
-                assert prompt["version"] == "local-portfolio-synthesis-v3"
+                assert prompt["version"] == "local-portfolio-synthesis-v4"
                 assert "Confirming that a gap exists does not resolve it" in prompt["content"]
                 assert "must not by itself make a review unresolved" in prompt["content"]
+                assert "audit vote remains non-support" in prompt["content"]
                 assert "operating disclosures" in prompt["content"]
                 assert "current trends" in prompt["content"]
                 assert "supplied public issuer operating figures" in prompt["content"]

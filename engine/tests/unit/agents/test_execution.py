@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from nexus.agents.actionable_research import safe_no_trade_intent_shape_valid
 from nexus.agents.committee import (
     ROLE_ORDER,
     CommitteeRoleOutput,
@@ -127,6 +128,7 @@ def _synthesize(
     staged: bool = False,
     structured: bool = False,
     actionable: bool = False,
+    assessment_stance: str = "buy_candidate",
     portfolio_context=None,
 ):
     now = datetime(2026, 8, 24, tzinfo=UTC)
@@ -155,7 +157,7 @@ def _synthesize(
     structured = structured or actionable
     assessment = (
         SynthesisAssessment(
-            stance="buy_candidate",
+            stance=assessment_stance,
             claims=(
                 ResearchClaim(
                     text="模型认为充分，但不得覆盖确定性准入。", evidence_refs=(evidence,)
@@ -302,6 +304,20 @@ def test_actionable_v4_preserves_reviewed_direction_only_when_audit_is_complete(
     rejected = _synthesize(("support",) * 6 + ("abstain", "support"), actionable=True)
     assert (rejected.stance, rejected.exposure_action) == ("watch", "none")
     assert rejected.quality_status == rejected.evidence_audit == "partial"
+
+
+def test_actionable_v4_maps_resolved_audit_opposition_to_safe_no_trade() -> None:
+    intent = _synthesize(
+        ("support",) * 6 + ("oppose", "abstain"),
+        actionable=True,
+        assessment_stance="watch",
+    )
+
+    assert (intent.stance, intent.exposure_action) == ("watch", "none")
+    assert intent.quality_status == intent.evidence_audit == "partial"
+    assert intent.synthesis_assessment is not None
+    assert intent.synthesis_assessment.review_conclusion == "limited"
+    assert safe_no_trade_intent_shape_valid(intent)
 
 
 def test_price_shaped_strings_do_not_establish_revalidated_authority() -> None:

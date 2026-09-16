@@ -299,6 +299,7 @@ class StagedCodexCommittee(CodexCommittee):
             {
                 "claim_id": f"{output.role}:{index}",
                 "role": output.role,
+                "vote": output.vote,
                 "text": claim.text,
                 "citations": [evidence_refs.index(ref) for ref in claim.evidence_refs],
             }
@@ -366,6 +367,9 @@ class StagedCodexCommittee(CodexCommittee):
                 "prevented_conclusion. Accepted acknowledges an issue; it does not resolve "
                 "it. If unresolved, name missing evidence and what it prevents. Sufficient "
                 "review cannot contain unresolved issues. Earlier analysis is not evidence. "
+                "If any evidence_audit previous claim has vote other than support, preserve "
+                "that veto: review_conclusion must be limited or insufficient even if every "
+                "individual review is resolved. Do not rewrite or infer a different vote. "
                 "Claims must integrate relevant operating disclosures, quarterly metrics and "
                 "current trends with the original portfolio question; explain their impact "
                 "or limits, not just repeat diagnostic triggers. Use only relevant frozen "

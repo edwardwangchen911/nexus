@@ -218,10 +218,11 @@ async def test_actionable_setup_is_idempotent_and_creates_no_work(migrated_datab
         synthesis_prompt = await session.scalar(
             select(AgentPromptVersionRecord).where(
                 AgentPromptVersionRecord.role == "portfolio",
-                AgentPromptVersionRecord.version == "local-portfolio-synthesis-v3",
+                AgentPromptVersionRecord.version == "local-portfolio-synthesis-v4",
             )
         )
         assert synthesis_prompt is not None
         assert "must not by itself make a review unresolved" in synthesis_prompt.content
+        assert "audit vote remains non-support" in synthesis_prompt.content
         for model_type in (AgentResearchRunRecord, DataSnapshot, Job):
             assert await session.scalar(select(func.count()).select_from(model_type)) == 0

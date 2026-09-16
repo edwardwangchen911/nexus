@@ -247,9 +247,12 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
     outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
     assert [p["stage"] for p in submitted] == ["research", "critique", "synthesis"]
     assert [len(p["previous_claims"]) for p in submitted] == [0, 5, 7]
-    assert {p["role"]: p["text"] for p in submitted[2]["previous_claims"][-2:]} == {
-        "bear": "成交容量未知，不能判断退出速度。",
-        "evidence_audit": "估值时间缺失，尚不能验证可比性。",
+    assert {
+        p["role"]: (p["vote"], p["text"])
+        for p in submitted[2]["previous_claims"][-2:]
+    } == {
+        "bear": ("abstain", "成交容量未知，不能判断退出速度。"),
+        "evidence_audit": ("abstain", "估值时间缺失，尚不能验证可比性。"),
     }
     assert all(
         "mutually incompatible facts" in p["instructions"]
@@ -1936,7 +1939,7 @@ async def test_v3_schema_valid_semantic_failure_keeps_precise_safe_terminal_diag
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resolved", [False, True])
-async def test_v3_actual_request_schema_explains_resolution_contract_and_preserves_hash(
+async def test_structured_request_preserves_audit_vote_and_resolution_contract(
     monkeypatch, resolved
 ):
     import jsonschema
@@ -1963,8 +1966,15 @@ async def test_v3_actual_request_schema_explains_resolution_contract_and_preserv
                 "empty string",
                 "non-whitespace",
                 "sufficient",
+                "evidence_audit previous claim has vote other than support",
             ):
-                assert text in payload["instructions"] and text in descriptions
+                assert text in payload["instructions"]
+                if text != "evidence_audit previous claim has vote other than support":
+                    assert text in descriptions
+            assert all(
+                item["vote"] in {"support", "oppose", "abstain"}
+                for item in payload["previous_claims"]
+            )
             expected_hash = hashlib.sha256(
                 json.dumps(
                     {"payload": payload, "output_schema": options["output_schema"]},
