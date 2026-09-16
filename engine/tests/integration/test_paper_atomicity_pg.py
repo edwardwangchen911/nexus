@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from helpers.paper_batch import seed_paper_batch
+from nexus.domain.ids import new_uuid7
 from nexus.paper.outbox import PaperOutboxMessage, dispatch_paper_outbox
 from nexus.paper.service import PaperBatchHooks, create_paper_order_batch
 from nexus.persistence.models.paper import (
@@ -207,3 +208,64 @@ def test_outbox_publish_failure_preserves_business_facts_and_replay_is_idempoten
     assert first_count == unpublished
     assert replay_count == 0
     assert len(delivered) == len(set(delivered)) == unpublished
+
+
+@pytest.mark.asyncio
+async def test_compat_dispatcher_ignores_unconsumed_batch_events(
+    migrated_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    event_ids = (new_uuid7(), new_uuid7())
+    try:
+        async with sessions.begin() as session:
+            for event_id, event_type in zip(
+                event_ids,
+                ("strategy_decision.persisted", "paper.order_batch.evaluated"),
+                strict=True,
+            ):
+                session.add(
+                    OutboxEvent(
+                        id=event_id,
+                        event_type=event_type,
+                        aggregate_id=new_uuid7(),
+                        schema_version="paper_event_v1",
+                        payload={"historical": True},
+                        published_at=None,
+                    )
+                )
+        async with sessions() as session:
+            available_at = max(
+                row.available_at
+                for row in await session.scalars(
+                    select(OutboxEvent).where(OutboxEvent.id.in_(event_ids))
+                )
+            )
+        delivered: list[UUID] = []
+
+        async def record_publish(message: PaperOutboxMessage) -> None:
+            delivered.append(message.event_id)
+
+        async with sessions.begin() as session:
+            count = await dispatch_paper_outbox(
+                session,
+                publisher=record_publish,
+                published_at=available_at + timedelta(seconds=1),
+            )
+        async with sessions() as session:
+            rows = tuple(
+                await session.scalars(
+                    select(OutboxEvent)
+                    .where(OutboxEvent.id.in_(event_ids))
+                    .order_by(OutboxEvent.id)
+                )
+            )
+
+        assert count == 0
+        assert delivered == []
+        assert [(row.status, row.attempt_count) for row in rows] == [
+            ("queued", 0),
+            ("queued", 0),
+        ]
+    finally:
+        await engine.dispose()
