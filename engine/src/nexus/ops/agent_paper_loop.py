@@ -13,6 +13,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import exchange_calendars  # type: ignore[import-untyped]
+from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.domain.ids import new_uuid7
+from nexus.domain.time import require_utc
 from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
 from nexus.ops.agent_paper_once import (
@@ -35,7 +37,10 @@ from nexus.ops.agent_paper_once import (
 from nexus.ops.alpaca_adjusted_authority_import import import_adjusted_authority
 from nexus.ops.alpaca_prices_import import import_trends
 from nexus.ops.alpaca_prices_local import collect_prices
+from nexus.ops.daily_once import DailyOnceSettings
 from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.fred_local import collect as collect_fred
+from nexus.ops.fred_local import import_collection as import_fred_collection
 from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest
 from nexus.ops.paper_once import run_once as run_paper_once
@@ -63,9 +68,13 @@ from nexus.persistence.models.paper import (
     PaperPerformanceSnapshotRecord,
 )
 from nexus.persistence.models.runtime import Job
+from nexus.providers.http import HttpPolicyError
 from nexus.research.alpaca_prices_archive import collection_window
 from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
+from nexus.research.fred_collection import load_fred_collection
+from nexus.research.fred_observations import FredVintageRequest
+from nexus.research.fred_storage import read_fred_observations
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
@@ -121,6 +130,14 @@ class CurrentTrendsScope:
     snapshot_ready: bool
 
 
+@dataclass(frozen=True)
+class MacroScope:
+    instrument_id: UUID
+    vintage: date
+    ready_series: frozenset[str]
+    snapshot_ready: bool
+
+
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
 _SAFE_TRIGGER_FAILURE_CODES = frozenset(
     {
@@ -133,10 +150,36 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
 AGENT_PAPER_LOOP_PROCESS_VERSION = "agent-paper-loop-v1"
+_PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
+_PAPER_MONTHLY_MACRO_SERIES = frozenset({"CPIAUCSL", "UNRATE"})
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def latest_visible_macro_vintage(now: datetime) -> date:
+    """Return the newest vintage whose conservative next XNYS open has passed."""
+    current = require_utc(now)
+    calendar = exchange_calendars.get_calendar("XNYS")
+    local_date = current.astimezone(ZoneInfo("America/New_York")).date()
+    for days_back in range(15):
+        vintage = local_date - timedelta(days=days_back)
+        next_session = calendar.date_to_session(vintage + timedelta(days=1), direction="next")
+        next_open = calendar.session_open(next_session).to_pydatetime().astimezone(UTC)
+        if next_open <= current:
+            return vintage
+    raise RuntimeError("AGENT_PAPER_MACRO_VINTAGE_UNAVAILABLE")
+
+
+def _macro_attempt_session(now: datetime) -> date:
+    current = require_utc(now)
+    local_date = current.astimezone(ZoneInfo("America/New_York")).date()
+    session = exchange_calendars.get_calendar("XNYS").date_to_session(
+        local_date,
+        direction="none",
+    )
+    return date.fromisoformat(str(session.date()))
 
 
 async def heartbeat_agent_paper_loop(
@@ -305,6 +348,159 @@ async def prepare_prior_daily_once(
         not verified.authority_ready
         or verified.instrument_id != scope.instrument_id
         or verified.prior_session != scope.prior_session
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    return "prepared"
+
+
+async def _inspect_macro_scope(
+    settings: EngineSettings, *, account_id: UUID, now: datetime
+) -> MacroScope:
+    prior = await _inspect_prior_daily_scope(settings, account_id=account_id, now=now)
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            vintage = latest_visible_macro_vintage(now)
+            observations = await read_fred_observations(session, as_of=now)
+            matching = tuple(
+                observation
+                for observation in observations.values()
+                if observation.vintage == vintage
+                and observation.series in _PAPER_MACRO_SERIES
+            )
+            ready_series = frozenset(
+                observation.series for observation in matching
+            )
+            snapshot_ready = False
+            if ready_series == _PAPER_MACRO_SERIES:
+                snapshot = await select_authoritative_snapshot(
+                    session,
+                    instrument_id=prior.instrument_id,
+                    as_of=now,
+                )
+                if snapshot is not None:
+                    bound_ids = set(
+                        await session.scalars(
+                            select(AgentDataSnapshotEvidenceRecord.evidence_ref_id).where(
+                                AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
+                                AgentDataSnapshotEvidenceRecord.instrument_id
+                                == prior.instrument_id,
+                                AgentDataSnapshotEvidenceRecord.authority_kind == "research",
+                                AgentDataSnapshotEvidenceRecord.source == "fred",
+                            )
+                        )
+                    )
+                    snapshot_ready = all(
+                        any(
+                            observation.series == series
+                            and observation.evidence_ref_id in bound_ids
+                            for observation in matching
+                        )
+                        for series in _PAPER_MACRO_SERIES
+                    )
+            return MacroScope(
+                instrument_id=prior.instrument_id,
+                vintage=vintage,
+                ready_series=ready_series,
+                snapshot_ready=snapshot_ready,
+            )
+    finally:
+        await engine.dispose()
+
+
+def _macro_request(series: str, vintage: date) -> FredVintageRequest:
+    if series in _PAPER_MONTHLY_MACRO_SERIES:
+        observation_end = vintage.replace(day=1) - timedelta(days=1)
+        observation_start = observation_end.replace(day=1)
+    else:
+        observation_start = vintage - timedelta(days=31)
+        observation_end = vintage
+    return FredVintageRequest(
+        series=series,
+        observation_start=observation_start,
+        observation_end=observation_end,
+        vintage=vintage,
+    )
+
+
+async def prepare_macro_once(
+    settings: DailyOnceSettings,
+    *,
+    fred_key: SecretStr,
+    account_id: UUID,
+    repo_root: Path,
+    now: datetime,
+) -> str:
+    """Best-effort daily macro preparation; unavailable macro does not block a cycle."""
+    scope = await _inspect_macro_scope(settings, account_id=account_id, now=now)
+    if scope.ready_series == _PAPER_MACRO_SERIES:
+        if scope.snapshot_ready:
+            return "ready"
+        await _prepare_current_trends_research_snapshot(
+            settings,
+            instrument_id=scope.instrument_id,
+            now=datetime.now(UTC),
+        )
+        verified = await _inspect_macro_scope(
+            settings,
+            account_id=account_id,
+            now=datetime.now(UTC),
+        )
+        if (
+            verified.instrument_id != scope.instrument_id
+            or verified.vintage != scope.vintage
+            or verified.ready_series != _PAPER_MACRO_SERIES
+            or not verified.snapshot_ready
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        return "prepared"
+    parent = repo_root / ".secrets" / "nexus-agent-paper" / "macro"
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    output_dir = parent / _macro_attempt_session(now).isoformat()
+    try:
+        output_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        return "unavailable"
+    missing = _PAPER_MACRO_SERIES - scope.ready_series
+    for series in sorted(missing):
+        series_dir = output_dir / series
+        series_dir.mkdir(mode=0o700)
+        try:
+            collected = await collect_fred(
+                _macro_request(series, scope.vintage),
+                key=fred_key,
+                directory=series_dir,
+            )
+        except (HttpPolicyError, ValueError):
+            return "unavailable"
+        if collected.get("status") != "collected" or not collected.get("observation_count"):
+            return "unavailable"
+        imported = await import_fred_collection(
+            settings,
+            collection=load_fred_collection(series_dir),
+        )
+        if imported.get("status") != "imported" or not imported.get(
+            "visible_observation_count"
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    await _prepare_current_trends_research_snapshot(
+        settings,
+        instrument_id=scope.instrument_id,
+        now=datetime.now(UTC),
+    )
+    verified = await _inspect_macro_scope(
+        settings,
+        account_id=account_id,
+        now=datetime.now(UTC),
+    )
+    if (
+        verified.instrument_id != scope.instrument_id
+        or verified.vintage != scope.vintage
+        or verified.ready_series != _PAPER_MACRO_SERIES
+        or not verified.snapshot_ready
     ):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     return "prepared"
@@ -773,6 +969,7 @@ async def execute_agent_paper_loop_action(
     if action == AgentPaperLoopAction.TRIGGER:
         environment = load_local_environment(repo_root, {})
         trigger_settings = AgentPaperTriggerSettings.model_validate(environment)
+        macro_settings = DailyOnceSettings.model_validate(environment)
         prior_daily = await prepare_prior_daily_once(
             trigger_settings,
             account_id=account_id,
@@ -784,6 +981,17 @@ async def execute_agent_paper_loop_action(
         if prior_daily == "unavailable":
             return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
         if prior_daily != "ready":
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        macro = await prepare_macro_once(
+            macro_settings,
+            fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+            account_id=account_id,
+            repo_root=repo_root,
+            now=snapshot.now,
+        )
+        if macro == "prepared":
+            return None
+        if macro not in {"ready", "unavailable"}:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         current_trends = await prepare_current_trends_once(
             trigger_settings,
