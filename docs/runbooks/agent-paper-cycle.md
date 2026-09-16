@@ -263,16 +263,8 @@ FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNY
 决策；导入、数据库或回读结果不明则立即 fail closed。不删除失败尝试目录来重试，不切换
 数据源，不用当天后来发布的 vintage 回填已有决策。
 
-Agent Paper 使用独立、版本化的 `agent_paper_research_v1` 研究池，固定顺序为
-`AAPL → MSFT → JPM`。每个五分钟槽只研究一只；周期首个 `CYCLE_PREPARED` 事件冻结
-`research_universe_version`、`research_universe_ordinal`、`research_symbol` 和
-`research_attempt`。成功终态才前进；`CANDIDATE_EVIDENCE_UNAVAILABLE`、
-`RESEARCH_OUTPUT_NOT_ACTIONABLE` 或 `AGENT_DECISION_CONFLICT` 在下一槽重试同一标的，第三次
-写成 `RESEARCH_BLOCKED` 后下一槽轮转。该标的本轮不生成订单，下圈可重新尝试。
-
-上述候选级终态只等待下一槽，不在同槽重复 Provider 或模型调用。账户、日历、身份、凭据、
-行情源、组合风控、订单冲突或结果未知等系统级 `unavailable` / `failed` 仍使本进程熔断退出，
-且不增加候选 attempt、不推进游标。所有终态事实保留；新槽仍须从持久化状态和前置数据检查开始。
+当前槽出现 `unavailable` 或 `failed` 时，本进程熔断退出，不在同槽重复 Provider 或模型调用。
+该终态事实保留；到同日下一合法五分钟槽后可重新启动进程，新槽仍须从持久化状态和前置数据检查开始。
 日线、宏观或趋势补齐已有失败尝试时不会删目录或换 key 重放 Provider。16:00 ET 后若没有活动订单则正常退出，
 已有订单可完成其已冻结窗口后再退出。运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。

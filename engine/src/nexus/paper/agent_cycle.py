@@ -25,7 +25,6 @@ from nexus.paper.agent_cycle_authority import (
     load_cycle_authority,
     load_recorded_schwab_cycle_authority,
     prepare_candidates,
-    select_agent_paper_research_target,
     validate_candidate_manifest,
 )
 from nexus.paper.agent_cycle_models import (
@@ -45,13 +44,6 @@ from nexus.paper.agent_decision import (
     build_agent_paper_decision,
 )
 from nexus.paper.agent_decision_store import persist_agent_paper_decision
-from nexus.paper.agent_research_universe import (
-    ResearchTarget,
-    choose_research_target,
-    research_failure_result_code,
-    research_target_facts,
-    research_target_from_events,
-)
 from nexus.paper.errors import PaperBatchError
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
@@ -130,26 +122,7 @@ async def reserve_schwab_agent_paper_trigger(
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
-        {"scope": f"nexus:agent-paper-cycle:{account_id}"},
-    )
     decision_slot_at = floor_decision_slot(now)
-    existing_cycle = await session.scalar(
-        select(AgentPaperCycleRecord).where(
-            AgentPaperCycleRecord.account_id == account_id,
-            AgentPaperCycleRecord.decision_slot_at == decision_slot_at,
-        )
-    )
-    if existing_cycle is None:
-        target = await select_agent_paper_research_target(
-            session, account_id=account_id, before_slot_at=decision_slot_at
-        )
-    else:
-        existing_events = await _events(session, existing_cycle.id)
-        if not existing_events:
-            raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
-        target = research_target_from_events(existing_events) or choose_research_target(())
     request_hash = job_input_hash(
         {
             "schema": "agent-paper-schwab-trigger-v2",
@@ -174,10 +147,6 @@ async def reserve_schwab_agent_paper_trigger(
         claim_id=claim.id,
         decision_session=local_time.date(),
         decision_slot_at=decision_slot_at,
-        research_universe_version="agent_paper_research_v1",
-        research_universe_ordinal=target.ordinal,
-        research_symbol=target.symbol,
-        research_attempt=target.attempt,
     )
     if inserted:
         return reservation
@@ -240,7 +209,6 @@ async def start_schwab_agent_paper_cycle(
     decision_slot_at: datetime,
     idempotency_key: str,
     daily_limit_usd: Decimal = Decimal("3.00"),
-    expected_research_target: ResearchTarget | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
     if (
@@ -271,16 +239,12 @@ async def start_schwab_agent_paper_cycle(
         events = await _events(session, cycle.id)
         if not events:
             raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
-        existing_target = research_target_from_events(events) or choose_research_target(())
-        if expected_research_target is not None and existing_target != expected_research_target:
-            raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
         return _result(cycle.id, events, replayed=True)
     return await _start_cycle(
         session,
         authority=authority,
         decision_slot_at=decision_slot_at,
         daily_limit_usd=daily_limit_usd,
-        expected_research_target=expected_research_target,
     )
 
 
@@ -324,10 +288,9 @@ async def resume_schwab_agent_paper_cycle(
     if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
         return _result(cycle.id, events, replayed=True)
     authority = await load_recorded_schwab_cycle_authority(session, cycle=cycle)
-    target = research_target_from_events(events) or choose_research_target(())
     manifest = parse_candidate_manifest(cycle.candidate_manifest, allow_legacy=False)
     valid_manifest = await validate_candidate_manifest(
-        session, authority=authority, manifest=manifest, target=target
+        session, authority=authority, manifest=manifest
     )
     if candidate_manifest_hash(manifest) != cycle.candidate_hash or not valid_manifest:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
@@ -395,22 +358,21 @@ async def advance_agent_paper_cycle(
         )
     if cycle.decision_time != decision_time:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
-    events = await _events(session, cycle.id)
-    if not events:
-        raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
     allow_legacy = cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
     manifest = parse_candidate_manifest(cycle.candidate_manifest, allow_legacy=allow_legacy)
     current_manifest = tuple(
         candidate for candidate in manifest if isinstance(candidate, CandidateManifestEntry)
     )
-    target = research_target_from_events(events) or choose_research_target(())
     valid_manifest = len(current_manifest) == len(manifest) and await validate_candidate_manifest(
-        session, authority=authority, manifest=current_manifest, target=target
+        session, authority=authority, manifest=current_manifest
     )
     if allow_legacy and not current_manifest:
         valid_manifest = True
     if candidate_manifest_hash(manifest) != cycle.candidate_hash or not valid_manifest:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
+    events = await _events(session, cycle.id)
+    if not events:
+        raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
     if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
         return _result(cycle.id, events, replayed=True)
     if events[-1].to_status == "prepared":
@@ -436,24 +398,12 @@ async def _start_cycle(
     authority: CycleAuthority,
     decision_slot_at: datetime,
     daily_limit_usd: Decimal,
-    expected_research_target: ResearchTarget | None = None,
 ) -> AgentPaperCycleResult:
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time
     )
     has_open_order = bool(projection.open_orders)
-    target = await select_agent_paper_research_target(
-        session,
-        account_id=authority.account_id,
-        before_slot_at=decision_slot_at,
-    )
-    if expected_research_target is not None and target != expected_research_target:
-        raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
-    manifest = (
-        ()
-        if has_open_order
-        else await prepare_candidates(session, authority=authority, target=target)
-    )
+    manifest = () if has_open_order else await prepare_candidates(session, authority=authority)
     same_session = authority.execution_session == authority.decision_session
     cycle = AgentPaperCycleRecord(
         id=new_uuid7(),
@@ -483,14 +433,7 @@ async def _start_cycle(
     )
     session.add(cycle)
     await session.flush()
-    await _append_event(
-        session,
-        cycle,
-        None,
-        "prepared",
-        "CYCLE_PREPARED",
-        research_target_facts(target),
-    )
+    await _append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", {})
     if has_open_order or not manifest:
         await _append_event(
             session,
@@ -500,7 +443,7 @@ async def _start_cycle(
             (
                 "OPEN_ORDER_EXISTS"
                 if has_open_order
-                else research_failure_result_code(target, "CANDIDATE_EVIDENCE_UNAVAILABLE")
+                else "RISK_INPUT_REQUIRED"
                 if same_session
                 else "NO_ELIGIBLE_CANDIDATE"
             ),
@@ -766,17 +709,12 @@ async def _stop_unavailable(
     cycle: AgentPaperCycleRecord,
     events: tuple[AgentPaperCycleEventRecord, ...],
 ) -> AgentPaperCycleResult:
-    target = research_target_from_events(events)
     await _append_event(
         session,
         cycle,
         cast(CycleStatus, events[-1].to_status),
         "unavailable",
-        (
-            research_failure_result_code(target, "RESEARCH_OUTPUT_NOT_ACTIONABLE")
-            if target is not None
-            else "RESEARCH_OUTPUT_NOT_ACTIONABLE"
-        ),
+        "RESEARCH_OUTPUT_NOT_ACTIONABLE",
         {},
     )
     return _result(cycle.id, await _events(session, cycle.id), replayed=False)
@@ -788,14 +726,12 @@ async def _stop_failed(
     events: tuple[AgentPaperCycleEventRecord, ...],
     code: str,
 ) -> AgentPaperCycleResult:
-    target = research_target_from_events(events)
-    result_code = code if target is None else research_failure_result_code(target, code)
     await _append_event(
         session,
         cycle,
         cast(CycleStatus, events[-1].to_status),
         "failed",
-        result_code,
+        code,
         {},
     )
     return _result(cycle.id, await _events(session, cycle.id), replayed=False)

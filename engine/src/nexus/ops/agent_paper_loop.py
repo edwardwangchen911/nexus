@@ -59,7 +59,6 @@ from nexus.paper.agent_cycle_authority import (
     ServiceCalendarAuthority,
     load_agent_paper_service_calendar_authority,
     load_quasi_realtime_cycle_authority,
-    select_agent_paper_research_target,
     select_agent_paper_service_calendar_authority,
 )
 from nexus.paper.agent_cycle_models import floor_decision_slot
@@ -144,7 +143,6 @@ class AgentPaperLoopSnapshot:
     next_decision_window_start_at: datetime | None = None
     cycle_id: UUID | None = None
     cycle_status: str | None = None
-    cycle_result_code: str | None = None
     cycle_slot_at: datetime | None = None
     research_job_status: str | None = None
     research_job_id: UUID | str | None = None
@@ -163,7 +161,6 @@ class PriorDailyScope:
     prior_session: date
     authority_ready: bool
     decision_session: date | None = None
-    symbol: str = "AAPL"
 
 
 @dataclass(frozen=True)
@@ -173,7 +170,6 @@ class CurrentTrendsScope:
     prior_session: date
     evidence_ready: bool
     snapshot_ready: bool
-    symbol: str = "AAPL"
 
 
 @dataclass(frozen=True)
@@ -186,14 +182,6 @@ class MacroScope:
 
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
-_CANDIDATE_RETRY_CODES = frozenset(
-    {
-        "CANDIDATE_EVIDENCE_UNAVAILABLE",
-        "RESEARCH_OUTPUT_NOT_ACTIONABLE",
-        "RESEARCH_BLOCKED",
-        "AGENT_DECISION_CONFLICT",
-    }
-)
 _SAFE_TRIGGER_FAILURE_CODES = frozenset(
     {
         "AGENT_PAPER_ACCOUNT_INVALID",
@@ -655,15 +643,10 @@ async def _inspect_prior_daily_scope(
                 or authority.calendar_authority_id != expected_calendar_authority_id
             ):
                 raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
-            target = await select_agent_paper_research_target(
-                session,
-                account_id=account_id,
-                before_slot_at=floor_decision_slot(database_now),
-            )
             scope = await inspect_query_authority_scope(
                 session,
                 decision_session=authority.decision_session,
-                symbol=target.symbol,
+                symbol="AAPL",
                 as_of=database_now,
                 universe_snapshot_id=authority.universe_snapshot_id,
                 source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
@@ -713,7 +696,6 @@ async def _inspect_prior_daily_scope(
                 prior_session=prior_session,
                 authority_ready=existing is not None,
                 decision_session=authority.decision_session,
-                symbol=target.symbol,
             )
     finally:
         await engine.dispose()
@@ -734,14 +716,11 @@ async def prepare_prior_daily_once(
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
     )
-    symbol = getattr(scope, "symbol", "AAPL")
     if scope.authority_ready:
         return "ready"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "daily"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output_parent = parent if symbol == "AAPL" else parent / symbol
-    output_parent.mkdir(mode=0o700, exist_ok=True)
-    output_dir = output_parent / scope.prior_session.isoformat()
+    output_dir = parent / scope.prior_session.isoformat()
     try:
         output_dir.mkdir(mode=0o700)
     except FileExistsError:
@@ -756,7 +735,7 @@ async def prepare_prior_daily_once(
         )
         collected = await collect_prices(
             request,
-            symbol=symbol,
+            symbol="AAPL",
             calendar=calendar,
             resolved_at=now,
             key_id=settings.alpaca_key,
@@ -787,7 +766,6 @@ async def prepare_prior_daily_once(
         not verified.authority_ready
         or verified.instrument_id != scope.instrument_id
         or verified.prior_session != scope.prior_session
-        or getattr(verified, "symbol", "AAPL") != symbol
     ):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     return "prepared"
@@ -1070,7 +1048,6 @@ async def _inspect_current_trends_scope(
                 prior_session=prior.prior_session,
                 evidence_ready=evidence_ready,
                 snapshot_ready=snapshot_ready,
-                symbol=prior.symbol,
             )
     finally:
         await engine.dispose()
@@ -1125,7 +1102,6 @@ async def prepare_current_trends_once(
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
     )
-    symbol = getattr(scope, "symbol", "AAPL")
     if scope.snapshot_ready:
         return "ready"
     if scope.evidence_ready:
@@ -1145,15 +1121,12 @@ async def prepare_current_trends_once(
             or not verified.snapshot_ready
             or verified.instrument_id != scope.instrument_id
             or verified.prior_session != scope.prior_session
-            or getattr(verified, "symbol", "AAPL") != symbol
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return "prepared"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output_parent = parent if symbol == "AAPL" else parent / symbol
-    output_parent.mkdir(mode=0o700, exist_ok=True)
-    output_dir = output_parent / scope.prior_session.isoformat()
+    output_dir = parent / scope.prior_session.isoformat()
     try:
         output_dir.mkdir(mode=0o700)
     except FileExistsError:
@@ -1170,7 +1143,7 @@ async def prepare_current_trends_once(
         return "unavailable"
     collected = await collect_prices(
         request,
-        symbol=symbol,
+        symbol="AAPL",
         calendar=calendar,
         resolved_at=now,
         key_id=settings.alpaca_key,
@@ -1206,7 +1179,6 @@ async def prepare_current_trends_once(
         or not verified.snapshot_ready
         or verified.instrument_id != scope.instrument_id
         or verified.prior_session != scope.prior_session
-        or getattr(verified, "symbol", "AAPL") != symbol
     ):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     return "prepared"
@@ -1251,7 +1223,6 @@ def snapshot_from_cycle_view(
     """Map the bounded read projection into the scheduler's fail-closed contract."""
     cycle_id = getattr(view, "cycle_id", None)
     cycle_status = getattr(view, "status", None)
-    cycle_result_code = getattr(view, "result_code", None)
     cycle_slot_at = getattr(view, "decision_slot_at", None)
     order_ids = getattr(view, "order_ids", ())
     execution_market = getattr(view, "execution_market", None)
@@ -1304,7 +1275,6 @@ def snapshot_from_cycle_view(
         next_decision_window_start_at=calendar.next_decision_window_start_at,
         cycle_id=cycle_id,
         cycle_status=cycle_status,
-        cycle_result_code=(cycle_result_code if isinstance(cycle_result_code, str) else None),
         cycle_slot_at=cycle_slot_at,
         research_job_status=None if research_job is None else research_job[1],
         research_job_id=None if research_job is None else research_job[0],
@@ -1366,8 +1336,6 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.cycle_status in {"unavailable", "failed"} and (
         snapshot.cycle_slot_at is None or snapshot.cycle_slot_at == current_slot
     ):
-        if snapshot.cycle_result_code in _CANDIDATE_RETRY_CODES:
-            return AgentPaperLoopAction.WAIT_FOR_SLOT
         return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
 
     if snapshot.cycle_status not in {None, "completed", "unavailable", "failed"}:

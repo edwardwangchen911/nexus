@@ -264,12 +264,11 @@ def _validate_trigger_quote(
     result: SchwabMarketStreamImportResult,
     *,
     decision_time: datetime,
-    symbol: str = "AAPL",
 ) -> None:
     if (
         quote is None
         or artifact is None
-        or result.quote_ids.get(symbol) != quote.id
+        or result.quote_ids.get("AAPL") != quote.id
         or result.artifact_id != artifact.id
         or quote.data_artifact_id != artifact.id
         or quote.source != "schwab"
@@ -359,7 +358,6 @@ async def trigger_in_session(
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     decision_session = reservation.decision_session
     decision_slot_at = reservation.decision_slot_at
-    target = reservation.research_target
 
     selected = (
         await select_agent_paper_service_calendar_authority(session, now=initial_time)
@@ -393,7 +391,7 @@ async def trigger_in_session(
     scope = await inspect_query_authority_scope(
         session,
         decision_session=decision_session,
-        symbol=target.symbol,
+        symbol="AAPL",
         as_of=initial_time,
         universe_snapshot_id=initial_authority.universe_snapshot_id,
         source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
@@ -404,7 +402,7 @@ async def trigger_in_session(
     attempt_directory = output_parent / f"{decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}"
     try:
         proofs = await collect_source_proofs(
-            symbol=target.symbol,
+            symbol="AAPL",
             instrument_id=scope.instrument_id,
             decision_session=decision_session,
             key_id=settings.alpaca_key,
@@ -422,7 +420,6 @@ async def trigger_in_session(
             repo_root=repo_root,
             client=client,
             instrument_id=scope.instrument_id,
-            symbol=target.symbol,
             process_environment=process_environment,
         )
     except (
@@ -451,23 +448,17 @@ async def trigger_in_session(
         or decision_time >= final_calendar.market_close_at
     ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
-    quote_id = stream.quote_ids.get(target.symbol)
+    quote_id = stream.quote_ids.get("AAPL")
     quote = None if quote_id is None else await session.get(LatestQuote, quote_id)
     artifact = await session.get(DataArtifact, stream.artifact_id)
-    _validate_trigger_quote(
-        quote,
-        artifact,
-        stream,
-        decision_time=decision_time,
-        symbol=target.symbol,
-    )
+    _validate_trigger_quote(quote, artifact, stream, decision_time=decision_time)
 
     try:
         await persist_query_authorities(
             session,
             universe_snapshot_id=scope.universe_snapshot_id,
             decision_session=decision_session,
-            symbol=target.symbol,
+            symbol="AAPL",
             proofs=proofs,
             source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
         )
@@ -487,7 +478,6 @@ async def trigger_in_session(
         decision_slot_at=decision_slot_at,
         idempotency_key=request.idempotency_key,
         daily_limit_usd=settings.agent_daily_budget_usd,
-        expected_research_target=target,
     )
 
 

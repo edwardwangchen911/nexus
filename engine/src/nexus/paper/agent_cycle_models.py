@@ -7,13 +7,7 @@ from datetime import UTC, date, datetime
 from typing import Annotated, Literal, overload
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
-
-from nexus.paper.agent_research_universe import (
-    AGENT_PAPER_RESEARCH_UNIVERSE_V1,
-    ResearchSymbol,
-    ResearchTarget,
-)
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -46,7 +40,7 @@ class CandidateManifestEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instrument_id: UUID
-    symbol: ResearchSymbol
+    symbol: Literal["AAPL"]
     inclusion_reason: str
     research_snapshot_id: UUID
     prior_daily_price_authority_id: UUID
@@ -90,30 +84,7 @@ class AgentPaperTriggerReservation(BaseModel):
     claim_id: UUID
     decision_session: date
     decision_slot_at: datetime
-    research_universe_version: Literal["agent_paper_research_v1"] = "agent_paper_research_v1"
-    research_universe_ordinal: int = Field(default=0, ge=0, le=2)
-    research_symbol: ResearchSymbol = "AAPL"
-    research_attempt: int = Field(default=1, ge=1, le=3)
     replay: AgentPaperCycleResult | None = None
-
-    @model_validator(mode="after")
-    def validate_research_target(self) -> "AgentPaperTriggerReservation":
-        if (
-            self.research_universe_version != AGENT_PAPER_RESEARCH_UNIVERSE_V1.version
-            or self.research_symbol
-            != AGENT_PAPER_RESEARCH_UNIVERSE_V1.symbols[self.research_universe_ordinal]
-        ):
-            raise ValueError("AGENT_PAPER_ROTATION_INVALID")
-        return self
-
-    @property
-    def research_target(self) -> ResearchTarget:
-        return ResearchTarget(
-            version=self.research_universe_version,
-            ordinal=self.research_universe_ordinal,
-            symbol=self.research_symbol,
-            attempt=self.research_attempt,
-        )
 
 
 def _canonical_json(payload: object) -> str:

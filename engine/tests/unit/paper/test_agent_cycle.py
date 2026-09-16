@@ -55,18 +55,18 @@ def test_candidate_manifest_hash_binds_every_frozen_authority() -> None:
         )
 
 
-def test_candidate_manifest_accepts_research_universe_and_exactly_three_risk_authorities() -> None:
+def test_candidate_manifest_only_accepts_aapl_and_exactly_three_risk_authorities() -> None:
     payload = _candidate().model_dump()
-    for symbol in ("AAPL", "MSFT", "JPM"):
-        assert CandidateManifestEntry.model_validate({**payload, "symbol": symbol}).symbol == symbol
     with pytest.raises(ValidationError):
-        CandidateManifestEntry.model_validate({**payload, "symbol": "TSLA"})
+        CandidateManifestEntry.model_validate({**payload, "symbol": "MSFT"})
     with pytest.raises(ValidationError):
         CandidateManifestEntry.model_validate(
             {**payload, "risk_query_authority_ids": [str(UUID(int=7))]}
         )
     with pytest.raises(ValidationError):
-        CandidateManifestEntry.model_validate({**payload, "decision_evidence_hash": "not-a-hash"})
+        CandidateManifestEntry.model_validate(
+            {**payload, "decision_evidence_hash": "not-a-hash"}
+        )
 
 
 def test_legacy_candidate_manifest_preserves_its_original_hash_and_fields() -> None:
