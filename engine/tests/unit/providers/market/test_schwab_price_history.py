@@ -1,6 +1,7 @@
 """Bounded Schwab price-history provider contracts."""
 
 import asyncio
+import base64
 import json
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
@@ -133,17 +134,42 @@ def test_live_access_token_is_returned_only_before_expiry() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
 async def test_provider_refreshes_expiring_token_once_before_price_history_request(
     tmp_path: Path,
+    monkeypatch,
+    explicit: bool,
 ) -> None:
     module = import_module("nexus.providers.market.schwab_price_history")
     _write_schwab_app_config(tmp_path)
     _save_live_token(tmp_path, expires_at=RECEIVED_AT + timedelta(minutes=4))
     requests: list[httpx.Request] = []
+    environment = {
+        "NEXUS_SCHWAB_APP_KEY": "registered-key",
+        "NEXUS_SCHWAB_APP_SECRET": "registered-secret",
+        "NEXUS_SCHWAB_CALLBACK_URL": "https://127.0.0.1",
+    }
+    if explicit:
+        from nexus.ops.agent_paper_loop import load_agent_paper_service_environment
+
+        env_file = tmp_path / "infra/.env.service"
+        env_file.write_text("\n".join(f"{name}={value}" for name, value in environment.items()))
+        environment = load_agent_paper_service_environment(tmp_path, {}, env_file=env_file)
+        monkeypatch.setenv("NEXUS_SCHWAB_APP_KEY", "process-key")
+        monkeypatch.setenv("NEXUS_SCHWAB_APP_SECRET", "process-secret")
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path == "/v1/oauth/token":
+            expected = (
+                "registered-key:registered-secret"
+                if explicit
+                else "app-key-canary:app-secret-canary"
+            )
+            assert (
+                request.headers["Authorization"]
+                == "Basic " + base64.b64encode(expected.encode()).decode()
+            )
             return httpx.Response(
                 200,
                 json={
@@ -165,6 +191,7 @@ async def test_provider_refreshes_expiring_token_once_before_price_history_reque
             client,
             symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
             now=lambda: RECEIVED_AT,
+            **({"process_environment": environment} if explicit else {}),
         )
         page = await provider.fetch_bars(_request())
 

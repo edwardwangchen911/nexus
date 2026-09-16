@@ -19,8 +19,10 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from dotenv import dotenv_values
 from pydantic import SecretStr
-from sqlalchemy import and_, func, select
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -49,6 +51,7 @@ from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.fred_local import collect as collect_fred
 from nexus.ops.fred_local import import_collection as import_fred_collection
 from nexus.ops.fred_local import validate_local_import
+from nexus.ops.local_stack import LocalStackConfigurationError, _validate_local_env
 from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest
 from nexus.ops.paper_once import run_once as run_paper_once
@@ -88,7 +91,7 @@ from nexus.persistence.models.paper import (
     PaperPerformanceSnapshotRecord,
     PaperRequestIdempotencyRecord,
 )
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import Job, WorkerHeartbeat
 from nexus.providers.http import HttpPolicyError
 from nexus.providers.market.schwab_oauth import (
     SchwabOAuthError,
@@ -280,6 +283,14 @@ def _nonempty_environment_values(environment: Mapping[str, str], names: Sequence
     )
 
 
+def _require_explicit_schwab_config(environment: Mapping[str, str]) -> None:
+    if not _nonempty_environment_values(
+        environment,
+        ("NEXUS_SCHWAB_APP_KEY", "NEXUS_SCHWAB_APP_SECRET", "NEXUS_SCHWAB_CALLBACK_URL"),
+    ):
+        raise ValueError("AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID")
+
+
 def _agent_paper_host_port(environment: Mapping[str, str], name: str, default: int) -> int:
     try:
         port = int(environment.get(name, str(default)))
@@ -290,11 +301,50 @@ def _agent_paper_host_port(environment: Mapping[str, str], name: str, default: i
     return port
 
 
+class _FileOnlySources:
+    """Explicit service settings never supplement missing values from process configuration."""
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings,)
+
+
+class _FileEngineSettings(_FileOnlySources, EngineSettings):
+    pass
+
+
+class _FileTriggerSettings(_FileOnlySources, AgentPaperTriggerSettings):
+    pass
+
+
+class _FileMarketSettings(_FileOnlySources, AgentPaperMarketSettings):
+    pass
+
+
+class _FileDailySettings(_FileOnlySources, DailyOnceSettings):
+    pass
+
+
 def load_agent_paper_service_environment(
-    repo_root: Path, process_environment: Mapping[str, str]
+    repo_root: Path, process_environment: Mapping[str, str], *, env_file: Path | None = None
 ) -> dict[str, str]:
     """Load configuration and restore loopback endpoints required by host networking."""
-    environment = load_local_environment(repo_root, process_environment)
+    if env_file is None:
+        environment = load_local_environment(repo_root, process_environment)
+    else:
+        environment = {
+            name: value
+            for name, value in dotenv_values(env_file, interpolate=False).items()
+            if isinstance(value, str) and value
+        }
+        environment.update({name: value for name, value in process_environment.items() if value})
     database_url = environment.get("DATABASE_URL")
     if database_url:
         database = make_url(database_url)
@@ -416,7 +466,7 @@ def agent_paper_service_preflight(
         blocking_codes.add("AGENT_PAPER_MODEL_RUNTIME_MISMATCH")
     if engine_config_valid and model_config_valid:
         try:
-            EngineSettings.model_validate(environment)
+            _FileEngineSettings.model_validate(environment)
         except Exception:
             blocking_codes.add("AGENT_PAPER_RUNTIME_CONFIG_INVALID")
         else:
@@ -427,8 +477,9 @@ def agent_paper_service_preflight(
     ):
         blocking_codes.add("AGENT_PAPER_MARKET_SOURCE_CONFIG_REQUIRED")
     try:
+        _require_explicit_schwab_config(environment)
         load_schwab_app_config(repo_root, environment)
-    except (OSError, SchwabOAuthError):
+    except (OSError, SchwabOAuthError, ValueError):
         blocking_codes.add("AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID")
     try:
         token = load_schwab_token(repo_root)
@@ -1640,6 +1691,7 @@ async def run_local_agent_paper_loop(
     *,
     account_id: UUID,
     repo_root: Path,
+    env_file: Path | None = None,
 ) -> AgentPaperLoopAction:
     """Run the concrete local loop through persisted inspection and scoped actions."""
 
@@ -1676,8 +1728,14 @@ async def run_local_agent_paper_loop(
                 raise
 
             async def inspect() -> AgentPaperLoopSnapshot:
-                current = EngineSettings.model_validate(
-                    load_agent_paper_service_environment(repo_root, os.environ)
+                current = (
+                    _FileEngineSettings.model_validate(
+                        load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                    )
+                    if env_file is not None
+                    else EngineSettings.model_validate(
+                        load_agent_paper_service_environment(repo_root, os.environ)
+                    )
                 )
                 if not current.agent_paper_cycle_enabled:
                     return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
@@ -1696,6 +1754,7 @@ async def run_local_agent_paper_loop(
                     repo_root=repo_root,
                     action=action,
                     snapshot=snapshot,
+                    **({"env_file": env_file} if env_file is not None else {}),
                 )
 
             async def heartbeat(seen_at: datetime) -> None:
@@ -1747,15 +1806,26 @@ async def execute_agent_paper_loop_action(
     repo_root: Path,
     action: AgentPaperLoopAction,
     snapshot: AgentPaperLoopSnapshot,
+    env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
     if action == AgentPaperLoopAction.TRIGGER:
         if snapshot.calendar_authority_id is None:
             return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
         expected_calendar_authority_id = snapshot.calendar_authority_id
-        environment = load_agent_paper_service_environment(repo_root, os.environ)
-        trigger_settings = AgentPaperTriggerSettings.model_validate(environment)
-        macro_settings = DailyOnceSettings.model_validate(environment)
+        environment = (
+            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            if env_file is not None
+            else load_agent_paper_service_environment(repo_root, os.environ)
+        )
+        trigger_settings = (
+            _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
+        ).model_validate(environment)
+        if env_file is not None:
+            _require_explicit_schwab_config(environment)
+        macro_settings = (
+            _FileDailySettings if env_file is not None else DailyOnceSettings
+        ).model_validate(environment)
         prior_daily = await prepare_prior_daily_once(
             trigger_settings,
             account_id=account_id,
@@ -1805,13 +1875,25 @@ async def execute_agent_paper_loop_action(
             ),
             repo_root=repo_root,
             expected_calendar_authority_id=expected_calendar_authority_id,
+            **({"process_environment": environment} if env_file is not None else {}),
         )
         return None
     if action == AgentPaperLoopAction.RUN_RESEARCH_JOB:
         if not isinstance(snapshot.research_job_id, UUID):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        research_settings = (
+            _FileEngineSettings.model_validate(
+                {
+                    **load_agent_paper_service_environment(repo_root, {}, env_file=env_file),
+                    "OPENAI_API_KEY": None,
+                    "NEXUS_PROVIDER_JOBS_ENABLED": "false",
+                }
+            )
+            if env_file is not None
+            else local_settings(repo_root, backend="codex_sdk")
+        )
         worked = await run_agent_worker_once(
-            local_settings(repo_root, backend="codex_sdk"),
+            research_settings,
             job_ids=(snapshot.research_job_id,),
         )
         if not worked:
@@ -1841,11 +1923,20 @@ async def execute_agent_paper_loop_action(
         )
         return None
     if action == AgentPaperLoopAction.COLLECT_WINDOW:
-        environment = load_agent_paper_service_environment(repo_root, os.environ)
+        environment = (
+            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            if env_file is not None
+            else load_agent_paper_service_environment(repo_root, os.environ)
+        )
+        if env_file is not None:
+            _require_explicit_schwab_config(environment)
         await collect_window_once(
-            AgentPaperMarketSettings.model_validate(environment),
+            (
+                _FileMarketSettings if env_file is not None else AgentPaperMarketSettings
+            ).model_validate(environment),
             AgentPaperCollectWindowRequest(action="collect-window", cycle_id=snapshot.cycle_id),
             repo_root=repo_root,
+            **({"process_environment": environment} if env_file is not None else {}),
         )
         return None
     if action == AgentPaperLoopAction.ADVANCE_ORDER and snapshot.order_id is not None:
@@ -2057,16 +2148,75 @@ async def inspect_agent_paper_loop(
         await engine.dispose()
 
 
+async def read_agent_paper_service_heartbeat(settings: EngineSettings) -> dict[str, object]:
+    """Read one persisted liveness fact; do not infer that an observed Worker is still alive."""
+    if not settings.database_url:
+        return {"status": "unavailable"}
+    database = make_url(settings.database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in _LOOPBACK_HOSTS
+        or database.query
+    ):
+        return {"status": "unavailable"}
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with async_sessionmaker(engine).begin() as session:
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            heartbeat = await session.scalar(
+                select(WorkerHeartbeat)
+                .where(WorkerHeartbeat.queue == QueueName.AGENT_PAPER.value)
+                .order_by(WorkerHeartbeat.seen_at.desc(), WorkerHeartbeat.id.desc())
+                .limit(1)
+            )
+            if heartbeat is None:
+                return {"status": "missing"}
+            return {
+                "status": "observed",
+                "seen_at": heartbeat.seen_at.isoformat(),
+                "started_at": heartbeat.started_at.isoformat(),
+                "process_version": heartbeat.process_version,
+                "migration_head": heartbeat.migration_head,
+            }
+    finally:
+        await engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexus-engine-agent-paper-loop")
     parser.add_argument("--account-id")
-    parser.add_argument("--service-preflight", action="store_true")
+    diagnostics = parser.add_mutually_exclusive_group()
+    diagnostics.add_argument("--service-preflight", action="store_true")
+    diagnostics.add_argument("--service-status", action="store_true")
+    parser.add_argument("--repo-root", type=Path)
+    parser.add_argument("--env-file", type=Path)
     args = parser.parse_args(argv)
-    root = Path.cwd()
+    root = args.repo_root.resolve() if args.repo_root is not None else Path.cwd()
+    env_file = None
+    if args.repo_root is not None or args.env_file is not None or args.service_status:
+        try:
+            if args.repo_root is None or args.env_file is None:
+                raise LocalStackConfigurationError("AGENT_PAPER_SERVICE_CONFIG_REQUIRED")
+            if not root.is_dir() or not (root / "infra/compose.yaml").is_file():
+                raise LocalStackConfigurationError("REPOSITORY_ROOT_INVALID")
+            path = args.env_file if args.env_file.is_absolute() else root / args.env_file
+            env_file = _validate_local_env(root, path)
+        except (LocalStackConfigurationError, OSError) as error:
+            code = (
+                str(error)
+                if isinstance(error, LocalStackConfigurationError)
+                else "LOCAL_ENV_UNSAFE"
+            )
+            print(json.dumps({"error_code": code}))
+            return 1
     try:
-        if args.service_preflight:
+        environment = (
+            load_agent_paper_service_environment(root, {}, env_file=env_file)
+            if env_file is not None
+            else load_agent_paper_service_environment(root, os.environ)
+        )
+        if args.service_preflight or args.service_status:
             try:
-                environment = load_agent_paper_service_environment(root, os.environ)
                 result = agent_paper_service_preflight(environment, repo_root=root)
             except Exception:
                 result = {
@@ -2076,9 +2226,24 @@ def main(argv: list[str] | None = None) -> int:
                     "blocking_codes": ["AGENT_PAPER_PREFLIGHT_CONFIG_LOAD_FAILED"],
                     "optional_codes": [],
                 }
+            if args.service_status:
+                try:
+                    heartbeat = asyncio.run(
+                        read_agent_paper_service_heartbeat(
+                            _FileEngineSettings.model_validate(environment)
+                        )
+                    )
+                except Exception:
+                    heartbeat = {"status": "unavailable"}
+                print(
+                    json.dumps(
+                        {"heartbeat": heartbeat, "preflight": result, "execution_locked": True},
+                        sort_keys=True,
+                    )
+                )
+                return 0 if result["status"] == "ready" and heartbeat["status"] == "observed" else 1
             print(json.dumps(result, sort_keys=True))
             return 0 if result["status"] == "ready" else 1
-        environment = load_agent_paper_service_environment(root, os.environ)
         requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
         if requested.strip().lower() in {"", "0", "false", "no", "off"}:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
@@ -2093,12 +2258,19 @@ def main(argv: list[str] | None = None) -> int:
         if environment.get("AGENT_RUNTIME_MODE", "").strip().lower() != "codex_sdk":
             print(json.dumps({"error_code": "AGENT_PAPER_MODEL_RUNTIME_MISMATCH"}))
             return 1
-        settings = EngineSettings.model_validate(environment)
+        settings = (_FileEngineSettings if env_file is not None else EngineSettings).model_validate(
+            environment
+        )
         if not settings.agent_paper_cycle_enabled:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
             return 1
         reason = asyncio.run(
-            run_local_agent_paper_loop(settings, account_id=account_id, repo_root=root)
+            run_local_agent_paper_loop(
+                settings,
+                account_id=account_id,
+                repo_root=root,
+                **({"env_file": env_file} if env_file is not None else {}),
+            )
         )
         if reason == AgentPaperLoopAction.STOP_UNCONFIRMED:
             print(json.dumps({"error_code": "AGENT_PAPER_LOOP_STOP_UNCONFIRMED"}))

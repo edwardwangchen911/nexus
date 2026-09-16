@@ -1438,6 +1438,249 @@ def test_service_environment_localizes_compose_endpoints_after_process_override(
     assert environment["OBJECT_STORE_ENDPOINT"] == "http://127.0.0.1:59000"
 
 
+def explicit_service_config(tmp_path: Path) -> Path:
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra/compose.yaml").touch()
+    (tmp_path / ".gitignore").write_text("infra/.env*\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    env_file = tmp_path / "infra/.env.service"
+    env_file.write_text(
+        "\n".join(f"{key}={value}" for key, value in service_ready_environment().items())
+    )
+    (tmp_path / "infra/.env.local").write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=false\n")
+    return env_file
+
+
+def test_explicit_config_cli_preflight_and_runtime_ignore_business_process_overrides(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    env_file = explicit_service_config(tmp_path)
+    for name, value in {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false",
+        "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(UUID(int=99)),
+        "AGENT_RUNTIME_MODE": "responses",
+        "DATABASE_URL": "postgresql+asyncpg://wrong/other",
+        "ALPACA_API_KEY_ID": "process-canary",
+        "FRED_API_KEY": "process-only-canary",
+    }.items():
+        monkeypatch.setenv(name, value)
+    seen = []
+
+    def preflight(environment, *, repo_root):
+        seen.append("preflight")
+        assert repo_root == tmp_path
+        assert environment["DATABASE_URL"] == enabled_environment()["DATABASE_URL"]
+        assert environment["ALPACA_API_KEY_ID"] == "alpaca-key"
+        assert "FRED_API_KEY" not in environment
+        return {"status": "ready"}
+
+    async def runtime(settings, *, account_id, repo_root, env_file):
+        seen.append("runtime")
+        assert repo_root == tmp_path and env_file == tmp_path / "infra/.env.service"
+        assert account_id == UUID(int=1)
+        assert settings.database_url == enabled_environment()["DATABASE_URL"]
+        assert settings.agent_paper_cycle_enabled
+        assert settings.agent_runtime_mode.value == "codex_sdk"
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "agent_paper_service_preflight", preflight)
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", runtime)
+    args = ["--repo-root", str(tmp_path), "--env-file", str(env_file)]
+    assert loop.main([*args, "--service-preflight"]) == 0
+    assert loop.main(args) == 0
+    assert seen == ["preflight", "runtime"]
+    assert "canary" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("invalid", ["missing", "tracked", "symlink", "outside", "not_ignored"])
+@pytest.mark.parametrize("action", [[], ["--service-preflight"], ["--service-status"]])
+def test_explicit_config_rejected_before_any_business_or_codex_access(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    invalid,
+    action,
+):
+    env_file = explicit_service_config(tmp_path)
+    if invalid == "missing":
+        env_file.unlink()
+    elif invalid == "tracked":
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-f", str(env_file)], check=True)
+    elif invalid == "symlink":
+        target = tmp_path / "infra/.env.target"
+        env_file.rename(target)
+        env_file.symlink_to(target)
+    elif invalid == "outside":
+        env_file = tmp_path.parent / f"{tmp_path.name}.env"
+        env_file.write_text("CANARY=private-config-canary")
+    else:
+        (tmp_path / ".gitignore").write_text("")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid config must fence Codex, database and producers")
+
+    for name in (
+        "sdk_status",
+        "create_async_engine",
+        "run_local_agent_paper_loop",
+        "agent_paper_service_preflight",
+    ):
+        monkeypatch.setattr(loop, name, unexpected)
+    assert loop.main(["--repo-root", str(tmp_path), "--env-file", str(env_file), *action]) == 1
+    assert "private-config-canary" not in capsys.readouterr().out
+
+
+def test_explicit_loop_reinspection_and_action_keep_registered_config(monkeypatch, tmp_path):
+    env_file = explicit_service_config(tmp_path)
+    monkeypatch.setenv("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
+    seen = []
+
+    async def model_ready():
+        return None
+
+    async def initial(_settings):
+        return CALENDAR_AUTHORITY_ID
+
+    async def inspect(settings, **kwargs):
+        assert settings.agent_paper_cycle_enabled
+        assert settings.database_url == enabled_environment()["DATABASE_URL"]
+        seen.append("inspect")
+        return snapshot()
+
+    async def execute(settings, *, env_file, **kwargs):
+        assert env_file == tmp_path / "infra/.env.service"
+        seen.append("execute")
+
+    async def run_loop(*, inspect, execute, **kwargs):
+        snap = await inspect()
+        await execute(A.TRIGGER, snap)
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", initial)
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "execute_agent_paper_loop_action", execute)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url=enabled_environment()["DATABASE_URL"]),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+        )
+    )
+    assert result == A.STOP_REQUESTED
+    assert seen == ["inspect", "execute"]
+
+
+@pytest.mark.parametrize("action", [A.TRIGGER, A.COLLECT_WINDOW, A.RUN_RESEARCH_JOB])
+def test_explicit_action_uses_registered_config_through_product_boundary(
+    monkeypatch,
+    tmp_path,
+    action,
+):
+    env_file = explicit_service_config(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://wrong/other")
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "wrong-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "process-only-canary")
+    observed = []
+
+    async def producer(settings, *args, **kwargs):
+        assert settings.database_url == enabled_environment()["DATABASE_URL"]
+        assert settings.openai_api_key is None
+        if action != A.RUN_RESEARCH_JOB:
+            assert settings.alpaca_key.get_secret_value() == "alpaca-key"
+        if action == A.COLLECT_WINDOW:
+            assert kwargs["process_environment"]["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
+        observed.append(action)
+        return "prepared" if action == A.TRIGGER else True
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", producer)
+    monkeypatch.setattr(loop, "collect_window_once", producer)
+    monkeypatch.setattr(loop, "run_agent_worker_once", producer)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+            action=action,
+            snapshot=snapshot(cycle_id=UUID(int=2), research_job_id=UUID(int=3)),
+        )
+    )
+    assert result is None
+    assert observed == [action]
+
+
+def test_explicit_trigger_forwards_registered_schwab_config_after_prerequisites(
+    monkeypatch, tmp_path
+):
+    env_file = explicit_service_config(tmp_path)
+    seen = []
+
+    async def ready(*args, **kwargs):
+        return "ready"
+
+    async def trigger(settings, request, *, process_environment, **kwargs):
+        assert process_environment["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
+        assert process_environment["NEXUS_SCHWAB_APP_SECRET"] == "schwab-secret"
+        seen.append(request.account_id)
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "trigger_once", trigger)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.TRIGGER,
+            snapshot=snapshot(),
+            env_file=env_file,
+        )
+    )
+    assert result is None and seen == [UUID(int=1)]
+
+
+def test_preflight_cannot_fill_missing_schwab_config_from_default_file(monkeypatch, tmp_path):
+    explicit_service_config(tmp_path)
+    (tmp_path / "infra/.env.local").write_text("NEXUS_SCHWAB_APP_KEY=default-key\n")
+    environment = service_ready_environment()
+    environment.pop("NEXUS_SCHWAB_APP_KEY")
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
+    result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
+    assert "AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID" in result["blocking_codes"]
+
+
+@pytest.mark.parametrize("action", [A.TRIGGER, A.COLLECT_WINDOW])
+def test_explicit_action_missing_schwab_config_never_falls_back(monkeypatch, tmp_path, action):
+    env_file = explicit_service_config(tmp_path)
+    environment = service_ready_environment()
+    environment.pop("NEXUS_SCHWAB_APP_KEY")
+    env_file.write_text("\n".join(f"{name}={value}" for name, value in environment.items()))
+    (tmp_path / "infra/.env.local").write_text("NEXUS_SCHWAB_APP_KEY=default-key\n")
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("missing registered config must fence all producers")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", unexpected)
+    monkeypatch.setattr(loop, "collect_window_once", unexpected)
+    with pytest.raises(ValueError, match="^AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID$"):
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                action=action,
+                snapshot=snapshot(cycle_id=UUID(int=2)),
+                env_file=env_file,
+            )
+        )
+
+
 def test_local_loop_reinspection_uses_service_environment_loader(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

@@ -4,9 +4,11 @@ import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from uuid import UUID
 
+import httpx
 import pytest
 from nexus.ops.schwab_market_stream import (
     SchwabMarketStreamImportResult,
@@ -311,9 +313,7 @@ async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
         imported.append((bindings, directory, imported_at))
         return expected
 
-    monkeypatch.setattr(
-        "nexus.ops.schwab_market_stream.import_schwab_market_stream", fake_import
-    )
+    monkeypatch.setattr("nexus.ops.schwab_market_stream.import_schwab_market_stream", fake_import)
     captured_at = datetime(2026, 8, 28, 14, 30, tzinfo=UTC)
 
     class Session:
@@ -341,6 +341,100 @@ async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
     assert imported[0][0] == {"AAPL": AAPL_ID}
     assert imported[0][2] == captured_at + timedelta(seconds=1)
     assert not imported[0][1].exists()
+
+
+@pytest.mark.asyncio
+async def test_explicit_capture_config_reaches_refresh_without_process_or_default_override(
+    tmp_path,
+    monkeypatch,
+):
+    from nexus.ops import schwab_market_stream as stream
+    from nexus.ops.agent_paper_loop import load_agent_paper_service_environment
+    from nexus.providers.market import schwab_oauth as oauth
+
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra/.env.local").write_text(
+        "NEXUS_SCHWAB_APP_KEY=default-key\nNEXUS_SCHWAB_APP_SECRET=default-secret\n"
+        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
+    )
+    env_file = tmp_path / "infra/.env.service"
+    env_file.write_text(
+        "NEXUS_SCHWAB_APP_KEY=registered-key\nNEXUS_SCHWAB_APP_SECRET=registered-secret\n"
+        "NEXUS_SCHWAB_CALLBACK_URL=https://127.0.0.1\n"
+    )
+    monkeypatch.setenv("NEXUS_SCHWAB_APP_KEY", "process-key")
+    monkeypatch.setenv("NEXUS_SCHWAB_APP_SECRET", "process-secret")
+    environment = load_agent_paper_service_environment(tmp_path, {}, env_file=env_file)
+    oauth.save_schwab_token(
+        tmp_path,
+        oauth.SchwabOAuthToken(
+            access_token="old-access",
+            refresh_token="refresh-canary",
+            obtained_at=EVENT_AT - timedelta(minutes=20),
+            expires_at=EVENT_AT,
+        ),
+    )
+    requests = []
+
+    def respond(request):
+        requests.append(request.url.path)
+        if request.url.path == "/v1/oauth/token":
+            expected = base64.b64encode(b"registered-key:registered-secret").decode()
+            assert request.headers["Authorization"] == "Basic " + expected
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "registered-access",
+                    "refresh_token": "rotated-refresh",
+                    "expires_in": 1800,
+                    "token_type": "Bearer",
+                },
+            )
+        assert request.headers["Authorization"] == "Bearer registered-access"
+        return httpx.Response(
+            200,
+            json={
+                "streamerInfo": [
+                    {
+                        "streamerSocketUrl": "wss://streamer-api.schwab.com/ws",
+                        "schwabClientCustomerId": "customer",
+                        "schwabClientCorrelId": "correlation",
+                        "schwabClientChannel": "channel",
+                        "schwabClientFunctionId": "function",
+                    }
+                ]
+            },
+        )
+
+    async def collect(**kwargs):
+        assert kwargs["credentials"].access_token == "registered-access"
+        assert kwargs["symbols"] == ("AAPL",)
+        kwargs["directory"].mkdir(mode=0o700)
+        return {"status": "bounded_complete"}
+
+    expected = SchwabMarketStreamImportResult("a" * 64, 1, 1, UUID(int=1), {}, {})
+
+    async def imported(*args, **kwargs):
+        return expected
+
+    class Session:
+        async def scalar(self, statement):
+            return EVENT_AT
+
+    monkeypatch.setattr(stream, "import_schwab_market_stream", imported)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await stream.capture_and_import_schwab_level_one_once(
+            Session(),
+            object(),
+            repo_root=tmp_path,
+            client=client,
+            instrument_id=AAPL_ID,
+            checked_at=EVENT_AT,
+            process_environment=environment,
+            capture=partial(stream.run_schwab_stream, collector=collect),
+        )
+    assert result == expected
+    assert requests == ["/v1/oauth/token", "/trader/v1/userPreference"]
 
 
 @pytest.mark.asyncio
@@ -532,9 +626,7 @@ async def test_schwab_snapshot_parser_rejects_quote_older_than_sixty_seconds(
         completed_at=EVENT_AT,
     )
 
-    with pytest.raises(
-        MarketProviderPayloadError, match="SCHWAB_MARKET_STREAM_EVIDENCE_STALE"
-    ):
+    with pytest.raises(MarketProviderPayloadError, match="SCHWAB_MARKET_STREAM_EVIDENCE_STALE"):
         parse_schwab_snapshot_batch(payload, _request("AAPL"))
 
 

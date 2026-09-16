@@ -22,7 +22,10 @@ from nexus.paper.agent_cycle import AgentPaperCycleError
 from nexus.paper.agent_cycle_authority import CycleAuthority, ServiceCalendarAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult, AgentPaperTriggerReservation
 from nexus.paper.agent_market import AgentPaperMarketScope
-from nexus.persistence.models.paper import PAPER_EXECUTION_SOURCE_POLICY_ID
+from nexus.persistence.models.paper import (
+    PAPER_EXECUTION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+)
 from nexus.providers.market.schwab_oauth import SchwabOAuthError
 from nexus.providers.market.schwab_stream import SchwabStreamError
 from nexus.risk.query_authority_producer import RiskQueryScope, RiskSourceProof
@@ -329,9 +332,11 @@ def test_run_research_claims_only_resolved_job_and_exits(
     }
 
 
-def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
+@pytest.mark.parametrize("schwab", [False, True])
+def test_collect_window_forwards_database_scope_and_explicit_provider_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    schwab: bool,
 ) -> None:
     cycle_id = UUID(int=1)
     instrument_id = UUID(int=2)
@@ -339,11 +344,22 @@ def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
     scope = AgentPaperMarketScope(
         cycle_id=cycle_id,
         instrument_id=instrument_id,
-        execution_source_policy_id=PAPER_EXECUTION_SOURCE_POLICY_ID,
+        execution_source_policy_id=(
+            PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID if schwab else PAPER_EXECUTION_SOURCE_POLICY_ID
+        ),
         window_start=window_start,
         window_end=window_start.replace(minute=35),
     )
     expected = object()
+    environment = {"NEXUS_SCHWAB_APP_KEY": "registered-key"}
+    providers = []
+
+    def schwab_provider(root, http, *, symbol_resolver, process_environment):
+        assert root == tmp_path
+        assert process_environment == environment
+        provider = object()
+        providers.append(provider)
+        return provider
 
     class AsyncContext:
         def __init__(self, value: object) -> None:
@@ -378,6 +394,8 @@ def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
         assert cycle_id == scope.cycle_id
         assert instrument_id == scope.instrument_id
         assert window_start == scope.window_start
+        if schwab:
+            assert _kwargs["provider"] is providers[0]
         return expected
 
     monkeypatch.setattr(cli, "create_async_engine", lambda *_args, **_kwargs: Engine())
@@ -387,6 +405,7 @@ def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
     monkeypatch.setattr(cli, "FixedOriginHttpClient", lambda **_kwargs: object())
     monkeypatch.setattr(cli, "AlpacaHttpTransport", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(cli, "AlpacaMarketDataProvider", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli, "SchwabPriceHistoryProvider", schwab_provider)
     monkeypatch.setattr(cli, "resolve_agent_paper_market_scope", resolve)
     monkeypatch.setattr(cli, "collect_agent_paper_window", collect)
 
@@ -405,6 +424,7 @@ def test_collect_window_forwards_database_scope_to_legacy_alpaca_collector(
                 instrument_id=instrument_id,
             ),
             repo_root=tmp_path,
+            **({"process_environment": environment} if schwab else {}),
         )
     )
 
@@ -542,6 +562,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         )
 
     async def level_one(*_args, **_kwargs):
+        assert _kwargs["process_environment"] == {"NEXUS_SCHWAB_APP_KEY": "registered-key"}
         events.append("level-one")
         return SchwabMarketStreamImportResult("b" * 64, 1, 1, artifact_id, {"AAPL": quote_id}, {})
 
@@ -597,6 +618,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             reservation=reservation,
             repo_root=tmp_path,
             client=object(),
+            process_environment={"NEXUS_SCHWAB_APP_KEY": "registered-key"},
         )
     )
 

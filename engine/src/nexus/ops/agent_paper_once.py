@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -319,6 +319,7 @@ async def trigger_in_session(
     repo_root: Path,
     client: httpx.AsyncClient,
     expected_calendar_authority_id: UUID | None = None,
+    process_environment: Mapping[str, str] | None = None,
 ) -> AgentPaperCycleResult:
     """Run one bounded provider pass, freeze DB time, and create one research Job."""
     initial_time = await session.scalar(select(func.clock_timestamp()))
@@ -388,6 +389,7 @@ async def trigger_in_session(
             repo_root=repo_root,
             client=client,
             instrument_id=scope.instrument_id,
+            process_environment=process_environment,
         )
     except (ProviderMarketStreamError, SchwabOAuthError, SchwabStreamError) as error:
         _raise_schwab_l1_incomplete(
@@ -448,6 +450,7 @@ async def trigger_once(
     *,
     repo_root: Path,
     expected_calendar_authority_id: UUID | None = None,
+    process_environment: Mapping[str, str] | None = None,
 ) -> AgentPaperCycleResult:
     _validate_local_database(settings.database_url)
     endpoint = urlsplit(settings.object_store_endpoint or "")
@@ -495,6 +498,11 @@ async def trigger_once(
                     repo_root=repo_root,
                     client=client,
                     expected_calendar_authority_id=expected_calendar_authority_id,
+                    **(
+                        {"process_environment": process_environment}
+                        if process_environment is not None
+                        else {}
+                    ),
                 )
                 await finish_schwab_agent_paper_trigger(
                     session, reservation=reservation, result=result
@@ -646,6 +654,7 @@ async def collect_window_once(
     request: AgentPaperCollectWindowRequest,
     *,
     repo_root: Path,
+    process_environment: Mapping[str, str] | None = None,
 ) -> PaperMarketWindowResult:
     if not settings.database_url:
         raise ValueError("AGENT_PAPER_DATABASE_UNCONFIGURED")
@@ -680,7 +689,12 @@ async def collect_window_once(
             resolver = SqlInstrumentSymbolResolver(resolver_session)
             provider: MarketDataProvider
             if scope.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
-                provider = SchwabPriceHistoryProvider(repo_root, http, symbol_resolver=resolver)
+                provider = SchwabPriceHistoryProvider(
+                    repo_root,
+                    http,
+                    symbol_resolver=resolver,
+                    process_environment=process_environment,
+                )
             else:
                 if (
                     settings.alpaca_key is None

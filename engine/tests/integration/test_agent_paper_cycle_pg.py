@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -88,7 +89,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
-from nexus.persistence.models.runtime import IdempotencyRecord, Job
+from nexus.persistence.models.runtime import IdempotencyRecord, Job, WorkerHeartbeat
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 from nexus.risk.authority import (
     canonical_query_authority_hash,
@@ -109,6 +110,96 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 ENGINE_ROOT = Path(__file__).parents[2]
+
+
+def test_service_status_reads_one_heartbeat_without_producers_or_business_writes(
+    migrated_database_url,
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from sqlalchemy import event
+
+    seen_at = datetime(2026, 9, 16, 12, tzinfo=UTC)
+
+    async def seed():
+        engine = create_async_engine(migrated_database_url)
+        try:
+            async with async_sessionmaker(engine).begin() as session:
+                session.add(
+                    WorkerHeartbeat(
+                        queue="agent_paper",
+                        worker_id="private-worker-canary",
+                        process_version=agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
+                        migration_head=agent_paper_loop.CURRENT_MIGRATION_HEAD,
+                        started_at=seen_at - timedelta(minutes=5),
+                        seen_at=seen_at,
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(seed())
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra/compose.yaml").touch()
+    (tmp_path / ".gitignore").write_text("infra/.env.service\n")
+    env_file = tmp_path / "infra/.env.service"
+    env_file.write_text(f"DATABASE_URL={migrated_database_url}\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    statements = []
+
+    def observed_engine(*args, **kwargs):
+        engine = create_async_engine(*args, **kwargs)
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe(connection, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        return engine
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("service status must not run producers or heartbeat writes")
+
+    for name in (
+        "run_local_agent_paper_loop",
+        "heartbeat_agent_paper_loop",
+        "trigger_once",
+        "collect_window_once",
+        "run_agent_worker_once",
+        "sdk_status",
+    ):
+        monkeypatch.setattr(agent_paper_loop, name, unexpected)
+    monkeypatch.setattr(agent_paper_loop, "create_async_engine", observed_engine)
+    assert (
+        agent_paper_loop.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--env-file",
+                str(env_file),
+                "--service-status",
+            ]
+        )
+        == 1
+    )  # Heartbeat exists, while configuration preflight independently remains blocked.
+    output = capsys.readouterr().out
+    result = json.loads(output)
+    assert result["heartbeat"] == {
+        "status": "observed",
+        "seen_at": seen_at.isoformat(),
+        "started_at": (seen_at - timedelta(minutes=5)).isoformat(),
+        "process_version": agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
+        "migration_head": agent_paper_loop.CURRENT_MIGRATION_HEAD,
+    }
+    assert result["preflight"]["status"] == "blocked"
+    assert result["preflight"]["external_requests"] == 0
+    assert result["execution_locked"] is True
+    assert "private-worker-canary" not in output
+    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 1 and "worker_heartbeats" in selects[0]
+    assert not any(
+        sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql in statements
+    )
 
 
 class _ObjectStore:
@@ -912,6 +1003,7 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
 
     async def reject_calendar(*_args, **_kwargs):
         nonlocal provider_calls
+        assert _kwargs["process_environment"] == {"NEXUS_SCHWAB_APP_KEY": "registered-key"}
         provider_calls += 1
         raise ValueError(failure_code)
 
@@ -935,7 +1027,12 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
     )
 
     with pytest.raises(ValueError, match=failure_code):
-        await agent_paper_once.trigger_once(settings, request, repo_root=ENGINE_ROOT.parent)
+        await agent_paper_once.trigger_once(
+            settings,
+            request,
+            repo_root=ENGINE_ROOT.parent,
+            process_environment={"NEXUS_SCHWAB_APP_KEY": "registered-key"},
+        )
 
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
