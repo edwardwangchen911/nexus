@@ -4,14 +4,13 @@ import argparse
 import asyncio
 import json
 import re
-from collections.abc import Sequence
-from datetime import UTC, datetime, time, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -38,7 +37,11 @@ from nexus.paper.agent_cycle import (
     resume_schwab_agent_paper_cycle,
     start_schwab_agent_paper_cycle,
 )
-from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
+from nexus.paper.agent_cycle_authority import (
+    load_agent_paper_service_calendar_authority,
+    load_quasi_realtime_cycle_authority,
+    select_agent_paper_service_calendar_authority,
+)
 from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
 from nexus.paper.agent_market import (
     PaperMarketWindowResult,
@@ -315,22 +318,45 @@ async def trigger_in_session(
     reservation: AgentPaperTriggerReservation,
     repo_root: Path,
     client: httpx.AsyncClient,
+    expected_calendar_authority_id: UUID | None = None,
+    process_environment: Mapping[str, str] | None = None,
 ) -> AgentPaperCycleResult:
     """Run one bounded provider pass, freeze DB time, and create one research Job."""
     initial_time = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(initial_time, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    local_time = initial_time.astimezone(ZoneInfo("America/New_York"))
-    if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
-        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     decision_session = reservation.decision_session
     decision_slot_at = reservation.decision_slot_at
-    if local_time.date() != decision_session:
-        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+
+    selected = (
+        await select_agent_paper_service_calendar_authority(session, now=initial_time)
+        if expected_calendar_authority_id is None
+        else None
+    )
+    calendar_authority_id = (
+        selected.calendar_authority_id if selected is not None else expected_calendar_authority_id
+    )
+    assert calendar_authority_id is not None
+    service_calendar = await load_agent_paper_service_calendar_authority(
+        session,
+        now=initial_time,
+        expected_calendar_authority_id=calendar_authority_id,
+    )
+    if (
+        service_calendar.session != decision_session
+        or initial_time < service_calendar.decision_window_start_at
+        or initial_time >= service_calendar.market_close_at
+    ):
+        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
 
     initial_authority = await load_quasi_realtime_cycle_authority(
-        session, account_id=request.account_id, now=initial_time
+        session,
+        account_id=request.account_id,
+        now=initial_time,
+        expected_calendar_authority_id=calendar_authority_id,
     )
+    if initial_authority.calendar_authority_id != calendar_authority_id:
+        raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
     scope = await inspect_query_authority_scope(
         session,
         decision_session=decision_session,
@@ -363,6 +389,7 @@ async def trigger_in_session(
             repo_root=repo_root,
             client=client,
             instrument_id=scope.instrument_id,
+            process_environment=process_environment,
         )
     except (ProviderMarketStreamError, SchwabOAuthError, SchwabStreamError) as error:
         _raise_schwab_l1_incomplete(
@@ -372,10 +399,17 @@ async def trigger_in_session(
     decision_time = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(decision_time, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    final_local = decision_time.astimezone(ZoneInfo("America/New_York"))
-    if final_local.date() != decision_session or not time(7) <= final_local.time().replace(
-        tzinfo=None
-    ) < time(16):
+    final_calendar = await load_agent_paper_service_calendar_authority(
+        session,
+        now=decision_time,
+        expected_calendar_authority_id=calendar_authority_id,
+    )
+    if (
+        final_calendar.calendar_authority_id != calendar_authority_id
+        or final_calendar.session != decision_session
+        or decision_time < final_calendar.decision_window_start_at
+        or decision_time >= final_calendar.market_close_at
+    ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     quote_id = stream.quote_ids.get("AAPL")
     quote = None if quote_id is None else await session.get(LatestQuote, quote_id)
@@ -394,8 +428,13 @@ async def trigger_in_session(
     except ValueError as error:
         raise ValueError("RISK_INPUT_REQUIRED") from error
     authority = await load_quasi_realtime_cycle_authority(
-        session, account_id=request.account_id, now=decision_time
+        session,
+        account_id=request.account_id,
+        now=decision_time,
+        expected_calendar_authority_id=calendar_authority_id,
     )
+    if authority.calendar_authority_id != calendar_authority_id:
+        raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
     return await start_schwab_agent_paper_cycle(
         session,
         authority=authority,
@@ -410,6 +449,8 @@ async def trigger_once(
     request: AgentPaperTriggerRequest,
     *,
     repo_root: Path,
+    expected_calendar_authority_id: UUID | None = None,
+    process_environment: Mapping[str, str] | None = None,
 ) -> AgentPaperCycleResult:
     _validate_local_database(settings.database_url)
     endpoint = urlsplit(settings.object_store_endpoint or "")
@@ -456,6 +497,12 @@ async def trigger_once(
                     reservation=reservation,
                     repo_root=repo_root,
                     client=client,
+                    expected_calendar_authority_id=expected_calendar_authority_id,
+                    **(
+                        {"process_environment": process_environment}
+                        if process_environment is not None
+                        else {}
+                    ),
                 )
                 await finish_schwab_agent_paper_trigger(
                     session, reservation=reservation, result=result
@@ -607,6 +654,7 @@ async def collect_window_once(
     request: AgentPaperCollectWindowRequest,
     *,
     repo_root: Path,
+    process_environment: Mapping[str, str] | None = None,
 ) -> PaperMarketWindowResult:
     if not settings.database_url:
         raise ValueError("AGENT_PAPER_DATABASE_UNCONFIGURED")
@@ -641,7 +689,12 @@ async def collect_window_once(
             resolver = SqlInstrumentSymbolResolver(resolver_session)
             provider: MarketDataProvider
             if scope.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
-                provider = SchwabPriceHistoryProvider(repo_root, http, symbol_resolver=resolver)
+                provider = SchwabPriceHistoryProvider(
+                    repo_root,
+                    http,
+                    symbol_resolver=resolver,
+                    process_environment=process_environment,
+                )
             else:
                 if (
                     settings.alpaca_key is None
@@ -724,8 +777,11 @@ def main(argv: list[str] | None = None) -> int:
         code = str(error)
         if code not in {
             "AGENT_PAPER_ACCOUNT_INVALID",
+            "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
+            "AGENT_PAPER_CALENDAR_UNAVAILABLE",
             "AGENT_PAPER_DATABASE_UNCONFIGURED",
             "AGENT_PAPER_DATABASE_NOT_LOCAL",
+            "AGENT_PAPER_MARKET_WINDOW_CLOSED",
             "AGENT_PAPER_TIME_IN_FUTURE",
             "AGENT_PAPER_MARKET_CONFIG_INVALID",
             "AGENT_PAPER_OUTSIDE_WINDOW",

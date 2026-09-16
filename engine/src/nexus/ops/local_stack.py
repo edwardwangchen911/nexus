@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
+
+from dotenv import dotenv_values
 
 
 class LocalStackConfigurationError(ValueError):
@@ -35,6 +38,33 @@ class LocalStackStepResult:
     ordinal: int
     exit_code: int
     result_code: str
+    fact: str = "compose"
+    details: tuple[tuple[str, object], ...] = ()
+
+
+_HOST_STATUSES = frozenset({"started", "running", "inactive", "stopped"})
+_HOST_ERROR_CODES = frozenset(
+    {
+        "AGENT_PAPER_SERVICE_ACKNOWLEDGEMENT_INVALID",
+        "AGENT_PAPER_SERVICE_ACTION_INVALID",
+        "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED",
+        "AGENT_PAPER_SERVICE_BOOTSTRAP_FAILED",
+        "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE",
+        "AGENT_PAPER_SERVICE_OWNER_MISMATCH",
+        "AGENT_PAPER_SERVICE_PREFLIGHT_FAILED",
+        "AGENT_PAPER_SERVICE_RUNTIME_MISSING",
+        "AGENT_PAPER_SERVICE_START_FAILED",
+        "AGENT_PAPER_SERVICE_STATUS_UNAVAILABLE",
+        "AGENT_PAPER_SERVICE_STOP_FAILED",
+        "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED",
+        "LOCAL_ENV_REQUIRED",
+        "LOCAL_ENV_UNSAFE",
+        "PROJECT_NAME_INVALID",
+        "REPOSITORY_ROOT_INVALID",
+    }
+)
+_SAFE_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
+_SAFE_TEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}")
 
 
 def build_local_stack_commands(
@@ -123,19 +153,30 @@ def run_local_stack(
     project_name: str,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> tuple[LocalStackStepResult, ...]:
-    """Run reviewed commands and discard all subprocess output."""
+    """Run the exact Compose and host-service lifecycle, emitting safe facts only."""
+    root = repo_root.resolve()
+    resolved_env = (
+        env_file.resolve()
+        if action is LocalStackAction.DOCTOR
+        else _validate_local_env(root, env_file)
+    )
+    agent_paper_enabled = (
+        _agent_paper_enabled(resolved_env) if action is LocalStackAction.UP else False
+    )
     commands = build_local_stack_commands(
         action,
-        repo_root=repo_root,
-        env_file=env_file,
+        repo_root=root,
+        env_file=resolved_env,
         project_name=project_name,
     )
     results: list[LocalStackStepResult] = []
-    for ordinal, command in enumerate(commands, start=1):
+
+    def run_command(command: LocalStackCommand, *, fact: str = "compose") -> tuple[int, str]:
+        ordinal = len(results) + 1
         try:
             completed = runner(
                 command.argv,
-                cwd=repo_root.resolve(),
+                cwd=root,
                 timeout=command.timeout_seconds,
                 check=False,
                 text=True,
@@ -148,13 +189,23 @@ def run_local_stack(
                     ordinal=ordinal,
                     exit_code=-1,
                     result_code="LOCAL_STACK_STEP_TIMEOUT",
+                    fact=fact,
                 )
             )
-            break
+            return -1, ""
+        except OSError:
+            results.append(
+                LocalStackStepResult(
+                    action=action,
+                    ordinal=ordinal,
+                    exit_code=-1,
+                    result_code="LOCAL_STACK_STEP_UNAVAILABLE",
+                    fact=fact,
+                )
+            )
+            return -1, ""
         result_code = (
-            "LOCAL_STACK_STEP_OK"
-            if completed.returncode == 0
-            else "LOCAL_STACK_STEP_FAILED"
+            "LOCAL_STACK_STEP_OK" if completed.returncode == 0 else "LOCAL_STACK_STEP_FAILED"
         )
         results.append(
             LocalStackStepResult(
@@ -162,10 +213,90 @@ def run_local_stack(
                 ordinal=ordinal,
                 exit_code=completed.returncode,
                 result_code=result_code,
+                fact=fact,
             )
         )
-        if completed.returncode != 0:
-            break
+        return completed.returncode, completed.stdout
+
+    def run_host(action_name: str) -> bool:
+        command = _host_service_command(
+            action_name,
+            repo_root=root,
+            env_file=resolved_env,
+            project_name=project_name,
+        )
+        exit_code, stdout = run_command(command, fact="host_service")
+        if exit_code == -1:
+            return False
+        results[-1] = _parse_host_service_result(results[-1], stdout)
+        status = dict(results[-1].details).get("status")
+        if action_name == "start":
+            accepted = status in {"started", "running"}
+        elif action_name == "stop":
+            accepted = status == "stopped"
+        else:
+            accepted = status in _HOST_STATUSES
+        if exit_code != 0 or not accepted:
+            if results[-1].exit_code == 0:
+                results[-1] = replace(results[-1], exit_code=1)
+            return False
+        return True
+
+    if action is LocalStackAction.DOWN:
+        if not run_host("stop"):
+            return tuple(results)
+        for command in commands:
+            exit_code, _ = run_command(command)
+            if exit_code != 0:
+                break
+        return tuple(results)
+
+    for command in commands:
+        exit_code, _ = run_command(command)
+        if exit_code != 0 and action is not LocalStackAction.STATUS:
+            return tuple(results)
+
+    if action is LocalStackAction.UP:
+        if agent_paper_enabled:
+            run_host("start")
+        return tuple(results)
+
+    if action is LocalStackAction.STATUS:
+        run_host("status")
+        diagnostic = _service_status_command(repo_root=root, env_file=resolved_env)
+        try:
+            completed = runner(
+                diagnostic.argv,
+                cwd=root,
+                timeout=diagnostic.timeout_seconds,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            result_code = (
+                "LOCAL_STACK_STEP_TIMEOUT"
+                if isinstance(error, subprocess.TimeoutExpired)
+                else "LOCAL_STACK_STEP_UNAVAILABLE"
+            )
+            for fact in ("heartbeat", "preflight"):
+                results.append(
+                    LocalStackStepResult(
+                        action=action,
+                        ordinal=len(results) + 1,
+                        exit_code=-1,
+                        result_code=result_code,
+                        fact=fact,
+                    )
+                )
+        else:
+            results.extend(
+                _parse_service_status_results(
+                    action=action,
+                    first_ordinal=len(results) + 1,
+                    stdout=completed.stdout,
+                )
+            )
     return tuple(results)
 
 
@@ -192,11 +323,19 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("local-stack configuration rejected\n")
         return 2
     for result in results:
-        sys.stdout.write(
-            f"{result.action.value} step={result.ordinal} "
-            f"code={result.result_code} exit={result.exit_code}\n"
-        )
-    return 0 if all(result.result_code == "LOCAL_STACK_STEP_OK" for result in results) else 1
+        safe_details = " ".join(f"{name}={value}" for name, value in result.details)
+        suffix = f" {safe_details}" if safe_details else ""
+        if result.fact == "compose":
+            sys.stdout.write(
+                f"{result.action.value} step={result.ordinal} "
+                f"code={result.result_code} exit={result.exit_code}\n"
+            )
+        else:
+            sys.stdout.write(
+                f"{result.action.value} fact={result.fact} step={result.ordinal} "
+                f"code={result.result_code} exit={result.exit_code}{suffix}\n"
+            )
+    return 0 if all(result.exit_code == 0 for result in results) else 1
 
 
 def _discover_repo_root() -> Path:
@@ -227,3 +366,175 @@ def _validate_local_env(repo_root: Path, env_file: Path) -> Path:
     if tracked.returncode == 0 or ignored.returncode != 0:
         raise LocalStackConfigurationError("LOCAL_ENV_UNSAFE")
     return resolved
+
+
+def _agent_paper_enabled(env_file: Path) -> bool:
+    value = dotenv_values(env_file, interpolate=False).get(
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false"
+    )
+    normalized = value.strip().lower() if isinstance(value, str) else "false"
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"", "0", "false", "no", "off"}:
+        return False
+    raise LocalStackConfigurationError("AGENT_PAPER_CYCLE_FLAG_INVALID")
+
+
+def _host_service_command(
+    action: str, *, repo_root: Path, env_file: Path, project_name: str
+) -> LocalStackCommand:
+    return LocalStackCommand(
+        (
+            sys.executable,
+            str(repo_root / "scripts/macos/agent-paper-loop-service.py"),
+            action,
+            "--repo-root",
+            str(repo_root),
+            "--env-file",
+            str(env_file),
+            "--project-name",
+            project_name,
+        ),
+        30 if action == "status" else 60,
+    )
+
+
+def _service_status_command(*, repo_root: Path, env_file: Path) -> LocalStackCommand:
+    return LocalStackCommand(
+        (
+            str(repo_root / ".venv/bin/nexus-engine-agent-paper-loop"),
+            "--service-status",
+            "--repo-root",
+            str(repo_root),
+            "--env-file",
+            str(env_file),
+        ),
+        30,
+    )
+
+
+def _json_object(stdout: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _parse_host_service_result(result: LocalStackStepResult, stdout: str) -> LocalStackStepResult:
+    payload = _json_object(stdout)
+    if payload is not None and payload.get("status") in _HOST_STATUSES:
+        status = str(payload["status"])
+        return LocalStackStepResult(
+            action=result.action,
+            ordinal=result.ordinal,
+            exit_code=result.exit_code,
+            result_code=f"AGENT_PAPER_SERVICE_{status.upper()}",
+            fact="host_service",
+            details=(("status", status),),
+        )
+    error_code = payload.get("error_code") if payload is not None else None
+    if isinstance(error_code, str) and error_code in _HOST_ERROR_CODES:
+        return LocalStackStepResult(
+            action=result.action,
+            ordinal=result.ordinal,
+            exit_code=result.exit_code,
+            result_code=error_code,
+            fact="host_service",
+        )
+    return LocalStackStepResult(
+        action=result.action,
+        ordinal=result.ordinal,
+        exit_code=result.exit_code if result.exit_code != 0 else 1,
+        result_code="AGENT_PAPER_SERVICE_OUTPUT_INVALID",
+        fact="host_service",
+    )
+
+
+def _safe_text(value: object) -> str | None:
+    return value if isinstance(value, str) and _SAFE_TEXT.fullmatch(value) else None
+
+
+def _safe_codes(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and _SAFE_CODE.fullmatch(item) for item in value
+    ):
+        return None
+    return tuple(value)
+
+
+def _parse_service_status_results(
+    *, action: LocalStackAction, first_ordinal: int, stdout: str
+) -> tuple[LocalStackStepResult, LocalStackStepResult]:
+    payload = _json_object(stdout)
+    heartbeat = payload.get("heartbeat") if payload is not None else None
+    preflight = payload.get("preflight") if payload is not None else None
+    heartbeat_details: tuple[tuple[str, object], ...] = ()
+    heartbeat_code = "AGENT_PAPER_HEARTBEAT_OUTPUT_INVALID"
+    if isinstance(heartbeat, dict) and heartbeat.get("status") in {
+        "observed",
+        "missing",
+        "unavailable",
+    }:
+        details: list[tuple[str, object]] = [("status", heartbeat["status"])]
+        valid = True
+        for name in ("seen_at", "started_at", "process_version", "migration_head"):
+            if name in heartbeat:
+                safe = _safe_text(heartbeat[name])
+                if safe is None:
+                    valid = False
+                    break
+                details.append((name, safe))
+        if valid:
+            heartbeat_details = tuple(details)
+            heartbeat_code = f"AGENT_PAPER_HEARTBEAT_{str(heartbeat['status']).upper()}"
+
+    preflight_details: tuple[tuple[str, object], ...] = ()
+    preflight_code = "AGENT_PAPER_PREFLIGHT_OUTPUT_INVALID"
+    if isinstance(preflight, dict) and preflight.get("status") in {"ready", "blocked"}:
+        blocking = _safe_codes(preflight.get("blocking_codes"))
+        optional = _safe_codes(preflight.get("optional_codes"))
+        locked = preflight.get("execution_locked")
+        external = preflight.get("external_requests")
+        if (
+            blocking is not None
+            and optional is not None
+            and locked is True
+            and type(external) is int
+            and external == 0
+        ):
+            preflight_details = (
+                ("status", preflight["status"]),
+                ("execution_locked", locked),
+                ("external_requests", external),
+                ("blocking_codes", blocking),
+                ("optional_codes", optional),
+            )
+            preflight_code = f"AGENT_PAPER_PREFLIGHT_{str(preflight['status']).upper()}"
+
+    return (
+        LocalStackStepResult(
+            action=action,
+            ordinal=first_ordinal,
+            exit_code=(
+                0 if heartbeat_details and dict(heartbeat_details)["status"] == "observed" else 1
+            ),
+            result_code=heartbeat_code,
+            fact="heartbeat",
+            details=heartbeat_details,
+        ),
+        LocalStackStepResult(
+            action=action,
+            ordinal=first_ordinal + 1,
+            exit_code=(
+                0
+                if preflight_details
+                and dict(preflight_details)["status"] == "ready"
+                and dict(preflight_details)["external_requests"] == 0
+                else 1
+            ),
+            result_code=preflight_code,
+            fact="preflight",
+            details=preflight_details,
+        ),
+    )

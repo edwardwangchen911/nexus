@@ -1,4 +1,4 @@
-"""Behavioral tests for the transient macOS Agent paper loop service."""
+"""Exercise the real adapter with an isolated launchctl executable, never launchd."""
 
 import json
 import os
@@ -9,79 +9,107 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[4]
-SOURCE = ROOT / "scripts" / "macos" / "agent-paper-loop-service.py"
+SOURCE = ROOT / "scripts/macos/agent-paper-loop-service.py"
+LABEL = f"gui/{os.getuid()}/com.nexus.agent-paper-loop"
 
 
-def _write_executable(path: Path, source: str) -> None:
+def _executable(path: Path, source: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
+    path.write_text(f"#!{sys.executable}\n" + source)
     path.chmod(0o755)
 
 
 def _service_root(tmp_path: Path) -> tuple[Path, dict[str, str]]:
-    assert SOURCE.is_file(), "host service script is missing"
     root = tmp_path / "repo"
-    script = root / "scripts" / "macos" / SOURCE.name
+    script = root / "scripts/macos" / SOURCE.name
     script.parent.mkdir(parents=True)
     shutil.copy2(SOURCE, script)
-    record = tmp_path / "calls.log"
-    _write_executable(
-        root / ".venv" / "bin" / "nexus-engine-agent-paper-loop",
-        "#!/bin/sh\nprintf 'engine:%s\\n' \"$*\" >> \"$NEXUS_TEST_RECORD\"\n"
-        "if [ \"$1\" = --service-preflight ]; then\n"
-        "  exit \"${NEXUS_TEST_PREFLIGHT_EXIT:-0}\"\n"
-        "fi\n"
-        "printf 'runtime:%s\\n' \"$AGENT_RUNTIME_MODE\" >> \"$NEXUS_TEST_RECORD\"\n"
-        "exit \"${NEXUS_TEST_RUN_EXIT:-0}\"\n",
+    (root / "infra").mkdir()
+    (root / "infra/compose.yaml").touch()
+    (root / "infra/.env.test").write_text("AGENT_RUNTIME_MODE=codex_sdk\n")
+    (root / ".gitignore").write_text("infra/.env*\n.secrets/\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    control, state, record = [tmp_path / name for name in ("control", "state", "calls")]
+    control.write_text("{}")
+    state.write_text("{}")
+    common = (
+        "import json, os, plistlib, sys\nfrom pathlib import Path\n"
+        f"record = Path({str(record)!r})\ncontrol = Path({str(control)!r})\n"
+        "options = json.loads(control.read_text())\n"
+        "def log(kind, args):\n"
+        "    with record.open('a') as f: f.write(json.dumps([kind, *args]) + '\\n')\n"
     )
-    fake_bin = tmp_path / "bin"
-    state_file = tmp_path / "launch-state"
-    state_file.write_text("absent", encoding="utf-8")
-    _write_executable(
-        fake_bin / "launchctl",
-        "#!/bin/sh\nprintf 'launchctl:%s\\n' \"$*\" >> \"$NEXUS_TEST_RECORD\"\n"
-        "case \"$1\" in\n"
-        "  bootstrap) printf 'inactive' > \"$NEXUS_TEST_LAUNCH_STATE\"; exit 0;;\n"
-        "  kickstart)\n"
-        "    printf '%s' \"${NEXUS_TEST_KICKSTART_STATE:-running}\" "
-        "> \"$NEXUS_TEST_LAUNCH_STATE\"\n"
-        "    exit 0;;\n"
-        "  print)\n"
-        "    state=$(cat \"$NEXUS_TEST_LAUNCH_STATE\")\n"
-        "    [ \"$state\" = absent ] && exit 113\n"
-        "    [ \"$state\" = error ] && exit 64\n"
-        "    if [ \"$state\" = delayed_config_error ]; then\n"
-        "      printf 'config_error' > \"$NEXUS_TEST_LAUNCH_STATE\"\n"
-        "      printf 'state = running\\n'\n"
-        "      exit 0\n"
-        "    fi\n"
-        "    if [ \"$state\" = config_error ]; then\n"
-        "      printf 'state = not running\\nlast exit code = 78: EX_CONFIG\\n'\n"
-        "      exit 0\n"
-        "    fi\n"
-        "    printf 'state = %s\\n' \"$state\"\n"
-        "    [ \"$state\" = running ] && printf 'pid = 123\\n'\n"
-        "    exit 0;;\n"
-        "  kill) printf 'inactive' > \"$NEXUS_TEST_LAUNCH_STATE\"; exit 0;;\n"
-        "  bootout) printf 'absent' > \"$NEXUS_TEST_LAUNCH_STATE\"; exit 0;;\n"
-        "esac\n"
-        "exit 64\n",
+    _executable(
+        root / ".venv/bin/nexus-engine-agent-paper-loop",
+        common
+        + """
+log('engine', sys.argv[1:])
+if '--service-preflight' in sys.argv: sys.exit(options.get('preflight_exit', 0))
+log('environment', sorted(os.environ))
+sys.exit(options.get('run_exit', 0))
+""",
     )
-    environment = {
-        **os.environ,
-        "PATH": f"{fake_bin}:/usr/bin:/bin",
-        "NEXUS_TEST_RECORD": str(record),
-        "NEXUS_TEST_LAUNCH_STATE": str(state_file),
-    }
-    return root, environment
+    _executable(
+        tmp_path / "bin/launchctl",
+        common
+        + f"state = Path({str(state)!r})\n"
+        + """
+job = json.loads(state.read_text())
+action = sys.argv[1]
+log('launchctl', sys.argv[1:])
+if action == 'bootstrap':
+    with open(sys.argv[3], 'rb') as f: job = plistlib.load(f)
+    job['state'] = 'inactive'
+elif action == 'kickstart':
+    job['state'] = options.get('kickstart_state', 'running')
+    for field in ('exit', 'pid'):
+        if field in options: job[field] = options[field]
+    state.write_text(json.dumps(job))
+    sys.exit(options.get('kickstart_exit', 0))
+elif action == 'print':
+    if not job: sys.exit(113)
+    if job['state'] == 'error': sys.exit(64)
+    display_state = {'delayed_config_error': 'running', 'config_error': 'not running'}
+    print('state = ' + display_state.get(job['state'], job['state']))
+    if 'pid' in job: print('pid = ' + str(job['pid']))
+    indent = options.get('indent', '')
+    print(indent + 'working directory = ' + job['WorkingDirectory'])
+    print(indent + 'arguments = {')
+    for arg in job['ProgramArguments']: print(indent + '\\t' + arg)
+    print(indent + '}')
+    if options.get('duplicate_owner'):
+        print(indent + 'working directory = ' + job['WorkingDirectory'])
+    print('environment = {\\n\\tCANARY => private-launchctl-canary\\n}')
+    if 'exit' in job: print('last exit code = ' + str(job['exit']))
+    if job['state'] == 'config_error': print('last exit code = 78: EX_CONFIG')
+    if job['state'] == 'delayed_config_error': job['state'] = 'config_error'
+elif action == 'kill':
+    job['state'] = 'inactive'
+    job['exit'] = options.get('stop_exit', 0)
+elif action == 'bootout': job = {}
+state.write_text(json.dumps(job))
+""",
+    )
+    return root, {**os.environ, "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin"}
 
 
-def test_start_preflights_before_submitting_private_transient_job(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
+def _invoke(root, environment, action, *extra):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts/macos" / SOURCE.name),
+            action,
+            "--repo-root",
+            str(root),
+            "--env-file",
+            "infra/.env.test",
+            "--project-name",
+            "nexus-test",
+            *extra,
+        ],
         cwd=root,
         env=environment,
         check=False,
@@ -89,275 +117,383 @@ def test_start_preflights_before_submitting_private_transient_job(tmp_path: Path
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "label": "com.nexus.agent-paper-loop",
-        "status": "started",
-    }
-    calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
-    assert calls[0] == "engine:--service-preflight"
-    plist_path = root / ".secrets" / "nexus-agent-paper" / "service.plist"
-    assert calls[1] == f"launchctl:bootstrap gui/{os.getuid()} {plist_path}"
-    assert calls[2] == (
-        f"launchctl:kickstart gui/{os.getuid()}/com.nexus.agent-paper-loop"
-    )
-    with plist_path.open("rb") as stream:
-        service = plistlib.load(stream)
-    assert service["Label"] == "com.nexus.agent-paper-loop"
-    assert service["KeepAlive"] is False
-    assert service["RunAtLoad"] is False
-    assert service["ProgramArguments"][-1] == "run"
+
+def _calls(root):
+    path = root.parent / "calls"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _register(root, *, state="running", legacy=False, exit_code=None):
+    args = [sys.executable, str(root / "scripts/macos" / SOURCE.name), "run"]
+    if not legacy:
+        args += [
+            "--repo-root",
+            str(root),
+            "--env-file",
+            str(root / "infra/.env.test"),
+            "--project-name",
+            "nexus-test",
+        ]
+    job = {"state": state, "ProgramArguments": args, "WorkingDirectory": str(root)}
+    if exit_code is not None:
+        job["exit"] = exit_code
+    (root.parent / "state").write_text(json.dumps(job))
+    return job
+
+
+def test_start_binds_exact_config_and_repeated_start_is_idempotent(tmp_path):
+    root, env = _service_root(tmp_path)
+    result = _invoke(root, env, "start")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["status"] == "started"
+    assert _calls(root)[:2] == [
+        ["launchctl", "print", LABEL],
+        [
+            "engine",
+            "--service-preflight",
+            "--repo-root",
+            str(root),
+            "--env-file",
+            str(root / "infra/.env.test"),
+        ],
+    ]
+    path = root / ".secrets/nexus-agent-paper/service.plist"
+    service = plistlib.loads(path.read_bytes())
+    assert service["ProgramArguments"] == [
+        sys.executable,
+        str(root / "scripts/macos" / SOURCE.name),
+        "run",
+        "--repo-root",
+        str(root),
+        "--env-file",
+        str(root / "infra/.env.test"),
+        "--project-name",
+        "nexus-test",
+    ]
+    assert service["WorkingDirectory"] == str(root)
+    assert service["KeepAlive"] is False and service["RunAtLoad"] is False
     assert "EnvironmentVariables" not in service
-    private_directory = root / ".secrets" / "nexus-agent-paper"
-    assert stat.S_IMODE(private_directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    before, count = path.stat().st_mtime_ns, len(_calls(root))
+    assert _invoke(root, env, "start").returncode == 0
+    assert _calls(root)[count:] == [["launchctl", "print", LABEL]]
+    assert path.stat().st_mtime_ns == before
 
 
-def test_start_does_not_submit_when_product_preflight_fails(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    environment["NEXUS_TEST_PREFLIGHT_EXIT"] = "7"
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
+@pytest.mark.parametrize("action", ["start", "status", "stop"])
+@pytest.mark.parametrize("different", ["repo", "env", "project", "script", "cwd"])
+def test_owner_mismatch_has_zero_mutation_or_signal(tmp_path, action, different):
+    root, env = _service_root(tmp_path)
+    job = _register(root)
+    if different == "cwd":
+        job["WorkingDirectory"] = str(tmp_path / "other")
+    else:
+        index = {"repo": 4, "env": 6, "project": 8, "script": 1}[different]
+        job["ProgramArguments"][index] = str(tmp_path / "other")
+    state = root.parent / "state"
+    state.write_text(json.dumps(job))
+    before = state.read_bytes()
+    result = _invoke(root, env, action)
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "error_code": "AGENT_PAPER_SERVICE_PREFLIGHT_FAILED"
-    }
-    calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
-    assert calls == ["engine:--service-preflight"]
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_OWNER_MISMATCH"}
+    assert _calls(root) == [["launchctl", "print", LABEL]]
+    assert not (root / ".secrets").exists()
+    assert state.read_bytes() == before
+    assert "private-launchctl-canary" not in result.stdout + result.stderr
 
 
-def test_start_reports_background_access_blocker_and_cleans_registration(
-    tmp_path: Path,
-) -> None:
-    root, environment = _service_root(tmp_path)
-    environment["NEXUS_TEST_KICKSTART_STATE"] = "delayed_config_error"
+@pytest.mark.parametrize("action", ["status", "stop"])
+@pytest.mark.parametrize("different", [None, "script", "cwd"])
+def test_legacy_requires_both_script_and_cwd_proof(tmp_path, action, different):
+    root, env = _service_root(tmp_path)
+    job = _register(root, legacy=True)
+    if different == "cwd":
+        job["WorkingDirectory"] = str(tmp_path / "other")
+    elif different == "script":
+        job["ProgramArguments"][1] = str(tmp_path / "other/scripts/macos" / SOURCE.name)
+    (root.parent / "state").write_text(json.dumps(job))
+    result = _invoke(root, env, action)
+    assert result.returncode == (0 if different is None else 1)
+    if different:
+        assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_OWNER_MISMATCH"
+        assert _calls(root) == [["launchctl", "print", LABEL]]
+    elif action == "stop":
+        assert _calls(root)[-1] == ["launchctl", "bootout", LABEL]
+        assert _invoke(root, env, "start").returncode == 0
+        assert (
+            json.loads((root.parent / "state").read_text())["ProgramArguments"][-1] == "nexus-test"
+        )
 
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
 
+def test_start_never_replaces_legacy_or_exit_75_registration(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root, legacy=True)
+    assert _invoke(root, env, "start").returncode == 1
+    _register(root, state="inactive", exit_code=75)
+    result = _invoke(root, env, "start")
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "error_code": "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED"
-    }
-    private_plist = root / ".secrets" / "nexus-agent-paper" / "service.plist"
-    assert not private_plist.exists()
-    calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
-    assert calls[-2:] == [
-        f"launchctl:print gui/{os.getuid()}/com.nexus.agent-paper-loop",
-        f"launchctl:bootout gui/{os.getuid()}/com.nexus.agent-paper-loop",
+    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"
+    assert _calls(root) == [["launchctl", "print", LABEL]] * 2
+
+
+@pytest.mark.parametrize("initial", ["running", "inactive"])
+def test_exit_75_survives_repeated_stop_until_explicit_acknowledgement(tmp_path, initial):
+    root, env = _service_root(tmp_path)
+    _register(root, state=initial, exit_code=75 if initial == "inactive" else None)
+    (root.parent / "control").write_text(json.dumps({"stop_exit": 75}))
+    for _ in range(2):
+        result = _invoke(root, env, "stop")
+        assert result.returncode == 1
+        assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"}
+    calls = _calls(root)
+    assert not any(call[1] == "bootout" for call in calls)
+    assert sum(call[1] == "kill" for call in calls) == (initial == "running")
+    result = _invoke(root, env, "stop", "--acknowledge-unconfirmed")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _calls(root)[len(calls) :] == [
+        ["launchctl", "print", LABEL],
+        ["launchctl", "bootout", LABEL],
     ]
 
 
-def test_start_fails_closed_when_launchd_state_cannot_be_confirmed(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    environment["NEXUS_TEST_KICKSTART_STATE"] = "error"
+@pytest.mark.parametrize(("state", "exit_code"), [("running", 75), ("inactive", 0)])
+def test_acknowledgement_requires_inactive_exit_75(tmp_path, state, exit_code):
+    root, env = _service_root(tmp_path)
+    _register(root, state=state, exit_code=exit_code)
+    assert _invoke(root, env, "stop", "--acknowledge-unconfirmed").returncode == 1
+    assert _calls(root) == [["launchctl", "print", LABEL]]
 
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
 
+@pytest.mark.parametrize("ambiguous", ["starting", "pid"])
+def test_acknowledgement_never_assumes_an_ambiguous_registration_has_exited(tmp_path, ambiguous):
+    root, env = _service_root(tmp_path)
+    job = _register(root, state="inactive" if ambiguous == "pid" else "starting", exit_code=75)
+    if ambiguous == "pid":
+        job["pid"] = 123
+    (root.parent / "state").write_text(json.dumps(job))
+    result = _invoke(root, env, "stop", "--acknowledge-unconfirmed")
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_START_FAILED"}
-    assert not (root / ".secrets" / "nexus-agent-paper" / "service.plist").exists()
+    assert _calls(root) == [["launchctl", "print", LABEL]]
 
 
-def test_start_rejects_symlinked_private_parent_before_preflight(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    outside = tmp_path / "outside-secrets"
-    outside.mkdir(mode=0o700)
-    (root / ".secrets").symlink_to(outside, target_is_directory=True)
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
+@pytest.mark.parametrize("action", ["status", "stop", "start"])
+def test_invoking_from_second_repo_cannot_replace_existing_owner_plist(tmp_path, action):
+    owner, env = _service_root(tmp_path / "owner")
+    other, _ = _service_root(tmp_path / "other")
+    _register(owner)
+    private = owner / ".secrets/nexus-agent-paper"
+    private.mkdir(parents=True, mode=0o700)
+    plist = private / "service.plist"
+    plist.write_bytes(b"registered owner plist")
+    result = _invoke(other, env, action)
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"
+    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_OWNER_MISMATCH"
+    assert _calls(owner) == [["launchctl", "print", LABEL]]
+    assert _calls(other) == []
+    assert plist.read_bytes() == b"registered owner plist"
+    assert not (other / ".secrets").exists()
+
+
+def test_start_checks_existing_owner_before_local_runtime_availability(tmp_path):
+    root, env = _service_root(tmp_path)
+    job = _register(root)
+    job["ProgramArguments"][-1] = "another-project"
+    (root.parent / "state").write_text(json.dumps(job))
+    (root / ".venv/bin/nexus-engine-agent-paper-loop").unlink()
+    result = _invoke(root, env, "start")
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_OWNER_MISMATCH"}
+    assert _calls(root) == [["launchctl", "print", LABEL]]
+
+
+@pytest.mark.parametrize(
+    ("options", "code"),
+    [
+        ({"preflight_exit": 7}, "AGENT_PAPER_SERVICE_PREFLIGHT_FAILED"),
+        (
+            {"kickstart_state": "delayed_config_error"},
+            "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED",
+        ),
+    ],
+)
+def test_start_fails_closed_without_leaving_failed_plist(tmp_path, options, code):
+    root, env = _service_root(tmp_path)
+    (root.parent / "control").write_text(json.dumps(options))
+    result = _invoke(root, env, "start")
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": code}
+    assert not (root / ".secrets/nexus-agent-paper/service.plist").exists()
+    if "preflight_exit" in options:
+        assert not any(call[1] == "bootstrap" for call in _calls(root))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"kickstart_state": "error"},
+        {"kickstart_state": "starting", "exit": 75},
+        {"kickstart_state": "running", "pid": 123, "exit": 78},
+        {"kickstart_state": "running", "pid": 123, "exit": 1, "kickstart_exit": 1},
+    ],
+)
+def test_start_retains_registration_and_plist_without_positive_inactive_proof(tmp_path, options):
+    root, env = _service_root(tmp_path)
+    (root.parent / "control").write_text(json.dumps(options))
+    result = _invoke(root, env, "start")
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error_code"] in {
+        "AGENT_PAPER_SERVICE_START_FAILED",
+        "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED",
+        "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED",
     }
-    assert not Path(environment["NEXUS_TEST_RECORD"]).exists()
-
-
-def test_start_rejects_symlinked_log_before_preflight(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    private_directory = root / ".secrets" / "nexus-agent-paper"
-    private_directory.mkdir(parents=True, mode=0o700)
-    private_directory.parent.chmod(0o700)
-    target = tmp_path / "outside.log"
-    target.write_text("outside", encoding="utf-8")
-    (private_directory / "service.stdout.log").symlink_to(target)
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
+    job = json.loads((root.parent / "state").read_text())
+    assert job["state"] == options["kickstart_state"]
+    if "exit" in options:
+        assert job["exit"] == options["exit"]
+    assert (root / ".secrets/nexus-agent-paper/service.plist").is_file()
+    assert not any(
+        call[0] == "launchctl" and call[1] in {"kill", "bootout"} for call in _calls(root)
     )
 
+
+@pytest.mark.parametrize("action", ["start", "status", "stop"])
+@pytest.mark.parametrize("field", ["env", "cwd", "script"])
+def test_owner_comparison_preserves_trailing_space_content(tmp_path, action, field):
+    root, env = _service_root(tmp_path)
+    job = _register(root)
+    if field == "cwd":
+        job["WorkingDirectory"] += " "
+    else:
+        job["ProgramArguments"][6 if field == "env" else 1] += " "
+    state = root.parent / "state"
+    state.write_text(json.dumps(job))
+    before = state.read_bytes()
+    result = _invoke(root, env, action)
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"
-    }
-    assert not Path(environment["NEXUS_TEST_RECORD"]).exists()
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_OWNER_MISMATCH"}
+    assert _calls(root) == [["launchctl", "print", LABEL]]
+    assert state.read_bytes() == before
+    assert not (root / ".secrets").exists()
 
 
-def test_start_rejects_hardlinked_log_before_preflight(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    private_directory = root / ".secrets" / "nexus-agent-paper"
-    private_directory.mkdir(parents=True, mode=0o700)
-    private_directory.parent.chmod(0o700)
-    target = tmp_path / "outside.log"
-    target.write_text("outside", encoding="utf-8")
-    target.chmod(0o600)
-    os.link(target, private_directory / "service.stdout.log")
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
+def test_owner_parser_accepts_only_unambiguous_launchctl_indentation(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root)
+    control = root.parent / "control"
+    control.write_text(json.dumps({"indent": "\t"}))
+    assert _invoke(root, env, "status").returncode == 0
+    control.write_text(json.dumps({"indent": "\t", "duplicate_owner": True}))
+    result = _invoke(root, env, "stop")
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"
-    }
-    assert not Path(environment["NEXUS_TEST_RECORD"]).exists()
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_OWNER_MISMATCH"}
+    assert _calls(root) == [["launchctl", "print", LABEL]] * 2
 
 
-def test_start_masks_private_plist_write_failure_before_launchctl(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    private_directory = root / ".secrets" / "nexus-agent-paper"
-    private_directory.mkdir(parents=True, mode=0o700)
-    private_directory.parent.chmod(0o700)
-    (private_directory / "service.plist").mkdir()
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "start"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
+@pytest.mark.parametrize("unsafe", ["parent_symlink", "log_symlink", "log_hardlink", "plist"])
+def test_start_rejects_unsafe_private_paths(tmp_path, unsafe):
+    root, env = _service_root(tmp_path)
+    target = tmp_path / "outside"
+    if unsafe == "parent_symlink":
+        target.mkdir(mode=0o700)
+        (root / ".secrets").symlink_to(target, target_is_directory=True)
+    else:
+        private = root / ".secrets/nexus-agent-paper"
+        private.mkdir(parents=True, mode=0o700)
+        private.parent.chmod(0o700)
+        if unsafe == "plist":
+            (private / "service.plist").mkdir()
+        else:
+            target.write_text("outside")
+            target.chmod(0o600)
+            if unsafe == "log_symlink":
+                (private / "service.stdout.log").symlink_to(target)
+            else:
+                os.link(target, private / "service.stdout.log")
+    result = _invoke(root, env, "start")
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"
-    }
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"}
     assert result.stderr == ""
-    calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
-    assert calls == ["engine:--service-preflight"]
+    assert not any(call[1] == "bootstrap" for call in _calls(root))
 
 
-def test_run_repreflights_then_executes_codex_sdk_loop(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "run"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
+def test_run_uses_exact_config_and_only_runtime_environment(tmp_path):
+    root, env = _service_root(tmp_path)
+    env.update(
+        AGENT_RUNTIME_MODE="responses", DATABASE_URL="private-canary", OPENAI_API_KEY="secret"
     )
-
-    assert result.returncode == 0, result.stderr
-    calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
-    assert calls == ["engine:--service-preflight", "engine:", "runtime:codex_sdk"]
-
-
-def test_status_normalizes_launchd_state_without_echoing_details(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    Path(environment["NEXUS_TEST_LAUNCH_STATE"]).write_text("running", encoding="utf-8")
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "status"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "label": "com.nexus.agent-paper-loop",
-        "status": "running",
-    }
-    assert "pid" not in result.stdout
+    result = _invoke(root, env, "run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    explicit = ["--repo-root", str(root), "--env-file", str(root / "infra/.env.test")]
+    calls = _calls(root)
+    assert calls[:2] == [["engine", "--service-preflight", *explicit], ["engine", *explicit]]
+    names = set(calls[2][1:])
+    assert {"PATH", "HOME"} <= names
+    assert not names & {"AGENT_RUNTIME_MODE", "DATABASE_URL", "OPENAI_API_KEY"}
 
 
-def test_status_does_not_misreport_unexpected_launchctl_failure_as_stopped(
-    tmp_path: Path,
-) -> None:
-    root, environment = _service_root(tmp_path)
-    Path(environment["NEXUS_TEST_LAUNCH_STATE"]).write_text("error", encoding="utf-8")
-
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "status"],
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
+def test_status_normalizes_without_echoing_launchctl_details(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root)
+    result = _invoke(root, env, "status")
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"label": "com.nexus.agent-paper-loop", "status": "running"}
+    _register(root, state="error")
+    result = _invoke(root, env, "status")
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "error_code": "AGENT_PAPER_SERVICE_STATUS_UNAVAILABLE"
-    }
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_STATUS_UNAVAILABLE"}
 
 
-def test_stop_interrupts_running_job_before_removing_registration(tmp_path: Path) -> None:
-    root, environment = _service_root(tmp_path)
-    Path(environment["NEXUS_TEST_LAUNCH_STATE"]).write_text("running", encoding="utf-8")
+def test_stop_interrupts_before_removing_registration(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root)
+    result = _invoke(root, env, "stop")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _calls(root) == [
+        ["launchctl", "print", LABEL],
+        ["launchctl", "kill", "SIGINT", LABEL],
+        ["launchctl", "print", LABEL],
+        ["launchctl", "bootout", LABEL],
+    ]
 
+
+@pytest.mark.parametrize("action", ["start", "status", "stop", "run"])
+def test_every_action_requires_explicit_arguments(tmp_path, action):
+    root, env = _service_root(tmp_path)
     result = subprocess.run(
-        [sys.executable, str(root / "scripts/macos" / SOURCE.name), "stop"],
-        cwd=root,
-        env=environment,
-        check=False,
+        [sys.executable, str(root / "scripts/macos" / SOURCE.name), action],
+        env=env,
         capture_output=True,
         text=True,
+        check=False,
     )
+    assert result.returncode == 2
+    assert _calls(root) == []
 
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "label": "com.nexus.agent-paper-loop",
-        "status": "stopped",
-    }
-    calls = Path(environment["NEXUS_TEST_RECORD"]).read_text(encoding="utf-8").splitlines()
-    assert calls == [
-        f"launchctl:print gui/{os.getuid()}/com.nexus.agent-paper-loop",
-        f"launchctl:kill SIGINT gui/{os.getuid()}/com.nexus.agent-paper-loop",
-        f"launchctl:print gui/{os.getuid()}/com.nexus.agent-paper-loop",
-        f"launchctl:bootout gui/{os.getuid()}/com.nexus.agent-paper-loop",
-    ]
+
+@pytest.mark.parametrize(
+    "invalid", ["missing", "tracked", "symlink", "outside", "not_ignored", "project", "root"]
+)
+def test_invalid_config_fails_before_launchctl_or_engine(tmp_path, invalid):
+    root, environment = _service_root(tmp_path)
+    env, extra = root / "infra/.env.test", []
+    if invalid == "missing":
+        env.unlink()
+    elif invalid == "tracked":
+        subprocess.run(["git", "-C", str(root), "add", "-f", str(env)], check=True)
+    elif invalid == "symlink":
+        target = root / "infra/.env.other"
+        env.rename(target)
+        env.symlink_to(target)
+    elif invalid == "outside":
+        target = tmp_path / ".env.outside"
+        target.write_text("secret=value")
+        extra = ["--env-file", str(target)]
+    elif invalid == "not_ignored":
+        (root / ".gitignore").write_text("")
+    elif invalid == "project":
+        extra = ["--project-name", "Invalid project"]
+    else:
+        (root / "infra/compose.yaml").unlink()
+    assert _invoke(root, environment, "start", *extra).returncode == 1
+    assert _calls(root) == []
+    assert not (root / ".secrets").exists()

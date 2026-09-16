@@ -39,11 +39,13 @@ class SchwabPriceHistoryProvider:
         *,
         symbol_resolver: InstrumentSymbolResolver,
         now: Callable[[], datetime] | None = None,
+        process_environment: Mapping[str, str] | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._client = client
         self._symbol_resolver = symbol_resolver
         self._now = now or (lambda: datetime.now(UTC))
+        self._process_environment = process_environment
         self._http = FixedOriginHttpClient(
             provider_name="schwab_price_history",
             origin=AllowedOrigin(scheme="https", host="api.schwabapi.com"),
@@ -71,7 +73,9 @@ class SchwabPriceHistoryProvider:
         token = await load_or_refresh_schwab_token(
             self._repo_root,
             self._client,
-            process_environment=os.environ,
+            process_environment=(
+                os.environ if self._process_environment is None else self._process_environment
+            ),
             now=checked_at,
             refresh_window=_TOKEN_REFRESH_WINDOW,
         )

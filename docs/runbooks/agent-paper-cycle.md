@@ -222,11 +222,27 @@ read current cycle/job/order state
 查原 `run → job → outputs` 和业务事实，不换 key、不重放。原始模型全文、token 和个人账户事实不
 进入 Git 或验收记录。
 
-## 8. Foreground loop：同一交易时段连续决策
+## 8. 连续服务与前台诊断
 
-手工双槽验收完成后，可在一个纽约交易时段内以前台进程按五分钟槽连续推进。该入口没有逐日
+手工双槽验收完成后，可在一个纽约交易时段内按五分钟槽连续推进。该入口没有逐日
 次数上限，但仍受现有美元日预算约束；每槽最多一个 cycle，每个 cycle 最多一个真实 Agent Job。
-它不常驻后台、不注册 LaunchAgent，也不改变 API/Web 的只读行为：
+正常启停统一使用本地后端入口；它先完成基础 Compose 步骤，仅在受保护配置明确启用时启动宿主机
+Agent Paper，停止时则先确认 Agent Paper 已安全退出，再停止 Compose：
+
+```bash
+uv run --project engine nexus-local-stack up \
+  --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
+uv run --project engine nexus-local-stack status \
+  --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
+uv run --project engine nexus-local-stack down \
+  --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
+```
+
+`status` 将 Compose、精确归属的宿主机托管状态、数据库 heartbeat 和零外部请求 preflight 作为
+四项独立事实报告。Agent Paper 离线不表示 Web/API 离线；页面仍只读取持久化 heartbeat、周期、
+Job、Output、订单和窗口，刷新不会启动或重放任何调用。
+
+以下前台命令仅用于开发诊断，不是另一套后台服务：
 
 ```bash
 AGENT_RUNTIME_MODE=codex_sdk uv run --project engine nexus-engine-agent-paper-loop \
@@ -253,40 +269,9 @@ FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNY
 已有订单可完成其已冻结窗口后再退出。运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
-终端关闭后仍需继续观察时，使用仓库内的临时 launchd 任务管理脚本：
-
-```bash
-.venv/bin/python scripts/macos/agent-paper-loop-service.py start
-.venv/bin/python scripts/macos/agent-paper-loop-service.py status
-.venv/bin/python scripts/macos/agent-paper-loop-service.py stop
-```
-
-`start` 先在当前终端做一次产品预检，launchd 任务实际启动后再预检一次，两次都通过才
-进入循环。任务固定使用宿主机 Codex SDK 登录，不复制凭据、不注入 OpenAI API key。它只在
-`.secrets/nexus-agent-paper` 生成明确 `KeepAlive=false` 的私有临时 plist，不安装到
-`~/Library/LaunchAgents`，不随登录启动，退出后不自动重启。`stop` 只先发送 `SIGINT`，
-确认进程已退出后才移除
-临时注册；十秒内无法确认时返回 `AGENT_PAPER_SERVICE_STOP_UNCONFIRMED`，不强杀。日志仅写入
-`.secrets/nexus-agent-paper/service.stdout.log` 和 `service.stderr.log`，目录必须归当前用户所有且权限
-为 `0700`。账户 ID、功能开关和 Provider 配置仍只从受保护的 `infra/.env.local` 和既有私密目录读取。
-
-上述前台或临时 launchd 方式都在宿主机运行。Agent paper 研究冻结为 Codex SDK actionable v4。
-Compose profile 也固定为 `codex_sdk`，但当前不挂载 ChatGPT 登录凭据；因此容器
-预检应返回 `CODEX_CHATGPT_LOGIN_REQUIRED`，不得误启动。不要向容器注入 OpenAI API key，也不要
-为了启动容器而把 actionable v4 重标为 Responses 配置。
-
-下列 Compose 命令只用于核对未来服务的其他本地前置；在模型运行时边界单独完成并复核前，不启动
-`agent-paper-loop`：
-
-```bash
-mkdir -p .secrets/nexus-agent-paper
-chmod 700 .secrets/nexus-agent-paper
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
-  --profile agent-paper run --rm --no-deps agent-paper-loop \
-  nexus-engine-agent-paper-loop --service-preflight
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
-  --profile app --profile agent-paper up -d postgres minio object-store-init api worker
-```
+内部托管适配器在 Mac 宿主机使用 Codex SDK 登录，不复制凭据、不注入 OpenAI API key，也没有
+Compose Agent Paper profile。适配器只在 `.secrets/nexus-agent-paper` 维护临时注册和受保护日志；
+正常使用不直接调用该脚本。
 
 预检只读取本地配置、受保护 token 文件、私有目录权限和 Codex SDK 本机登录状态；不刷新
 ChatGPT 登录、不连接数据库、不请求券商、不调用模型；
@@ -296,16 +281,29 @@ FRED 未配置只作为可选提示；Schwab access token 已过期时提示首�
 缺失均 fail closed。行情请求发现 token 已过期或将在五分钟内到期时，只调用一次既有 refresh
 端点；成功后原子替换私密文件并继续，失败则保留旧文件、不重试且不请求 K 线。
 
-先在 `infra/.env.local` 明确配置账户 ID、当前 Mac 的非秘密 UID/GID，并保持功能开关为 true。预检
+先在 `infra/.env.local` 明确配置账户 ID，并保持功能开关为 true。预检
 同时核对动态 Schwab token 目录可写；该目录只用于一次刷新后的原子替换。预检发现 token 挂载
 只读时拒绝启动。
-容器退出后先读取数据库终态和日志中的固定错误码，不直接重启。回滚只需将开关恢复为 false，并
-停止 `agent-paper-loop` 服务；不会删除或改写 cycle、Job、Output、订单、成交、账本和心跳事实。
+服务退出后先读取数据库终态和日志中的固定错误码，不直接重启。回滚只需将开关恢复为 false，并
+运行统一 `down`；不会删除或改写 cycle、Job、Output、订单、成交、账本和心跳事实。
+
+若普通 `down` 返回 `AGENT_PAPER_SERVICE_STOP_UNCONFIRMED`（进程退出码 75），不得重复停止 Compose
+或盲目重启。先只读核对原 `cycle → job → outputs → order/window`，确认没有结果未知、待对账或仍需
+依赖服务的动作；只有完成该人工核对后，才可对同一 repo/env/project 使用内部恢复命令清理已退出
+注册（该命令不发信号、不改业务事实）：
+
+```bash
+.venv/bin/python scripts/macos/agent-paper-loop-service.py stop \
+  --repo-root "$PWD" --env-file "$PWD/infra/.env.local" \
+  --project-name nexus-fosun-live --acknowledge-unconfirmed
+uv run --project engine nexus-local-stack down \
+  --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
+```
 
 ## 9. Stop：默认关闭并保留现场
 
-1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`。只停止本轮自己启动的进程；一次性 worker 正常
-   返回即已停止。若另有自己启动的普通/Provider worker，只各按一次 `Ctrl-C`。
+1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`，再运行统一 `nexus-local-stack down`。它仍会检查并
+   停止同一 repo/env/project 遗留的 Agent Paper 注册；功能开关不会掩盖实际托管状态。
 2. 只读确认没有未解释的 queued/running Job，没有结果未知的模型调用，也没有未对账的
    `proposed`、`risk_approved`、`submitted`、`partially_filled` 订单。
 3. 对 `prepared`、`researching`、`decision_recorded`、`risk_evaluated` 或 `awaiting_market` 周期，

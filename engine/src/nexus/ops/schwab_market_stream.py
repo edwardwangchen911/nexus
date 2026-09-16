@@ -187,6 +187,7 @@ async def run_schwab_stream(
     *,
     collector: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     now: datetime | None = None,
+    process_environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     if checked_at.tzinfo is None or checked_at.utcoffset() is None:
@@ -194,7 +195,7 @@ async def run_schwab_stream(
     token = await load_or_refresh_schwab_token(
         arguments.repo_root,
         client,
-        process_environment=os.environ,
+        process_environment=os.environ if process_environment is None else process_environment,
         now=checked_at,
         refresh_window=TOKEN_REFRESH_WINDOW,
     )
@@ -341,6 +342,7 @@ async def capture_and_import_schwab_level_one_once(
     instrument_id: UUID,
     checked_at: datetime | None = None,
     capture: Callable[..., Awaitable[dict[str, Any]]] = run_schwab_stream,
+    process_environment: Mapping[str, str] | None = None,
 ) -> SchwabMarketStreamImportResult:
     """Capture and freeze one bounded AAPL Level One decision observation."""
     with tempfile.TemporaryDirectory(prefix="nexus-agent-schwab-") as raw_directory:
@@ -352,7 +354,16 @@ async def capture_and_import_schwab_level_one_once(
             duration=15.0,
             max_frames=100,
         )
-        await capture(arguments, client, now=checked_at)
+        await capture(
+            arguments,
+            client,
+            now=checked_at,
+            **(
+                {"process_environment": process_environment}
+                if process_environment is not None
+                else {}
+            ),
+        )
         imported_at = await session.scalar(select(func.clock_timestamp()))
         if not isinstance(imported_at, datetime):
             raise RuntimeError("SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID")

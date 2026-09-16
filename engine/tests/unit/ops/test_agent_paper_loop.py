@@ -1,9 +1,15 @@
 import asyncio
 import gc
 import json
+import multiprocessing
 import os
+import signal
+import subprocess
+import sys
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -19,10 +25,51 @@ PREVIOUS_SLOT = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
 AFTER_CLOSE = datetime(2026, 9, 14, 20, 1, tzinfo=UTC)
 LAST_SLOT = datetime(2026, 9, 14, 19, 55, tzinfo=UTC)
 A = loop.AgentPaperLoopAction
+CALENDAR_AUTHORITY_ID = UUID(int=9)
 
 
 async def noop_heartbeat(_seen_at: datetime) -> None:
     return None
+
+
+def test_agent_paper_lock_is_shared_across_spawned_worktrees(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "shared-runtime"
+    side_effect_path = tmp_path / "loser-side-effects"
+    result_path = tmp_path / "loser-result"
+    context = multiprocessing.get_context("spawn")
+    child = """
+from pathlib import Path
+import sys
+from nexus.ops.agent_paper_loop import acquire_agent_paper_lock
+try:
+    with acquire_agent_paper_lock(runtime_root=Path(sys.argv[1])):
+        Path(sys.argv[2]).write_text("heartbeat\\ninspection\\nprovider\\nmodel\\n")
+        Path(sys.argv[3]).write_text("LOCK_ACQUIRED")
+except Exception as error:
+    Path(sys.argv[3]).write_text(str(error))
+"""
+
+    with loop.acquire_agent_paper_lock(runtime_root=runtime_root):
+        contender = context.Process(
+            target=subprocess.run,
+            args=(
+                (
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(runtime_root),
+                    str(side_effect_path),
+                    str(result_path),
+                ),
+            ),
+            kwargs={"check": False},
+        )
+        contender.start()
+        contender.join(timeout=5)
+
+    assert contender.exitcode == 0
+    assert result_path.read_text(encoding="utf-8") == "AGENT_PAPER_LOOP_ALREADY_RUNNING"
+    assert not side_effect_path.exists()
 
 
 @pytest.fixture
@@ -31,7 +78,183 @@ def codex_ready(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
-    return replace(loop.AgentPaperLoopSnapshot(now=NOW), **changes)
+    current = changes.get("now", NOW)
+    assert isinstance(current, datetime)
+    local_session = current.astimezone(loop.ZoneInfo("America/New_York")).date()
+    start = datetime.combine(local_session, datetime.min.time(), tzinfo=UTC) + timedelta(hours=11)
+    end = start + timedelta(hours=9)
+    return replace(
+        loop.AgentPaperLoopSnapshot(
+            now=NOW,
+            calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            decision_window_start_at=start,
+            decision_window_end_at=end,
+            next_decision_window_start_at=start + timedelta(days=1),
+        ),
+        **changes,
+    )
+
+
+@pytest.mark.parametrize(
+    ("now", "window_start", "window_end", "next_start", "expected"),
+    [
+        (
+            datetime(2026, 7, 6, 10, 59, tzinfo=UTC),
+            datetime(2026, 7, 6, 11, tzinfo=UTC),
+            datetime(2026, 7, 6, 20, tzinfo=UTC),
+            datetime(2026, 7, 7, 11, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+        (
+            datetime(2026, 11, 27, 17, 59, tzinfo=UTC),
+            datetime(2026, 11, 27, 12, tzinfo=UTC),
+            datetime(2026, 11, 27, 18, tzinfo=UTC),
+            datetime(2026, 11, 30, 12, tzinfo=UTC),
+            A.TRIGGER,
+        ),
+        (
+            datetime(2026, 11, 27, 18, 1, tzinfo=UTC),
+            datetime(2026, 11, 27, 12, tzinfo=UTC),
+            datetime(2026, 11, 27, 18, tzinfo=UTC),
+            datetime(2026, 11, 30, 12, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+        (
+            datetime(2026, 11, 28, 15, tzinfo=UTC),
+            datetime(2026, 11, 30, 12, tzinfo=UTC),
+            datetime(2026, 11, 30, 21, tzinfo=UTC),
+            datetime(2026, 12, 1, 12, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+        (
+            datetime(2026, 12, 1, 11, 59, tzinfo=UTC),
+            datetime(2026, 12, 1, 12, tzinfo=UTC),
+            datetime(2026, 12, 1, 21, tzinfo=UTC),
+            datetime(2026, 12, 2, 12, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+    ],
+)
+def test_policy_uses_bound_calendar_windows_across_sessions(
+    now: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    next_start: datetime,
+    expected: loop.AgentPaperLoopAction,
+) -> None:
+    state = loop.AgentPaperLoopSnapshot(
+        now=now,
+        calendar_authority_id=UUID(int=9),
+        decision_window_start_at=window_start,
+        decision_window_end_at=window_end,
+        next_decision_window_start_at=next_start,
+    )
+
+    assert loop.choose_loop_action(state) == expected
+
+
+def test_foreground_loop_waits_for_session_without_product_side_effects() -> None:
+    start = datetime(2026, 7, 6, 11, tzinfo=UTC)
+    states = iter(
+        (
+            loop.AgentPaperLoopSnapshot(
+                now=start - timedelta(seconds=31),
+                calendar_authority_id=UUID(int=9),
+                decision_window_start_at=start,
+                decision_window_end_at=datetime(2026, 7, 6, 20, tzinfo=UTC),
+                next_decision_window_start_at=datetime(2026, 7, 7, 11, tzinfo=UTC),
+            ),
+            loop.AgentPaperLoopSnapshot(now=start, enabled=False),
+        )
+    )
+    sleeps: list[float] = []
+    heartbeats: list[datetime] = []
+    elapsed = 0.0
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    async def execute(_action, _state) -> None:
+        raise AssertionError("session waiting must not run provider, model, or trigger actions")
+
+    async def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    async def heartbeat(seen_at: datetime) -> None:
+        heartbeats.append(seen_at)
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: start,
+            monotonic=lambda: elapsed,
+        )
+    )
+
+    assert result == A.STOP_DISABLED
+    assert sleeps == [15.0, 15.0, 1.0]
+    assert len(heartbeats) == 4
+
+
+def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() -> None:
+    start = datetime(2026, 7, 6, 11, tzinfo=UTC)
+    states = iter(
+        (
+            loop.AgentPaperLoopSnapshot(
+                now=start - timedelta(seconds=31),
+                calendar_authority_id=UUID(int=9),
+                decision_window_start_at=start,
+                decision_window_end_at=datetime(2026, 7, 6, 20, tzinfo=UTC),
+                next_decision_window_start_at=datetime(2026, 7, 7, 11, tzinfo=UTC),
+            ),
+            loop.AgentPaperLoopSnapshot(now=start, enabled=False),
+        )
+    )
+    elapsed = 0.0
+    sleeps: list[float] = []
+    business_actions: list[loop.AgentPaperLoopAction] = []
+    inspections_at: list[float] = []
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        inspections_at.append(elapsed)
+        return next(states)
+
+    async def execute(
+        action: loop.AgentPaperLoopAction, _state: loop.AgentPaperLoopSnapshot
+    ) -> None:
+        business_actions.append(action)
+
+    async def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal elapsed
+        elapsed += 10
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: start,
+            monotonic=lambda: elapsed,
+        )
+    )
+
+    assert result == A.STOP_DISABLED
+    inspection_delay = inspections_at[1] - inspections_at[0]
+    assert inspection_delay <= 31.0 + 10.0
+    assert inspection_delay == 41.0
+    assert sleeps == [15.0, 6.0]
+    assert business_actions == []
 
 
 @pytest.mark.parametrize(
@@ -119,7 +342,7 @@ def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
         ),
         (
             {"now": AFTER_CLOSE, "cycle_status": "completed", "cycle_slot_at": LAST_SLOT},
-            A.STOP_SESSION_CLOSED,
+            A.WAIT_FOR_SESSION,
         ),
         (
             {
@@ -145,11 +368,7 @@ def test_foreground_loop_executes_persisted_action_then_stops() -> None:
             snapshot(
                 cycle_status="researching", research_job_status="queued", research_job_id="job-1"
             ),
-            snapshot(
-                now=datetime(2026, 9, 14, 20, 1, tzinfo=UTC),
-                cycle_status="completed",
-                cycle_slot_at=datetime(2026, 9, 14, 19, 55, tzinfo=UTC),
-            ),
+            snapshot(enabled=False),
         )
     )
     actions: list[object] = []
@@ -171,8 +390,476 @@ def test_foreground_loop_executes_persisted_action_then_stops() -> None:
             heartbeat=noop_heartbeat,
         )
     )
-    assert result == loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
+    assert result == loop.AgentPaperLoopAction.STOP_DISABLED
     assert actions == [(loop.AgentPaperLoopAction.RUN_RESEARCH_JOB, "job-1")]
+
+
+def test_foreground_loop_stops_at_idle_boundary_without_side_effects() -> None:
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("idle shutdown must not heartbeat, inspect, execute, or confirm")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=unexpected,
+            execute=unexpected,
+            sleep=unexpected,
+            heartbeat=unexpected,
+            shutdown_requested=lambda: True,
+            confirm_shutdown=unexpected,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+
+
+def test_foreground_loop_stops_idle_wait_after_signal_without_reinspection() -> None:
+    shutdown = asyncio.Event()
+    inspections = 0
+    heartbeat_count = 0
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        nonlocal inspections
+        inspections += 1
+        return snapshot(
+            cycle_status="completed",
+            cycle_slot_at=SLOT,
+        )
+
+    async def unexpected_execute(*_args) -> None:
+        raise AssertionError("idle shutdown must not execute an action")
+
+    async def sleep(_seconds: float) -> None:
+        shutdown.set()
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+
+    async def unexpected_confirmation(*_args) -> bool:
+        raise AssertionError("idle shutdown has no action to confirm")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=unexpected_execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            shutdown_requested=shutdown.is_set,
+            confirm_shutdown=unexpected_confirmation,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+    assert inspections == 1
+    assert heartbeat_count == 1
+
+
+def test_foreground_loop_stop_during_inspection_fences_all_new_actions() -> None:
+    async def scenario() -> tuple[loop.AgentPaperLoopAction, int, int]:
+        shutdown = asyncio.Event()
+        inspection_started = asyncio.Event()
+        release_inspection = asyncio.Event()
+        execution_attempts = 0
+        confirmations = 0
+
+        async def inspect() -> loop.AgentPaperLoopSnapshot:
+            inspection_started.set()
+            await release_inspection.wait()
+            return snapshot()
+
+        async def execute(*_args) -> None:
+            nonlocal execution_attempts
+            execution_attempts += 1
+            raise AssertionError("stop must fence trigger, model, provider, and collection work")
+
+        async def confirm_shutdown(*_args) -> bool:
+            nonlocal confirmations
+            confirmations += 1
+            raise AssertionError("inspection is an idle boundary and needs no confirmation")
+
+        running = asyncio.create_task(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=noop_heartbeat,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
+            )
+        )
+        await inspection_started.wait()
+        shutdown.set()
+        release_inspection.set()
+        async with asyncio.timeout(1):
+            result = await running
+        return result, execution_attempts, confirmations
+
+    result, execution_attempts, confirmations = asyncio.run(scenario())
+
+    assert result is A.STOP_REQUESTED
+    assert execution_attempts == 0
+    assert confirmations == 0
+
+
+@pytest.mark.parametrize(
+    ("before", "expected_action"),
+    [
+        (snapshot(), A.TRIGGER),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_status="queued",
+                research_job_id=UUID(int=3),
+            ),
+            A.RUN_RESEARCH_JOB,
+        ),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_status="succeeded",
+                research_job_id=UUID(int=3),
+            ),
+            A.RESUME,
+        ),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                has_open_order=True,
+                order_id=UUID(int=4),
+                market_window_end_at=NOW,
+            ),
+            A.COLLECT_WINDOW,
+        ),
+        (
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                has_open_order=True,
+                order_id=UUID(int=4),
+                market_window_ready=True,
+            ),
+            A.ADVANCE_ORDER,
+        ),
+        (
+            snapshot(
+                cycle_status="completed",
+                cycle_slot_at=PREVIOUS_SLOT,
+                performance_due_at=NOW - timedelta(hours=1),
+            ),
+            A.PUBLISH_PERFORMANCE,
+        ),
+    ],
+    ids=("trigger", "research-job", "resume", "collect-window", "advance", "performance"),
+)
+def test_foreground_loop_drains_action_then_confirms_exact_frozen_context_once(
+    before: loop.AgentPaperLoopSnapshot,
+    expected_action: loop.AgentPaperLoopAction,
+) -> None:
+    async def scenario() -> tuple[loop.AgentPaperLoopAction, bool, int, list[tuple[object, ...]]]:
+        shutdown = asyncio.Event()
+        action_started = asyncio.Event()
+        release_action = asyncio.Event()
+        action_cancelled = False
+        heartbeat_count = 0
+        confirmations: list[tuple[object, ...]] = []
+
+        async def inspect() -> loop.AgentPaperLoopSnapshot:
+            return before
+
+        async def execute(
+            action: loop.AgentPaperLoopAction,
+            state: loop.AgentPaperLoopSnapshot,
+        ) -> None:
+            nonlocal action_cancelled
+            assert action is expected_action
+            assert state is before
+            action_started.set()
+            shutdown.set()
+            try:
+                await release_action.wait()
+            except asyncio.CancelledError:
+                action_cancelled = True
+                raise
+
+        async def controlled_sleep(_seconds: float) -> None:
+            await action_started.wait()
+
+        async def heartbeat(_seen_at: datetime) -> None:
+            nonlocal heartbeat_count
+            heartbeat_count += 1
+            if heartbeat_count == 2:
+                release_action.set()
+                await asyncio.sleep(0)
+
+        async def confirm_shutdown(
+            action: loop.AgentPaperLoopAction,
+            state: loop.AgentPaperLoopSnapshot,
+            action_result: loop.AgentPaperLoopAction | None,
+        ) -> bool:
+            confirmations.append((action, state, action_result))
+            return True
+
+        async with asyncio.timeout(1):
+            result = await loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=controlled_sleep,
+                heartbeat=heartbeat,
+                clock=lambda: NOW,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
+            )
+        return result, action_cancelled, heartbeat_count, confirmations
+
+    result, action_cancelled, heartbeat_count, confirmations = asyncio.run(scenario())
+
+    assert result is A.STOP_REQUESTED
+    assert action_cancelled is False
+    assert heartbeat_count == 2
+    assert confirmations == [(expected_action, before, None)]
+
+
+@pytest.mark.parametrize("confirmation", [False, RuntimeError("read failed")])
+def test_foreground_loop_fails_closed_when_shutdown_confirmation_fails(
+    confirmation: bool | RuntimeError,
+) -> None:
+    shutdown = asyncio.Event()
+    confirmation_reads = 0
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot()
+
+    async def execute(*_args) -> None:
+        shutdown.set()
+
+    async def no_sleep(_seconds: float) -> None:
+        raise AssertionError("an immediate action must not sleep")
+
+    async def confirm_shutdown(*_args) -> bool:
+        nonlocal confirmation_reads
+        confirmation_reads += 1
+        if isinstance(confirmation, RuntimeError):
+            raise confirmation
+        return confirmation
+
+    async def scenario() -> loop.AgentPaperLoopAction:
+        async with asyncio.timeout(1):
+            return await loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=no_sleep,
+                heartbeat=noop_heartbeat,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
+            )
+
+    result = asyncio.run(scenario())
+
+    assert result is A.STOP_UNCONFIRMED
+    assert confirmation_reads == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "before", "after", "expected"),
+    [
+        (
+            A.TRIGGER,
+            snapshot(),
+            snapshot(cycle_id=UUID(int=2), cycle_status="researching", cycle_slot_at=SLOT),
+            True,
+        ),
+        (
+            A.TRIGGER,
+            snapshot(),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                cycle_slot_at=PREVIOUS_SLOT,
+            ),
+            False,
+        ),
+        (
+            A.RUN_RESEARCH_JOB,
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_id=UUID(int=3),
+                research_job_status="queued",
+            ),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="researching",
+                research_job_id=UUID(int=3),
+                research_job_status="succeeded",
+            ),
+            True,
+        ),
+        (
+            A.RESUME,
+            snapshot(cycle_id=UUID(int=2), cycle_status="researching"),
+            snapshot(
+                cycle_id=UUID(int=2),
+                cycle_status="awaiting_market",
+                order_id=UUID(int=4),
+                has_open_order=True,
+            ),
+            True,
+        ),
+    ],
+    ids=(
+        "trigger-exact-slot",
+        "trigger-slot-conflict",
+        "research-exact-job",
+        "resume-exact-cycle",
+    ),
+)
+def test_shutdown_confirmation_reads_once_and_matches_exact_persisted_action(
+    monkeypatch: pytest.MonkeyPatch,
+    action: loop.AgentPaperLoopAction,
+    before: loop.AgentPaperLoopSnapshot,
+    after: loop.AgentPaperLoopSnapshot,
+    expected: bool,
+) -> None:
+    inspections: list[tuple[UUID, UUID]] = []
+
+    async def inspect(_settings, *, account_id, expected_calendar_authority_id):
+        inspections.append((account_id, expected_calendar_authority_id))
+        return after
+
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    result = asyncio.run(
+        loop.confirm_agent_paper_shutdown(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            action=action,
+            before_snapshot=before,
+            action_result=None,
+        )
+    )
+
+    assert result is expected
+    assert inspections == [(UUID(int=1), CALENDAR_AUTHORITY_ID)]
+
+
+def test_shutdown_confirmation_masks_persisted_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def inspect(*_args, **_kwargs):
+        raise RuntimeError("private-database-canary")
+
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+
+    assert (
+        asyncio.run(
+            loop.confirm_agent_paper_shutdown(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+                action=A.TRIGGER,
+                before_snapshot=snapshot(),
+                action_result=None,
+            )
+        )
+        is False
+    )
+
+
+def test_local_runner_holds_lock_and_coalesces_signals_before_calendar_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[object] = []
+    handlers: dict[signal.Signals, object] = {}
+
+    @contextmanager
+    def acquire_lock(*, runtime_root=None):
+        assert runtime_root is None
+        events.append("lock-enter")
+        yield
+        events.append("lock-exit")
+
+    class SignalLoop:
+        def add_signal_handler(self, item, callback) -> None:
+            handlers[item] = callback
+            events.append(("add", item))
+
+        def remove_signal_handler(self, item) -> bool:
+            events.append(("remove", item))
+            return handlers.pop(item, None) is not None
+
+    async def select_calendar(_settings) -> UUID:
+        events.append("calendar")
+        return CALENDAR_AUTHORITY_ID
+
+    async def run_loop(**kwargs) -> loop.AgentPaperLoopAction:
+        events.append("loop")
+        for item in (signal.SIGINT, signal.SIGTERM, signal.SIGTERM):
+            callback = handlers[item]
+            assert callable(callback)
+            callback()
+        assert kwargs["shutdown_requested"]() is True
+        return A.STOP_REQUESTED
+
+    async def model_ready() -> None:
+        return None
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", acquire_lock)
+    monkeypatch.setattr(loop.asyncio, "get_running_loop", lambda: SignalLoop())
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_calendar)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+    assert events == [
+        "lock-enter",
+        ("add", signal.SIGINT),
+        ("add", signal.SIGTERM),
+        "calendar",
+        "loop",
+        ("remove", signal.SIGINT),
+        ("remove", signal.SIGTERM),
+        "lock-exit",
+    ]
+
+
+def test_local_runner_lock_contention_stops_before_calendar_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def reject_lock(*, runtime_root=None):
+        assert runtime_root is None
+        raise RuntimeError("AGENT_PAPER_LOOP_ALREADY_RUNNING")
+        yield
+
+    async def unexpected_calendar(_settings):
+        raise AssertionError("the losing process must not select or inspect the calendar")
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", reject_lock)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", unexpected_calendar)
+
+    with pytest.raises(RuntimeError, match="^AGENT_PAPER_LOOP_ALREADY_RUNNING$"):
+        asyncio.run(
+            loop.run_local_agent_paper_loop(
+                loop.EngineSettings(
+                    database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"
+                ),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+            )
+        )
 
 
 def test_foreground_loop_honors_known_executor_stop_without_reinspection() -> None:
@@ -241,11 +928,7 @@ def test_foreground_loop_waits_without_product_side_effects(
     states = iter(
         (
             first,
-            snapshot(
-                now=datetime(2026, 9, 14, 20, 1, tzinfo=UTC),
-                cycle_status="completed",
-                cycle_slot_at=datetime(2026, 9, 14, 19, 55, tzinfo=UTC),
-            ),
+            snapshot(enabled=False),
         )
     )
     sleeps: list[float] = []
@@ -267,7 +950,7 @@ def test_foreground_loop_waits_without_product_side_effects(
             heartbeat=noop_heartbeat,
         )
     )
-    assert result == loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
+    assert result == loop.AgentPaperLoopAction.STOP_DISABLED
     assert sum(sleeps) == expected_sleep
     assert all(seconds <= 15 for seconds in sleeps)
 
@@ -283,7 +966,7 @@ def test_foreground_loop_heartbeats_before_inspection_and_after_action() -> None
                 research_job_status="queued",
                 research_job_id="job-1",
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -311,7 +994,7 @@ def test_foreground_loop_heartbeats_before_inspection_and_after_action() -> None
         )
     )
 
-    assert result == A.STOP_SESSION_CLOSED
+    assert result == A.STOP_DISABLED
     assert events == ["heartbeat", "inspect", "execute", "heartbeat", "inspect"]
     assert heartbeat_times == [NOW, NOW + timedelta(seconds=1)]
 
@@ -327,7 +1010,7 @@ def test_foreground_loop_keeps_heartbeat_live_during_long_action() -> None:
                 research_job_status="queued",
                 research_job_id="job-1",
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -359,7 +1042,7 @@ def test_foreground_loop_keeps_heartbeat_live_during_long_action() -> None:
             timeout=1,
         )
 
-    assert asyncio.run(run()) == A.STOP_SESSION_CLOSED
+    assert asyncio.run(run()) == A.STOP_DISABLED
     assert heartbeat_count == 4
 
 
@@ -375,7 +1058,7 @@ def test_foreground_loop_uses_fixed_heartbeat_cadence_during_long_action() -> No
                 research_job_status="queued",
                 research_job_id="job-1",
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -411,19 +1094,24 @@ def test_foreground_loop_uses_fixed_heartbeat_cadence_during_long_action() -> No
         )
     )
 
-    assert result == A.STOP_SESSION_CLOSED
+    assert result == A.STOP_DISABLED
     assert sleeps == [10.0, 6.0]
 
 
-def test_foreground_loop_stops_long_action_when_heartbeat_fails() -> None:
+def test_foreground_loop_does_not_cancel_active_action_when_heartbeat_fails() -> None:
     heartbeat_count = 0
     execute_started = asyncio.Event()
-    execute_cancelled = asyncio.Event()
+    release_execute = asyncio.Event()
+    shutdown = asyncio.Event()
+    action_cancelled = False
+    confirmation_reads = 0
 
     async def heartbeat(_seen_at: datetime) -> None:
         nonlocal heartbeat_count
         heartbeat_count += 1
         if heartbeat_count == 2:
+            release_execute.set()
+            await asyncio.sleep(0)
             raise RuntimeError("database unavailable")
 
     async def inspect() -> loop.AgentPaperLoopSnapshot:
@@ -434,14 +1122,22 @@ def test_foreground_loop_stops_long_action_when_heartbeat_fails() -> None:
         )
 
     async def execute(_action, _state) -> None:
+        nonlocal action_cancelled
         execute_started.set()
+        shutdown.set()
         try:
-            await asyncio.Event().wait()
-        finally:
-            execute_cancelled.set()
+            await release_execute.wait()
+        except asyncio.CancelledError:
+            action_cancelled = True
+            raise
 
     async def controlled_sleep(_seconds: float) -> None:
         await execute_started.wait()
+
+    async def confirm_shutdown(*_args) -> bool:
+        nonlocal confirmation_reads
+        confirmation_reads += 1
+        return True
 
     async def run() -> loop.AgentPaperLoopAction:
         return await asyncio.wait_for(
@@ -451,16 +1147,83 @@ def test_foreground_loop_stops_long_action_when_heartbeat_fails() -> None:
                 sleep=controlled_sleep,
                 heartbeat=heartbeat,
                 clock=lambda: NOW,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
             ),
             timeout=1,
         )
 
-    assert asyncio.run(run()) == A.STOP_RESULT_UNKNOWN
+    assert asyncio.run(run()) == A.STOP_UNCONFIRMED
     assert heartbeat_count == 2
-    assert execute_cancelled.is_set()
+    assert action_cancelled is False
+    assert confirmation_reads == 1
 
 
-def test_foreground_loop_retrieves_action_failure_when_heartbeat_also_fails() -> None:
+@pytest.mark.parametrize("heartbeat_fails", [False, True])
+def test_foreground_loop_confirms_once_after_stopped_action_failure(
+    heartbeat_fails: bool,
+) -> None:
+    heartbeat_count = 0
+    execute_started = asyncio.Event()
+    release_execute = asyncio.Event()
+    shutdown = asyncio.Event()
+    action_cancelled = False
+    confirmations: list[tuple[object, ...]] = []
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+        if heartbeat_count == 2:
+            release_execute.set()
+            await asyncio.sleep(0)
+            if heartbeat_fails:
+                raise RuntimeError("database unavailable")
+
+    before = snapshot(
+        cycle_status="researching",
+        research_job_status="queued",
+        research_job_id="job-1",
+    )
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return before
+
+    async def execute(_action, _state) -> None:
+        nonlocal action_cancelled
+        execute_started.set()
+        shutdown.set()
+        try:
+            await release_execute.wait()
+        except asyncio.CancelledError:
+            action_cancelled = True
+            raise
+        raise RuntimeError("action failed")
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await execute_started.wait()
+
+    async def confirm_shutdown(*args) -> bool:
+        confirmations.append(args)
+        return True
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=controlled_sleep,
+            heartbeat=heartbeat,
+            clock=lambda: NOW,
+            shutdown_requested=shutdown.is_set,
+            confirm_shutdown=confirm_shutdown,
+        )
+    )
+
+    assert result is A.STOP_UNCONFIRMED
+    assert action_cancelled is False
+    assert confirmations == [(A.RUN_RESEARCH_JOB, before, A.STOP_RESULT_UNKNOWN)]
+
+
+def test_foreground_loop_preserves_action_failure_when_heartbeat_also_fails() -> None:
     heartbeat_count = 0
     execute_started = asyncio.Event()
     release_execute = asyncio.Event()
@@ -492,19 +1255,21 @@ def test_foreground_loop_retrieves_action_failure_when_heartbeat_also_fails() ->
     async def run() -> loop.AgentPaperLoopAction:
         running_loop = asyncio.get_running_loop()
         running_loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
-        result = await loop.run_foreground_loop(
-            inspect=inspect,
-            execute=execute,
-            sleep=controlled_sleep,
-            heartbeat=heartbeat,
-            clock=lambda: NOW,
-        )
-        await asyncio.sleep(0)
-        gc.collect()
-        await asyncio.sleep(0)
-        return result
+        try:
+            return await loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=controlled_sleep,
+                heartbeat=heartbeat,
+                clock=lambda: NOW,
+            )
+        finally:
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
 
-    assert asyncio.run(run()) == A.STOP_RESULT_UNKNOWN
+    with pytest.raises(RuntimeError, match="action failed"):
+        asyncio.run(run())
     assert unhandled == []
 
 
@@ -526,7 +1291,7 @@ def test_foreground_loop_heartbeats_during_long_waits() -> None:
                 has_open_order=True,
                 market_window_end_at=NOW + timedelta(seconds=31),
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -552,7 +1317,7 @@ def test_foreground_loop_heartbeats_during_long_waits() -> None:
         )
     )
 
-    assert result == A.STOP_SESSION_CLOSED
+    assert result == A.STOP_DISABLED
     assert sleeps == [15.0, 15.0, 1.0]
     assert heartbeat_times == list(
         (
@@ -675,6 +1440,249 @@ def test_service_environment_localizes_compose_endpoints_after_process_override(
     assert environment["OBJECT_STORE_ENDPOINT"] == "http://127.0.0.1:59000"
 
 
+def explicit_service_config(tmp_path: Path) -> Path:
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra/compose.yaml").touch()
+    (tmp_path / ".gitignore").write_text("infra/.env*\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    env_file = tmp_path / "infra/.env.service"
+    env_file.write_text(
+        "\n".join(f"{key}={value}" for key, value in service_ready_environment().items())
+    )
+    (tmp_path / "infra/.env.local").write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=false\n")
+    return env_file
+
+
+def test_explicit_config_cli_preflight_and_runtime_ignore_business_process_overrides(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    env_file = explicit_service_config(tmp_path)
+    for name, value in {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false",
+        "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(UUID(int=99)),
+        "AGENT_RUNTIME_MODE": "responses",
+        "DATABASE_URL": "postgresql+asyncpg://wrong/other",
+        "ALPACA_API_KEY_ID": "process-canary",
+        "FRED_API_KEY": "process-only-canary",
+    }.items():
+        monkeypatch.setenv(name, value)
+    seen = []
+
+    def preflight(environment, *, repo_root):
+        seen.append("preflight")
+        assert repo_root == tmp_path
+        assert environment["DATABASE_URL"] == enabled_environment()["DATABASE_URL"]
+        assert environment["ALPACA_API_KEY_ID"] == "alpaca-key"
+        assert "FRED_API_KEY" not in environment
+        return {"status": "ready"}
+
+    async def runtime(settings, *, account_id, repo_root, env_file):
+        seen.append("runtime")
+        assert repo_root == tmp_path and env_file == tmp_path / "infra/.env.service"
+        assert account_id == UUID(int=1)
+        assert settings.database_url == enabled_environment()["DATABASE_URL"]
+        assert settings.agent_paper_cycle_enabled
+        assert settings.agent_runtime_mode.value == "codex_sdk"
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "agent_paper_service_preflight", preflight)
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", runtime)
+    args = ["--repo-root", str(tmp_path), "--env-file", str(env_file)]
+    assert loop.main([*args, "--service-preflight"]) == 0
+    assert loop.main(args) == 0
+    assert seen == ["preflight", "runtime"]
+    assert "canary" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("invalid", ["missing", "tracked", "symlink", "outside", "not_ignored"])
+@pytest.mark.parametrize("action", [[], ["--service-preflight"], ["--service-status"]])
+def test_explicit_config_rejected_before_any_business_or_codex_access(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    invalid,
+    action,
+):
+    env_file = explicit_service_config(tmp_path)
+    if invalid == "missing":
+        env_file.unlink()
+    elif invalid == "tracked":
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-f", str(env_file)], check=True)
+    elif invalid == "symlink":
+        target = tmp_path / "infra/.env.target"
+        env_file.rename(target)
+        env_file.symlink_to(target)
+    elif invalid == "outside":
+        env_file = tmp_path.parent / f"{tmp_path.name}.env"
+        env_file.write_text("CANARY=private-config-canary")
+    else:
+        (tmp_path / ".gitignore").write_text("")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid config must fence Codex, database and producers")
+
+    for name in (
+        "sdk_status",
+        "create_async_engine",
+        "run_local_agent_paper_loop",
+        "agent_paper_service_preflight",
+    ):
+        monkeypatch.setattr(loop, name, unexpected)
+    assert loop.main(["--repo-root", str(tmp_path), "--env-file", str(env_file), *action]) == 1
+    assert "private-config-canary" not in capsys.readouterr().out
+
+
+def test_explicit_loop_reinspection_and_action_keep_registered_config(monkeypatch, tmp_path):
+    env_file = explicit_service_config(tmp_path)
+    monkeypatch.setenv("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
+    seen = []
+
+    async def model_ready():
+        return None
+
+    async def initial(_settings):
+        return CALENDAR_AUTHORITY_ID
+
+    async def inspect(settings, **kwargs):
+        assert settings.agent_paper_cycle_enabled
+        assert settings.database_url == enabled_environment()["DATABASE_URL"]
+        seen.append("inspect")
+        return snapshot()
+
+    async def execute(settings, *, env_file, **kwargs):
+        assert env_file == tmp_path / "infra/.env.service"
+        seen.append("execute")
+
+    async def run_loop(*, inspect, execute, **kwargs):
+        snap = await inspect()
+        await execute(A.TRIGGER, snap)
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", initial)
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "execute_agent_paper_loop_action", execute)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url=enabled_environment()["DATABASE_URL"]),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+        )
+    )
+    assert result == A.STOP_REQUESTED
+    assert seen == ["inspect", "execute"]
+
+
+@pytest.mark.parametrize("action", [A.TRIGGER, A.COLLECT_WINDOW, A.RUN_RESEARCH_JOB])
+def test_explicit_action_uses_registered_config_through_product_boundary(
+    monkeypatch,
+    tmp_path,
+    action,
+):
+    env_file = explicit_service_config(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://wrong/other")
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "wrong-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "process-only-canary")
+    observed = []
+
+    async def producer(settings, *args, **kwargs):
+        assert settings.database_url == enabled_environment()["DATABASE_URL"]
+        assert settings.openai_api_key is None
+        if action != A.RUN_RESEARCH_JOB:
+            assert settings.alpaca_key.get_secret_value() == "alpaca-key"
+        if action == A.COLLECT_WINDOW:
+            assert kwargs["process_environment"]["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
+        observed.append(action)
+        return "prepared" if action == A.TRIGGER else True
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", producer)
+    monkeypatch.setattr(loop, "collect_window_once", producer)
+    monkeypatch.setattr(loop, "run_agent_worker_once", producer)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+            action=action,
+            snapshot=snapshot(cycle_id=UUID(int=2), research_job_id=UUID(int=3)),
+        )
+    )
+    assert result is None
+    assert observed == [action]
+
+
+def test_explicit_trigger_forwards_registered_schwab_config_after_prerequisites(
+    monkeypatch, tmp_path
+):
+    env_file = explicit_service_config(tmp_path)
+    seen = []
+
+    async def ready(*args, **kwargs):
+        return "ready"
+
+    async def trigger(settings, request, *, process_environment, **kwargs):
+        assert process_environment["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
+        assert process_environment["NEXUS_SCHWAB_APP_SECRET"] == "schwab-secret"
+        seen.append(request.account_id)
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "trigger_once", trigger)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.TRIGGER,
+            snapshot=snapshot(),
+            env_file=env_file,
+        )
+    )
+    assert result is None and seen == [UUID(int=1)]
+
+
+def test_preflight_cannot_fill_missing_schwab_config_from_default_file(monkeypatch, tmp_path):
+    explicit_service_config(tmp_path)
+    (tmp_path / "infra/.env.local").write_text("NEXUS_SCHWAB_APP_KEY=default-key\n")
+    environment = service_ready_environment()
+    environment.pop("NEXUS_SCHWAB_APP_KEY")
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
+    result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
+    assert "AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID" in result["blocking_codes"]
+
+
+@pytest.mark.parametrize("action", [A.TRIGGER, A.COLLECT_WINDOW])
+def test_explicit_action_missing_schwab_config_never_falls_back(monkeypatch, tmp_path, action):
+    env_file = explicit_service_config(tmp_path)
+    environment = service_ready_environment()
+    environment.pop("NEXUS_SCHWAB_APP_KEY")
+    env_file.write_text("\n".join(f"{name}={value}" for name, value in environment.items()))
+    (tmp_path / "infra/.env.local").write_text("NEXUS_SCHWAB_APP_KEY=default-key\n")
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("missing registered config must fence all producers")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", unexpected)
+    monkeypatch.setattr(loop, "collect_window_once", unexpected)
+    with pytest.raises(ValueError, match="^AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID$"):
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                action=action,
+                snapshot=snapshot(cycle_id=UUID(int=2)),
+                env_file=env_file,
+            )
+        )
+
+
 def test_local_loop_reinspection_uses_service_environment_loader(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -687,13 +1695,20 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         service_loads.append(process_environment)
         return environment
 
-    async def inspect(_settings, *, account_id):
+    async def inspect(_settings, *, account_id, expected_calendar_authority_id):
         assert account_id == UUID(int=1)
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return snapshot()
+
+    async def select_initial(_settings):
+        return CALENDAR_AUTHORITY_ID
 
     async def run_loop(*, inspect, **_kwargs):
         await inspect()
         return A.STOP_SESSION_CLOSED
+
+    async def model_ready() -> None:
+        return None
 
     monkeypatch.setattr(loop, "load_agent_paper_service_environment", load_service)
     monkeypatch.setattr(
@@ -704,6 +1719,8 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         ),
     )
     monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_initial)
     monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
 
     result = asyncio.run(
@@ -968,6 +1985,53 @@ def test_service_preflight_cli_masks_configuration_values(
     assert json.loads(output)["status"] == "blocked"
 
 
+def test_service_status_keeps_heartbeat_independent_of_runtime_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unrelated invalid runtime field must not erase an available DB heartbeat fact."""
+    env_file = explicit_service_config(tmp_path)
+    environment = service_ready_environment() | {"AGENT_DAILY_BUDGET_USD": "0"}
+    env_file.write_text("\n".join(f"{name}={value}" for name, value in environment.items()))
+    observed_database_urls: list[str | None] = []
+
+    monkeypatch.setattr(
+        loop,
+        "agent_paper_service_preflight",
+        lambda *_args, **_kwargs: {
+            "status": "blocked",
+            "execution_locked": True,
+            "external_requests": 0,
+            "blocking_codes": ["AGENT_PAPER_RUNTIME_CONFIG_INVALID"],
+            "optional_codes": [],
+        },
+    )
+
+    async def heartbeat(database_url: str | None) -> dict[str, object]:
+        observed_database_urls.append(database_url)
+        return {"status": "observed", "seen_at": NOW.isoformat()}
+
+    monkeypatch.setattr(loop, "read_agent_paper_service_heartbeat", heartbeat)
+
+    assert (
+        loop.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--env-file",
+                str(env_file),
+                "--service-status",
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["heartbeat"]["status"] == "observed"
+    assert payload["preflight"]["blocking_codes"] == ["AGENT_PAPER_RUNTIME_CONFIG_INVALID"]
+    assert observed_database_urls == [environment["DATABASE_URL"]]
+
+
 def test_loop_command_reads_account_and_runtime_settings_from_process_environment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -979,9 +2043,7 @@ def test_loop_command_reads_account_and_runtime_settings_from_process_environmen
     def load(_root, process_environment):
         captured_process_environment.append(dict(process_environment))
         return enabled_environment() | {
-            "NEXUS_AGENT_PAPER_ACCOUNT_ID": process_environment[
-                "NEXUS_AGENT_PAPER_ACCOUNT_ID"
-            ]
+            "NEXUS_AGENT_PAPER_ACCOUNT_ID": process_environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"]
         }
 
     async def stop(_settings, *, account_id: UUID, repo_root):
@@ -1063,6 +2125,16 @@ def test_loop_command_rejects_responses_runtime_before_running(
     ("reason", "exit_code", "output"),
     [
         (
+            loop.AgentPaperLoopAction.STOP_REQUESTED,
+            0,
+            {"execution_locked": True, "status": "stopped", "reason": "stop_requested"},
+        ),
+        (
+            loop.AgentPaperLoopAction.STOP_UNCONFIRMED,
+            75,
+            {"error_code": "AGENT_PAPER_LOOP_STOP_UNCONFIRMED"},
+        ),
+        (
             loop.AgentPaperLoopAction.STOP_SESSION_CLOSED,
             0,
             {"execution_locked": True, "status": "stopped", "reason": "stop_session_closed"},
@@ -1086,6 +2158,16 @@ def test_loop_command_rejects_responses_runtime_before_running(
             loop.AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE,
             1,
             {"error_code": "AGENT_PAPER_LOOP_PREREQUISITE_UNAVAILABLE"},
+        ),
+        (
+            loop.AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE,
+            1,
+            {"error_code": "AGENT_PAPER_CALENDAR_UNAVAILABLE"},
+        ),
+        (
+            loop.AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH,
+            1,
+            {"error_code": "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH"},
         ),
     ],
 )
@@ -1111,6 +2193,9 @@ def test_loop_command_exposes_only_safe_stop_reasons(
     "error_code",
     [
         "AGENT_PAPER_ACCOUNT_INVALID",
+        "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
+        "AGENT_PAPER_CALENDAR_UNAVAILABLE",
+        "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
@@ -1150,6 +2235,30 @@ def test_loop_command_masks_unknown_failure_details(
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN"}
     assert "private-failure-canary" not in captured.out + captured.err
+
+
+def test_loop_command_reports_lock_contention_without_running_or_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
+) -> None:
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
+    model_status_reads = 0
+
+    def model_status() -> None:
+        nonlocal model_status_reads
+        model_status_reads += 1
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", model_status)
+
+    async def contend(*_args, **_kwargs):
+        raise RuntimeError("AGENT_PAPER_LOOP_ALREADY_RUNNING")
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", contend)
+
+    assert loop.main(["--account-id", str(UUID(int=1))]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error_code": "AGENT_PAPER_LOOP_ALREADY_RUNNING"}
+    assert model_status_reads == 0
 
 
 def test_loop_command_rejects_invalid_account_without_echo(
@@ -1224,6 +2333,7 @@ def test_executor_claims_only_persisted_job(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calendar_authority_id = UUID(int=9)
     requests: list[object] = []
     preparations: list[tuple[UUID, datetime]] = []
     trend_preparations: list[tuple[UUID, datetime]] = []
@@ -1236,16 +2346,26 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     }
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
-    async def prepare(settings, *, account_id, repo_root, now):
+    async def prepare(settings, *, account_id, repo_root, now, expected_calendar_authority_id):
         assert repo_root == loop.Path("/repo")
+        assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
         preparations.append((account_id, now))
         return "ready"
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
 
-    async def prepare_macro(settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
         assert repo_root == loop.Path("/repo")
+        assert expected_calendar_authority_id == calendar_authority_id
         assert fred_key.get_secret_value() == ""
         assert isinstance(settings, loop.DailyOnceSettings)
         macro_preparations.append((account_id, now))
@@ -1253,15 +2373,19 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(loop, "prepare_macro_once", prepare_macro, raising=False)
 
-    async def prepare_trends(settings, *, account_id, repo_root, now):
+    async def prepare_trends(
+        settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
         assert repo_root == loop.Path("/repo")
+        assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
         trend_preparations.append((account_id, now))
         return "ready"
 
     monkeypatch.setattr(loop, "prepare_current_trends_once", prepare_trends, raising=False)
 
-    async def trigger(settings, request, *, repo_root):
+    async def trigger(settings, request, *, repo_root, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
         requests.append(request)
 
@@ -1272,7 +2396,10 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
             account_id=UUID(int=1),
             repo_root=loop.Path("/repo"),
             action=loop.AgentPaperLoopAction.TRIGGER,
-            snapshot=snapshot(now=datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC)),
+            snapshot=snapshot(
+                now=datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC),
+                calendar_authority_id=calendar_authority_id,
+            ),
         )
     )
     request = requests[0]
@@ -1297,7 +2424,8 @@ def test_executor_reinspects_after_preparing_missing_prior_daily(
     }
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
-    async def prepare(_settings, *, account_id, repo_root, now):
+    async def prepare(_settings, *, account_id, repo_root, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "prepared"
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
@@ -1332,7 +2460,8 @@ def test_executor_stops_before_cycle_when_prior_daily_is_unavailable(
         },
     )
 
-    async def prepare(_settings, *, account_id, repo_root, now):
+    async def prepare(_settings, *, account_id, repo_root, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "unavailable"
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
@@ -1376,13 +2505,28 @@ def test_executor_does_not_trigger_until_current_trends_are_ready(
         },
     )
 
-    async def prepare_daily(_settings, *, account_id, repo_root, now):
+    async def prepare_daily(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
 
-    async def prepare_trends(_settings, *, account_id, repo_root, now):
+    async def prepare_trends(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return trend_status
 
-    async def prepare_macro(_settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        _settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
 
     async def unexpected_trigger(*_args, **_kwargs):
@@ -1420,19 +2564,35 @@ def test_executor_continues_when_daily_macro_refresh_is_unavailable(
     )
     events: list[str] = []
 
-    async def prepare_daily(_settings, *, account_id, repo_root, now):
+    async def prepare_daily(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("daily")
         return "ready"
 
-    async def prepare_macro(_settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        _settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("macro")
         return "unavailable"
 
-    async def prepare_trends(_settings, *, account_id, repo_root, now):
+    async def prepare_trends(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("trends")
         return "ready"
 
-    async def trigger(_settings, _request, *, repo_root):
+    async def trigger(_settings, _request, *, repo_root, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("trigger")
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare_daily)
@@ -1467,10 +2627,22 @@ def test_executor_reinspects_after_binding_macro_evidence(
         },
     )
 
-    async def prepare_daily(_settings, *, account_id, repo_root, now):
+    async def prepare_daily(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
 
-    async def prepare_macro(_settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        _settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "prepared"
 
     async def unexpected(*_args, **_kwargs):
@@ -1515,7 +2687,8 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
 
@@ -1543,6 +2716,7 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1556,7 +2730,8 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
 def test_prior_daily_preparation_reuses_existing_authority_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
             prior_session=date(2026, 9, 11),
@@ -1576,6 +2751,7 @@ def test_prior_daily_preparation_reuses_existing_authority_without_provider_call
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1590,7 +2766,8 @@ def test_prior_daily_preparation_does_not_repeat_an_existing_attempt(
     attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "daily" / prior_session.isoformat()
     attempt.mkdir(mode=0o700, parents=True)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
             prior_session=prior_session,
@@ -1610,6 +2787,7 @@ def test_prior_daily_preparation_does_not_repeat_an_existing_attempt(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1621,7 +2799,8 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
             prior_session=prior_session,
@@ -1645,6 +2824,7 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1654,7 +2834,8 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
 def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         assert account_id == UUID(int=1)
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -1677,6 +2858,7 @@ def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1723,7 +2905,8 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
     )
     snapshots: list[UUID] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return next(scopes)
 
     async def prepare_snapshot(_settings, *, instrument_id, now, macro_vintage):
@@ -1744,6 +2927,7 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1755,7 +2939,8 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
 def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -1775,6 +2960,7 @@ def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1792,7 +2978,19 @@ def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
 def test_macro_vintage_advances_only_after_its_next_xnys_open(
     decision_time: datetime, expected_vintage: date
 ) -> None:
-    assert loop.latest_visible_macro_vintage(decision_time) == expected_vintage
+    class Session:
+        async def scalar(self, _statement):
+            return expected_vintage + timedelta(days=1)
+
+    result = asyncio.run(
+        loop.latest_visible_macro_vintage(
+            Session(),
+            now=decision_time,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        )
+    )
+
+    assert result == expected_vintage
 
 
 def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
@@ -1820,7 +3018,8 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
     imported: list[str] = []
     snapshots: list[UUID] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         assert account_id == UUID(int=1)
         return next(scopes)
 
@@ -1854,6 +3053,7 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1896,7 +3096,8 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
     )
     attempts: list[str] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return next(scopes)
 
     async def collect(request, *, key, directory):
@@ -1915,6 +3116,7 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
         assert result == "unavailable"
@@ -1925,7 +3127,8 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
 def test_macro_preparation_degrades_only_known_provider_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -1946,6 +3149,7 @@ def test_macro_preparation_degrades_only_known_provider_failure(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1955,7 +3159,8 @@ def test_macro_preparation_degrades_only_known_provider_failure(
 def test_macro_preparation_propagates_unknown_provider_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -1977,6 +3182,7 @@ def test_macro_preparation_propagates_unknown_provider_failure(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
 
@@ -1993,7 +3199,8 @@ def test_macro_preparation_fails_closed_on_import_or_readback_mismatch(
     tmp_path: loop.Path,
     imported: dict[str, object],
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -2020,6 +3227,7 @@ def test_macro_preparation_fails_closed_on_import_or_readback_mismatch(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
 
@@ -2052,7 +3260,8 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
 
@@ -2089,6 +3298,7 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2112,20 +3322,14 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
     assert calls[2] == ("collect", "request", prior_session, 10)
 
 
-def test_current_trends_window_uses_a_full_year_not_the_short_execution_calendar() -> None:
-    start_session = getattr(loop, "_current_trends_start_session", None)
-    assert start_session is not None, "current trends need their own full-year calendar window"
-
-    assert start_session(date(2026, 9, 14)) == date(2025, 9, 15)
-
-
 def test_current_trends_preparation_reuses_current_evidence_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
     prepare = getattr(loop, "prepare_current_trends_once", None)
     assert prepare is not None, "the loop must prepare current trends before triggering research"
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2147,6 +3351,7 @@ def test_current_trends_preparation_reuses_current_evidence_without_provider_cal
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2179,7 +3384,8 @@ def test_current_trends_preparation_builds_missing_snapshot_without_provider_cal
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
 
@@ -2200,6 +3406,7 @@ def test_current_trends_preparation_builds_missing_snapshot_without_provider_cal
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2217,7 +3424,8 @@ def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
     attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "trends" / prior_session.isoformat()
     attempt.mkdir(mode=0o700, parents=True)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2239,6 +3447,7 @@ def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2250,7 +3459,8 @@ def test_current_trends_preparation_stops_after_known_collection_failure(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2276,6 +3486,7 @@ def test_current_trends_preparation_stops_after_known_collection_failure(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2290,7 +3501,8 @@ def test_current_trends_preparation_preserves_unknown_external_outcomes(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2321,6 +3533,7 @@ def test_current_trends_preparation_preserves_unknown_external_outcomes(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
 
@@ -2413,13 +3626,27 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
         window_start=window_end - timedelta(minutes=5),
         window_end=window_end,
     )
+    calendar = loop.ServiceCalendarAuthority(
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        as_of=NOW,
+        local_date=NOW.date(),
+        session=NOW.date(),
+        decision_window_start_at=NOW - timedelta(hours=3),
+        market_open_at=NOW - timedelta(minutes=35),
+        market_close_at=NOW + timedelta(hours=6),
+        next_session=NOW.date() + timedelta(days=1),
+        next_decision_window_start_at=NOW + timedelta(hours=21),
+        next_market_close_at=NOW + timedelta(days=1, hours=6),
+    )
     result = loop.snapshot_from_cycle_view(
         now=NOW,
         view=view,
         research_job=None,
         market_scope=market_scope,
+        calendar=calendar,
     )
     assert result.order_id == order_id
+    assert result.market_window_start_at == window_end - timedelta(minutes=5)
     assert result.market_window_end_at == window_end + timedelta(seconds=60)
     assert result.has_open_order is True
     with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):
@@ -2428,4 +3655,5 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
             view=view,
             research_job=None,
             market_scope=market_scope.model_copy(update={"cycle_id": UUID(int=5)}),
+            calendar=calendar,
         )
