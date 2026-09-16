@@ -645,16 +645,18 @@ def test_foreground_loop_fails_closed_when_shutdown_confirmation_fails(
             raise confirmation
         return confirmation
 
-    result = asyncio.run(
-        loop.run_foreground_loop(
-            inspect=inspect,
-            execute=execute,
-            sleep=no_sleep,
-            heartbeat=noop_heartbeat,
-            shutdown_requested=shutdown.is_set,
-            confirm_shutdown=confirm_shutdown,
-        )
-    )
+    async def scenario() -> loop.AgentPaperLoopAction:
+        async with asyncio.timeout(1):
+            return await loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=no_sleep,
+                heartbeat=noop_heartbeat,
+                shutdown_requested=shutdown.is_set,
+                confirm_shutdown=confirm_shutdown,
+            )
+
+    result = asyncio.run(scenario())
 
     assert result is A.STOP_UNCONFIRMED
     assert confirmation_reads == 1
