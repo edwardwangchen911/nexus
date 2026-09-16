@@ -206,9 +206,12 @@ def _start(root: Path, env_file: Path, project: str) -> int:
     if last_exit_code == 75:
         _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
         return 1
-    if state != "stopped":
+    if state == "running":
         _emit({"label": LABEL, "status": state})
         return 0
+    if state != "stopped":
+        _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
+        return 1
     if not engine.is_file() or not os.access(engine, os.X_OK):
         _emit({"error_code": "AGENT_PAPER_SERVICE_RUNTIME_MISSING"})
         return 1
@@ -299,6 +302,9 @@ def _start(root: Path, env_file: Path, project: str) -> int:
             return 1
         if attempt == 0:
             time.sleep(0.25)
+    if state != "running":
+        _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
+        return 1
     _emit({"label": LABEL, "status": "started"})
     return 0
 
@@ -424,7 +430,7 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
     except RuntimeError as error:
         _emit({"error_code": str(error)})
         return 1
-    if acknowledge and (state != "inactive" or last_exit_code != 75):
+    if acknowledge and (state != "inactive" or last_exit_code == 0):
         _emit({"error_code": "AGENT_PAPER_SERVICE_ACKNOWLEDGEMENT_INVALID"})
         return 1
     if last_exit_code == 75 and not acknowledge:
@@ -459,6 +465,9 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
         if state == "running" or last_exit_code == 75:
             _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
             return 1
+    if not acknowledge and state != "stopped" and (state != "inactive" or last_exit_code != 0):
+        _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
+        return 1
     if state != "stopped":
         removed = subprocess.run(
             [launchctl, "bootout", domain_label],

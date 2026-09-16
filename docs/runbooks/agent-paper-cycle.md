@@ -287,10 +287,12 @@ FRED 未配置只作为可选提示；Schwab access token 已过期时提示首�
 服务退出后先读取数据库终态和日志中的固定错误码，不直接重启。回滚只需将开关恢复为 false，并
 运行统一 `down`；不会删除或改写 cycle、Job、Output、订单、成交、账本和心跳事实。
 
-若普通 `down` 返回 `AGENT_PAPER_SERVICE_STOP_UNCONFIRMED`（进程退出码 75），不得重复停止 Compose
-或盲目重启。先只读核对原 `cycle → job → outputs → order/window`，确认没有结果未知、待对账或仍需
-依赖服务的动作；只有完成该人工核对后，才可对同一 repo/env/project 使用内部恢复命令清理已退出
-注册（该命令不发信号、不改业务事实）：
+若普通 `down` 返回 `AGENT_PAPER_SERVICE_STOP_UNCONFIRMED`（退出码非零或缺失，75 是典型情况），
+不得重复停止 Compose 或盲目重启。先只读核对原 `cycle → job → outputs → order/window`，
+确认没有结果未知、待对账或仍需依赖服务的动作；只有完成该人工核对后，才可对同一
+repo/env/project 使用内部恢复命令清理已退出注册。该命令只接受归属精确匹配、已确认
+inactive 且未能证明正常退出的注册；running 或退出码 0 均拒绝。它只移除注册，不发信号、
+不改业务事实：
 
 ```bash
 .venv/bin/python scripts/macos/agent-paper-loop-service.py stop \

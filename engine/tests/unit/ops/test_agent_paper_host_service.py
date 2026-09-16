@@ -260,6 +260,29 @@ def test_start_never_replaces_legacy_or_exit_75_registration(tmp_path):
     assert _calls(root) == [["launchctl", "print", LABEL]] * 2
 
 
+def test_start_does_not_report_an_inactive_failed_registration_as_running(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root, state="inactive", exit_code=1)
+
+    result = _invoke(root, env, "start")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_START_FAILED"}
+    assert _calls(root) == [["launchctl", "print", LABEL]]
+
+
+def test_start_requires_the_kickstarted_registration_to_be_running(tmp_path):
+    root, env = _service_root(tmp_path)
+    (root.parent / "control").write_text(json.dumps({"kickstart_state": "inactive"}))
+
+    result = _invoke(root, env, "start")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_START_FAILED"}
+    assert (root / ".secrets/nexus-agent-paper/service.plist").is_file()
+    assert not any(call[1] == "bootout" for call in _calls(root))
+
+
 @pytest.mark.parametrize("initial", ["running", "inactive"])
 def test_exit_75_survives_repeated_stop_until_explicit_acknowledgement(tmp_path, initial):
     root, env = _service_root(tmp_path)
@@ -280,8 +303,26 @@ def test_exit_75_survives_repeated_stop_until_explicit_acknowledgement(tmp_path,
     ]
 
 
+def test_inactive_nonzero_exit_requires_explicit_acknowledgement(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root, state="inactive", exit_code=1)
+
+    result = _invoke(root, env, "stop")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"}
+    assert _calls(root) == [["launchctl", "print", LABEL]]
+
+    acknowledged = _invoke(root, env, "stop", "--acknowledge-unconfirmed")
+    assert acknowledged.returncode == 0, acknowledged.stdout + acknowledged.stderr
+    assert _calls(root)[1:] == [
+        ["launchctl", "print", LABEL],
+        ["launchctl", "bootout", LABEL],
+    ]
+
+
 @pytest.mark.parametrize(("state", "exit_code"), [("running", 75), ("inactive", 0)])
-def test_acknowledgement_requires_inactive_exit_75(tmp_path, state, exit_code):
+def test_acknowledgement_requires_an_inactive_unconfirmed_exit(tmp_path, state, exit_code):
     root, env = _service_root(tmp_path)
     _register(root, state=state, exit_code=exit_code)
     assert _invoke(root, env, "stop", "--acknowledge-unconfirmed").returncode == 1
