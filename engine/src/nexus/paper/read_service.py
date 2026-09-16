@@ -463,14 +463,6 @@ class PaperReadService:
         }:
             status = "in_progress"
             next_reason = "CURRENT_CYCLE_IN_PROGRESS"
-        elif latest is not None and latest.status in {"unavailable", "failed"}:
-            status = "stopped"
-            next_session = await self._next_xnys_session(decision_session)
-            if next_session is None:
-                next_reason = "CALENDAR_UNAVAILABLE"
-            else:
-                next_at = self._paper_window_open(next_session)
-                next_reason = "NEXT_SESSION"
         elif local_now.time().replace(tzinfo=None) < time(7):
             status = "not_started" if latest is None else "completed"
             next_at = self._paper_window_open(decision_session)
@@ -484,8 +476,18 @@ class PaperReadService:
                 next_at = self._paper_window_open(next_session)
                 next_reason = "NEXT_SESSION"
         else:
-            status = "ready" if latest is None else "completed"
             current_slot = floor_decision_slot(self._request_time)
+            failed_current_slot = (
+                latest is not None
+                and latest.status in {"unavailable", "failed"}
+                and latest.decision_slot_at == current_slot
+            )
+            if failed_current_slot:
+                status = "stopped"
+            elif latest is None or latest.status in {"unavailable", "failed"}:
+                status = "ready"
+            else:
+                status = "completed"
             if latest is not None and latest.decision_slot_at == current_slot:
                 next_at = current_slot + timedelta(minutes=5)
                 next_reason = "NEXT_SLOT"

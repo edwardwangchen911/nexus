@@ -290,6 +290,103 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
 
 
 @pytest.mark.asyncio
+async def test_failed_agent_cycle_becomes_eligible_again_in_the_next_slot(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    decision_time = datetime(2026, 8, 27, 18, tzinfo=UTC)
+    cycle_id = UUID("72000000-0000-0000-0000-000000000103")
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        session.add(
+            AgentPaperCycleRecord(
+                id=cycle_id,
+                account_id=seed.account_id,
+                portfolio_id=seed.portfolio_id,
+                decision_session=EXECUTION_SESSION,
+                decision_time=decision_time,
+                decision_slot_at=floor_decision_slot(decision_time),
+                execution_session=EXECUTION_SESSION,
+                universe_snapshot_id=UNIVERSE_ID,
+                quality_report_id=None,
+                decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                candidate_manifest=[],
+                candidate_hash=candidate_manifest_hash(()),
+                sizing_policy_version="agent_paper_sizing_v1",
+                sizing_policy_hash="9" * 64,
+                execution_locked=True,
+                created_at=decision_time,
+            )
+        )
+        await session.flush()
+        events = (
+            (1, None, "prepared", "CYCLE_PREPARED"),
+            (2, "prepared", "unavailable", "RISK_INPUT_REQUIRED"),
+        )
+        for sequence, from_status, to_status, result_code in events:
+            session.add(
+                AgentPaperCycleEventRecord(
+                    cycle_id=cycle_id,
+                    sequence=sequence,
+                    from_status=from_status,
+                    to_status=to_status,
+                    result_code=result_code,
+                    fact_ids={},
+                    occurred_at=decision_time,
+                    event_hash=canonical_cycle_event_hash(
+                        cycle_id=cycle_id,
+                        sequence=sequence,
+                        from_status=from_status,
+                        to_status=to_status,
+                        result_code=result_code,
+                        fact_ids={},
+                        occurred_at=decision_time,
+                    ),
+                    created_at=decision_time,
+                )
+            )
+
+    path = "/internal/v1/paper/cycles?limit=20"
+    cases = (
+        (
+            decision_time + timedelta(minutes=1),
+            "stopped",
+            decision_time + timedelta(minutes=5),
+            "NEXT_SLOT",
+        ),
+        (
+            decision_time + timedelta(minutes=6),
+            "ready",
+            decision_time + timedelta(minutes=5),
+            "CURRENT_SLOT",
+        ),
+        (
+            datetime(2026, 8, 27, 20, 1, tzinfo=UTC),
+            "closed",
+            None,
+            "CALENDAR_UNAVAILABLE",
+        ),
+    )
+    for now, expected_status, expected_next_at, expected_reason in cases:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=now)),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200, response.text
+        summary = response.json()["data"]["summary"]
+        assert summary["status"] == expected_status
+        assert summary["next_eligible_at"] == (
+            None
+            if expected_next_at is None
+            else expected_next_at.isoformat().replace("+00:00", "Z")
+        )
+        assert summary["next_eligible_reason"] == expected_reason
+
+
+@pytest.mark.asyncio
 async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_result(
     migrated_database_url: str,
 ) -> None:
