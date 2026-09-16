@@ -19,6 +19,7 @@ const readyPayload = (): WorkbenchPayload => ({
     execution_locked: true,
     loop: {
       status: "online",
+      reason_code: null,
       started_at: "2026-08-26T19:20:00Z",
       last_seen_at: "2026-08-26T20:00:00Z",
       stale_after_seconds: 30,
@@ -99,6 +100,7 @@ describe("decision-first trading workbench", () => {
   it("distinguishes offline, unknown, no-order, and result-unknown states", () => {
     const offline = readyPayload();
     offline.data.loop.status = "offline";
+    offline.data.loop.reason_code = "HEARTBEAT_STALE";
     offline.data.attention = [{
       kind: "service", severity: "warning", title_code: "AGENT_PAPER_LOOP_OFFLINE",
       reason_code: "HEARTBEAT_STALE", safe_action: "wait", href: "/settings",
@@ -109,6 +111,7 @@ describe("decision-first trading workbench", () => {
 
     const unknown = readyPayload();
     unknown.data.loop.status = "unknown";
+    unknown.data.loop.reason_code = "HEARTBEAT_MISSING";
     unknown.data.latest_cycle = { ...unknown.data.latest_cycle!, status: "partially_filled", order_ids: [] };
     unknown.data.attention = [{
       kind: "execution", severity: "critical", title_code: "PAPER_ORDER_RECONCILING",
@@ -116,7 +119,7 @@ describe("decision-first trading workbench", () => {
       cycle_id: unknown.data.latest_cycle.cycle_id,
     }];
     rerender(<WorkbenchPanel state="ready" payload={unknown} refreshing={false} onRefresh={vi.fn()} />);
-    expect(screen.getByText("循环状态未知")).toBeVisible();
+    expect(screen.getByText("循环未启动")).toBeVisible();
     expect(screen.getAllByText("结果未知").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "核对原操作结果" })).toHaveAttribute("href", "/paper");
     expect(screen.queryByRole("button", { name: /重试/ })).not.toBeInTheDocument();
@@ -168,7 +171,7 @@ describe("decision-first trading workbench", () => {
 
   it("rejects malformed responses instead of guessing partial data", async () => {
     const malformed = readyPayload() as unknown as { data: Record<string, unknown>; meta: unknown };
-    delete malformed.data.loop;
+    delete (malformed.data.loop as Record<string, unknown>).reason_code;
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(malformed)));
     render(<WorkspacePage />);
 

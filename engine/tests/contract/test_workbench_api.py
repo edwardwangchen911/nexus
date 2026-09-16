@@ -37,6 +37,7 @@ def _workbench(**changes: object) -> dict[str, object]:
         "execution_locked": True,
         "loop": {
             "status": "unknown",
+            "reason_code": "HEARTBEAT_MISSING",
             "started_at": None,
             "last_seen_at": None,
             "stale_after_seconds": 30,
@@ -65,6 +66,7 @@ def test_workbench_schema_is_strict_bounded_and_execution_locked() -> None:
     response = WorkbenchResponse.model_validate(_workbench())
     assert response.execution_locked is True
     assert response.loop.status == "unknown"
+    assert response.loop.reason_code == "HEARTBEAT_MISSING"
 
     with pytest.raises(ValidationError):
         WorkbenchResponse.model_validate(_workbench(execution_locked=False))
@@ -94,9 +96,7 @@ def test_openapi_exposes_only_read_only_workbench_and_owned_cycle_detail() -> No
     paths = document["paths"]
 
     assert set(paths["/internal/v1/workbench"]) == {"get"}
-    assert paths["/internal/v1/workbench"]["get"]["operationId"] == (
-        "getInternalPaperWorkbench"
-    )
+    assert paths["/internal/v1/workbench"]["get"]["operationId"] == ("getInternalPaperWorkbench")
     assert paths["/internal/v1/workbench"]["get"]["responses"]["200"]["content"][
         "application/json"
     ]["schema"] == {"$ref": "#/components/schemas/WorkbenchEnvelope"}
@@ -104,9 +104,9 @@ def test_openapi_exposes_only_read_only_workbench_and_owned_cycle_detail() -> No
     detail = paths["/internal/v1/paper/cycles/{cycle_id}"]
     assert set(detail) == {"get"}
     assert detail["get"]["operationId"] == "getInternalAgentPaperCycleDetail"
-    assert detail["get"]["responses"]["200"]["content"]["application/json"][
-        "schema"
-    ] == {"$ref": "#/components/schemas/AgentPaperCycleDetailEnvelope"}
+    assert detail["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/AgentPaperCycleDetailEnvelope"
+    }
     assert "requestBody" not in detail["get"]
 
     schemas = document["components"]["schemas"]
@@ -116,15 +116,9 @@ def test_openapi_exposes_only_read_only_workbench_and_owned_cycle_detail() -> No
         "type": "boolean",
     }
     assert schemas["WorkbenchResponse"]["properties"]["attention"]["maxItems"] == 10
-    assert schemas["AgentPaperCycleDetailResponse"]["properties"]["orders"][
-        "maxItems"
-    ] == 50
+    assert schemas["AgentPaperCycleDetailResponse"]["properties"]["orders"]["maxItems"] == 50
     wire = str(
-        {
-            name: schema
-            for name, schema in schemas.items()
-            if name.startswith("Workbench")
-        }
+        {name: schema for name, schema in schemas.items() if name.startswith("Workbench")}
     ).lower()
     assert not any(
         forbidden in wire

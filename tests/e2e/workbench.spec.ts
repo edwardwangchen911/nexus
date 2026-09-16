@@ -10,7 +10,7 @@ const readyWorkbench = (): WorkbenchPayload => ({
   data: {
     mode: "internal_paper",
     execution_locked: true,
-    loop: { status: "online", started_at: "2026-08-26T19:20:00Z", last_seen_at: "2026-08-26T20:00:00Z", stale_after_seconds: 30 },
+    loop: { status: "online", reason_code: null, started_at: "2026-08-26T19:20:00Z", last_seen_at: "2026-08-26T20:00:00Z", stale_after_seconds: 30 },
     session: {
       decision_session: "2026-08-26", status: "completed", cycle_count: 1, completed_count: 1,
       latest_result_code: "NO_ORDER_REQUIRED", last_completed_decision_at: agentPaperCycle.decision_time,

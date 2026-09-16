@@ -21,6 +21,7 @@ class _StrictSchema(BaseModel):
 
 class WorkbenchLoopResponse(_StrictSchema):
     status: Literal["online", "offline", "unknown"]
+    reason_code: Literal["HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"] | None
     started_at: AwareDatetime | None
     last_seen_at: AwareDatetime | None
     stale_after_seconds: Literal[30]
@@ -31,9 +32,7 @@ class WorkbenchAttentionResponse(_StrictSchema):
     severity: Literal["info", "warning", "critical"]
     title_code: str = Field(min_length=1, max_length=100)
     reason_code: str = Field(min_length=1, max_length=100)
-    safe_action: Literal[
-        "view_evidence", "view_decision", "verify_original_result", "wait"
-    ]
+    safe_action: Literal["view_evidence", "view_decision", "verify_original_result", "wait"]
     href: str = Field(min_length=1, max_length=500, pattern=r"^/")
     cycle_id: UUID | None = None
     order_id: UUID | None = None

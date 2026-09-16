@@ -140,6 +140,7 @@ function workbenchEnvelope() {
       execution_locked: true,
       loop: {
         status: "offline",
+        reason_code: "HEARTBEAT_STALE",
         started_at: null,
         last_seen_at: null,
         stale_after_seconds: 30,

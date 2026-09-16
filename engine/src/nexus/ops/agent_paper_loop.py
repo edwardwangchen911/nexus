@@ -52,7 +52,10 @@ from nexus.paper.agent_market import resolve_agent_paper_market_scope
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
-from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+from nexus.persistence.migrations import (
+    AGENT_PAPER_LOOP_PROCESS_VERSION,
+    CURRENT_MIGRATION_HEAD,
+)
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -151,7 +154,6 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
     }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
-AGENT_PAPER_LOOP_PROCESS_VERSION = "agent-paper-loop-v1"
 _PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
 _PAPER_MONTHLY_MACRO_SERIES = frozenset({"CPIAUCSL", "UNRATE"})
 

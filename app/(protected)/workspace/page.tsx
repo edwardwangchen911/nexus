@@ -128,8 +128,13 @@ function deriveState(workbench: WorkbenchPayload["data"]): WorkbenchPageState {
 function isWorkbenchPayload(value: unknown): value is WorkbenchPayload {
   if (!isPlain(value) || !isPlain(value.data) || !isPlain(value.meta)) return false;
   const data = value.data;
+  const loopReasons = [null, "HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"];
   if (data.mode !== "internal_paper" || data.execution_locked !== true
     || !isPlain(data.loop) || !["online", "offline", "unknown"].includes(String(data.loop.status))
+    || !loopReasons.includes(data.loop.reason_code as null | string)
+    || (data.loop.status === "online" && data.loop.reason_code !== null)
+    || (data.loop.status === "unknown" && data.loop.reason_code !== "HEARTBEAT_MISSING")
+    || (data.loop.status === "offline" && !["HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"].includes(String(data.loop.reason_code)))
     || data.loop.stale_after_seconds !== 30
     || !isNullableString(data.loop.started_at) || !isNullableString(data.loop.last_seen_at)
     || !isPlain(data.session) || data.session.execution_locked !== true

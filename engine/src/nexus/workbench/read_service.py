@@ -21,7 +21,10 @@ from nexus.api.schemas.workbench import (
     WorkbenchResponse,
 )
 from nexus.paper.read_service import PaperReadService
-from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+from nexus.persistence.migrations import (
+    AGENT_PAPER_LOOP_PROCESS_VERSION,
+    CURRENT_MIGRATION_HEAD,
+)
 from nexus.persistence.models.runtime import WorkerHeartbeat
 
 _LOOP_STALE_AFTER = timedelta(seconds=30)
@@ -62,7 +65,6 @@ class WorkbenchReadService:
             select(WorkerHeartbeat)
             .where(
                 WorkerHeartbeat.queue == "agent_paper",
-                WorkerHeartbeat.migration_head == CURRENT_MIGRATION_HEAD,
                 WorkerHeartbeat.seen_at <= self._request_time,
             )
             .order_by(WorkerHeartbeat.seen_at.desc(), WorkerHeartbeat.id.desc())
@@ -71,17 +73,25 @@ class WorkbenchReadService:
         if heartbeat is None:
             return WorkbenchLoopResponse(
                 status="unknown",
+                reason_code="HEARTBEAT_MISSING",
                 started_at=None,
                 last_seen_at=None,
                 stale_after_seconds=30,
             )
-        status: Literal["online", "offline"] = (
-            "online"
-            if self._request_time - heartbeat.seen_at <= _LOOP_STALE_AFTER
-            else "offline"
+        compatible = (
+            heartbeat.migration_head == CURRENT_MIGRATION_HEAD
+            and heartbeat.process_version == AGENT_PAPER_LOOP_PROCESS_VERSION
         )
+        fresh = self._request_time - heartbeat.seen_at <= _LOOP_STALE_AFTER
+        status: Literal["online", "offline"] = "online" if compatible and fresh else "offline"
+        reason_code: Literal["HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"] | None = None
+        if not compatible:
+            reason_code = "HEARTBEAT_INCOMPATIBLE"
+        elif not fresh:
+            reason_code = "HEARTBEAT_STALE"
         return WorkbenchLoopResponse(
             status=status,
+            reason_code=reason_code,
             started_at=heartbeat.started_at,
             last_seen_at=heartbeat.seen_at,
             stale_after_seconds=30,
@@ -172,7 +182,7 @@ def _attention_items(
                 kind="service",
                 severity="warning",
                 title_code="AGENT_PAPER_LOOP_OFFLINE",
-                reason_code="HEARTBEAT_STALE",
+                reason_code=loop.reason_code or "HEARTBEAT_STALE",
                 safe_action="wait",
                 href="/settings",
             )

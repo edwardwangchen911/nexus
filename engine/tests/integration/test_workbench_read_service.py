@@ -20,8 +20,10 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
 )
+from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.workbench.read_service import WorkbenchReadService
+from sqlalchemy import select
 
 ACTIVE_DECISION_TIME = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
 
@@ -46,6 +48,7 @@ async def test_workbench_reads_online_loop_active_order_and_empty_account(
     assert result.mode == "internal_paper"
     assert result.execution_locked is True
     assert result.loop.status == "online"
+    assert result.loop.reason_code is None
     assert result.loop.last_seen_at == request_time - timedelta(seconds=15)
     assert result.latest_cycle is None
     assert len(result.active_orders) == 2
@@ -81,6 +84,7 @@ async def test_workbench_keeps_no_order_cycle_empty_and_reports_only_stale_loop(
         result = await WorkbenchReadService(session, request_time).read()
 
     assert result.loop.status == "offline"
+    assert result.loop.reason_code == "HEARTBEAT_STALE"
     assert result.latest_cycle is not None
     assert result.latest_cycle.cycle_id == cycle_id
     assert result.latest_cycle.result_code == "NO_ORDER_REQUIRED"
@@ -88,6 +92,34 @@ async def test_workbench_keeps_no_order_cycle_empty_and_reports_only_stale_loop(
     assert [(item.kind, item.reason_code) for item in result.attention] == [
         ("service", "HEARTBEAT_STALE")
     ]
+
+
+@pytest.mark.asyncio
+async def test_workbench_reports_incompatible_agent_paper_heartbeat(
+    migrated_database_url: str,
+) -> None:
+    request_time = datetime(2026, 8, 27, 13, 45, tzinfo=UTC)
+    await heartbeat_agent_paper_loop(
+        settings(migrated_database_url),
+        worker_id="agent-paper-loop-test-incompatible",
+        started_at=request_time - timedelta(minutes=1),
+        seen_at=request_time - timedelta(seconds=5),
+    )
+    factory = session_factory(settings(migrated_database_url))
+    async with factory.begin() as session:
+        heartbeat = await session.scalar(
+            select(WorkerHeartbeat).where(
+                WorkerHeartbeat.worker_id == "agent-paper-loop-test-incompatible"
+            )
+        )
+        assert heartbeat is not None
+        heartbeat.process_version = "agent-paper-loop-obsolete"
+
+    async with factory() as session:
+        result = await WorkbenchReadService(session, request_time).read()
+
+    assert result.loop.status == "offline"
+    assert result.loop.reason_code == "HEARTBEAT_INCOMPATIBLE"
 
 
 @pytest.mark.asyncio
@@ -152,9 +184,7 @@ async def _seed_no_order_cycle(
         await session.flush()
         events = [
             _cycle_event(cycle_id, 1, None, "prepared", "CYCLE_PREPARED"),
-            _cycle_event(
-                cycle_id, 2, "prepared", "researching", "RESEARCH_ADMITTED"
-            ),
+            _cycle_event(cycle_id, 2, "prepared", "researching", "RESEARCH_ADMITTED"),
             _cycle_event(
                 cycle_id,
                 3,

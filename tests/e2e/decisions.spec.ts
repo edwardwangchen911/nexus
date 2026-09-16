@@ -80,7 +80,7 @@ function workbenchPayload(): WorkbenchPayload {
   return {
     data: {
       mode: "internal_paper", execution_locked: true,
-      loop: { status: "online", started_at: "2026-08-26T19:20:00Z", last_seen_at: "2026-08-26T20:00:00Z", stale_after_seconds: 30 },
+      loop: { status: "online", reason_code: null, started_at: "2026-08-26T19:20:00Z", last_seen_at: "2026-08-26T20:00:00Z", stale_after_seconds: 30 },
       session: { decision_session: "2026-08-26", status: "in_progress", cycle_count: 1, completed_count: 0, latest_result_code: agentPaperCycle.result_code, last_completed_decision_at: null, next_eligible_at: null, next_eligible_reason: null, execution_locked: true },
       latest_cycle: agentPaperCycle, active_orders: [cancellableOrder],
       account: { portfolio_id: paperPortfolio.portfolio_id, currency: "USD", initial_capital: paperPortfolio.initial_capital, data_state: "READY", as_of: paperPortfolio.performance!.as_of, nav: paperPortfolio.performance!.nav, available_cash: paperPortfolio.performance!.available_cash, reserved_cash: paperPortfolio.performance!.reserved_cash, market_value: paperPortfolio.performance!.market_value, realized_pnl: paperPortfolio.performance!.realized_pnl, unrealized_pnl: paperPortfolio.performance!.unrealized_pnl },

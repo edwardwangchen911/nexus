@@ -6709,6 +6709,8 @@ export interface components {
         WorkbenchLoopResponse: {
             /** Last Seen At */
             last_seen_at: string | null;
+            /** Reason Code */
+            reason_code: ("HEARTBEAT_MISSING" | "HEARTBEAT_STALE" | "HEARTBEAT_INCOMPATIBLE") | null;
             /**
              * Stale After Seconds
              * @constant

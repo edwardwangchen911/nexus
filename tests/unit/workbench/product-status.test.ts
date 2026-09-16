@@ -166,12 +166,13 @@ describe("central product-state vocabulary", () => {
   });
 
   it.each([
-    ["online", "online", "循环在线"],
-    ["offline", "offline", "循环离线"],
-    ["unknown", "unknown", "循环状态未知"],
-  ] as const)("keeps loop liveness %s independent from saved session progress", (status, key, label) => {
-    const loop: Loop = { status, started_at: null, last_seen_at: null, stale_after_seconds: 30 };
-    expect(loopPresentation(loop, session)).toMatchObject({ key, label, rawCode: "CYCLE_PREPARED" });
+    ["online", null, "online", "循环在线", "30 秒内收到心跳"],
+    ["offline", "HEARTBEAT_STALE", "offline", "循环离线", "心跳已经过期"],
+    ["offline", "HEARTBEAT_INCOMPATIBLE", "offline", "循环版本不兼容", "运行版本与当前数据库版本不匹配"],
+    ["unknown", "HEARTBEAT_MISSING", "unknown", "循环未启动", "尚未保存过循环心跳"],
+  ] as const)("explains loop liveness reason %s", (status, reasonCode, key, label, detail) => {
+    const loop: Loop = { status, reason_code: reasonCode, started_at: null, last_seen_at: null, stale_after_seconds: 30 };
+    expect(loopPresentation(loop, session)).toMatchObject({ key, label, detail: expect.stringContaining(detail), rawCode: reasonCode });
   });
 
   it.each([
@@ -180,6 +181,7 @@ describe("central product-state vocabulary", () => {
     ["risk", "AGENT_PAPER_RISK_REJECTED", "RISK_REJECTED", "risk_rejected", "风控拒绝", "view_decision"],
     ["execution", "PAPER_ORDER_RECONCILING", "paper_result_unknown", "result_unknown", "结果未知", "verify_original_result"],
     ["service", "AGENT_PAPER_LOOP_OFFLINE", "HEARTBEAT_STALE", "loop_offline", "循环离线", "wait"],
+    ["service", "AGENT_PAPER_LOOP_OFFLINE", "HEARTBEAT_INCOMPATIBLE", "loop_offline", "循环版本不兼容", "wait"],
   ] as const)("maps attention code %s", (kind, titleCode, reasonCode, key, label, safeAction) => {
     const item: Attention = {
       kind,

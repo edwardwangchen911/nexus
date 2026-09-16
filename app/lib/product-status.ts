@@ -113,12 +113,18 @@ export function executionPresentation(cycle: Cycle, orders: Order[]): Actionable
 export function loopPresentation(loop: Loop, session: Session): ProductPresentation<LoopKey> {
   const sessionLabel = sessionStatusLabel(session.status);
   if (loop.status === "online") {
-    return presentation("online", "循环在线", `30 秒内收到心跳；已保存会话状态为${sessionLabel}。`, "positive", session.latest_result_code);
+    return presentation("online", "循环在线", `30 秒内收到心跳；已保存会话状态为${sessionLabel}。`, "positive", loop.reason_code);
   }
-  if (loop.status === "offline") {
-    return presentation("offline", "循环离线", `心跳已经过期；已保存会话状态仍为${sessionLabel}。`, "warning", session.latest_result_code);
+  if (loop.reason_code === "HEARTBEAT_INCOMPATIBLE") {
+    return presentation("offline", "循环版本不兼容", `运行版本与当前数据库版本不匹配；已保存会话状态为${sessionLabel}。`, "warning", loop.reason_code);
   }
-  return presentation("unknown", "循环状态未知", `当前无法确认循环心跳；已保存会话状态为${sessionLabel}。`, "neutral", session.latest_result_code);
+  if (loop.reason_code === "HEARTBEAT_STALE") {
+    return presentation("offline", "循环离线", `心跳已经过期；已保存会话状态仍为${sessionLabel}。`, "warning", loop.reason_code);
+  }
+  if (loop.reason_code === "HEARTBEAT_MISSING") {
+    return presentation("unknown", "循环未启动", `尚未保存过循环心跳；已保存会话状态为${sessionLabel}。`, "neutral", loop.reason_code);
+  }
+  return presentation("unknown", "循环状态未知", `当前无法确认循环心跳；已保存会话状态为${sessionLabel}。`, "neutral", loop.reason_code);
 }
 
 export function attentionPresentation(item: Attention): ActionableProductPresentation<AttentionKey> & {
@@ -186,6 +192,9 @@ function knownAttention(item: Attention): ActionableProductPresentation<Exclude<
   }
   if (item.kind === "service" && item.title_code === "AGENT_PAPER_LOOP_OFFLINE" && item.reason_code === "HEARTBEAT_STALE") {
     return actionable("loop_offline", "循环离线", "循环心跳已经超过 30 秒。", "warning", item.reason_code, ["wait"]);
+  }
+  if (item.kind === "service" && item.title_code === "AGENT_PAPER_LOOP_OFFLINE" && item.reason_code === "HEARTBEAT_INCOMPATIBLE") {
+    return actionable("loop_offline", "循环版本不兼容", "循环运行版本或迁移版本与当前服务不匹配。", "warning", item.reason_code, ["wait"]);
   }
   return null;
 }

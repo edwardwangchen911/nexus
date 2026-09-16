@@ -13176,6 +13176,22 @@ export const runtimeContractSchemas = {
         ],
         "title": "Last Seen At"
       },
+      "reason_code": {
+        "anyOf": [
+          {
+            "enum": [
+              "HEARTBEAT_MISSING",
+              "HEARTBEAT_STALE",
+              "HEARTBEAT_INCOMPATIBLE"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason Code"
+      },
       "stale_after_seconds": {
         "const": 30,
         "title": "Stale After Seconds",
@@ -13205,6 +13221,7 @@ export const runtimeContractSchemas = {
     },
     "required": [
       "status",
+      "reason_code",
       "started_at",
       "last_seen_at",
       "stale_after_seconds"
