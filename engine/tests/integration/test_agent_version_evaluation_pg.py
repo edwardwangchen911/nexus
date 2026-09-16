@@ -16,6 +16,8 @@ from nexus.paper.agent_version_models import (
     AgentVersionEvaluationRegistration,
     AgentVersionEvaluationRequest,
 )
+from nexus.paper.agent_version_runner import advance_agent_version_slot
+from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
@@ -28,8 +30,17 @@ from nexus.persistence.models.backtest import (
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
-from nexus.persistence.models.paper import PaperAccountRecord
+from nexus.persistence.models.paper import (
+    AgentPaperCycleRecord,
+    PaperAccountRecord,
+    PaperDrawdownLockEventRecord,
+    PaperLedgerAccountRecord,
+    PaperLedgerEntryRecord,
+    PaperLedgerTransactionRecord,
+    PaperOrderRecord,
+)
 from nexus.persistence.models.portfolio import Account, Portfolio
+from nexus.persistence.models.runtime import Job
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -351,6 +362,133 @@ async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
             )
             assert authority_replay.evaluation_id == registration.evaluation_id
             assert authority_replay.replayed is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_first_slot_initializes_equal_internal_accounts_without_work_replay(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    slot = _slots(TRAIN_DATES)[0]
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-runner-v1",
+                now=NOW,
+            )
+
+        async with factory.begin() as session:
+            first = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=slot,
+                daily_limit_usd=Decimal("3"),
+                now=slot,
+            )
+            incumbent = await load_paper_projection(
+                session,
+                account_id=registration.incumbent_account_id,
+                as_of=slot,
+            )
+            challenger = await load_paper_projection(
+                session,
+                account_id=registration.challenger_account_id,
+                as_of=slot,
+            )
+            counts = {
+                "ledger_accounts": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperLedgerAccountRecord)
+                    )
+                    or 0
+                ),
+                "ledger_transactions": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperLedgerTransactionRecord)
+                    )
+                    or 0
+                ),
+                "ledger_entries": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperLedgerEntryRecord)
+                    )
+                    or 0
+                ),
+                "drawdown_events": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperDrawdownLockEventRecord)
+                    )
+                    or 0
+                ),
+            }
+
+        assert first.status == "incomparable"
+        assert first.reason_code == "PAIR_AUTHORITY_UNAVAILABLE"
+        assert first.phase == "train"
+        assert first.execution_locked is True
+        assert first.replayed is False
+        assert counts == {
+            "ledger_accounts": 21,
+            "ledger_transactions": 3,
+            "ledger_entries": 6,
+            "drawdown_events": 3,
+        }
+        assert incumbent.available_cash == challenger.available_cash == Decimal("10000")
+        assert incumbent.reserved_cash == challenger.reserved_cash == Decimal("0")
+        assert incumbent.positions == challenger.positions == ()
+        assert incumbent.open_orders == challenger.open_orders == ()
+
+        async with factory.begin() as session:
+            replay = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=slot,
+                daily_limit_usd=Decimal("3"),
+                now=slot,
+            )
+            replay_counts = {
+                "ledger_accounts": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperLedgerAccountRecord)
+                    )
+                    or 0
+                ),
+                "ledger_transactions": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperLedgerTransactionRecord)
+                    )
+                    or 0
+                ),
+                "ledger_entries": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperLedgerEntryRecord)
+                    )
+                    or 0
+                ),
+                "drawdown_events": int(
+                    await session.scalar(
+                        select(func.count()).select_from(PaperDrawdownLockEventRecord)
+                    )
+                    or 0
+                ),
+                "cycles": int(
+                    await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord))
+                    or 0
+                ),
+                "jobs": int(await session.scalar(select(func.count()).select_from(Job)) or 0),
+                "orders": int(
+                    await session.scalar(select(func.count()).select_from(PaperOrderRecord)) or 0
+                ),
+            }
+        assert replay.model_copy(update={"replayed": False}) == first
+        assert replay.replayed is True
+        assert replay_counts == {**counts, "cycles": 0, "jobs": 0, "orders": 0}
     finally:
         await engine.dispose()
 

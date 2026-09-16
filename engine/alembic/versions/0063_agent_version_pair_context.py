@@ -162,9 +162,25 @@ def _pair_guard_sql(*, account_neutral: bool) -> str:
     """
 
 
+def _require_empty_pairs() -> None:
+    op.execute("LOCK TABLE public.agent_version_cycle_pairs IN ACCESS EXCLUSIVE MODE")
+    op.execute(
+        """
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM public.agent_version_cycle_pairs) THEN
+            RAISE EXCEPTION 'agent version cycle pairs prevent evidence semantic change'
+              USING ERRCODE='P3D01';
+          END IF;
+        END $$
+        """
+    )
+
+
 def upgrade() -> None:
+    _require_empty_pairs()
     op.execute(_pair_guard_sql(account_neutral=True))
 
 
 def downgrade() -> None:
+    _require_empty_pairs()
     op.execute(_pair_guard_sql(account_neutral=False))

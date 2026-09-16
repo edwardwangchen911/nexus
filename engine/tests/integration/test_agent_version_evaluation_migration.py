@@ -83,6 +83,9 @@ def test_0063_pair_guard_uses_account_neutral_market_authority() -> None:
     assert "NEW.market_evidence_hash IS DISTINCT FROM" in sql
     assert "incumbent_run.data_snapshot_id <> challenger_run.data_snapshot_id" not in sql
     assert "incumbent_run.evidence_hash <> challenger_run.evidence_hash" not in sql
+    assert "LOCK TABLE public.agent_version_cycle_pairs IN ACCESS EXCLUSIVE MODE" in sql
+    assert "agent version cycle pairs prevent evidence semantic change" in sql
+    assert "ERRCODE='P3D01'" in sql
 
 
 async def _tables(database_url: str) -> set[str]:

@@ -106,6 +106,22 @@ class AgentVersionEvaluationProgress(BaseModel):
     status: Literal["training", "evaluating", "finalized"]
 
 
+class AgentVersionSlotResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evaluation_id: UUID
+    decision_slot_at: datetime
+    phase: Literal["train", "oos"]
+    incumbent_cycle_id: UUID | None = None
+    challenger_cycle_id: UUID | None = None
+    incumbent_run_id: UUID | None = None
+    challenger_run_id: UUID | None = None
+    status: Literal["prepared", "running", "paired", "incomparable"]
+    reason_code: str = Field(min_length=1, max_length=100)
+    replayed: bool
+    execution_locked: Literal[True] = True
+
+
 def evaluation_policy_hash() -> str:
     return _sha256(
         {
