@@ -14,6 +14,8 @@ import pytest
 ROOT = Path(__file__).parents[4]
 SOURCE = ROOT / "scripts/macos/agent-paper-loop-service.py"
 LABEL = f"gui/{os.getuid()}/com.nexus.agent-paper-loop"
+RUNTIME = str(Path(sys.executable).resolve())
+SERVICE_WORKING_DIRECTORY = str(Path(RUNTIME).parent)
 
 
 def _executable(path: Path, source: str) -> None:
@@ -24,6 +26,8 @@ def _executable(path: Path, source: str) -> None:
 
 def _service_root(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     root = tmp_path / "repo"
+    home = tmp_path / "home"
+    (home / "Library/Logs").mkdir(parents=True)
     script = root / "scripts/macos" / SOURCE.name
     script.parent.mkdir(parents=True)
     shutil.copy2(SOURCE, script)
@@ -47,10 +51,15 @@ def _service_root(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         common
         + """
 log('engine', sys.argv[1:])
+if options.get('record_launcher'):
+    log('prefix', [sys.prefix])
 if '--service-preflight' in sys.argv: sys.exit(options.get('preflight_exit', 0))
 log('environment', sorted(os.environ))
 sys.exit(options.get('run_exit', 0))
 """,
+    )
+    (root / ".venv/pyvenv.cfg").write_text(
+        f"home = {Path(RUNTIME).parent}\ninclude-system-site-packages = false\n"
     )
     _executable(
         tmp_path / "bin/launchctl",
@@ -93,7 +102,11 @@ elif action == 'bootout': job = {}
 state.write_text(json.dumps(job))
 """,
     )
-    return root, {**os.environ, "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin"}
+    return root, {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+    }
 
 
 def _invoke(root, environment, action, *extra):
@@ -124,7 +137,7 @@ def _calls(root):
 
 
 def _register(root, *, state="running", legacy=False, exit_code=None):
-    args = [sys.executable, str(root / "scripts/macos" / SOURCE.name), "run"]
+    args = [RUNTIME, str(root / "scripts/macos" / SOURCE.name), "run"]
     if not legacy:
         args += [
             "--repo-root",
@@ -134,7 +147,11 @@ def _register(root, *, state="running", legacy=False, exit_code=None):
             "--project-name",
             "nexus-test",
         ]
-    job = {"state": state, "ProgramArguments": args, "WorkingDirectory": str(root)}
+    job = {
+        "state": state,
+        "ProgramArguments": args,
+        "WorkingDirectory": str(root) if legacy else SERVICE_WORKING_DIRECTORY,
+    }
     if exit_code is not None:
         job["exit"] = exit_code
     (root.parent / "state").write_text(json.dumps(job))
@@ -160,7 +177,7 @@ def test_start_binds_exact_config_and_repeated_start_is_idempotent(tmp_path):
     path = root / ".secrets/nexus-agent-paper/service.plist"
     service = plistlib.loads(path.read_bytes())
     assert service["ProgramArguments"] == [
-        sys.executable,
+        RUNTIME,
         str(root / "scripts/macos" / SOURCE.name),
         "run",
         "--repo-root",
@@ -170,7 +187,13 @@ def test_start_binds_exact_config_and_repeated_start_is_idempotent(tmp_path):
         "--project-name",
         "nexus-test",
     ]
-    assert service["WorkingDirectory"] == str(root)
+    assert service["WorkingDirectory"] == SERVICE_WORKING_DIRECTORY
+    log_directory = Path(env["HOME"]) / "Library/Logs/nexus-agent-paper"
+    assert service["StandardOutPath"] == str(log_directory / "service.stdout.log")
+    assert service["StandardErrorPath"] == str(log_directory / "service.stderr.log")
+    assert stat.S_IMODE(log_directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE((log_directory / "service.stdout.log").stat().st_mode) == 0o600
+    assert stat.S_IMODE((log_directory / "service.stderr.log").stat().st_mode) == 0o600
     assert service["KeepAlive"] is False and service["RunAtLoad"] is False
     assert "EnvironmentVariables" not in service
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
@@ -403,12 +426,14 @@ def test_start_rejects_unsafe_private_paths(tmp_path, unsafe):
         if unsafe == "plist":
             (private / "service.plist").mkdir()
         else:
+            log_directory = Path(env["HOME"]) / "Library/Logs/nexus-agent-paper"
+            log_directory.mkdir(mode=0o700)
             target.write_text("outside")
             target.chmod(0o600)
             if unsafe == "log_symlink":
-                (private / "service.stdout.log").symlink_to(target)
+                (log_directory / "service.stdout.log").symlink_to(target)
             else:
-                os.link(target, private / "service.stdout.log")
+                os.link(target, log_directory / "service.stdout.log")
     result = _invoke(root, env, "start")
     assert result.returncode == 1
     assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"}
@@ -429,6 +454,21 @@ def test_run_uses_exact_config_and_only_runtime_environment(tmp_path):
     names = set(calls[2][1:])
     assert {"PATH", "HOME"} <= names
     assert not names & {"AGENT_RUNTIME_MODE", "DATABASE_URL", "OPENAI_API_KEY"}
+
+
+@pytest.mark.parametrize("action", ["start", "run"])
+def test_engine_entrypoint_is_always_invoked_through_resolved_python(tmp_path, action):
+    root, env = _service_root(tmp_path)
+    (root.parent / "control").write_text(json.dumps({"record_launcher": True}))
+    engine = root / ".venv/bin/nexus-engine-agent-paper-loop"
+    source = engine.read_text()
+    engine.write_text("#!/missing/python\n" + source.split("\n", 1)[1])
+
+    result = _invoke(root, env, action)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any(call[0] == "engine" for call in _calls(root))
+    assert ["prefix", str(root / ".venv")] in _calls(root)
 
 
 def test_status_normalizes_without_echoing_launchctl_details(tmp_path):

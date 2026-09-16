@@ -26,11 +26,15 @@ def test_up_uses_exact_app_services_and_never_broker_profile(repo_root: Path) ->
 
     rendered = [command.argv for command in commands]
     assert all("broker" not in argument for argv in rendered for argument in argv)
-    assert rendered[2][-4:] == ("build", "object-store-init", "api", "worker")
-    assert commands[2].timeout_seconds == 300
-    assert rendered[3][-3:] == ("run", "--rm", "object-store-init")
-    assert "--no-build" not in rendered[3]
-    assert "--no-build" not in rendered[4]
+    assert [argv[-2:] for argv in rendered[2:5]] == [
+        ("build", "object-store-init"),
+        ("build", "api"),
+        ("build", "worker"),
+    ]
+    assert [command.timeout_seconds for command in commands[2:5]] == [300, 300, 300]
+    assert rendered[5][-3:] == ("run", "--rm", "object-store-init")
+    assert "--no-build" not in rendered[5]
+    assert "--no-build" not in rendered[6]
     assert rendered[-1][-5:] == ("up", "-d", "--no-build", "api", "worker")
 
 
@@ -147,19 +151,21 @@ def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path)
         runner=runner,
     )
 
-    assert [call[-1] for call in calls[:6]] == [
+    assert [call[-1] for call in calls[:8]] == [
         "--quiet",
         "minio",
+        "object-store-init",
+        "api",
         "worker",
         "object-store-init",
         "head",
         "worker",
     ]
-    assert calls[6][1:3] == (
+    assert calls[8][1:3] == (
         str(repo_root / "scripts/macos/agent-paper-loop-service.py"),
         "start",
     )
-    assert [result.fact for result in results] == ["compose"] * 6 + ["host_service"]
+    assert [result.fact for result in results] == ["compose"] * 8 + ["host_service"]
 
     calls.clear()
     env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=false\n", encoding="utf-8")
@@ -170,8 +176,8 @@ def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path)
         project_name="nexus-phase3-local",
         runner=runner,
     )
-    assert len(calls) == 6
-    assert [result.fact for result in results] == ["compose"] * 6
+    assert len(calls) == 8
+    assert [result.fact for result in results] == ["compose"] * 8
 
 
 def test_up_rejects_invalid_agent_paper_flag_before_compose(repo_root: Path) -> None:
@@ -387,7 +393,7 @@ def test_enabled_up_accepts_only_started_or_running_host_status(
         runner=runner,
     )
 
-    assert len(results) == 7
+    assert len(results) == 9
     assert results[-1].fact == "host_service"
     assert results[-1].exit_code != 0
 

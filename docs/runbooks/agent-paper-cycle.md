@@ -270,8 +270,8 @@ FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNY
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
 内部托管适配器在 Mac 宿主机使用 Codex SDK 登录，不复制凭据、不注入 OpenAI API key，也没有
-Compose Agent Paper profile。适配器只在 `.secrets/nexus-agent-paper` 维护临时注册和受保护日志；
-正常使用不直接调用该脚本。
+Compose Agent Paper profile。适配器在 `.secrets/nexus-agent-paper` 维护临时注册，并将 0600 日志写入
+`~/Library/Logs/nexus-agent-paper` 的 0700 私有目录；正常使用不直接调用该脚本。
 
 预检只读取本地配置、受保护 token 文件、私有目录权限和 Codex SDK 本机登录状态；不刷新
 ChatGPT 登录、不连接数据库、不请求券商、不调用模型；

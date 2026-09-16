@@ -101,10 +101,9 @@ def build_local_stack_commands(
         return (
             LocalStackCommand((*compose, "config", "--quiet"), 30),
             LocalStackCommand((*compose, "up", "-d", "postgres", "minio"), 120),
-            LocalStackCommand(
-                (*compose, "build", "object-store-init", "api", "worker"),
-                300,
-            ),
+            LocalStackCommand((*compose, "build", "object-store-init"), 300),
+            LocalStackCommand((*compose, "build", "api"), 300),
+            LocalStackCommand((*compose, "build", "worker"), 300),
             LocalStackCommand(
                 (*compose, "run", "--rm", "object-store-init"),
                 120,

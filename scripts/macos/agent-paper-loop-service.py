@@ -66,9 +66,24 @@ def _runtime_environment() -> dict[str, str]:
     return {name: value for name, value in os.environ.items() if name in allowed}
 
 
+def _runtime_executable() -> str:
+    return str(Path(sys.executable).resolve())
+
+
+def _service_working_directory() -> str:
+    return str(Path(_runtime_executable()).parent)
+
+
+def _engine_environment(root: Path) -> dict[str, str]:
+    return {
+        **_runtime_environment(),
+        "__PYVENV_LAUNCHER__": str(root / ".venv/bin/python3"),
+    }
+
+
 def _program_arguments(root: Path, env_file: Path, project: str) -> list[str]:
     return [
-        sys.executable,
+        _runtime_executable(),
         str(root / "scripts/macos/agent-paper-loop-service.py"),
         "run",
         "--repo-root",
@@ -102,6 +117,21 @@ def _private_directory(root: Path) -> Path:
             or stat.S_IMODE(info.st_mode) != 0o700
         ):
             raise ValueError("AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE")
+    return directory
+
+
+def _private_log_directory() -> Path:
+    directory = Path.home() / "Library/Logs/nexus-agent-paper"
+    if directory.is_symlink():
+        raise ValueError("AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE")
+    directory.mkdir(exist_ok=True, mode=0o700)
+    info = directory.stat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise ValueError("AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE")
     for name in ("service.stdout.log", "service.stderr.log"):
         descriptor = os.open(
             directory / name,
@@ -122,14 +152,20 @@ def _private_directory(root: Path) -> Path:
     return directory
 
 
-def _write_service_plist(root: Path, private_directory: Path, env_file: Path, project: str) -> Path:
+def _write_service_plist(
+    root: Path,
+    private_directory: Path,
+    log_directory: Path,
+    env_file: Path,
+    project: str,
+) -> Path:
     path = private_directory / "service.plist"
     payload = {
         "Label": LABEL,
         "ProgramArguments": _program_arguments(root, env_file, project),
-        "WorkingDirectory": str(root),
-        "StandardOutPath": str(private_directory / "service.stdout.log"),
-        "StandardErrorPath": str(private_directory / "service.stderr.log"),
+        "WorkingDirectory": _service_working_directory(),
+        "StandardOutPath": str(log_directory / "service.stdout.log"),
+        "StandardErrorPath": str(log_directory / "service.stderr.log"),
         "RunAtLoad": False,
         "KeepAlive": False,
     }
@@ -172,12 +208,18 @@ def _start(root: Path, env_file: Path, project: str) -> int:
         return 1
     try:
         private_directory = _private_directory(root)
+        log_directory = _private_log_directory()
     except (OSError, ValueError):
         _emit({"error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"})
         return 1
-    environment = _runtime_environment()
+    environment = _engine_environment(root)
     preflight = subprocess.run(
-        [str(engine), "--service-preflight", *_engine_arguments(root, env_file)],
+        [
+            _runtime_executable(),
+            str(engine),
+            "--service-preflight",
+            *_engine_arguments(root, env_file),
+        ],
         cwd=root,
         env=environment,
         check=False,
@@ -188,7 +230,13 @@ def _start(root: Path, env_file: Path, project: str) -> int:
         _emit({"error_code": "AGENT_PAPER_SERVICE_PREFLIGHT_FAILED"})
         return 1
     try:
-        plist_path = _write_service_plist(root, private_directory, env_file, project)
+        plist_path = _write_service_plist(
+            root,
+            private_directory,
+            log_directory,
+            env_file,
+            project,
+        )
     except (OSError, ValueError):
         _emit({"error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"})
         return 1
@@ -254,9 +302,14 @@ def _run(root: Path, env_file: Path) -> int:
     if not engine.is_file() or not os.access(engine, os.X_OK):
         _emit({"error_code": "AGENT_PAPER_SERVICE_RUNTIME_MISSING"})
         return 1
-    environment = _runtime_environment()
+    environment = _engine_environment(root)
     preflight = subprocess.run(
-        [str(engine), "--service-preflight", *_engine_arguments(root, env_file)],
+        [
+            _runtime_executable(),
+            str(engine),
+            "--service-preflight",
+            *_engine_arguments(root, env_file),
+        ],
         cwd=root,
         env=environment,
         check=False,
@@ -267,7 +320,12 @@ def _run(root: Path, env_file: Path) -> int:
         _emit({"error_code": "AGENT_PAPER_SERVICE_PREFLIGHT_FAILED"})
         return 1
     os.chdir(root)
-    os.execve(str(engine), [str(engine), *_engine_arguments(root, env_file)], environment)
+    runtime = _runtime_executable()
+    os.execve(
+        runtime,
+        [runtime, str(engine), *_engine_arguments(root, env_file)],
+        environment,
+    )
     return 1
 
 
@@ -303,8 +361,16 @@ def _launchctl_inspection(
     else:
         raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
     expected = _program_arguments(root, env_file, project)
-    legacy = allow_legacy and len(registered) == 3 and registered[1:] == expected[1:3]
-    if working_directories[0] != str(root) or (registered != expected and not legacy):
+    current = (
+        working_directories[0] == _service_working_directory() and registered == expected
+    )
+    legacy_arguments = len(registered) == 3 and registered[1:] == expected[1:3]
+    legacy = (
+        allow_legacy
+        and working_directories[0] == str(root)
+        and (registered == expected or legacy_arguments)
+    )
+    if not current and not legacy:
         raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
     match = re.search(r"^\s*last exit code = (\d+)(?::|$)", output, re.MULTILINE)
     last_exit_code = int(match.group(1)) if match is not None else None

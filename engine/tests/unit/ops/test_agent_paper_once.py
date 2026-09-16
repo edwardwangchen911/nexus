@@ -686,6 +686,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             SchwabOAuthError("SCHWAB_OAUTH_REFRESH_HTTP_401"),
             SchwabStreamError("SCHWAB_STREAM_CREDENTIALS_INVALID"),
             SchwabStreamError("SCHWAB_STREAM_FRAME_INVALID"),
+            RuntimeError("SCHWAB_MARKET_STREAM_OBJECT_READBACK_MISMATCH"),
+            OSError("private filesystem detail"),
         ),
         start=1,
     ):
@@ -722,7 +724,12 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             / f"{reservation.decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{attempt}"
             / "schwab-failure.json"
         )
-        assert json.loads(saved.read_text())["provider_error_code"] == str(provider_error)
+        expected_code = (
+            "SCHWAB_MARKET_STREAM_FAILURE_UNCLASSIFIED"
+            if isinstance(provider_error, OSError)
+            else str(provider_error)
+        )
+        assert json.loads(saved.read_text())["provider_error_code"] == expected_code
 
 
 def test_trigger_rejects_after_bound_half_day_close_before_provider_calls(

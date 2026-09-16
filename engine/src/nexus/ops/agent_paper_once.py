@@ -88,6 +88,9 @@ _SAFE_SCHWAB_FAILURE_CODES = frozenset(
         "SCHWAB_MARKET_STREAM_EVIDENCE_STALE",
         "SCHWAB_MARKET_STREAM_IDENTITY_REQUIRED",
         "SCHWAB_MARKET_STREAM_IMPORT_TIME_INVALID",
+        "SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID",
+        "SCHWAB_MARKET_STREAM_OBJECT_READBACK_MISMATCH",
+        "SCHWAB_MARKET_STREAM_OBJECT_URI_MISMATCH",
         "SCHWAB_APP_CONFIG_INVALID",
         "SCHWAB_APP_CONFIG_REQUIRED",
         "SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED",
@@ -391,7 +394,13 @@ async def trigger_in_session(
             instrument_id=scope.instrument_id,
             process_environment=process_environment,
         )
-    except (ProviderMarketStreamError, SchwabOAuthError, SchwabStreamError) as error:
+    except (
+        OSError,
+        RuntimeError,
+        ProviderMarketStreamError,
+        SchwabOAuthError,
+        SchwabStreamError,
+    ) as error:
         _raise_schwab_l1_incomplete(
             error,
             diagnostic_path=attempt_directory / "schwab-failure.json",
