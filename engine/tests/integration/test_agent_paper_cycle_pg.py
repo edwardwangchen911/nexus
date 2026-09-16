@@ -3583,6 +3583,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert cycle_page.version_observation.order_count == 1
         assert cycle_page.version_observation.fill_count == 2
         assert cycle_page.version_observation.challenger_available is False
+        assert cycle_page.version_observation.lifecycle_state == "incumbent_frozen"
         assert cycle_page.version_observation.verdict == "continue_observing"
         assert cycle_page.version_observation.reason_codes == (
             "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
@@ -3782,7 +3783,21 @@ async def test_agent_version_history_groups_exact_identity_and_keeps_latest_twen
         assert page.version_history[0].prompt_version == "history-prompt-label-21"
         assert page.version_history[0].model_id == "history-model-label-21"
         assert page.version_history[0].cycle_count == 2
+        assert page.version_history[0].lifecycle_state == "incumbent_frozen"
+        assert page.version_history[0].verdict == "continue_observing"
         assert page.version_history[-1].prompt_version == "history-prompt-label-1"
+        assert all(
+            item.lifecycle_state == "historical_frozen"
+            and item.verdict == "retained_as_frozen_history"
+            and item.reason_codes
+            == (
+                "VERSION_FROZEN_AUDIT_HISTORY",
+                "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+                "VERSION_ORDER_PATH_UNOBSERVED",
+                "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE",
+            )
+            for item in page.version_history[1:]
+        )
     finally:
         await engine.dispose()
 

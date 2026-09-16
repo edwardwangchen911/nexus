@@ -388,6 +388,9 @@ function validCyclePage(value: { items?: AgentPaperCycleFact[]; summary?: AgentP
   const observation = value.version_observation ?? null;
   if ((observation === null) !== (value.version_history.length === 0)) return null;
   if (observation !== null && !sameVersionObservation(observation, value.version_history[0])) return null;
+  if (value.version_history.length > 0
+    && (value.version_history[0].lifecycle_state !== "incumbent_frozen"
+      || value.version_history.slice(1).some((item) => item.lifecycle_state !== "historical_frozen"))) return null;
   const identities = new Set<string>();
   let previousLast = Number.POSITIVE_INFINITY;
   for (const item of value.version_history) {
@@ -407,6 +410,7 @@ function sameVersionObservation(left: AgentPaperVersionObservationFact, right: A
     && left.cycle_count === right.cycle_count && left.completed_count === right.completed_count
     && left.unavailable_count === right.unavailable_count && left.order_count === right.order_count
     && left.fill_count === right.fill_count && left.challenger_available === right.challenger_available
+    && left.lifecycle_state === right.lifecycle_state
     && left.verdict === right.verdict && left.reason_codes.length === right.reason_codes.length
     && left.reason_codes.every((reason, index) => reason === right.reason_codes[index]);
 }

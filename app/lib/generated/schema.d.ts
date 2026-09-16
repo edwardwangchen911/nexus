@@ -1392,6 +1392,11 @@ export interface components {
              * Format: date-time
              */
             last_decision_at: string;
+            /**
+             * Lifecycle State
+             * @enum {string}
+             */
+            lifecycle_state: "incumbent_frozen" | "historical_frozen";
             /** Model Hash */
             model_hash: string;
             /** Model Id */
@@ -1407,14 +1412,14 @@ export interface components {
             /** Prompt Version */
             prompt_version: string;
             /** Reason Codes */
-            reason_codes: ("VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE" | "VERSION_ORDER_PATH_UNOBSERVED" | "VERSION_CHALLENGER_UNAVAILABLE")[];
+            reason_codes: ("VERSION_FROZEN_AUDIT_HISTORY" | "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE" | "VERSION_ORDER_PATH_UNOBSERVED" | "VERSION_CHALLENGER_UNAVAILABLE" | "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE")[];
             /** Unavailable Count */
             unavailable_count: number;
             /**
              * Verdict
-             * @constant
+             * @enum {string}
              */
-            verdict: "continue_observing";
+            verdict: "continue_observing" | "retained_as_frozen_history";
         };
         /** @enum {string} */
         AgentRole: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";

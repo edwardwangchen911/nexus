@@ -319,12 +319,15 @@ class AgentPaperVersionObservationResponse(_StrictSchema):
     order_count: int = Field(ge=0, le=100_000)
     fill_count: int = Field(ge=0, le=100_000)
     challenger_available: Literal[False]
-    verdict: Literal["continue_observing"]
+    lifecycle_state: Literal["incumbent_frozen", "historical_frozen"]
+    verdict: Literal["continue_observing", "retained_as_frozen_history"]
     reason_codes: tuple[
         Literal[
+            "VERSION_FROZEN_AUDIT_HISTORY",
             "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
             "VERSION_ORDER_PATH_UNOBSERVED",
             "VERSION_CHALLENGER_UNAVAILABLE",
+            "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE",
         ],
         ...,
     ] = Field(min_length=1, max_length=4)
@@ -337,10 +340,24 @@ class AgentPaperVersionObservationResponse(_StrictSchema):
             raise ValueError("version observation sessions exceed cycles")
         if self.completed_count + self.unavailable_count > self.cycle_count:
             raise ValueError("version observation terminal counts exceed cycles")
-        expected_reasons = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+        if self.lifecycle_state == "incumbent_frozen":
+            if self.verdict != "continue_observing":
+                raise ValueError("incumbent version must continue observing")
+            expected_reasons = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+        else:
+            if self.verdict != "retained_as_frozen_history":
+                raise ValueError("historical version must remain frozen history")
+            expected_reasons = [
+                "VERSION_FROZEN_AUDIT_HISTORY",
+                "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+            ]
         if self.order_count == 0 or self.fill_count == 0:
             expected_reasons.append("VERSION_ORDER_PATH_UNOBSERVED")
-        expected_reasons.append("VERSION_CHALLENGER_UNAVAILABLE")
+        expected_reasons.append(
+            "VERSION_CHALLENGER_UNAVAILABLE"
+            if self.lifecycle_state == "incumbent_frozen"
+            else "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE"
+        )
         if self.reason_codes != tuple(expected_reasons):
             raise ValueError("version observation reasons do not match facts")
         return self
@@ -362,6 +379,11 @@ class AgentPaperCyclePageResponse(_StrictSchema):
             return self
         if not self.version_history or self.version_history[0] != self.version_observation:
             raise ValueError("current version observation must lead version history")
+        if self.version_history[0].lifecycle_state != "incumbent_frozen" or any(
+            item.lifecycle_state != "historical_frozen"
+            for item in self.version_history[1:]
+        ):
+            raise ValueError("version history must contain exactly one leading incumbent")
         identities = [
             (item.prompt_hash, item.model_hash) for item in self.version_history
         ]

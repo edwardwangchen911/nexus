@@ -47,9 +47,11 @@ const nextReasonLabels: Partial<Record<NonNullable<AgentPaperSessionSummaryFact[
 };
 
 const versionReasonLabels: Record<AgentPaperVersionObservationFact["reason_codes"][number], string> = {
+  VERSION_FROZEN_AUDIT_HISTORY: "保留为冻结审计证据",
   VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE: "尚无 Agent 版本级绩效归因",
   VERSION_ORDER_PATH_UNOBSERVED: "尚无模拟订单与成交的持久化路径事实",
   VERSION_CHALLENGER_UNAVAILABLE: "尚无并行 challenger 版本",
+  VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE: "该版本只是顺序历史，不能与 incumbent 做并行比较",
 };
 
 export function AgentPaperVersionHistory({ history }: {
@@ -57,9 +59,9 @@ export function AgentPaperVersionHistory({ history }: {
 }): React.ReactElement {
   return <section className="paper-performance" aria-labelledby="agent-version-history-title">
     <header><div><p className="eyebrow">冻结身份 · 跨交易日只读聚合</p><h2 id="agent-version-history-title">Agent 版本历史</h2></div><span className="mode-badge">继续观察</span></header>
-    <p>这里只记录依次出现过的冻结版本。顺序历史不是并行 challenger；当前没有正式晋升或淘汰结论。最近观察版本不代表当前进程在线或当前配置仍选中该版本。</p>
+    <p>当前冻结 incumbent 是现有准入逻辑从同一 Agent actor 最近 run 复用的精确身份；它不代表当前进程在线，也不代表已通过绩效门槛。其余项只保留为历史冻结证据；顺序历史不是并行 challenger，当前没有正式晋升或淘汰结论。</p>
     {history.map((observation, index) => <article key={`${observation.prompt_hash}:${observation.model_hash}`}>
-      <h3>{index === 0 ? "最近观察版本" : "历史冻结版本"}</h3>
+      <h3>{observation.lifecycle_state === "incumbent_frozen" ? "当前冻结 incumbent" : "历史冻结证据"}</h3>
       <dl>
       <div><dt>Prompt 版本</dt><dd>{observation.prompt_version}</dd></div>
       <div><dt>模型</dt><dd>{observation.model_id}</dd></div>
@@ -70,7 +72,7 @@ export function AgentPaperVersionHistory({ history }: {
       <div><dt>订单 / 成交</dt><dd>{observation.order_count} / {observation.fill_count}</dd></div>
       </dl>
       <aside className="inline-notice" role="note" aria-label={`Agent 版本观察结论 ${index + 1}`}>
-      <strong>继续观察</strong>
+      <strong>{observation.verdict === "continue_observing" ? "继续观察" : "保留为历史证据"}</strong>
       <ul>{observation.reason_codes.map((reason) => <li key={reason}>{versionReasonLabels[reason]}</li>)}</ul>
       </aside>
     </article>)}

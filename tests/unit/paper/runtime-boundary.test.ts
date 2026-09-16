@@ -50,6 +50,7 @@ describe("internal-paper Engine response boundary", () => {
       first_decision_at: "2026-08-26T19:30:00Z", last_decision_at: "2026-08-28T19:30:00Z",
       observed_sessions: 3, cycle_count: 48, completed_count: 39, unavailable_count: 9,
       order_count: 0, fill_count: 0, challenger_available: false,
+      lifecycle_state: "incumbent_frozen",
       verdict: "continue_observing",
       reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE", "VERSION_ORDER_PATH_UNOBSERVED", "VERSION_CHALLENGER_UNAVAILABLE"],
     };
@@ -62,6 +63,9 @@ describe("internal-paper Engine response boundary", () => {
       cycle_count: 4,
       completed_count: 4,
       unavailable_count: 0,
+      lifecycle_state: "historical_frozen",
+      verdict: "retained_as_frozen_history",
+      reason_codes: ["VERSION_FROZEN_AUDIT_HISTORY", "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE", "VERSION_ORDER_PATH_UNOBSERVED", "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE"],
     };
     const versionHistory = [versionObservation, olderVersion];
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(200);
@@ -74,6 +78,10 @@ describe("internal-paper Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, first_decision_at: "2026-08-29T00:00:00Z" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, prompt_hash: "not-a-hash" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"] }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, lifecycle_state: "historical_frozen" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: olderVersion, version_history: [olderVersion] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    const secondIncumbent = { ...versionObservation, prompt_hash: "d".repeat(64), first_decision_at: "2026-08-25T19:30:00Z", last_decision_at: "2026-08-25T20:00:00Z" };
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [versionObservation, secondIncumbent] }, meta }), undefined, listPath, "GET")).status).toBe(500);
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 21 }, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(200);
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 0 }, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);
     expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data), summary: cycleSummary, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);

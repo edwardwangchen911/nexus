@@ -4,7 +4,10 @@ from datetime import datetime
 
 import pytest
 from nexus.api.schemas.integrations import IntegrationStatusResponse
-from nexus.api.schemas.paper import AgentPaperVersionObservationResponse
+from nexus.api.schemas.paper import (
+    AgentPaperCyclePageResponse,
+    AgentPaperVersionObservationResponse,
+)
 from nexus.main import create_engine_app
 from nexus.settings import EngineSettings
 from pydantic import ValidationError
@@ -237,11 +240,14 @@ def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct(
         "maxItems"
     ] == 20
     observation = schemas["AgentPaperVersionObservationResponse"]
-    assert observation["properties"]["verdict"] == {
-        "const": "continue_observing",
-        "title": "Verdict",
-        "type": "string",
-    }
+    assert observation["properties"]["lifecycle_state"]["enum"] == [
+        "incumbent_frozen",
+        "historical_frozen",
+    ]
+    assert observation["properties"]["verdict"]["enum"] == [
+        "continue_observing",
+        "retained_as_frozen_history",
+    ]
     assert observation["properties"]["reason_codes"]["maxItems"] == 4
     assert observation["properties"]["reason_codes"]["minItems"] == 1
     summary = schemas["AgentPaperSessionSummaryResponse"]
@@ -288,6 +294,7 @@ def test_agent_version_observation_rejects_internally_inconsistent_facts() -> No
         "order_count": 0,
         "fill_count": 0,
         "challenger_available": False,
+        "lifecycle_state": "incumbent_frozen",
         "verdict": "continue_observing",
         "reason_codes": (
             "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
@@ -302,10 +309,60 @@ def test_agent_version_observation_rejects_internally_inconsistent_facts() -> No
         {"first_decision_at": "2026-09-17T00:00:00Z"},
         {"prompt_hash": "not-a-hash"},
         {"challenger_available": True},
+        {"lifecycle_state": "historical_frozen"},
+        {"verdict": "retained_as_frozen_history"},
         {"reason_codes": ("VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",)},
     ):
         with pytest.raises(ValidationError):
             AgentPaperVersionObservationResponse.model_validate(payload | changes)
+
+    incumbent = AgentPaperVersionObservationResponse.model_validate(payload)
+    historical = AgentPaperVersionObservationResponse.model_validate(
+        payload
+        | {
+            "prompt_hash": "c" * 64,
+            "first_decision_at": "2026-09-13T15:32:03Z",
+            "last_decision_at": "2026-09-13T18:12:07Z",
+            "lifecycle_state": "historical_frozen",
+            "verdict": "retained_as_frozen_history",
+            "reason_codes": (
+                "VERSION_FROZEN_AUDIT_HISTORY",
+                "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+                "VERSION_ORDER_PATH_UNOBSERVED",
+                "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE",
+            ),
+        }
+    )
+    second_incumbent = incumbent.model_copy(
+        update={
+            "prompt_hash": "d" * 64,
+            "first_decision_at": datetime.fromisoformat("2026-09-13T15:32:03+00:00"),
+            "last_decision_at": datetime.fromisoformat("2026-09-13T18:12:07+00:00"),
+        }
+    )
+    page = {
+        "items": (),
+        "summary": {
+            "decision_session": "2026-09-16",
+            "status": "historical",
+            "cycle_count": 0,
+            "completed_count": 0,
+            "latest_result_code": None,
+            "last_completed_decision_at": None,
+            "next_eligible_at": None,
+            "next_eligible_reason": None,
+            "execution_locked": True,
+        },
+    }
+    for observation, history in (
+        (historical, (historical,)),
+        (incumbent, (incumbent, second_incumbent)),
+        (historical, (historical, incumbent)),
+    ):
+        with pytest.raises(ValidationError):
+            AgentPaperCyclePageResponse.model_validate(
+                page | {"version_observation": observation, "version_history": history}
+            )
 def test_openapi_exposes_closed_strategy_evolution_surface() -> None:
     document = create_engine_app(EngineSettings.for_test()).openapi()
     paths = document["paths"]

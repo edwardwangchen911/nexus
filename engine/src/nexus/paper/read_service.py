@@ -436,15 +436,29 @@ class PaperReadService:
                             count(DISTINCT fill_id) AS fill_count
                         FROM version_rows
                         GROUP BY prompt_hash, model_hash
+                    ),
+                    incumbent_version AS (
+                        SELECT run.prompt_hash, run.model_hash
+                        FROM agent_research_runs AS run
+                        WHERE run.actor_id = 'local-agent-paper-cycle'
+                          AND run.decision_time <= :cutoff
+                          AND run.created_at <= :cutoff
+                        ORDER BY run.decision_time DESC, run.created_at DESC, run.id DESC
+                        LIMIT 1
                     )
                     SELECT
                         version_stats.*,
+                        (
+                            version_stats.prompt_hash = incumbent.prompt_hash
+                            AND version_stats.model_hash = incumbent.model_hash
+                        ) AS is_incumbent,
                         (
                             SELECT count(*)
                             FROM cycle_version_counts
                             WHERE version_count > 1
                         ) AS mixed_cycle_count
                     FROM version_stats
+                    CROSS JOIN incumbent_version AS incumbent
                     ORDER BY
                         last_decision_at DESC,
                         prompt_hash,
@@ -458,14 +472,31 @@ class PaperReadService:
                 {"account_id": account_id, "cutoff": self._request_time},
             )
         ).mappings().all()
-        if not rows or any(int(row["mixed_cycle_count"]) > 0 for row in rows):
+        if (
+            not rows
+            or any(int(row["mixed_cycle_count"]) > 0 for row in rows)
+            or not bool(rows[0]["is_incumbent"])
+            or sum(bool(row["is_incumbent"]) for row in rows) != 1
+        ):
             return ()
         observations: list[AgentPaperVersionObservationResponse] = []
         for row in rows:
-            reason_codes = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+            is_incumbent = bool(row["is_incumbent"])
+            reason_codes = (
+                ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+                if is_incumbent
+                else [
+                    "VERSION_FROZEN_AUDIT_HISTORY",
+                    "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
+                ]
+            )
             if int(row["order_count"]) == 0 or int(row["fill_count"]) == 0:
                 reason_codes.append("VERSION_ORDER_PATH_UNOBSERVED")
-            reason_codes.append("VERSION_CHALLENGER_UNAVAILABLE")
+            reason_codes.append(
+                "VERSION_CHALLENGER_UNAVAILABLE"
+                if is_incumbent
+                else "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE"
+            )
             observations.append(
                 AgentPaperVersionObservationResponse(
                     prompt_version=cast(str, row["prompt_version"]),
@@ -482,7 +513,14 @@ class PaperReadService:
                     order_count=int(row["order_count"]),
                     fill_count=int(row["fill_count"]),
                     challenger_available=False,
-                    verdict="continue_observing",
+                    lifecycle_state=(
+                        "incumbent_frozen" if is_incumbent else "historical_frozen"
+                    ),
+                    verdict=(
+                        "continue_observing"
+                        if is_incumbent
+                        else "retained_as_frozen_history"
+                    ),
                     reason_codes=cast(Any, tuple(reason_codes)),
                 )
             )

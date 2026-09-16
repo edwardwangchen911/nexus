@@ -821,11 +821,20 @@ function agentPaperVersionObservationValid(value: unknown): boolean {
     || Number(value.completed_count) + Number(value.unavailable_count) > Number(value.cycle_count)
     || value.challenger_available !== false
     || !Array.isArray(value.reason_codes)) return false;
-  const expectedReasons = ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"];
+  const incumbent = value.lifecycle_state === "incumbent_frozen";
+  const historical = value.lifecycle_state === "historical_frozen";
+  if ((!incumbent && !historical)
+    || (incumbent && value.verdict !== "continue_observing")
+    || (historical && value.verdict !== "retained_as_frozen_history")) return false;
+  const expectedReasons = incumbent
+    ? ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"]
+    : ["VERSION_FROZEN_AUDIT_HISTORY", "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"];
   if (Number(value.order_count) === 0 || Number(value.fill_count) === 0) {
     expectedReasons.push("VERSION_ORDER_PATH_UNOBSERVED");
   }
-  expectedReasons.push("VERSION_CHALLENGER_UNAVAILABLE");
+  expectedReasons.push(incumbent
+    ? "VERSION_CHALLENGER_UNAVAILABLE"
+    : "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE");
   return value.reason_codes.length === expectedReasons.length
     && value.reason_codes.every((reason, index) => reason === expectedReasons[index]);
 }
@@ -836,6 +845,8 @@ function agentPaperVersionHistoryValid(observation: unknown, history: unknown): 
   if (observation === null) return history.length === 0;
   if (!agentPaperVersionObservationValid(observation) || history.length === 0
     || !sameAgentPaperVersionObservation(observation, history[0])) return false;
+  if (!isPlain(history[0]) || history[0].lifecycle_state !== "incumbent_frozen"
+    || history.slice(1).some((item) => !isPlain(item) || item.lifecycle_state !== "historical_frozen")) return false;
   const identities = new Set<string>();
   let previousLast = Number.POSITIVE_INFINITY;
   for (const item of history) {
@@ -858,7 +869,7 @@ function sameAgentPaperVersionObservation(left: unknown, right: unknown): boolea
     "prompt_version", "prompt_hash", "model_id", "model_version", "model_hash",
     "first_decision_at", "last_decision_at", "observed_sessions", "cycle_count",
     "completed_count", "unavailable_count", "order_count", "fill_count",
-    "challenger_available", "verdict",
+    "challenger_available", "lifecycle_state", "verdict",
   ];
   return scalarFields.every((field) => left[field] === right[field])
     && leftReasons.length === rightReasons.length

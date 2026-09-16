@@ -754,6 +754,14 @@ export const runtimeContractSchemas = {
         "title": "Last Decision At",
         "type": "string"
       },
+      "lifecycle_state": {
+        "enum": [
+          "incumbent_frozen",
+          "historical_frozen"
+        ],
+        "title": "Lifecycle State",
+        "type": "string"
+      },
       "model_hash": {
         "pattern": "^[0-9a-f]{64}$",
         "title": "Model Hash",
@@ -797,9 +805,11 @@ export const runtimeContractSchemas = {
       "reason_codes": {
         "items": {
           "enum": [
+            "VERSION_FROZEN_AUDIT_HISTORY",
             "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
             "VERSION_ORDER_PATH_UNOBSERVED",
-            "VERSION_CHALLENGER_UNAVAILABLE"
+            "VERSION_CHALLENGER_UNAVAILABLE",
+            "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE"
           ],
           "type": "string"
         },
@@ -815,7 +825,10 @@ export const runtimeContractSchemas = {
         "type": "integer"
       },
       "verdict": {
-        "const": "continue_observing",
+        "enum": [
+          "continue_observing",
+          "retained_as_frozen_history"
+        ],
         "title": "Verdict",
         "type": "string"
       }
@@ -835,6 +848,7 @@ export const runtimeContractSchemas = {
       "order_count",
       "fill_count",
       "challenger_available",
+      "lifecycle_state",
       "verdict",
       "reason_codes"
     ],
