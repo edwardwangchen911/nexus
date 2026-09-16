@@ -229,7 +229,7 @@ read current cycle/job/order state
 它不常驻后台、不注册 LaunchAgent，也不改变 API/Web 的只读行为：
 
 ```bash
-uv run --project engine nexus-engine-agent-paper-loop \
+AGENT_RUNTIME_MODE=codex_sdk uv run --project engine nexus-engine-agent-paper-loop \
   --account-id "$PAPER_ACCOUNT_ID"
 ```
 
@@ -253,8 +253,13 @@ FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNY
 已有订单可完成其已冻结窗口后再退出。运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
-需要连续观察时可显式启动同一入口的独立 Compose profile。它默认关闭、不自动重启，并继续通过
-host networking 使用既有 loopback 数据库和对象存储边界；不会取得 broker 或 Shadow 能力：
+需要连续观察时，当前先在宿主机交互终端运行第 8 节的前台循环。Agent paper 研究冻结为
+Codex SDK actionable v4。Compose profile 也固定为 `codex_sdk`，但当前不挂载 ChatGPT 登录凭据；因此容器
+预检应返回 `CODEX_CHATGPT_LOGIN_REQUIRED`，不得误启动。不要向容器注入 OpenAI API key，也不要
+为了启动容器而把 actionable v4 重标为 Responses 配置。
+
+下列 Compose 命令只用于核对未来服务的其他本地前置；在模型运行时边界单独完成并复核前，不启动
+`agent-paper-loop`：
 
 ```bash
 mkdir -p .secrets/nexus-agent-paper
@@ -264,20 +269,19 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml \
   nexus-engine-agent-paper-loop --service-preflight
 docker compose --env-file infra/.env.local -f infra/compose.yaml \
   --profile app --profile agent-paper up -d postgres minio object-store-init api worker
-docker compose --env-file infra/.env.local -f infra/compose.yaml \
-  --profile agent-paper up --build agent-paper-loop
 ```
 
-预检只读取本地配置、受保护 token 文件和私有目录权限，不连接数据库、不请求券商、不调用模型；
+预检只读取本地配置、受保护 token 文件、私有目录权限和 Codex SDK 本机登录状态；不刷新
+ChatGPT 登录、不连接数据库、不请求券商、不调用模型；
 它一次返回全部固定阻塞码，`status=ready` 才允许进入启动步骤。输出中的
 `execution_locked=true` 不代表会解锁交易，`external_requests=0` 表示本次预检没有外部调用。
 FRED 未配置只作为可选提示；Schwab access token 已过期时提示首次行情请求需要刷新，其他必需项
 缺失均 fail closed。行情请求发现 token 已过期或将在五分钟内到期时，只调用一次既有 refresh
 端点；成功后原子替换私密文件并继续，失败则保留旧文件、不重试且不请求 K 线。
 
-先在 `infra/.env.local` 明确配置账户 ID、当前 Mac 的非秘密 UID/GID，并保持功能开关为 true；模型
-运行固定使用现有 Responses worker；仅动态 Schwab token 目录和循环自己的诊断目录可写，前者只用于
-一次刷新后的原子替换。预检发现 token 挂载只读时拒绝启动。
+先在 `infra/.env.local` 明确配置账户 ID、当前 Mac 的非秘密 UID/GID，并保持功能开关为 true。预检
+同时核对动态 Schwab token 目录可写；该目录只用于一次刷新后的原子替换。预检发现 token 挂载
+只读时拒绝启动。
 容器退出后先读取数据库终态和日志中的固定错误码，不直接重启。回滚只需将开关恢复为 false，并
 停止 `agent-paper-loop` 服务；不会删除或改写 cycle、Job、Output、订单、成交、账本和心跳事实。
 

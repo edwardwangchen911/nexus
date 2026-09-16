@@ -28,6 +28,11 @@ def test_agent_paper_service_is_opt_in_fail_closed_and_has_no_broker_capability(
     assert "NEXUS_AGENT_PAPER_ACCOUNT_ID" in service
     assert "NEXUS_SCHWAB_APP_KEY" in service
     assert "NEXUS_SCHWAB_APP_SECRET" in service
+    assert "HOME=/tmp" in service
+    assert "AGENT_RUNTIME_MODE=codex_sdk" in service
+    assert "OPENAI_API_KEY" not in service
+    assert "OPENAI_EXTRACTION_MODEL" not in service
+    assert "OPENAI_REASONING_MODEL" not in service
     assert "FOSUN_GATEWAY_" not in service
     assert "NEXUS_BROKER_" not in service
     assert "broker-worker:" not in service
@@ -40,7 +45,7 @@ def test_agent_paper_service_mounts_only_its_explicit_private_directories() -> N
 
     assert "../.secrets/nexus-schwab-local" in service
     assert "/app/.secrets/nexus-schwab-local" in service
-    assert "read_only: true" in service
+    assert "read_only: true" not in service
     assert "../.secrets/nexus-agent-paper" in service
     assert "/app/.secrets/nexus-agent-paper" in service
     assert "../.secrets/nexus-fosun-local" not in service

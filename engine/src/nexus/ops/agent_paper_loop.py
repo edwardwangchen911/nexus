@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from nexus.agents.codex_sdk import sdk_status
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.domain.ids import new_uuid7
@@ -274,6 +275,19 @@ def _schwab_token_store_writable(repo_root: Path) -> bool:
         return False
 
 
+def _codex_sdk_preflight_blocker() -> str | None:
+    """Read local ChatGPT login state without refreshing auth or invoking a model."""
+    try:
+        result = asyncio.run(sdk_status())
+    except Exception:
+        return "AGENT_PAPER_CODEX_STATUS_UNAVAILABLE"
+    if result.get("ready_for_model_requests") is True:
+        return None
+    if result.get("blocker") == "CODEX_CHATGPT_LOGIN_REQUIRED":
+        return "CODEX_CHATGPT_LOGIN_REQUIRED"
+    return "AGENT_PAPER_CODEX_STATUS_UNAVAILABLE"
+
+
 def agent_paper_service_preflight(
     environment: Mapping[str, str], *, repo_root: Path, now: datetime | None = None
 ) -> dict[str, object]:
@@ -291,21 +305,20 @@ def agent_paper_service_preflight(
     engine_config_valid = _agent_paper_engine_config_valid(environment)
     if not engine_config_valid:
         blocking_codes.add("AGENT_PAPER_ENGINE_CONFIG_INVALID")
-    model_config_valid = environment.get(
-        "AGENT_RUNTIME_MODE", ""
-    ).strip().lower() == "responses" and (
-        _nonempty_environment_values(
-            environment,
-            ("OPENAI_API_KEY", "OPENAI_EXTRACTION_MODEL", "OPENAI_REASONING_MODEL"),
-        )
-    )
-    if not model_config_valid:
+    runtime_mode = environment.get("AGENT_RUNTIME_MODE", "").strip().lower()
+    model_config_valid = runtime_mode == "codex_sdk"
+    if not runtime_mode:
         blocking_codes.add("AGENT_PAPER_MODEL_CONFIG_REQUIRED")
+    elif not model_config_valid:
+        blocking_codes.add("AGENT_PAPER_MODEL_RUNTIME_MISMATCH")
     if engine_config_valid and model_config_valid:
         try:
             EngineSettings.model_validate(environment)
         except Exception:
             blocking_codes.add("AGENT_PAPER_RUNTIME_CONFIG_INVALID")
+        else:
+            if model_blocker := _codex_sdk_preflight_blocker():
+                blocking_codes.add(model_blocker)
     if not _nonempty_environment_values(
         environment, ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY")
     ):
@@ -1463,9 +1476,15 @@ def main(argv: list[str] | None = None) -> int:
         if requested.strip().lower() in {"", "0", "false", "no", "off"}:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
             return 1
+        if environment.get("AGENT_RUNTIME_MODE", "").strip().lower() != "codex_sdk":
+            print(json.dumps({"error_code": "AGENT_PAPER_MODEL_RUNTIME_MISMATCH"}))
+            return 1
         settings = EngineSettings.model_validate(environment)
         if not settings.agent_paper_cycle_enabled:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
+            return 1
+        if model_blocker := _codex_sdk_preflight_blocker():
+            print(json.dumps({"error_code": model_blocker}))
             return 1
         reason = asyncio.run(
             run_local_agent_paper_loop(settings, account_id=account_id, repo_root=root)

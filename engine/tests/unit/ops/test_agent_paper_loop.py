@@ -25,6 +25,11 @@ async def noop_heartbeat(_seen_at: datetime) -> None:
     return None
 
 
+@pytest.fixture
+def codex_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
+
+
 def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
     return replace(loop.AgentPaperLoopSnapshot(now=NOW), **changes)
 
@@ -623,6 +628,7 @@ def enabled_environment() -> dict[str, str]:
     return {
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
+        "AGENT_RUNTIME_MODE": "codex_sdk",
     }
 
 
@@ -630,7 +636,7 @@ def service_ready_environment() -> dict[str, str]:
     return {
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(UUID(int=1)),
-        "NEXUS_ENV": "production",
+        "NEXUS_ENV": "development",
         "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
         "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
         "OBJECT_STORE_REGION": "us-east-1",
@@ -639,10 +645,7 @@ def service_ready_environment() -> dict[str, str]:
         "OBJECT_STORE_SECRET_ACCESS_KEY": "object-secret",
         "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID": "current",
         "NEXUS_ENGINE_HMAC_CURRENT_SECRET": "hmac-secret",
-        "AGENT_RUNTIME_MODE": "responses",
-        "OPENAI_API_KEY": "openai-secret",
-        "OPENAI_EXTRACTION_MODEL": "extract-model",
-        "OPENAI_REASONING_MODEL": "reason-model",
+        "AGENT_RUNTIME_MODE": "codex_sdk",
         "ALPACA_API_KEY_ID": "alpaca-key",
         "ALPACA_API_SECRET_KEY": "alpaca-secret",
         "NEXUS_SCHWAB_APP_KEY": "schwab-key",
@@ -753,6 +756,7 @@ def test_service_preflight_accepts_complete_local_configuration(
         lambda *_args, **_kwargs: "access-token-canary",
     )
     monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
     environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
 
     assert loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW) == {
@@ -762,6 +766,35 @@ def test_service_preflight_accepts_complete_local_configuration(
         "blocking_codes": [],
         "optional_codes": [],
     }
+
+
+def test_service_preflight_rejects_responses_for_codex_actionable_research(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    output_directory = tmp_path / ".secrets" / "nexus-agent-paper"
+    output_directory.mkdir(parents=True, mode=0o700)
+    output_directory.chmod(0o700)
+    monkeypatch.setattr(loop, "load_schwab_app_config", lambda *_args: object())
+    monkeypatch.setattr(loop, "load_schwab_token", lambda *_args: object())
+    monkeypatch.setattr(
+        loop,
+        "require_live_schwab_access_token",
+        lambda *_args, **_kwargs: "access-token-canary",
+    )
+    monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
+    environment = service_ready_environment() | {
+        "AGENT_RUNTIME_MODE": "responses",
+        "OPENAI_API_KEY": "openai-secret",
+        "OPENAI_EXTRACTION_MODEL": "extract-model",
+        "OPENAI_REASONING_MODEL": "reason-model",
+        "FRED_API_KEY": "fred-secret",
+    }
+
+    result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
+
+    assert result["status"] == "blocked"
+    assert result["blocking_codes"] == ["AGENT_PAPER_MODEL_RUNTIME_MISMATCH"]
 
 
 def test_service_preflight_rejects_runtime_configuration_startup_would_reject(
@@ -779,6 +812,7 @@ def test_service_preflight_rejects_runtime_configuration_startup_would_reject(
         lambda *_args, **_kwargs: "access-token-canary",
     )
     monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
     environment = service_ready_environment() | {
         "AGENT_DAILY_BUDGET_USD": "0",
         "FRED_API_KEY": "fred-secret",
@@ -807,6 +841,7 @@ def test_service_preflight_treats_expired_access_token_as_refreshable_warning(
         ),
     )
     monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
     environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
 
     result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
@@ -835,12 +870,85 @@ def test_service_preflight_blocks_read_only_schwab_token_store(
         lambda *_args, **_kwargs: "access-token-canary",
     )
     monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: False)
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
     environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
 
     result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
 
     assert result["status"] == "blocked"
     assert result["blocking_codes"] == ["AGENT_PAPER_SCHWAB_TOKEN_STORE_READ_ONLY"]
+
+
+def test_service_preflight_blocks_missing_codex_login(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    output_directory = tmp_path / ".secrets" / "nexus-agent-paper"
+    output_directory.mkdir(parents=True, mode=0o700)
+    output_directory.chmod(0o700)
+    monkeypatch.setattr(loop, "load_schwab_app_config", lambda *_args: object())
+    monkeypatch.setattr(loop, "load_schwab_token", lambda *_args: object())
+    monkeypatch.setattr(
+        loop,
+        "require_live_schwab_access_token",
+        lambda *_args, **_kwargs: "access-token-canary",
+    )
+    monkeypatch.setattr(loop, "_schwab_token_store_writable", lambda *_args: True)
+    monkeypatch.setattr(
+        loop,
+        "_codex_sdk_preflight_blocker",
+        lambda: "CODEX_CHATGPT_LOGIN_REQUIRED",
+    )
+
+    result = loop.agent_paper_service_preflight(
+        service_ready_environment() | {"FRED_API_KEY": "fred-secret"},
+        repo_root=tmp_path,
+        now=NOW,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocking_codes"] == ["CODEX_CHATGPT_LOGIN_REQUIRED"]
+
+
+@pytest.mark.parametrize(
+    ("status_result", "expected"),
+    [
+        ({"ready_for_model_requests": True, "blocker": None}, None),
+        (
+            {
+                "ready_for_model_requests": False,
+                "blocker": "CODEX_CHATGPT_LOGIN_REQUIRED",
+            },
+            "CODEX_CHATGPT_LOGIN_REQUIRED",
+        ),
+        (
+            {"ready_for_model_requests": False, "blocker": "unexpected"},
+            "AGENT_PAPER_CODEX_STATUS_UNAVAILABLE",
+        ),
+    ],
+)
+def test_codex_sdk_preflight_blocker_maps_only_safe_status(
+    monkeypatch: pytest.MonkeyPatch,
+    status_result: dict[str, object],
+    expected: str | None,
+) -> None:
+    async def status() -> dict[str, object]:
+        return status_result
+
+    monkeypatch.setattr(loop, "sdk_status", status)
+
+    assert loop._codex_sdk_preflight_blocker() == expected
+
+
+def test_codex_sdk_preflight_blocker_masks_status_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def status() -> dict[str, object]:
+        raise RuntimeError("private-codex-status-canary")
+
+    monkeypatch.setattr(loop, "sdk_status", status)
+
+    assert loop._codex_sdk_preflight_blocker() == "AGENT_PAPER_CODEX_STATUS_UNAVAILABLE"
 
 
 def test_service_preflight_cli_masks_configuration_values(
@@ -863,6 +971,7 @@ def test_service_preflight_cli_masks_configuration_values(
 def test_loop_command_reads_account_and_runtime_settings_from_process_environment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
 ) -> None:
     account_id = UUID(int=1)
     captured_process_environment: list[dict[str, str]] = []
@@ -908,6 +1017,24 @@ def test_loop_command_stays_disabled_before_optional_model_config_validation(
     assert json.loads(capsys.readouterr().out) == {"error_code": "AGENT_PAPER_CYCLE_DISABLED"}
 
 
+def test_loop_command_rejects_responses_runtime_before_running(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    environment = enabled_environment() | {"AGENT_RUNTIME_MODE": "responses"}
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
+
+    async def must_not_run(*_args, **_kwargs):
+        raise AssertionError("loop must not run")
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", must_not_run)
+
+    assert loop.main(["--account-id", str(UUID(int=1))]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error_code": "AGENT_PAPER_MODEL_RUNTIME_MISMATCH"
+    }
+
+
 @pytest.mark.parametrize(
     ("reason", "exit_code", "output"),
     [
@@ -941,6 +1068,7 @@ def test_loop_command_stays_disabled_before_optional_model_config_validation(
 def test_loop_command_exposes_only_safe_stop_reasons(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
     reason: loop.AgentPaperLoopAction,
     exit_code: int,
     output: dict[str, object],
@@ -968,6 +1096,7 @@ def test_loop_command_exposes_only_safe_stop_reasons(
 def test_loop_command_exposes_persisted_trigger_failure_codes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
     error_code: str,
 ) -> None:
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
@@ -984,6 +1113,7 @@ def test_loop_command_exposes_persisted_trigger_failure_codes(
 def test_loop_command_masks_unknown_failure_details(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
 ) -> None:
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
 
@@ -1015,6 +1145,7 @@ def test_loop_command_rejects_invalid_account_without_echo(
 def test_loop_command_reports_interrupt_without_leaking_traceback(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
 ) -> None:
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: enabled_environment())
 
