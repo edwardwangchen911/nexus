@@ -978,7 +978,11 @@ def test_loop_command_reads_account_and_runtime_settings_from_process_environmen
 
     def load(_root, process_environment):
         captured_process_environment.append(dict(process_environment))
-        return enabled_environment()
+        return enabled_environment() | {
+            "NEXUS_AGENT_PAPER_ACCOUNT_ID": process_environment[
+                "NEXUS_AGENT_PAPER_ACCOUNT_ID"
+            ]
+        }
 
     async def stop(_settings, *, account_id: UUID, repo_root):
         assert account_id == UUID(int=1)
@@ -990,6 +994,26 @@ def test_loop_command_reads_account_and_runtime_settings_from_process_environmen
 
     assert loop.main([]) == 0
     assert captured_process_environment == [dict(os.environ)]
+    assert json.loads(capsys.readouterr().out)["reason"] == "stop_session_closed"
+
+
+def test_loop_command_reads_account_from_loaded_local_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    codex_ready: None,
+) -> None:
+    account_id = UUID(int=1)
+    environment = enabled_environment() | {"NEXUS_AGENT_PAPER_ACCOUNT_ID": str(account_id)}
+    monkeypatch.delenv("NEXUS_AGENT_PAPER_ACCOUNT_ID", raising=False)
+    monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
+
+    async def stop(_settings, *, account_id: UUID, repo_root):
+        assert account_id == UUID(int=1)
+        return loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", stop)
+
+    assert loop.main([]) == 0
     assert json.loads(capsys.readouterr().out)["reason"] == "stop_session_closed"
 
 

@@ -1466,15 +1466,17 @@ def main(argv: list[str] | None = None) -> int:
                 }
             print(json.dumps(result, sort_keys=True))
             return 0 if result["status"] == "ready" else 1
-        try:
-            account_id = UUID(args.account_id or os.environ.get("NEXUS_AGENT_PAPER_ACCOUNT_ID", ""))
-        except (AttributeError, TypeError, ValueError):
-            print(json.dumps({"error_code": "AGENT_PAPER_ACCOUNT_INVALID"}))
-            return 1
         environment = load_agent_paper_service_environment(root, os.environ)
         requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
         if requested.strip().lower() in {"", "0", "false", "no", "off"}:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
+            return 1
+        try:
+            account_id = UUID(
+                args.account_id or environment.get("NEXUS_AGENT_PAPER_ACCOUNT_ID", "")
+            )
+        except (AttributeError, TypeError, ValueError):
+            print(json.dumps({"error_code": "AGENT_PAPER_ACCOUNT_INVALID"}))
             return 1
         if environment.get("AGENT_RUNTIME_MODE", "").strip().lower() != "codex_sdk":
             print(json.dumps({"error_code": "AGENT_PAPER_MODEL_RUNTIME_MISMATCH"}))

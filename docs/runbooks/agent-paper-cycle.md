@@ -253,8 +253,25 @@ FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNY
 已有订单可完成其已冻结窗口后再退出。运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
-需要连续观察时，当前先在宿主机交互终端运行第 8 节的前台循环。Agent paper 研究冻结为
-Codex SDK actionable v4。Compose profile 也固定为 `codex_sdk`，但当前不挂载 ChatGPT 登录凭据；因此容器
+终端关闭后仍需继续观察时，使用仓库内的临时 launchd 任务管理脚本：
+
+```bash
+.venv/bin/python scripts/macos/agent-paper-loop-service.py start
+.venv/bin/python scripts/macos/agent-paper-loop-service.py status
+.venv/bin/python scripts/macos/agent-paper-loop-service.py stop
+```
+
+`start` 先在当前终端做一次产品预检，launchd 任务实际启动后再预检一次，两次都通过才
+进入循环。任务固定使用宿主机 Codex SDK 登录，不复制凭据、不注入 OpenAI API key。它只在
+`.secrets/nexus-agent-paper` 生成明确 `KeepAlive=false` 的私有临时 plist，不安装到
+`~/Library/LaunchAgents`，不随登录启动，退出后不自动重启。`stop` 只先发送 `SIGINT`，
+确认进程已退出后才移除
+临时注册；十秒内无法确认时返回 `AGENT_PAPER_SERVICE_STOP_UNCONFIRMED`，不强杀。日志仅写入
+`.secrets/nexus-agent-paper/service.stdout.log` 和 `service.stderr.log`，目录必须归当前用户所有且权限
+为 `0700`。账户 ID、功能开关和 Provider 配置仍只从受保护的 `infra/.env.local` 和既有私密目录读取。
+
+上述前台或临时 launchd 方式都在宿主机运行。Agent paper 研究冻结为 Codex SDK actionable v4。
+Compose profile 也固定为 `codex_sdk`，但当前不挂载 ChatGPT 登录凭据；因此容器
 预检应返回 `CODEX_CHATGPT_LOGIN_REQUIRED`，不得误启动。不要向容器注入 OpenAI API key，也不要
 为了启动容器而把 actionable v4 重标为 Responses 配置。
 
