@@ -5,13 +5,12 @@ import asyncio
 import json
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -39,6 +38,7 @@ from nexus.paper.agent_cycle import (
     start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import (
+    load_agent_paper_service_calendar_authority,
     load_quasi_realtime_cycle_authority,
     select_agent_paper_service_calendar_authority,
 )
@@ -324,13 +324,8 @@ async def trigger_in_session(
     initial_time = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(initial_time, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    local_time = initial_time.astimezone(ZoneInfo("America/New_York"))
-    if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
-        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     decision_session = reservation.decision_session
     decision_slot_at = reservation.decision_slot_at
-    if local_time.date() != decision_session:
-        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
 
     selected = (
         await select_agent_paper_service_calendar_authority(session, now=initial_time)
@@ -338,11 +333,20 @@ async def trigger_in_session(
         else None
     )
     calendar_authority_id = (
-        selected.calendar_authority_id
-        if selected is not None
-        else expected_calendar_authority_id
+        selected.calendar_authority_id if selected is not None else expected_calendar_authority_id
     )
     assert calendar_authority_id is not None
+    service_calendar = await load_agent_paper_service_calendar_authority(
+        session,
+        now=initial_time,
+        expected_calendar_authority_id=calendar_authority_id,
+    )
+    if (
+        service_calendar.session != decision_session
+        or initial_time < service_calendar.decision_window_start_at
+        or initial_time >= service_calendar.market_close_at
+    ):
+        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
 
     initial_authority = await load_quasi_realtime_cycle_authority(
         session,
@@ -350,6 +354,8 @@ async def trigger_in_session(
         now=initial_time,
         expected_calendar_authority_id=calendar_authority_id,
     )
+    if initial_authority.calendar_authority_id != calendar_authority_id:
+        raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
     scope = await inspect_query_authority_scope(
         session,
         decision_session=decision_session,
@@ -391,10 +397,17 @@ async def trigger_in_session(
     decision_time = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(decision_time, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    final_local = decision_time.astimezone(ZoneInfo("America/New_York"))
-    if final_local.date() != decision_session or not time(7) <= final_local.time().replace(
-        tzinfo=None
-    ) < time(16):
+    final_calendar = await load_agent_paper_service_calendar_authority(
+        session,
+        now=decision_time,
+        expected_calendar_authority_id=calendar_authority_id,
+    )
+    if (
+        final_calendar.calendar_authority_id != calendar_authority_id
+        or final_calendar.session != decision_session
+        or decision_time < final_calendar.decision_window_start_at
+        or decision_time >= final_calendar.market_close_at
+    ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     quote_id = stream.quote_ids.get("AAPL")
     quote = None if quote_id is None else await session.get(LatestQuote, quote_id)
@@ -418,6 +431,8 @@ async def trigger_in_session(
         now=decision_time,
         expected_calendar_authority_id=calendar_authority_id,
     )
+    if authority.calendar_authority_id != calendar_authority_id:
+        raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
     return await start_schwab_agent_paper_cycle(
         session,
         authority=authority,

@@ -19,6 +19,7 @@ PREVIOUS_SLOT = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
 AFTER_CLOSE = datetime(2026, 9, 14, 20, 1, tzinfo=UTC)
 LAST_SLOT = datetime(2026, 9, 14, 19, 55, tzinfo=UTC)
 A = loop.AgentPaperLoopAction
+CALENDAR_AUTHORITY_ID = UUID(int=9)
 
 
 async def noop_heartbeat(_seen_at: datetime) -> None:
@@ -31,7 +32,123 @@ def codex_ready(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
-    return replace(loop.AgentPaperLoopSnapshot(now=NOW), **changes)
+    current = changes.get("now", NOW)
+    assert isinstance(current, datetime)
+    local_session = current.astimezone(loop.ZoneInfo("America/New_York")).date()
+    start = datetime.combine(local_session, datetime.min.time(), tzinfo=UTC) + timedelta(hours=11)
+    end = start + timedelta(hours=9)
+    return replace(
+        loop.AgentPaperLoopSnapshot(
+            now=NOW,
+            calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            decision_window_start_at=start,
+            decision_window_end_at=end,
+            next_decision_window_start_at=start + timedelta(days=1),
+        ),
+        **changes,
+    )
+
+
+@pytest.mark.parametrize(
+    ("now", "window_start", "window_end", "next_start", "expected"),
+    [
+        (
+            datetime(2026, 7, 6, 10, 59, tzinfo=UTC),
+            datetime(2026, 7, 6, 11, tzinfo=UTC),
+            datetime(2026, 7, 6, 20, tzinfo=UTC),
+            datetime(2026, 7, 7, 11, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+        (
+            datetime(2026, 11, 27, 17, 59, tzinfo=UTC),
+            datetime(2026, 11, 27, 12, tzinfo=UTC),
+            datetime(2026, 11, 27, 18, tzinfo=UTC),
+            datetime(2026, 11, 30, 12, tzinfo=UTC),
+            A.TRIGGER,
+        ),
+        (
+            datetime(2026, 11, 27, 18, 1, tzinfo=UTC),
+            datetime(2026, 11, 27, 12, tzinfo=UTC),
+            datetime(2026, 11, 27, 18, tzinfo=UTC),
+            datetime(2026, 11, 30, 12, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+        (
+            datetime(2026, 11, 28, 15, tzinfo=UTC),
+            datetime(2026, 11, 30, 12, tzinfo=UTC),
+            datetime(2026, 11, 30, 21, tzinfo=UTC),
+            datetime(2026, 12, 1, 12, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+        (
+            datetime(2026, 12, 1, 11, 59, tzinfo=UTC),
+            datetime(2026, 12, 1, 12, tzinfo=UTC),
+            datetime(2026, 12, 1, 21, tzinfo=UTC),
+            datetime(2026, 12, 2, 12, tzinfo=UTC),
+            A.WAIT_FOR_SESSION,
+        ),
+    ],
+)
+def test_policy_uses_bound_calendar_windows_across_sessions(
+    now: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    next_start: datetime,
+    expected: loop.AgentPaperLoopAction,
+) -> None:
+    state = loop.AgentPaperLoopSnapshot(
+        now=now,
+        calendar_authority_id=UUID(int=9),
+        decision_window_start_at=window_start,
+        decision_window_end_at=window_end,
+        next_decision_window_start_at=next_start,
+    )
+
+    assert loop.choose_loop_action(state) == expected
+
+
+def test_foreground_loop_waits_for_session_without_product_side_effects() -> None:
+    start = datetime(2026, 7, 6, 11, tzinfo=UTC)
+    states = iter(
+        (
+            loop.AgentPaperLoopSnapshot(
+                now=start - timedelta(seconds=31),
+                calendar_authority_id=UUID(int=9),
+                decision_window_start_at=start,
+                decision_window_end_at=datetime(2026, 7, 6, 20, tzinfo=UTC),
+                next_decision_window_start_at=datetime(2026, 7, 7, 11, tzinfo=UTC),
+            ),
+            loop.AgentPaperLoopSnapshot(now=start, enabled=False),
+        )
+    )
+    sleeps: list[float] = []
+    heartbeats: list[datetime] = []
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    async def execute(_action, _state) -> None:
+        raise AssertionError("session waiting must not run provider, model, or trigger actions")
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async def heartbeat(seen_at: datetime) -> None:
+        heartbeats.append(seen_at)
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: start,
+        )
+    )
+
+    assert result == A.STOP_DISABLED
+    assert sleeps == [15.0, 15.0, 1.0]
+    assert len(heartbeats) == 4
 
 
 @pytest.mark.parametrize(
@@ -119,7 +236,7 @@ def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
         ),
         (
             {"now": AFTER_CLOSE, "cycle_status": "completed", "cycle_slot_at": LAST_SLOT},
-            A.STOP_SESSION_CLOSED,
+            A.WAIT_FOR_SESSION,
         ),
         (
             {
@@ -145,11 +262,7 @@ def test_foreground_loop_executes_persisted_action_then_stops() -> None:
             snapshot(
                 cycle_status="researching", research_job_status="queued", research_job_id="job-1"
             ),
-            snapshot(
-                now=datetime(2026, 9, 14, 20, 1, tzinfo=UTC),
-                cycle_status="completed",
-                cycle_slot_at=datetime(2026, 9, 14, 19, 55, tzinfo=UTC),
-            ),
+            snapshot(enabled=False),
         )
     )
     actions: list[object] = []
@@ -171,7 +284,7 @@ def test_foreground_loop_executes_persisted_action_then_stops() -> None:
             heartbeat=noop_heartbeat,
         )
     )
-    assert result == loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
+    assert result == loop.AgentPaperLoopAction.STOP_DISABLED
     assert actions == [(loop.AgentPaperLoopAction.RUN_RESEARCH_JOB, "job-1")]
 
 
@@ -241,11 +354,7 @@ def test_foreground_loop_waits_without_product_side_effects(
     states = iter(
         (
             first,
-            snapshot(
-                now=datetime(2026, 9, 14, 20, 1, tzinfo=UTC),
-                cycle_status="completed",
-                cycle_slot_at=datetime(2026, 9, 14, 19, 55, tzinfo=UTC),
-            ),
+            snapshot(enabled=False),
         )
     )
     sleeps: list[float] = []
@@ -267,7 +376,7 @@ def test_foreground_loop_waits_without_product_side_effects(
             heartbeat=noop_heartbeat,
         )
     )
-    assert result == loop.AgentPaperLoopAction.STOP_SESSION_CLOSED
+    assert result == loop.AgentPaperLoopAction.STOP_DISABLED
     assert sum(sleeps) == expected_sleep
     assert all(seconds <= 15 for seconds in sleeps)
 
@@ -283,7 +392,7 @@ def test_foreground_loop_heartbeats_before_inspection_and_after_action() -> None
                 research_job_status="queued",
                 research_job_id="job-1",
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -311,7 +420,7 @@ def test_foreground_loop_heartbeats_before_inspection_and_after_action() -> None
         )
     )
 
-    assert result == A.STOP_SESSION_CLOSED
+    assert result == A.STOP_DISABLED
     assert events == ["heartbeat", "inspect", "execute", "heartbeat", "inspect"]
     assert heartbeat_times == [NOW, NOW + timedelta(seconds=1)]
 
@@ -327,7 +436,7 @@ def test_foreground_loop_keeps_heartbeat_live_during_long_action() -> None:
                 research_job_status="queued",
                 research_job_id="job-1",
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -359,7 +468,7 @@ def test_foreground_loop_keeps_heartbeat_live_during_long_action() -> None:
             timeout=1,
         )
 
-    assert asyncio.run(run()) == A.STOP_SESSION_CLOSED
+    assert asyncio.run(run()) == A.STOP_DISABLED
     assert heartbeat_count == 4
 
 
@@ -375,7 +484,7 @@ def test_foreground_loop_uses_fixed_heartbeat_cadence_during_long_action() -> No
                 research_job_status="queued",
                 research_job_id="job-1",
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -411,7 +520,7 @@ def test_foreground_loop_uses_fixed_heartbeat_cadence_during_long_action() -> No
         )
     )
 
-    assert result == A.STOP_SESSION_CLOSED
+    assert result == A.STOP_DISABLED
     assert sleeps == [10.0, 6.0]
 
 
@@ -526,7 +635,7 @@ def test_foreground_loop_heartbeats_during_long_waits() -> None:
                 has_open_order=True,
                 market_window_end_at=NOW + timedelta(seconds=31),
             ),
-            snapshot(now=AFTER_CLOSE, cycle_status="completed", cycle_slot_at=LAST_SLOT),
+            snapshot(enabled=False),
         )
     )
 
@@ -552,7 +661,7 @@ def test_foreground_loop_heartbeats_during_long_waits() -> None:
         )
     )
 
-    assert result == A.STOP_SESSION_CLOSED
+    assert result == A.STOP_DISABLED
     assert sleeps == [15.0, 15.0, 1.0]
     assert heartbeat_times == list(
         (
@@ -687,9 +796,13 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         service_loads.append(process_environment)
         return environment
 
-    async def inspect(_settings, *, account_id):
+    async def inspect(_settings, *, account_id, expected_calendar_authority_id):
         assert account_id == UUID(int=1)
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return snapshot()
+
+    async def select_initial(_settings):
+        return CALENDAR_AUTHORITY_ID
 
     async def run_loop(*, inspect, **_kwargs):
         await inspect()
@@ -704,6 +817,7 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         ),
     )
     monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_initial)
     monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
 
     result = asyncio.run(
@@ -979,9 +1093,7 @@ def test_loop_command_reads_account_and_runtime_settings_from_process_environmen
     def load(_root, process_environment):
         captured_process_environment.append(dict(process_environment))
         return enabled_environment() | {
-            "NEXUS_AGENT_PAPER_ACCOUNT_ID": process_environment[
-                "NEXUS_AGENT_PAPER_ACCOUNT_ID"
-            ]
+            "NEXUS_AGENT_PAPER_ACCOUNT_ID": process_environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"]
         }
 
     async def stop(_settings, *, account_id: UUID, repo_root):
@@ -1086,6 +1198,16 @@ def test_loop_command_rejects_responses_runtime_before_running(
             loop.AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE,
             1,
             {"error_code": "AGENT_PAPER_LOOP_PREREQUISITE_UNAVAILABLE"},
+        ),
+        (
+            loop.AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE,
+            1,
+            {"error_code": "AGENT_PAPER_CALENDAR_UNAVAILABLE"},
+        ),
+        (
+            loop.AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH,
+            1,
+            {"error_code": "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH"},
         ),
     ],
 )
@@ -1227,6 +1349,7 @@ def test_executor_claims_only_persisted_job(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calendar_authority_id = UUID(int=9)
     requests: list[object] = []
     preparations: list[tuple[UUID, datetime]] = []
     trend_preparations: list[tuple[UUID, datetime]] = []
@@ -1239,16 +1362,26 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     }
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
-    async def prepare(settings, *, account_id, repo_root, now):
+    async def prepare(settings, *, account_id, repo_root, now, expected_calendar_authority_id):
         assert repo_root == loop.Path("/repo")
+        assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
         preparations.append((account_id, now))
         return "ready"
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
 
-    async def prepare_macro(settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
         assert repo_root == loop.Path("/repo")
+        assert expected_calendar_authority_id == calendar_authority_id
         assert fred_key.get_secret_value() == ""
         assert isinstance(settings, loop.DailyOnceSettings)
         macro_preparations.append((account_id, now))
@@ -1256,15 +1389,19 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(loop, "prepare_macro_once", prepare_macro, raising=False)
 
-    async def prepare_trends(settings, *, account_id, repo_root, now):
+    async def prepare_trends(
+        settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
         assert repo_root == loop.Path("/repo")
+        assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
         trend_preparations.append((account_id, now))
         return "ready"
 
     monkeypatch.setattr(loop, "prepare_current_trends_once", prepare_trends, raising=False)
 
-    async def trigger(settings, request, *, repo_root):
+    async def trigger(settings, request, *, repo_root, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
         requests.append(request)
 
@@ -1275,7 +1412,10 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
             account_id=UUID(int=1),
             repo_root=loop.Path("/repo"),
             action=loop.AgentPaperLoopAction.TRIGGER,
-            snapshot=snapshot(now=datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC)),
+            snapshot=snapshot(
+                now=datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC),
+                calendar_authority_id=calendar_authority_id,
+            ),
         )
     )
     request = requests[0]
@@ -1300,7 +1440,8 @@ def test_executor_reinspects_after_preparing_missing_prior_daily(
     }
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
-    async def prepare(_settings, *, account_id, repo_root, now):
+    async def prepare(_settings, *, account_id, repo_root, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "prepared"
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
@@ -1335,7 +1476,8 @@ def test_executor_stops_before_cycle_when_prior_daily_is_unavailable(
         },
     )
 
-    async def prepare(_settings, *, account_id, repo_root, now):
+    async def prepare(_settings, *, account_id, repo_root, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "unavailable"
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare, raising=False)
@@ -1379,13 +1521,28 @@ def test_executor_does_not_trigger_until_current_trends_are_ready(
         },
     )
 
-    async def prepare_daily(_settings, *, account_id, repo_root, now):
+    async def prepare_daily(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
 
-    async def prepare_trends(_settings, *, account_id, repo_root, now):
+    async def prepare_trends(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return trend_status
 
-    async def prepare_macro(_settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        _settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
 
     async def unexpected_trigger(*_args, **_kwargs):
@@ -1423,19 +1580,35 @@ def test_executor_continues_when_daily_macro_refresh_is_unavailable(
     )
     events: list[str] = []
 
-    async def prepare_daily(_settings, *, account_id, repo_root, now):
+    async def prepare_daily(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("daily")
         return "ready"
 
-    async def prepare_macro(_settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        _settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("macro")
         return "unavailable"
 
-    async def prepare_trends(_settings, *, account_id, repo_root, now):
+    async def prepare_trends(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("trends")
         return "ready"
 
-    async def trigger(_settings, _request, *, repo_root):
+    async def trigger(_settings, _request, *, repo_root, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("trigger")
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", prepare_daily)
@@ -1470,10 +1643,22 @@ def test_executor_reinspects_after_binding_macro_evidence(
         },
     )
 
-    async def prepare_daily(_settings, *, account_id, repo_root, now):
+    async def prepare_daily(
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
 
-    async def prepare_macro(_settings, *, fred_key, account_id, repo_root, now):
+    async def prepare_macro(
+        _settings,
+        *,
+        fred_key,
+        account_id,
+        repo_root,
+        now,
+        expected_calendar_authority_id,
+    ):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "prepared"
 
     async def unexpected(*_args, **_kwargs):
@@ -1518,7 +1703,8 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
 
@@ -1546,6 +1732,7 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1559,7 +1746,8 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
 def test_prior_daily_preparation_reuses_existing_authority_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
             prior_session=date(2026, 9, 11),
@@ -1579,6 +1767,7 @@ def test_prior_daily_preparation_reuses_existing_authority_without_provider_call
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1593,7 +1782,8 @@ def test_prior_daily_preparation_does_not_repeat_an_existing_attempt(
     attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "daily" / prior_session.isoformat()
     attempt.mkdir(mode=0o700, parents=True)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
             prior_session=prior_session,
@@ -1613,6 +1803,7 @@ def test_prior_daily_preparation_does_not_repeat_an_existing_attempt(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1624,7 +1815,8 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
             prior_session=prior_session,
@@ -1648,6 +1840,7 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1657,7 +1850,8 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
 def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         assert account_id == UUID(int=1)
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -1680,6 +1874,7 @@ def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1726,7 +1921,8 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
     )
     snapshots: list[UUID] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return next(scopes)
 
     async def prepare_snapshot(_settings, *, instrument_id, now, macro_vintage):
@@ -1747,6 +1943,7 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1758,7 +1955,8 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
 def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -1778,6 +1976,7 @@ def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1795,7 +1994,19 @@ def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
 def test_macro_vintage_advances_only_after_its_next_xnys_open(
     decision_time: datetime, expected_vintage: date
 ) -> None:
-    assert loop.latest_visible_macro_vintage(decision_time) == expected_vintage
+    class Session:
+        async def scalar(self, _statement):
+            return expected_vintage + timedelta(days=1)
+
+    result = asyncio.run(
+        loop.latest_visible_macro_vintage(
+            Session(),
+            now=decision_time,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        )
+    )
+
+    assert result == expected_vintage
 
 
 def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
@@ -1823,7 +2034,8 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
     imported: list[str] = []
     snapshots: list[UUID] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         assert account_id == UUID(int=1)
         return next(scopes)
 
@@ -1857,6 +2069,7 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1899,7 +2112,8 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
     )
     attempts: list[str] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return next(scopes)
 
     async def collect(request, *, key, directory):
@@ -1918,6 +2132,7 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
         assert result == "unavailable"
@@ -1928,7 +2143,8 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
 def test_macro_preparation_degrades_only_known_provider_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -1949,6 +2165,7 @@ def test_macro_preparation_degrades_only_known_provider_failure(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -1958,7 +2175,8 @@ def test_macro_preparation_degrades_only_known_provider_failure(
 def test_macro_preparation_propagates_unknown_provider_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -1980,6 +2198,7 @@ def test_macro_preparation_propagates_unknown_provider_failure(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
 
@@ -1996,7 +2215,8 @@ def test_macro_preparation_fails_closed_on_import_or_readback_mismatch(
     tmp_path: loop.Path,
     imported: dict[str, object],
 ) -> None:
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             vintage=date(2026, 9, 13),
@@ -2023,6 +2243,7 @@ def test_macro_preparation_fails_closed_on_import_or_readback_mismatch(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
 
@@ -2055,7 +2276,8 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
 
@@ -2092,6 +2314,7 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2115,20 +2338,14 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
     assert calls[2] == ("collect", "request", prior_session, 10)
 
 
-def test_current_trends_window_uses_a_full_year_not_the_short_execution_calendar() -> None:
-    start_session = getattr(loop, "_current_trends_start_session", None)
-    assert start_session is not None, "current trends need their own full-year calendar window"
-
-    assert start_session(date(2026, 9, 14)) == date(2025, 9, 15)
-
-
 def test_current_trends_preparation_reuses_current_evidence_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
     prepare = getattr(loop, "prepare_current_trends_once", None)
     assert prepare is not None, "the loop must prepare current trends before triggering research"
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2150,6 +2367,7 @@ def test_current_trends_preparation_reuses_current_evidence_without_provider_cal
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2182,7 +2400,8 @@ def test_current_trends_preparation_builds_missing_snapshot_without_provider_cal
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
 
@@ -2203,6 +2422,7 @@ def test_current_trends_preparation_builds_missing_snapshot_without_provider_cal
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2220,7 +2440,8 @@ def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
     attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "trends" / prior_session.isoformat()
     attempt.mkdir(mode=0o700, parents=True)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2242,6 +2463,7 @@ def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2253,7 +2475,8 @@ def test_current_trends_preparation_stops_after_known_collection_failure(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2279,6 +2502,7 @@ def test_current_trends_preparation_stops_after_known_collection_failure(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
         )
     )
 
@@ -2293,7 +2517,8 @@ def test_current_trends_preparation_preserves_unknown_external_outcomes(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(_settings, *, account_id, now):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
             start_session=date(2025, 9, 12),
@@ -2324,6 +2549,7 @@ def test_current_trends_preparation_preserves_unknown_external_outcomes(
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
             )
         )
 
@@ -2416,11 +2642,24 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
         window_start=window_end - timedelta(minutes=5),
         window_end=window_end,
     )
+    calendar = loop.ServiceCalendarAuthority(
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        as_of=NOW,
+        local_date=NOW.date(),
+        session=NOW.date(),
+        decision_window_start_at=NOW - timedelta(hours=3),
+        market_open_at=NOW - timedelta(minutes=35),
+        market_close_at=NOW + timedelta(hours=6),
+        next_session=NOW.date() + timedelta(days=1),
+        next_decision_window_start_at=NOW + timedelta(hours=21),
+        next_market_close_at=NOW + timedelta(days=1, hours=6),
+    )
     result = loop.snapshot_from_cycle_view(
         now=NOW,
         view=view,
         research_job=None,
         market_scope=market_scope,
+        calendar=calendar,
     )
     assert result.order_id == order_id
     assert result.market_window_end_at == window_end + timedelta(seconds=60)
@@ -2431,4 +2670,5 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
             view=view,
             research_job=None,
             market_scope=market_scope.model_copy(update={"cycle_id": UUID(int=5)}),
+            calendar=calendar,
         )

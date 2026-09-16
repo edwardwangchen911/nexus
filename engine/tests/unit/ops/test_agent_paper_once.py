@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from nexus.ops import agent_paper_once as cli
@@ -18,7 +19,7 @@ from nexus.ops.agent_paper_once import (
 )
 from nexus.ops.schwab_market_stream import SchwabMarketStreamImportResult
 from nexus.paper.agent_cycle import AgentPaperCycleError
-from nexus.paper.agent_cycle_authority import CycleAuthority
+from nexus.paper.agent_cycle_authority import CycleAuthority, ServiceCalendarAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult, AgentPaperTriggerReservation
 from nexus.paper.agent_market import AgentPaperMarketScope
 from nexus.persistence.models.paper import PAPER_EXECUTION_SOURCE_POLICY_ID
@@ -484,9 +485,9 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     authority = CycleAuthority(
         account_id=account_id,
         portfolio_id=portfolio_id,
-        decision_session=initial.astimezone(cli.ZoneInfo("America/New_York")).date(),
+        decision_session=initial.astimezone(ZoneInfo("America/New_York")).date(),
         decision_time=initial,
-        execution_session=initial.astimezone(cli.ZoneInfo("America/New_York")).date(),
+        execution_session=initial.astimezone(ZoneInfo("America/New_York")).date(),
         calendar_authority_id=UUID(int=8),
         universe_snapshot_id=universe_id,
     )
@@ -507,6 +508,23 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     async def select_calendar(*_args, **_kwargs):
         events.append("select-calendar")
         return SimpleNamespace(calendar_authority_id=authority.calendar_authority_id)
+
+    async def load_service_calendar(*_args, **kwargs):
+        assert kwargs["expected_calendar_authority_id"] == authority.calendar_authority_id
+        current = kwargs["now"]
+        events.append("service-calendar")
+        return ServiceCalendarAuthority(
+            calendar_authority_id=authority.calendar_authority_id,
+            as_of=current,
+            local_date=authority.decision_session,
+            session=authority.decision_session,
+            decision_window_start_at=initial - cli.timedelta(hours=3),
+            market_open_at=initial - cli.timedelta(minutes=30),
+            market_close_at=initial + cli.timedelta(hours=6),
+            next_session=authority.decision_session + cli.timedelta(days=1),
+            next_decision_window_start_at=initial + cli.timedelta(hours=21),
+            next_market_close_at=initial + cli.timedelta(days=1, hours=6),
+        )
 
     async def scope(*_args, **_kwargs):
         events.append("scope")
@@ -547,6 +565,11 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         "select_agent_paper_service_calendar_authority",
         select_calendar,
     )
+    monkeypatch.setattr(
+        cli,
+        "load_agent_paper_service_calendar_authority",
+        load_service_calendar,
+    )
     monkeypatch.setattr(cli, "inspect_query_authority_scope", scope)
     monkeypatch.setattr(cli, "collect_source_proofs", risk)
     monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", level_one)
@@ -581,11 +604,13 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     assert events == [
         "clock-1",
         "select-calendar",
+        "service-calendar",
         "root",
         "scope",
         "risk-action-delisting-halt",
         "level-one",
         "clock-2",
+        "service-calendar",
         "validate-l1",
         "persist-risk",
         "root",
@@ -676,6 +701,65 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             / "schwab-failure.json"
         )
         assert json.loads(saved.read_text())["provider_error_code"] == str(provider_error)
+
+
+def test_trigger_rejects_after_bound_half_day_close_before_provider_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calendar_authority_id = UUID(int=8)
+    after_close = datetime(2026, 11, 27, 18, 1, tzinfo=UTC)
+
+    class Session:
+        async def scalar(self, _statement):
+            return after_close
+
+    async def load_calendar(*_args, **_kwargs):
+        return ServiceCalendarAuthority(
+            calendar_authority_id=calendar_authority_id,
+            as_of=after_close,
+            local_date=after_close.date(),
+            session=after_close.date(),
+            decision_window_start_at=datetime(2026, 11, 27, 12, tzinfo=UTC),
+            market_open_at=datetime(2026, 11, 27, 14, 30, tzinfo=UTC),
+            market_close_at=datetime(2026, 11, 27, 18, tzinfo=UTC),
+            next_session=datetime(2026, 11, 30, tzinfo=UTC).date(),
+            next_decision_window_start_at=datetime(2026, 11, 30, 12, tzinfo=UTC),
+            next_market_close_at=datetime(2026, 11, 30, 21, tzinfo=UTC),
+        )
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("closed bound session must not call a provider or create a cycle")
+
+    monkeypatch.setattr(cli, "load_agent_paper_service_calendar_authority", load_calendar)
+    monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", forbidden)
+    monkeypatch.setattr(cli, "collect_source_proofs", forbidden)
+    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", forbidden)
+
+    with pytest.raises(ValueError, match="AGENT_PAPER_OUTSIDE_WINDOW"):
+        asyncio.run(
+            trigger_in_session(
+                Session(),
+                object(),
+                cli.AgentPaperTriggerSettings(
+                    database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+                    alpaca_key=SecretStr("key"),
+                    alpaca_secret=SecretStr("secret"),
+                ),
+                AgentPaperTriggerRequest(
+                    action="trigger",
+                    account_id=UUID(int=1),
+                    idempotency_key="half-day-close",
+                ),
+                reservation=AgentPaperTriggerReservation(
+                    claim_id=UUID(int=9),
+                    decision_session=after_close.date(),
+                    decision_slot_at=after_close,
+                ),
+                repo_root=tmp_path,
+                client=object(),
+                expected_calendar_authority_id=calendar_authority_id,
+            )
+        )
 
 
 def test_trigger_replay_returns_before_any_provider_call(

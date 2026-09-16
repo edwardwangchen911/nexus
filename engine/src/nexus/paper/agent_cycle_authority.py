@@ -120,10 +120,7 @@ async def load_quasi_realtime_cycle_authority(
     if row is None:
         raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
     calendar, calendar_session = row
-    if (
-        local_now.time().replace(tzinfo=None) < time(7)
-        or now >= calendar_session.market_close_at
-    ):
+    if local_now.time().replace(tzinfo=None) < time(7) or now >= calendar_session.market_close_at:
         raise ValueError("AGENT_PAPER_MARKET_WINDOW_CLOSED")
     universe = await session.scalar(
         select(UniverseSnapshot)
@@ -204,6 +201,74 @@ async def select_agent_paper_service_calendar_authority(
     ):
         raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
     calendar_session, next_session = rows[:2]
+    return ServiceCalendarAuthority(
+        calendar_authority_id=authority.id,
+        as_of=now,
+        local_date=local_date,
+        session=calendar_session.session,
+        decision_window_start_at=datetime.combine(
+            calendar_session.session,
+            time(7),
+            tzinfo=ny,
+        ).astimezone(UTC),
+        market_open_at=calendar_session.market_open_at,
+        market_close_at=calendar_session.market_close_at,
+        next_session=next_session.session,
+        next_decision_window_start_at=datetime.combine(
+            next_session.session,
+            time(7),
+            tzinfo=ny,
+        ).astimezone(UTC),
+        next_market_close_at=next_session.market_close_at,
+    )
+
+
+async def load_agent_paper_service_calendar_authority(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    expected_calendar_authority_id: UUID,
+) -> ServiceCalendarAuthority:
+    """Reload one already-bound service calendar without selecting a replacement."""
+    require_utc(now)
+    ny = ZoneInfo("America/New_York")
+    local_date = now.astimezone(ny).date()
+    authority = await session.scalar(
+        select(ExchangeCalendarAuthorityRecord).where(
+            ExchangeCalendarAuthorityRecord.id == expected_calendar_authority_id,
+            ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+            ExchangeCalendarAuthorityRecord.completeness_status == "complete",
+            ExchangeCalendarAuthorityRecord.range_start <= local_date,
+            ExchangeCalendarAuthorityRecord.range_end >= local_date,
+            ExchangeCalendarAuthorityRecord.published_at <= now,
+            ExchangeCalendarAuthorityRecord.created_at <= now,
+        )
+    )
+    if authority is None:
+        raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
+    rows = tuple(
+        (
+            await session.scalars(
+                select(ExchangeCalendarSessionRecord)
+                .where(
+                    ExchangeCalendarSessionRecord.calendar_authority_id == authority.id,
+                    ExchangeCalendarSessionRecord.session >= local_date,
+                    ExchangeCalendarSessionRecord.created_at <= now,
+                )
+                .order_by(ExchangeCalendarSessionRecord.session.asc())
+                .limit(2)
+            )
+        ).all()
+    )
+    if (
+        len(rows) < 2
+        or rows[1].session <= rows[0].session
+        or any(
+            row.session < authority.range_start or row.session > authority.range_end for row in rows
+        )
+    ):
+        raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
+    calendar_session, next_session = rows
     return ServiceCalendarAuthority(
         calendar_authority_id=authority.id,
         as_of=now,
@@ -437,7 +502,8 @@ async def prepare_candidates(
     )
     risk_rows = tuple(
         await session.scalars(
-            select(RiskQueryAuthorityRecord).where(
+            select(RiskQueryAuthorityRecord)
+            .where(
                 RiskQueryAuthorityRecord.source_policy_id == decision_source_policy_id,
                 RiskQueryAuthorityRecord.universe_snapshot_id == authority.universe_snapshot_id,
                 RiskQueryAuthorityRecord.decision_session == authority.decision_session,

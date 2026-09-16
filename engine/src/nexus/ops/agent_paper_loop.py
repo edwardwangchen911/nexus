@@ -7,7 +7,7 @@ import os
 import stat
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic as monotonic_clock
@@ -15,11 +15,10 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-import exchange_calendars  # type: ignore[import-untyped]
 from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.agents.codex_sdk import sdk_status
 from nexus.agents.persistence import select_authoritative_snapshot
@@ -50,6 +49,8 @@ from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest
 from nexus.ops.paper_once import run_once as run_paper_once
 from nexus.paper.agent_cycle_authority import (
+    ServiceCalendarAuthority,
+    load_agent_paper_service_calendar_authority,
     load_quasi_realtime_cycle_authority,
     select_agent_paper_service_calendar_authority,
 )
@@ -106,11 +107,14 @@ class AgentPaperLoopAction(StrEnum):
     PUBLISH_PERFORMANCE = "publish_performance"
     WAIT_FOR_SLOT = "wait_for_slot"
     WAIT_FOR_MARKET = "wait_for_market"
+    WAIT_FOR_SESSION = "wait_for_session"
     STOP_RESULT_UNKNOWN = "stop_result_unknown"
     STOP_CYCLE_UNAVAILABLE = "stop_cycle_unavailable"
     STOP_ORDER_UNAVAILABLE = "stop_order_unavailable"
     STOP_PERFORMANCE_UNAVAILABLE = "stop_performance_unavailable"
     STOP_PREREQUISITE_UNAVAILABLE = "stop_prerequisite_unavailable"
+    STOP_CALENDAR_UNAVAILABLE = "stop_calendar_unavailable"
+    STOP_CALENDAR_AUTHORITY_MISMATCH = "stop_calendar_authority_mismatch"
     STOP_DISABLED = "stop_disabled"
     STOP_SESSION_CLOSED = "stop_session_closed"
 
@@ -119,6 +123,10 @@ class AgentPaperLoopAction(StrEnum):
 class AgentPaperLoopSnapshot:
     now: datetime
     enabled: bool = True
+    calendar_authority_id: UUID | None = None
+    decision_window_start_at: datetime | None = None
+    decision_window_end_at: datetime | None = None
+    next_decision_window_start_at: datetime | None = None
     cycle_id: UUID | None = None
     cycle_status: str | None = None
     cycle_slot_at: datetime | None = None
@@ -136,6 +144,7 @@ class PriorDailyScope:
     instrument_id: UUID
     prior_session: date
     authority_ready: bool
+    decision_session: date | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +162,7 @@ class MacroScope:
     vintage: date
     ready_series: frozenset[str]
     snapshot_ready: bool
+    attempt_session: date | None = None
 
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "dead_letter", "skipped"})
@@ -379,28 +389,27 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def latest_visible_macro_vintage(now: datetime) -> date:
-    """Return the newest vintage whose conservative next XNYS open has passed."""
+async def latest_visible_macro_vintage(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    expected_calendar_authority_id: UUID,
+) -> date:
+    """Return the newest conservative vintage from the bound persisted calendar."""
     current = require_utc(now)
-    calendar = exchange_calendars.get_calendar("XNYS")
-    local_date = current.astimezone(ZoneInfo("America/New_York")).date()
-    for days_back in range(15):
-        vintage = local_date - timedelta(days=days_back)
-        next_session = calendar.date_to_session(vintage + timedelta(days=1), direction="next")
-        next_open = calendar.session_open(next_session).to_pydatetime().astimezone(UTC)
-        if next_open <= current:
-            return vintage
-    raise RuntimeError("AGENT_PAPER_MACRO_VINTAGE_UNAVAILABLE")
-
-
-def _macro_attempt_session(now: datetime) -> date:
-    current = require_utc(now)
-    local_date = current.astimezone(ZoneInfo("America/New_York")).date()
-    session = exchange_calendars.get_calendar("XNYS").date_to_session(
-        local_date,
-        direction="none",
+    opened_session = await session.scalar(
+        select(ExchangeCalendarSessionRecord.session)
+        .where(
+            ExchangeCalendarSessionRecord.calendar_authority_id == expected_calendar_authority_id,
+            ExchangeCalendarSessionRecord.market_open_at <= current,
+            ExchangeCalendarSessionRecord.created_at <= current,
+        )
+        .order_by(ExchangeCalendarSessionRecord.session.desc())
+        .limit(1)
     )
-    return date.fromisoformat(str(session.date()))
+    if not isinstance(opened_session, date):
+        raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
+    return opened_session - timedelta(days=1)
 
 
 async def heartbeat_agent_paper_loop(
@@ -437,9 +446,33 @@ async def heartbeat_agent_paper_loop(
         await engine.dispose()
 
 
+async def _select_initial_service_calendar_authority_id(
+    settings: EngineSettings,
+) -> UUID:
+    """Select one service calendar using the database clock in the same transaction."""
+    if not settings.database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(now, datetime):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            selected = await select_agent_paper_service_calendar_authority(session, now=now)
+            return selected.calendar_authority_id
+    finally:
+        await engine.dispose()
+
+
 async def _inspect_prior_daily_scope(
-    settings: EngineSettings, *, account_id: UUID, now: datetime
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    now: datetime,
+    expected_calendar_authority_id: UUID,
 ) -> PriorDailyScope:
+    require_utc(now)
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     database = make_url(settings.database_url)
@@ -453,18 +486,30 @@ async def _inspect_prior_daily_scope(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
-            selected = await select_agent_paper_service_calendar_authority(session, now=now)
+            database_now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(database_now, datetime):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            service_calendar = await load_agent_paper_service_calendar_authority(
+                session,
+                now=database_now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+            )
             authority = await load_quasi_realtime_cycle_authority(
                 session,
                 account_id=account_id,
-                now=now,
-                expected_calendar_authority_id=selected.calendar_authority_id,
+                now=database_now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
             )
+            if (
+                service_calendar.calendar_authority_id != expected_calendar_authority_id
+                or authority.calendar_authority_id != expected_calendar_authority_id
+            ):
+                raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
             scope = await inspect_query_authority_scope(
                 session,
                 decision_session=authority.decision_session,
                 symbol="AAPL",
-                as_of=now,
+                as_of=database_now,
                 universe_snapshot_id=authority.universe_snapshot_id,
                 source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
             )
@@ -492,13 +537,13 @@ async def _inspect_prior_daily_scope(
                 )
                 .where(
                     PriceBarSetAuthority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
-                    PriceBarSetAuthority.available_at <= now,
-                    PriceBarSetAuthority.created_at <= now,
+                    PriceBarSetAuthority.available_at <= database_now,
+                    PriceBarSetAuthority.created_at <= database_now,
                     PriceBarRecord.instrument_id == scope.instrument_id,
                     PriceBarRecord.session == prior_session,
-                    PriceBarRecord.available_at <= now,
-                    PriceBarRecord.created_at <= now,
-                    PriceSeriesManifest.created_at <= now,
+                    PriceBarRecord.available_at <= database_now,
+                    PriceBarRecord.created_at <= database_now,
+                    PriceSeriesManifest.created_at <= database_now,
                     PriceSeriesManifest.source == "alpaca",
                     PriceSeriesManifest.feed == "sip",
                     PriceSeriesManifest.delivery_mode == "delayed",
@@ -512,6 +557,7 @@ async def _inspect_prior_daily_scope(
                 instrument_id=scope.instrument_id,
                 prior_session=prior_session,
                 authority_ready=existing is not None,
+                decision_session=authority.decision_session,
             )
     finally:
         await engine.dispose()
@@ -523,9 +569,15 @@ async def prepare_prior_daily_once(
     account_id: UUID,
     repo_root: Path,
     now: datetime,
+    expected_calendar_authority_id: UUID,
 ) -> str:
     """Create at most one exact prior-session daily authority before a cycle."""
-    scope = await _inspect_prior_daily_scope(settings, account_id=account_id, now=now)
+    scope = await _inspect_prior_daily_scope(
+        settings,
+        account_id=account_id,
+        now=now,
+        expected_calendar_authority_id=expected_calendar_authority_id,
+    )
     if scope.authority_ready:
         return "ready"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "daily"
@@ -567,7 +619,10 @@ async def prepare_prior_daily_once(
     except ValueError:
         return "unavailable"
     verified = await _inspect_prior_daily_scope(
-        settings, account_id=account_id, now=datetime.now(UTC)
+        settings,
+        account_id=account_id,
+        now=datetime.now(UTC),
+        expected_calendar_authority_id=expected_calendar_authority_id,
     )
     if (
         not verified.authority_ready
@@ -579,19 +634,41 @@ async def prepare_prior_daily_once(
 
 
 async def _inspect_macro_scope(
-    settings: EngineSettings, *, account_id: UUID, now: datetime
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    now: datetime,
+    expected_calendar_authority_id: UUID,
 ) -> MacroScope:
-    prior = await _inspect_prior_daily_scope(settings, account_id=account_id, now=now)
+    require_utc(now)
+    prior = await _inspect_prior_daily_scope(
+        settings,
+        account_id=account_id,
+        now=now,
+        expected_calendar_authority_id=expected_calendar_authority_id,
+    )
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     engine = create_async_engine(settings.database_url)
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
-            vintage = latest_visible_macro_vintage(now)
+            database_now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(database_now, datetime):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            await load_agent_paper_service_calendar_authority(
+                session,
+                now=database_now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+            )
+            vintage = await latest_visible_macro_vintage(
+                session,
+                now=database_now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+            )
             observations = await read_fred_observations(
                 session,
-                as_of=now,
+                as_of=database_now,
                 series=_PAPER_MACRO_SERIES,
                 vintage=vintage,
             )
@@ -606,7 +683,7 @@ async def _inspect_macro_scope(
                 snapshot = await select_authoritative_snapshot(
                     session,
                     instrument_id=prior.instrument_id,
-                    as_of=now,
+                    as_of=database_now,
                 )
                 if snapshot is not None:
                     bound_ids = set(
@@ -628,6 +705,7 @@ async def _inspect_macro_scope(
                 vintage=vintage,
                 ready_series=ready_series,
                 snapshot_ready=snapshot_ready,
+                attempt_session=prior.decision_session,
             )
     finally:
         await engine.dispose()
@@ -655,9 +733,15 @@ async def prepare_macro_once(
     account_id: UUID,
     repo_root: Path,
     now: datetime,
+    expected_calendar_authority_id: UUID,
 ) -> str:
     """Best-effort daily macro preparation; unavailable macro does not block a cycle."""
-    scope = await _inspect_macro_scope(settings, account_id=account_id, now=now)
+    scope = await _inspect_macro_scope(
+        settings,
+        account_id=account_id,
+        now=now,
+        expected_calendar_authority_id=expected_calendar_authority_id,
+    )
     if scope.ready_series == _PAPER_MACRO_SERIES:
         if scope.snapshot_ready:
             return "ready"
@@ -671,6 +755,7 @@ async def prepare_macro_once(
             settings,
             account_id=account_id,
             now=datetime.now(UTC),
+            expected_calendar_authority_id=expected_calendar_authority_id,
         )
         if (
             verified.instrument_id != scope.instrument_id
@@ -686,7 +771,10 @@ async def prepare_macro_once(
         return "unavailable"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "macro"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output_dir = parent / _macro_attempt_session(now).isoformat()
+    attempt_session = getattr(scope, "attempt_session", None)
+    if not isinstance(attempt_session, date):
+        attempt_session = now.astimezone(ZoneInfo("America/New_York")).date()
+    output_dir = parent / attempt_session.isoformat()
     try:
         output_dir.mkdir(mode=0o700)
     except FileExistsError:
@@ -721,6 +809,7 @@ async def prepare_macro_once(
         settings,
         account_id=account_id,
         now=datetime.now(UTC),
+        expected_calendar_authority_id=expected_calendar_authority_id,
     )
     if (
         verified.instrument_id != scope.instrument_id
@@ -733,19 +822,52 @@ async def prepare_macro_once(
 
 
 async def _inspect_current_trends_scope(
-    settings: EngineSettings, *, account_id: UUID, now: datetime
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    now: datetime,
+    expected_calendar_authority_id: UUID,
 ) -> CurrentTrendsScope:
-    prior = await _inspect_prior_daily_scope(settings, account_id=account_id, now=now)
+    require_utc(now)
+    prior = await _inspect_prior_daily_scope(
+        settings,
+        account_id=account_id,
+        now=now,
+        expected_calendar_authority_id=expected_calendar_authority_id,
+    )
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     engine = create_async_engine(settings.database_url)
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
+            database_now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(database_now, datetime):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            await load_agent_paper_service_calendar_authority(
+                session,
+                now=database_now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+            )
+            start_session = await session.scalar(
+                select(ExchangeCalendarSessionRecord.session)
+                .where(
+                    ExchangeCalendarSessionRecord.calendar_authority_id
+                    == expected_calendar_authority_id,
+                    ExchangeCalendarSessionRecord.session
+                    >= prior.prior_session - timedelta(days=366),
+                    ExchangeCalendarSessionRecord.session <= prior.prior_session,
+                    ExchangeCalendarSessionRecord.created_at <= database_now,
+                )
+                .order_by(ExchangeCalendarSessionRecord.session.asc())
+                .limit(1)
+            )
+            if not isinstance(start_session, date):
+                raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
             documents = await read_current_price_trends(
                 session,
                 instrument_id=prior.instrument_id,
-                as_of=now,
+                as_of=database_now,
             )
             evidence_ready = len(documents) == 1 and all(
                 document.last_observed_on == prior.prior_session
@@ -761,7 +883,7 @@ async def _inspect_current_trends_scope(
                 snapshot = await select_authoritative_snapshot(
                     session,
                     instrument_id=prior.instrument_id,
-                    as_of=now,
+                    as_of=database_now,
                 )
                 snapshot_ready = snapshot is not None and bool(
                     await session.scalar(
@@ -776,20 +898,13 @@ async def _inspect_current_trends_scope(
                 )
             return CurrentTrendsScope(
                 instrument_id=prior.instrument_id,
-                start_session=_current_trends_start_session(prior.prior_session),
+                start_session=start_session,
                 prior_session=prior.prior_session,
                 evidence_ready=evidence_ready,
                 snapshot_ready=snapshot_ready,
             )
     finally:
         await engine.dispose()
-
-
-def _current_trends_start_session(prior_session: date) -> date:
-    """Resolve the first XNYS session inside the archive's 366-day bound."""
-    calendar = exchange_calendars.get_calendar("XNYS")
-    session = calendar.date_to_session(prior_session - timedelta(days=366), direction="next")
-    return date.fromisoformat(str(session.date()))
 
 
 async def _prepare_current_trends_research_snapshot(
@@ -832,9 +947,15 @@ async def prepare_current_trends_once(
     account_id: UUID,
     repo_root: Path,
     now: datetime,
+    expected_calendar_authority_id: UUID,
 ) -> str:
     """Create at most one current-trends evidence record for the prior session."""
-    scope = await _inspect_current_trends_scope(settings, account_id=account_id, now=now)
+    scope = await _inspect_current_trends_scope(
+        settings,
+        account_id=account_id,
+        now=now,
+        expected_calendar_authority_id=expected_calendar_authority_id,
+    )
     if scope.snapshot_ready:
         return "ready"
     if scope.evidence_ready:
@@ -844,7 +965,10 @@ async def prepare_current_trends_once(
             now=datetime.now(UTC),
         )
         verified = await _inspect_current_trends_scope(
-            settings, account_id=account_id, now=datetime.now(UTC)
+            settings,
+            account_id=account_id,
+            now=datetime.now(UTC),
+            expected_calendar_authority_id=expected_calendar_authority_id,
         )
         if (
             not verified.evidence_ready
@@ -899,7 +1023,10 @@ async def prepare_current_trends_once(
         now=datetime.now(UTC),
     )
     verified = await _inspect_current_trends_scope(
-        settings, account_id=account_id, now=datetime.now(UTC)
+        settings,
+        account_id=account_id,
+        now=datetime.now(UTC),
+        expected_calendar_authority_id=expected_calendar_authority_id,
     )
     if (
         not verified.evidence_ready
@@ -943,6 +1070,7 @@ def snapshot_from_cycle_view(
     view: object,
     research_job: tuple[UUID, str] | None,
     market_scope: object | None,
+    calendar: ServiceCalendarAuthority,
     performance_due_at: datetime | None = None,
 ) -> AgentPaperLoopSnapshot:
     """Map the bounded read projection into the scheduler's fail-closed contract."""
@@ -973,6 +1101,10 @@ def snapshot_from_cycle_view(
         market_window_end_at += _MARKET_PUBLICATION_LAG
     return AgentPaperLoopSnapshot(
         now=now,
+        calendar_authority_id=calendar.calendar_authority_id,
+        decision_window_start_at=calendar.decision_window_start_at,
+        decision_window_end_at=calendar.market_close_at,
+        next_decision_window_start_at=calendar.next_decision_window_start_at,
         cycle_id=cycle_id,
         cycle_status=cycle_status,
         cycle_slot_at=cycle_slot_at,
@@ -1015,10 +1147,21 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.cycle_status in {"decision_recorded", "risk_evaluated"}:
         return AgentPaperLoopAction.RESUME
 
+    if (
+        snapshot.calendar_authority_id is None
+        or snapshot.decision_window_start_at is None
+        or snapshot.decision_window_end_at is None
+        or snapshot.next_decision_window_start_at is None
+    ):
+        return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+    if snapshot.now < snapshot.decision_window_start_at:
+        return AgentPaperLoopAction.WAIT_FOR_SESSION
+    if snapshot.now >= snapshot.decision_window_end_at:
+        return AgentPaperLoopAction.WAIT_FOR_SESSION
+
     if snapshot.performance_due_at is not None:
         return AgentPaperLoopAction.PUBLISH_PERFORMANCE
 
-    local_time = snapshot.now.astimezone(ZoneInfo("America/New_York"))
     current_slot = floor_decision_slot(snapshot.now)
     if snapshot.cycle_status in {"unavailable", "failed"} and (
         snapshot.cycle_slot_at is None or snapshot.cycle_slot_at == current_slot
@@ -1028,8 +1171,6 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.cycle_status not in {None, "completed", "unavailable", "failed"}:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
-    if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
-        return AgentPaperLoopAction.STOP_SESSION_CLOSED
     if snapshot.cycle_slot_at == current_slot:
         return AgentPaperLoopAction.WAIT_FOR_SLOT
     return AgentPaperLoopAction.TRIGGER
@@ -1073,6 +1214,8 @@ async def run_foreground_loop(
         if action in {
             AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
             AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE,
+            AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE,
+            AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH,
             AgentPaperLoopAction.STOP_DISABLED,
             AgentPaperLoopAction.STOP_SESSION_CLOSED,
         }:
@@ -1080,6 +1223,23 @@ async def run_foreground_loop(
         if action == AgentPaperLoopAction.WAIT_FOR_SLOT:
             next_slot = floor_decision_slot(snapshot.now) + timedelta(minutes=5)
             remaining = (next_slot - snapshot.now).total_seconds()
+            while remaining > 0:
+                duration = min(remaining, interval_seconds)
+                await sleep(duration)
+                try:
+                    await persist_heartbeat()
+                except Exception:
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+                remaining -= duration
+            continue
+        if action == AgentPaperLoopAction.WAIT_FOR_SESSION:
+            assert snapshot.decision_window_start_at is not None
+            assert snapshot.next_decision_window_start_at is not None
+            if snapshot.now < snapshot.decision_window_start_at:
+                wait_until = snapshot.decision_window_start_at
+            else:
+                wait_until = snapshot.next_decision_window_start_at
+            remaining = (wait_until - snapshot.now).total_seconds()
             while remaining > 0:
                 duration = min(remaining, interval_seconds)
                 await sleep(duration)
@@ -1159,6 +1319,14 @@ async def run_local_agent_paper_loop(
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     worker_id = f"agent-paper-loop-{new_uuid7()}"
     started_at = datetime.now(UTC)
+    try:
+        calendar_authority_id = await _select_initial_service_calendar_authority_id(settings)
+    except ValueError as error:
+        if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
+            return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+        if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
+            return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
+        raise
 
     async def inspect() -> AgentPaperLoopSnapshot:
         current = EngineSettings.model_validate(
@@ -1166,7 +1334,11 @@ async def run_local_agent_paper_loop(
         )
         if not current.agent_paper_cycle_enabled:
             return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
-        return await inspect_agent_paper_loop(current, account_id=account_id)
+        return await inspect_agent_paper_loop(
+            current,
+            account_id=account_id,
+            expected_calendar_authority_id=calendar_authority_id,
+        )
 
     async def execute(
         action: AgentPaperLoopAction, snapshot: AgentPaperLoopSnapshot
@@ -1187,12 +1359,19 @@ async def run_local_agent_paper_loop(
             seen_at=seen_at,
         )
 
-    return await run_foreground_loop(
-        inspect=inspect,
-        execute=execute,
-        sleep=asyncio.sleep,
-        heartbeat=heartbeat,
-    )
+    try:
+        return await run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=asyncio.sleep,
+            heartbeat=heartbeat,
+        )
+    except ValueError as error:
+        if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
+            return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+        if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
+            return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
+        raise
 
 
 async def execute_agent_paper_loop_action(
@@ -1205,6 +1384,9 @@ async def execute_agent_paper_loop_action(
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
     if action == AgentPaperLoopAction.TRIGGER:
+        if snapshot.calendar_authority_id is None:
+            return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+        expected_calendar_authority_id = snapshot.calendar_authority_id
         environment = load_agent_paper_service_environment(repo_root, os.environ)
         trigger_settings = AgentPaperTriggerSettings.model_validate(environment)
         macro_settings = DailyOnceSettings.model_validate(environment)
@@ -1213,6 +1395,7 @@ async def execute_agent_paper_loop_action(
             account_id=account_id,
             repo_root=repo_root,
             now=snapshot.now,
+            expected_calendar_authority_id=expected_calendar_authority_id,
         )
         if prior_daily == "prepared":
             return None
@@ -1226,6 +1409,7 @@ async def execute_agent_paper_loop_action(
             account_id=account_id,
             repo_root=repo_root,
             now=snapshot.now,
+            expected_calendar_authority_id=expected_calendar_authority_id,
         )
         if macro == "prepared":
             return None
@@ -1236,6 +1420,7 @@ async def execute_agent_paper_loop_action(
             account_id=account_id,
             repo_root=repo_root,
             now=snapshot.now,
+            expected_calendar_authority_id=expected_calendar_authority_id,
         )
         if current_trends == "prepared":
             return None
@@ -1253,6 +1438,7 @@ async def execute_agent_paper_loop_action(
                 ),
             ),
             repo_root=repo_root,
+            expected_calendar_authority_id=expected_calendar_authority_id,
         )
         return None
     if action == AgentPaperLoopAction.RUN_RESEARCH_JOB:
@@ -1349,7 +1535,10 @@ async def publish_due_performance_once(
 
 
 async def inspect_agent_paper_loop(
-    settings: EngineSettings, *, account_id: UUID
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    expected_calendar_authority_id: UUID,
 ) -> AgentPaperLoopSnapshot:
     """Read one bounded scheduler snapshot without starting or replaying work."""
     if not settings.database_url:
@@ -1368,6 +1557,11 @@ async def inspect_agent_paper_loop(
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            calendar = await load_agent_paper_service_calendar_authority(
+                session,
+                now=now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+            )
             service = PaperReadService(session, now)
             account, _ = await service.account()
             if account.id != account_id:
@@ -1380,6 +1574,7 @@ async def inspect_agent_paper_loop(
                     == ExchangeCalendarSessionRecord.calendar_authority_id,
                 )
                 .where(
+                    ExchangeCalendarAuthorityRecord.id == expected_calendar_authority_id,
                     ExchangeCalendarAuthorityRecord.exchange == "XNYS",
                     ExchangeCalendarAuthorityRecord.completeness_status == "complete",
                     ExchangeCalendarAuthorityRecord.published_at
@@ -1401,6 +1596,10 @@ async def inspect_agent_paper_loop(
             if view is None:
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=calendar.calendar_authority_id,
+                    decision_window_start_at=calendar.decision_window_start_at,
+                    decision_window_end_at=calendar.market_close_at,
+                    next_decision_window_start_at=calendar.next_decision_window_start_at,
                     performance_due_at=performance_due_at,
                 )
 
@@ -1449,6 +1648,7 @@ async def inspect_agent_paper_loop(
                 view=view,
                 research_job=research_job,
                 market_scope=market_scope,
+                calendar=calendar,
                 performance_due_at=performance_due_at,
             )
     finally:
@@ -1511,6 +1711,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if reason == AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE:
             print(json.dumps({"error_code": "AGENT_PAPER_LOOP_PREREQUISITE_UNAVAILABLE"}))
+            return 1
+        if reason == AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE:
+            print(json.dumps({"error_code": "AGENT_PAPER_CALENDAR_UNAVAILABLE"}))
+            return 1
+        if reason == AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH:
+            print(json.dumps({"error_code": "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH"}))
             return 1
     except KeyboardInterrupt:
         print(json.dumps({"error_code": "AGENT_PAPER_LOOP_INTERRUPTED"}))
