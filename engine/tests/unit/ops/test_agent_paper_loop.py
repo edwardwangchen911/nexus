@@ -626,6 +626,185 @@ def enabled_environment() -> dict[str, str]:
     }
 
 
+def service_ready_environment() -> dict[str, str]:
+    return {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(UUID(int=1)),
+        "NEXUS_ENV": "production",
+        "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
+        "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
+        "OBJECT_STORE_REGION": "us-east-1",
+        "OBJECT_STORE_BUCKET": "nexus",
+        "OBJECT_STORE_ACCESS_KEY_ID": "object-access",
+        "OBJECT_STORE_SECRET_ACCESS_KEY": "object-secret",
+        "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID": "current",
+        "NEXUS_ENGINE_HMAC_CURRENT_SECRET": "hmac-secret",
+        "AGENT_RUNTIME_MODE": "responses",
+        "OPENAI_API_KEY": "openai-secret",
+        "OPENAI_EXTRACTION_MODEL": "extract-model",
+        "OPENAI_REASONING_MODEL": "reason-model",
+        "ALPACA_API_KEY_ID": "alpaca-key",
+        "ALPACA_API_SECRET_KEY": "alpaca-secret",
+        "NEXUS_SCHWAB_APP_KEY": "schwab-key",
+        "NEXUS_SCHWAB_APP_SECRET": "schwab-secret",
+        "NEXUS_SCHWAB_CALLBACK_URL": "https://127.0.0.1",
+    }
+
+
+def test_service_environment_localizes_compose_endpoints_after_process_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {
+            "DATABASE_URL": "postgresql+asyncpg://u:p@postgres:5432/nexus",
+            "OBJECT_STORE_ENDPOINT": "http://minio:9000",
+            "NEXUS_POSTGRES_HOST_PORT": "58000",
+            "NEXUS_MINIO_HOST_PORT": "59000",
+        },
+    )
+
+    environment = loop.load_agent_paper_service_environment(tmp_path, {})
+
+    assert environment["DATABASE_URL"] == ("postgresql+asyncpg://u:p@127.0.0.1:58000/nexus")
+    assert environment["OBJECT_STORE_ENDPOINT"] == "http://127.0.0.1:59000"
+
+
+def test_local_loop_reinspection_uses_service_environment_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    environment = enabled_environment()
+    service_loads: list[object] = []
+
+    def load_service(repo_root, process_environment):
+        assert repo_root == tmp_path
+        service_loads.append(process_environment)
+        return environment
+
+    async def inspect(_settings, *, account_id):
+        assert account_id == UUID(int=1)
+        return snapshot()
+
+    async def run_loop(*, inspect, **_kwargs):
+        await inspect()
+        return A.STOP_SESSION_CLOSED
+
+    monkeypatch.setattr(loop, "load_agent_paper_service_environment", load_service)
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("the loop must not reload unlocalized Compose endpoints")
+        ),
+    )
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url=environment["DATABASE_URL"]),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+        )
+    )
+
+    assert result == A.STOP_SESSION_CLOSED
+    assert service_loads == [os.environ]
+
+
+def test_service_preflight_aggregates_safe_blockers_without_external_requests(
+    tmp_path,
+) -> None:
+    result = loop.agent_paper_service_preflight({}, repo_root=tmp_path, now=NOW)
+
+    assert result == {
+        "status": "blocked",
+        "execution_locked": True,
+        "external_requests": 0,
+        "blocking_codes": [
+            "AGENT_PAPER_ACCOUNT_INVALID",
+            "AGENT_PAPER_CYCLE_DISABLED",
+            "AGENT_PAPER_ENGINE_CONFIG_INVALID",
+            "AGENT_PAPER_MARKET_SOURCE_CONFIG_REQUIRED",
+            "AGENT_PAPER_MODEL_CONFIG_REQUIRED",
+            "AGENT_PAPER_OUTPUT_DIRECTORY_INVALID",
+            "AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID",
+            "SCHWAB_OAUTH_TOKEN_STORE_INVALID",
+        ],
+        "optional_codes": ["AGENT_PAPER_FRED_OPTIONAL_UNCONFIGURED"],
+    }
+
+
+def test_service_preflight_accepts_complete_local_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    output_directory = tmp_path / ".secrets" / "nexus-agent-paper"
+    output_directory.mkdir(parents=True, mode=0o700)
+    output_directory.chmod(0o700)
+    monkeypatch.setattr(loop, "load_schwab_app_config", lambda *_args: object())
+    monkeypatch.setattr(loop, "load_schwab_token", lambda *_args: object())
+    monkeypatch.setattr(
+        loop,
+        "require_live_schwab_access_token",
+        lambda *_args, **_kwargs: "access-token-canary",
+    )
+    environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
+
+    assert loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW) == {
+        "status": "ready",
+        "execution_locked": True,
+        "external_requests": 0,
+        "blocking_codes": [],
+        "optional_codes": [],
+    }
+
+
+def test_service_preflight_rejects_runtime_configuration_startup_would_reject(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    output_directory = tmp_path / ".secrets" / "nexus-agent-paper"
+    output_directory.mkdir(parents=True, mode=0o700)
+    output_directory.chmod(0o700)
+    monkeypatch.setattr(loop, "load_schwab_app_config", lambda *_args: object())
+    monkeypatch.setattr(loop, "load_schwab_token", lambda *_args: object())
+    monkeypatch.setattr(
+        loop,
+        "require_live_schwab_access_token",
+        lambda *_args, **_kwargs: "access-token-canary",
+    )
+    environment = service_ready_environment() | {
+        "AGENT_DAILY_BUDGET_USD": "0",
+        "FRED_API_KEY": "fred-secret",
+    }
+
+    result = loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW)
+
+    assert result["status"] == "blocked"
+    assert result["blocking_codes"] == ["AGENT_PAPER_RUNTIME_CONFIG_INVALID"]
+
+
+def test_service_preflight_cli_masks_configuration_values(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = "private-preflight-canary"
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {"OPENAI_API_KEY": canary},
+    )
+
+    assert loop.main(["--service-preflight"]) == 1
+    output = capsys.readouterr().out
+    assert canary not in output
+    assert json.loads(output)["status"] == "blocked"
+
+
 def test_loop_command_reads_account_and_runtime_settings_from_process_environment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

@@ -260,10 +260,18 @@ host networking 使用既有 loopback 数据库和对象存储边界；不会取
 mkdir -p .secrets/nexus-agent-paper
 chmod 700 .secrets/nexus-agent-paper
 docker compose --env-file infra/.env.local -f infra/compose.yaml \
+  --profile agent-paper run --rm --no-deps agent-paper-loop \
+  nexus-engine-agent-paper-loop --service-preflight
+docker compose --env-file infra/.env.local -f infra/compose.yaml \
   --profile app --profile agent-paper up -d postgres minio object-store-init api worker
 docker compose --env-file infra/.env.local -f infra/compose.yaml \
   --profile agent-paper up --build agent-paper-loop
 ```
+
+预检只读取本地配置、受保护 token 文件和私有目录权限，不连接数据库、不请求券商、不调用模型；
+它一次返回全部固定阻塞码，`status=ready` 才允许进入启动步骤。输出中的
+`execution_locked=true` 不代表会解锁交易，`external_requests=0` 表示本次预检没有外部调用。
+FRED 未配置只作为可选提示，其他必需项缺失均 fail closed。
 
 先在 `infra/.env.local` 明确配置账户 ID、当前 Mac 的非秘密 UID/GID，并保持功能开关为 true；模型
 运行固定使用现有 Responses worker，动态 Schwab token 目录只读挂载，循环自己的诊断目录可写。

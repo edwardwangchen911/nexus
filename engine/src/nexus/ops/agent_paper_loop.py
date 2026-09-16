@@ -4,12 +4,14 @@ import argparse
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Callable, Sequence
+import stat
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic as monotonic_clock
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -74,6 +76,12 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.runtime import Job
 from nexus.providers.http import HttpPolicyError
+from nexus.providers.market.schwab_oauth import (
+    SchwabOAuthError,
+    load_schwab_app_config,
+    load_schwab_token,
+    require_live_schwab_access_token,
+)
 from nexus.research.alpaca_prices_archive import collection_window
 from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
@@ -156,6 +164,163 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
 _PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
 _PAPER_MONTHLY_MACRO_SERIES = frozenset({"CPIAUCSL", "UNRATE"})
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_SAFE_SCHWAB_PREFLIGHT_CODES = frozenset(
+    {
+        "SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED",
+        "SCHWAB_OAUTH_TIME_INVALID",
+        "SCHWAB_OAUTH_TOKEN_STORE_INVALID",
+    }
+)
+
+
+def _nonempty_environment_values(environment: Mapping[str, str], names: Sequence[str]) -> bool:
+    return all(
+        isinstance(environment.get(name), str) and bool(environment[name].strip()) for name in names
+    )
+
+
+def _agent_paper_host_port(environment: Mapping[str, str], name: str, default: int) -> int:
+    try:
+        port = int(environment.get(name, str(default)))
+    except ValueError:
+        raise ValueError("AGENT_PAPER_LOCAL_HOST_PORT_INVALID") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("AGENT_PAPER_LOCAL_HOST_PORT_INVALID")
+    return port
+
+
+def load_agent_paper_service_environment(
+    repo_root: Path, process_environment: Mapping[str, str]
+) -> dict[str, str]:
+    """Load configuration and restore loopback endpoints required by host networking."""
+    environment = load_local_environment(repo_root, process_environment)
+    database_url = environment.get("DATABASE_URL")
+    if database_url:
+        database = make_url(database_url)
+        if database.host == "postgres":
+            environment["DATABASE_URL"] = database.set(
+                host="127.0.0.1",
+                port=_agent_paper_host_port(environment, "NEXUS_POSTGRES_HOST_PORT", 5432),
+            ).render_as_string(hide_password=False)
+    object_store_endpoint = environment.get("OBJECT_STORE_ENDPOINT")
+    if object_store_endpoint:
+        object_store = urlsplit(object_store_endpoint)
+        if object_store.hostname == "minio":
+            host_port = _agent_paper_host_port(environment, "NEXUS_MINIO_HOST_PORT", 9000)
+            environment["OBJECT_STORE_ENDPOINT"] = urlunsplit(
+                object_store._replace(netloc=f"127.0.0.1:{host_port}")
+            )
+    return environment
+
+
+def _agent_paper_engine_config_valid(environment: Mapping[str, str]) -> bool:
+    required = (
+        "DATABASE_URL",
+        "OBJECT_STORE_ENDPOINT",
+        "OBJECT_STORE_REGION",
+        "OBJECT_STORE_BUCKET",
+        "OBJECT_STORE_ACCESS_KEY_ID",
+        "OBJECT_STORE_SECRET_ACCESS_KEY",
+        "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID",
+        "NEXUS_ENGINE_HMAC_CURRENT_SECRET",
+    )
+    if not _nonempty_environment_values(environment, required):
+        return False
+    try:
+        database = make_url(environment["DATABASE_URL"])
+        object_store = urlsplit(environment["OBJECT_STORE_ENDPOINT"])
+    except (TypeError, ValueError):
+        return False
+    return (
+        database.drivername == "postgresql+asyncpg"
+        and database.host in _LOOPBACK_HOSTS
+        and bool(database.database)
+        and not database.query
+        and object_store.scheme in {"http", "https"}
+        and object_store.hostname in _LOOPBACK_HOSTS
+        and object_store.username is None
+        and object_store.password is None
+        and object_store.path in {"", "/"}
+        and not object_store.query
+        and not object_store.fragment
+    )
+
+
+def _agent_paper_output_directory_valid(repo_root: Path) -> bool:
+    directory = repo_root.resolve() / ".secrets" / "nexus-agent-paper"
+    try:
+        return (
+            not directory.is_symlink()
+            and directory.is_dir()
+            and stat.S_IMODE(directory.stat().st_mode) == 0o700
+            and os.access(directory, os.R_OK | os.W_OK | os.X_OK)
+        )
+    except OSError:
+        return False
+
+
+def agent_paper_service_preflight(
+    environment: Mapping[str, str], *, repo_root: Path, now: datetime | None = None
+) -> dict[str, object]:
+    """Validate local service prerequisites without network or persistence access."""
+    blocking_codes: set[str] = set()
+    requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
+    requested_normalized = requested.strip().lower()
+    if requested_normalized in {"", "0", "false", "no", "off"}:
+        blocking_codes.add("AGENT_PAPER_CYCLE_DISABLED")
+    try:
+        UUID(environment.get("NEXUS_AGENT_PAPER_ACCOUNT_ID", ""))
+    except (AttributeError, TypeError, ValueError):
+        blocking_codes.add("AGENT_PAPER_ACCOUNT_INVALID")
+    engine_config_valid = _agent_paper_engine_config_valid(environment)
+    if not engine_config_valid:
+        blocking_codes.add("AGENT_PAPER_ENGINE_CONFIG_INVALID")
+    model_config_valid = environment.get(
+        "AGENT_RUNTIME_MODE", ""
+    ).strip().lower() == "responses" and (
+        _nonempty_environment_values(
+            environment,
+            ("OPENAI_API_KEY", "OPENAI_EXTRACTION_MODEL", "OPENAI_REASONING_MODEL"),
+        )
+    )
+    if not model_config_valid:
+        blocking_codes.add("AGENT_PAPER_MODEL_CONFIG_REQUIRED")
+    if engine_config_valid and model_config_valid:
+        try:
+            EngineSettings.model_validate(environment)
+        except Exception:
+            blocking_codes.add("AGENT_PAPER_RUNTIME_CONFIG_INVALID")
+    if not _nonempty_environment_values(
+        environment, ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY")
+    ):
+        blocking_codes.add("AGENT_PAPER_MARKET_SOURCE_CONFIG_REQUIRED")
+    try:
+        load_schwab_app_config(repo_root, environment)
+    except (OSError, SchwabOAuthError):
+        blocking_codes.add("AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID")
+    try:
+        token = load_schwab_token(repo_root)
+        require_live_schwab_access_token(token, now=now)
+    except SchwabOAuthError as error:
+        code = str(error)
+        blocking_codes.add(
+            code if code in _SAFE_SCHWAB_PREFLIGHT_CODES else "AGENT_PAPER_SCHWAB_TOKEN_INVALID"
+        )
+    except OSError:
+        blocking_codes.add("AGENT_PAPER_SCHWAB_TOKEN_INVALID")
+    if not _agent_paper_output_directory_valid(repo_root):
+        blocking_codes.add("AGENT_PAPER_OUTPUT_DIRECTORY_INVALID")
+    optional_codes = []
+    if not _nonempty_environment_values(environment, ("FRED_API_KEY",)):
+        optional_codes.append("AGENT_PAPER_FRED_OPTIONAL_UNCONFIGURED")
+    return {
+        "status": "blocked" if blocking_codes else "ready",
+        "execution_locked": True,
+        "external_requests": 0,
+        "blocking_codes": sorted(blocking_codes),
+        "optional_codes": optional_codes,
+    }
 
 
 def _macro_snapshot_contains_required_observations(
@@ -954,7 +1119,9 @@ async def run_local_agent_paper_loop(
     started_at = datetime.now(UTC)
 
     async def inspect() -> AgentPaperLoopSnapshot:
-        current = EngineSettings.model_validate(load_local_environment(repo_root, os.environ))
+        current = EngineSettings.model_validate(
+            load_agent_paper_service_environment(repo_root, os.environ)
+        )
         if not current.agent_paper_cycle_enabled:
             return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
         return await inspect_agent_paper_loop(current, account_id=account_id)
@@ -996,7 +1163,7 @@ async def execute_agent_paper_loop_action(
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
     if action == AgentPaperLoopAction.TRIGGER:
-        environment = load_local_environment(repo_root, os.environ)
+        environment = load_agent_paper_service_environment(repo_root, os.environ)
         trigger_settings = AgentPaperTriggerSettings.model_validate(environment)
         macro_settings = DailyOnceSettings.model_validate(environment)
         prior_daily = await prepare_prior_daily_once(
@@ -1080,7 +1247,7 @@ async def execute_agent_paper_loop_action(
         )
         return None
     if action == AgentPaperLoopAction.COLLECT_WINDOW:
-        environment = load_local_environment(repo_root, os.environ)
+        environment = load_agent_paper_service_environment(repo_root, os.environ)
         await collect_window_once(
             AgentPaperMarketSettings.model_validate(environment),
             AgentPaperCollectWindowRequest(action="collect-window", cycle_id=snapshot.cycle_id),
@@ -1249,15 +1416,30 @@ async def inspect_agent_paper_loop(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexus-engine-agent-paper-loop")
     parser.add_argument("--account-id")
+    parser.add_argument("--service-preflight", action="store_true")
     args = parser.parse_args(argv)
     root = Path.cwd()
     try:
+        if args.service_preflight:
+            try:
+                environment = load_agent_paper_service_environment(root, os.environ)
+                result = agent_paper_service_preflight(environment, repo_root=root)
+            except Exception:
+                result = {
+                    "status": "blocked",
+                    "execution_locked": True,
+                    "external_requests": 0,
+                    "blocking_codes": ["AGENT_PAPER_PREFLIGHT_CONFIG_LOAD_FAILED"],
+                    "optional_codes": [],
+                }
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result["status"] == "ready" else 1
         try:
             account_id = UUID(args.account_id or os.environ.get("NEXUS_AGENT_PAPER_ACCOUNT_ID", ""))
         except (AttributeError, TypeError, ValueError):
             print(json.dumps({"error_code": "AGENT_PAPER_ACCOUNT_INVALID"}))
             return 1
-        environment = load_local_environment(root, os.environ)
+        environment = load_agent_paper_service_environment(root, os.environ)
         requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
         if requested.strip().lower() in {"", "0", "false", "no", "off"}:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
