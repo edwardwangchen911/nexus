@@ -91,9 +91,7 @@ class ProviderMarketStreamError(ValueError):
         capture_summary: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(code)
-        self.capture_summary = (
-            None if capture_summary is None else dict(capture_summary)
-        )
+        self.capture_summary = None if capture_summary is None else dict(capture_summary)
 
 
 @dataclass(frozen=True)
@@ -351,16 +349,18 @@ async def capture_and_import_schwab_level_one_once(
     repo_root: Path,
     client: httpx.AsyncClient,
     instrument_id: UUID,
+    symbol: str = "AAPL",
     checked_at: datetime | None = None,
     capture: Callable[..., Awaitable[dict[str, Any]]] = run_schwab_stream,
     process_environment: Mapping[str, str] | None = None,
 ) -> SchwabMarketStreamImportResult:
-    """Capture and freeze one bounded AAPL Level One decision observation."""
+    """Capture and freeze one bounded Level One decision observation."""
+    selected_symbol = validate_symbol(symbol)
     with tempfile.TemporaryDirectory(prefix="nexus-agent-schwab-") as raw_directory:
         directory = Path(raw_directory) / "capture"
         arguments = argparse.Namespace(
             repo_root=repo_root,
-            symbol=["AAPL"],
+            symbol=[selected_symbol],
             output_dir=directory,
             duration=30.0,
             max_frames=100,
@@ -386,7 +386,7 @@ async def capture_and_import_schwab_level_one_once(
         return await import_schwab_market_stream(
             session,
             store,
-            bindings={"AAPL": instrument_id},
+            bindings={selected_symbol: instrument_id},
             directory=directory,
             imported_at=imported_at,
         )

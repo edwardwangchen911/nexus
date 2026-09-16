@@ -288,7 +288,7 @@ async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
+async def test_agent_decision_capture_is_one_selected_symbol_attempt_with_fixed_limits(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[object, object, object]] = []
@@ -304,8 +304,8 @@ async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
         created_observations=2,
         symbols_observed=1,
         artifact_id=UUID(int=10),
-        quote_ids={"AAPL": UUID(int=11)},
-        trade_ids={"AAPL": UUID(int=12)},
+        quote_ids={"MSFT": UUID(int=11)},
+        trade_ids={"MSFT": UUID(int=12)},
     )
 
     async def fake_import(session, store, *, bindings, directory, imported_at):
@@ -326,6 +326,7 @@ async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
         object(),
         repo_root=tmp_path,
         client=object(),
+        symbol="MSFT",
         instrument_id=AAPL_ID,
         checked_at=captured_at,
         capture=capture,
@@ -334,11 +335,11 @@ async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
     assert result == expected
     assert len(calls) == 1
     arguments, _, now = calls[0]
-    assert arguments.symbol == ["AAPL"]
+    assert arguments.symbol == ["MSFT"]
     assert arguments.duration == 30.0
     assert arguments.max_frames == 100
     assert now == captured_at
-    assert imported[0][0] == {"AAPL": AAPL_ID}
+    assert imported[0][0] == {"MSFT": AAPL_ID}
     assert imported[0][2] == captured_at + timedelta(seconds=1)
     assert not imported[0][1].exists()
 

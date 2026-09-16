@@ -12,6 +12,12 @@ from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.domain.time import require_utc
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
+from nexus.paper.agent_research_universe import (
+    AGENT_PAPER_RESEARCH_UNIVERSE_V1,
+    ResearchTarget,
+    choose_research_target,
+    research_cycle_outcome_from_events,
+)
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -35,10 +41,53 @@ from nexus.persistence.models.market import (
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     PaperAccountRecord,
     RiskQueryAuthorityRecord,
 )
+
+
+async def select_agent_paper_research_target(
+    session: AsyncSession, *, account_id: UUID, before_slot_at: datetime
+) -> ResearchTarget:
+    """Derive one cursor from append-only terminal cycle events."""
+    require_utc(before_slot_at)
+    version = AGENT_PAPER_RESEARCH_UNIVERSE_V1.version
+    versioned_cycle_ids = select(AgentPaperCycleEventRecord.cycle_id).where(
+        AgentPaperCycleEventRecord.sequence == 1,
+        AgentPaperCycleEventRecord.fact_ids["research_universe_version"].as_string() == version,
+    )
+    rows = (
+        await session.execute(
+            select(AgentPaperCycleRecord.id, AgentPaperCycleEventRecord)
+            .join(
+                AgentPaperCycleEventRecord,
+                AgentPaperCycleEventRecord.cycle_id == AgentPaperCycleRecord.id,
+            )
+            .where(
+                AgentPaperCycleRecord.account_id == account_id,
+                AgentPaperCycleRecord.decision_slot_at < before_slot_at,
+                AgentPaperCycleRecord.id.in_(versioned_cycle_ids),
+            )
+            .order_by(
+                AgentPaperCycleRecord.decision_slot_at,
+                AgentPaperCycleRecord.id,
+                AgentPaperCycleEventRecord.sequence,
+            )
+        )
+    ).all()
+    grouped: dict[UUID, list[AgentPaperCycleEventRecord]] = {}
+    for cycle_id, event in rows:
+        grouped.setdefault(cycle_id, []).append(event)
+    reduced = []
+    for events in grouped.values():
+        outcome = research_cycle_outcome_from_events(events)
+        if outcome is None:
+            raise ValueError("AGENT_PAPER_ROTATION_INVALID")
+        reduced.append(outcome)
+    outcomes = tuple(reduced)
+    return choose_research_target(outcomes)
 
 
 class CycleAuthority(BaseModel):
@@ -402,7 +451,7 @@ async def load_recorded_schwab_cycle_authority(
 
 
 async def prepare_candidates(
-    session: AsyncSession, *, authority: CycleAuthority
+    session: AsyncSession, *, authority: CycleAuthority, target: ResearchTarget
 ) -> tuple[CandidateManifestEntry, ...]:
     decision_source_policy_id = _decision_source_policy_id(authority)
     aliases = tuple(
@@ -415,7 +464,7 @@ async def prepare_candidates(
             .where(
                 UniverseMember.universe_snapshot_id == authority.universe_snapshot_id,
                 UniverseMember.created_at <= authority.decision_time,
-                InstrumentAlias.symbol == "AAPL",
+                InstrumentAlias.symbol == target.symbol,
                 InstrumentAlias.alias_type == "ticker",
                 InstrumentAlias.valid_from <= authority.decision_session,
                 (InstrumentAlias.valid_to.is_(None))
@@ -602,7 +651,7 @@ async def prepare_candidates(
     return (
         CandidateManifestEntry(
             instrument_id=alias.instrument_id,
-            symbol="AAPL",
+            symbol=target.symbol,
             inclusion_reason=member.inclusion_reason,
             research_snapshot_id=snapshot.id,
             prior_daily_price_authority_id=prior_daily.id,
@@ -620,19 +669,22 @@ async def validate_candidate_manifest(
     *,
     authority: CycleAuthority,
     manifest: tuple[CandidateManifestEntry, ...],
+    target: ResearchTarget,
 ) -> bool:
     """Read back the exact frozen authorities without selecting newer evidence."""
     if len(manifest) != 1:
         return False
     decision_source_policy_id = _decision_source_policy_id(authority)
     candidate = manifest[0]
+    if candidate.symbol != target.symbol:
+        return False
     instrument = await session.get(Instrument, candidate.instrument_id)
     alias_count = await session.scalar(
         select(func.count())
         .select_from(InstrumentAlias)
         .where(
             InstrumentAlias.instrument_id == candidate.instrument_id,
-            InstrumentAlias.symbol == "AAPL",
+            InstrumentAlias.symbol == target.symbol,
             InstrumentAlias.alias_type == "ticker",
             InstrumentAlias.valid_from <= authority.decision_session,
             (InstrumentAlias.valid_to.is_(None))

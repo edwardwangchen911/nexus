@@ -43,6 +43,7 @@ from nexus.paper.agent_cycle_authority import (
     load_agent_paper_service_calendar_authority,
     load_quasi_realtime_cycle_authority,
     prepare_candidates,
+    select_agent_paper_research_target,
 )
 from nexus.paper.agent_cycle_models import (
     LegacyCandidateManifestEntry,
@@ -54,6 +55,7 @@ from nexus.paper.agent_market import (
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
 )
+from nexus.paper.agent_research_universe import choose_research_target
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
@@ -258,9 +260,7 @@ def test_service_heartbeat_rejects_stale_incompatible_or_malformed_liveness(
                         seen_at=now + seen_offset,
                     )
                 )
-            return await agent_paper_loop.read_agent_paper_service_heartbeat(
-                migrated_database_url
-            )
+            return await agent_paper_loop.read_agent_paper_service_heartbeat(migrated_database_url)
         finally:
             await engine.dispose()
 
@@ -880,6 +880,24 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             "PAPER_BATCH_EVALUATED",
             "NO_ORDER_REQUIRED",
         )
+
+        async with sessions() as session:
+            prepared = await session.get(AgentPaperCycleEventRecord, (completed.cycle_id, 1))
+            assert prepared is not None
+            assert prepared.fact_ids == {
+                "research_universe_version": "agent_paper_research_v1",
+                "research_universe_ordinal": 0,
+                "research_symbol": "AAPL",
+                "research_attempt": 1,
+            }
+            next_target = await select_agent_paper_research_target(
+                session,
+                account_id=seed.account_id,
+                before_slot_at=DECISION_TIME + timedelta(minutes=5),
+            )
+        assert next_target.symbol == "MSFT"
+        assert next_target.ordinal == 1
+        assert next_target.attempt == 1
 
         async with sessions.begin() as session:
             no_change = await session.scalar(
@@ -2584,7 +2602,9 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                     await session.execute(
                         text("ALTER TABLE exchange_calendar_sessions ENABLE TRIGGER USER")
                     )
-            manifest = await prepare_candidates(session, authority=authority)
+            manifest = await prepare_candidates(
+                session, authority=authority, target=choose_research_target(())
+            )
             assert len(manifest) == 1
             assert set(manifest[0].risk_query_authority_ids) == newest_risk_ids
             cycle = AgentPaperCycleRecord(

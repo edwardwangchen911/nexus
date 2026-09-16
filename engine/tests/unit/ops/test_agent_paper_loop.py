@@ -283,6 +283,22 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
         ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
         (
             {
+                "cycle_status": "unavailable",
+                "cycle_slot_at": SLOT,
+                "cycle_result_code": "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+            },
+            A.WAIT_FOR_SLOT,
+        ),
+        (
+            {
+                "cycle_status": "unavailable",
+                "cycle_slot_at": SLOT,
+                "cycle_result_code": "RESEARCH_BLOCKED",
+            },
+            A.WAIT_FOR_SLOT,
+        ),
+        (
+            {
                 "now": NOW + timedelta(minutes=5),
                 "cycle_status": "unavailable",
                 "cycle_slot_at": SLOT,
@@ -2708,11 +2724,13 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
                 instrument_id=instrument_id,
                 prior_session=prior_session,
                 authority_ready=False,
+                symbol="MSFT",
             ),
             SimpleNamespace(
                 instrument_id=instrument_id,
                 prior_session=prior_session,
                 authority_ready=True,
+                symbol="MSFT",
             ),
         )
     )
@@ -2728,7 +2746,15 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
         return "request", {"session": prior_session.isoformat()}
 
     async def collect(request, **kwargs):
-        calls.append(("collect", request, kwargs["identity_asof"], kwargs["max_pages"]))
+        calls.append(
+            (
+                "collect",
+                request,
+                kwargs["identity_asof"],
+                kwargs["max_pages"],
+                kwargs["symbol"],
+            )
+        )
         return {"status": "collected", "readback_verified": True}
 
     async def import_authority(_settings, **kwargs):
@@ -2754,8 +2780,11 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
     assert result == "prepared"
     assert [call[0] for call in calls] == ["inspect", "window", "collect", "import", "inspect"]
     assert calls[1] == ("window", instrument_id, prior_session, prior_session, "all", NOW)
-    assert calls[2] == ("collect", "request", prior_session, 10)
+    assert calls[2] == ("collect", "request", prior_session, 10, "MSFT")
     assert calls[3] == ("import", instrument_id, "agent-paper-decision")
+    assert (
+        tmp_path / ".secrets" / "nexus-agent-paper" / "daily" / "MSFT" / prior_session.isoformat()
+    ).is_dir()
 
 
 def test_prior_daily_preparation_reuses_existing_authority_without_provider_call(
@@ -3279,6 +3308,7 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
                 prior_session=prior_session,
                 evidence_ready=False,
                 snapshot_ready=False,
+                symbol="MSFT",
             ),
             SimpleNamespace(
                 instrument_id=instrument_id,
@@ -3286,6 +3316,7 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
                 prior_session=prior_session,
                 evidence_ready=True,
                 snapshot_ready=True,
+                symbol="MSFT",
             ),
         )
     )
@@ -3301,7 +3332,15 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
         return "request", {"session": prior_session.isoformat()}
 
     async def collect(request, **kwargs):
-        calls.append(("collect", request, kwargs["identity_asof"], kwargs["max_pages"]))
+        calls.append(
+            (
+                "collect",
+                request,
+                kwargs["identity_asof"],
+                kwargs["max_pages"],
+                kwargs["symbol"],
+            )
+        )
         return {"status": "collected", "readback_verified": True}
 
     async def import_context(_settings, **kwargs):
@@ -3350,7 +3389,10 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
         "split",
         NOW,
     )
-    assert calls[2] == ("collect", "request", prior_session, 10)
+    assert calls[2] == ("collect", "request", prior_session, 10, "MSFT")
+    assert (
+        tmp_path / ".secrets" / "nexus-agent-paper" / "trends" / "MSFT" / prior_session.isoformat()
+    ).is_dir()
 
 
 def test_current_trends_preparation_reuses_current_evidence_without_provider_call(
@@ -3646,6 +3688,7 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
     view = SimpleNamespace(
         cycle_id=cycle_id,
         status="awaiting_market",
+        result_code="PAPER_ORDERS_AWAITING_MARKET",
         decision_slot_at=SLOT,
         order_ids=(order_id,),
         execution_market=SimpleNamespace(status="pending"),
@@ -3677,6 +3720,7 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
         calendar=calendar,
     )
     assert result.order_id == order_id
+    assert result.cycle_result_code == "PAPER_ORDERS_AWAITING_MARKET"
     assert result.market_window_start_at == window_end - timedelta(minutes=5)
     assert result.market_window_end_at == window_end + timedelta(seconds=60)
     assert result.has_open_order is True

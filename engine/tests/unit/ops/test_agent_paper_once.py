@@ -515,6 +515,10 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         claim_id=UUID(int=9),
         decision_session=authority.decision_session,
         decision_slot_at=initial,
+        research_universe_version="agent_paper_research_v1",
+        research_universe_ordinal=1,
+        research_symbol="MSFT",
+        research_attempt=1,
     )
 
     async def root(*_args, **_kwargs):
@@ -547,6 +551,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         )
 
     async def scope(*_args, **_kwargs):
+        assert _kwargs["symbol"] == "MSFT"
         events.append("scope")
         return RiskQueryScope(
             instrument_id,
@@ -555,6 +560,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         )
 
     async def risk(**_kwargs):
+        assert _kwargs["symbol"] == "MSFT"
         events.append("risk-action-delisting-halt")
         return tuple(
             RiskSourceProof(kind, False, "a" * 64, initial)
@@ -563,15 +569,18 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
 
     async def level_one(*_args, **_kwargs):
         assert _kwargs["process_environment"] == {"NEXUS_SCHWAB_APP_KEY": "registered-key"}
+        assert _kwargs["symbol"] == "MSFT"
         events.append("level-one")
-        return SchwabMarketStreamImportResult("b" * 64, 1, 1, artifact_id, {"AAPL": quote_id}, {})
+        return SchwabMarketStreamImportResult("b" * 64, 1, 1, artifact_id, {"MSFT": quote_id}, {})
 
     async def persist(*_args, **_kwargs):
+        assert _kwargs["symbol"] == "MSFT"
         events.append("persist-risk")
         return ()
 
     async def start(*_args, **kwargs):
         assert kwargs["decision_slot_at"] == initial
+        assert kwargs["expected_research_target"] == reservation.research_target
         events.append("cycle-job")
         return AgentPaperCycleResult(
             cycle_id=cycle_id,
