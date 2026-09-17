@@ -55,10 +55,11 @@ Schwab 决策报价、按需执行窗口、API/BFF/`/paper` 回读和前台五�
 - 当前业务库没有已登记评价或评价终态，`version_evaluation=null`；所有 broker binding、broker
   execution intent、内部订单和成交计数均为 0，`execution_locked=true`。没有为了制造观察数据
   调用模型、Provider 或券商，也没有把历史提示复制成无意义 challenger。
-- 受控测试分别覆盖 no-trade、完整成交、部分成交、风控缩减/拒绝、行情 unavailable、账本守恒、
-  双通道原 Job 恢复和幂等配对；真实 AAPL 仍只有 no-trade 事实，因此不得把受控订单测试写成真实
-  订单验收。第三阶段还需完成双通道订单/成交 fixture 的集中证明，并在存在合法冻结 challenger 后
-  用定时任务积累真实样本外观察；等待这些事实不阻塞第四、第五阶段的本地接入就绪开发。
+- 受控测试分别覆盖 no-trade、完整成交、部分成交、风控缩减/拒绝、行情 unavailable 和账本守恒；
+  双通道集中 fixture 进一步证明两侧原 Job 恢复后只采集一次相同市场权威，各自形成订单、成交和
+  守恒账本，成交终态前不写 pair，终态后才幂等配对，且 broker intent 仍为零。真实 AAPL 仍只有
+  no-trade 事实，因此不得把受控订单测试写成真实订单验收；在存在合法冻结 challenger 后由定时任务
+  积累真实样本外观察，等待这些事实不阻塞第四、第五阶段的本地接入就绪开发。
 
 2026-09-15 盘前补充核验：Schwab `LEVELONE_EQUITIES` 在约 05:45 ET 的 20 秒有界采集中，
 AAPL 与 NVDA 均返回 `delayed=false` 的双边报价和最近成交，证明 07:00 前可以获得盘前决策报价；

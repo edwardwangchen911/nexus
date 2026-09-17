@@ -8,7 +8,7 @@ from typing import Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
@@ -22,6 +22,7 @@ from nexus.paper.agent_cycle import (
     start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import CycleAuthority
+from nexus.paper.agent_cycle_models import AgentPaperCycleResult
 from nexus.paper.agent_version_models import (
     AgentVersionSlotResult,
     FrozenAgentVersionSelection,
@@ -44,6 +45,7 @@ from nexus.persistence.models.paper import (
     PaperLedgerAccountRecord,
     PaperLedgerEntryRecord,
     PaperLedgerTransactionRecord,
+    PaperOrderEventRecord,
     StrategyDecisionRecord,
 )
 from nexus.risk.canonical import canonical_paper_ledger_transaction_hash
@@ -314,6 +316,23 @@ async def resume_agent_version_slot(
             reason_code="PAIR_OUTPUTS_PENDING",
             replayed=incumbent.replayed and challenger.replayed,
         )
+    if not await _slot_execution_terminal(
+        session,
+        results=(incumbent, challenger),
+        now=now,
+    ):
+        return AgentVersionSlotResult(
+            evaluation_id=evaluation.id,
+            decision_slot_at=decision_slot_at,
+            phase=phase,
+            incumbent_cycle_id=cycles[0].id,
+            challenger_cycle_id=cycles[1].id,
+            incumbent_run_id=incumbent_run_id,
+            challenger_run_id=challenger_run_id,
+            status="running",
+            reason_code="PAIR_EXECUTION_PENDING",
+            replayed=incumbent.replayed and challenger.replayed,
+        )
     if not await _previous_slot_is_paired(
         session,
         evaluation=evaluation,
@@ -511,6 +530,51 @@ async def _cycle_run_id(session: AsyncSession, cycle_id: UUID) -> UUID | None:
                 return None
     unique = tuple(dict.fromkeys(run_ids))
     return unique[0] if len(unique) == 1 else None
+
+
+async def _slot_execution_terminal(
+    session: AsyncSession,
+    *,
+    results: tuple[AgentPaperCycleResult, AgentPaperCycleResult],
+    now: datetime,
+) -> bool:
+    terminal_order_statuses = {"filled", "cancelled", "rejected", "risk_rejected"}
+    for result in results:
+        if result.status == "completed":
+            continue
+        if result.status != "awaiting_market" or not result.order_ids:
+            return False
+        latest_events = (
+            select(
+                PaperOrderEventRecord.order_id,
+                func.max(PaperOrderEventRecord.event_seq).label("event_seq"),
+            )
+            .where(
+                PaperOrderEventRecord.order_id.in_(result.order_ids),
+                PaperOrderEventRecord.occurred_at <= now,
+                PaperOrderEventRecord.created_at <= now,
+            )
+            .group_by(PaperOrderEventRecord.order_id)
+            .subquery()
+        )
+        statuses = tuple(
+            await session.scalars(
+                select(PaperOrderEventRecord.to_status)
+                .join(
+                    latest_events,
+                    and_(
+                        latest_events.c.order_id == PaperOrderEventRecord.order_id,
+                        latest_events.c.event_seq == PaperOrderEventRecord.event_seq,
+                    ),
+                )
+                .order_by(PaperOrderEventRecord.order_id)
+            )
+        )
+        if len(statuses) != len(result.order_ids) or any(
+            status not in terminal_order_statuses for status in statuses
+        ):
+            return False
+    return True
 
 
 async def _previous_slot_is_paired(

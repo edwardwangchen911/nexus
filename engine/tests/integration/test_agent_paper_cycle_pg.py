@@ -93,10 +93,12 @@ from nexus.persistence.models.paper import (
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
+    AgentPaperMarketWindowRecord,
     PaperExecutionWindowAuthorityRecord,
     PaperExecutionWindowMemberRecord,
     PaperFillRecord,
     PaperLedgerEntryRecord,
+    PaperLedgerTransactionRecord,
     PaperOrderRecord,
     PaperPositionAdjustmentEventRecord,
     PaperReservationEventRecord,
@@ -1321,6 +1323,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
 @pytest.mark.asyncio
 async def test_agent_version_pair_resumes_original_outputs_without_duplicate_work(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
@@ -1507,6 +1510,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
         assert prepared.challenger_run_id is not None
 
         output_at = evaluation_start + timedelta(seconds=5)
+        admitted: dict[UUID, ActionableResearchDecision] = {}
         async with sessions.begin() as session:
             for index, run_id in enumerate(
                 (prepared.incumbent_run_id, prepared.challenger_run_id), start=1
@@ -1608,9 +1612,36 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                     )
                     for row in frozen_evidence
                 )
+                admitted[run_id] = ActionableResearchDecision(
+                    instrument_id=run.instrument_id,
+                    output_id=output_id,
+                    intent_hash=content_hash,
+                    stance="buy_candidate",
+                    sizing_action="increase",
+                    evidence_ref_ids=tuple(row.id for row in frozen_evidence),
+                )
+
+        async def fake_load_actionable(
+            _session: AsyncSession,
+            *,
+            run_id: UUID,
+            decision_time: datetime,
+            allow_safe_no_trade: bool,
+        ) -> ActionableResearchDecision:
+            assert decision_time in {train_slots[0], output_at}
+            assert allow_safe_no_trade is True
+            return admitted[run_id]
+
+        monkeypatch.setattr(
+            "nexus.paper.agent_cycle.load_actionable_research_output", fake_load_actionable
+        )
+        monkeypatch.setattr(
+            "nexus.paper.agent_decision_store.load_actionable_research_output",
+            fake_load_actionable,
+        )
 
         async with sessions.begin() as session:
-            paired = await resume_agent_version_slot(
+            pending = await resume_agent_version_slot(
                 session,
                 evaluation_id=registration.evaluation_id,
                 decision_slot_at=train_slots[0],
@@ -1650,11 +1681,195 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
             broker_intent_count = int(
                 await session.scalar(text("SELECT count(*) FROM broker_execution_intents")) or 0
             )
+        assert pending.status == "running", pending.reason_code
+        assert pending.reason_code == "PAIR_EXECUTION_PENDING"
+        assert pair_count == 0
+        assert version_job_count == 2
+        assert order_count == 2
+        assert broker_intent_count == 0
+
+        assert prepared.incumbent_cycle_id is not None
+        assert prepared.challenger_cycle_id is not None
+        async with sessions() as session:
+            orders = tuple(
+                await session.scalars(
+                    select(PaperOrderRecord)
+                    .where(
+                        PaperOrderRecord.account_id.in_(
+                            (
+                                registration.incumbent_account_id,
+                                registration.challenger_account_id,
+                            )
+                        )
+                    )
+                    .order_by(PaperOrderRecord.account_id)
+                )
+            )
+        order_by_account = {order.account_id: order for order in orders}
+        assert set(order_by_account) == {
+            registration.incumbent_account_id,
+            registration.challenger_account_id,
+        }
+
+        evaluated_times: list[datetime] = []
+        provider = _SchwabPriceHistoryProvider()
+        for cycle_id, account_id in (
+            (prepared.incumbent_cycle_id, registration.incumbent_account_id),
+            (prepared.challenger_cycle_id, registration.challenger_account_id),
+        ):
+            async with sessions() as session:
+                scope = await resolve_agent_paper_market_scope(session, cycle_id=cycle_id)
+            evaluated_at = scope.window_end + timedelta(seconds=2)
+            evaluated_times.append(evaluated_at)
+            market = await collect_agent_paper_window(
+                sessions,
+                cycle_id=cycle_id,
+                provider=provider,
+                object_store=_ObjectStore(),
+                evaluated_at=evaluated_at,
+            )
+            assert market.purpose == "paper_fill"
+            async with sessions.begin() as session:
+                filled = await advance_internal_paper_order(
+                    session,
+                    order_id=order_by_account[account_id].id,
+                    evaluated_at=evaluated_at,
+                    idempotency_key=f"agent-version-fill:{account_id}",
+            )
+            assert filled.action == "filled"
+        assert provider.calls == 1
+
+        final_now = max(evaluated_times)
+        async with sessions.begin() as session:
+            paired = await resume_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[0],
+                now=final_now,
+            )
+            pair_count = int(
+                await session.scalar(select(func.count()).select_from(AgentVersionCyclePairRecord))
+                or 0
+            )
+            fills_by_account = {
+                account_id: int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperFillRecord)
+                        .where(PaperFillRecord.account_id == account_id)
+                    )
+                    or 0
+                )
+                for account_id in (
+                    registration.incumbent_account_id,
+                    registration.challenger_account_id,
+                )
+            }
+            fills = {
+                account_id: tuple(
+                    await session.scalars(
+                        select(PaperFillRecord)
+                        .where(PaperFillRecord.account_id == account_id)
+                        .order_by(PaperFillRecord.fill_seq)
+                    )
+                )
+                for account_id in (
+                    registration.incumbent_account_id,
+                    registration.challenger_account_id,
+                )
+            }
+            position_adjustments = {
+                account_id: tuple(
+                    await session.scalars(
+                        select(PaperPositionAdjustmentEventRecord)
+                        .where(PaperPositionAdjustmentEventRecord.account_id == account_id)
+                        .order_by(PaperPositionAdjustmentEventRecord.event_seq)
+                    )
+                )
+                for account_id in (
+                    registration.incumbent_account_id,
+                    registration.challenger_account_id,
+                )
+            }
+            market_windows = tuple(
+                await session.scalars(
+                    select(AgentPaperMarketWindowRecord)
+                    .where(
+                        AgentPaperMarketWindowRecord.cycle_id.in_(
+                            (prepared.incumbent_cycle_id, prepared.challenger_cycle_id)
+                        )
+                    )
+                    .order_by(AgentPaperMarketWindowRecord.cycle_id)
+                )
+            )
+            for account_id in fills_by_account:
+                transactions = tuple(
+                    await session.scalars(
+                        select(PaperLedgerTransactionRecord).where(
+                            PaperLedgerTransactionRecord.account_id == account_id
+                        )
+                    )
+                )
+                transaction_ids = tuple(row.id for row in transactions)
+                entries = tuple(
+                    await session.scalars(
+                        select(PaperLedgerEntryRecord).where(
+                            PaperLedgerEntryRecord.transaction_id.in_(transaction_ids)
+                        )
+                    )
+                )
+                assert all(
+                    sum(
+                        (
+                            entry.debit_amount
+                            for entry in entries
+                            if entry.transaction_id == transaction.id
+                        ),
+                        Decimal(0),
+                    )
+                    == sum(
+                        (
+                            entry.credit_amount
+                            for entry in entries
+                            if entry.transaction_id == transaction.id
+                        ),
+                        Decimal(0),
+                    )
+                    for transaction in transactions
+                )
+            broker_intent_count = int(
+                await session.scalar(text("SELECT count(*) FROM broker_execution_intents")) or 0
+            )
         assert paired.status == "paired", paired.reason_code
         assert paired.reason_code == "PAIR_RECORDED"
         assert pair_count == 1
-        assert version_job_count == 2
-        assert order_count == 0
+        assert fills_by_account == {
+            registration.incumbent_account_id: 1,
+            registration.challenger_account_id: 1,
+        }
+        incumbent_fills = fills[registration.incumbent_account_id]
+        challenger_fills = fills[registration.challenger_account_id]
+        assert tuple(
+            (row.instrument_id, row.quantity, row.price, row.notional, row.fee)
+            for row in incumbent_fills
+        ) == tuple(
+            (row.instrument_id, row.quantity, row.price, row.notional, row.fee)
+            for row in challenger_fills
+        )
+        incumbent_adjustments = position_adjustments[registration.incumbent_account_id]
+        challenger_adjustments = position_adjustments[registration.challenger_account_id]
+        assert tuple(
+            (row.instrument_id, row.event_type, row.quantity_delta, row.cost_delta)
+            for row in incumbent_adjustments
+        ) == tuple(
+            (row.instrument_id, row.event_type, row.quantity_delta, row.cost_delta)
+            for row in challenger_adjustments
+        )
+        assert len(market_windows) == 2
+        assert len({row.source_authority_id for row in market_windows}) == 1
+        assert len({row.raw_artifact_id for row in market_windows}) == 1
+        assert len({row.price_series_manifest_id for row in market_windows}) == 1
+        assert len({row.content_hash for row in market_windows}) == 2
         assert broker_intent_count == 0
 
         async with sessions.begin() as session:
@@ -1662,7 +1877,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                 session,
                 evaluation_id=registration.evaluation_id,
                 decision_slot_at=train_slots[0],
-                now=output_at,
+                now=final_now,
             )
             assert (
                 int(

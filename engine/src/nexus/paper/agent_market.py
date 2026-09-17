@@ -19,6 +19,7 @@ from nexus.market.ingestion import (
     persist_prepared_price_page,
     prepare_price_page,
 )
+from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
 from nexus.persistence.models.agents import AgentResearchOutputRecord
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import DataArtifact
@@ -292,6 +293,54 @@ async def collect_agent_paper_window(
                 raise PaperMarketError("PAPER_MARKET_PROBE_REJECTED")
             purpose = "acceptance_probe"
 
+        peer_window = await _evaluation_peer_window(
+            session,
+            cycle=cycle,
+            instrument_id=instrument_id,
+            window_start=window_start,
+        )
+        if peer_window is not None:
+            evaluation_time = evaluated_at or _utc_now()
+            if evaluation_time < peer_window.evaluated_at:
+                raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
+            content_hash = _binding_hash(
+                cycle_id=cycle_id,
+                instrument_id=instrument_id,
+                order_id=order_id,
+                purpose=purpose,
+                source_authority_id=peer_window.source_authority_id,
+                raw_artifact_id=peer_window.raw_artifact_id,
+                manifest_id=peer_window.price_series_manifest_id,
+                window_start=peer_window.window_start_at,
+                window_end=peer_window.window_end_at,
+                evaluated_at=peer_window.evaluated_at,
+                source_content_hash=peer_window.source_content_hash,
+                raw_content_hash=peer_window.raw_content_hash,
+            )
+            binding = AgentPaperMarketWindowRecord(
+                id=new_uuid7(),
+                cycle_id=cycle_id,
+                instrument_id=instrument_id,
+                order_id=order_id,
+                purpose=purpose,
+                source_authority_id=peer_window.source_authority_id,
+                raw_artifact_id=peer_window.raw_artifact_id,
+                price_series_manifest_id=peer_window.price_series_manifest_id,
+                window_start_at=peer_window.window_start_at,
+                window_end_at=peer_window.window_end_at,
+                evaluated_at=peer_window.evaluated_at,
+                data_available_at=peer_window.data_available_at,
+                source=peer_window.source,
+                feed=peer_window.feed,
+                delivery_mode=peer_window.delivery_mode,
+                source_content_hash=peer_window.source_content_hash,
+                raw_content_hash=peer_window.raw_content_hash,
+                content_hash=content_hash,
+            )
+            session.add(binding)
+            await session.flush()
+            return _market_result(binding, replayed=False)
+
         request = BarsRequest(
             instrument_id=InstrumentId(instrument_id),
             start=window_start,
@@ -364,6 +413,64 @@ async def collect_agent_paper_window(
         session.add(binding)
         await session.flush()
         return _market_result(binding, replayed=False)
+
+
+async def _evaluation_peer_window(
+    session: AsyncSession,
+    *,
+    cycle: AgentPaperCycleRecord,
+    instrument_id: UUID,
+    window_start: datetime,
+) -> AgentPaperMarketWindowRecord | None:
+    has_evaluation_table = await session.scalar(
+        text("SELECT to_regclass('agent_version_evaluations') IS NOT NULL")
+    )
+    if has_evaluation_table is not True:
+        return None
+    evaluation = await session.scalar(
+        select(AgentVersionEvaluationRecord).where(
+            (AgentVersionEvaluationRecord.incumbent_account_id == cycle.account_id)
+            | (AgentVersionEvaluationRecord.challenger_account_id == cycle.account_id)
+        )
+    )
+    if evaluation is None:
+        return None
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {
+            "scope": (
+                f"nexus:agent-version-market:{evaluation.id}:"
+                f"{instrument_id}:{window_start.isoformat()}"
+            )
+        },
+    )
+    peer_account_id = (
+        evaluation.challenger_account_id
+        if cycle.account_id == evaluation.incumbent_account_id
+        else evaluation.incumbent_account_id
+    )
+    return cast(
+        AgentPaperMarketWindowRecord | None,
+        await session.scalar(
+            select(AgentPaperMarketWindowRecord)
+            .join(
+                AgentPaperCycleRecord,
+                AgentPaperCycleRecord.id == AgentPaperMarketWindowRecord.cycle_id,
+            )
+            .where(
+                AgentPaperCycleRecord.account_id == peer_account_id,
+                AgentPaperCycleRecord.decision_slot_at == cycle.decision_slot_at,
+                AgentPaperCycleRecord.candidate_hash == cycle.candidate_hash,
+                AgentPaperCycleRecord.execution_price_policy_id
+                == cycle.execution_price_policy_id,
+                AgentPaperCycleRecord.execution_locked.is_(True),
+                AgentPaperMarketWindowRecord.instrument_id == instrument_id,
+                AgentPaperMarketWindowRecord.window_start_at == window_start,
+                AgentPaperMarketWindowRecord.purpose == "paper_fill",
+            )
+            .limit(1)
+        ),
+    )
 
 
 async def resolve_agent_paper_market_scope(
