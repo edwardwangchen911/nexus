@@ -214,11 +214,20 @@ def test_cli_emits_only_bounded_result_and_never_requires_cycle_enablement(
     }
     seen = {}
 
-    async def run_once(settings, *, decision_session, decision_time, output_dir, now=None):
+    async def run_once(
+        settings,
+        *,
+        decision_session,
+        decision_time,
+        output_dir,
+        now=None,
+        source_policy_id,
+    ):
         seen["database_url"] = settings.database_url
         seen["decision_session"] = decision_session
         seen["decision_time"] = decision_time
         seen["output_dir"] = output_dir
+        seen["source_policy_id"] = source_policy_id
         return {
             "status": "verified",
             "authority_count": 3,
@@ -254,6 +263,55 @@ def test_cli_emits_only_bounded_result_and_never_requires_cycle_enablement(
     assert seen["decision_time"] == datetime(2026, 9, 14, 20, 30, tzinfo=UTC)
     assert seen["output_dir"] == output
     assert seen["database_url"].endswith("/nexus")
+    assert seen["source_policy_id"] == cli.PAPER_DECISION_SOURCE_POLICY_ID
+
+
+def test_cli_selects_same_session_schwab_policy_explicitly(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    environment = {
+        "DATABASE_URL": "postgresql+asyncpg://user:password@127.0.0.1:55433/nexus",
+        "ALPACA_API_KEY_ID": "synthetic-key",
+        "ALPACA_API_SECRET_KEY": "synthetic-secret",
+    }
+    seen = {}
+
+    async def run_once(
+        settings,
+        *,
+        decision_session,
+        decision_time,
+        output_dir,
+        now=None,
+        source_policy_id,
+    ):
+        seen["source_policy_id"] = source_policy_id
+        return {
+            "status": "verified",
+            "authority_count": 3,
+            "blocked_kinds": [],
+            "execution_locked": True,
+            "model_called": False,
+        }
+
+    monkeypatch.setattr(cli, "load_local_environment", lambda root, values: environment)
+    monkeypatch.setattr(cli, "run_once", run_once)
+
+    code = cli.main(
+        [
+            "--decision-session",
+            "2026-09-14",
+            "--decision-time",
+            "2026-09-14T14:00:00Z",
+            "--output-dir",
+            str(tmp_path / "risk"),
+            "--same-session-schwab",
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "verified"
+    assert seen["source_policy_id"] == cli.PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
 
 
 def test_cli_invalid_date_returns_fixed_code_without_echoing_input(

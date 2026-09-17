@@ -14,6 +14,17 @@ uv run --project engine nexus-engine-agent-risk-authority \
   --output-dir <新的本机受保护目录>
 ```
 
+同日 Schwab Agent 槽位必须显式加上 `--same-session-schwab`；该标志只把三条查询
+证明绑定到现有 Schwab 决策来源政策，不改变采集时间窗、标的范围或执行权限：
+
+```sh
+uv run --project engine nexus-engine-agent-risk-authority \
+  --decision-session <纽约当日YYYY-MM-DD> \
+  --decision-time <冻结的UTC时槽> \
+  --output-dir <新的本机受保护目录> \
+  --same-session-schwab
+```
+
 入口先查数据库；若同一股票池和交易日已有三条完整证明，则直接核验并返回，不再次请求来源。
 首次运行只读 Alpaca Corporate Actions、Nasdaq Trader 当前停牌 RSS 和 Nasdaq 当日上市目录，
 把原始响应写入新目录后才追加数据库证明。停牌 RSS 超过两分钟、目录不是纽约当日、分页未穷尽、

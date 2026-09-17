@@ -392,15 +392,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--decision-session", type=date.fromisoformat, required=True)
     parser.add_argument("--decision-time", type=_utc_datetime, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--same-session-schwab", action="store_true")
     try:
         args = parser.parse_args(argv)
         settings = AgentRiskSettings.model_validate(load_local_environment(Path.cwd(), {}))
+        source_policy_id = (
+            PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+            if args.same_session_schwab
+            else PAPER_DECISION_SOURCE_POLICY_ID
+        )
         result = asyncio.run(
             run_once(
                 settings,
                 decision_session=args.decision_session,
                 decision_time=args.decision_time,
                 output_dir=args.output_dir,
+                source_policy_id=source_policy_id,
             )
         )
     except (Exception, KeyboardInterrupt) as error:
