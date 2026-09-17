@@ -20,6 +20,7 @@ from nexus.agents.persistence import load_complete_prompt_authority
 from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
 from nexus.paper.agent_version_models import (
+    MIN_OOS_SESSIONS,
     POLICY_VERSION,
     AgentVersionEvaluationDecision,
     AgentVersionEvaluationRegistration,
@@ -29,6 +30,7 @@ from nexus.paper.agent_version_models import (
     evaluate_agent_version_metrics,
     evaluation_policy_hash,
     evaluation_request_hash,
+    has_unsafe_same_session_gap,
 )
 from nexus.persistence.models.agent_versions import (
     AgentVersionCyclePairRecord,
@@ -269,7 +271,8 @@ async def finalize_agent_version_evaluation(
     )
     if existing is not None:
         return _decision_result(existing, evaluation=evaluation, replayed=True)
-    if now < evaluation.oos_slots[-1]:
+    session_closes = await load_oos_session_closes(session, evaluation=evaluation)
+    if not session_closes or now < session_closes[-1]:
         raise ValueError("AGENT_VERSION_WINDOW_OPEN")
 
     facts = await _load_agent_version_metric_facts(
@@ -333,11 +336,15 @@ async def invalidate_agent_version_evaluation(
     if existing is not None:
         return _decision_result(existing, evaluation=evaluation, replayed=True)
     first_session = min(_session(slot) for slot in evaluation.train_slots)
-    if await _calendar_has_prior_session(
+    has_prior_session = await _calendar_has_prior_session(
         session,
         calendar_id=evaluation.calendar_authority_id,
         before=first_session,
-    ):
+    )
+    schedule_unsafe = has_unsafe_same_session_gap(
+        tuple(evaluation.train_slots)
+    ) or has_unsafe_same_session_gap(tuple(evaluation.oos_slots))
+    if has_prior_session and not schedule_unsafe:
         raise ValueError("AGENT_VERSION_EVALUATION_NOT_INVALID")
     pair_count = int(
         await session.scalar(
@@ -359,7 +366,24 @@ async def invalidate_agent_version_evaluation(
         )
         or 0
     )
-    if pair_count or cycle_count:
+    account_ids = (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+    order_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(PaperOrderRecord)
+            .where(PaperOrderRecord.account_id.in_(account_ids))
+        )
+        or 0
+    )
+    fill_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(PaperFillRecord)
+            .where(PaperFillRecord.account_id.in_(account_ids))
+        )
+        or 0
+    )
+    if pair_count or cycle_count or order_count or fill_count:
         raise ValueError("AGENT_VERSION_INVALIDATION_UNSAFE")
     facts = await _load_agent_version_metric_facts(
         session,
@@ -371,7 +395,11 @@ async def invalidate_agent_version_evaluation(
         session,
         evaluation=evaluation,
         status="UNKNOWN",
-        reason_code="CALENDAR_PRIOR_SESSION_MISSING",
+        reason_code=(
+            "CALENDAR_PRIOR_SESSION_MISSING"
+            if not has_prior_session
+            else "EVALUATION_SCHEDULE_UNSAFE"
+        ),
         metric_report=report.model_dump(mode="json"),
         selected_run_id=evaluation.incumbent_version_source_run_id,
     )
@@ -728,38 +756,29 @@ async def _load_agent_version_metric_facts(
         if order.id not in risk_by_order or risk_by_order[order.id].outcome != order.risk_outcome
     )
 
-    snapshots = tuple(
-        await session.scalars(
-            select(PaperPerformanceSnapshotRecord)
-            .where(
-                PaperPerformanceSnapshotRecord.account_id.in_(account_ids),
-                PaperPerformanceSnapshotRecord.as_of >= evaluation.oos_slots[0],
-                PaperPerformanceSnapshotRecord.as_of <= now,
-            )
-            .order_by(
-                PaperPerformanceSnapshotRecord.account_id,
-                PaperPerformanceSnapshotRecord.as_of,
+    session_closes = await load_oos_session_closes(session, evaluation=evaluation)
+    snapshots = (
+        tuple(
+            await session.scalars(
+                select(PaperPerformanceSnapshotRecord)
+                .where(
+                    PaperPerformanceSnapshotRecord.account_id.in_(account_ids),
+                    PaperPerformanceSnapshotRecord.as_of.in_(session_closes),
+                    PaperPerformanceSnapshotRecord.as_of <= now,
+                )
+                .order_by(
+                    PaperPerformanceSnapshotRecord.account_id,
+                    PaperPerformanceSnapshotRecord.as_of,
+                )
             )
         )
+        if session_closes
+        else ()
     )
-    snapshots_by_account = {
-        account_id: tuple(row for row in snapshots if row.account_id == account_id)
-        for account_id in account_ids
+    snapshot_by_key = {(row.account_id, row.as_of): row for row in snapshots}
+    required_snapshot_keys = {
+        (account_id, close) for account_id in account_ids for close in session_closes
     }
-    slot_snapshots: dict[UUID, list[PaperPerformanceSnapshotRecord]] = {
-        account_id: [] for account_id in account_ids
-    }
-    for index, slot in enumerate(evaluation.oos_slots):
-        upper = evaluation.oos_slots[index + 1] if index + 1 < len(evaluation.oos_slots) else now
-        for account_id in account_ids:
-            candidates = tuple(
-                row
-                for row in snapshots_by_account[account_id]
-                if slot <= row.as_of < upper
-                or (index + 1 == len(evaluation.oos_slots) and row.as_of == upper)
-            )
-            if candidates:
-                slot_snapshots[account_id].append(candidates[-1])
 
     accounts = tuple(
         await session.scalars(
@@ -767,26 +786,34 @@ async def _load_agent_version_metric_facts(
         )
     )
     capital_by_account = {row.id: row.initial_capital for row in accounts}
-    comparable_performance = all(
-        len(slot_snapshots[account_id]) == len(evaluation.oos_slots) for account_id in account_ids
-    ) and set(capital_by_account) == set(account_ids)
+    comparable_performance = (
+        len(session_closes) == MIN_OOS_SESSIONS
+        and set(snapshot_by_key) == required_snapshot_keys
+        and set(capital_by_account) == set(account_ids)
+    )
     cumulative_excess_return = Decimal(0)
     positive_sessions = 0
     drawdown_degradation = Decimal(0)
     if comparable_performance:
-        incumbent_rows = slot_snapshots[evaluation.incumbent_account_id]
-        challenger_rows = slot_snapshots[evaluation.challenger_account_id]
+        incumbent_rows = [
+            snapshot_by_key[(evaluation.incumbent_account_id, close)]
+            for close in session_closes
+        ]
+        challenger_rows = [
+            snapshot_by_key[(evaluation.challenger_account_id, close)]
+            for close in session_closes
+        ]
         cumulative_excess_return = (
             challenger_rows[-1].nav / capital_by_account[evaluation.challenger_account_id]
             - incumbent_rows[-1].nav / capital_by_account[evaluation.incumbent_account_id]
         )
-        incumbent_by_session = _last_snapshot_by_session(incumbent_rows)
-        challenger_by_session = _last_snapshot_by_session(challenger_rows)
         previous_incumbent = capital_by_account[evaluation.incumbent_account_id]
         previous_challenger = capital_by_account[evaluation.challenger_account_id]
-        for session_date in sorted(set(incumbent_by_session) & set(challenger_by_session)):
-            incumbent_nav = incumbent_by_session[session_date].nav
-            challenger_nav = challenger_by_session[session_date].nav
+        for incumbent_row, challenger_row in zip(
+            incumbent_rows, challenger_rows, strict=True
+        ):
+            incumbent_nav = incumbent_row.nav
+            challenger_nav = challenger_row.nav
             positive_sessions += int(
                 challenger_nav / previous_challenger > incumbent_nav / previous_incumbent
             )
@@ -880,13 +907,29 @@ async def _load_agent_version_metric_facts(
     )
 
 
-def _last_snapshot_by_session(
-    rows: list[PaperPerformanceSnapshotRecord],
-) -> dict[date, PaperPerformanceSnapshotRecord]:
-    result: dict[date, PaperPerformanceSnapshotRecord] = {}
-    for row in rows:
-        result[_session(row.as_of)] = row
-    return result
+async def load_oos_session_closes(
+    session: AsyncSession,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+) -> tuple[datetime, ...]:
+    session_dates = tuple(sorted({_session(slot) for slot in evaluation.oos_slots}))
+    if len(session_dates) != MIN_OOS_SESSIONS:
+        return ()
+    rows = tuple(
+        await session.scalars(
+            select(ExchangeCalendarSessionRecord)
+            .where(
+                ExchangeCalendarSessionRecord.calendar_authority_id
+                == evaluation.calendar_authority_id,
+                ExchangeCalendarSessionRecord.session.in_(session_dates),
+            )
+            .order_by(ExchangeCalendarSessionRecord.session)
+        )
+    )
+    if tuple(row.session for row in rows) != session_dates:
+        return ()
+    closes = tuple(row.market_close_at for row in rows)
+    return closes if len(set(closes)) == len(closes) else ()
 
 
 def _decision_result(

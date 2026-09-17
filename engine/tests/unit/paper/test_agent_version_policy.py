@@ -1,6 +1,6 @@
 """Frozen policy tests for paired Agent-version evaluation."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -11,6 +11,7 @@ from nexus.paper.agent_version_models import (
     MIN_CHALLENGER_FILLS,
     MIN_EXCESS_RETURN,
     MIN_POSITIVE_EXCESS_SESSIONS,
+    MIN_SAME_SESSION_SLOT_GAP,
     OOS_SLOT_COUNT,
     POLICY_VERSION,
     TRAIN_SLOT_COUNT,
@@ -19,6 +20,7 @@ from nexus.paper.agent_version_models import (
     agent_version_market_evidence_hash,
     evaluate_agent_version_metrics,
     evaluation_policy_hash,
+    evaluation_policy_payload,
     evaluation_request_hash,
 )
 from pydantic import ValidationError
@@ -48,9 +50,11 @@ def _slot(day: int, minute: int = 0) -> datetime:
     return datetime(2026, 10, day, 14, minute, tzinfo=UTC)
 
 
-TRAIN_SLOTS = (_slot(1), _slot(1, 5), _slot(2), _slot(2, 5))
+TRAIN_SLOTS = (_slot(1), _slot(1, 15), _slot(2), _slot(2, 15))
 OOS_SLOTS = tuple(
-    slot for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16) for slot in (_slot(day), _slot(day, 5))
+    slot
+    for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16)
+    for slot in (_slot(day), _slot(day, 15))
 )
 
 
@@ -77,9 +81,22 @@ def test_v1_policy_is_frozen() -> None:
     assert MIN_EXCESS_RETURN == Decimal("0.005")
     assert MIN_POSITIVE_EXCESS_SESSIONS == 7
     assert MAX_DRAWDOWN_DEGRADATION == Decimal("0.0025")
-    assert evaluation_policy_hash() == (
-        "7af8c4c83a82b3c2c493c674a5efcb4e1c1a2480fb73ee09576edc6eb7313661"
-    )
+    assert MIN_SAME_SESSION_SLOT_GAP == timedelta(minutes=15)
+    assert evaluation_policy_payload()["min_same_session_slot_gap_seconds"] == 900
+    assert len(evaluation_policy_hash()) == 64
+
+
+def test_v1_policy_rejects_five_minute_same_session_gap() -> None:
+    train_slots = (_slot(1), _slot(1, 5), _slot(2), _slot(2, 5))
+
+    with pytest.raises((ValidationError, ValueError), match="AGENT_VERSION_WINDOW_INVALID"):
+        _request(train_slots=train_slots)
+
+
+def test_v1_policy_accepts_fifteen_minute_same_session_gap() -> None:
+    request = _request()
+
+    assert request.train_slots[1] - request.train_slots[0] == timedelta(minutes=15)
 
 
 def test_agent_version_v1_passes_only_complete_gate() -> None:
@@ -233,14 +250,14 @@ def test_v1_policy_rejects_non_utc_slots() -> None:
 def test_v1_policy_rejects_train_and_oos_on_same_new_york_session() -> None:
     train_slots = (
         datetime(2026, 9, 30, 14, 0, tzinfo=UTC),
-        datetime(2026, 9, 30, 14, 5, tzinfo=UTC),
+        datetime(2026, 9, 30, 14, 15, tzinfo=UTC),
         datetime(2026, 10, 1, 14, 0, tzinfo=UTC),
-        datetime(2026, 10, 1, 14, 5, tzinfo=UTC),
+        datetime(2026, 10, 1, 14, 15, tzinfo=UTC),
     )
     oos_slots = tuple(
         slot
         for day in (1, 2, 5, 6, 7, 8, 9, 12, 13, 14)
-        for slot in (_slot(day, 10), _slot(day, 15))
+        for slot in (_slot(day, 15), _slot(day, 30))
     )
 
     with pytest.raises((ValidationError, ValueError), match="AGENT_VERSION_WINDOW_INVALID"):

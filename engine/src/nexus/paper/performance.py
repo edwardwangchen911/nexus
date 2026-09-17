@@ -1002,6 +1002,7 @@ async def publish_paper_performance_snapshot(
     account_id: UUID,
     as_of: datetime,
     hooks: PaperPerformanceHooks | None = None,
+    enqueue_session_summary: bool = True,
 ) -> PublishedPaperPerformance:
     """Atomically publish one internal-paper close from frozen PostgreSQL facts."""
     effective_at = _utc(as_of, field="as_of")
@@ -1289,7 +1290,8 @@ async def publish_paper_performance_snapshot(
         )
     ):
         raise PaperPerformanceError("PAPER_PERFORMANCE_CONFLICT")
-    await enqueue_paper_session_summary(
-        session, account=account, snapshot=snapshot, calendar=calendar
-    )
+    if enqueue_session_summary:
+        await enqueue_paper_session_summary(
+            session, account=account, snapshot=snapshot, calendar=calendar
+        )
     return persisted

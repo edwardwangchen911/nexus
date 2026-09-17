@@ -34,6 +34,7 @@ from nexus.paper.agent_version_runner import (
     resolve_internal_agent_version_source,
     resume_agent_version_slot,
 )
+from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.models.agent_versions import (
@@ -64,7 +65,7 @@ from nexus.persistence.models.portfolio import Account, Portfolio
 from nexus.persistence.models.runtime import Job
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select, text
+from sqlalchemy import func, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 NOW = datetime(2026, 9, 30, 12, tzinfo=UTC)
@@ -89,11 +90,13 @@ OOS_DATES = (
 )
 
 
-def _slots(dates: tuple[date, ...], minute_offset: int = 0) -> tuple[datetime, ...]:
+def _slots(
+    dates: tuple[date, ...], minute_offset: int = 0, gap_minutes: int = 15
+) -> tuple[datetime, ...]:
     return tuple(
         datetime.combine(day, time(14, minute, tzinfo=UTC))
         for day in dates
-        for minute in (minute_offset, minute_offset + 5)
+        for minute in (minute_offset, minute_offset + gap_minutes)
     )
 
 
@@ -293,10 +296,15 @@ async def _factory(database_url: str) -> tuple[async_sessionmaker[AsyncSession],
     return async_sessionmaker(engine, expire_on_commit=False), engine
 
 
-async def _seed_legacy_invalid_evaluation(session: AsyncSession) -> UUID:
+async def _seed_legacy_invalid_evaluation(
+    session: AsyncSession,
+    *,
+    omit_prior_calendar_session: bool = True,
+    gap_minutes: int = 15,
+) -> UUID:
     prompt_id, model_id = await _seed_authority(
         session,
-        omit_prior_calendar_session=True,
+        omit_prior_calendar_session=omit_prior_calendar_session,
     )
     incumbent_run = await session.get(AgentResearchRunRecord, INCUMBENT_RUN_ID)
     assert incumbent_run is not None
@@ -378,8 +386,8 @@ async def _seed_legacy_invalid_evaluation(session: AsyncSession) -> UUID:
             incumbent_model_hash=incumbent_run.model_hash,
             challenger_prompt_hash="2" * 64,
             challenger_model_hash="a" * 64,
-            train_slots=list(_slots(TRAIN_DATES)),
-            oos_slots=list(_slots(OOS_DATES)),
+            train_slots=list(_slots(TRAIN_DATES, gap_minutes=gap_minutes)),
+            oos_slots=list(_slots(OOS_DATES, gap_minutes=gap_minutes)),
             policy_version="agent_version_evaluation_v1",
             policy_hash=evaluation_policy_hash(),
             authority_hash="3" * 64,
@@ -583,23 +591,24 @@ async def test_finalization_is_fail_closed_and_idempotent_without_oos_pairs(
                 now=NOW,
             )
 
+        final_close = datetime.combine(OOS_DATES[-1], time(20, tzinfo=UTC))
         with pytest.raises(ValueError, match="AGENT_VERSION_WINDOW_OPEN"):
             async with factory.begin() as session:
                 await finalize_agent_version_evaluation(
                     session,
                     evaluation_id=registration.evaluation_id,
-                    now=request.oos_slots[-1] - timedelta(seconds=1),
+                    now=final_close - timedelta(seconds=1),
                 )
 
         async with factory.begin() as session:
             finalized = await finalize_agent_version_evaluation(
                 session,
                 evaluation_id=registration.evaluation_id,
-                now=request.oos_slots[-1] + timedelta(seconds=1),
+                now=final_close + timedelta(seconds=1),
             )
             selected = await load_selected_internal_agent_version(
                 session,
-                now=request.oos_slots[-1] + timedelta(seconds=1),
+                now=final_close + timedelta(seconds=1),
             )
             decision_count = int(
                 await session.scalar(
@@ -620,7 +629,7 @@ async def test_finalization_is_fail_closed_and_idempotent_without_oos_pairs(
             replay = await finalize_agent_version_evaluation(
                 session,
                 evaluation_id=registration.evaluation_id,
-                now=request.oos_slots[-1] + timedelta(minutes=1),
+                now=final_close + timedelta(minutes=1),
             )
             assert (
                 int(
@@ -633,6 +642,73 @@ async def test_finalization_is_fail_closed_and_idempotent_without_oos_pairs(
             )
         assert replay.model_copy(update={"replayed": False}) == finalized
         assert replay.replayed is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_metric_facts_use_one_official_close_per_oos_session(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-session-close-metrics-v1",
+                now=NOW,
+            )
+            evaluation = await session.get(
+                AgentVersionEvaluationRecord,
+                registration.evaluation_id,
+            )
+            assert evaluation is not None
+            assert await agent_version_runner._ensure_equal_internal_accounts(
+                session,
+                evaluation=evaluation,
+            )
+            closes = tuple(
+                datetime.combine(day, time(20, tzinfo=UTC)) for day in OOS_DATES
+            )
+            monkeypatch.setattr(
+                "nexus.paper.performance.func",
+                type(
+                    "PerformanceFunctions",
+                    (),
+                    {
+                        "max": staticmethod(func.max),
+                        "clock_timestamp": staticmethod(
+                            lambda: literal(closes[-1] + timedelta(seconds=1))
+                        ),
+                    },
+                ),
+            )
+            for account_id in (
+                registration.incumbent_account_id,
+                registration.challenger_account_id,
+            ):
+                for close in closes:
+                    await publish_paper_performance_snapshot(
+                        session,
+                        account_id=account_id,
+                        as_of=close,
+                        enqueue_session_summary=False,
+                    )
+
+            facts = await agent_version_evaluation._load_agent_version_metric_facts(
+                session,
+                evaluation=evaluation,
+                now=closes[-1] + timedelta(seconds=1),
+            )
+
+        assert facts.cost_authority_complete is True
+        assert facts.cumulative_excess_return == Decimal("0")
+        assert facts.positive_excess_session_count == 0
+        assert facts.authority_complete is False
     finally:
         await engine.dispose()
 
@@ -701,6 +777,35 @@ async def test_valid_open_evaluation_cannot_use_legacy_invalidation(
                     evaluation_id=registration.evaluation_id,
                     now=NOW,
                 )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_unsafe_schedule_can_only_be_invalidated_before_work(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            evaluation_id = await _seed_legacy_invalid_evaluation(
+                session,
+                omit_prior_calendar_session=False,
+                gap_minutes=5,
+            )
+
+        async with factory.begin() as session:
+            invalidated = await agent_version_evaluation.invalidate_agent_version_evaluation(
+                session,
+                evaluation_id=evaluation_id,
+                now=NOW,
+            )
+
+        assert invalidated.status == "UNKNOWN"
+        assert invalidated.reason_code == "EVALUATION_SCHEDULE_UNSAFE"
+        assert invalidated.selected_version_source_run_id == INCUMBENT_RUN_ID
+        assert invalidated.execution_locked is True
+        assert invalidated.replayed is False
     finally:
         await engine.dispose()
 

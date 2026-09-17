@@ -403,6 +403,16 @@ def test_policy_is_slot_based_restart_safe_and_fail_closed(
             {
                 "evaluation_id": UUID(int=101),
                 "evaluation_slot_at": SLOT,
+                "cycle_status": "evaluation_performance_due",
+                "performance_due_at": SLOT - timedelta(days=1),
+                "action_account_id": UUID(int=103),
+            },
+            A.PUBLISH_EVALUATION_PERFORMANCE,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
                 "cycle_status": "evaluation_pending",
             },
             A.ADVANCE_EVALUATION,
@@ -483,6 +493,46 @@ def test_evaluation_policy_never_replays_a_missed_registered_slot(
     changes: dict[str, object], expected: loop.AgentPaperLoopAction
 ) -> None:
     assert loop.choose_loop_action(snapshot(**changes)) == expected
+
+
+def test_evaluation_performance_selects_due_accounts_then_future_close() -> None:
+    incumbent = UUID(int=103)
+    challenger = UUID(int=104)
+    first_close = datetime(2026, 9, 11, 20, tzinfo=UTC)
+    second_close = datetime(2026, 9, 14, 20, tzinfo=UTC)
+
+    assert loop._next_evaluation_performance(
+        account_ids=(incumbent, challenger),
+        session_closes=(first_close, second_close),
+        persisted_snapshot_keys=set(),
+        now=first_close,
+    ) == (incumbent, first_close)
+    assert loop._next_evaluation_performance(
+        account_ids=(incumbent, challenger),
+        session_closes=(first_close, second_close),
+        persisted_snapshot_keys={(incumbent, first_close)},
+        now=first_close,
+    ) == (challenger, first_close)
+    assert loop._next_evaluation_performance(
+        account_ids=(incumbent, challenger),
+        session_closes=(first_close, second_close),
+        persisted_snapshot_keys={
+            (incumbent, first_close),
+            (challenger, first_close),
+        },
+        now=first_close,
+    ) == (None, second_close)
+    assert loop._next_evaluation_performance(
+        account_ids=(incumbent, challenger),
+        session_closes=(first_close, second_close),
+        persisted_snapshot_keys={
+            (incumbent, first_close),
+            (challenger, first_close),
+            (incumbent, second_close),
+            (challenger, second_close),
+        },
+        now=second_close,
+    ) == (None, None)
 
 
 def test_foreground_loop_keeps_heartbeat_while_waiting_for_evaluation_slot() -> None:
@@ -3913,6 +3963,44 @@ def test_performance_executor_publishes_exact_due_close_once(
 
     assert result == expected
     assert received == [(UUID(int=1), close_at)]
+
+
+def test_evaluation_performance_executor_suppresses_session_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_at = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)
+    evaluation_account_id = UUID(int=103)
+    received: list[tuple[UUID, datetime, bool]] = []
+
+    async def publish(
+        _settings,
+        *,
+        account_id,
+        as_of,
+        enqueue_session_summary=True,
+    ):
+        received.append((account_id, as_of, enqueue_session_summary))
+        return True
+
+    monkeypatch.setattr(loop, "publish_due_performance_once", publish)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=A.PUBLISH_EVALUATION_PERFORMANCE,
+            snapshot=snapshot(
+                evaluation_id=UUID(int=101),
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_performance_due",
+                performance_due_at=close_at,
+                action_account_id=evaluation_account_id,
+            ),
+        )
+    )
+
+    assert result is None
+    assert received == [(evaluation_account_id, close_at, False)]
 
 
 @pytest.mark.parametrize(

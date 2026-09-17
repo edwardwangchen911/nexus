@@ -1354,7 +1354,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
             datetime.combine(day, datetime.min.time(), tzinfo=UTC)
             + timedelta(hours=19, minutes=minute)
             for day in dates
-            for minute in (0, 5)
+            for minute in (0, 15)
         )
 
     train_slots = slots(train_dates)

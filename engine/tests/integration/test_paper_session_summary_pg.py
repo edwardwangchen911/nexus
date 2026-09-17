@@ -375,6 +375,37 @@ async def test_no_cycle_means_no_empty_summary(migrated_database_url: str) -> No
 
 
 @pytest.mark.asyncio
+async def test_evaluation_performance_can_suppress_session_summary(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            await add_cycle(session, seed.execution.account_id)
+            publication = await publish_paper_performance_snapshot(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=seed.as_of,
+                enqueue_session_summary=False,
+            )
+            assert publication.replayed is False
+            assert await summaries(session) == []
+
+        async with AsyncSession(engine) as session, session.begin():
+            replay = await publish_paper_performance_snapshot(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=seed.as_of,
+                enqueue_session_summary=False,
+            )
+            assert replay.replayed is True
+            assert await summaries(session) == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_summary_is_not_eligible_before_the_market_close(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,

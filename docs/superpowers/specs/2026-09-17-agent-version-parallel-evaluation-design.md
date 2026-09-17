@@ -225,3 +225,36 @@ incumbent 与 challenger 各使用一个隔离的内部评价账户，现有第�
 - 不发送券商模拟盘或实盘订单。
 - 不让 LLM 修改 sizing、硬风控、费用、评价阈值或版本选择结果。
 - 不因 no-trade、短窗口或页面可用宣称 challenger 已优于 incumbent。
+
+## 12. 2026-09-18 运行验收修正
+
+首次真实评价登记后的持久化与 runner 核对发现两个会使 v1 永远无法产生有效结果的合同缺陷。本节是对已确认 v1 指标的缺陷修正，不改变 4+20 样本数、PASS 阈值、AAPL 范围或执行权限。
+
+### 12.1 绩效快照按 OOS 交易日计算
+
+`publish_paper_performance_snapshot` 的正式产品合同只允许 `as_of` 等于 XNYS 官方收盘时刻。OOS 为 10 个交易日、每日 2 个决策槽，因此每个评价账户必须有恰好 10 份可比收盘快照，而不是 20 份槽位快照。
+
+- finalizer 从冻结 calendar authority 导出 10 个 OOS session 及各自 `market_close_at`。
+- incumbent 与 challenger 每个 session close 各必须存在且只能存在一份账户快照；缺失或多余均不可比，结果为 `UNKNOWN`。
+- 累计超额、正净超额交易日数和回撤都仅从这 10 组收盘快照计算。
+- 不放宽绩效入口，不允许用任意槽位时刻冒充官方收盘。
+
+### 12.2 runner 自动发布评价收盘快照
+
+现有单一 host runner 继续是唯一调度者。它在打开评价期间同时检查两类持久化动作：下一个未配对决策槽，以及下一个已到期但未发布的 OOS session close。等待截止时间取两者中较早值，心跳保持原有频率。
+
+- 每次只对一个账户、一个 `market_close_at` 调用现有绩效发布入口；精确 `(account_id, as_of)` 幂等保持不变。
+- `publish_paper_performance_snapshot(..., enqueue_session_summary=True)` 新增窄布尔参数。普通 Stage 2 账户保持默认 `True`；评价账户显式传 `False`，不产生 Bark 日终摘要。
+- 发布失败保留原有 fail-closed 行为；不为评价新增重试、新 worker 或新表。
+
+### 12.3 同交易日槽位安全间隔
+
+同一 session 内任意相邻 train 或 OOS 决策槽必须相隔至少 15 分钟。该间隔为现有串行双 lane 研究、5 分钟订单执行窗口及 60 秒发布延迟留出有界余量。不满足时注册直接拒绝为 `AGENT_VERSION_WINDOW_INVALID`。
+
+此修正纳入 `policy_hash`。窗口数、收益、回撤和成交门禁未改，因此仍使用 `agent_version_evaluation_v1`；旧评价保留其原 `policy_hash`，不被重判。
+
+### 12.4 已登记不安全评价的收口
+
+`invalidate_agent_version_evaluation` 增加一个严格分支：只当评价尚无 pair、cycle、research run/job/output、order 或 fill，且其冻结槽位违反 15 分钟间隔时，才可以不调用模型地写入 `UNKNOWN / EVALUATION_SCHEDULE_UNSAFE`。已有任何运行事实时仍拒绝失效。
+
+当前无效评价完成该收口后，用相同冻结 incumbent/challenger 权威注册一个新评价：4 个 train 槽覆盖 2 个交易日，20 个 OOS 槽覆盖随后 10 个交易日，每日两槽间隔至少 15 分钟。新评价继续使用未来真实时槽，不回放已错过时间。

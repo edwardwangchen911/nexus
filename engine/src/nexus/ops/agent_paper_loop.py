@@ -67,6 +67,7 @@ from nexus.paper.agent_version_evaluation import (
     close_incomplete_agent_version_evaluation,
     close_unrecoverable_agent_version_evaluation,
     finalize_agent_version_evaluation,
+    load_oos_session_closes,
 )
 from nexus.paper.agent_version_runner import (
     advance_agent_version_slot,
@@ -138,6 +139,7 @@ class AgentPaperLoopAction(StrEnum):
     RESUME = "resume"
     COLLECT_WINDOW = "collect_window"
     ADVANCE_ORDER = "advance_order"
+    PUBLISH_EVALUATION_PERFORMANCE = "publish_evaluation_performance"
     PUBLISH_PERFORMANCE = "publish_performance"
     WAIT_FOR_SLOT = "wait_for_slot"
     WAIT_FOR_MARKET = "wait_for_market"
@@ -196,6 +198,26 @@ class CurrentTrendsScope:
     prior_session: date
     evidence_ready: bool
     snapshot_ready: bool
+
+
+def _next_evaluation_performance(
+    *,
+    account_ids: tuple[UUID, UUID],
+    session_closes: tuple[datetime, ...],
+    persisted_snapshot_keys: set[tuple[UUID, datetime]],
+    now: datetime,
+) -> tuple[UUID | None, datetime | None]:
+    """Select one due account or the first future close from persisted facts."""
+    for close_at in session_closes:
+        missing_accounts = tuple(
+            account_id
+            for account_id in account_ids
+            if (account_id, close_at) not in persisted_snapshot_keys
+        )
+        if not missing_accounts:
+            continue
+        return (missing_accounts[0] if close_at <= now else None, close_at)
+    return None, None
 
 
 @dataclass(frozen=True)
@@ -1409,6 +1431,13 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         if snapshot.cycle_status == "evaluation_waiting":
             return AgentPaperLoopAction.WAIT_FOR_EVALUATION
+        if snapshot.cycle_status == "evaluation_performance_due":
+            if (
+                snapshot.performance_due_at is None
+                or snapshot.action_account_id is None
+            ):
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+            return AgentPaperLoopAction.PUBLISH_EVALUATION_PERFORMANCE
         if snapshot.cycle_status == "evaluation_complete":
             return AgentPaperLoopAction.FINALIZE_EVALUATION
         if snapshot.cycle_status == "evaluation_pending":
@@ -1747,6 +1776,7 @@ async def confirm_agent_paper_shutdown(
     exact_actions = {
         AgentPaperLoopAction.COLLECT_WINDOW,
         AgentPaperLoopAction.ADVANCE_ORDER,
+        AgentPaperLoopAction.PUBLISH_EVALUATION_PERFORMANCE,
         AgentPaperLoopAction.PUBLISH_PERFORMANCE,
     }
     if action in exact_actions:
@@ -1766,12 +1796,23 @@ async def confirm_agent_paper_shutdown(
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session:
-                if action == AgentPaperLoopAction.PUBLISH_PERFORMANCE:
+                if action in {
+                    AgentPaperLoopAction.PUBLISH_EVALUATION_PERFORMANCE,
+                    AgentPaperLoopAction.PUBLISH_PERFORMANCE,
+                }:
                     if before_snapshot.performance_due_at is None:
+                        return False
+                    performance_account_id = (
+                        before_snapshot.action_account_id
+                        if action == AgentPaperLoopAction.PUBLISH_EVALUATION_PERFORMANCE
+                        else account_id
+                    )
+                    if performance_account_id is None:
                         return False
                     persisted = await session.scalar(
                         select(PaperPerformanceSnapshotRecord.id).where(
-                            PaperPerformanceSnapshotRecord.account_id == account_id,
+                            PaperPerformanceSnapshotRecord.account_id
+                            == performance_account_id,
                             PaperPerformanceSnapshotRecord.as_of
                             == before_snapshot.performance_due_at,
                         )
@@ -2196,6 +2237,18 @@ async def execute_agent_paper_loop_action(
         if not published:
             return AgentPaperLoopAction.STOP_PERFORMANCE_UNAVAILABLE
         return None
+    if action == AgentPaperLoopAction.PUBLISH_EVALUATION_PERFORMANCE:
+        if snapshot.performance_due_at is None or snapshot.action_account_id is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        published = await publish_due_performance_once(
+            settings,
+            account_id=snapshot.action_account_id,
+            as_of=snapshot.performance_due_at,
+            enqueue_session_summary=False,
+        )
+        if not published:
+            return AgentPaperLoopAction.STOP_PERFORMANCE_UNAVAILABLE
+        return None
     if snapshot.cycle_id is None:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     if action == AgentPaperLoopAction.RESUME:
@@ -2247,6 +2300,7 @@ async def publish_due_performance_once(
     *,
     account_id: UUID,
     as_of: datetime,
+    enqueue_session_summary: bool = True,
 ) -> bool:
     """Publish one exact close, stopping cleanly when its price facts are incomplete."""
     if not settings.database_url:
@@ -2267,6 +2321,7 @@ async def publish_due_performance_once(
                     session,
                     account_id=account_id,
                     as_of=as_of,
+                    enqueue_session_summary=enqueue_session_summary,
                 )
         except PaperPerformanceError as error:
             if error.code == "PAPER_PERFORMANCE_PRICE_INCOMPLETE":
@@ -2327,19 +2382,78 @@ async def inspect_agent_version_evaluation_loop(
                 )
             )
             registered_slots = tuple(evaluation.train_slots) + tuple(evaluation.oos_slots)
+            account_ids = (
+                evaluation.incumbent_account_id,
+                evaluation.challenger_account_id,
+            )
+            session_closes = await load_oos_session_closes(
+                session,
+                evaluation=evaluation,
+            )
+            if not session_closes:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            persisted_snapshot_keys = {
+                (snapshot_account_id, snapshot_as_of)
+                for snapshot_account_id, snapshot_as_of in (
+                    await session.execute(
+                        select(
+                            PaperPerformanceSnapshotRecord.account_id,
+                            PaperPerformanceSnapshotRecord.as_of,
+                        ).where(
+                            PaperPerformanceSnapshotRecord.account_id.in_(account_ids),
+                            PaperPerformanceSnapshotRecord.as_of.in_(session_closes),
+                        )
+                    )
+                ).all()
+            }
+            due_account_id, next_unpublished_close = _next_evaluation_performance(
+                account_ids=account_ids,
+                session_closes=session_closes,
+                persisted_snapshot_keys=persisted_snapshot_keys,
+                now=now,
+            )
             slot = next((item for item in registered_slots if item not in paired_slots), None)
-            if slot is None:
+            if (
+                due_account_id is not None
+                and next_unpublished_close is not None
+                and (slot is None or slot > next_unpublished_close)
+            ):
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
+                    evaluation_id=evaluation.id,
+                    evaluation_slot_at=registered_slots[-1],
+                    cycle_status="evaluation_performance_due",
+                    performance_due_at=next_unpublished_close,
+                    action_account_id=due_account_id,
+                )
+            if slot is None:
+                if next_unpublished_close is not None:
+                    return AgentPaperLoopSnapshot(
+                        now=now,
+                        calendar_authority_id=evaluation.calendar_authority_id,
+                        evaluation_id=evaluation.id,
+                        evaluation_slot_at=next_unpublished_close,
+                        cycle_status="evaluation_waiting",
+                    )
+                return AgentPaperLoopSnapshot(
+                    now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=registered_slots[-1],
                     cycle_status="evaluation_complete",
                 )
             if now < slot:
+                wait_until = (
+                    min(slot, next_unpublished_close)
+                    if next_unpublished_close is not None
+                    else slot
+                )
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
-                    evaluation_slot_at=slot,
+                    evaluation_slot_at=wait_until,
                     cycle_status="evaluation_waiting",
                 )
             cycles = tuple(

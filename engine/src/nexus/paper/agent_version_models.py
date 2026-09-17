@@ -3,7 +3,8 @@
 import hashlib
 import re
 from collections import Counter
-from datetime import UTC, date, datetime
+from collections.abc import Sequence
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -24,6 +25,7 @@ MIN_CHALLENGER_FILLS = 1
 MIN_EXCESS_RETURN = Decimal("0.005")
 MIN_POSITIVE_EXCESS_SESSIONS = 7
 MAX_DRAWDOWN_DEGRADATION = Decimal("0.0025")
+MIN_SAME_SESSION_SLOT_GAP = timedelta(minutes=15)
 
 _NEW_YORK = ZoneInfo("America/New_York")
 type AgentVersionGateKey = Literal[
@@ -81,6 +83,8 @@ class AgentVersionEvaluationRequest(BaseModel):
             len(train_sessions) < MIN_TRAIN_SESSIONS
             or len(oos_counts) < MIN_OOS_SESSIONS
             or max(oos_counts.values()) > MAX_OOS_SLOTS_PER_SESSION
+            or has_unsafe_same_session_gap(self.train_slots)
+            or has_unsafe_same_session_gap(self.oos_slots)
         ):
             raise ValueError("AGENT_VERSION_WINDOW_INVALID")
         return self
@@ -299,20 +303,41 @@ def _gate(
 
 
 def evaluation_policy_hash() -> str:
-    return _sha256(
-        {
-            "max_drawdown_degradation": _decimal(MAX_DRAWDOWN_DEGRADATION),
-            "max_oos_slots_per_session": MAX_OOS_SLOTS_PER_SESSION,
-            "min_action_divergences": MIN_ACTION_DIVERGENCES,
-            "min_challenger_fills": MIN_CHALLENGER_FILLS,
-            "min_excess_return": _decimal(MIN_EXCESS_RETURN),
-            "min_oos_sessions": MIN_OOS_SESSIONS,
-            "min_positive_excess_sessions": MIN_POSITIVE_EXCESS_SESSIONS,
-            "min_train_sessions": MIN_TRAIN_SESSIONS,
-            "oos_slot_count": OOS_SLOT_COUNT,
-            "policy_version": POLICY_VERSION,
-            "train_slot_count": TRAIN_SLOT_COUNT,
-        }
+    return _sha256(evaluation_policy_payload())
+
+
+def evaluation_policy_payload() -> dict[str, object]:
+    """Return the canonical v1 policy payload used by new evaluations."""
+    return {
+        "max_drawdown_degradation": _decimal(MAX_DRAWDOWN_DEGRADATION),
+        "max_oos_slots_per_session": MAX_OOS_SLOTS_PER_SESSION,
+        "min_action_divergences": MIN_ACTION_DIVERGENCES,
+        "min_challenger_fills": MIN_CHALLENGER_FILLS,
+        "min_excess_return": _decimal(MIN_EXCESS_RETURN),
+        "min_oos_sessions": MIN_OOS_SESSIONS,
+        "min_positive_excess_sessions": MIN_POSITIVE_EXCESS_SESSIONS,
+        "min_same_session_slot_gap_seconds": int(
+            MIN_SAME_SESSION_SLOT_GAP.total_seconds()
+        ),
+        "min_train_sessions": MIN_TRAIN_SESSIONS,
+        "oos_slot_count": OOS_SLOT_COUNT,
+        "policy_version": POLICY_VERSION,
+        "train_slot_count": TRAIN_SLOT_COUNT,
+    }
+
+
+def has_unsafe_same_session_gap(slots: Sequence[datetime]) -> bool:
+    by_session: dict[date, list[datetime]] = {}
+    for slot in slots:
+        by_session.setdefault(_session(slot), []).append(slot)
+    return any(
+        later - earlier < MIN_SAME_SESSION_SLOT_GAP
+        for session_slots in by_session.values()
+        for earlier, later in zip(
+            sorted(session_slots),
+            sorted(session_slots)[1:],
+            strict=False,
+        )
     )
 
 
