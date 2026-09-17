@@ -11,6 +11,7 @@ const eslintConfig = defineConfig([
   globalIgnores([
     ".worktrees/**",
     ".nexus-pytest/**",
+    "outputs/**",
     ".next/**",
     "dist/**",
     "out/**",

@@ -167,10 +167,10 @@ _EXPECTED_GATEWAY_SOURCE_SHA256 = {
     "main.py": "dcab8e8167b7a866b1fe5b6bd1d36c4c69f75723c338bec68d5052cbc6c8ae65",
 }
 _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256 = (
-    "00c8c68a02d9865eb81cfcc872b2243c4188de802bfce4ee2c5febb5485ecfda"
+    "b916038dc5e7d27f91eb9f3bf7194e9e11ef9f9183270f0506af9f32989b199b"
 )
 _EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256 = (
-    "af648cc96932885d58dca6acb6b5d18f5f0da21ad35e9e37db3eda9b9177c6ea"
+    "4e89cbc386624d338b8d0896808943714e54e2cd38543d87a6d3e3a74dc2879a"
 )
 _EXPECTED_FOSUN_GATEWAY_PROJECT = {
     "name": "nexus-fosun-gateway",
@@ -204,6 +204,9 @@ _EXPECTED_FOSUN_GATEWAY_PROJECT = {
         ),
         "nexus-fosun-simulation-fixture": (
             "nexus_fosun_gateway.simulation_main:run_fixture"
+        ),
+        "nexus-fosun-simulation-readonly": (
+            "nexus_fosun_gateway.simulation_readonly_cli:run"
         ),
     },
 }
