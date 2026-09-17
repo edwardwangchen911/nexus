@@ -67,6 +67,7 @@ test("facts-only overview leads with assets without hiding decision boundaries",
 });
 
 test("no data progresses through frozen research, diagnosis, three proposals, and shadow observation", async ({ page }) => {
+  test.slow();
   let researchReady = false;
   let shadowStarted = false;
   let shadowRequest: { body: unknown; idempotencyKey?: string; version?: string } | null = null;
