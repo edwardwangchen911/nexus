@@ -1,8 +1,8 @@
 # NEXUS Agent 模拟交易与策略进化路线图
 
-**状态：** 第一阶段已完成真实 no-trade 闭环和同日多决策验收；连续运行与真实订单路径待推进
+**状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段版本评价进入验收收口，真实订单路径仍待自然发生
 
-**核查日期：** 2026-09-16
+**核查日期：** 2026-09-17
 
 **适用范围：** Mac 本地、内部模拟优先、真实账户只读、实盘关闭
 
@@ -43,6 +43,22 @@ Schwab 决策报价、按需执行窗口、API/BFF/`/paper` 回读和前台五�
 | 统一对照与 Agent 进化 | Agent、`hold_current` 和 SPY 已有持久化对照；`baseline_v1` 诚实 unavailable | 先积累连续模拟和真实订单事实；baseline 前向价格合同暂缓，不阻塞第二阶段 |
 | 券商正式模拟盘 / 实盘 | 未开始且不在当前范围 | 外部写入和实盘仍需用户单独授权；实盘继续逐笔确认 |
 | Research Shadow | 保留但暂停 | 不合并 Shadow 分支，不把它恢复为主线前置 |
+
+### 2026-09-17 第三阶段验收对账
+
+- 业务库迁移已从 `0061_agent_paper_job_isolation` 正常升级到当前代码权威头
+  `0063_agent_version_pair_context`；历史 Agent 周期和决策仍可读取。
+- 提交快照的 Engine API、BFF 和 `/paper` 已完成同库回读：11 个周期中 9 个 completed、2 个
+  unavailable，最近结果为 `NO_ORDER_REQUIRED`，版本历史有 3 条，页面保持只读。
+- Agent 版本评价已具备固定 AAPL、冻结 incumbent/challenger、独立等额内部账户、4 个训练槽、
+  20 个样本外槽、原 Job 恢复、配对、确定性 `PASS/FAIL/UNKNOWN` 门禁和只读页面投影。
+- 当前业务库没有已登记评价或评价终态，`version_evaluation=null`；所有 broker binding、broker
+  execution intent、内部订单和成交计数均为 0，`execution_locked=true`。没有为了制造观察数据
+  调用模型、Provider 或券商，也没有把历史提示复制成无意义 challenger。
+- 受控测试分别覆盖 no-trade、完整成交、部分成交、风控缩减/拒绝、行情 unavailable、账本守恒、
+  双通道原 Job 恢复和幂等配对；真实 AAPL 仍只有 no-trade 事实，因此不得把受控订单测试写成真实
+  订单验收。第三阶段还需完成双通道订单/成交 fixture 的集中证明，并在存在合法冻结 challenger 后
+  用定时任务积累真实样本外观察；等待这些事实不阻塞第四、第五阶段的本地接入就绪开发。
 
 2026-09-15 盘前补充核验：Schwab `LEVELONE_EQUITIES` 在约 05:45 ET 的 20 秒有界采集中，
 AAPL 与 NVDA 均返回 `delayed=false` 的双边报价和最近成交，证明 07:00 前可以获得盘前决策报价；
@@ -334,7 +350,7 @@ Alpaca 的接线和覆盖较广，但当时的 1 分钟数据不连续；嘉信�
 每天可以更新证据和评价，但不要求 Agent 每天强行交易。先固定资金、候选范围、决策时点、最大
 换手和停止条件，再启用本地调度。断线或结果未知时先查持久化事实，不更换幂等键重发。
 
-### 第三阶段：Agent 复盘与版本进化（未开始）
+### 第三阶段：Agent 复盘与版本进化（实现已进入验收收口）
 
 **用户可见结果：** 每个 Agent 版本为什么被保留、淘汰或继续观察都有证据。
 

@@ -556,7 +556,7 @@ After code, migration, fixture suite, and readback are green, inspect the busine
 
 Before claiming Stage 3 implementation complete, verify from current state:
 
-- migration head is 0062 and authenticated API readiness is healthy;
+- migration head is `0063_agent_version_pair_context` and authenticated API migration readiness is healthy;
 - isolated evaluation accounts exist only for a registered evaluation;
 - no evaluation work or model call was duplicated;
 - fixture order/fill/ledger proof passes even if live AAPL remains no-trade;

@@ -22,6 +22,50 @@ uv run --project engine nexus-engine-agent-risk-authority \
 不把 Alpaca 标注的来源完整性未知改写为全球事实完备。该命令不调用模型，
 不创建周期、决策、订单、成交或账本记录；页面仍只读已持久化结果。
 
+## Agent 版本并行评价：先查持久化状态
+
+版本评价只允许固定 AAPL、两个冻结版本、独立内部账户以及预先登记的 4 个训练槽和 20 个
+样本外槽。网页只读，不提供注册、推进、恢复、终结或晋升按钮。任何自动任务或人工恢复都必须
+按以下顺序核对，不能因为命令超时、输出流断开或市场时间已到就重新注册或盲目推进：
+
+1. 读取 `agent_version_evaluations` 和 `agent_version_evaluation_decisions`，先确认是否已有相同
+   authority hash 的评价、是否仍为 open，以及是否已有 `PASS`、`FAIL` 或 `UNKNOWN` 终态；
+2. 按 `evaluation_id + decision_slot_at` 核对 incumbent 和 challenger 两条 cycle，不能只看其中一条；
+3. 对每条 cycle 依次核对原 `AgentResearchRun`、原生 `Job` 和唯一终态 Output；已有 queued、running
+   或 succeeded Job 时不得创建替代 Job，也不得再次调用模型；
+4. 核对 `agent_version_cycle_pairs` 和终态 decision，已配对或已终结的槽不得重放；
+5. 核对当日模型预算和既有 usage；额度不足或账目不明时保持 unavailable/UNKNOWN；
+6. 核对两个内部账户都没有 `broker_account_bindings`、`broker_execution_intents` 或外部账户标识，
+   同时确认券商命令和实盘订单计数仍为零；
+7. 核对关联 cycle、评价投影和页面均为 `execution_locked=true`，且 `broker_write=false`、
+   `live_write=false`；
+8. 只有某个登记槽的两条持久化事实都确实缺失，且冻结 authority 仍完全匹配时，才允许推进该
+   精确槽；不得换槽、换幂等键、改冻结版本或补造 challenger。
+
+先使用只读状态命令；它只读取本地 PostgreSQL，不调用模型或 Provider：
+
+```sh
+uv run --project engine nexus-engine-agent-version-evaluation status \
+  --evaluation-id <已登记评价UUID>
+```
+
+如果某槽已经有原 Job 或 Output，但 pair 尚未落盘，只恢复同一槽：
+
+```sh
+uv run --project engine nexus-engine-agent-version-evaluation resume \
+  --evaluation-id <已登记评价UUID> \
+  --decision-slot <原UTC槽时刻>
+```
+
+只有上述检查证明两条 lane 的精确槽工作均未创建时，才可对该槽执行 `advance`。只有全部样本外
+槽已过窗口且持久化事实齐备时才可执行 `finalize`。`UNKNOWN` 和 `FAIL` 都保留 incumbent；即使
+`PASS` 也只影响未来内部模拟版本选择，不授予券商模拟或实盘权限。
+
+如果业务库没有 open 评价，也没有一个明确冻结、与 incumbent 不同且用途合法的 challenger
+prompt/model authority，则保持 `version_evaluation=null`，不要为了启动观察而复制旧提示、修改提示
+或注册无意义评价。定时补证任务应保持安静，直到合法 authority 已存在；这不阻塞第四、第五阶段
+的本地接入就绪工作。
+
 ```sh
 PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.paper_once --help
 ```
