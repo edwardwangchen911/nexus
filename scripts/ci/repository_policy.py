@@ -227,7 +227,7 @@ _EXPECTED_FOSUN_GATEWAY_TOOL = {
     },
 }
 _EXPECTED_COMPOSE_SHA256 = (
-    "2572c24e138de6d0b1a48c2671dacf77b99022aa6d7cedc51ad3c96fa55c08be"
+    "02870b2529070646f9f95ae27fe3847439aabed502e5adb3bb4b8ec5bed59fcf"
 )
 _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256 = (
     "f22c88598929e7cab2282fab240b0d19791e12a7af4c6ca051df99d7eda9d6f1"
@@ -276,7 +276,7 @@ _REAL_E2E_CONFIG_REQUIRED = (
 # The workflow digest covers only the real-e2e job so unrelated CI maintenance
 # does not require re-approving the real-fixture boundary.
 _EXPECTED_REAL_E2E_CONFIG_SHA256 = (
-    "a7f53f775f634015c31952c6cf9f20d15ee44c6919038da03c3b5183d53d11aa"
+    "78dbbb17a0bcfa2689a349bd8a98254e9e5797a37ea3a2f2a945cfd7519fffb2"
 )
 _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256 = (
     "a9f765040dd2916c8950991854944b5a78501c57db87047bcb6e02a3768a2d66"

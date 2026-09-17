@@ -28,7 +28,6 @@ PREVIOUS_HEAD = "0059_agent_paper_intraday_cycles"
 def test_0060_is_the_single_head_and_exposes_agent_paper_queue() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == "0061_agent_paper_job_isolation"
     assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     revision = scripts.get_revision(MIGRATION_HEAD)
     assert revision is not None

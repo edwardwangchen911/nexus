@@ -94,11 +94,11 @@ for (const viewport of releaseViewports) {
     }
     if (viewport.width < 768) {
       await page.locator(".app-shell__drawer > summary").click();
-      await expect(page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "组合" })).toHaveAttribute("aria-current", "page");
+      await expect(page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "账户与交易" })).toHaveAttribute("aria-current", "page");
       await page.locator(".app-shell__drawer > summary").click();
     } else {
       const navigation = page.getByRole("navigation", { name: "主导航" });
-      await expect(navigation.getByRole("link", { name: "组合" })).toHaveAttribute("aria-current", "page");
+      await expect(navigation.getByRole("link", { name: "账户与交易" })).toHaveAttribute("aria-current", "page");
       if (viewport.name === "mobile-landscape") {
         const sidebar = page.locator(".app-shell__sidebar");
         await expect(sidebar).toHaveCSS("overflow-y", "auto");

@@ -1,9 +1,10 @@
 """Normal FRED import augments exact research, never its historical or standalone base."""
 
 import json
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from helpers.research_snapshots import INSTRUMENT, seed_filing
@@ -16,6 +17,10 @@ from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops import agent_paper_loop as loop
 from nexus.ops.daily_once import DailyOnceSettings
 from nexus.ops.openai_local import prepare_database
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
 from nexus.persistence.models.data import DataSnapshot, MacroObservation
 from nexus.persistence.session import session_factory
 from nexus.research.fred_observations import (
@@ -26,7 +31,7 @@ from nexus.research.fred_observations import (
 )
 from nexus.research.fred_storage import import_fred_vintage, read_fred_observations
 from pydantic import SecretStr
-from sqlalchemy import select
+from sqlalchemy import func, select
 from unit.market.test_object_store import FakeS3Client
 from unit.research.test_fred_observations import parse
 
@@ -233,17 +238,54 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
     )
     await prepare_database(settings)
     factory = session_factory(settings)
-    fixed_now = datetime(2026, 9, 16, 15, tzinfo=UTC)
-    initial_as_of = fixed_now - timedelta(minutes=1)
-    vintage = loop.latest_visible_macro_vintage(fixed_now)
+    async with factory() as session:
+        database_now = await session.scalar(select(func.clock_timestamp()))
+    assert isinstance(database_now, datetime)
+    fixed_now = database_now
+    local_date = fixed_now.astimezone(ZoneInfo("America/New_York")).date()
+    calendar_authority_id = UUID("0199c8a1-0000-7000-8000-000000000001")
+    async with factory() as session, session.begin():
+        session.add(
+            ExchangeCalendarAuthorityRecord(
+                id=calendar_authority_id,
+                exchange="XNYS",
+                version="fred-research-context-v1",
+                source="fixture",
+                range_start=local_date - timedelta(days=7),
+                range_end=local_date + timedelta(days=7),
+                query_parameters={},
+                completeness_status="complete",
+                content_hash="f" * 64,
+                published_at=fixed_now - timedelta(days=1),
+                created_at=fixed_now - timedelta(days=1),
+            )
+        )
+        for offset in range(-3, 4):
+            session_date = local_date + timedelta(days=offset)
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=calendar_authority_id,
+                    session=session_date,
+                    market_open_at=datetime.combine(
+                        session_date, time(13, 30), tzinfo=UTC
+                    ),
+                    market_close_at=datetime.combine(
+                        session_date, time(20), tzinfo=UTC
+                    ),
+                    decision_at=datetime.combine(
+                        session_date, time(20, 1), tzinfo=UTC
+                    ),
+                    created_at=fixed_now - timedelta(days=1),
+                )
+            )
+    initial_as_of = fixed_now
+    async with factory() as session:
+        vintage = await loop.latest_visible_macro_vintage(
+            session,
+            now=fixed_now,
+            expected_calendar_authority_id=calendar_authority_id,
+        )
 
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return fixed_now.replace(tzinfo=None) if tz is None else fixed_now.astimezone(tz)
-
-    monkeypatch.setattr(loop, "datetime", FixedDateTime)
-    monkeypatch.setattr(snapshot_module, "datetime", FixedDateTime)
     async with factory() as session, session.begin():
         await seed_filing(session)
         original = await prepare_research_snapshot(
@@ -255,7 +297,7 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
         original_payload = dict(original.payload)
 
     store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
-    received_at = datetime(2026, 9, 15, 14, tzinfo=UTC)
+    received_at = fixed_now - timedelta(minutes=1)
     async with factory() as session, session.begin():
         for series in loop._PAPER_MACRO_SERIES:
             await import_fred_vintage(
@@ -267,13 +309,16 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
                 ),
                 store=store,
             )
+    async with factory() as session:
+        decision_now = await session.scalar(select(func.clock_timestamp()))
+        assert isinstance(decision_now, datetime)
         scoped = await read_fred_observations(
             session,
-            as_of=fixed_now,
+            as_of=decision_now,
             series=loop._PAPER_MACRO_SERIES,
             vintage=vintage,
         )
-        assert {row.series for row in scoped.values()} == loop._PAPER_MACRO_SERIES
+    assert {row.series for row in scoped.values()} == loop._PAPER_MACRO_SERIES
 
     async def prepare_scoped_snapshot(session, instrument_id, *, as_of, **kwargs):
         assert kwargs["macro_series"] == loop._PAPER_MACRO_SERIES
@@ -285,11 +330,15 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
             **kwargs,
         )
 
-    async def inspect_prior(_settings, *, account_id, now):
+    async def inspect_prior(
+        _settings, *, account_id, now, expected_calendar_authority_id
+    ):
+        assert expected_calendar_authority_id == calendar_authority_id
         return loop.PriorDailyScope(
             instrument_id=INSTRUMENT,
             prior_session=vintage,
             authority_ready=True,
+            decision_session=vintage + timedelta(days=1),
         )
 
     async def unexpected_provider(*_args, **_kwargs):
@@ -304,7 +353,8 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
         fred_key=SecretStr("unused-test-key"),
         account_id=UUID(int=1),
         repo_root=tmp_path,
-        now=fixed_now,
+        now=decision_now,
+        expected_calendar_authority_id=calendar_authority_id,
     )
 
     assert result == "prepared"
@@ -312,15 +362,18 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
     scope = await loop._inspect_macro_scope(
         settings,
         account_id=UUID(int=1),
-        now=fixed_now,
+        now=decision_now,
+        expected_calendar_authority_id=calendar_authority_id,
     )
     assert scope.ready_series == loop._PAPER_MACRO_SERIES
     assert scope.snapshot_ready is True
     async with factory() as session:
+        read_now = await session.scalar(select(func.clock_timestamp()))
+        assert isinstance(read_now, datetime)
         current = await select_authoritative_snapshot(
             session,
             instrument_id=INSTRUMENT,
-            as_of=fixed_now,
+            as_of=read_now,
         )
         persisted_original = await session.get(DataSnapshot, original.id)
         assert current is not None and current.id != original.id
@@ -335,12 +388,12 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
             request=ResearchRequest(
                 instrument_id=INSTRUMENT,
                 data_snapshot_id=current.id,
-                decision_time=fixed_now,
+                decision_time=read_now,
             ),
             prompt_version_id=None,
             model_config_id=None,
             daily_limit_usd=Decimal("3"),
-            now=fixed_now,
+            now=read_now,
         )
         tools = await database_read_only_tools(
             session,
@@ -351,7 +404,7 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
             "get_macro_snapshot",
             {
                 "data_snapshot_id": str(current.id),
-                "as_of": fixed_now.isoformat(),
+                "as_of": read_now.isoformat(),
                 "series": sorted(loop._PAPER_MACRO_SERIES),
             },
         )

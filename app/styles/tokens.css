@@ -619,6 +619,7 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .paper-performance dd, .paper-order__facts dd { min-inline-size: 0; overflow-wrap: anywhere; margin: var(--space-1) 0 0; }
 .paper-performance dd[data-sign="positive"] { color: var(--color-action); }
 .paper-performance dd[data-sign="negative"] { color: var(--color-danger); }
+.agent-version-evaluation__comparisons { overflow-wrap: anywhere; }
 .paper-table-section { display: grid; gap: var(--space-3); }
 .paper-position-table, .paper-attribution-table, .paper-fill-table, .paper-comparison-table { inline-size: 100%; border-collapse: collapse; }
 .paper-position-table { min-inline-size: 82rem; }

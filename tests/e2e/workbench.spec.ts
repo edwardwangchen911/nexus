@@ -75,6 +75,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
 test("workbench presents offline and unknown results as distinct safe states", async ({ page }) => {
   const payload = readyWorkbench();
   payload.data.loop.status = "offline";
+  payload.data.loop.reason_code = "HEARTBEAT_STALE";
   payload.data.latest_cycle = { ...agentPaperCycle, status: "partially_filled", order_ids: [] };
   payload.data.active_orders = [];
   payload.data.attention = [{

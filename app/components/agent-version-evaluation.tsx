@@ -36,7 +36,7 @@ export function AgentVersionEvaluation({ evaluation }: {
       <LaneRow label="incumbent" metrics={evaluation.incumbent_metrics} />
       <LaneRow label="challenger" metrics={evaluation.challenger_metrics} />
     </tbody></table></div>
-    <ul>{evaluation.comparisons.map((comparison) => <li key={comparison.key}>{comparisonLabels[comparison.key]}：{comparison.data_state === "READY" ? "同窗事实就绪" : "同窗事实不足"}（{comparison.reason_code}）</li>)}</ul>
+    <ul className="agent-version-evaluation__comparisons">{evaluation.comparisons.map((comparison) => <li key={comparison.key}>{comparisonLabels[comparison.key]}：{comparison.data_state === "READY" ? "同窗事实就绪" : "同窗事实不足"}（{comparison.reason_code}）</li>)}</ul>
     <aside className="inline-notice" role="note" aria-label="Agent 版本评价结论"><strong>{statusLabels[evaluation.status]}</strong><p className="numeric-data">{evaluation.reason_code}</p>{evaluation.gates.length > 0 ? <ul>{evaluation.gates.map((gate) => <li key={gate.key}>{gate.key}：{gate.status} · {gate.reason_code}</li>)}</ul> : <p>尚未终结，不展示推测性门禁结果。</p>}</aside>
   </section>;
 }

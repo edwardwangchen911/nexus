@@ -16,8 +16,7 @@ PREVIOUS_HEAD = "0060_agent_paper_loop_heartbeat"
 def test_0061_is_the_single_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
-    assert CURRENT_MIGRATION_HEAD == MIGRATION_HEAD
-    assert scripts.get_heads() == [MIGRATION_HEAD]
+    assert scripts.get_heads() == [CURRENT_MIGRATION_HEAD]
     revision = scripts.get_revision(MIGRATION_HEAD)
     assert revision is not None
     assert revision.down_revision == PREVIOUS_HEAD

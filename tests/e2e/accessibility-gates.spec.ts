@@ -39,9 +39,9 @@ test("client-side route changes focus the main landmark with a visible outline",
   await page.goto("/overview");
   await expect(page.getByRole("heading", { name: "尚无可用诊断" })).toBeVisible();
 
-  await page.getByRole("link", { name: "市场", exact: true }).click();
+  await page.getByRole("link", { name: "设置与运行", exact: true }).click();
 
-  await expect(page).toHaveURL(/\/market$/);
+  await expect(page).toHaveURL(/\/integrations$/);
   const main = page.locator("#main-content");
   await expect(main).toBeFocused();
   const focusStyle = await main.evaluate((element) => {

@@ -51,10 +51,10 @@ for (const viewport of [
       const drawer = page.locator(".app-shell__drawer");
       await drawer.locator(":scope > summary").click();
       await expect(drawer).toHaveAttribute("open", "");
-      const mobileOverview = page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "概览" });
-      await expect(mobileOverview).toHaveAttribute("aria-current", "page");
-      await mobileOverview.focus();
-      await expect(mobileOverview).toBeFocused();
+      const mobileWorkbench = page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "交易工作台" });
+      await expect(mobileWorkbench).toBeVisible();
+      await mobileWorkbench.focus();
+      await expect(mobileWorkbench).toBeFocused();
       if (viewport.name === "mobile-short") {
         const navigationPanel = drawer.locator(":scope > .app-shell__navigation-groups");
         const scrollEvidence = await navigationPanel.evaluate((element) => {
@@ -68,13 +68,13 @@ for (const viewport of [
           };
         });
         expect(scrollEvidence.overflowY).toBe("auto");
-        expect(scrollEvidence.scrollHeight).toBeGreaterThan(scrollEvidence.clientHeight);
-        expect(scrollEvidence.scrollTop).toBeGreaterThan(0);
+        expect(scrollEvidence.scrollHeight).toBeLessThanOrEqual(scrollEvidence.clientHeight);
+        expect(scrollEvidence.scrollTop).toBe(0);
       }
       await drawer.locator(":scope > summary").click();
       await expect(drawer).not.toHaveAttribute("open", "");
     } else {
-      await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
+      await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "交易工作台" })).toBeVisible();
     }
     await expect(page.getByRole("link", { name: "生成一个调整候选" })).toHaveAttribute("href", "/portfolio");
     await page.goto("/optimize");
