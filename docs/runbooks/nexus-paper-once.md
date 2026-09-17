@@ -90,6 +90,12 @@ challenger orchestrator ID 只作为整套 bundle 的锚，缺角色或混入 ac
 宿主启动只校验静态配置与本地 PostgreSQL 可达性；Codex 登录状态仅在领取精确研究 Job
 之前检查，因此临时未登录不会阻止未来槽等待或把尚可登记的槽误判为错过。
 
+v1 运行修正要求同一 XNYS session 内的两个决策槽至少间隔 15 分钟。评价绩效不按
+20 个 OOS 槽造 20 个任意时点快照，而是两个评价账户在 10 个 OOS 交易日各发布一份
+冻结 calendar 的正式 `market_close_at` 快照。宿主在评价期间自动选择下一个缺失账户和收盘时刻，
+继续走正常绩效发布入口，但显式禁止评价账户的 Bark 日终摘要。任一早于最后 OOS 收盘的
+`finalize` 都必须返回 `AGENT_VERSION_WINDOW_OPEN`。
+
 先使用只读状态命令；它只读取本地 PostgreSQL，不调用模型或 Provider：
 
 ```sh

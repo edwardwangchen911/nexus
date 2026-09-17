@@ -2,7 +2,7 @@
 
 **状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段本地版本评价路径已收口；第四阶段已达本地券商模拟接入就绪；第五阶段只读评估投影已完成，当前仍为 `not_ready`
 
-**核查日期：** 2026-09-17
+**核查日期：** 2026-09-18
 
 **适用范围：** Mac 本地、内部模拟优先、真实账户只读、实盘关闭
 
@@ -63,6 +63,26 @@ Schwab 决策报价、按需执行窗口、API/BFF/`/paper` 回读和前台五�
   守恒账本，成交终态前不写 pair，终态后才幂等配对，且 broker intent 仍为零。真实 AAPL 仍只有
   no-trade 事实，因此不得把受控订单测试写成真实订单验收；在存在合法冻结 challenger 后由定时任务
   积累真实样本外观察，等待这些事实不阻塞第四、第五阶段的本地接入就绪开发。
+
+### 2026-09-18 评价 runner 运行修正与新观察
+
+- 首次登记评价 `01a0b00c-57b9-70e6-9d65-0fb4bea0c69f` 在产生任何 cycle、Job、
+  Output、pair、订单或成交前被证明为结构不安全：同日两槽只间隔 5 分钟，且
+  finalizer 错把 10 个 OOS 交易日要求成 20 份绩效快照。该评价已通过正常入口不可变
+  关闭为 `UNKNOWN / EVALUATION_SCHEDULE_UNSAFE`，选中版本仍为 incumbent，没有回放或模型调用。
+- `main@5da6bbd9` 保留 4+20 和全部 PASS 阈值，但要求同交易日决策槽至少间隔 15 分钟；
+  绩效只按冻结 XNYS calendar 的 10 个正式 `market_close_at` 比较。单一 host runner 会幂等
+  发布两个评价账户的收盘快照，并显式禁止评价账户产生 Bark 日终摘要。
+- 新评价 `01a0b0ab-2974-7d34-ae8f-bf24d9a34c7e` 复用同一冻结 AAPL、incumbent、
+  challenger、初始资金和交易日；train 为 2026-09-18/21 每日 14:05、14:20 UTC，
+  OOS 为 2026-09-22至10-05 的 10 个 XNYS 交易日、每日同时两槽。注册时创建
+  0 个 Job/cycle/order/fill，`execution_locked=true`。
+- `com.nexus.agent-paper-loop` 已恢复为 `running`，心跳 `fresh`，持久化读回为
+  `evaluation_waiting`，下一精确唤醒点是 2026-09-18 14:05 UTC。现有 Codex 只读监控
+  `nexus-agent` 已原地改为跟踪新评价，调度与静默通知策略不变。
+
+未来真实槽、收盘快照和最终 `PASS/FAIL/UNKNOWN` 仍须按市场时间自然产生；这些未来
+事实不能用历史回放伪造，也不影响当前代码和 runner 运行验收已完成。
 
 2026-09-15 盘前补充核验：Schwab `LEVELONE_EQUITIES` 在约 05:45 ET 的 20 秒有界采集中，
 AAPL 与 NVDA 均返回 `delayed=false` 的双边报价和最近成交，证明 07:00 前可以获得盘前决策报价；
