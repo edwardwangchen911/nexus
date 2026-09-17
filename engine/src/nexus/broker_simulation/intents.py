@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
@@ -19,15 +20,22 @@ from nexus.broker_simulation.domain import (
     effective_approval_expiry,
     require_intent_transition,
 )
-from nexus.broker_simulation.risk import BrokerRiskContext, evaluate_broker_order_batch
+from nexus.broker_simulation.risk import (
+    BrokerRiskContext,
+    BrokerRiskInstrument,
+    BrokerRiskPosition,
+    evaluate_broker_order_batch,
+)
 from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.broker_simulation import (
     BrokerAccountBindingRecord,
     BrokerBatchApprovalRecord,
     BrokerExecutionIntentOrderRecord,
     BrokerExecutionIntentRecord,
 )
+from nexus.persistence.models.market import Instrument, LatestQuote
 from nexus.persistence.models.paper import (
     AgentPaperCycleRecord,
     PaperExecutionModelRecord,
@@ -38,6 +46,11 @@ from nexus.persistence.models.paper import (
     RiskEvaluationRecord,
     RiskPolicyRecord,
     StrategyDecisionRecord,
+)
+from nexus.persistence.models.portfolio import (
+    CashSnapshot,
+    PortfolioSnapshotRecord,
+    PositionSnapshot,
 )
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -103,8 +116,14 @@ class AgentPaperIntentSource(_FrozenModel):
     execution_locked: Literal[True]
     risk_policy_hash: Hash64
     execution_model_hash: Hash64
+    session_close_at: datetime
     evidence_hashes: tuple[Hash64, ...]
     orders: tuple[AgentPaperIntentSourceOrder, ...]
+
+    @field_validator("session_close_at")
+    @classmethod
+    def _session_close_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
 
 
 @dataclass(frozen=True)
@@ -162,6 +181,12 @@ async def load_agent_paper_intent_source(
         )
     )
     if policy is None or execution_model is None:
+        raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+    calendar_session = await session.get(
+        ExchangeCalendarSessionRecord,
+        (decision.calendar_authority_id, decision.execution_session),
+    )
+    if calendar_session is None or calendar_session.market_close_at is None:
         raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
     paper_orders = tuple(
         await session.scalars(
@@ -240,8 +265,233 @@ async def load_agent_paper_intent_source(
         execution_locked=True,
         risk_policy_hash=policy.content_hash,
         execution_model_hash=execution_model.content_hash,
+        session_close_at=calendar_session.market_close_at,
         evidence_hashes=tuple(sorted(evidence_hashes)),
         orders=tuple(source_orders),
+    )
+
+
+def canonical_broker_account_snapshot_identity(
+    snapshot: PortfolioSnapshotRecord,
+    cash_rows: tuple[CashSnapshot, ...],
+) -> str:
+    return canonical_document_hash(
+        {
+            "schema": "broker_account_snapshot_identity_v1",
+            "portfolio_snapshot_id": snapshot.id,
+            "portfolio_id": snapshot.portfolio_id,
+            "as_of": snapshot.as_of,
+            "position_hash": snapshot.position_hash,
+            "order_hash": snapshot.order_hash,
+            "cash": tuple(
+                {
+                    "currency": row.currency,
+                    "cash_balance": row.cash_balance,
+                    "available_cash": row.available_cash,
+                    "provider_as_of": row.provider_as_of,
+                }
+                for row in sorted(cash_rows, key=lambda item: item.currency)
+            ),
+        }
+    )
+
+
+async def prepare_agent_paper_execution_intent(
+    session: AsyncSession,
+    *,
+    source: AgentPaperIntentSource,
+    account_binding_id: UUID,
+    portfolio_snapshot_id: UUID,
+    now: datetime,
+) -> PreparedExecutionIntent:
+    """Re-risk one frozen Agent Paper batch and persist it as not-sent only."""
+    now = require_utc(now)
+    binding = await session.get(BrokerAccountBindingRecord, account_binding_id)
+    snapshot = await session.get(PortfolioSnapshotRecord, portfolio_snapshot_id)
+    if (
+        binding is None
+        or binding.locked
+        or binding.reconciliation_status != "matched"
+        or binding.provider != "fosun"
+        or binding.environment != "simulation"
+        or binding.account_type != "simulation"
+        or snapshot is None
+        or snapshot.status != "READY"
+        or snapshot.as_of is None
+        or snapshot.as_of > now
+        or snapshot.as_of <= now - timedelta(minutes=15)
+        or source.session_close_at <= now
+    ):
+        raise BrokerIntentError("ACCOUNT_BINDING_NOT_READY")
+    cash_rows = tuple(
+        await session.scalars(
+            select(CashSnapshot)
+            .where(CashSnapshot.portfolio_snapshot_id == snapshot.id)
+            .order_by(CashSnapshot.currency)
+        )
+    )
+    if (
+        not cash_rows
+        or canonical_broker_account_snapshot_identity(snapshot, cash_rows)
+        != binding.snapshot_identity_hash
+    ):
+        raise BrokerIntentError("ACCOUNT_SNAPSHOT_INCOMPLETE")
+    usd_cash = tuple(row for row in cash_rows if row.currency == "USD")
+    if len(usd_cash) != 1:
+        raise BrokerIntentError("ACCOUNT_SNAPSHOT_INCOMPLETE")
+    cash = usd_cash[0]
+    positions = tuple(
+        await session.scalars(
+            select(PositionSnapshot)
+            .where(PositionSnapshot.portfolio_snapshot_id == snapshot.id)
+            .order_by(PositionSnapshot.instrument_id)
+        )
+    )
+    instrument_ids = {item.instrument_id for item in positions} | {
+        item.instrument_id for item in source.orders
+    }
+    instruments = {
+        item.id: item
+        for item in await session.scalars(
+            select(Instrument).where(Instrument.id.in_(instrument_ids))
+        )
+    }
+    if set(instruments) != instrument_ids:
+        raise BrokerIntentError("INSTRUMENT_AUTHORITY_UNAVAILABLE")
+    positions_by_instrument = {item.instrument_id: item for item in positions}
+    sector_notionals: dict[str, Decimal] = {}
+    market_value = Decimal(0)
+    for position in positions:
+        instrument = instruments[position.instrument_id]
+        if position.currency != "USD" or position.current_price is None:
+            raise BrokerIntentError("ACCOUNT_SNAPSHOT_INCOMPLETE")
+        notional = position.quantity * position.current_price
+        market_value += notional
+        sector_notionals[instrument.risk_bucket] = (
+            sector_notionals.get(instrument.risk_bucket, Decimal(0)) + notional
+        )
+
+    orders: list[BrokerOrderDocument] = []
+    quotes: list[LatestQuote] = []
+    for ordinal, item in enumerate(source.orders, start=1):
+        instrument = instruments[item.instrument_id]
+        quote = await session.scalar(
+            select(LatestQuote)
+            .where(
+                LatestQuote.instrument_id == item.instrument_id,
+                LatestQuote.available_at <= now,
+                LatestQuote.available_at > now - timedelta(minutes=15),
+            )
+            .order_by(LatestQuote.available_at.desc(), LatestQuote.id.desc())
+            .limit(1)
+        )
+        price = None if quote is None else quote.ask if item.side == "buy" else quote.bid
+        if (
+            quote is None
+            or price is None
+            or quote.quality_flags
+            or quote.evidence_status not in {"verified", "fixture"}
+            or quote.delivery_mode not in {"real_time", "fixture"}
+            or instrument.tick_size is None
+            or price % instrument.tick_size != 0
+        ):
+            raise BrokerIntentError("PRICE_AUTHORITY_UNAVAILABLE")
+        quotes.append(quote)
+        orders.append(
+            BrokerOrderDocument(
+                instrument_id=item.instrument_id,
+                side=item.side,
+                quantity=item.quantity,
+                limit_price=price,
+                sort_key=ordinal,
+            )
+        )
+    nav = cash.cash_balance + market_value
+    risk_context = BrokerRiskContext(
+        available_cash=cash.available_cash,
+        nav=nav,
+        drawdown_locked=False,
+        minimum_cash_ratio=Decimal("0.10"),
+        single_name_limit=Decimal("0.20"),
+        sector_limit=Decimal("0.40"),
+        positions=tuple(
+            BrokerRiskPosition(
+                instrument_id=position.instrument_id,
+                quantity=position.quantity,
+            )
+            for position in positions
+        ),
+        instruments=tuple(
+            BrokerRiskInstrument(
+                instrument_id=item.instrument_id,
+                asset_type=(
+                    "ETF"
+                    if instruments[item.instrument_id].asset_type.lower() == "etf"
+                    else "common_stock"
+                ),
+                sector=instruments[item.instrument_id].risk_bucket,
+                whitelisted=(
+                    instruments[item.instrument_id].exchange in {"XNYS", "XNAS"}
+                    and instruments[item.instrument_id].currency == "USD"
+                    and instruments[item.instrument_id].asset_type
+                    in {"equity", "common_stock", "etf"}
+                ),
+                existing_notional=(
+                    Decimal(0)
+                    if positions_by_instrument.get(item.instrument_id) is None
+                    else positions_by_instrument[item.instrument_id].quantity
+                    * cast(
+                        Decimal,
+                        positions_by_instrument[item.instrument_id].current_price,
+                    )
+                ),
+            )
+            for item in source.orders
+        ),
+        sector_notionals=sector_notionals,
+    )
+    evidence_hashes = tuple(
+        sorted(
+            {
+                *source.evidence_hashes,
+                binding.snapshot_identity_hash,
+                snapshot.position_hash,
+                snapshot.order_hash,
+                *(quote.content_hash for quote in quotes),
+            }
+        )
+    )
+    return await prepare_execution_intent(
+        session,
+        BrokerIntentPreparation(
+            proposal_group_id=source.cycle_id,
+            strategy_decision_id=source.strategy_decision_id,
+            portfolio_snapshot_id=snapshot.id,
+            evidence_hashes=evidence_hashes,
+            risk_policy_hash=canonical_document_hash(
+                {
+                    "policy": "broker_hard_risk_v1",
+                    "minimum_cash_ratio": "0.10",
+                    "single_name_limit": "0.20",
+                    "sector_limit": "0.40",
+                    "agent_paper_risk_policy_hash": source.risk_policy_hash,
+                }
+            ),
+            execution_model_hash=canonical_document_hash(
+                {
+                    "model": "limit_day_regular_whole_share_v1",
+                    "agent_paper_execution_model_hash": source.execution_model_hash,
+                }
+            ),
+            account_binding_id=binding.id,
+            orders=tuple(orders),
+            risk_context=risk_context,
+            prepared_at=now,
+            quote_expires_at=min(
+                quote.available_at + timedelta(minutes=15) for quote in quotes
+            ),
+            session_close_at=source.session_close_at,
+        ),
     )
 
 

@@ -4,9 +4,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+import nexus.broker_simulation.intents as broker_intents
 import pytest
-from nexus.broker_simulation.domain import BrokerOrderDocument
+from nexus.broker_simulation.domain import BrokerOrderDocument, canonical_document_hash
 from nexus.broker_simulation.intents import (
+    AgentPaperIntentSource,
+    AgentPaperIntentSourceOrder,
     BrokerApprovalAuthority,
     BrokerIntentAuthorityChanged,
     BrokerIntentPreparation,
@@ -18,15 +21,33 @@ from nexus.broker_simulation.risk import (
     BrokerRiskInstrument,
     BrokerRiskPosition,
 )
-from nexus.persistence.models.broker_simulation import BrokerAccountBindingRecord
-from nexus.persistence.models.market import Instrument
+from nexus.persistence.models.broker_simulation import (
+    BrokerAccountBindingRecord,
+    BrokerBatchApprovalRecord,
+    BrokerCommandRecord,
+    BrokerExecutionIntentOrderRecord,
+    BrokerExecutionIntentRecord,
+)
+from nexus.persistence.models.market import Instrument, LatestQuote
+from nexus.persistence.models.portfolio import (
+    Account,
+    BrokerSyncRun,
+    CashSnapshot,
+    Portfolio,
+    PortfolioSnapshotRecord,
+)
+from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 _NOW = datetime(2026, 8, 28, 14, tzinfo=UTC)
 _BINDING_ID = UUID(int=1001)
 _INSTRUMENT_ID = UUID(int=1002)
+_ACCOUNT_ID = UUID(int=1201)
+_PORTFOLIO_ID = UUID(int=1202)
+_SYNC_RUN_ID = UUID(int=1203)
+_SNAPSHOT_ID = UUID(int=1204)
 
 
 async def _seed(database_url: str) -> None:
@@ -118,6 +139,168 @@ def _approval(preparation: BrokerIntentPreparation) -> BrokerApprovalAuthority:
         execution_model_hash=preparation.execution_model_hash,
         orders=preparation.orders,
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_paper_source_prepares_not_sent_intent_without_dispatch(
+    migrated_database_url: str,
+) -> None:
+    await _seed(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    snapshot_identity = canonical_document_hash(
+        {
+            "schema": "broker_account_snapshot_identity_v1",
+            "portfolio_snapshot_id": _SNAPSHOT_ID,
+            "portfolio_id": _PORTFOLIO_ID,
+            "as_of": _NOW,
+            "position_hash": "1" * 64,
+            "order_hash": "2" * 64,
+            "cash": (
+                {
+                    "currency": "USD",
+                    "cash_balance": Decimal("10000"),
+                    "available_cash": Decimal("10000"),
+                    "provider_as_of": _NOW,
+                },
+            ),
+        }
+    )
+    async with factory() as session, session.begin():
+        binding = await session.get(BrokerAccountBindingRecord, _BINDING_ID)
+        assert binding is not None
+        binding.snapshot_identity_hash = snapshot_identity
+        session.add_all(
+            (
+                Account(id=_ACCOUNT_ID, provider="fosun", status="ACTIVE"),
+                Portfolio(id=_PORTFOLIO_ID, account_id=_ACCOUNT_ID, name="Fixture SIM"),
+            )
+        )
+        await session.flush()
+        session.add(
+            BrokerSyncRun(
+                id=_SYNC_RUN_ID,
+                account_id=_ACCOUNT_ID,
+                portfolio_id=_PORTFOLIO_ID,
+                trigger_kind="MANUAL",
+                actor_id="fixture",
+                route="fixture",
+                idempotency_key="agent-paper-broker-snapshot",
+                request_hash="3" * 64,
+                status="READY",
+                accepted_at=_NOW,
+                completed_at=_NOW,
+                attempt_count=1,
+                failure_reason=None,
+                cash_flow_quality="PASS",
+            )
+        )
+        await session.flush()
+        session.add(
+            PortfolioSnapshotRecord(
+                id=_SNAPSHOT_ID,
+                portfolio_id=_PORTFOLIO_ID,
+                sync_run_id=_SYNC_RUN_ID,
+                stale_from_snapshot_id=None,
+                status="READY",
+                as_of=_NOW,
+                position_hash_version="position_snapshot_v1",
+                position_hash="1" * 64,
+                order_hash_version="order_snapshot_v1",
+                order_hash="2" * 64,
+                source_request_ids=["fixture"],
+                source_observations=[],
+            )
+        )
+        await session.flush()
+        session.add_all(
+            (
+                CashSnapshot(
+                    portfolio_snapshot_id=_SNAPSHOT_ID,
+                    currency="USD",
+                    cash_balance=Decimal("10000"),
+                    available_cash=Decimal("10000"),
+                    provider_as_of=_NOW,
+                ),
+                LatestQuote(
+                    instrument_id=_INSTRUMENT_ID,
+                    source="fixture",
+                    feed="fixture",
+                    delivery_mode="fixture",
+                    bid=Decimal("99.99"),
+                    ask=Decimal("100.00"),
+                    last=Decimal("99.995"),
+                    observed_at=_NOW,
+                    available_at=_NOW,
+                    received_at=_NOW,
+                    revision="fixture-v1",
+                    quality_flags=[],
+                    event_kind="fixture",
+                    content_hash="4" * 64,
+                    evidence_status="fixture",
+                    data_artifact_id=None,
+                ),
+            )
+        )
+
+    source = AgentPaperIntentSource(
+        cycle_id=UUID(int=1301),
+        strategy_decision_id=UUID(int=1302),
+        paper_order_batch_id=UUID(int=1303),
+        execution_locked=True,
+        risk_policy_hash="5" * 64,
+        execution_model_hash="6" * 64,
+        session_close_at=datetime(2026, 8, 28, 20, tzinfo=UTC),
+        evidence_hashes=("5" * 64, "6" * 64, "7" * 64),
+        orders=(
+            AgentPaperIntentSourceOrder(
+                paper_order_id=UUID(int=1304),
+                instrument_id=_INSTRUMENT_ID,
+                side="buy",
+                quantity=10,
+                risk_evaluation_id=UUID(int=1305),
+                risk_result_hash="7" * 64,
+                fill_hash="8" * 64,
+            ),
+        ),
+    )
+    async with factory() as session, session.begin():
+        prepare_source = getattr(
+            broker_intents,
+            "prepare_agent_paper_execution_intent",
+        )
+        prepared = await prepare_source(
+            session,
+            source=source,
+            account_binding_id=_BINDING_ID,
+            portfolio_snapshot_id=_SNAPSHOT_ID,
+            now=_NOW,
+        )
+
+    async with factory() as session:
+        intent = await session.get(BrokerExecutionIntentRecord, prepared.intent_id)
+        orders = tuple(
+            await session.scalars(
+                select(BrokerExecutionIntentOrderRecord).where(
+                    BrokerExecutionIntentOrderRecord.intent_id == prepared.intent_id
+                )
+            )
+        )
+        side_effect_counts_list: list[int] = []
+        for model in (BrokerBatchApprovalRecord, BrokerCommandRecord, Job):
+            side_effect_counts_list.append(
+                int(await session.scalar(select(func.count()).select_from(model)) or 0)
+            )
+        side_effect_counts = tuple(side_effect_counts_list)
+    assert intent is not None
+    assert (intent.status, prepared.status) == ("prepared", "prepared")
+    assert len(orders) == 1
+    assert (orders[0].status, orders[0].side, orders[0].quantity) == (
+        "not_sent",
+        "buy",
+        Decimal("10"),
+    )
+    assert orders[0].limit_price == Decimal("100.00")
+    assert side_effect_counts == (0, 0, 0)
 
 
 @pytest.mark.asyncio
