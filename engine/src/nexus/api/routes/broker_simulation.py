@@ -39,6 +39,8 @@ from nexus.broker_simulation.intents import (
     BrokerIntentError,
     BrokerIntentPreparation,
     approve_execution_intent,
+    load_agent_paper_intent_source,
+    prepare_agent_paper_execution_intent,
     prepare_execution_intent,
     reject_execution_intent,
 )
@@ -189,8 +191,24 @@ async def prepare_broker_intent(
             meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
         )
     try:
-        authority = await _preparation_from_proposal(session, payload=payload, now=now)
-        prepared = await prepare_execution_intent(session, authority)
+        if payload.agent_paper_cycle_id is not None:
+            if payload.account_binding_id is None or payload.portfolio_snapshot_id is None:
+                raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+            source = await load_agent_paper_intent_source(
+                session,
+                cycle_id=payload.agent_paper_cycle_id,
+                now=now,
+            )
+            prepared = await prepare_agent_paper_execution_intent(
+                session,
+                source=source,
+                account_binding_id=payload.account_binding_id,
+                portfolio_snapshot_id=payload.portfolio_snapshot_id,
+                now=now,
+            )
+        else:
+            authority = await _preparation_from_proposal(session, payload=payload, now=now)
+            prepared = await prepare_execution_intent(session, authority)
     except BrokerIntentError as error:
         raise _domain_error(error) from error
     intent = await _intent_response(session, prepared.intent_id)
@@ -521,6 +539,8 @@ async def _intent_response(session: AsyncSession, intent_id: UUID) -> BrokerInte
 async def _preparation_from_proposal(
     session: AsyncSession, *, payload: BrokerIntentPrepareRequest, now: datetime
 ) -> BrokerIntentPreparation:
+    if payload.proposal_group_id is None or payload.proposal_id is None:
+        raise BrokerIntentError("PROPOSAL_NOT_EXECUTABLE")
     if not current_paper_order_price_authority_available():
         raise BrokerIntentError("PRICE_AUTHORITY_UNAVAILABLE")
     group = await session.get(OptimizationProposalGroupRecord, payload.proposal_group_id)

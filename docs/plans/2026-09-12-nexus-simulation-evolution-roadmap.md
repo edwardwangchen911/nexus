@@ -1,6 +1,6 @@
 # NEXUS Agent 模拟交易与策略进化路线图
 
-**状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段本地版本评价路径已收口；第四阶段复用既有离线券商模拟边界补 Agent 主线接线
+**状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段本地版本评价路径已收口；第四阶段 Agent 主线已达本地券商模拟接入就绪，外部激活仍阻断
 
 **核查日期：** 2026-09-17
 
@@ -360,7 +360,7 @@ Alpaca 的接线和覆盖较广，但当时的 1 分钟数据不连续；嘉信�
 回撤、成本、稳定性和数据完整性共同通过预定门槛，才能成为下一版模拟冠军。硬风控不由 Agent
 修改。
 
-### 第四阶段：券商正式模拟盘（本地接入就绪建设中，外部激活仍阻断）
+### 第四阶段：券商正式模拟盘（本地接入就绪已完成，外部激活仍阻断）
 
 代码不是从零开始。主线已有独立 broker worker、模拟 Gateway 严格契约、mTLS/HMAC 与密钥域隔离、
 账户类型和 capability admission、服务端人工批准、单次提交、结果未知不重发、全量对账、Webhook 冲突
@@ -372,15 +372,18 @@ simulation admission、当前有效 `SIMULATION_WRITE_ACTIVATED`、intent、comm
 计数全部为零。因此当前准确状态是：离线能力边界已实现，但未绑定模拟账户、未激活外部写入，
 也没有任何曾经尝试发送的券商命令。
 
-当前唯一必要的代码接线缺口是：现有 intent 准备入口只能消费旧 optimization proposal，尚不能从
-Agent Paper 已冻结的 `cycle → strategy decision → paper order batch → risk evaluation` 事实生成同数量、同方向的
-`prepared / not_sent` broker intent。最小实施方案是在 `broker_simulation` 边界内增加单向适配器：
+该接线已在 2026-09-17 完成：现有 intent 准备入口保留旧 optimization proposal 来源，同时严格二选一接受
+Agent Paper 已冻结的 `cycle → strategy decision → paper order batch → risk evaluation` 事实，生成同数量、同方向的
+`prepared / not_sent` broker intent。实现仍限定在 `broker_simulation` 边界内：
 
 1. 只接受一个已完成决策且已有受控订单的 Agent Paper cycle，不发起 Agent、行情或 Provider 调用；
 2. 从已持久化的内部订单读取标的、方向和已批整股数量，并绑定原 risk policy/input/result hash；
 3. 使用当前已对账的券商模拟快照重新执行既有 broker 硬风控，不从 Paper 账户倒推外部现金或持仓；
 4. 准备后只落库 `prepared / not_sent`，不自动批准、不创建 dispatch Job；
 5. Agent Paper 模块继续不引用 broker/provider 代码，反向依赖边界和 `execution_locked=true` 不变。
+
+受控 PostgreSQL/API 验收已证明同一幂等键只产生一个 intent，GET workbench 可读回同一条
+`prepared / not_sent` 事实，且 approval、broker command 和 Job 均为零。这是离线接入就绪证据，不是真实券商订单验收。
 
 该接线只能使系统达到“外部接入就绪”，不代表券商模拟已验收。真实订单生命周期、回报、对账、
 断线恢复和本地模拟偏差仍必须在门禁 A/B 完成后，由用户对精确账户、时间窗口、上限和具体批次单独授权。

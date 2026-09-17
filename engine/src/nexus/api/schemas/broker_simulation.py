@@ -1,12 +1,12 @@
 """Closed and redacted contracts for the offline broker-simulation workbench."""
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Self
 from uuid import UUID
 
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _StrictBrokerSchema(BaseModel):
@@ -14,8 +14,25 @@ class _StrictBrokerSchema(BaseModel):
 
 
 class BrokerIntentPrepareRequest(_StrictBrokerSchema):
-    proposal_group_id: UUID
-    proposal_id: UUID
+    proposal_group_id: UUID | None = None
+    proposal_id: UUID | None = None
+    agent_paper_cycle_id: UUID | None = None
+    account_binding_id: UUID | None = None
+    portfolio_snapshot_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _requires_exactly_one_source(self) -> Self:
+        proposal = (self.proposal_group_id, self.proposal_id)
+        agent_paper = (
+            self.agent_paper_cycle_id,
+            self.account_binding_id,
+            self.portfolio_snapshot_id,
+        )
+        if (all(value is not None for value in proposal) and not any(agent_paper)) or (
+            all(value is not None for value in agent_paper) and not any(proposal)
+        ):
+            return self
+        raise ValueError("exactly one broker intent source is required")
 
 
 class BrokerIntentApprovalRequest(_StrictBrokerSchema):

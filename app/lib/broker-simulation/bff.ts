@@ -6,8 +6,16 @@ type CanonicalBody = { bytes: Uint8Array; value: Record<string, unknown> };
 
 export async function readPrepare(request: Request): Promise<Uint8Array> {
   const body = await readCanonicalJson(request);
-  exactKeys(body.value, ["proposal_group_id", "proposal_id"]);
-  for (const key of ["proposal_group_id", "proposal_id"] as const) {
+  const proposalKeys = ["proposal_group_id", "proposal_id"] as const;
+  const agentPaperKeys = ["agent_paper_cycle_id", "account_binding_id", "portfolio_snapshot_id"] as const;
+  const keys = Object.keys(body.value);
+  const sourceKeys = keys.length === proposalKeys.length && proposalKeys.every((key) => key in body.value)
+    ? proposalKeys
+    : keys.length === agentPaperKeys.length && agentPaperKeys.every((key) => key in body.value)
+      ? agentPaperKeys
+      : null;
+  if (!sourceKeys) invalid();
+  for (const key of sourceKeys) {
     if (typeof body.value[key] !== "string" || !validateUuid(body.value[key])) invalid();
   }
   return body.bytes;
@@ -110,4 +118,3 @@ function invalid(): never {
 function isPlain(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-

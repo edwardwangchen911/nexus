@@ -49,7 +49,7 @@ describe("broker-simulation BFF", () => {
     expect(engineFetch).not.toHaveBeenCalled();
   });
 
-  it("prepares only from two proposal identities", async () => {
+  it("prepares only from one exact proposal or Agent Paper source", async () => {
     const { POST } = await import("../../../app/api/v1/broker-simulation/intents/route");
     await POST(writeRequest("/api/v1/broker-simulation/intents", { proposal_group_id: proposalGroupId, proposal_id: proposalId }));
     const [target, init] = engineFetch.mock.calls[0];
@@ -67,6 +67,26 @@ describe("broker-simulation BFF", () => {
         proposal_id: proposalId,
         [forbidden]: "escape",
       }));
+      expect(response.status).toBe(400);
+      expect(engineFetch).not.toHaveBeenCalled();
+    }
+
+    engineFetch.mockClear();
+    const agentPaper = {
+      agent_paper_cycle_id: intentId,
+      account_binding_id: orderId,
+      portfolio_snapshot_id: runId,
+    };
+    await POST(writeRequest("/api/v1/broker-simulation/intents", agentPaper));
+    expect(new TextDecoder().decode(engineFetch.mock.calls[0][1].body)).toBe(JSON.stringify(agentPaper));
+
+    for (const invalid of [
+      { agent_paper_cycle_id: intentId, account_binding_id: orderId },
+      { ...agentPaper, proposal_group_id: proposalGroupId, proposal_id: proposalId },
+      { ...agentPaper, quantity: "10" },
+    ]) {
+      engineFetch.mockClear();
+      const response = await POST(writeRequest("/api/v1/broker-simulation/intents", invalid));
       expect(response.status).toBe(400);
       expect(engineFetch).not.toHaveBeenCalled();
     }
@@ -160,4 +180,3 @@ describe("broker-simulation BFF", () => {
     }
   });
 });
-
