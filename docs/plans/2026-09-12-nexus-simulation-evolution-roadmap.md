@@ -1,6 +1,6 @@
 # NEXUS Agent 模拟交易与策略进化路线图
 
-**状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段版本评价进入验收收口，真实订单路径仍待自然发生
+**状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段本地版本评价路径已收口；第四阶段复用既有离线券商模拟边界补 Agent 主线接线
 
 **核查日期：** 2026-09-17
 
@@ -41,7 +41,7 @@ Schwab 决策报价、按需执行窗口、API/BFF/`/paper` 回读和前台五�
 | 确定性风控与内部订单能力 | 受控测试覆盖买卖、拒绝、部分成交、幂等和账本 | 真实 Agent 尚未自然产生可执行订单，不能把测试冒充真实订单验收 |
 | 连续模拟 | 前台五分钟循环已实现；prior-daily、当前趋势和六项 FRED 宏观证据已有自动准备入口 | 需要在合法交易时段观察整段运行、跨槽恢复、熔断和停止条件 |
 | 统一对照与 Agent 进化 | Agent、`hold_current` 和 SPY 已有持久化对照；`baseline_v1` 诚实 unavailable | 先积累连续模拟和真实订单事实；baseline 前向价格合同暂缓，不阻塞第二阶段 |
-| 券商正式模拟盘 / 实盘 | 未开始且不在当前范围 | 外部写入和实盘仍需用户单独授权；实盘继续逐笔确认 |
+| 券商正式模拟盘 / 实盘 | 离线券商模拟边界已存在；Agent 主线接线待补 | 业务库无 binding/admission/intent/command；外部写入仍需单独授权，实盘继续逐笔确认 |
 | Research Shadow | 保留但暂停 | 不合并 Shadow 分支，不把它恢复为主线前置 |
 
 ### 2026-09-17 第三阶段验收对账
@@ -360,10 +360,30 @@ Alpaca 的接线和覆盖较广，但当时的 1 分钟数据不连续；嘉信�
 回撤、成本、稳定性和数据完整性共同通过预定门槛，才能成为下一版模拟冠军。硬风控不由 Agent
 修改。
 
-### 第四阶段：券商正式模拟盘（未开始）
+### 第四阶段：券商正式模拟盘（本地接入就绪建设中，外部激活仍阻断）
 
-在内部模拟稳定后，用同一意图和风控结果接入券商正式模拟账户，验证订单生命周期、回报、对账、
-断线恢复和本地模拟偏差。该阶段属于外部写入，启用前单独授权，不与内部模拟第一阶段并行建设。
+代码不是从零开始。主线已有独立 broker worker、模拟 Gateway 严格契约、mTLS/HMAC 与密钥域隔离、
+账户类型和 capability admission、服务端人工批准、单次提交、结果未知不重发、全量对账、Webhook 冲突
+锁定和脱敏只读 workbench；普通 worker 无法领取 broker queue，默认 `offline_fixture` 也不会因环境
+变量自动升级为外部写入。
+
+2026-09-17 业务库只读核对为：迁移头 `0063_agent_version_pair_context`，且 broker account binding、
+simulation admission、当前有效 `SIMULATION_WRITE_ACTIVATED`、intent、command、attempt、event 和 reconciliation
+计数全部为零。因此当前准确状态是：离线能力边界已实现，但未绑定模拟账户、未激活外部写入，
+也没有任何曾经尝试发送的券商命令。
+
+当前唯一必要的代码接线缺口是：现有 intent 准备入口只能消费旧 optimization proposal，尚不能从
+Agent Paper 已冻结的 `cycle → strategy decision → paper order batch → risk evaluation` 事实生成同数量、同方向的
+`prepared / not_sent` broker intent。最小实施方案是在 `broker_simulation` 边界内增加单向适配器：
+
+1. 只接受一个已完成决策且已有受控订单的 Agent Paper cycle，不发起 Agent、行情或 Provider 调用；
+2. 从已持久化的内部订单读取标的、方向和已批整股数量，并绑定原 risk policy/input/result hash；
+3. 使用当前已对账的券商模拟快照重新执行既有 broker 硬风控，不从 Paper 账户倒推外部现金或持仓；
+4. 准备后只落库 `prepared / not_sent`，不自动批准、不创建 dispatch Job；
+5. Agent Paper 模块继续不引用 broker/provider 代码，反向依赖边界和 `execution_locked=true` 不变。
+
+该接线只能使系统达到“外部接入就绪”，不代表券商模拟已验收。真实订单生命周期、回报、对账、
+断线恢复和本地模拟偏差仍必须在门禁 A/B 完成后，由用户对精确账户、时间窗口、上限和具体批次单独授权。
 
 ### 第五阶段：用户决定是否进入实盘（未开始）
 
