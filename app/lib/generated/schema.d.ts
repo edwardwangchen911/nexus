@@ -1215,6 +1215,7 @@ export interface components {
             /** Items */
             items: components["schemas"]["AgentPaperCycleResponse"][];
             summary: components["schemas"]["AgentPaperSessionSummaryResponse"];
+            version_evaluation: components["schemas"]["AgentVersionEvaluationResponse"] | null;
             /** Version History */
             version_history: components["schemas"]["AgentPaperVersionObservationResponse"][];
             version_observation: components["schemas"]["AgentPaperVersionObservationResponse"] | null;
@@ -1371,11 +1372,8 @@ export interface components {
         };
         /** AgentPaperVersionObservationResponse */
         AgentPaperVersionObservationResponse: {
-            /**
-             * Challenger Available
-             * @constant
-             */
-            challenger_available: false;
+            /** Challenger Available */
+            challenger_available: boolean;
             /** Completed Count */
             completed_count: number;
             /** Cycle Count */
@@ -1425,6 +1423,111 @@ export interface components {
         AgentRole: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";
         /** @enum {string} */
         AgentRunStatus: "prepared" | "running" | "validated" | "audited" | "synthesized" | "completed" | "failed" | "abstained";
+        /** AgentVersionComparisonResponse */
+        AgentVersionComparisonResponse: {
+            /**
+             * Data State
+             * @enum {string}
+             */
+            data_state: "READY" | "UNKNOWN";
+            /**
+             * Key
+             * @enum {string}
+             */
+            key: "hold_current" | "baseline_v1" | "market_benchmark";
+            /** Reason Code */
+            reason_code: string;
+        };
+        /** AgentVersionEvaluationResponse */
+        AgentVersionEvaluationResponse: {
+            /**
+             * Broker Write
+             * @constant
+             */
+            broker_write: false;
+            challenger_metrics: components["schemas"]["AgentVersionLaneMetricsResponse"] | null;
+            /** Challenger Model Hash */
+            challenger_model_hash: string;
+            /** Challenger Prompt Hash */
+            challenger_prompt_hash: string;
+            /** Comparisons */
+            comparisons: components["schemas"]["AgentVersionComparisonResponse"][];
+            /**
+             * Evaluation Id
+             * Format: uuid
+             */
+            evaluation_id: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /** Gates */
+            gates: components["schemas"]["AgentVersionGateResponse"][];
+            incumbent_metrics: components["schemas"]["AgentVersionLaneMetricsResponse"] | null;
+            /** Incumbent Model Hash */
+            incumbent_model_hash: string;
+            /** Incumbent Prompt Hash */
+            incumbent_prompt_hash: string;
+            /**
+             * Live Write
+             * @constant
+             */
+            live_write: false;
+            /** Oos Completed */
+            oos_completed: number;
+            /** Oos Incomparable */
+            oos_incomparable: number;
+            /** Oos Missing */
+            oos_missing: number;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "observing" | "PASS" | "FAIL" | "UNKNOWN";
+            /** Train Completed */
+            train_completed: number;
+        };
+        /** AgentVersionGateResponse */
+        AgentVersionGateResponse: {
+            /**
+             * Key
+             * @enum {string}
+             */
+            key: "authority" | "oos_pairs" | "cost_authority" | "comparison_authority" | "hard_risk" | "ledger_conservation" | "duplicate_execution" | "action_divergence" | "challenger_fills" | "excess_return" | "positive_excess_sessions" | "drawdown_degradation";
+            /** Observed */
+            observed?: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "PASS" | "FAIL" | "UNKNOWN";
+            /** Threshold */
+            threshold?: string | null;
+        };
+        /** AgentVersionLaneMetricsResponse */
+        AgentVersionLaneMetricsResponse: {
+            /** Fill Count */
+            fill_count: number;
+            /** Hard Risk Count */
+            hard_risk_count: number;
+            /** Max Drawdown Ratio */
+            max_drawdown_ratio: string;
+            /** Nav */
+            nav: string;
+            /** Order Count */
+            order_count: number;
+            /** Total Cost */
+            total_cost: string;
+            /** Total Return Ratio */
+            total_return_ratio: string;
+            /** Turnover Ratio */
+            turnover_ratio: string;
+        };
         /**
          * AggregateMetric
          * @description Bounded integer aggregate with an explicit known/unknown state.

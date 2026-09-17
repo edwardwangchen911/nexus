@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { AgentPaperCycle, AgentPaperSessionSummary, AgentPaperVersionHistory, type AgentPaperCycleFact, type AgentPaperSessionSummaryFact, type AgentPaperVersionObservationFact } from "../../components/agent-paper-cycle";
+import { AgentVersionEvaluation, type AgentVersionEvaluationFact } from "../../components/agent-version-evaluation";
 import { DecisionPath } from "../../components/decision-path";
 import { formatPaperDecimal, formatPaperTime, OrderTimeline, type PaperOrder } from "../../components/order-timeline";
 import type { components } from "../../lib/generated/schema";
@@ -31,6 +32,7 @@ type PaperPanelProps = {
   cycleSummary?: AgentPaperSessionSummaryFact | null;
   versionObservation?: AgentPaperVersionObservationFact | null;
   versionHistory?: AgentPaperVersionObservationFact[];
+  versionEvaluation?: AgentVersionEvaluationFact | null;
   cycleUnavailable?: boolean;
   onRefresh: () => void;
   onStatusFilter: (status: "" | OrderStatus) => void;
@@ -58,6 +60,7 @@ export default function PaperPage(): React.ReactElement {
   const [cycleSummary, setCycleSummary] = useState<AgentPaperSessionSummaryFact | null>(null);
   const [versionObservation, setVersionObservation] = useState<AgentPaperVersionObservationFact | null>(null);
   const [versionHistory, setVersionHistory] = useState<AgentPaperVersionObservationFact[]>([]);
+  const [versionEvaluation, setVersionEvaluation] = useState<AgentVersionEvaluationFact | null>(null);
   const [cycleUnavailable, setCycleUnavailable] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"" | OrderStatus>("");
@@ -83,6 +86,7 @@ export default function PaperPage(): React.ReactElement {
     setCycleSummary(null);
     setVersionObservation(null);
     setVersionHistory([]);
+    setVersionEvaluation(null);
     setCycleUnavailable(false);
     setNextCursor(null);
   }, []);
@@ -126,14 +130,15 @@ export default function PaperPage(): React.ReactElement {
       ordersRef.current = page.items; setOrders(page.items); setNextCursor(page.next_cursor);
       cursorHistory.current = new Set(page.next_cursor ? [page.next_cursor] : []);
       if (cycleResponse.ok) {
-        const cyclePayload = await cycleResponse.json() as { data?: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact; version_observation?: AgentPaperVersionObservationFact | null; version_history?: AgentPaperVersionObservationFact[] } };
+        const cyclePayload = await cycleResponse.json() as { data?: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact; version_observation?: AgentPaperVersionObservationFact | null; version_history?: AgentPaperVersionObservationFact[]; version_evaluation?: AgentVersionEvaluationFact | null } };
         const nextCycles = validCyclePage(cyclePayload.data);
         if (!nextCycles) throw new Error("paper cycles invalid");
         setCycles(nextCycles.items); setCycleSummary(nextCycles.summary); setCycleUnavailable(false);
         setVersionObservation(nextCycles.version_observation);
         setVersionHistory(nextCycles.version_history);
+        setVersionEvaluation(nextCycles.version_evaluation);
       } else {
-        setCycles([]); setCycleSummary(null); setVersionObservation(null); setVersionHistory([]); setCycleUnavailable(true);
+        setCycles([]); setCycleSummary(null); setVersionObservation(null); setVersionHistory([]); setVersionEvaluation(null); setCycleUnavailable(true);
       }
       setState(portfolioState(nextPortfolio.data_state));
       return true;
@@ -269,6 +274,7 @@ export default function PaperPage(): React.ReactElement {
       cycleSummary={cycleSummary}
       versionObservation={versionObservation}
       versionHistory={versionHistory}
+      versionEvaluation={versionEvaluation}
       statusFilter={statusFilter} loadingMore={loadingMore} notice={notice}
       onRefresh={() => void refresh()} onStatusFilter={(value) => void changeStatusFilter(value)}
       onLoadMore={() => void loadMoreOrders()} onCancel={openCancel} />
@@ -277,7 +283,7 @@ export default function PaperPage(): React.ReactElement {
   </>;
 }
 
-export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
+export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
   const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
@@ -297,6 +303,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         </section>
         {cycleSummary ? <AgentPaperSessionSummary summary={cycleSummary} /> : null}
         {versionObservation ? <AgentPaperVersionHistory history={versionHistory} /> : null}
+        {versionEvaluation ? <AgentVersionEvaluation evaluation={versionEvaluation} /> : null}
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         <PerformanceFacts portfolio={portfolio} />
@@ -381,7 +388,7 @@ function orderPath(status: "" | OrderStatus, cursor: string | null): string {
 }
 function validPortfolio(value: PaperPortfolio | undefined): PaperPortfolio | null { return value?.mode === "internal_paper" && value.currency === "USD" && Array.isArray(value.positions) && Array.isArray(value.attributions) ? value : null; }
 function validOrderPage(value: { items?: PaperOrder[]; next_cursor?: string | null } | undefined): { items: PaperOrder[]; next_cursor: string | null } | null { return value && Array.isArray(value.items) && value.items.length <= ORDER_PAGE_SIZE && (value.next_cursor === null || typeof value.next_cursor === "string" && value.next_cursor.length > 0 && value.next_cursor.length <= 2048) ? { items: value.items, next_cursor: value.next_cursor } : null; }
-function validCyclePage(value: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact; version_observation?: AgentPaperVersionObservationFact | null; version_history?: AgentPaperVersionObservationFact[] } | undefined): { items: AgentPaperCycleFact[]; summary: AgentPaperSessionSummaryFact; version_observation: AgentPaperVersionObservationFact | null; version_history: AgentPaperVersionObservationFact[] } | null {
+function validCyclePage(value: { items?: AgentPaperCycleFact[]; summary?: AgentPaperSessionSummaryFact; version_observation?: AgentPaperVersionObservationFact | null; version_history?: AgentPaperVersionObservationFact[]; version_evaluation?: AgentVersionEvaluationFact | null } | undefined): { items: AgentPaperCycleFact[]; summary: AgentPaperSessionSummaryFact; version_observation: AgentPaperVersionObservationFact | null; version_history: AgentPaperVersionObservationFact[]; version_evaluation: AgentVersionEvaluationFact | null } | null {
   if (!value || !Array.isArray(value.items) || value.items.length > 20
     || value.summary?.execution_locked !== true || !Array.isArray(value.version_history)
     || value.version_history.length > 20) return null;
@@ -400,7 +407,25 @@ function validCyclePage(value: { items?: AgentPaperCycleFact[]; summary?: AgentP
     identities.add(identity);
     previousLast = last;
   }
-  return { items: value.items, summary: value.summary, version_observation: observation, version_history: value.version_history };
+  const evaluation = value.version_evaluation ?? null;
+  if (evaluation !== null && !validVersionEvaluation(evaluation)) return null;
+  return { items: value.items, summary: value.summary, version_observation: observation, version_history: value.version_history, version_evaluation: evaluation };
+}
+function validVersionEvaluation(value: AgentVersionEvaluationFact): boolean {
+  const expectedGates = ["authority", "oos_pairs", "cost_authority", "comparison_authority", "hard_risk", "ledger_conservation", "duplicate_execution", "action_divergence", "challenger_fills", "excess_return", "positive_excess_sessions", "drawdown_degradation"];
+  if (value.execution_locked !== true || value.broker_write !== false || value.live_write !== false
+    || value.train_completed < 0 || value.train_completed > 4
+    || value.oos_completed < 0 || value.oos_completed > 20
+    || value.oos_missing < 0 || value.oos_incomparable < 0
+    || value.oos_completed + value.oos_missing + value.oos_incomparable !== 20
+    || value.comparisons.length !== 3
+    || value.comparisons.map((row) => row.key).join(":") !== "hold_current:baseline_v1:market_benchmark"
+    || value.gates.length > 12) return false;
+  if (value.status === "observing") return value.gates.length === 0;
+  if (value.gates.map((gate) => gate.key).join(":") !== expectedGates.join(":")) return false;
+  if (value.status === "PASS") return value.reason_code === "OOS_IMPROVEMENT_PROVEN" && value.gates.every((gate) => gate.status === "PASS");
+  if (value.status === "FAIL") return value.gates.some((gate) => gate.status === "FAIL");
+  return value.gates.some((gate) => gate.status === "UNKNOWN");
 }
 function sameVersionObservation(left: AgentPaperVersionObservationFact, right: AgentPaperVersionObservationFact): boolean {
   return left.prompt_version === right.prompt_version && left.prompt_hash === right.prompt_hash

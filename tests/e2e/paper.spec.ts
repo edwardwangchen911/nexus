@@ -17,6 +17,9 @@ for (const viewport of [
     await expect(currentStage).toHaveAttribute("aria-current", "step");
     await expect(currentStage).toBeInViewport();
     await expect(page.getByRole("region", { name: "模拟账户边界" })).toContainText("不是实盘");
+    const versionEvaluation = page.getByRole("region", { name: "Agent 版本并行评价" });
+    await expect(versionEvaluation).toContainText("执行锁定 · 券商写入关闭 · 实盘写入关闭");
+    await expect(versionEvaluation.getByRole("button")).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "当日 Agent 模拟周期" })).toBeVisible();
     const agentCycle = page.getByRole("region", { name: "当日 Agent 模拟周期" });
     await expect(agentCycle).toContainText("决策报价 · Schwab Level One · 实时");
@@ -187,6 +190,18 @@ async function installPaperFixtures(
       decision_session: "2026-08-26", status: "completed", cycle_count: 1, completed_count: 1,
       latest_result_code: "NO_ORDER_REQUIRED", last_completed_decision_at: "2026-08-26T19:30:00Z",
       next_eligible_at: "2026-08-26T19:35:00Z", next_eligible_reason: "NEXT_SLOT", execution_locked: true,
+    }, version_observation: null, version_history: [], version_evaluation: {
+      evaluation_id: "71000000-0000-7000-8000-000000000099", status: "observing",
+      incumbent_prompt_hash: "a".repeat(64), incumbent_model_hash: "b".repeat(64),
+      challenger_prompt_hash: "c".repeat(64), challenger_model_hash: "d".repeat(64),
+      train_completed: 2, oos_completed: 0, oos_missing: 20, oos_incomparable: 0,
+      incumbent_metrics: null, challenger_metrics: null,
+      comparisons: [
+        { key: "hold_current", data_state: "READY", reason_code: "CASH_HOLD_CURRENT" },
+        { key: "baseline_v1", data_state: "UNKNOWN", reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+        { key: "market_benchmark", data_state: "UNKNOWN", reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+      ], gates: [], reason_code: "EVALUATION_OBSERVING",
+      execution_locked: true, broker_write: false, live_write: false,
     } }, meta: meta() }),
   }));
   await page.route("**/api/v1/paper/orders?**", options.ordersHandler ?? (async (route) => route.fulfill({

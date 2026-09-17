@@ -313,6 +313,16 @@ export const runtimeContractSchemas = {
       "summary": {
         "$ref": "#/components/schemas/AgentPaperSessionSummaryResponse"
       },
+      "version_evaluation": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentVersionEvaluationResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "version_history": {
         "items": {
           "$ref": "#/components/schemas/AgentPaperVersionObservationResponse"
@@ -336,7 +346,8 @@ export const runtimeContractSchemas = {
       "items",
       "summary",
       "version_observation",
-      "version_history"
+      "version_history",
+      "version_evaluation"
     ],
     "title": "AgentPaperCyclePageResponse",
     "type": "object"
@@ -722,7 +733,6 @@ export const runtimeContractSchemas = {
     "additionalProperties": false,
     "properties": {
       "challenger_available": {
-        "const": false,
         "title": "Challenger Available",
         "type": "boolean"
       },
@@ -880,6 +890,319 @@ export const runtimeContractSchemas = {
       "abstained"
     ],
     "type": "string"
+  },
+  "AgentVersionComparisonResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "data_state": {
+        "enum": [
+          "READY",
+          "UNKNOWN"
+        ],
+        "title": "Data State",
+        "type": "string"
+      },
+      "key": {
+        "enum": [
+          "hold_current",
+          "baseline_v1",
+          "market_benchmark"
+        ],
+        "title": "Key",
+        "type": "string"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "data_state",
+      "reason_code"
+    ],
+    "title": "AgentVersionComparisonResponse",
+    "type": "object"
+  },
+  "AgentVersionEvaluationResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "broker_write": {
+        "const": false,
+        "title": "Broker Write",
+        "type": "boolean"
+      },
+      "challenger_metrics": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentVersionLaneMetricsResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "challenger_model_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Challenger Model Hash",
+        "type": "string"
+      },
+      "challenger_prompt_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Challenger Prompt Hash",
+        "type": "string"
+      },
+      "comparisons": {
+        "items": {
+          "$ref": "#/components/schemas/AgentVersionComparisonResponse"
+        },
+        "maxItems": 3,
+        "minItems": 3,
+        "title": "Comparisons",
+        "type": "array"
+      },
+      "evaluation_id": {
+        "format": "uuid",
+        "title": "Evaluation Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "gates": {
+        "items": {
+          "$ref": "#/components/schemas/AgentVersionGateResponse"
+        },
+        "maxItems": 12,
+        "title": "Gates",
+        "type": "array"
+      },
+      "incumbent_metrics": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentVersionLaneMetricsResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "incumbent_model_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Incumbent Model Hash",
+        "type": "string"
+      },
+      "incumbent_prompt_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Incumbent Prompt Hash",
+        "type": "string"
+      },
+      "live_write": {
+        "const": false,
+        "title": "Live Write",
+        "type": "boolean"
+      },
+      "oos_completed": {
+        "maximum": 20,
+        "minimum": 0,
+        "title": "Oos Completed",
+        "type": "integer"
+      },
+      "oos_incomparable": {
+        "maximum": 20,
+        "minimum": 0,
+        "title": "Oos Incomparable",
+        "type": "integer"
+      },
+      "oos_missing": {
+        "maximum": 20,
+        "minimum": 0,
+        "title": "Oos Missing",
+        "type": "integer"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "observing",
+          "PASS",
+          "FAIL",
+          "UNKNOWN"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "train_completed": {
+        "maximum": 4,
+        "minimum": 0,
+        "title": "Train Completed",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "evaluation_id",
+      "status",
+      "incumbent_prompt_hash",
+      "incumbent_model_hash",
+      "challenger_prompt_hash",
+      "challenger_model_hash",
+      "train_completed",
+      "oos_completed",
+      "oos_missing",
+      "oos_incomparable",
+      "incumbent_metrics",
+      "challenger_metrics",
+      "comparisons",
+      "gates",
+      "reason_code",
+      "execution_locked",
+      "broker_write",
+      "live_write"
+    ],
+    "title": "AgentVersionEvaluationResponse",
+    "type": "object"
+  },
+  "AgentVersionGateResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "key": {
+        "enum": [
+          "authority",
+          "oos_pairs",
+          "cost_authority",
+          "comparison_authority",
+          "hard_risk",
+          "ledger_conservation",
+          "duplicate_execution",
+          "action_divergence",
+          "challenger_fills",
+          "excess_return",
+          "positive_excess_sessions",
+          "drawdown_degradation"
+        ],
+        "title": "Key",
+        "type": "string"
+      },
+      "observed": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Observed"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "PASS",
+          "FAIL",
+          "UNKNOWN"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "threshold": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Threshold"
+      }
+    },
+    "required": [
+      "key",
+      "status",
+      "reason_code"
+    ],
+    "title": "AgentVersionGateResponse",
+    "type": "object"
+  },
+  "AgentVersionLaneMetricsResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "fill_count": {
+        "maximum": 100000,
+        "minimum": 0,
+        "title": "Fill Count",
+        "type": "integer"
+      },
+      "hard_risk_count": {
+        "maximum": 100000,
+        "minimum": 0,
+        "title": "Hard Risk Count",
+        "type": "integer"
+      },
+      "max_drawdown_ratio": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Max Drawdown Ratio",
+        "type": "string"
+      },
+      "nav": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Nav",
+        "type": "string"
+      },
+      "order_count": {
+        "maximum": 100000,
+        "minimum": 0,
+        "title": "Order Count",
+        "type": "integer"
+      },
+      "total_cost": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Total Cost",
+        "type": "string"
+      },
+      "total_return_ratio": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Total Return Ratio",
+        "type": "string"
+      },
+      "turnover_ratio": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Turnover Ratio",
+        "type": "string"
+      }
+    },
+    "required": [
+      "nav",
+      "total_return_ratio",
+      "max_drawdown_ratio",
+      "turnover_ratio",
+      "total_cost",
+      "order_count",
+      "fill_count",
+      "hard_risk_count"
+    ],
+    "title": "AgentVersionLaneMetricsResponse",
+    "type": "object"
   },
   "AggregateMetric": {
     "additionalProperties": false,

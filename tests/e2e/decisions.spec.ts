@@ -66,7 +66,7 @@ async function installFixtures(page: Page, methods: string[]): Promise<void> {
   await page.route("**/api/v1/paper/cycles?limit=20", async (route) => {
     methods.push(route.request().method());
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
-      data: { items: [agentPaperCycle], summary: { decision_session: "2026-08-26", status: "completed", cycle_count: 1, completed_count: 0, last_completed_decision_at: null, next_eligible_at: null, next_eligible_reason: null, latest_result_code: agentPaperCycle.result_code, execution_locked: true } },
+      data: { items: [agentPaperCycle], summary: { decision_session: "2026-08-26", status: "completed", cycle_count: 1, completed_count: 0, last_completed_decision_at: null, next_eligible_at: null, next_eligible_reason: null, latest_result_code: agentPaperCycle.result_code, execution_locked: true }, version_observation: null, version_history: [], version_evaluation: null },
       meta: meta(),
     }) });
   });

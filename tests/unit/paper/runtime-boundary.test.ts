@@ -42,7 +42,22 @@ describe("internal-paper Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json({ data: { ...data, execution_market: { ...data.execution_market, source: "schwab" } }, meta }), undefined, path, "GET")).status).toBe(500);
 
     const listPath = "/internal/v1/paper/cycles";
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null, version_history: [], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    const versionEvaluation = {
+      evaluation_id: "71000000-0000-7000-8000-000000000099", status: "observing",
+      incumbent_prompt_hash: "a".repeat(64), incumbent_model_hash: "b".repeat(64),
+      challenger_prompt_hash: "c".repeat(64), challenger_model_hash: "d".repeat(64),
+      train_completed: 2, oos_completed: 0, oos_missing: 20, oos_incomparable: 0,
+      incumbent_metrics: null, challenger_metrics: null,
+      comparisons: [
+        { key: "hold_current", data_state: "READY", reason_code: "CASH_HOLD_CURRENT" },
+        { key: "baseline_v1", data_state: "UNKNOWN", reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+        { key: "market_benchmark", data_state: "UNKNOWN", reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+      ], gates: [], reason_code: "EVALUATION_OBSERVING",
+      execution_locked: true, broker_write: false, live_write: false,
+    };
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null, version_history: [], version_evaluation: versionEvaluation }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null, version_history: [], version_evaluation: { ...versionEvaluation, oos_missing: 19 } }, meta }), undefined, listPath, "GET")).status).toBe(500);
     const versionObservation = {
       prompt_version: "local-openai-v1", prompt_hash: "a".repeat(64), model_id: "gpt-5.6-terra",
       model_version: "codex-sdk-chatgpt-v4-actionable",
@@ -68,24 +83,24 @@ describe("internal-paper Engine response boundary", () => {
       reason_codes: ["VERSION_FROZEN_AUDIT_HISTORY", "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE", "VERSION_ORDER_PATH_UNOBSERVED", "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE"],
     };
     const versionHistory = [versionObservation, olderVersion];
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(200);
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [olderVersion, versionObservation] }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [versionObservation, versionObservation] }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: olderVersion, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PROMOTED"] }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, completed_count: 49 }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, first_decision_at: "2026-08-29T00:00:00Z" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, prompt_hash: "not-a-hash" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"] }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, lifecycle_state: "historical_frozen" }, version_history: versionHistory }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: olderVersion, version_history: [olderVersion] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [olderVersion, versionObservation], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [versionObservation, versionObservation], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: olderVersion, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PROMOTED"] }, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, completed_count: 49 }, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, first_decision_at: "2026-08-29T00:00:00Z" }, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, prompt_hash: "not-a-hash" }, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE"] }, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: { ...versionObservation, lifecycle_state: "historical_frozen" }, version_history: versionHistory, version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: olderVersion, version_history: [olderVersion], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
     const secondIncumbent = { ...versionObservation, prompt_hash: "d".repeat(64), first_decision_at: "2026-08-25T19:30:00Z", last_decision_at: "2026-08-25T20:00:00Z" };
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [versionObservation, secondIncumbent] }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 21 }, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(200);
-    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 0 }, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data), summary: cycleSummary, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);
-    expect((await sanitizeEngineResponse(json({ data: { items: [{ ...data, execution_locked: false }], summary: cycleSummary, version_observation: null, version_history: [] }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: versionObservation, version_history: [versionObservation, secondIncumbent], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 21 }, version_observation: null, version_history: [], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: { ...cycleSummary, cycle_count: 0 }, version_observation: null, version_history: [], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: Array.from({ length: 21 }, () => data), summary: cycleSummary, version_observation: null, version_history: [], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { items: [{ ...data, execution_locked: false }], summary: cycleSummary, version_observation: null, version_history: [], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(500);
   });
   it("accepts the strict portfolio projection and rejects nested extras", async () => {
     const data = portfolio();
@@ -174,7 +189,7 @@ describe("internal-paper Engine response boundary", () => {
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: input.toString(), init: init ?? {} });
       if (input.toString().includes("/paper/cycles")) {
-        return json({ data: { items: [], summary: { ...cycleSummary, status: "ready", cycle_count: 0, completed_count: 0, latest_result_code: null, next_eligible_at: "2026-08-26T21:00:00Z", next_eligible_reason: "CURRENT_SLOT" }, version_observation: null, version_history: [] }, meta });
+        return json({ data: { items: [], summary: { ...cycleSummary, status: "ready", cycle_count: 0, completed_count: 0, latest_result_code: null, next_eligible_at: "2026-08-26T21:00:00Z", next_eligible_reason: "CURRENT_SLOT" }, version_observation: null, version_history: [], version_evaluation: null }, meta });
       }
       return json({ data: { items: [order()], next_cursor: null }, meta });
     });

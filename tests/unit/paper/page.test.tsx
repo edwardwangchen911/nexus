@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import PaperPage, { PaperPanel } from "../../../app/(protected)/paper/page";
-import { AgentPaperCycle, AgentPaperSessionSummary } from "../../../app/components/agent-paper-cycle";
+import { AgentPaperCycle, AgentPaperSessionSummary, AgentPaperVersionHistory } from "../../../app/components/agent-paper-cycle";
+import { AgentVersionEvaluation } from "../../../app/components/agent-version-evaluation";
 import type { DataStateKind } from "../../../app/components/data-state";
 import { agentPaperCycle, cancellableOrder, filledOrder, meta, olderAgentPaperCycle, paperPortfolio } from "./fixtures";
 
@@ -18,6 +19,47 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("internal paper page", () => {
+  it("renders a read-only paired Agent version evaluation with all write paths closed", () => {
+    render(<AgentVersionEvaluation evaluation={{
+      evaluation_id: "71000000-0000-0000-0000-000000000099",
+      status: "observing",
+      incumbent_prompt_hash: "a".repeat(64), incumbent_model_hash: "b".repeat(64),
+      challenger_prompt_hash: "c".repeat(64), challenger_model_hash: "d".repeat(64),
+      train_completed: 2, oos_completed: 0, oos_missing: 20, oos_incomparable: 0,
+      incumbent_metrics: null, challenger_metrics: null,
+      comparisons: [
+        { key: "hold_current", data_state: "READY", reason_code: "CASH_HOLD_CURRENT" },
+        { key: "baseline_v1", data_state: "UNKNOWN", reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+        { key: "market_benchmark", data_state: "UNKNOWN", reason_code: "SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE" },
+      ],
+      gates: [], reason_code: "EVALUATION_OBSERVING",
+      execution_locked: true, broker_write: false, live_write: false,
+    }} />);
+
+    const region = screen.getByRole("region", { name: "Agent 版本并行评价" });
+    expect(region).toHaveTextContent("训练槽2 / 4 已配对");
+    expect(region).toHaveTextContent("执行锁定 · 券商写入关闭 · 实盘写入关闭");
+    expect(region).toHaveTextContent("尚未终结，不展示推测性门禁结果");
+    expect(within(region).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("stops claiming the challenger is unavailable after registration is proven", () => {
+    render(<AgentPaperVersionHistory history={[{
+      prompt_version: "local-openai-v1", prompt_hash: "a".repeat(64),
+      model_id: "gpt-5.6-terra", model_version: "codex-sdk-chatgpt-v4-actionable",
+      model_hash: "b".repeat(64), first_decision_at: "2026-09-14T15:32:03Z",
+      last_decision_at: "2026-09-16T18:12:07Z", observed_sessions: 3,
+      cycle_count: 48, completed_count: 39, unavailable_count: 9,
+      order_count: 0, fill_count: 0, challenger_available: true,
+      lifecycle_state: "incumbent_frozen", verdict: "continue_observing",
+      reason_codes: ["VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE", "VERSION_ORDER_PATH_UNOBSERVED"],
+    }]} />);
+
+    const region = screen.getByRole("region", { name: "Agent 版本历史" });
+    expect(region).toHaveTextContent("已注册的并行 challenger");
+    expect(region).not.toHaveTextContent("尚无并行 challenger 版本");
+  });
+
   it("shows persisted continuous-run status without implying a live scheduler", () => {
     render(<AgentPaperSessionSummary summary={{
       decision_session: "2026-08-26",
@@ -147,6 +189,38 @@ describe("internal paper page", () => {
 
     expect(await screen.findByText("模拟盘事实读取失败；未触发任何订单动作。")).toBeVisible();
     expect(screen.queryByRole("region", { name: "Agent 版本历史" })).not.toBeInTheDocument();
+  });
+
+  it("fails closed on inconsistent Agent version evaluation lifecycle counts", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/paper/portfolio") return Response.json({ data: paperPortfolio, meta: meta() });
+      if (url === "/api/v1/paper/orders?limit=20") return Response.json({ data: { items: [], next_cursor: null }, meta: meta() });
+      if (url === "/api/v1/paper/cycles?limit=20") return Response.json({ data: {
+        items: [], summary: {
+          decision_session: "2026-08-26", status: "not_started", cycle_count: 0, completed_count: 0,
+          latest_result_code: null, last_completed_decision_at: null, next_eligible_at: null,
+          next_eligible_reason: null, execution_locked: true,
+        }, version_observation: null, version_history: [], version_evaluation: {
+          evaluation_id: "71000000-0000-0000-0000-000000000099", status: "observing",
+          incumbent_prompt_hash: "a".repeat(64), incumbent_model_hash: "b".repeat(64),
+          challenger_prompt_hash: "c".repeat(64), challenger_model_hash: "d".repeat(64),
+          train_completed: 0, oos_completed: 0, oos_missing: 19, oos_incomparable: 0,
+          incumbent_metrics: null, challenger_metrics: null,
+          comparisons: [
+            { key: "hold_current", data_state: "READY", reason_code: "READY" },
+            { key: "baseline_v1", data_state: "UNKNOWN", reason_code: "UNKNOWN" },
+            { key: "market_benchmark", data_state: "UNKNOWN", reason_code: "UNKNOWN" },
+          ], gates: [], reason_code: "EVALUATION_OBSERVING",
+          execution_locked: true, broker_write: false, live_write: false,
+        },
+      }, meta: meta() });
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    render(<PaperPage />);
+    expect(await screen.findByText("模拟盘事实读取失败；未触发任何订单动作。")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Agent 版本并行评价" })).not.toBeInTheDocument();
   });
 
   it("separates realtime Schwab decision quotes from unknown-delivery execution bars", () => {

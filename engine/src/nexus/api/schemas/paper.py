@@ -293,14 +293,17 @@ class AgentPaperSessionSummaryResponse(_StrictSchema):
     latest_result_code: str | None = Field(default=None, min_length=1, max_length=100)
     last_completed_decision_at: AwareDatetime | None
     next_eligible_at: AwareDatetime | None
-    next_eligible_reason: Literal[
-        "CURRENT_SLOT",
-        "NEXT_SLOT",
-        "SESSION_OPEN",
-        "NEXT_SESSION",
-        "CURRENT_CYCLE_IN_PROGRESS",
-        "CALENDAR_UNAVAILABLE",
-    ] | None
+    next_eligible_reason: (
+        Literal[
+            "CURRENT_SLOT",
+            "NEXT_SLOT",
+            "SESSION_OPEN",
+            "NEXT_SESSION",
+            "CURRENT_CYCLE_IN_PROGRESS",
+            "CALENDAR_UNAVAILABLE",
+        ]
+        | None
+    )
     execution_locked: Literal[True]
 
 
@@ -318,7 +321,7 @@ class AgentPaperVersionObservationResponse(_StrictSchema):
     unavailable_count: int = Field(ge=0, le=100_000)
     order_count: int = Field(ge=0, le=100_000)
     fill_count: int = Field(ge=0, le=100_000)
-    challenger_available: Literal[False]
+    challenger_available: bool
     lifecycle_state: Literal["incumbent_frozen", "historical_frozen"]
     verdict: Literal["continue_observing", "retained_as_frozen_history"]
     reason_codes: tuple[
@@ -353,13 +356,113 @@ class AgentPaperVersionObservationResponse(_StrictSchema):
             ]
         if self.order_count == 0 or self.fill_count == 0:
             expected_reasons.append("VERSION_ORDER_PATH_UNOBSERVED")
-        expected_reasons.append(
-            "VERSION_CHALLENGER_UNAVAILABLE"
-            if self.lifecycle_state == "incumbent_frozen"
-            else "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE"
-        )
+        if self.lifecycle_state == "incumbent_frozen":
+            if not self.challenger_available:
+                expected_reasons.append("VERSION_CHALLENGER_UNAVAILABLE")
+        else:
+            expected_reasons.append("VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE")
         if self.reason_codes != tuple(expected_reasons):
             raise ValueError("version observation reasons do not match facts")
+        return self
+
+
+class AgentVersionLaneMetricsResponse(_StrictSchema):
+    nav: DecimalString
+    total_return_ratio: DecimalString
+    max_drawdown_ratio: DecimalString
+    turnover_ratio: DecimalString
+    total_cost: DecimalString
+    order_count: int = Field(ge=0, le=100_000)
+    fill_count: int = Field(ge=0, le=100_000)
+    hard_risk_count: int = Field(ge=0, le=100_000)
+
+
+class AgentVersionComparisonResponse(_StrictSchema):
+    key: Literal["hold_current", "baseline_v1", "market_benchmark"]
+    data_state: Literal["READY", "UNKNOWN"]
+    reason_code: str = Field(min_length=1, max_length=100)
+
+
+class AgentVersionGateResponse(_StrictSchema):
+    key: Literal[
+        "authority",
+        "oos_pairs",
+        "cost_authority",
+        "comparison_authority",
+        "hard_risk",
+        "ledger_conservation",
+        "duplicate_execution",
+        "action_divergence",
+        "challenger_fills",
+        "excess_return",
+        "positive_excess_sessions",
+        "drawdown_degradation",
+    ]
+    status: Literal["PASS", "FAIL", "UNKNOWN"]
+    observed: str | None = Field(default=None, max_length=100)
+    threshold: str | None = Field(default=None, max_length=100)
+    reason_code: str = Field(min_length=1, max_length=100)
+
+
+class AgentVersionEvaluationResponse(_StrictSchema):
+    evaluation_id: UUID
+    status: Literal["observing", "PASS", "FAIL", "UNKNOWN"]
+    incumbent_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    incumbent_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    challenger_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    challenger_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    train_completed: int = Field(ge=0, le=4)
+    oos_completed: int = Field(ge=0, le=20)
+    oos_missing: int = Field(ge=0, le=20)
+    oos_incomparable: int = Field(ge=0, le=20)
+    incumbent_metrics: AgentVersionLaneMetricsResponse | None
+    challenger_metrics: AgentVersionLaneMetricsResponse | None
+    comparisons: tuple[AgentVersionComparisonResponse, ...] = Field(min_length=3, max_length=3)
+    gates: tuple[AgentVersionGateResponse, ...] = Field(max_length=12)
+    reason_code: str = Field(min_length=1, max_length=100)
+    execution_locked: Literal[True]
+    broker_write: Literal[False]
+    live_write: Literal[False]
+
+    @model_validator(mode="after")
+    def _facts_are_consistent(self) -> AgentVersionEvaluationResponse:
+        if self.oos_completed + self.oos_missing + self.oos_incomparable != 20:
+            raise ValueError("Agent version OOS lifecycle counts must total 20")
+        if tuple(row.key for row in self.comparisons) != (
+            "hold_current",
+            "baseline_v1",
+            "market_benchmark",
+        ):
+            raise ValueError("Agent version comparisons must use the fixed order")
+        if self.status == "observing" and self.gates:
+            raise ValueError("observing Agent version evaluation cannot expose final gates")
+        if self.status != "observing" and not self.gates:
+            raise ValueError("finalized Agent version evaluation requires gates")
+        expected_gate_keys = (
+            "authority",
+            "oos_pairs",
+            "cost_authority",
+            "comparison_authority",
+            "hard_risk",
+            "ledger_conservation",
+            "duplicate_execution",
+            "action_divergence",
+            "challenger_fills",
+            "excess_return",
+            "positive_excess_sessions",
+            "drawdown_degradation",
+        )
+        if self.gates and tuple(gate.key for gate in self.gates) != expected_gate_keys:
+            raise ValueError("finalized Agent version gates must use the fixed order")
+        if self.status == "PASS" and (
+            self.reason_code != "OOS_IMPROVEMENT_PROVEN"
+            or any(gate.status != "PASS" for gate in self.gates)
+        ):
+            raise ValueError("PASS Agent version evaluation requires every gate")
+        if self.status == "FAIL" and not any(gate.status == "FAIL" for gate in self.gates):
+            raise ValueError("FAIL Agent version evaluation requires a failed gate")
+        if self.status == "UNKNOWN" and not any(gate.status == "UNKNOWN" for gate in self.gates):
+            raise ValueError("UNKNOWN Agent version evaluation requires an unknown gate")
         return self
 
 
@@ -367,9 +470,8 @@ class AgentPaperCyclePageResponse(_StrictSchema):
     items: tuple[AgentPaperCycleResponse, ...] = Field(max_length=20)
     summary: AgentPaperSessionSummaryResponse
     version_observation: AgentPaperVersionObservationResponse | None
-    version_history: tuple[AgentPaperVersionObservationResponse, ...] = Field(
-        max_length=20
-    )
+    version_history: tuple[AgentPaperVersionObservationResponse, ...] = Field(max_length=20)
+    version_evaluation: AgentVersionEvaluationResponse | None
 
     @model_validator(mode="after")
     def _version_history_is_consistent(self) -> AgentPaperCyclePageResponse:
@@ -380,13 +482,10 @@ class AgentPaperCyclePageResponse(_StrictSchema):
         if not self.version_history or self.version_history[0] != self.version_observation:
             raise ValueError("current version observation must lead version history")
         if self.version_history[0].lifecycle_state != "incumbent_frozen" or any(
-            item.lifecycle_state != "historical_frozen"
-            for item in self.version_history[1:]
+            item.lifecycle_state != "historical_frozen" for item in self.version_history[1:]
         ):
             raise ValueError("version history must contain exactly one leading incumbent")
-        identities = [
-            (item.prompt_hash, item.model_hash) for item in self.version_history
-        ]
+        identities = [(item.prompt_hash, item.model_hash) for item in self.version_history]
         if len(identities) != len(set(identities)):
             raise ValueError("version history identities must be unique")
         if any(

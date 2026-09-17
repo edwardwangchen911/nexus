@@ -282,7 +282,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || data.items.length > 20
       || data.items.some((cycle) => !agentPaperCycleValid(cycle))
       || !agentPaperSessionSummaryValid(data.summary, data.items)
-      || !agentPaperVersionHistoryValid(data.version_observation, data.version_history)) return INVALID_DATA;
+      || !agentPaperVersionHistoryValid(data.version_observation, data.version_history)
+      || !agentVersionEvaluationValid(data.version_evaluation)) return INVALID_DATA;
     return data;
   }
   const paperCycleDetail = /^\/internal\/v1\/paper\/cycles\/([^/]+)$/.exec(pathname);
@@ -819,7 +820,7 @@ function agentPaperVersionObservationValid(value: unknown): boolean {
     || !Number.isSafeInteger(value.unavailable_count)
     || Number(value.observed_sessions) > Number(value.cycle_count)
     || Number(value.completed_count) + Number(value.unavailable_count) > Number(value.cycle_count)
-    || value.challenger_available !== false
+    || typeof value.challenger_available !== "boolean"
     || !Array.isArray(value.reason_codes)) return false;
   const incumbent = value.lifecycle_state === "incumbent_frozen";
   const historical = value.lifecycle_state === "historical_frozen";
@@ -832,11 +833,43 @@ function agentPaperVersionObservationValid(value: unknown): boolean {
   if (Number(value.order_count) === 0 || Number(value.fill_count) === 0) {
     expectedReasons.push("VERSION_ORDER_PATH_UNOBSERVED");
   }
-  expectedReasons.push(incumbent
-    ? "VERSION_CHALLENGER_UNAVAILABLE"
-    : "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE");
+  if (historical) expectedReasons.push("VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE");
+  else if (value.challenger_available === false) expectedReasons.push("VERSION_CHALLENGER_UNAVAILABLE");
   return value.reason_codes.length === expectedReasons.length
     && value.reason_codes.every((reason, index) => reason === expectedReasons[index]);
+}
+
+function agentVersionEvaluationValid(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isPlain(value)
+    || value.execution_locked !== true
+    || value.broker_write !== false
+    || value.live_write !== false
+    || !Number.isSafeInteger(value.train_completed)
+    || !Number.isSafeInteger(value.oos_completed)
+    || !Number.isSafeInteger(value.oos_missing)
+    || !Number.isSafeInteger(value.oos_incomparable)
+    || Number(value.train_completed) < 0 || Number(value.train_completed) > 4
+    || Number(value.oos_completed) < 0 || Number(value.oos_completed) > 20
+    || Number(value.oos_missing) < 0 || Number(value.oos_incomparable) < 0
+    || Number(value.oos_completed) + Number(value.oos_missing) + Number(value.oos_incomparable) !== 20
+    || !Array.isArray(value.comparisons)
+    || value.comparisons.map((row) => isPlain(row) ? row.key : null).join(":") !== "hold_current:baseline_v1:market_benchmark"
+    || !Array.isArray(value.gates)) return false;
+  if (value.status === "observing") return value.gates.length === 0;
+  const expectedGates = [
+    "authority", "oos_pairs", "cost_authority", "comparison_authority",
+    "hard_risk", "ledger_conservation", "duplicate_execution", "action_divergence",
+    "challenger_fills", "excess_return", "positive_excess_sessions", "drawdown_degradation",
+  ];
+  if (value.gates.map((gate) => isPlain(gate) ? gate.key : null).join(":") !== expectedGates.join(":")) return false;
+  if (value.status === "PASS") {
+    return value.reason_code === "OOS_IMPROVEMENT_PROVEN"
+      && value.gates.every((gate) => isPlain(gate) && gate.status === "PASS");
+  }
+  if (value.status === "FAIL") return value.gates.some((gate) => isPlain(gate) && gate.status === "FAIL");
+  return value.status === "UNKNOWN"
+    && value.gates.some((gate) => isPlain(gate) && gate.status === "UNKNOWN");
 }
 
 function agentPaperVersionHistoryValid(observation: unknown, history: unknown): boolean {

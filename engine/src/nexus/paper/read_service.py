@@ -24,6 +24,10 @@ from nexus.api.schemas.paper import (
     AgentPaperSchwabExecutionMarketResponse,
     AgentPaperSessionSummaryResponse,
     AgentPaperVersionObservationResponse,
+    AgentVersionComparisonResponse,
+    AgentVersionEvaluationResponse,
+    AgentVersionGateResponse,
+    AgentVersionLaneMetricsResponse,
     PaperAttributionResponse,
     PaperComparisonResponse,
     PaperComparisonRowResponse,
@@ -46,6 +50,11 @@ from nexus.paper.agent_cycle_models import (
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
+from nexus.persistence.models.agent_versions import (
+    AgentVersionCyclePairRecord,
+    AgentVersionEvaluationDecisionRecord,
+    AgentVersionEvaluationRecord,
+)
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -84,7 +93,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
 )
-from nexus.persistence.models.portfolio import Portfolio
+from nexus.persistence.models.portfolio import Account, Portfolio
 
 _MAX_POSITIONS = 500
 _MAX_ATTRIBUTIONS = 500
@@ -145,7 +154,11 @@ class PaperReadService:
             await self._session.execute(
                 select(PaperAccountRecord, Portfolio)
                 .join(Portfolio, Portfolio.id == PaperAccountRecord.portfolio_id)
-                .where(PaperAccountRecord.capability == "simulation_write_internal")
+                .join(Account, Account.id == Portfolio.account_id)
+                .where(
+                    PaperAccountRecord.capability == "simulation_write_internal",
+                    Account.provider != "internal_paper_evaluation",
+                )
                 .order_by(PaperAccountRecord.id)
                 .limit(2)
             )
@@ -177,9 +190,7 @@ class PaperReadService:
             return None
         return await self._agent_cycle(cycle)
 
-    async def agent_cycle_detail(
-        self, cycle_id: UUID
-    ) -> AgentPaperCycleDetailResponse | None:
+    async def agent_cycle_detail(self, cycle_id: UUID) -> AgentPaperCycleDetailResponse | None:
         account, _ = await self.account()
         cycle = await self._session.scalar(
             select(AgentPaperCycleRecord).where(
@@ -205,7 +216,11 @@ class PaperReadService:
         if not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
         account, _ = await self.account()
-        version_history = await self._agent_version_history(account_id=account.id)
+        version_evaluation = await self._agent_version_evaluation()
+        version_history = await self._agent_version_history(
+            account_id=account.id,
+            challenger_available=version_evaluation is not None,
+        )
         resolved_session = decision_session
         if resolved_session is None:
             resolved_session = await self._current_xnys_session()
@@ -220,6 +235,7 @@ class PaperReadService:
                 ),
                 version_observation=version_history[0] if version_history else None,
                 version_history=version_history,
+                version_evaluation=version_evaluation,
             )
         cycles = tuple(
             await self._session.scalars(
@@ -254,15 +270,197 @@ class PaperReadService:
             ),
             version_observation=version_history[0] if version_history else None,
             version_history=version_history,
+            version_evaluation=version_evaluation,
+        )
+
+    async def _agent_version_evaluation(
+        self,
+    ) -> AgentVersionEvaluationResponse | None:
+        row = (
+            await self._session.execute(
+                select(
+                    AgentVersionEvaluationRecord,
+                    AgentVersionEvaluationDecisionRecord,
+                )
+                .outerjoin(
+                    AgentVersionEvaluationDecisionRecord,
+                    and_(
+                        AgentVersionEvaluationDecisionRecord.evaluation_id
+                        == AgentVersionEvaluationRecord.id,
+                        AgentVersionEvaluationDecisionRecord.created_at <= self._request_time,
+                    ),
+                )
+                .where(AgentVersionEvaluationRecord.created_at <= self._request_time)
+                .order_by(
+                    AgentVersionEvaluationRecord.created_at.desc(),
+                    AgentVersionEvaluationRecord.id.desc(),
+                )
+                .limit(1)
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        evaluation, decision = row
+        pairs = tuple(
+            await self._session.scalars(
+                select(AgentVersionCyclePairRecord).where(
+                    AgentVersionCyclePairRecord.evaluation_id == evaluation.id,
+                    AgentVersionCyclePairRecord.created_at <= self._request_time,
+                )
+            )
+        )
+        train_completed = sum(pair.phase == "train" for pair in pairs)
+        oos_completed = sum(pair.phase == "oos" for pair in pairs)
+        incumbent_metrics = await self._agent_version_lane_metrics(
+            account_id=evaluation.incumbent_account_id,
+            window_start=evaluation.train_slots[0],
+        )
+        challenger_metrics = await self._agent_version_lane_metrics(
+            account_id=evaluation.challenger_account_id,
+            window_start=evaluation.train_slots[0],
+        )
+        comparisons = (
+            AgentVersionComparisonResponse(
+                key="hold_current",
+                data_state="READY",
+                reason_code="CASH_HOLD_CURRENT",
+            ),
+            AgentVersionComparisonResponse(
+                key="baseline_v1",
+                data_state="UNKNOWN",
+                reason_code="SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
+            ),
+            AgentVersionComparisonResponse(
+                key="market_benchmark",
+                data_state="UNKNOWN",
+                reason_code="SAME_WINDOW_FORWARD_FACTS_UNAVAILABLE",
+            ),
+        )
+        gates: tuple[AgentVersionGateResponse, ...] = ()
+        if decision is not None:
+            raw_gates = decision.metric_report.get("gates")
+            if not isinstance(raw_gates, list):
+                raise ValueError("AGENT_VERSION_DECISION_AUTHORITY_INVALID")
+            gates = tuple(AgentVersionGateResponse.model_validate(item) for item in raw_gates)
+        return AgentVersionEvaluationResponse(
+            evaluation_id=evaluation.id,
+            status="observing" if decision is None else decision.status,
+            incumbent_prompt_hash=evaluation.incumbent_prompt_hash,
+            incumbent_model_hash=evaluation.incumbent_model_hash,
+            challenger_prompt_hash=evaluation.challenger_prompt_hash,
+            challenger_model_hash=evaluation.challenger_model_hash,
+            train_completed=train_completed,
+            oos_completed=oos_completed,
+            oos_missing=20 - oos_completed,
+            oos_incomparable=0,
+            incumbent_metrics=incumbent_metrics,
+            challenger_metrics=challenger_metrics,
+            comparisons=comparisons,
+            gates=gates,
+            reason_code=("EVALUATION_OBSERVING" if decision is None else decision.reason_code),
+            execution_locked=True,
+            broker_write=False,
+            live_write=False,
+        )
+
+    async def _latest_performance_snapshot(
+        self, *, account_id: UUID
+    ) -> PaperPerformanceSnapshotRecord | None:
+        return cast(
+            PaperPerformanceSnapshotRecord | None,
+            await self._session.scalar(
+                select(PaperPerformanceSnapshotRecord)
+                .where(
+                    PaperPerformanceSnapshotRecord.account_id == account_id,
+                    PaperPerformanceSnapshotRecord.as_of <= self._request_time,
+                    PaperPerformanceSnapshotRecord.created_at <= self._request_time,
+                )
+                .order_by(
+                    PaperPerformanceSnapshotRecord.as_of.desc(),
+                    PaperPerformanceSnapshotRecord.id.desc(),
+                )
+                .limit(1)
+            ),
+        )
+
+    async def _agent_version_lane_metrics(
+        self,
+        *,
+        account_id: UUID,
+        window_start: datetime,
+    ) -> AgentVersionLaneMetricsResponse | None:
+        account = await self._session.get(PaperAccountRecord, account_id)
+        snapshot = await self._latest_performance_snapshot(account_id=account_id)
+        if account is None or snapshot is None:
+            return None
+        max_drawdown = await self._session.scalar(
+            select(func.max(PaperPerformanceSnapshotRecord.drawdown_ratio)).where(
+                PaperPerformanceSnapshotRecord.account_id == account_id,
+                PaperPerformanceSnapshotRecord.as_of >= window_start,
+                PaperPerformanceSnapshotRecord.as_of <= snapshot.as_of,
+            )
+        )
+        orders = tuple(
+            await self._session.scalars(
+                select(PaperOrderRecord).where(
+                    PaperOrderRecord.account_id == account_id,
+                    PaperOrderRecord.created_at >= window_start,
+                    PaperOrderRecord.created_at <= self._request_time,
+                )
+            )
+        )
+        order_ids = tuple(order.id for order in orders)
+        fills = (
+            tuple(
+                await self._session.scalars(
+                    select(PaperFillRecord).where(
+                        PaperFillRecord.order_id.in_(order_ids),
+                        PaperFillRecord.occurred_at <= self._request_time,
+                    )
+                )
+            )
+            if order_ids
+            else ()
+        )
+        risk_rows = (
+            tuple(
+                await self._session.scalars(
+                    select(RiskEvaluationRecord).where(RiskEvaluationRecord.order_id.in_(order_ids))
+                )
+            )
+            if order_ids
+            else ()
+        )
+        risk_by_order = {risk.order_id: risk for risk in risk_rows}
+        hard_risk_count = sum(
+            order.id not in risk_by_order or risk_by_order[order.id].outcome != order.risk_outcome
+            for order in orders
+        )
+        turnover = sum((fill.notional for fill in fills), Decimal(0))
+        slippage = sum((fill.slippage_amount for fill in fills), Decimal(0))
+        return AgentVersionLaneMetricsResponse(
+            nav=decimal_to_string(snapshot.nav),
+            total_return_ratio=decimal_to_string(
+                snapshot.nav / account.initial_capital - Decimal(1)
+            ),
+            max_drawdown_ratio=decimal_to_string(
+                snapshot.drawdown_ratio if max_drawdown is None else max_drawdown
+            ),
+            turnover_ratio=decimal_to_string(turnover / account.initial_capital),
+            total_cost=decimal_to_string(snapshot.fees + slippage),
+            order_count=len(orders),
+            fill_count=len(fills),
+            hard_risk_count=hard_risk_count,
         )
 
     async def _agent_version_history(
-        self, *, account_id: UUID
+        self, *, account_id: UUID, challenger_available: bool
     ) -> tuple[AgentPaperVersionObservationResponse, ...]:
         rows = (
-            await self._session.execute(
-                text(
-                    """
+            (
+                await self._session.execute(
+                    text(
+                        """
                     WITH scoped_cycles AS (
                         SELECT id, decision_session, decision_time
                         FROM agent_paper_cycles
@@ -468,10 +666,13 @@ class PaperReadService:
                         model_version
                     LIMIT 20
                     """
-                ),
-                {"account_id": account_id, "cutoff": self._request_time},
+                    ),
+                    {"account_id": account_id, "cutoff": self._request_time},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         if (
             not rows
             or any(int(row["mixed_cycle_count"]) > 0 for row in rows)
@@ -492,11 +693,10 @@ class PaperReadService:
             )
             if int(row["order_count"]) == 0 or int(row["fill_count"]) == 0:
                 reason_codes.append("VERSION_ORDER_PATH_UNOBSERVED")
-            reason_codes.append(
-                "VERSION_CHALLENGER_UNAVAILABLE"
-                if is_incumbent
-                else "VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE"
-            )
+            if not is_incumbent:
+                reason_codes.append("VERSION_SEQUENTIAL_HISTORY_NOT_COMPARABLE")
+            elif not challenger_available:
+                reason_codes.append("VERSION_CHALLENGER_UNAVAILABLE")
             observations.append(
                 AgentPaperVersionObservationResponse(
                     prompt_version=cast(str, row["prompt_version"]),
@@ -512,14 +712,10 @@ class PaperReadService:
                     unavailable_count=int(row["unavailable_count"]),
                     order_count=int(row["order_count"]),
                     fill_count=int(row["fill_count"]),
-                    challenger_available=False,
-                    lifecycle_state=(
-                        "incumbent_frozen" if is_incumbent else "historical_frozen"
-                    ),
+                    challenger_available=challenger_available,
+                    lifecycle_state=("incumbent_frozen" if is_incumbent else "historical_frozen"),
                     verdict=(
-                        "continue_observing"
-                        if is_incumbent
-                        else "retained_as_frozen_history"
+                        "continue_observing" if is_incumbent else "retained_as_frozen_history"
                     ),
                     reason_codes=cast(Any, tuple(reason_codes)),
                 )
@@ -594,15 +790,13 @@ class PaperReadService:
                     AgentPaperCycleEventRecord,
                     and_(
                         AgentPaperCycleEventRecord.cycle_id == AgentPaperCycleRecord.id,
-                        AgentPaperCycleEventRecord.sequence
-                        == latest_cycle_events.c.sequence,
+                        AgentPaperCycleEventRecord.sequence == latest_cycle_events.c.sequence,
                     ),
                 )
                 .outerjoin(
                     StrategyDecisionRecord,
                     and_(
-                        StrategyDecisionRecord.agent_paper_cycle_id
-                        == AgentPaperCycleRecord.id,
+                        StrategyDecisionRecord.agent_paper_cycle_id == AgentPaperCycleRecord.id,
                         StrategyDecisionRecord.decision_origin == "agent_research",
                         StrategyDecisionRecord.created_at <= self._request_time,
                     ),
@@ -642,8 +836,7 @@ class PaperReadService:
             )
         ).all()
         if len(rows) > _MAX_AGENT_CYCLES_PER_SESSION or any(
-            order_count > _MAX_AGENT_ORDERS_PER_CYCLE
-            for _, order_count, _ in rows
+            order_count > _MAX_AGENT_ORDERS_PER_CYCLE for _, order_count, _ in rows
         ):
             raise NexusError(
                 ErrorCode.DATA_PARTIAL,
@@ -709,14 +902,17 @@ class PaperReadService:
 
         local_now = self._request_time.astimezone(ZoneInfo("America/New_York"))
         next_at: datetime | None = None
-        next_reason: Literal[
-            "CURRENT_SLOT",
-            "NEXT_SLOT",
-            "SESSION_OPEN",
-            "NEXT_SESSION",
-            "CURRENT_CYCLE_IN_PROGRESS",
-            "CALENDAR_UNAVAILABLE",
-        ] | None = None
+        next_reason: (
+            Literal[
+                "CURRENT_SLOT",
+                "NEXT_SLOT",
+                "SESSION_OPEN",
+                "NEXT_SESSION",
+                "CURRENT_CYCLE_IN_PROGRESS",
+                "CALENDAR_UNAVAILABLE",
+            ]
+            | None
+        ) = None
         status: Literal[
             "calendar_unavailable",
             "not_started",
@@ -1222,8 +1418,7 @@ class PaperReadService:
                 )
                 .join(
                     PriceSeriesManifest,
-                    PriceSeriesManifest.id
-                    == PriceBarSetAuthority.price_series_manifest_id,
+                    PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
                 )
                 .where(
                     PaperPositionSnapshotRecord.account_id == account.id,
@@ -1475,8 +1670,7 @@ class PaperReadService:
                     PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
                 )
                 .where(
-                    PriceBarSetAuthority.source_policy_id
-                    == PAPER_DECISION_SOURCE_POLICY_ID,
+                    PriceBarSetAuthority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
                     PriceBarSetAuthority.first_session <= expected_sessions[0],
                     PriceBarSetAuthority.last_session >= expected_sessions[-1],
                     PriceBarSetAuthority.available_at <= self._request_time,

@@ -7,11 +7,14 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+import httpx
 import nexus.paper.agent_version_runner as agent_version_runner
 import pytest
+from helpers.paper_api import app, headers
 from nexus.agents.codex_sdk import MODEL_ID
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION, aggregate_input_limit
 from nexus.agents.committee import ROLE_ORDER
+from nexus.ops.agent_version_evaluation import EvaluationRequest, StatusResult, execute
 from nexus.paper.agent_cycle_authority import CycleAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult
 from nexus.paper.agent_version_evaluation import (
@@ -29,6 +32,7 @@ from nexus.paper.agent_version_runner import (
     resume_agent_version_slot,
 )
 from nexus.paper.projection import load_paper_projection
+from nexus.paper.read_service import PaperReadService
 from nexus.persistence.models.agent_versions import (
     AgentVersionEvaluationDecisionRecord,
     AgentVersionEvaluationRecord,
@@ -56,6 +60,7 @@ from nexus.persistence.models.paper import (
 from nexus.persistence.models.portfolio import Account, Portfolio
 from nexus.persistence.models.runtime import Job
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
+from nexus.settings import EngineSettings
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -375,6 +380,86 @@ async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
             )
             assert authority_replay.evaluation_id == registration.evaluation_id
             assert authority_replay.replayed is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_registered_evaluation_projects_as_locked_read_only_fact(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-readback-v1",
+                now=NOW,
+            )
+        request_time = _request(prompt_id, model_id).oos_slots[-1] + timedelta(days=1)
+        async with factory() as session:
+            visible_accounts = (
+                await session.execute(
+                    select(PaperAccountRecord.id, Account.provider)
+                    .join(Portfolio, Portfolio.id == PaperAccountRecord.portfolio_id)
+                    .join(Account, Account.id == Portfolio.account_id)
+                )
+            ).all()
+            assert (
+                sum(provider != "internal_paper_evaluation" for _, provider in visible_accounts)
+                == 1
+            )
+            page = await PaperReadService(session, request_time).agent_cycles(
+                decision_session=TRAIN_DATES[0],
+                limit=20,
+            )
+
+        evaluation = page.version_evaluation
+        assert evaluation is not None
+        assert evaluation.evaluation_id == registration.evaluation_id
+        assert evaluation.status == "observing"
+        assert evaluation.train_completed == 0
+        assert evaluation.oos_completed == 0
+        assert evaluation.oos_missing == 20
+        assert tuple(row.key for row in evaluation.comparisons) == (
+            "hold_current",
+            "baseline_v1",
+            "market_benchmark",
+        )
+        assert evaluation.execution_locked is True
+        assert evaluation.broker_write is False
+        assert evaluation.live_write is False
+        wire = evaluation.model_dump_json()
+        assert str(registration.incumbent_account_id) not in wire
+        assert str(registration.challenger_account_id) not in wire
+
+        path = f"/internal/v1/paper/cycles?decision_session={TRAIN_DATES[0]}&limit=20"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url)),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+        assert response.status_code == 200
+        api_evaluation = response.json()["data"]["version_evaluation"]
+        assert api_evaluation["evaluation_id"] == str(registration.evaluation_id)
+        assert api_evaluation["status"] == "observing"
+        assert api_evaluation["execution_locked"] is True
+        assert api_evaluation["broker_write"] is False
+        assert api_evaluation["live_write"] is False
+
+        cli_status = await execute(
+            EngineSettings(database_url=migrated_database_url),
+            EvaluationRequest(
+                action="status",
+                evaluation_id=registration.evaluation_id,
+            ),
+        )
+        assert isinstance(cli_status, StatusResult)
+        assert cli_status.status == "observing"
+        assert cli_status.execution_locked is True
     finally:
         await engine.dispose()
 

@@ -5,6 +5,7 @@ from uuid import UUID
 import pytest
 from nexus.api.schemas.paper import (
     AgentPaperCycleResponse,
+    AgentVersionEvaluationResponse,
     PaperCancelRequest,
     PaperComparisonRowResponse,
     PaperOrderPageResponse,
@@ -58,6 +59,67 @@ def test_persisted_market_benchmark_is_an_available_comparison_row() -> None:
     assert row.reason_code == "PERSISTED_MARKET_BENCHMARK"
 
 
+def test_agent_version_evaluation_rejects_inconsistent_counts_and_pass() -> None:
+    base = {
+        "evaluation_id": UUID(int=99),
+        "status": "observing",
+        "incumbent_prompt_hash": "a" * 64,
+        "incumbent_model_hash": "b" * 64,
+        "challenger_prompt_hash": "c" * 64,
+        "challenger_model_hash": "d" * 64,
+        "train_completed": 0,
+        "oos_completed": 0,
+        "oos_missing": 20,
+        "oos_incomparable": 0,
+        "incumbent_metrics": None,
+        "challenger_metrics": None,
+        "comparisons": (
+            {"key": "hold_current", "data_state": "READY", "reason_code": "READY"},
+            {"key": "baseline_v1", "data_state": "UNKNOWN", "reason_code": "UNKNOWN"},
+            {"key": "market_benchmark", "data_state": "UNKNOWN", "reason_code": "UNKNOWN"},
+        ),
+        "gates": (),
+        "reason_code": "EVALUATION_OBSERVING",
+        "execution_locked": True,
+        "broker_write": False,
+        "live_write": False,
+    }
+    with pytest.raises(ValidationError, match="lifecycle counts"):
+        AgentVersionEvaluationResponse.model_validate({**base, "oos_missing": 19})
+    with pytest.raises(ValidationError, match="PASS.*every gate"):
+        gate_keys = (
+            "authority",
+            "oos_pairs",
+            "cost_authority",
+            "comparison_authority",
+            "hard_risk",
+            "ledger_conservation",
+            "duplicate_execution",
+            "action_divergence",
+            "challenger_fills",
+            "excess_return",
+            "positive_excess_sessions",
+            "drawdown_degradation",
+        )
+        AgentVersionEvaluationResponse.model_validate(
+            {
+                **base,
+                "status": "PASS",
+                "reason_code": "OOS_IMPROVEMENT_PROVEN",
+                "gates": tuple(
+                    {
+                        "key": key,
+                        "status": "UNKNOWN" if key == "authority" else "PASS",
+                        "reason_code": (
+                            "OOS_AUTHORITY_INCOMPLETE" if key == "authority" else "GATE_PASSED"
+                        ),
+                    }
+                    for key in gate_keys
+                ),
+            }
+        )
+
+
 def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_creation() -> None:
     portfolio_schema = PaperPortfolioResponse.model_json_schema()
     page_schema = PaperOrderPageResponse.model_json_schema()
@@ -89,6 +151,16 @@ def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_cre
     cycle_wire = str(cycle_schema).lower()
     assert "prompt" not in cycle_wire
     assert "account_id" not in cycle_wire
+
+    evaluation_schema = AgentVersionEvaluationResponse.model_json_schema()
+    assert evaluation_schema["properties"]["comparisons"]["maxItems"] == 3
+    assert evaluation_schema["properties"]["gates"]["maxItems"] == 12
+    evaluation_wire = str(evaluation_schema).lower()
+    assert "account_id" not in evaluation_wire
+    assert "prompt_content" not in evaluation_wire
+    assert "create" not in evaluation_wire
+    assert "promote" not in evaluation_wire
+    assert "broker_order" not in evaluation_wire
 
 
 def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() -> None:

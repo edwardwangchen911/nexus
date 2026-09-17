@@ -57,9 +57,10 @@ const versionReasonLabels: Record<AgentPaperVersionObservationFact["reason_codes
 export function AgentPaperVersionHistory({ history }: {
   history: AgentPaperVersionObservationFact[];
 }): React.ReactElement {
+  const challengerAvailable = history[0]?.challenger_available === true;
   return <section className="paper-performance" aria-labelledby="agent-version-history-title">
     <header><div><p className="eyebrow">冻结身份 · 跨交易日只读聚合</p><h2 id="agent-version-history-title">Agent 版本历史</h2></div><span className="mode-badge">继续观察</span></header>
-    <p>当前冻结 incumbent 是现有准入逻辑从同一 Agent actor 最近 run 复用的精确身份；它不代表当前进程在线，也不代表已通过绩效门槛。其余项只保留为历史冻结证据；顺序历史不是并行 challenger，当前没有正式晋升或淘汰结论。</p>
+    <p>当前冻结 incumbent 是现有准入逻辑从同一 Agent actor 最近 run 复用的精确身份；它不代表当前进程在线，也不代表已通过绩效门槛。{challengerAvailable ? "已注册的并行 challenger 在独立评价卡中展示；版本历史仍只标记当前 incumbent。" : "其余项只保留为历史冻结证据；顺序历史不是并行 challenger，当前没有正式晋升或淘汰结论。"}</p>
     {history.map((observation, index) => <article key={`${observation.prompt_hash}:${observation.model_hash}`}>
       <h3>{observation.lifecycle_state === "incumbent_frozen" ? "当前冻结 incumbent" : "历史冻结证据"}</h3>
       <dl>
@@ -76,7 +77,7 @@ export function AgentPaperVersionHistory({ history }: {
       <ul>{observation.reason_codes.map((reason) => <li key={reason}>{versionReasonLabels[reason]}</li>)}</ul>
       </aside>
     </article>)}
-    <p>同名标签可能包含不同冻结配置；每项统计只属于对应指纹，不触发任何版本变更或自动创建 challenger。</p>
+    <p>同名标签可能包含不同冻结配置；每项统计只属于对应指纹，不触发任何版本变更{challengerAvailable ? "或晋升" : "或自动创建 challenger"}。</p>
   </section>;
 }
 
