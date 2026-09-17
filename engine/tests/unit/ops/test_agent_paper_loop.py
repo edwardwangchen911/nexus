@@ -77,6 +77,14 @@ def codex_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", lambda: None)
 
 
+@pytest.fixture
+def codex_model_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def ready() -> None:
+        return None
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", ready)
+
+
 def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
     current = changes.get("now", NOW)
     assert isinstance(current, datetime)
@@ -1839,6 +1847,7 @@ def test_explicit_action_uses_registered_config_through_product_boundary(
     monkeypatch,
     tmp_path,
     action,
+    codex_model_ready,
 ):
     env_file = explicit_service_config(tmp_path)
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://wrong/other")
@@ -2639,7 +2648,10 @@ def test_research_job_resolution_accepts_only_cycle_bound_job() -> None:
     assert loop.resolve_cycle_research_job(events=(event,), jobs=(wrong,)) is None
 
 
-def test_executor_claims_only_persisted_job(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_executor_claims_only_persisted_job(
+    monkeypatch: pytest.MonkeyPatch,
+    codex_model_ready: None,
+) -> None:
     job_id = UUID(int=11)
     received: list[tuple[UUID, ...] | None] = []
 
