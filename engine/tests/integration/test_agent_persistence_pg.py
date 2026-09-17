@@ -610,22 +610,33 @@ async def test_propose_job_rejects_tampered_queued_authority_before_runtime(
             retry_policy=RetryPolicy.NEVER,
             max_attempts=1,
         )
-        if mutation == "input_hash":
-            job.input_hash = "f" * 64
-        else:
-            changed = copy.deepcopy(job.payload)
-            if mutation == "request_hash":
-                changed["request_hash"] = "f" * 64
+        await session.flush()
+        await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER trg_jobs_state"))
+        try:
+            if mutation == "input_hash":
+                await session.execute(
+                    text("UPDATE jobs SET input_hash=:value WHERE id=:job_id"),
+                    {"value": "f" * 64, "job_id": job.id},
+                )
             else:
-                frozen = changed["retrospective"]
-                assert isinstance(frozen, dict)
-                field = {
-                    "source_hash": "source_hash",
-                    "output_contract_hash": "output_contract_hash",
-                    "model_hash": "incumbent_model_hash",
-                }[mutation]
-                frozen[field] = "f" * 64
-            job.payload = changed
+                changed = copy.deepcopy(job.payload)
+                if mutation == "request_hash":
+                    changed["request_hash"] = "f" * 64
+                else:
+                    frozen = changed["retrospective"]
+                    assert isinstance(frozen, dict)
+                    field = {
+                        "source_hash": "source_hash",
+                        "output_contract_hash": "output_contract_hash",
+                        "model_hash": "incumbent_model_hash",
+                    }[mutation]
+                    frozen[field] = "f" * 64
+                await session.execute(
+                    text("UPDATE jobs SET payload=CAST(:payload AS jsonb) WHERE id=:job_id"),
+                    {"payload": json.dumps(changed), "job_id": job.id},
+                )
+        finally:
+            await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER trg_jobs_state"))
 
     class Runtime:
         calls = 0
