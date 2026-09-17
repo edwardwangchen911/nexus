@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import Literal
+from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.schemas.paper import (
@@ -17,17 +16,18 @@ from nexus.api.schemas.paper import (
 from nexus.api.schemas.workbench import (
     WorkbenchAccountSummaryResponse,
     WorkbenchAttentionResponse,
+    WorkbenchCompatibilityResponse,
     WorkbenchLoopResponse,
     WorkbenchResponse,
 )
+from nexus.ops.agent_paper_loop import _classify_agent_paper_service_heartbeat
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import (
     AGENT_PAPER_LOOP_PROCESS_VERSION,
     CURRENT_MIGRATION_HEAD,
 )
 from nexus.persistence.models.runtime import WorkerHeartbeat
-
-_LOOP_STALE_AFTER = timedelta(seconds=30)
+from nexus.workbench.readiness import cycle_blocker, runtime_readiness
 
 
 class WorkbenchReadService:
@@ -43,11 +43,13 @@ class WorkbenchReadService:
         portfolio = await paper.portfolio()
         active_orders = await paper.active_orders(limit=20)
         latest = cycles.items[0] if cycles.items else None
-        loop = await self._loop_status()
+        loop, compatibility = await self._loop_status()
         return WorkbenchResponse(
             mode="internal_paper",
             execution_locked=True,
             loop=loop,
+            compatibility=compatibility,
+            readiness=runtime_readiness(cycles.items, cycles.summary, active_orders),
             session=cycles.summary,
             latest_cycle=latest,
             active_orders=active_orders,
@@ -60,42 +62,63 @@ class WorkbenchReadService:
             ),
         )
 
-    async def _loop_status(self) -> WorkbenchLoopResponse:
-        heartbeat = await self._session.scalar(
-            select(WorkerHeartbeat)
-            .where(
-                WorkerHeartbeat.queue == "agent_paper",
-                WorkerHeartbeat.seen_at <= self._request_time,
+    async def _loop_status(
+        self,
+    ) -> tuple[WorkbenchLoopResponse, WorkbenchCompatibilityResponse]:
+        heads = tuple(
+            await self._session.scalars(
+                text("SELECT version_num FROM alembic_version ORDER BY version_num LIMIT 11")
             )
-            .order_by(WorkerHeartbeat.seen_at.desc(), WorkerHeartbeat.id.desc())
-            .limit(1)
         )
-        if heartbeat is None:
-            return WorkbenchLoopResponse(
-                status="unknown",
-                reason_code="HEARTBEAT_MISSING",
-                started_at=None,
-                last_seen_at=None,
-                stale_after_seconds=30,
+        row = (
+            await self._session.execute(
+                select(func.clock_timestamp(), WorkerHeartbeat)
+                .where(WorkerHeartbeat.queue == "agent_paper")
+                .order_by(WorkerHeartbeat.seen_at.desc(), WorkerHeartbeat.id.desc())
+                .limit(1)
             )
-        compatible = (
-            heartbeat.migration_head == CURRENT_MIGRATION_HEAD
-            and heartbeat.process_version == AGENT_PAPER_LOOP_PROCESS_VERSION
+        ).one_or_none()
+        heartbeat = row[1] if row else None
+        classification = (
+            "missing"
+            if row is None
+            else _classify_agent_paper_service_heartbeat(row[0], heartbeat)["status"]
         )
-        fresh = self._request_time - heartbeat.seen_at <= _LOOP_STALE_AFTER
-        status: Literal["online", "offline"] = "online" if compatible and fresh else "offline"
-        reason_code: Literal["HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"] | None = None
-        if not compatible:
-            reason_code = "HEARTBEAT_INCOMPATIBLE"
-        elif not fresh:
-            reason_code = "HEARTBEAT_STALE"
-        return WorkbenchLoopResponse(
-            status=status,
-            reason_code=reason_code,
-            started_at=heartbeat.started_at,
-            last_seen_at=heartbeat.seen_at,
-            stale_after_seconds=30,
+        compatibility = WorkbenchCompatibilityResponse(
+            status="unknown"
+            if classification in {"missing", "unavailable"}
+            else (
+                "incompatible"
+                if classification == "incompatible" or heads != (CURRENT_MIGRATION_HEAD,)
+                else "compatible"
+            ),
+            expected_process_version=AGENT_PAPER_LOOP_PROCESS_VERSION,
+            expected_migration_head=CURRENT_MIGRATION_HEAD,
+            reported_process_version=heartbeat.process_version if heartbeat else None,
+            reported_migration_head=heartbeat.migration_head if heartbeat else None,
+            database_migration_heads=heads,
         )
+        if heads != (CURRENT_MIGRATION_HEAD,):
+            compatibility.status = "incompatible"
+            classification = "incompatible"
+        reasons = {
+            "missing": "HEARTBEAT_MISSING",
+            "unavailable": "HEARTBEAT_INVALID",
+            "stale": "HEARTBEAT_STALE",
+            "incompatible": "HEARTBEAT_INCOMPATIBLE",
+        }
+        loop = WorkbenchLoopResponse.model_validate(
+            {
+                "status": "online"
+                if classification == "fresh"
+                else ("offline" if classification in {"stale", "incompatible"} else "unknown"),
+                "reason_code": reasons.get(str(classification)),
+                "started_at": heartbeat.started_at if heartbeat else None,
+                "last_seen_at": heartbeat.seen_at if heartbeat else None,
+                "stale_after_seconds": 30,
+            }
+        )
+        return loop, compatibility
 
 
 def _account_summary(portfolio: PaperPortfolioResponse) -> WorkbenchAccountSummaryResponse:
@@ -126,9 +149,15 @@ def _attention_items(
     if latest is not None and latest.status == "unavailable":
         items.append(
             WorkbenchAttentionResponse(
-                kind="data",
+                kind=(
+                    "data"
+                    if cycle_blocker(latest) in {"data_missing", "stale"}
+                    else (
+                        "model" if cycle_blocker(latest) == "research_not_actionable" else "service"
+                    )
+                ),
                 severity="warning",
-                title_code="AGENT_PAPER_DATA_UNAVAILABLE",
+                title_code="AGENT_PAPER_BLOCKED",
                 reason_code=latest.result_code,
                 safe_action="view_evidence",
                 href=f"/decisions/{latest.cycle_id}",

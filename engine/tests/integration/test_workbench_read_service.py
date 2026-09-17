@@ -34,11 +34,12 @@ async def test_workbench_reads_online_loop_active_order_and_empty_account(
 ) -> None:
     seed = await seed_paper_execution(migrated_database_url)
     request_time = datetime(2026, 8, 27, 13, 45, tzinfo=UTC)
+    heartbeat_time = datetime.now(UTC)
     await heartbeat_agent_paper_loop(
         settings(migrated_database_url),
-        worker_id="agent-paper-loop-test-online",
-        started_at=request_time - timedelta(minutes=1),
-        seen_at=request_time - timedelta(seconds=15),
+        worker_id="agent-paper-loop-72000000-0000-0000-0000-000000000001",
+        started_at=heartbeat_time - timedelta(minutes=1),
+        seen_at=heartbeat_time,
     )
 
     factory = session_factory(settings(migrated_database_url))
@@ -49,7 +50,12 @@ async def test_workbench_reads_online_loop_active_order_and_empty_account(
     assert result.execution_locked is True
     assert result.loop.status == "online"
     assert result.loop.reason_code is None
-    assert result.loop.last_seen_at == request_time - timedelta(seconds=15)
+    assert result.loop.last_seen_at == heartbeat_time
+    assert result.compatibility is not None
+    assert result.compatibility.status == "compatible"
+    assert result.compatibility.database_migration_heads == ("0064_prompt_release_channel",)
+    assert result.readiness is not None
+    assert result.readiness.previous_cycle_id is None
     assert result.latest_cycle is None
     assert len(result.active_orders) == 2
     assert seed.order_id in {order.order_id for order in result.active_orders}
@@ -74,7 +80,7 @@ async def test_workbench_keeps_no_order_cycle_empty_and_reports_only_stale_loop(
     )
     await heartbeat_agent_paper_loop(
         settings(migrated_database_url),
-        worker_id="agent-paper-loop-test-stale",
+        worker_id="agent-paper-loop-72000000-0000-0000-0000-000000000002",
         started_at=request_time - timedelta(minutes=10),
         seen_at=request_time - timedelta(seconds=31),
     )
@@ -101,7 +107,7 @@ async def test_workbench_reports_incompatible_agent_paper_heartbeat(
     request_time = datetime(2026, 8, 27, 13, 45, tzinfo=UTC)
     await heartbeat_agent_paper_loop(
         settings(migrated_database_url),
-        worker_id="agent-paper-loop-test-incompatible",
+        worker_id="agent-paper-loop-72000000-0000-0000-0000-000000000003",
         started_at=request_time - timedelta(minutes=1),
         seen_at=request_time - timedelta(seconds=5),
     )
@@ -109,7 +115,7 @@ async def test_workbench_reports_incompatible_agent_paper_heartbeat(
     async with factory.begin() as session:
         heartbeat = await session.scalar(
             select(WorkerHeartbeat).where(
-                WorkerHeartbeat.worker_id == "agent-paper-loop-test-incompatible"
+                WorkerHeartbeat.worker_id == "agent-paper-loop-72000000-0000-0000-0000-000000000003"
             )
         )
         assert heartbeat is not None
@@ -158,6 +164,7 @@ async def _seed_no_order_cycle(
     portfolio_id: UUID,
     cycle_id: UUID,
     future_completion_at: datetime | None = None,
+    decision_time: datetime = ACTIVE_DECISION_TIME,
 ) -> None:
     factory = session_factory(settings(database_url))
     async with factory() as session, session.begin():
@@ -167,8 +174,8 @@ async def _seed_no_order_cycle(
                 account_id=account_id,
                 portfolio_id=portfolio_id,
                 decision_session=EXECUTION_SESSION,
-                decision_time=ACTIVE_DECISION_TIME,
-                decision_slot_at=ACTIVE_DECISION_TIME,
+                decision_time=decision_time,
+                decision_slot_at=decision_time,
                 execution_session=date(2026, 8, 28),
                 universe_snapshot_id=UNIVERSE_ID,
                 quality_report_id=None,
@@ -246,3 +253,72 @@ async def _read_missing_cycle(database_url: str, cycle_id: UUID):
         return await PaperReadService(
             session, ACTIVE_DECISION_TIME + timedelta(minutes=1)
         ).agent_cycle_detail(cycle_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["identity", "future"])
+async def test_workbench_never_calls_invalid_heartbeat_online(
+    migrated_database_url: str,
+    invalid: str,
+) -> None:
+    request_time = datetime.now(UTC)
+    worker_id = "agent-paper-loop-72000000-0000-0000-0000-000000000399"
+    if invalid == "identity":
+        worker_id = "agent-paper-loop-not-a-uuid"
+    await heartbeat_agent_paper_loop(
+        settings(migrated_database_url),
+        worker_id=worker_id,
+        started_at=request_time - timedelta(minutes=1),
+        seen_at=request_time + timedelta(hours=1) if invalid == "future" else request_time,
+    )
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session:
+        result = await WorkbenchReadService(session, request_time).read()
+    assert result.loop.status == "unknown"
+    assert result.loop.reason_code == "HEARTBEAT_INVALID"
+    assert result.compatibility is not None
+    assert result.compatibility.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_readiness_round_trips_persisted_adjacent_cycles_through_read_only_api(
+    migrated_database_url: str,
+) -> None:
+    import httpx
+    from helpers.paper_api import app, headers
+    from sqlalchemy import text
+
+    seed = await seed_paper_batch(migrated_database_url)
+    previous_id, latest_id = UUID(int=401), UUID(int=402)
+    await _seed_no_order_cycle(
+        migrated_database_url,
+        account_id=seed.account_id,
+        portfolio_id=seed.portfolio_id,
+        cycle_id=previous_id,
+        decision_time=ACTIVE_DECISION_TIME - timedelta(minutes=5),
+    )
+    await _seed_no_order_cycle(
+        migrated_database_url,
+        account_id=seed.account_id,
+        portfolio_id=seed.portfolio_id,
+        cycle_id=latest_id,
+        future_completion_at=ACTIVE_DECISION_TIME + timedelta(hours=1),
+    )
+    request_time = ACTIVE_DECISION_TIME + timedelta(minutes=1)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory.begin() as session:
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        result = await WorkbenchReadService(session, request_time).read()
+    assert result.readiness is not None
+    assert result.readiness.previous_cycle_id == previous_id
+    assert result.readiness.previous_result_code == "NO_ORDER_REQUIRED"
+    assert result.readiness.stage == "execution"
+    assert result.readiness.changes == ("stage", "result")
+    path = "/internal/v1/workbench"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url, now=request_time)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    assert response.json()["data"] == result.model_dump(mode="json")

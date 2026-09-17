@@ -7,6 +7,7 @@ import { AccountSummary } from "../../components/workbench/account-summary";
 import { AttentionList } from "../../components/workbench/attention-list";
 import { LatestDecision } from "../../components/workbench/latest-decision";
 import { ModeStrip } from "../../components/workbench/mode-strip";
+import { ReadinessSummary } from "../../components/workbench/readiness-summary";
 import { OrderSummary } from "../../components/workbench/order-summary";
 import { DataState } from "../../components/data-state";
 import type { components } from "../../lib/generated/schema";
@@ -107,6 +108,7 @@ export function WorkbenchPanel({
 
       {payload ? <>
         <ModeStrip workbench={payload.data} />
+        <ReadinessSummary workbench={payload.data} />
         <div className="workbench-primary-grid">
           <LatestDecision cycle={payload.data.latest_cycle} orders={payload.data.active_orders} />
           <AttentionList items={payload.data.attention} />
@@ -128,12 +130,12 @@ function deriveState(workbench: WorkbenchPayload["data"]): WorkbenchPageState {
 function isWorkbenchPayload(value: unknown): value is WorkbenchPayload {
   if (!isPlain(value) || !isPlain(value.data) || !isPlain(value.meta)) return false;
   const data = value.data;
-  const loopReasons = [null, "HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"];
+  const loopReasons = [null, "HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE", "HEARTBEAT_INVALID"];
   if (data.mode !== "internal_paper" || data.execution_locked !== true
     || !isPlain(data.loop) || !["online", "offline", "unknown"].includes(String(data.loop.status))
     || !loopReasons.includes(data.loop.reason_code as null | string)
     || (data.loop.status === "online" && data.loop.reason_code !== null)
-    || (data.loop.status === "unknown" && data.loop.reason_code !== "HEARTBEAT_MISSING")
+    || (data.loop.status === "unknown" && !["HEARTBEAT_MISSING", "HEARTBEAT_INVALID"].includes(String(data.loop.reason_code)))
     || (data.loop.status === "offline" && !["HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"].includes(String(data.loop.reason_code)))
     || data.loop.stale_after_seconds !== 30
     || !isNullableString(data.loop.started_at) || !isNullableString(data.loop.last_seen_at)
@@ -141,6 +143,7 @@ function isWorkbenchPayload(value: unknown): value is WorkbenchPayload {
     || !Array.isArray(data.active_orders) || !Array.isArray(data.attention)
     || typeof value.meta.as_of !== "string" || typeof value.meta.request_id !== "string"
     || typeof value.meta.schema_version !== "string") return false;
+  if (!validReadiness(data.readiness) || !validCompatibility(data.compatibility)) return false;
   if (!validSession(data.session)) return false;
   if (data.latest_cycle !== null && !validCycle(data.latest_cycle)) return false;
   if (!data.active_orders.every(validOrder) || !data.attention.every(validAttention)) return false;
@@ -190,4 +193,22 @@ function isPlain(value: unknown): value is Record<string, unknown> {
 
 function isNullableString(value: unknown): boolean {
   return value === null || typeof value === "string";
+}
+
+function validReadiness(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return isPlain(value)
+    && ["window", "data", "agent", "risk", "execution", "recovery", "completed", "unknown"].includes(String(value.stage))
+    && ["none", "data_missing", "stale", "unbound", "research_not_actionable", "risk_rejected", "result_unknown", "incompatible", "unknown"].includes(String(value.blocker))
+    && typeof value.reason_code === "string" && isNullableString(value.previous_cycle_id)
+    && (value.previous_result_code === undefined || isNullableString(value.previous_result_code))
+    && Array.isArray(value.changes) && value.changes.every((key) => ["stage", "blocker", "result", "risk", "orders"].includes(key));
+}
+
+function validCompatibility(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return isPlain(value) && ["compatible", "incompatible", "unknown"].includes(String(value.status))
+    && typeof value.expected_process_version === "string" && typeof value.expected_migration_head === "string"
+    && isNullableString(value.reported_process_version) && isNullableString(value.reported_migration_head)
+    && Array.isArray(value.database_migration_heads) && value.database_migration_heads.every((head) => typeof head === "string");
 }

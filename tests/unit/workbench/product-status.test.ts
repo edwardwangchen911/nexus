@@ -75,8 +75,8 @@ const session: Session = {
 
 describe("central product-state vocabulary", () => {
   it.each([
-    ["unavailable", "data_insufficient", "数据不足"],
-    ["failed", "model_failed", "模型失败"],
+    ["unavailable", "unknown", "阻断原因待核对"],
+    ["failed", "model_failed", "运行失败"],
     ["prepared", "in_progress", "决策进行中"],
     ["completed", "decision_recorded", "决策已记录"],
   ] as const)("maps cycle status %s without calling every outcome no-trade", (status, key, label) => {
@@ -181,16 +181,16 @@ describe("central product-state vocabulary", () => {
   it.each([
     ["online", null, "online", "循环在线", "30 秒内收到心跳"],
     ["offline", "HEARTBEAT_STALE", "offline", "循环离线", "心跳已经过期"],
-    ["offline", "HEARTBEAT_INCOMPATIBLE", "offline", "循环版本不兼容", "运行版本与当前数据库版本不匹配"],
-    ["unknown", "HEARTBEAT_MISSING", "unknown", "循环未启动", "尚未保存过循环心跳"],
+    ["offline", "HEARTBEAT_INCOMPATIBLE", "offline", "循环版本不兼容", "循环报告的版本与当前代码预期不匹配"],
+    ["unknown", "HEARTBEAT_MISSING", "unknown", "循环状态未知", "未找到循环心跳"],
   ] as const)("explains loop liveness reason %s", (status, reasonCode, key, label, detail) => {
     const loop: Loop = { status, reason_code: reasonCode, started_at: null, last_seen_at: null, stale_after_seconds: 30 };
     expect(loopPresentation(loop, session)).toMatchObject({ key, label, detail: expect.stringContaining(detail), rawCode: reasonCode });
   });
 
   it.each([
-    ["data", "AGENT_PAPER_DATA_UNAVAILABLE", "RISK_INPUT_REQUIRED", "data_insufficient", "数据不足", "view_evidence"],
-    ["model", "AGENT_PAPER_MODEL_FAILED", "AGENT_DECISION_CONFLICT", "model_failed", "模型失败", "view_decision"],
+    ["data", "AGENT_PAPER_DATA_UNAVAILABLE", "RISK_INPUT_REQUIRED", "unknown", "已保存状态，需查看记录代码", "wait"],
+    ["model", "AGENT_PAPER_MODEL_FAILED", "AGENT_DECISION_CONFLICT", "model_failed", "运行失败", "view_decision"],
     ["risk", "AGENT_PAPER_RISK_REJECTED", "RISK_REJECTED", "risk_rejected", "风控拒绝", "view_decision"],
     ["execution", "PAPER_ORDER_RECONCILING", "paper_result_unknown", "result_unknown", "结果未知", "verify_original_result"],
     ["service", "AGENT_PAPER_LOOP_OFFLINE", "HEARTBEAT_STALE", "loop_offline", "循环离线", "wait"],
@@ -247,4 +247,10 @@ describe("central product-state vocabulary", () => {
       rawCode: "NEW_REASON_CODE",
     });
   });
+});
+
+it("does not turn research admission failures into missing data", () => {
+  expect(cycleDecisionPresentation(cycle({ status: "unavailable", result_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE" })).summary.label).toBe("研究未通过交易准入");
+  expect(cycleDecisionPresentation(cycle({ status: "unavailable", result_code: "RESEARCH_ADMISSION_UNAVAILABLE" })).summary.label).toBe("阻断原因待核对");
+  expect(cycleDecisionPresentation(cycle({ status: "failed", result_code: "AGENT_DECISION_CONFLICT" })).summary.label).toBe("运行失败");
 });

@@ -119,7 +119,7 @@ describe("decision-first trading workbench", () => {
       cycle_id: unknown.data.latest_cycle.cycle_id,
     }];
     rerender(<WorkbenchPanel state="ready" payload={unknown} refreshing={false} onRefresh={vi.fn()} />);
-    expect(screen.getByText("循环未启动")).toBeVisible();
+    expect(screen.getByText("循环状态未知")).toBeVisible();
     expect(screen.getAllByText("结果未知").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "核对原操作结果" })).toHaveAttribute("href", "/paper");
     expect(screen.queryByRole("button", { name: /重试/ })).not.toBeInTheDocument();
@@ -192,4 +192,45 @@ describe("decision-first trading workbench", () => {
     expect(account).toHaveTextContent("USD 10,000");
     expect(screen.getByRole("link", { name: "查看账户与持仓" })).toHaveAttribute("href", "/portfolio");
   });
+});
+
+it("explains readiness, compatibility, and adjacent-cycle changes without new actions", () => {
+  const payload = readyPayload();
+  payload.data.readiness = {
+    stage: "agent", blocker: "research_not_actionable", reason_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+    previous_cycle_id: agentPaperCycle.cycle_id, changes: ["blocker", "result"],
+  };
+  payload.data.compatibility = {
+    status: "incompatible", expected_process_version: "agent-paper-loop-v1",
+    expected_migration_head: "0064_prompt_release_channel", reported_process_version: "old-loop",
+    reported_migration_head: "0061_agent_paper_job_isolation", database_migration_heads: ["0064_prompt_release_channel"],
+  };
+  render(<WorkbenchPanel state="ready" payload={payload} refreshing={false} onRefresh={vi.fn()} />);
+  const readiness = screen.getByRole("region", { name: "运行就绪与阻断" });
+  expect(readiness).toHaveTextContent("研究未通过交易准入");
+  expect(readiness).toHaveTextContent("服务 / 版本不兼容");
+  expect(readiness).toHaveTextContent("old-loop");
+  expect(readiness).toHaveTextContent("阻断分类、结果代码");
+  expect(readiness).toHaveTextContent("下一可运行时段");
+  expect(within(readiness).queryByRole("button")).not.toBeInTheDocument();
+});
+
+it("preserves unknown readiness for an older server and unknown next time", () => {
+  const payload = readyPayload();
+  payload.data.session.next_eligible_at = null;
+  payload.data.session.next_eligible_reason = "CURRENT_CYCLE_IN_PROGRESS";
+  render(<WorkbenchPanel state="ready" payload={payload} refreshing={false} onRefresh={vi.fn()} />);
+  const readiness = screen.getByRole("region", { name: "运行就绪与阻断" });
+  expect(readiness).toHaveTextContent("当前服务尚未提供运行解释");
+  expect(readiness).toHaveTextContent("当前周期结束后再判断");
+  expect(readiness).toHaveTextContent("兼容状态未知");
+});
+
+it("rejects malformed readiness instead of rendering an invented phase", async () => {
+  const payload = readyPayload();
+  Object.assign(payload.data, { readiness: { stage: "auto_trade", blocker: "none", changes: null } });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(payload)));
+  render(<WorkspacePage />);
+  await waitFor(() => expect(screen.getByRole("status", { name: "工作台状态" })).toHaveTextContent("工作台加载失败"));
+  expect(screen.queryByRole("region", { name: "运行就绪与阻断" })).not.toBeInTheDocument();
 });
