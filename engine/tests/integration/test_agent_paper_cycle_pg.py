@@ -33,6 +33,7 @@ from nexus.agents.paper_context import (
     revalidate_frozen_agent_paper_context,
 )
 from nexus.agents.persistence import admit_research_run, select_authoritative_snapshot
+from nexus.broker_simulation.intents import load_agent_paper_intent_source
 from nexus.domain.evidence import EvidenceRef
 from nexus.jobs.daily_research import admit_agent_paper_research
 from nexus.market.ingestion import ingest_price_page
@@ -3982,6 +3983,43 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         assert execution_member_count == 5
         assert "consumed" in reservation_events
         assert "released" in reservation_events
+
+        async with sessions() as session:
+            source = await load_agent_paper_intent_source(
+                session,
+                cycle_id=first.cycle_id,
+                now=evaluated_at,
+            )
+            persisted_order = await session.get(
+                PaperOrderRecord,
+                awaiting_market.order_ids[0],
+            )
+            assert persisted_order is not None
+            expected_decision_id = persisted_order.strategy_decision_id
+            broker_counts_list: list[int] = []
+            for table in (
+                "broker_execution_intents",
+                "broker_batch_approvals",
+                "broker_commands",
+                "jobs",
+            ):
+                broker_counts_list.append(
+                    int(await session.scalar(text(f"SELECT count(*) FROM {table}")) or 0)
+                )
+            broker_counts = tuple(broker_counts_list)
+        assert source.cycle_id == first.cycle_id
+        assert source.strategy_decision_id == expected_decision_id
+        assert source.execution_locked is True
+        assert source.risk_policy_hash
+        assert len(source.orders) == 1
+        assert source.orders[0].paper_order_id == awaiting_market.order_ids[0]
+        assert source.orders[0].instrument_id == manifest[0].instrument_id
+        assert source.orders[0].side == "buy"
+        assert source.orders[0].quantity == filled.filled_quantity
+        assert source.evidence_hashes == tuple(sorted(set(source.evidence_hashes)))
+        assert all(len(value) == 64 for value in source.evidence_hashes)
+        assert broker_counts[:3] == (0, 0, 0)
+        assert broker_counts[3] == 1
     finally:
         await engine.dispose()
 

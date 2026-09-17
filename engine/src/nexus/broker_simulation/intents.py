@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
@@ -27,6 +27,17 @@ from nexus.persistence.models.broker_simulation import (
     BrokerBatchApprovalRecord,
     BrokerExecutionIntentOrderRecord,
     BrokerExecutionIntentRecord,
+)
+from nexus.persistence.models.paper import (
+    AgentPaperCycleRecord,
+    PaperExecutionModelRecord,
+    PaperFillRecord,
+    PaperOrderBatchRecord,
+    PaperOrderEventRecord,
+    PaperOrderRecord,
+    RiskEvaluationRecord,
+    RiskPolicyRecord,
+    StrategyDecisionRecord,
 )
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -75,6 +86,27 @@ class BrokerApprovalAuthority(_FrozenModel):
     orders: tuple[BrokerOrderDocument, ...]
 
 
+class AgentPaperIntentSourceOrder(_FrozenModel):
+    paper_order_id: UUID
+    instrument_id: UUID
+    side: Literal["buy", "sell"]
+    quantity: int = Field(gt=0)
+    risk_evaluation_id: UUID
+    risk_result_hash: Hash64
+    fill_hash: Hash64
+
+
+class AgentPaperIntentSource(_FrozenModel):
+    cycle_id: UUID
+    strategy_decision_id: UUID
+    paper_order_batch_id: UUID
+    execution_locked: Literal[True]
+    risk_policy_hash: Hash64
+    execution_model_hash: Hash64
+    evidence_hashes: tuple[Hash64, ...]
+    orders: tuple[AgentPaperIntentSourceOrder, ...]
+
+
 @dataclass(frozen=True)
 class PreparedExecutionIntent:
     intent_id: UUID
@@ -94,6 +126,123 @@ class ApprovedExecutionIntent:
     body_hash: str
     expires_at: datetime
     replayed: bool
+
+
+async def load_agent_paper_intent_source(
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    now: datetime,
+) -> AgentPaperIntentSource:
+    """Freeze a filled Agent Paper batch without creating broker-side facts."""
+    now = require_utc(now)
+    cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+    if cycle is None or not cycle.execution_locked:
+        raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+    decision = await session.scalar(
+        select(StrategyDecisionRecord).where(
+            StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+            StrategyDecisionRecord.decision_origin == "agent_research",
+        )
+    )
+    if decision is None:
+        raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+    batch = await session.scalar(
+        select(PaperOrderBatchRecord).where(
+            PaperOrderBatchRecord.account_id == cycle.account_id,
+            PaperOrderBatchRecord.strategy_decision_id == decision.id,
+        )
+    )
+    if batch is None:
+        raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+    policy = await session.get(RiskPolicyRecord, batch.risk_policy_id)
+    execution_model = await session.scalar(
+        select(PaperExecutionModelRecord).where(
+            PaperExecutionModelRecord.version == "execution_model_v1"
+        )
+    )
+    if policy is None or execution_model is None:
+        raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+    paper_orders = tuple(
+        await session.scalars(
+            select(PaperOrderRecord)
+            .where(PaperOrderRecord.batch_id == batch.id)
+            .order_by(PaperOrderRecord.instrument_id)
+        )
+    )
+    if not paper_orders:
+        raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+
+    source_orders: list[AgentPaperIntentSourceOrder] = []
+    evidence_hashes = {
+        cycle.candidate_hash,
+        decision.portfolio_projection_hash,
+        decision.authority_hash,
+        decision.strategy_parameters_hash,
+        decision.decision_hash,
+        batch.request_hash,
+        batch.projection_hash,
+        batch.risk_input_hash,
+        batch.result_hash,
+        batch.batch_hash,
+        policy.content_hash,
+        execution_model.content_hash,
+    }
+    for order in paper_orders:
+        risk = await session.scalar(
+            select(RiskEvaluationRecord).where(RiskEvaluationRecord.order_id == order.id)
+        )
+        latest_event = await session.scalar(
+            select(PaperOrderEventRecord)
+            .where(
+                PaperOrderEventRecord.order_id == order.id,
+                PaperOrderEventRecord.occurred_at <= now,
+                PaperOrderEventRecord.created_at <= now,
+            )
+            .order_by(PaperOrderEventRecord.event_seq.desc())
+            .limit(1)
+        )
+        if (
+            risk is None
+            or risk.outcome not in {"approved", "reduced"}
+            or risk.approved_quantity != order.quantity
+            or risk.worst_price != order.worst_price
+            or order.risk_outcome != risk.outcome
+            or latest_event is None
+            or latest_event.to_status != "filled"
+            or latest_event.source_fill_id is None
+        ):
+            raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+        fill = await session.get(PaperFillRecord, latest_event.source_fill_id)
+        if (
+            fill is None
+            or fill.order_id != order.id
+            or fill.account_id != cycle.account_id
+            or fill.quantity != order.quantity
+        ):
+            raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+        evidence_hashes.update((risk.input_hash, risk.result_hash, fill.payload_hash))
+        source_orders.append(
+            AgentPaperIntentSourceOrder(
+                paper_order_id=order.id,
+                instrument_id=order.instrument_id,
+                side=cast(Literal["buy", "sell"], order.side),
+                quantity=int(order.quantity),
+                risk_evaluation_id=risk.id,
+                risk_result_hash=risk.result_hash,
+                fill_hash=fill.payload_hash,
+            )
+        )
+    return AgentPaperIntentSource(
+        cycle_id=cycle.id,
+        strategy_decision_id=decision.id,
+        paper_order_batch_id=batch.id,
+        execution_locked=True,
+        risk_policy_hash=policy.content_hash,
+        execution_model_hash=execution_model.content_hash,
+        evidence_hashes=tuple(sorted(evidence_hashes)),
+        orders=tuple(source_orders),
+    )
 
 
 async def prepare_execution_intent(
