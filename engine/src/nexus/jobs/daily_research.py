@@ -344,7 +344,7 @@ async def admit_agent_paper_research(
             data_snapshot_id=research_snapshot_id,
             decision_time=research_as_of,
         ),
-        prompt_version_id=None,
+        prompt_version_id=prompt_version_id,
         model_config_id=model_config_id,
         daily_limit_usd=daily_limit_usd,
         now=now,

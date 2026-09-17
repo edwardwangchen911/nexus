@@ -491,6 +491,7 @@ async def _seed_cycle_research_authority(
     quote_received_at: datetime = DECISION_TIME,
     price_available_at: datetime | None = None,
     base_payload: dict[str, object] | None = None,
+    prompt_bundle_version: str | None = None,
 ) -> None:
     authority_time = price_available_at or DECISION_TIME
     await session.execute(text("ALTER TABLE instrument_aliases DISABLE TRIGGER USER"))
@@ -539,7 +540,7 @@ async def _seed_cycle_research_authority(
         AgentPromptVersionRecord(
             id=UUID(int=0x63000000000000000000000000000100 + index),
             role=role,
-            version=f"agent-paper-{role}-v1",
+            version=prompt_bundle_version or f"agent-paper-{role}-v1",
             content_hash=prompts[role].content_hash,
             content=prompts[role].content,
         )
@@ -1374,6 +1375,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                 source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
                 quote_received_at=evaluation_start,
                 price_available_at=evaluation_start,
+                prompt_bundle_version="agent-version-incumbent-v1",
             )
             await session.execute(text("ALTER TABLE universe_snapshots DISABLE TRIGGER USER"))
             try:
@@ -1451,6 +1453,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                         version="agent-version-challenger-v1",
                         content_hash=sha256(content.encode()).hexdigest(),
                         content=content,
+                        release_channel="challenger",
                     )
                 )
             assert challenger_orchestrator_id is not None
@@ -3485,9 +3488,6 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             no_selected_version,
         )
         migration_config = Config(str(ENGINE_ROOT / "alembic.ini"))
-        await asyncio.to_thread(
-            command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"
-        )
         async with sessions.begin() as session:
             first = await start_schwab_agent_paper_cycle(
                 session,
@@ -3495,21 +3495,30 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 decision_slot_at=floor_decision_slot(authority.decision_time),
                 idempotency_key="schwab-trigger-1",
             )
-        async with sessions.begin() as session:
-            await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER trg_jobs_state"))
+            run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])
+            assert run is not None
+            paper_snapshot_id = run.data_snapshot_id
+            await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
             try:
                 await session.execute(
                     text(
-                        "UPDATE jobs SET job_type='agent.research',"
-                        "job_key='agent.research' || substring("
-                        "job_key FROM 21) WHERE job_type='agent.paper.research'"
-                    )
+                        "UPDATE data_snapshots SET source='nexus_research',"
+                        "schema_version='research_filings_v1' WHERE id=:snapshot_id"
+                    ),
+                    {"snapshot_id": paper_snapshot_id},
                 )
             finally:
-                await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER trg_jobs_state"))
+                await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+
+        await asyncio.to_thread(
+            command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"
+        )
         async with sessions() as session:
             assert await session.scalar(select(Job.job_type)) == "agent.research"
         await asyncio.to_thread(command.upgrade, migration_config, "0061_agent_paper_job_isolation")
+        async with sessions() as session:
+            assert await session.scalar(select(Job.job_type)) == "agent.paper.research"
+        await asyncio.to_thread(command.upgrade, migration_config, "head")
         async with sessions.begin() as session:
             replay = await start_schwab_agent_paper_cycle(
                 session,
@@ -3534,6 +3543,19 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         assert job_count == resumed_job_count == 1
         assert job_type == "agent.paper.research"
 
+        async with sessions.begin() as session:
+            await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE data_snapshots SET source='nexus_agent_paper',"
+                        "schema_version='agent_paper_research_v1' WHERE id=:snapshot_id"
+                    ),
+                    {"snapshot_id": paper_snapshot_id},
+                )
+            finally:
+                await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+
         with pytest.raises(DBAPIError, match="agent paper snapshots prevent downgrade"):
             await asyncio.to_thread(
                 command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"
@@ -3542,7 +3564,7 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             assert await session.scalar(select(Job.job_type)) == "agent.paper.research"
             assert (
                 await session.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0061_agent_paper_job_isolation"
+                == agent_paper_loop.CURRENT_MIGRATION_HEAD
             )
 
         assert (
