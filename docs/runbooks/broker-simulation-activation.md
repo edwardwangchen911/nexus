@@ -1,9 +1,90 @@
 # 复星模拟盘 Phase 3B 激活手册
 
-## 当前结论与停止边界
+## 2026-09-17：独立模拟账户只读准备入口
 
-当前唯一可报告状态是 `Phase 3A offline_ready / Phase 3B external_activation_blocked`。
-本手册是未来激活检查表，不是对复星账户、模拟写入、Webhook 注册、凭据加载或部署的授权。
+本节覆盖后文历史记录中“模拟接入只有 fixture”的描述，但**不激活 Phase 3B 写入**。
+新增 `nexus-fosun-simulation-readonly` 一次性 CLI；原模拟 Gateway、Broker Worker、
+数据库、main 本地服务及现有 fixture 组合根不变。不创建或重置模拟账户、不注册 Webhook、
+不发送下单/改单/撤单，不调用可能解锁 binding 的 reconciliation。输出恒为
+`simulation_write_enabled=false`、`execution_locked=true`。
+
+### 合同与实现范围
+
+- 官方 [trade OpenAPI](https://openapi-docs.fosunxcz.com/specs/public/trade/openapi.yaml)
+  的 `mapping.AccountInfo.subAccountType`：0 为实盘证券、1 为实盘期权、2 为模拟盘。
+  读取前必须由本次 Accounts 原始响应唯一匹配选定账户，且严格为整数 2、启用状态整数 1。
+  缺失、重复、字符串枚举、未知类型或停用都在资产/订单调用前拒绝；不凭配置声明模拟身份。
+- 沿用锁定的官方 SDK commit `891d95fb4967efaa682387c1b35966ceea38fb21`，启动核对
+  安装包 direct-url commit 和已有 SDK admission manifest；只暴露 Accounts、CashSummary、
+  Holdings、OrderList、CashFlows 五个固定读取路径，低层请求也拒绝写路径、其他账户和代理 URL。
+- 复用 `SdkFosunTransport`、`GatewayPage` 与账户/现金/持仓/订单/流水归一化模型、TLS 强制验证、
+  关闭重定向/HTTP 重试和依赖日志脱敏。独立进程、独立 SDK Session；不复用真实账户的会话缓存。
+- 订单省略状态过滤，明确给出日期范围；账户和资产读取当前状态，订单/流水读取指定日期窗口，
+  **不称为原子快照或已对账快照**。逐页保留 request ID、读取时间、币种、质量与未知 provider 时间。
+- 窗口最多 32 个自然日（含首尾）；持仓/订单各最多 3 页、每页 100 条。CashFlows SDK 没有分页
+  入参，只调用一次；响应不能证明完整时拒绝，不用虚构游标重复调用。最多 9 次业务请求、
+  1 次 Session 请求、120 秒物理调用准入窗口；失败不自动重试，读取实例不可重复执行。
+- 2026-09-17 官方 trade YAML SHA-256 为
+  `5bda8d6a25532ed414fdac283686a2dff51b6580b6a2d8b0e06d0c4f5764d7a0`，
+  与既有只读 admission manifest 的历史合同 hash 不同。本次核对上述读取方法与模拟类型字段，
+  不改写历史 manifest，不声称整个新版合同或任何写契约已获准入。
+
+### 配置与正常入口
+
+默认只检查 `~/.config/nexus/fosun-simulation/provider.env`，不读取 main 配置或回退到
+环境中的 `FSOPENAPI_*`。文件必须位于 Git 工作树外、无符号链接、当前用户所有，目录无组/其他
+用户权限、文件建议 `0600`。只使用既有模拟专用配置；缺失时停止，不自动复制真实账户凭据。
+配置只接受以下键（真实值不得进入命令参数、聊天、Git 或日志）：
+
+```dotenv
+FOSUN_SIMULATION_API_KEY=<simulation-only credential>
+FOSUN_SIMULATION_CLIENT_PRIVATE_KEY="<PEM; dotenv quoted multiline supported>"
+FOSUN_SIMULATION_SERVER_PUBLIC_KEY="<PEM>"
+FOSUN_SIMULATION_ACCOUNT_ID=<existing simulation subAccountId>
+FOSUN_SIMULATION_WRITE_ENABLED=false
+FOSUN_SIMULATION_EXECUTION_LOCKED=true
+```
+
+SDK construction 只在这个独立 CLI 进程中临时映射密钥变量，完成后立即恢复；不是验收脚本注入。
+HTTPS 使用现有审核过的 loopback proxy `http://127.0.0.1:9090`，无代理回退；不启动或修改代理。
+
+```bash
+# 无网络配置检查；configuration_ready 只代表配置语法/权限合格。
+uv run --package nexus-fosun-gateway nexus-fosun-simulation-readonly
+
+# 只有既有模拟配置与权限就绪时，显式执行一次有界只读。
+uv run --package nexus-fosun-gateway nexus-fosun-simulation-readonly \
+  --read --date-from 2026-09-01 --date-to 2026-09-17
+```
+
+也可用 `--config /absolute/protected/path/provider.env` 选择独立配置。终端仅输出固定状态、
+随机 run ID 和安全开关，不输出账户标识、余额、持仓或原始错误。正常读取的本地业务记录在
+配置同级 `reads/<run_id>/`（0700）内，文件为 0600：`started.json`、调用前持久化的
+`dispatching.json`、成功时的 `snapshot.json`、终态 `status.json`。
+只有 dispatching 而无终态表示结果未知；先检查这些记录和进程，不因终端断开重放。
+`read_completed` 只表示该窗口读取与落盘完成；页内 `PARTIAL` 不提升为 `PASS`，不解除执行锁。
+
+### 本切片验证及外部阻塞
+
+隔离测试覆盖实际固定 SDK 方法 → 请求白名单 → 账户类型校验 → 现有归一化 → 正常 CLI
+私有落盘；使用合成密钥和数据，未访问券商。另覆盖类型/状态异常、分页截断、写接口拒绝、
+身份/路径隔离、HTTP 预算、失败无重试和中断记录。本机默认模拟专用配置缺失，因此真实账户、
+权限、Provider 返回与持久化验收仍未完成。没有创建/重置账户或发送任何模拟/实盘订单。
+
+本变更无迁移、无新增依赖、不改变公共 API；可独立选择性集成。回滚为撤回本 CLI 入口及
+新增模块；保留受保护的读取记录。后续外部写入仍按下方独立门禁处理。
+
+本切片本地验证（2026-09-17）：启用 `NEXUS_OFFLINE_SOCKET_GUARD=1` 的完整 gateway
+测试 1000 项通过；gateway Ruff、Mypy（40 个源文件）、新增文件格式检查和 `git diff --check`
+通过。正常 CLI 默认检查实际返回 `configuration_blocked / network_attempted=false`。
+首次全量命令因遗漏创建 pytest basetemp 父目录而产生 setup 错误，补齐 CI 的目录准备后通过；
+测试配置使用 Git 工作树外的隔离临时目录，不放宽正式配置存储规则。独立只读审查已完成，
+发现的中断标记问题已修复并补回归。以上是本地验证，不是 GitHub CI 或真实券商验收。
+
+## 历史 Phase 3A 状态与 Phase 3B 写入停止边界
+
+原 fixture 通道仍为 `Phase 3A offline_ready / Phase 3B external_activation_blocked`；
+新增只读 CLI 状态见上节。下方是未来写入激活检查表，不授权模拟写入、Webhook 注册或部署。
 
 仓库中的 `broker-simulation` Compose profile 只用于静态组合审查：
 

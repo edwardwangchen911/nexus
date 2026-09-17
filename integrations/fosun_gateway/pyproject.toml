@@ -24,6 +24,7 @@ nexus-fosun-push-probe = "nexus_fosun_gateway.push_probe_cli:run"
 nexus-fosun-probe-publisher-key-preflight = "nexus_fosun_gateway.probe_capture:key_preflight_run"
 nexus-fosun-publish-probe-receipt = "nexus_fosun_gateway.probe_receipt:run"
 nexus-fosun-simulation-fixture = "nexus_fosun_gateway.simulation_main:run_fixture"
+nexus-fosun-simulation-readonly = "nexus_fosun_gateway.simulation_readonly_cli:run"
 
 [dependency-groups]
 dev = [
