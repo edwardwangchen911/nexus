@@ -765,6 +765,17 @@ async def _select_calendar(
         )
     )
     for candidate in candidates:
+        prior_session = await session.scalar(
+            select(ExchangeCalendarSessionRecord.session)
+            .where(
+                ExchangeCalendarSessionRecord.calendar_authority_id == candidate.id,
+                ExchangeCalendarSessionRecord.session < min(dates),
+            )
+            .order_by(ExchangeCalendarSessionRecord.session.desc())
+            .limit(1)
+        )
+        if prior_session is None:
+            continue
         rows = tuple(
             await session.scalars(
                 select(ExchangeCalendarSessionRecord).where(

@@ -119,6 +119,7 @@ async def _seed_authority(
     model_output_price: Decimal = Decimal("0"),
     pricing_expires_at: datetime = datetime(2027, 1, 1, tzinfo=UTC),
     omit_calendar_date: date | None = None,
+    omit_prior_calendar_session: bool = False,
     corrupt_incumbent_prompt_hash: bool = False,
 ) -> tuple[UUID, UUID]:
     session.add_all(
@@ -147,7 +148,7 @@ async def _seed_authority(
                 exchange="XNYS",
                 version="agent-version-registration-v1",
                 source="exchange_calendars",
-                range_start=TRAIN_DATES[0],
+                range_start=date(2026, 9, 30),
                 range_end=OOS_DATES[-1],
                 query_parameters={},
                 completeness_status="complete",
@@ -167,8 +168,10 @@ async def _seed_authority(
             **({"created_at": alias_created_at} if alias_created_at is not None else {}),
         )
     )
-    for session_date in TRAIN_DATES + OOS_DATES:
-        if session_date == omit_calendar_date:
+    for session_date in (date(2026, 9, 30),) + TRAIN_DATES + OOS_DATES:
+        if session_date == omit_calendar_date or (
+            omit_prior_calendar_session and session_date == date(2026, 9, 30)
+        ):
             continue
         session.add(
             ExchangeCalendarSessionRecord(
@@ -876,6 +879,10 @@ async def test_concurrent_registration_creates_only_one_open_evaluation(
         ),
         (
             {"omit_calendar_date": OOS_DATES[-1]},
+            "AGENT_VERSION_CALENDAR_INVALID",
+        ),
+        (
+            {"omit_prior_calendar_session": True},
             "AGENT_VERSION_CALENDAR_INVALID",
         ),
     ],
