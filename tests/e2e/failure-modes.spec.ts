@@ -28,7 +28,11 @@ test("Agent abstention preserves evidence but cannot create a strategy target", 
     status: 200, contentType: "application/json", body: JSON.stringify(researchAdmissionEnvelope()),
   }));
 
+  const researchLoaded = page.waitForResponse((response) => (
+    new URL(response.url()).pathname === `/api/v1/instruments/${instrumentId}/research`
+  ));
   await page.goto(`/research/${instrumentId}?as_of=${encodeURIComponent(decisionTime)}`);
+  expect((await researchLoaded).ok()).toBe(true);
 
   await expect(page.getByText(/EVIDENCE_INSUFFICIENT/)).toBeVisible();
   await expect(page.getByText("尚未形成可供后续分析的研究结论；系统保持观望。")).toBeVisible();

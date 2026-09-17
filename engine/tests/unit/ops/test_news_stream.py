@@ -3,6 +3,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from nexus.ops import news_stream
 from nexus.ops.news_stream import collect_stream, load_stream_archive
 
 
@@ -32,6 +33,18 @@ class Socket:
 class SlowCloseSocket(Socket):
     async def __aexit__(self, *args):
         await asyncio.sleep(1.2)
+
+
+class DeadlineCloseSocket(SlowCloseSocket):
+    def __init__(self, frames, expire):
+        super().__init__(frames)
+        self.expire = expire
+
+    async def recv(self):
+        if not self.frames:
+            self.expire()
+            raise TimeoutError
+        return await super().recv()
 
 
 AUTH = [{"T": "success", "msg": "authenticated"}]
@@ -68,24 +81,43 @@ async def test_confirmed_silent_window_is_not_permission_failure(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("frames", "duration", "max_frames", "reason"),
-    [([AUTH, SUB], 0.02, 100, "DURATION_LIMIT"), ([AUTH, SUB], 1.0, 2, "FRAME_LIMIT")],
-)
-async def test_close_cleanup_is_not_part_of_bounded_subscription_window(
-    tmp_path, frames, duration, max_frames, reason
-):
-    directory = tmp_path / reason
+async def test_close_cleanup_is_not_part_of_duration_limited_window(tmp_path, monkeypatch):
+    duration = 60.0
+    clock = [0.0]
+    monkeypatch.setattr(news_stream, "monotonic", lambda: clock[0])
+    directory = tmp_path / "DURATION_LIMIT"
     result = await collect_stream(
         symbol="EXAMPLE",
         directory=directory,
         key="example-key",
         secret="example-secret",
         duration=duration,
-        max_frames=max_frames,
-        connector=lambda *args, **kwargs: SlowCloseSocket(frames),
+        max_frames=100,
+        connector=lambda *args, **kwargs: DeadlineCloseSocket(
+            [AUTH, SUB], lambda: clock.__setitem__(0, duration)
+        ),
     )
-    assert result["stop_reason"] == reason and result["status"] == "bounded_complete"
+    assert result["stop_reason"] == "DURATION_LIMIT"
+    assert result["status"] == "bounded_complete"
+    receipt = json.loads((directory / "receipt.json").read_text())
+    assert receipt["elapsed_monotonic_seconds"] == duration
+    assert load_stream_archive(directory)["status"] == "bounded_complete"
+
+
+@pytest.mark.asyncio
+async def test_close_cleanup_is_not_part_of_frame_limited_window(tmp_path):
+    directory = tmp_path / "FRAME_LIMIT"
+    result = await collect_stream(
+        symbol="EXAMPLE",
+        directory=directory,
+        key="example-key",
+        secret="example-secret",
+        duration=60.0,
+        max_frames=2,
+        connector=lambda *args, **kwargs: SlowCloseSocket([AUTH, SUB]),
+    )
+    assert result["stop_reason"] == "FRAME_LIMIT"
+    assert result["status"] == "bounded_complete"
     receipt = json.loads((directory / "receipt.json").read_text())
     assert receipt["elapsed_monotonic_seconds"] < 0.2
     assert load_stream_archive(directory)["status"] == "bounded_complete"

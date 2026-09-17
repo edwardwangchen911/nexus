@@ -273,7 +273,15 @@ def test_response_size_limit_rejects_before_parsing_without_retry(invoke):
 
 
 def test_deadline_during_spacing_never_starts_another_request(invoke, monkeypatch):
-    monkeypatch.setattr(cli, "_COLLECTION_SECONDS", 0.1)
+    clock = [0.0]
+
+    async def pass_spacing(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli.asyncio, "sleep", pass_spacing)
+    monkeypatch.setattr(cli, "_COLLECTION_SECONDS", 60.0)
+    monkeypatch.setattr(cli, "_REQUEST_SPACING_SECONDS", 61.0)
     code, directory, _ = invoke([httpx.Response(200, content=page("next"))])
     assert code == 1 and len(invoke.requests) == 1
     manifest = json.loads((directory / "manifest.json").read_bytes())
