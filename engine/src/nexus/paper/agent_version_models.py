@@ -9,7 +9,7 @@ from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nexus.audit.canonical import canonical_json
 
@@ -26,6 +26,20 @@ MIN_POSITIVE_EXCESS_SESSIONS = 7
 MAX_DRAWDOWN_DEGRADATION = Decimal("0.0025")
 
 _NEW_YORK = ZoneInfo("America/New_York")
+type AgentVersionGateKey = Literal[
+    "authority",
+    "oos_pairs",
+    "cost_authority",
+    "comparison_authority",
+    "hard_risk",
+    "ledger_conservation",
+    "duplicate_execution",
+    "action_divergence",
+    "challenger_fills",
+    "excess_return",
+    "positive_excess_sessions",
+    "drawdown_degradation",
+]
 
 
 class AgentVersionEvaluationRequest(BaseModel):
@@ -45,16 +59,11 @@ class AgentVersionEvaluationRequest(BaseModel):
     def _validate_policy(self) -> "AgentVersionEvaluationRequest":
         if not self.initial_capital.is_finite() or self.initial_capital <= 0:
             raise ValueError("AGENT_VERSION_CAPITAL_INVALID")
-        if (
-            len(self.train_slots) != TRAIN_SLOT_COUNT
-            or len(self.oos_slots) != OOS_SLOT_COUNT
-        ):
+        if len(self.train_slots) != TRAIN_SLOT_COUNT or len(self.oos_slots) != OOS_SLOT_COUNT:
             raise ValueError("AGENT_VERSION_WINDOW_INVALID")
         all_slots = self.train_slots + self.oos_slots
         if any(
-            slot.tzinfo is None
-            or slot.utcoffset() != UTC.utcoffset(slot)
-            or slot.microsecond != 0
+            slot.tzinfo is None or slot.utcoffset() != UTC.utcoffset(slot) or slot.microsecond != 0
             for slot in all_slots
         ):
             raise ValueError("AGENT_VERSION_WINDOW_INVALID")
@@ -122,6 +131,173 @@ class AgentVersionSlotResult(BaseModel):
     execution_locked: Literal[True] = True
 
 
+class AgentVersionMetricFacts(BaseModel):
+    """Decimal-only OOS facts consumed by the frozen v1 gate."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    oos_pair_count: int = Field(ge=0, le=OOS_SLOT_COUNT)
+    action_divergence_count: int = Field(ge=0, le=OOS_SLOT_COUNT)
+    challenger_fill_count: int = Field(ge=0)
+    cumulative_excess_return: Decimal
+    positive_excess_session_count: int = Field(ge=0, le=MIN_OOS_SESSIONS)
+    drawdown_degradation: Decimal
+    hard_risk_violation_count: int = Field(ge=0)
+    ledger_conserved: bool
+    duplicate_execution_fact_count: int = Field(ge=0)
+    cost_authority_complete: bool
+    comparison_authority_complete: bool
+    authority_complete: bool
+
+    @field_validator("cumulative_excess_return", "drawdown_degradation", mode="before")
+    @classmethod
+    def _exact_decimal(cls, value: object) -> object:
+        if isinstance(value, float):
+            raise ValueError("AGENT_VERSION_METRIC_DECIMAL_INVALID")
+        return value
+
+    @field_validator("cumulative_excess_return", "drawdown_degradation")
+    @classmethod
+    def _finite_decimal(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("AGENT_VERSION_METRIC_DECIMAL_INVALID")
+        return value
+
+
+class AgentVersionGate(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    key: AgentVersionGateKey
+    status: Literal["PASS", "FAIL", "UNKNOWN"]
+    reason_code: str = Field(min_length=1, max_length=100)
+    observed: str | None = None
+    threshold: str | None = None
+
+
+class AgentVersionGateReport(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["PASS", "FAIL", "UNKNOWN"]
+    reason_code: str = Field(min_length=1, max_length=100)
+    facts: AgentVersionMetricFacts
+    gates: tuple[AgentVersionGate, ...]
+
+
+class AgentVersionEvaluationDecision(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evaluation_id: UUID
+    status: Literal["PASS", "FAIL", "UNKNOWN"]
+    selected_version_source_run_id: UUID
+    reason_code: str = Field(min_length=1, max_length=100)
+    metric_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replayed: bool
+    execution_locked: Literal[True] = True
+
+
+def evaluate_agent_version_metrics(facts: AgentVersionMetricFacts) -> AgentVersionGateReport:
+    """Apply the immutable v1 safety and OOS improvement gates in fixed order."""
+    checks = (
+        _gate("authority", facts.authority_complete, "OOS_AUTHORITY_INCOMPLETE"),
+        _gate(
+            "oos_pairs",
+            facts.oos_pair_count == OOS_SLOT_COUNT,
+            "OOS_PAIR_INCOMPLETE",
+            observed=str(facts.oos_pair_count),
+            threshold=str(OOS_SLOT_COUNT),
+        ),
+        _gate("cost_authority", facts.cost_authority_complete, "OOS_COST_AUTHORITY_INCOMPLETE"),
+        _gate(
+            "comparison_authority",
+            facts.comparison_authority_complete,
+            "OOS_COMPARISON_AUTHORITY_INCOMPLETE",
+        ),
+        _gate(
+            "hard_risk",
+            facts.hard_risk_violation_count == 0,
+            "HARD_RISK_VIOLATION",
+            failure="FAIL",
+            observed=str(facts.hard_risk_violation_count),
+            threshold="0",
+        ),
+        _gate(
+            "ledger_conservation",
+            facts.ledger_conserved,
+            "LEDGER_CONSERVATION_FAILED",
+            failure="FAIL",
+        ),
+        _gate(
+            "duplicate_execution",
+            facts.duplicate_execution_fact_count == 0,
+            "DUPLICATE_EXECUTION_FACT",
+            failure="FAIL",
+            observed=str(facts.duplicate_execution_fact_count),
+            threshold="0",
+        ),
+        _gate(
+            "action_divergence",
+            facts.action_divergence_count >= MIN_ACTION_DIVERGENCES,
+            "OOS_ACTION_DIVERGENCE_INSUFFICIENT",
+            observed=str(facts.action_divergence_count),
+            threshold=str(MIN_ACTION_DIVERGENCES),
+        ),
+        _gate(
+            "challenger_fills",
+            facts.challenger_fill_count >= MIN_CHALLENGER_FILLS,
+            "OOS_CHALLENGER_FILL_INSUFFICIENT",
+            observed=str(facts.challenger_fill_count),
+            threshold=str(MIN_CHALLENGER_FILLS),
+        ),
+        _gate(
+            "excess_return",
+            facts.cumulative_excess_return >= MIN_EXCESS_RETURN,
+            "OOS_EXCESS_RETURN_INSUFFICIENT",
+            observed=_decimal(facts.cumulative_excess_return),
+            threshold=_decimal(MIN_EXCESS_RETURN),
+        ),
+        _gate(
+            "positive_excess_sessions",
+            facts.positive_excess_session_count >= MIN_POSITIVE_EXCESS_SESSIONS,
+            "OOS_POSITIVE_SESSIONS_INSUFFICIENT",
+            observed=str(facts.positive_excess_session_count),
+            threshold=str(MIN_POSITIVE_EXCESS_SESSIONS),
+        ),
+        _gate(
+            "drawdown_degradation",
+            facts.drawdown_degradation <= MAX_DRAWDOWN_DEGRADATION,
+            "OOS_DRAWDOWN_DEGRADATION_EXCESSIVE",
+            observed=_decimal(facts.drawdown_degradation),
+            threshold=_decimal(MAX_DRAWDOWN_DEGRADATION),
+        ),
+    )
+    first = next((gate for gate in checks if gate.status != "PASS"), None)
+    return AgentVersionGateReport(
+        status="PASS" if first is None else first.status,
+        reason_code="OOS_IMPROVEMENT_PROVEN" if first is None else first.reason_code,
+        facts=facts,
+        gates=checks,
+    )
+
+
+def _gate(
+    key: AgentVersionGateKey,
+    passed: bool,
+    reason_code: str,
+    *,
+    failure: Literal["FAIL", "UNKNOWN"] = "UNKNOWN",
+    observed: str | None = None,
+    threshold: str | None = None,
+) -> AgentVersionGate:
+    return AgentVersionGate(
+        key=key,
+        status="PASS" if passed else failure,
+        reason_code="GATE_PASSED" if passed else reason_code,
+        observed=observed,
+        threshold=threshold,
+    )
+
+
 def evaluation_policy_hash() -> str:
     return _sha256(
         {
@@ -145,9 +321,7 @@ def evaluation_request_hash(request: AgentVersionEvaluationRequest) -> str:
         {
             "challenger_model_config_id": str(request.challenger_model_config_id),
             "challenger_prompt_version_id": str(request.challenger_prompt_version_id),
-            "incumbent_version_source_run_id": str(
-                request.incumbent_version_source_run_id
-            ),
+            "incumbent_version_source_run_id": str(request.incumbent_version_source_run_id),
             "initial_capital": _decimal(request.initial_capital),
             "instrument_id": str(request.instrument_id),
             "oos_slots": [_timestamp(slot) for slot in request.oos_slots],
@@ -161,9 +335,7 @@ def agent_version_market_evidence_hash(candidate_hash: str) -> str:
     """Hash the shared account-neutral candidate authority for one paired slot."""
     if re.fullmatch(r"[0-9a-f]{64}", candidate_hash) is None:
         raise ValueError("AGENT_VERSION_MARKET_EVIDENCE_INVALID")
-    return hashlib.sha256(
-        f"agent_version_market_evidence_v1|{candidate_hash}".encode()
-    ).hexdigest()
+    return hashlib.sha256(f"agent_version_market_evidence_v1|{candidate_hash}".encode()).hexdigest()
 
 
 def _session(value: datetime) -> date:

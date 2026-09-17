@@ -14,6 +14,7 @@ import httpx
 import nexus.ops.agent_paper_loop as agent_paper_loop
 import nexus.ops.agent_paper_once as agent_paper_once
 import nexus.paper.agent_cycle_authority as agent_cycle_authority
+import nexus.paper.agent_version_evaluation as agent_version_evaluation
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -59,7 +60,10 @@ from nexus.paper.agent_market import (
     resolve_agent_paper_market_scope,
 )
 from nexus.paper.agent_version_evaluation import register_agent_version_evaluation
-from nexus.paper.agent_version_models import AgentVersionEvaluationRequest
+from nexus.paper.agent_version_models import (
+    AgentVersionEvaluationRequest,
+    FrozenAgentVersionSelection,
+)
 from nexus.paper.agent_version_runner import (
     advance_agent_version_slot,
     resume_agent_version_slot,
@@ -771,6 +775,7 @@ def _safe_no_trade_intent(
 @pytest.mark.asyncio
 async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exists(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
@@ -858,6 +863,37 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
         assert second.run.model_config_id == first_model_config_id
         assert second.replayed is False
         assert second.run_id != first_run.id
+
+        async def selected_version(
+            session: AsyncSession, *, now: datetime
+        ) -> FrozenAgentVersionSelection:
+            del session, now
+            return FrozenAgentVersionSelection(
+                source_run_id=first_run.id,
+                prompt_hash=first_run.prompt_hash,
+                model_hash=first_run.model_hash,
+            )
+
+        with monkeypatch.context() as selected_patch:
+            selected_patch.setattr(
+                agent_version_evaluation,
+                "load_selected_internal_agent_version",
+                selected_version,
+            )
+            async with sessions.begin() as session:
+                selected_admission = await admit_agent_paper_research(
+                    session,
+                    cycle_id=uuid4(),
+                    instrument_id=first_run.instrument_id,
+                    research_snapshot_id=first_run.data_snapshot_id,
+                    research_as_of=first_run.decision_time,
+                    daily_limit_usd=Decimal("1"),
+                    now=first_run.decision_time,
+                )
+
+        assert selected_admission.run.prompt_hash == first_run.prompt_hash
+        assert selected_admission.run.model_hash == first_run.model_hash
+        assert selected_admission.run.model_config_id == first_run.model_config_id
 
         pinned_cycle_id = uuid4()
         pinned_key = f"agent-version:test:incumbent:{first_run.decision_time.isoformat()}"
@@ -3222,6 +3258,16 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         )
 
         monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+
+        async def no_selected_version(session: AsyncSession, *, now: datetime) -> None:
+            del session, now
+            return None
+
+        monkeypatch.setattr(
+            agent_version_evaluation,
+            "load_selected_internal_agent_version",
+            no_selected_version,
+        )
         migration_config = Config(str(ENGINE_ROOT / "alembic.ini"))
         await asyncio.to_thread(
             command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"

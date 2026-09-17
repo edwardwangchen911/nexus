@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -19,12 +21,17 @@ from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
 from nexus.paper.agent_version_models import (
     POLICY_VERSION,
+    AgentVersionEvaluationDecision,
     AgentVersionEvaluationRegistration,
     AgentVersionEvaluationRequest,
+    AgentVersionMetricFacts,
+    FrozenAgentVersionSelection,
+    evaluate_agent_version_metrics,
     evaluation_policy_hash,
     evaluation_request_hash,
 )
 from nexus.persistence.models.agent_versions import (
+    AgentVersionCyclePairRecord,
     AgentVersionEvaluationDecisionRecord,
     AgentVersionEvaluationRecord,
 )
@@ -38,7 +45,19 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarSessionRecord,
 )
 from nexus.persistence.models.market import InstrumentAlias
-from nexus.persistence.models.paper import PaperAccountRecord
+from nexus.persistence.models.paper import (
+    AgentPaperCycleEventRecord,
+    AgentPaperCycleRecord,
+    PaperAccountRecord,
+    PaperFillRecord,
+    PaperLedgerEntryRecord,
+    PaperLedgerTransactionRecord,
+    PaperOrderRecord,
+    PaperPerformanceSnapshotRecord,
+    RiskEvaluationRecord,
+    StrategyDecisionAgentOutputRecord,
+    StrategyDecisionRecord,
+)
 from nexus.persistence.models.portfolio import Account, Portfolio
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
@@ -160,8 +179,7 @@ async def register_agent_version_evaluation(
         select(AgentVersionEvaluationRecord)
         .outerjoin(
             AgentVersionEvaluationDecisionRecord,
-            AgentVersionEvaluationDecisionRecord.evaluation_id
-            == AgentVersionEvaluationRecord.id,
+            AgentVersionEvaluationDecisionRecord.evaluation_id == AgentVersionEvaluationRecord.id,
         )
         .where(AgentVersionEvaluationDecisionRecord.evaluation_id.is_(None))
         .limit(1)
@@ -210,6 +228,463 @@ async def register_agent_version_evaluation(
     claim.response_payload = registration.model_dump(mode="json")
     await session.flush()
     return registration
+
+
+async def finalize_agent_version_evaluation(
+    session: AsyncSession,
+    *,
+    evaluation_id: UUID,
+    now: datetime,
+) -> AgentVersionEvaluationDecision:
+    """Persist one deterministic OOS decision without model or provider work."""
+    if now.tzinfo is None or now.utcoffset() != UTC.utcoffset(now):
+        raise ValueError("AGENT_VERSION_TIME_INVALID")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-version-evaluation:{evaluation_id}"},
+    )
+    evaluation = await session.get(
+        AgentVersionEvaluationRecord,
+        evaluation_id,
+        populate_existing=True,
+    )
+    if evaluation is None:
+        raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    existing = await session.scalar(
+        select(AgentVersionEvaluationDecisionRecord).where(
+            AgentVersionEvaluationDecisionRecord.evaluation_id == evaluation.id
+        )
+    )
+    if existing is not None:
+        return _decision_result(existing, evaluation=evaluation, replayed=True)
+    if now < evaluation.oos_slots[-1]:
+        raise ValueError("AGENT_VERSION_WINDOW_OPEN")
+
+    facts = await _load_agent_version_metric_facts(
+        session,
+        evaluation=evaluation,
+        now=now,
+    )
+    report = evaluate_agent_version_metrics(facts)
+    selected_run_id = evaluation.incumbent_version_source_run_id
+    if report.status == "PASS":
+        challenger_run_id = await session.scalar(
+            select(AgentVersionCyclePairRecord.challenger_run_id)
+            .where(
+                AgentVersionCyclePairRecord.evaluation_id == evaluation.id,
+                AgentVersionCyclePairRecord.phase == "oos",
+            )
+            .order_by(
+                AgentVersionCyclePairRecord.decision_slot_at,
+                AgentVersionCyclePairRecord.id,
+            )
+            .limit(1)
+        )
+        if challenger_run_id is None:
+            raise ValueError("AGENT_VERSION_DECISION_AUTHORITY_INVALID")
+        selected_run_id = challenger_run_id
+    metric_report = report.model_dump(mode="json")
+    metric_hash = hashlib.sha256(canonical_json(metric_report).encode()).hexdigest()
+    decision_hash = hashlib.sha256(
+        canonical_json(
+            {
+                "evaluation_id": str(evaluation.id),
+                "metric_hash": metric_hash,
+                "policy_hash": evaluation.policy_hash,
+                "reason_code": report.reason_code,
+                "selected_version_source_run_id": str(selected_run_id),
+                "status": report.status,
+            }
+        ).encode()
+    ).hexdigest()
+    record = AgentVersionEvaluationDecisionRecord(
+        id=new_uuid7(),
+        evaluation_id=evaluation.id,
+        status=report.status,
+        metric_report=metric_report,
+        metric_hash=metric_hash,
+        selected_version_source_run_id=selected_run_id,
+        reason_code=report.reason_code,
+        decision_hash=decision_hash,
+    )
+    session.add(record)
+    await session.flush()
+    return _decision_result(record, evaluation=evaluation, replayed=False)
+
+
+async def load_selected_internal_agent_version(
+    session: AsyncSession,
+    *,
+    now: datetime,
+) -> FrozenAgentVersionSelection | None:
+    """Return only the newest hash-valid PASS selection for future internal cycles."""
+    if now.tzinfo is None or now.utcoffset() != UTC.utcoffset(now):
+        raise ValueError("AGENT_VERSION_TIME_INVALID")
+    row = (
+        await session.execute(
+            select(AgentVersionEvaluationDecisionRecord, AgentVersionEvaluationRecord)
+            .join(
+                AgentVersionEvaluationRecord,
+                AgentVersionEvaluationRecord.id
+                == AgentVersionEvaluationDecisionRecord.evaluation_id,
+            )
+            .where(
+                AgentVersionEvaluationDecisionRecord.status == "PASS",
+                AgentVersionEvaluationDecisionRecord.created_at <= now,
+            )
+            .order_by(
+                AgentVersionEvaluationDecisionRecord.created_at.desc(),
+                AgentVersionEvaluationDecisionRecord.id.desc(),
+            )
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    decision, evaluation = row
+    run = await session.get(
+        AgentResearchRunRecord,
+        decision.selected_version_source_run_id,
+        populate_existing=True,
+    )
+    prompts = None if run is None else await load_frozen_prompts(session, run)
+    model = (
+        None
+        if run is None
+        else await session.get(
+            AgentModelConfigRecord,
+            run.model_config_id,
+            populate_existing=True,
+        )
+    )
+    first_oos_run = await session.scalar(
+        select(AgentVersionCyclePairRecord.challenger_run_id)
+        .where(
+            AgentVersionCyclePairRecord.evaluation_id == evaluation.id,
+            AgentVersionCyclePairRecord.phase == "oos",
+        )
+        .order_by(
+            AgentVersionCyclePairRecord.decision_slot_at,
+            AgentVersionCyclePairRecord.id,
+        )
+        .limit(1)
+    )
+    if (
+        run is None
+        or run.status != "completed"
+        or prompts is None
+        or model is None
+        or run.id != first_oos_run
+        or run.prompt_hash != evaluation.challenger_prompt_hash
+        or run.model_hash != evaluation.challenger_model_hash
+        or _prompt_manifest_hash(prompts) != run.prompt_hash
+        or model.config_hash != run.model_hash
+    ):
+        raise ValueError("AGENT_VERSION_SELECTED_AUTHORITY_INVALID")
+    return FrozenAgentVersionSelection(
+        source_run_id=run.id,
+        prompt_hash=run.prompt_hash,
+        model_hash=run.model_hash,
+    )
+
+
+async def _load_agent_version_metric_facts(
+    session: AsyncSession,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+    now: datetime,
+) -> AgentVersionMetricFacts:
+    pairs = tuple(
+        await session.scalars(
+            select(AgentVersionCyclePairRecord)
+            .where(
+                AgentVersionCyclePairRecord.evaluation_id == evaluation.id,
+                AgentVersionCyclePairRecord.phase == "oos",
+            )
+            .order_by(AgentVersionCyclePairRecord.decision_slot_at)
+        )
+    )
+    cycle_ids = tuple(
+        cycle_id
+        for pair in pairs
+        for cycle_id in (pair.incumbent_cycle_id, pair.challenger_cycle_id)
+    )
+    cycles = (
+        tuple(
+            await session.scalars(
+                select(AgentPaperCycleRecord).where(AgentPaperCycleRecord.id.in_(cycle_ids))
+            )
+        )
+        if cycle_ids
+        else ()
+    )
+    decisions = (
+        tuple(
+            await session.scalars(
+                select(StrategyDecisionRecord).where(
+                    StrategyDecisionRecord.agent_paper_cycle_id.in_(cycle_ids)
+                )
+            )
+        )
+        if cycle_ids
+        else ()
+    )
+    decision_by_cycle = {row.agent_paper_cycle_id: row for row in decisions}
+    decision_ids = tuple(row.id for row in decisions)
+    bindings = (
+        tuple(
+            await session.scalars(
+                select(StrategyDecisionAgentOutputRecord).where(
+                    StrategyDecisionAgentOutputRecord.strategy_decision_id.in_(decision_ids)
+                )
+            )
+        )
+        if decision_ids
+        else ()
+    )
+    action_by_decision = {row.strategy_decision_id: row.sizing_action for row in bindings}
+    divergence_count = 0
+    for pair in pairs:
+        incumbent_decision = decision_by_cycle.get(pair.incumbent_cycle_id)
+        challenger_decision = decision_by_cycle.get(pair.challenger_cycle_id)
+        if incumbent_decision is None or challenger_decision is None:
+            continue
+        incumbent_action = action_by_decision.get(incumbent_decision.id)
+        challenger_action = action_by_decision.get(challenger_decision.id)
+        if incumbent_action is not None and challenger_action is not None:
+            divergence_count += int(incumbent_action != challenger_action)
+
+    account_ids = (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+    fills = tuple(
+        await session.scalars(
+            select(PaperFillRecord).where(
+                PaperFillRecord.account_id.in_(account_ids),
+                PaperFillRecord.occurred_at >= evaluation.oos_slots[0],
+                PaperFillRecord.occurred_at <= now,
+            )
+        )
+    )
+    orders = tuple(
+        await session.scalars(
+            select(PaperOrderRecord).where(
+                PaperOrderRecord.account_id.in_(account_ids),
+                PaperOrderRecord.created_at >= evaluation.oos_slots[0],
+                PaperOrderRecord.created_at <= now,
+            )
+        )
+    )
+    order_ids = tuple(row.id for row in orders)
+    risk_rows = (
+        tuple(
+            await session.scalars(
+                select(RiskEvaluationRecord).where(RiskEvaluationRecord.order_id.in_(order_ids))
+            )
+        )
+        if order_ids
+        else ()
+    )
+    risk_by_order = {row.order_id: row for row in risk_rows}
+    hard_risk_violations = sum(
+        1
+        for order in orders
+        if order.id not in risk_by_order or risk_by_order[order.id].outcome != order.risk_outcome
+    )
+
+    snapshots = tuple(
+        await session.scalars(
+            select(PaperPerformanceSnapshotRecord)
+            .where(
+                PaperPerformanceSnapshotRecord.account_id.in_(account_ids),
+                PaperPerformanceSnapshotRecord.as_of >= evaluation.oos_slots[0],
+                PaperPerformanceSnapshotRecord.as_of <= now,
+            )
+            .order_by(
+                PaperPerformanceSnapshotRecord.account_id,
+                PaperPerformanceSnapshotRecord.as_of,
+            )
+        )
+    )
+    snapshots_by_account = {
+        account_id: tuple(row for row in snapshots if row.account_id == account_id)
+        for account_id in account_ids
+    }
+    slot_snapshots: dict[UUID, list[PaperPerformanceSnapshotRecord]] = {
+        account_id: [] for account_id in account_ids
+    }
+    for index, slot in enumerate(evaluation.oos_slots):
+        upper = evaluation.oos_slots[index + 1] if index + 1 < len(evaluation.oos_slots) else now
+        for account_id in account_ids:
+            candidates = tuple(
+                row
+                for row in snapshots_by_account[account_id]
+                if slot <= row.as_of < upper
+                or (index + 1 == len(evaluation.oos_slots) and row.as_of == upper)
+            )
+            if candidates:
+                slot_snapshots[account_id].append(candidates[-1])
+
+    accounts = tuple(
+        await session.scalars(
+            select(PaperAccountRecord).where(PaperAccountRecord.id.in_(account_ids))
+        )
+    )
+    capital_by_account = {row.id: row.initial_capital for row in accounts}
+    comparable_performance = all(
+        len(slot_snapshots[account_id]) == len(evaluation.oos_slots) for account_id in account_ids
+    ) and set(capital_by_account) == set(account_ids)
+    cumulative_excess_return = Decimal(0)
+    positive_sessions = 0
+    drawdown_degradation = Decimal(0)
+    if comparable_performance:
+        incumbent_rows = slot_snapshots[evaluation.incumbent_account_id]
+        challenger_rows = slot_snapshots[evaluation.challenger_account_id]
+        cumulative_excess_return = (
+            challenger_rows[-1].nav / capital_by_account[evaluation.challenger_account_id]
+            - incumbent_rows[-1].nav / capital_by_account[evaluation.incumbent_account_id]
+        )
+        incumbent_by_session = _last_snapshot_by_session(incumbent_rows)
+        challenger_by_session = _last_snapshot_by_session(challenger_rows)
+        previous_incumbent = capital_by_account[evaluation.incumbent_account_id]
+        previous_challenger = capital_by_account[evaluation.challenger_account_id]
+        for session_date in sorted(set(incumbent_by_session) & set(challenger_by_session)):
+            incumbent_nav = incumbent_by_session[session_date].nav
+            challenger_nav = challenger_by_session[session_date].nav
+            positive_sessions += int(
+                challenger_nav / previous_challenger > incumbent_nav / previous_incumbent
+            )
+            previous_incumbent = incumbent_nav
+            previous_challenger = challenger_nav
+        drawdown_degradation = max(row.drawdown_ratio for row in challenger_rows) - max(
+            row.drawdown_ratio for row in incumbent_rows
+        )
+
+    transactions = tuple(
+        await session.scalars(
+            select(PaperLedgerTransactionRecord).where(
+                PaperLedgerTransactionRecord.account_id.in_(account_ids),
+                PaperLedgerTransactionRecord.occurred_at <= now,
+            )
+        )
+    )
+    transaction_ids = tuple(row.id for row in transactions)
+    entries = (
+        tuple(
+            await session.scalars(
+                select(PaperLedgerEntryRecord).where(
+                    PaperLedgerEntryRecord.transaction_id.in_(transaction_ids)
+                )
+            )
+        )
+        if transaction_ids
+        else ()
+    )
+    ledger_conserved = all(
+        sum(
+            (entry.debit_amount for entry in entries if entry.transaction_id == transaction.id),
+            Decimal(0),
+        )
+        == sum(
+            (entry.credit_amount for entry in entries if entry.transaction_id == transaction.id),
+            Decimal(0),
+        )
+        for transaction in transactions
+    )
+    latest_events: dict[UUID, AgentPaperCycleEventRecord] = {}
+    if cycle_ids:
+        events = tuple(
+            await session.scalars(
+                select(AgentPaperCycleEventRecord)
+                .where(AgentPaperCycleEventRecord.cycle_id.in_(cycle_ids))
+                .order_by(
+                    AgentPaperCycleEventRecord.cycle_id,
+                    AgentPaperCycleEventRecord.sequence,
+                )
+            )
+        )
+        for event in events:
+            latest_events[event.cycle_id] = event
+    authority_complete = (
+        len(pairs) == len(evaluation.oos_slots)
+        and len(cycles) == len(evaluation.oos_slots) * 2
+        and len(decisions) == len(evaluation.oos_slots) * 2
+        and len(bindings) == len(evaluation.oos_slots) * 2
+        and comparable_performance
+        and all(cycle.execution_locked for cycle in cycles)
+        and all(
+            latest_events.get(cycle.id) is not None
+            and latest_events[cycle.id].to_status == "completed"
+            for cycle in cycles
+        )
+    )
+    duplicate_count = (
+        len(orders)
+        - len({(row.account_id, row.client_order_id) for row in orders})
+        + len(fills)
+        - len({(row.order_id, row.fill_seq) for row in fills})
+    )
+    execution_model_hashes = {row.execution_model_hash for row in fills}
+    cost_authority_complete = comparable_performance and len(execution_model_hashes) <= 1
+    return AgentVersionMetricFacts(
+        oos_pair_count=len(pairs),
+        action_divergence_count=divergence_count,
+        challenger_fill_count=sum(
+            row.account_id == evaluation.challenger_account_id for row in fills
+        ),
+        cumulative_excess_return=cumulative_excess_return,
+        positive_excess_session_count=positive_sessions,
+        drawdown_degradation=drawdown_degradation,
+        hard_risk_violation_count=hard_risk_violations,
+        ledger_conserved=ledger_conserved,
+        duplicate_execution_fact_count=duplicate_count,
+        cost_authority_complete=cost_authority_complete,
+        comparison_authority_complete=False,
+        authority_complete=authority_complete,
+    )
+
+
+def _last_snapshot_by_session(
+    rows: list[PaperPerformanceSnapshotRecord],
+) -> dict[date, PaperPerformanceSnapshotRecord]:
+    result: dict[date, PaperPerformanceSnapshotRecord] = {}
+    for row in rows:
+        result[_session(row.as_of)] = row
+    return result
+
+
+def _decision_result(
+    record: AgentVersionEvaluationDecisionRecord,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+    replayed: bool,
+) -> AgentVersionEvaluationDecision:
+    expected_metric_hash = hashlib.sha256(canonical_json(record.metric_report).encode()).hexdigest()
+    if expected_metric_hash != record.metric_hash:
+        raise ValueError("AGENT_VERSION_DECISION_AUTHORITY_INVALID")
+    expected_decision_hash = hashlib.sha256(
+        canonical_json(
+            {
+                "evaluation_id": str(record.evaluation_id),
+                "metric_hash": record.metric_hash,
+                "policy_hash": evaluation.policy_hash,
+                "reason_code": record.reason_code,
+                "selected_version_source_run_id": str(record.selected_version_source_run_id),
+                "status": record.status,
+            }
+        ).encode()
+    ).hexdigest()
+    if expected_decision_hash != record.decision_hash:
+        raise ValueError("AGENT_VERSION_DECISION_AUTHORITY_INVALID")
+    if record.status not in {"PASS", "FAIL", "UNKNOWN"}:
+        raise ValueError("AGENT_VERSION_DECISION_AUTHORITY_INVALID")
+    return AgentVersionEvaluationDecision(
+        evaluation_id=record.evaluation_id,
+        status=cast(Literal["PASS", "FAIL", "UNKNOWN"], record.status),
+        selected_version_source_run_id=record.selected_version_source_run_id,
+        reason_code=record.reason_code,
+        metric_hash=record.metric_hash,
+        decision_hash=record.decision_hash,
+        replayed=replayed,
+    )
 
 
 def _evaluation_account(
@@ -310,9 +785,7 @@ async def _select_calendar(
     return None
 
 
-def _pricing_covers(
-    model: AgentModelConfigRecord, *, now: datetime, last_slot: datetime
-) -> bool:
+def _pricing_covers(model: AgentModelConfigRecord, *, now: datetime, last_slot: datetime) -> bool:
     return model.pricing_available_at <= now and model.pricing_expires_at > last_slot
 
 
@@ -327,7 +800,9 @@ def _model_is_agent_paper_compatible(model: AgentModelConfigRecord) -> bool:
     )
 
 
-def _prompt_manifest_hash(prompts: dict[AgentRole, AgentPromptVersionRecord]) -> str:
+def _prompt_manifest_hash(
+    prompts: Mapping[AgentRole, AgentPromptVersionRecord],
+) -> str:
     manifest = {
         role: {
             "id": str(prompts[role].id),
@@ -385,9 +860,7 @@ def _registration_from_payload(
     try:
         if payload.get("model_jobs_created") != 0 or payload.get("execution_locked") is not True:
             raise ValueError
-        return AgentVersionEvaluationRegistration.model_validate(
-            {**payload, "replayed": replayed}
-        )
+        return AgentVersionEvaluationRegistration.model_validate({**payload, "replayed": replayed})
     except (TypeError, ValueError) as error:
         raise RuntimeError("Agent-version idempotency response is incomplete") from error
 

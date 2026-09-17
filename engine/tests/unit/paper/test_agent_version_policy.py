@@ -15,7 +15,9 @@ from nexus.paper.agent_version_models import (
     POLICY_VERSION,
     TRAIN_SLOT_COUNT,
     AgentVersionEvaluationRequest,
+    AgentVersionMetricFacts,
     agent_version_market_evidence_hash,
+    evaluate_agent_version_metrics,
     evaluation_policy_hash,
     evaluation_request_hash,
 )
@@ -26,6 +28,21 @@ CHALLENGER_PROMPT_ID = UUID("71000000-0000-0000-0000-000000000002")
 MODEL_ID = UUID("71000000-0000-0000-0000-000000000003")
 INSTRUMENT_ID = UUID("71000000-0000-0000-0000-000000000004")
 
+PASS_FACTS = AgentVersionMetricFacts(
+    oos_pair_count=20,
+    action_divergence_count=3,
+    challenger_fill_count=1,
+    cumulative_excess_return=Decimal("0.005"),
+    positive_excess_session_count=7,
+    drawdown_degradation=Decimal("0.0025"),
+    hard_risk_violation_count=0,
+    ledger_conserved=True,
+    duplicate_execution_fact_count=0,
+    cost_authority_complete=True,
+    comparison_authority_complete=True,
+    authority_complete=True,
+)
+
 
 def _slot(day: int, minute: int = 0) -> datetime:
     return datetime(2026, 10, day, 14, minute, tzinfo=UTC)
@@ -33,9 +50,7 @@ def _slot(day: int, minute: int = 0) -> datetime:
 
 TRAIN_SLOTS = (_slot(1), _slot(1, 5), _slot(2), _slot(2, 5))
 OOS_SLOTS = tuple(
-    slot
-    for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16)
-    for slot in (_slot(day), _slot(day, 5))
+    slot for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16) for slot in (_slot(day), _slot(day, 5))
 )
 
 
@@ -65,6 +80,97 @@ def test_v1_policy_is_frozen() -> None:
     assert evaluation_policy_hash() == (
         "7af8c4c83a82b3c2c493c674a5efcb4e1c1a2480fb73ee09576edc6eb7313661"
     )
+
+
+def test_agent_version_v1_passes_only_complete_gate() -> None:
+    report = evaluate_agent_version_metrics(PASS_FACTS)
+
+    assert (report.status, report.reason_code) == (
+        "PASS",
+        "OOS_IMPROVEMENT_PROVEN",
+    )
+    assert tuple(gate.key for gate in report.gates) == (
+        "authority",
+        "oos_pairs",
+        "cost_authority",
+        "comparison_authority",
+        "hard_risk",
+        "ledger_conservation",
+        "duplicate_execution",
+        "action_divergence",
+        "challenger_fills",
+        "excess_return",
+        "positive_excess_sessions",
+        "drawdown_degradation",
+    )
+    assert all(gate.status == "PASS" for gate in report.gates)
+
+
+@pytest.mark.parametrize(
+    ("change", "status", "reason"),
+    [
+        ({"authority_complete": False}, "UNKNOWN", "OOS_AUTHORITY_INCOMPLETE"),
+        ({"oos_pair_count": 19}, "UNKNOWN", "OOS_PAIR_INCOMPLETE"),
+        (
+            {"cost_authority_complete": False},
+            "UNKNOWN",
+            "OOS_COST_AUTHORITY_INCOMPLETE",
+        ),
+        (
+            {"comparison_authority_complete": False},
+            "UNKNOWN",
+            "OOS_COMPARISON_AUTHORITY_INCOMPLETE",
+        ),
+        ({"hard_risk_violation_count": 1}, "FAIL", "HARD_RISK_VIOLATION"),
+        ({"ledger_conserved": False}, "FAIL", "LEDGER_CONSERVATION_FAILED"),
+        (
+            {"duplicate_execution_fact_count": 1},
+            "FAIL",
+            "DUPLICATE_EXECUTION_FACT",
+        ),
+        (
+            {"action_divergence_count": 2},
+            "UNKNOWN",
+            "OOS_ACTION_DIVERGENCE_INSUFFICIENT",
+        ),
+        (
+            {"challenger_fill_count": 0},
+            "UNKNOWN",
+            "OOS_CHALLENGER_FILL_INSUFFICIENT",
+        ),
+        (
+            {"cumulative_excess_return": Decimal("0.0049")},
+            "UNKNOWN",
+            "OOS_EXCESS_RETURN_INSUFFICIENT",
+        ),
+        (
+            {"positive_excess_session_count": 6},
+            "UNKNOWN",
+            "OOS_POSITIVE_SESSIONS_INSUFFICIENT",
+        ),
+        (
+            {"drawdown_degradation": Decimal("0.0026")},
+            "UNKNOWN",
+            "OOS_DRAWDOWN_DEGRADATION_EXCESSIVE",
+        ),
+    ],
+)
+def test_agent_version_v1_gate_truth_table(
+    change: dict[str, object], status: str, reason: str
+) -> None:
+    report = evaluate_agent_version_metrics(PASS_FACTS.model_copy(update=change))
+
+    assert (report.status, report.reason_code) == (status, reason)
+
+
+def test_agent_version_metric_facts_reject_binary_float() -> None:
+    with pytest.raises(ValidationError, match="AGENT_VERSION_METRIC_DECIMAL_INVALID"):
+        AgentVersionMetricFacts.model_validate(
+            {
+                **PASS_FACTS.model_dump(),
+                "cumulative_excess_return": 0.005,
+            }
+        )
 
 
 def test_request_hash_is_stable_for_decimal_and_utc_slots() -> None:
@@ -103,9 +209,7 @@ def test_market_evidence_hash_is_account_neutral_and_domain_separated() -> None:
         ),
     ],
 )
-def test_v1_policy_rejects_invalid_requests(
-    change: dict[str, object], reason: str
-) -> None:
+def test_v1_policy_rejects_invalid_requests(change: dict[str, object], reason: str) -> None:
     with pytest.raises((ValidationError, ValueError), match=reason):
         _request(**change)
 

@@ -304,26 +304,35 @@ async def admit_agent_paper_research(
                 "prompt_version_id": (
                     str(prompt_version_id) if prompt_version_id is not None else None
                 ),
-                "model_config_id": (
-                    str(model_config_id) if model_config_id is not None else None
-                ),
+                "model_config_id": (str(model_config_id) if model_config_id is not None else None),
             }
         )
     request_hash = job_input_hash(request_payload)
     reuse_latest_actor_agent_version = not evaluation_actor
     if not evaluation_actor:
-        model_config_id = await session.scalar(
-            select(AgentModelConfigRecord.id)
-            .where(
-                AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION,
-                AgentModelConfigRecord.pricing_available_at <= now,
-                AgentModelConfigRecord.pricing_expires_at > now,
-            )
-            .order_by(
-                AgentModelConfigRecord.created_at.desc(), AgentModelConfigRecord.id.desc()
-            )
-            .limit(1)
+        from nexus.paper.agent_version_evaluation import (
+            load_selected_internal_agent_version,
         )
+
+        selected = await load_selected_internal_agent_version(session, now=now)
+        if selected is None:
+            model_config_id = await session.scalar(
+                select(AgentModelConfigRecord.id)
+                .where(
+                    AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION,
+                    AgentModelConfigRecord.pricing_available_at <= now,
+                    AgentModelConfigRecord.pricing_expires_at > now,
+                )
+                .order_by(
+                    AgentModelConfigRecord.created_at.desc(),
+                    AgentModelConfigRecord.id.desc(),
+                )
+                .limit(1)
+            )
+        else:
+            reuse_latest_actor_agent_version = False
+            version_source_run_id = selected.source_run_id
+            model_config_id = None
     return await admit_research_run(
         session,
         actor_id=actor_id,

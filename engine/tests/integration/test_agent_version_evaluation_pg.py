@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import json
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -14,7 +14,11 @@ from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION, aggregate_inp
 from nexus.agents.committee import ROLE_ORDER
 from nexus.paper.agent_cycle_authority import CycleAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult
-from nexus.paper.agent_version_evaluation import register_agent_version_evaluation
+from nexus.paper.agent_version_evaluation import (
+    finalize_agent_version_evaluation,
+    load_selected_internal_agent_version,
+    register_agent_version_evaluation,
+)
 from nexus.paper.agent_version_models import (
     AgentVersionEvaluationRegistration,
     AgentVersionEvaluationRequest,
@@ -25,7 +29,10 @@ from nexus.paper.agent_version_runner import (
     resume_agent_version_slot,
 )
 from nexus.paper.projection import load_paper_projection
-from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
+from nexus.persistence.models.agent_versions import (
+    AgentVersionEvaluationDecisionRecord,
+    AgentVersionEvaluationRecord,
+)
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -238,9 +245,7 @@ async def _seed_authority(
             retry_count=0,
             schema_hash="d" * 64,
             model_hash=model_hash,
-            prompt_hash=(
-                "9" * 64 if corrupt_incumbent_prompt_hash else _hash(incumbent_manifest)
-            ),
+            prompt_hash=("9" * 64 if corrupt_incumbent_prompt_hash else _hash(incumbent_manifest)),
             prompt_manifest=incumbent_manifest,
             evidence_hash="e" * 64,
             evidence_manifest=[{}],
@@ -286,9 +291,7 @@ async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
         async with factory.begin() as session:
             prompt_id, model_id = await _seed_authority(session)
             before = {
-                table: int(
-                    await session.scalar(text(f"SELECT count(*) FROM {table}")) or 0
-                )
+                table: int(await session.scalar(text(f"SELECT count(*) FROM {table}")) or 0)
                 for table in (
                     "jobs",
                     "agent_paper_cycles",
@@ -337,9 +340,7 @@ async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
             )
             assert providers == {"internal_paper_evaluation"}
             after = {
-                table: int(
-                    await session.scalar(text(f"SELECT count(*) FROM {table}")) or 0
-                )
+                table: int(await session.scalar(text(f"SELECT count(*) FROM {table}")) or 0)
                 for table in before
             }
             assert after == before
@@ -354,10 +355,15 @@ async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
             )
             assert replay.model_copy(update={"replayed": False}) == registration
             assert replay.replayed is True
-            assert int(
-                await session.scalar(select(func.count()).select_from(AgentVersionEvaluationRecord))
-                or 0
-            ) == 1
+            assert (
+                int(
+                    await session.scalar(
+                        select(func.count()).select_from(AgentVersionEvaluationRecord)
+                    )
+                    or 0
+                )
+                == 1
+            )
 
         async with factory.begin() as session:
             authority_replay = await register_agent_version_evaluation(
@@ -369,6 +375,77 @@ async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
             )
             assert authority_replay.evaluation_id == registration.evaluation_id
             assert authority_replay.replayed is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_finalization_is_fail_closed_and_idempotent_without_oos_pairs(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            request = _request(prompt_id, model_id)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=request,
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-finalization-v1",
+                now=NOW,
+            )
+
+        with pytest.raises(ValueError, match="AGENT_VERSION_WINDOW_OPEN"):
+            async with factory.begin() as session:
+                await finalize_agent_version_evaluation(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    now=request.oos_slots[-1] - timedelta(seconds=1),
+                )
+
+        async with factory.begin() as session:
+            finalized = await finalize_agent_version_evaluation(
+                session,
+                evaluation_id=registration.evaluation_id,
+                now=request.oos_slots[-1] + timedelta(seconds=1),
+            )
+            selected = await load_selected_internal_agent_version(
+                session,
+                now=request.oos_slots[-1] + timedelta(seconds=1),
+            )
+            decision_count = int(
+                await session.scalar(
+                    select(func.count()).select_from(AgentVersionEvaluationDecisionRecord)
+                )
+                or 0
+            )
+
+        assert finalized.status == "UNKNOWN"
+        assert finalized.reason_code == "OOS_AUTHORITY_INCOMPLETE"
+        assert finalized.selected_version_source_run_id == INCUMBENT_RUN_ID
+        assert finalized.execution_locked is True
+        assert finalized.replayed is False
+        assert selected is None
+        assert decision_count == 1
+
+        async with factory.begin() as session:
+            replay = await finalize_agent_version_evaluation(
+                session,
+                evaluation_id=registration.evaluation_id,
+                now=request.oos_slots[-1] + timedelta(minutes=1),
+            )
+            assert (
+                int(
+                    await session.scalar(
+                        select(func.count()).select_from(AgentVersionEvaluationDecisionRecord)
+                    )
+                    or 0
+                )
+                == 1
+            )
+        assert replay.model_copy(update={"replayed": False}) == finalized
+        assert replay.replayed is True
     finally:
         await engine.dispose()
 
@@ -410,9 +487,7 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
             )
             counts = {
                 "ledger_accounts": int(
-                    await session.scalar(
-                        select(func.count()).select_from(PaperLedgerAccountRecord)
-                    )
+                    await session.scalar(select(func.count()).select_from(PaperLedgerAccountRecord))
                     or 0
                 ),
                 "ledger_transactions": int(
@@ -422,9 +497,7 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
                     or 0
                 ),
                 "ledger_entries": int(
-                    await session.scalar(
-                        select(func.count()).select_from(PaperLedgerEntryRecord)
-                    )
+                    await session.scalar(select(func.count()).select_from(PaperLedgerEntryRecord))
                     or 0
                 ),
                 "drawdown_events": int(
@@ -461,9 +534,7 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
             )
             replay_counts = {
                 "ledger_accounts": int(
-                    await session.scalar(
-                        select(func.count()).select_from(PaperLedgerAccountRecord)
-                    )
+                    await session.scalar(select(func.count()).select_from(PaperLedgerAccountRecord))
                     or 0
                 ),
                 "ledger_transactions": int(
@@ -473,9 +544,7 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
                     or 0
                 ),
                 "ledger_entries": int(
-                    await session.scalar(
-                        select(func.count()).select_from(PaperLedgerEntryRecord)
-                    )
+                    await session.scalar(select(func.count()).select_from(PaperLedgerEntryRecord))
                     or 0
                 ),
                 "drawdown_events": int(
@@ -669,21 +738,21 @@ async def test_concurrent_registration_creates_only_one_open_evaluation(
 
         results = await asyncio.gather(register(0), register(1))
         assert (
-            sum(isinstance(result, AgentVersionEvaluationRegistration) for result in results)
-            == 1
+            sum(isinstance(result, AgentVersionEvaluationRegistration) for result in results) == 1
         )
         assert (
-            sum(
-                "AGENT_VERSION_EVALUATION_ALREADY_OPEN" in str(result)
-                for result in results
-            )
-            == 1
+            sum("AGENT_VERSION_EVALUATION_ALREADY_OPEN" in str(result) for result in results) == 1
         )
         async with factory() as session:
-            assert int(
-                await session.scalar(select(func.count()).select_from(AgentVersionEvaluationRecord))
-                or 0
-            ) == 1
+            assert (
+                int(
+                    await session.scalar(
+                        select(func.count()).select_from(AgentVersionEvaluationRecord)
+                    )
+                    or 0
+                )
+                == 1
+            )
     finally:
         await engine.dispose()
 
