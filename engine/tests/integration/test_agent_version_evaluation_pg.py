@@ -8,6 +8,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import httpx
+import nexus.paper.agent_version_evaluation as agent_version_evaluation
 import nexus.paper.agent_version_runner as agent_version_runner
 import pytest
 from helpers.paper_api import app, headers
@@ -25,6 +26,7 @@ from nexus.paper.agent_version_evaluation import (
 from nexus.paper.agent_version_models import (
     AgentVersionEvaluationRegistration,
     AgentVersionEvaluationRequest,
+    evaluation_policy_hash,
 )
 from nexus.paper.agent_version_runner import (
     advance_agent_version_slot,
@@ -290,6 +292,102 @@ async def _factory(database_url: str) -> tuple[async_sessionmaker[AsyncSession],
     return async_sessionmaker(engine, expire_on_commit=False), engine
 
 
+async def _seed_legacy_invalid_evaluation(session: AsyncSession) -> UUID:
+    prompt_id, model_id = await _seed_authority(
+        session,
+        omit_prior_calendar_session=True,
+    )
+    incumbent_run = await session.get(AgentResearchRunRecord, INCUMBENT_RUN_ID)
+    assert incumbent_run is not None
+    evaluation_id = UUID("72000000-0000-0000-0000-000000000090")
+    incumbent_account_id = UUID("72000000-0000-0000-0000-000000000091")
+    challenger_account_id = UUID("72000000-0000-0000-0000-000000000092")
+    incumbent_portfolio_id = UUID("72000000-0000-0000-0000-000000000093")
+    challenger_portfolio_id = UUID("72000000-0000-0000-0000-000000000094")
+    incumbent_paper_id = UUID("72000000-0000-0000-0000-000000000095")
+    challenger_paper_id = UUID("72000000-0000-0000-0000-000000000096")
+    session.add_all(
+        (
+            Account(
+                id=incumbent_account_id,
+                provider="internal_paper_evaluation",
+                status="ACTIVE",
+            ),
+            Account(
+                id=challenger_account_id,
+                provider="internal_paper_evaluation",
+                status="ACTIVE",
+            ),
+        )
+    )
+    await session.flush()
+    session.add_all(
+        (
+            Portfolio(
+                id=incumbent_portfolio_id,
+                account_id=incumbent_account_id,
+                name="Legacy invalid incumbent",
+            ),
+            Portfolio(
+                id=challenger_portfolio_id,
+                account_id=challenger_account_id,
+                name="Legacy invalid challenger",
+            ),
+        )
+    )
+    await session.flush()
+    session.add_all(
+        (
+            PaperAccountRecord(
+                id=incumbent_paper_id,
+                account_id=incumbent_account_id,
+                portfolio_id=incumbent_portfolio_id,
+                code="legacy-invalid-incumbent",
+                currency="USD",
+                account_model="cash",
+                position_model="long_only",
+                initial_capital=Decimal("10000"),
+                capability="simulation_write_internal",
+            ),
+            PaperAccountRecord(
+                id=challenger_paper_id,
+                account_id=challenger_account_id,
+                portfolio_id=challenger_portfolio_id,
+                code="legacy-invalid-challenger",
+                currency="USD",
+                account_model="cash",
+                position_model="long_only",
+                initial_capital=Decimal("10000"),
+                capability="simulation_write_internal",
+            ),
+        )
+    )
+    await session.flush()
+    session.add(
+        AgentVersionEvaluationRecord(
+            id=evaluation_id,
+            incumbent_account_id=incumbent_paper_id,
+            challenger_account_id=challenger_paper_id,
+            instrument_id=INSTRUMENT_ID,
+            calendar_authority_id=CALENDAR_ID,
+            incumbent_version_source_run_id=INCUMBENT_RUN_ID,
+            challenger_prompt_version_id=prompt_id,
+            challenger_model_config_id=model_id,
+            incumbent_prompt_hash=incumbent_run.prompt_hash,
+            incumbent_model_hash=incumbent_run.model_hash,
+            challenger_prompt_hash="2" * 64,
+            challenger_model_hash="a" * 64,
+            train_slots=list(_slots(TRAIN_DATES)),
+            oos_slots=list(_slots(OOS_DATES)),
+            policy_version="agent_version_evaluation_v1",
+            policy_hash=evaluation_policy_hash(),
+            authority_hash="3" * 64,
+        )
+    )
+    await session.flush()
+    return evaluation_id
+
+
 @pytest.mark.asyncio
 async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
     migrated_database_url: str,
@@ -534,6 +632,74 @@ async def test_finalization_is_fail_closed_and_idempotent_without_oos_pairs(
             )
         assert replay.model_copy(update={"replayed": False}) == finalized
         assert replay.replayed is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_evaluation_without_prior_session_can_only_be_invalidated_before_work(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            evaluation_id = await _seed_legacy_invalid_evaluation(session)
+
+        async with factory.begin() as session:
+            invalidated = await agent_version_evaluation.invalidate_agent_version_evaluation(
+                session,
+                evaluation_id=evaluation_id,
+                now=NOW,
+            )
+            decision_count = int(
+                await session.scalar(
+                    select(func.count()).select_from(AgentVersionEvaluationDecisionRecord)
+                )
+                or 0
+            )
+
+        assert invalidated.status == "UNKNOWN"
+        assert invalidated.reason_code == "CALENDAR_PRIOR_SESSION_MISSING"
+        assert invalidated.selected_version_source_run_id == INCUMBENT_RUN_ID
+        assert invalidated.execution_locked is True
+        assert invalidated.replayed is False
+        assert decision_count == 1
+
+        async with factory.begin() as session:
+            replay = await agent_version_evaluation.invalidate_agent_version_evaluation(
+                session,
+                evaluation_id=evaluation_id,
+                now=NOW + timedelta(minutes=1),
+            )
+        assert replay.model_copy(update={"replayed": False}) == invalidated
+        assert replay.replayed is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_valid_open_evaluation_cannot_use_legacy_invalidation(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-valid-invalidation-v1",
+                now=NOW,
+            )
+
+        with pytest.raises(ValueError, match="AGENT_VERSION_EVALUATION_NOT_INVALID"):
+            async with factory.begin() as session:
+                await agent_version_evaluation.invalidate_agent_version_evaluation(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    now=NOW,
+                )
     finally:
         await engine.dispose()
 

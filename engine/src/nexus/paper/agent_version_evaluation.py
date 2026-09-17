@@ -9,7 +9,7 @@ from typing import Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_sdk import MODEL_ID
@@ -283,7 +283,97 @@ async def finalize_agent_version_evaluation(
         if challenger_run_id is None:
             raise ValueError("AGENT_VERSION_DECISION_AUTHORITY_INVALID")
         selected_run_id = challenger_run_id
-    metric_report = report.model_dump(mode="json")
+    return await _persist_evaluation_decision(
+        session,
+        evaluation=evaluation,
+        status=report.status,
+        reason_code=report.reason_code,
+        metric_report=report.model_dump(mode="json"),
+        selected_run_id=selected_run_id,
+    )
+
+
+async def invalidate_agent_version_evaluation(
+    session: AsyncSession,
+    *,
+    evaluation_id: UUID,
+    now: datetime,
+) -> AgentVersionEvaluationDecision:
+    """Close one legacy, structurally invalid evaluation without replaying work."""
+    if now.tzinfo is None or now.utcoffset() != UTC.utcoffset(now):
+        raise ValueError("AGENT_VERSION_TIME_INVALID")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-version-evaluation:{evaluation_id}"},
+    )
+    evaluation = await session.get(
+        AgentVersionEvaluationRecord,
+        evaluation_id,
+        populate_existing=True,
+    )
+    if evaluation is None:
+        raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    existing = await session.scalar(
+        select(AgentVersionEvaluationDecisionRecord).where(
+            AgentVersionEvaluationDecisionRecord.evaluation_id == evaluation.id
+        )
+    )
+    if existing is not None:
+        return _decision_result(existing, evaluation=evaluation, replayed=True)
+    first_session = min(_session(slot) for slot in evaluation.train_slots)
+    if await _calendar_has_prior_session(
+        session,
+        calendar_id=evaluation.calendar_authority_id,
+        before=first_session,
+    ):
+        raise ValueError("AGENT_VERSION_EVALUATION_NOT_INVALID")
+    pair_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(AgentVersionCyclePairRecord)
+            .where(AgentVersionCyclePairRecord.evaluation_id == evaluation.id)
+        )
+        or 0
+    )
+    cycle_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(AgentPaperCycleRecord)
+            .where(
+                AgentPaperCycleRecord.account_id.in_(
+                    (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+                )
+            )
+        )
+        or 0
+    )
+    if pair_count or cycle_count:
+        raise ValueError("AGENT_VERSION_INVALIDATION_UNSAFE")
+    facts = await _load_agent_version_metric_facts(
+        session,
+        evaluation=evaluation,
+        now=now,
+    )
+    report = evaluate_agent_version_metrics(facts)
+    return await _persist_evaluation_decision(
+        session,
+        evaluation=evaluation,
+        status="UNKNOWN",
+        reason_code="CALENDAR_PRIOR_SESSION_MISSING",
+        metric_report=report.model_dump(mode="json"),
+        selected_run_id=evaluation.incumbent_version_source_run_id,
+    )
+
+
+async def _persist_evaluation_decision(
+    session: AsyncSession,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+    status: Literal["PASS", "FAIL", "UNKNOWN"],
+    reason_code: str,
+    metric_report: dict[str, object],
+    selected_run_id: UUID,
+) -> AgentVersionEvaluationDecision:
     metric_hash = hashlib.sha256(canonical_json(metric_report).encode()).hexdigest()
     decision_hash = hashlib.sha256(
         canonical_json(
@@ -291,20 +381,20 @@ async def finalize_agent_version_evaluation(
                 "evaluation_id": str(evaluation.id),
                 "metric_hash": metric_hash,
                 "policy_hash": evaluation.policy_hash,
-                "reason_code": report.reason_code,
+                "reason_code": reason_code,
                 "selected_version_source_run_id": str(selected_run_id),
-                "status": report.status,
+                "status": status,
             }
         ).encode()
     ).hexdigest()
     record = AgentVersionEvaluationDecisionRecord(
         id=new_uuid7(),
         evaluation_id=evaluation.id,
-        status=report.status,
+        status=status,
         metric_report=metric_report,
         metric_hash=metric_hash,
         selected_version_source_run_id=selected_run_id,
-        reason_code=report.reason_code,
+        reason_code=reason_code,
         decision_hash=decision_hash,
     )
     session.add(record)
@@ -765,16 +855,11 @@ async def _select_calendar(
         )
     )
     for candidate in candidates:
-        prior_session = await session.scalar(
-            select(ExchangeCalendarSessionRecord.session)
-            .where(
-                ExchangeCalendarSessionRecord.calendar_authority_id == candidate.id,
-                ExchangeCalendarSessionRecord.session < min(dates),
-            )
-            .order_by(ExchangeCalendarSessionRecord.session.desc())
-            .limit(1)
-        )
-        if prior_session is None:
+        if not await _calendar_has_prior_session(
+            session,
+            calendar_id=candidate.id,
+            before=min(dates),
+        ):
             continue
         rows = tuple(
             await session.scalars(
@@ -794,6 +879,24 @@ async def _select_calendar(
         ):
             return candidate
     return None
+
+
+async def _calendar_has_prior_session(
+    session: AsyncSession,
+    *,
+    calendar_id: UUID,
+    before: date,
+) -> bool:
+    prior_session = await session.scalar(
+        select(ExchangeCalendarSessionRecord.session)
+        .where(
+            ExchangeCalendarSessionRecord.calendar_authority_id == calendar_id,
+            ExchangeCalendarSessionRecord.session < before,
+        )
+        .order_by(ExchangeCalendarSessionRecord.session.desc())
+        .limit(1)
+    )
+    return prior_session is not None
 
 
 def _pricing_covers(model: AgentModelConfigRecord, *, now: datetime, last_slot: datetime) -> bool:

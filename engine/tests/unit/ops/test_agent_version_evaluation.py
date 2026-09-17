@@ -24,6 +24,19 @@ def test_parser_rejects_database_and_credential_overrides() -> None:
         )
 
 
+def test_parser_accepts_bounded_legacy_invalidation() -> None:
+    values = vars(
+        parser().parse_args(
+            ["invalidate", "--evaluation-id", str(EVALUATION_ID)]
+        )
+    )
+
+    assert cli._request(values) == cli.EvaluationRequest(
+        action="invalidate",
+        evaluation_id=EVALUATION_ID,
+    )
+
+
 def test_register_requires_exact_frozen_window() -> None:
     with pytest.raises(ValidationError):
         RegisterRequest(

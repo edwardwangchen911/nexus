@@ -17,6 +17,7 @@ from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.fosun_local import load_local_environment
 from nexus.paper.agent_version_evaluation import (
     finalize_agent_version_evaluation,
+    invalidate_agent_version_evaluation,
     register_agent_version_evaluation,
 )
 from nexus.paper.agent_version_models import AgentVersionEvaluationRequest
@@ -55,7 +56,7 @@ class SlotRequest(_Request):
 
 
 class EvaluationRequest(_Request):
-    action: Literal["finalize", "status"]
+    action: Literal["finalize", "invalidate", "status"]
     evaluation_id: UUID
 
 
@@ -88,7 +89,7 @@ def parser() -> argparse.ArgumentParser:
         slot = commands.add_parser(action)
         slot.add_argument("--evaluation-id", required=True)
         slot.add_argument("--decision-slot", required=True)
-    for action in ("finalize", "status"):
+    for action in ("finalize", "invalidate", "status"):
         evaluation = commands.add_parser(action)
         evaluation.add_argument("--evaluation-id", required=True)
     return root
@@ -147,6 +148,12 @@ async def execute(
                     session,
                     evaluation_id=request.evaluation_id,
                     decision_slot_at=request.decision_slot,
+                    now=now,
+                )
+            if request.action == "invalidate":
+                return await invalidate_agent_version_evaluation(
+                    session,
+                    evaluation_id=request.evaluation_id,
                     now=now,
                 )
             return await finalize_agent_version_evaluation(
