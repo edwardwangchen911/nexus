@@ -19,6 +19,7 @@ from nexus.ops.agent_version_evaluation import EvaluationRequest, StatusResult, 
 from nexus.paper.agent_cycle_authority import CycleAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult
 from nexus.paper.agent_version_evaluation import (
+    close_incomplete_agent_version_evaluation,
     finalize_agent_version_evaluation,
     load_selected_internal_agent_version,
     register_agent_version_evaluation,
@@ -699,6 +700,109 @@ async def test_valid_open_evaluation_cannot_use_legacy_invalidation(
                     session,
                     evaluation_id=registration.evaluation_id,
                     now=NOW,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_missed_registered_slot_closes_evaluation_without_replaying_work(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    first_slot = _slots(TRAIN_DATES)[0]
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-missed-slot-v1",
+                now=NOW,
+            )
+
+        async with factory.begin() as session:
+            closed = await close_incomplete_agent_version_evaluation(
+                session,
+                evaluation_id=registration.evaluation_id,
+                now=first_slot + timedelta(seconds=61),
+            )
+            cycle_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AgentPaperCycleRecord)
+                    .where(
+                        AgentPaperCycleRecord.account_id.in_(
+                            (
+                                registration.incumbent_account_id,
+                                registration.challenger_account_id,
+                            )
+                        )
+                    )
+                )
+                or 0
+            )
+
+        assert closed.status == "UNKNOWN"
+        assert closed.reason_code == "REGISTERED_SLOT_MISSED"
+        assert closed.selected_version_source_run_id == INCUMBENT_RUN_ID
+        assert closed.execution_locked is True
+        assert cycle_count == 0
+
+        async with factory.begin() as session:
+            replay = await close_incomplete_agent_version_evaluation(
+                session,
+                evaluation_id=registration.evaluation_id,
+                now=first_slot + timedelta(seconds=62),
+            )
+        assert replay.model_copy(update={"replayed": False}) == closed
+        assert replay.replayed is True
+
+        with pytest.raises(ValueError, match="AGENT_VERSION_EVALUATION_CLOSED"):
+            async with factory.begin() as session:
+                await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=first_slot,
+                    daily_limit_usd=Decimal("3"),
+                    now=first_slot + timedelta(seconds=62),
+                )
+        with pytest.raises(ValueError, match="AGENT_VERSION_EVALUATION_CLOSED"):
+            async with factory.begin() as session:
+                await resume_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=first_slot,
+                    now=first_slot + timedelta(seconds=62),
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_evaluation_cannot_close_before_first_slot_is_missed(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    first_slot = _slots(TRAIN_DATES)[0]
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-not-yet-missed-slot-v1",
+                now=NOW,
+            )
+
+        with pytest.raises(ValueError, match="AGENT_VERSION_SLOT_NOT_MISSED"):
+            async with factory.begin() as session:
+                await close_incomplete_agent_version_evaluation(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    now=first_slot + timedelta(seconds=60),
                 )
     finally:
         await engine.dispose()

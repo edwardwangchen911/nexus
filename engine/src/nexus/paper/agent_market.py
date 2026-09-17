@@ -7,7 +7,7 @@ from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import String, select, text
+from sqlalchemy import String, func, select, text
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,6 +28,7 @@ from nexus.persistence.models.paper import (
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
+    PaperExecutionWindowAuthorityRecord,
     PaperOrderRecord,
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
@@ -461,8 +462,7 @@ async def _evaluation_peer_window(
                 AgentPaperCycleRecord.account_id == peer_account_id,
                 AgentPaperCycleRecord.decision_slot_at == cycle.decision_slot_at,
                 AgentPaperCycleRecord.candidate_hash == cycle.candidate_hash,
-                AgentPaperCycleRecord.execution_price_policy_id
-                == cycle.execution_price_policy_id,
+                AgentPaperCycleRecord.execution_price_policy_id == cycle.execution_price_policy_id,
                 AgentPaperCycleRecord.execution_locked.is_(True),
                 AgentPaperMarketWindowRecord.instrument_id == instrument_id,
                 AgentPaperMarketWindowRecord.window_start_at == window_start,
@@ -491,8 +491,7 @@ async def resolve_agent_paper_market_scope(
         raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
     try:
         candidate_ids = tuple(
-            UUID(str(candidate.get("instrument_id")))
-            for candidate in cycle.candidate_manifest
+            UUID(str(candidate.get("instrument_id"))) for candidate in cycle.candidate_manifest
         )
     except (TypeError, ValueError):
         raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED") from None
@@ -516,10 +515,7 @@ async def resolve_agent_paper_market_scope(
                         ExchangeCalendarSessionRecord.calendar_authority_id
                         == StrategyDecisionRecord.calendar_authority_id
                     )
-                    & (
-                        ExchangeCalendarSessionRecord.session
-                        == cycle.execution_session
-                    ),
+                    & (ExchangeCalendarSessionRecord.session == cycle.execution_session),
                 )
                 .where(
                     StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
@@ -533,61 +529,79 @@ async def resolve_agent_paper_market_scope(
         if len(calendars) != 1 or calendars[0].market_open_at is None:
             raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
         start = calendars[0].market_open_at
-        return AgentPaperMarketScope(
-            cycle_id=cycle.id,
-            instrument_id=instrument_id,
-            execution_source_policy_id=cycle.execution_price_policy_id,
-            window_start=start,
-            window_end=start + timedelta(minutes=5),
-        )
-    row = (
-        await session.execute(
-            select(AgentResearchOutputRecord, Job, ExchangeCalendarSessionRecord)
-            .join(
-                StrategyDecisionAgentOutputRecord,
-                StrategyDecisionAgentOutputRecord.agent_research_output_id
-                == AgentResearchOutputRecord.id,
-            )
-            .join(
-                StrategyDecisionRecord,
-                StrategyDecisionRecord.id == StrategyDecisionAgentOutputRecord.strategy_decision_id,
-            )
-            .join(
-                Job,
-                Job.payload["run_id"].as_string()
-                == sql_cast(AgentResearchOutputRecord.run_id, String),
-            )
-            .join(
-                ExchangeCalendarSessionRecord,
-                (
-                    ExchangeCalendarSessionRecord.calendar_authority_id
-                    == StrategyDecisionRecord.calendar_authority_id
+        market_close_at = calendars[0].market_close_at
+    else:
+        row = (
+            await session.execute(
+                select(AgentResearchOutputRecord, Job, ExchangeCalendarSessionRecord)
+                .join(
+                    StrategyDecisionAgentOutputRecord,
+                    StrategyDecisionAgentOutputRecord.agent_research_output_id
+                    == AgentResearchOutputRecord.id,
                 )
-                & (ExchangeCalendarSessionRecord.session == cycle.execution_session),
+                .join(
+                    StrategyDecisionRecord,
+                    StrategyDecisionRecord.id
+                    == StrategyDecisionAgentOutputRecord.strategy_decision_id,
+                )
+                .join(
+                    Job,
+                    Job.payload["run_id"].as_string()
+                    == sql_cast(AgentResearchOutputRecord.run_id, String),
+                )
+                .join(
+                    ExchangeCalendarSessionRecord,
+                    (
+                        ExchangeCalendarSessionRecord.calendar_authority_id
+                        == StrategyDecisionRecord.calendar_authority_id
+                    )
+                    & (ExchangeCalendarSessionRecord.session == cycle.execution_session),
+                )
+                .where(
+                    StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+                    StrategyDecisionRecord.decision_origin == "agent_research",
+                    StrategyDecisionRecord.execution_source_policy_id
+                    == cycle.execution_price_policy_id,
+                    AgentResearchOutputRecord.status == "completed",
+                    AgentResearchOutputRecord.role.is_(None),
+                    Job.job_type.in_(
+                        (JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)
+                    ),
+                    Job.status == "succeeded",
+                    Job.finished_at.is_not(None),
+                )
+                .limit(2)
             )
-            .where(
-                StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
-                StrategyDecisionRecord.decision_origin == "agent_research",
-                StrategyDecisionRecord.execution_source_policy_id
-                == cycle.execution_price_policy_id,
-                AgentResearchOutputRecord.status == "completed",
-                AgentResearchOutputRecord.role.is_(None),
-                Job.job_type.in_(
-                    (JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)
-                ),
-                Job.status == "succeeded",
-                Job.finished_at.is_not(None),
-            )
-            .limit(2)
+        ).all()
+        if len(row) != 1:
+            raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
+        output, job, calendar = row[0]
+        if job.finished_at is None:
+            raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
+        output_available_at = max(output.created_at, job.finished_at)
+        start, _ = agent_paper_window_bounds(output_available_at, calendar.market_close_at)
+        market_close_at = calendar.market_close_at
+    consumed_end = await session.scalar(
+        select(func.max(PaperExecutionWindowAuthorityRecord.window_end_at))
+        .join(
+            PaperOrderRecord,
+            PaperOrderRecord.id == PaperExecutionWindowAuthorityRecord.order_id,
         )
-    ).all()
-    if len(row) != 1:
+        .join(
+            StrategyDecisionRecord,
+            StrategyDecisionRecord.id == PaperOrderRecord.strategy_decision_id,
+        )
+        .where(
+            StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+            PaperExecutionWindowAuthorityRecord.account_id == cycle.account_id,
+            PaperExecutionWindowAuthorityRecord.instrument_id == instrument_id,
+        )
+    )
+    if consumed_end is not None:
+        start = max(start, consumed_end)
+    end = start + timedelta(minutes=5)
+    if end > market_close_at:
         raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
-    output, job, calendar = row[0]
-    if job.finished_at is None:
-        raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
-    output_available_at = max(output.created_at, job.finished_at)
-    start, end = agent_paper_window_bounds(output_available_at, calendar.market_close_at)
     return AgentPaperMarketScope(
         cycle_id=cycle.id,
         instrument_id=instrument_id,

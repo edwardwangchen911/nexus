@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import json
 import os
 import plistlib
@@ -13,10 +15,57 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 LABEL = "com.nexus.agent-paper-loop"
+
+
+@contextmanager
+def _service_control_lock() -> Iterator[None]:
+    """Serialize owner inspection and launchd mutation across all local checkouts."""
+    directory = Path.home() / "Library" / "Application Support" / "NEXUS" / "runtime"
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = directory.stat()
+        if (
+            directory.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise OSError
+        descriptor = os.open(
+            directory / "agent-paper-service-control.lock",
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+            0o600,
+        )
+    except OSError:
+        raise RuntimeError("AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE") from None
+    locked = False
+    try:
+        lock_info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(lock_info.st_mode)
+            or lock_info.st_uid != os.getuid()
+            or stat.S_IMODE(lock_info.st_mode) != 0o600
+            or lock_info.st_nlink != 1
+        ):
+            raise RuntimeError("AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN}:
+                raise RuntimeError("AGENT_PAPER_SERVICE_CONTROL_BUSY") from None
+            raise RuntimeError("AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE") from None
+        locked = True
+        yield
+    finally:
+        if locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _validate_config(root: Path, env_file: Path, project: str) -> tuple[Path, Path]:
@@ -209,7 +258,10 @@ def _start(root: Path, env_file: Path, project: str) -> int:
     if state == "running":
         _emit({"label": LABEL, "status": state})
         return 0
-    if state != "stopped":
+    if state == "inactive" and last_exit_code not in {None, 0}:
+        _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
+        return 1
+    if state not in {"stopped", "inactive"}:
         _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
         return 1
     if not engine.is_file() or not os.access(engine, os.X_OK):
@@ -226,7 +278,7 @@ def _start(root: Path, env_file: Path, project: str) -> int:
         [
             _runtime_executable(),
             str(engine),
-            "--service-preflight",
+            "--service-startup-preflight",
             *_engine_arguments(root, env_file),
         ],
         cwd=root,
@@ -238,6 +290,30 @@ def _start(root: Path, env_file: Path, project: str) -> int:
     if preflight.returncode != 0:
         _emit({"error_code": "AGENT_PAPER_SERVICE_PREFLIGHT_FAILED"})
         return 1
+    domain = f"gui/{os.getuid()}"
+    if state == "inactive":
+        started = subprocess.run(
+            [launchctl, "kickstart", f"{domain}/{LABEL}"],
+            cwd=root,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            state, last_exit_code = _launchctl_inspection(launchctl, root, env_file, project)
+        except RuntimeError as error:
+            code = (
+                str(error)
+                if str(error) == "AGENT_PAPER_SERVICE_OWNER_MISMATCH"
+                else "AGENT_PAPER_SERVICE_START_FAILED"
+            )
+            _emit({"error_code": code})
+            return 1
+        if started.returncode != 0 or state != "running" or last_exit_code == 75:
+            _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
+            return 1
+        _emit({"label": LABEL, "status": "started"})
+        return 0
     try:
         plist_path = _write_service_plist(
             root,
@@ -249,7 +325,6 @@ def _start(root: Path, env_file: Path, project: str) -> int:
     except (OSError, ValueError):
         _emit({"error_code": "AGENT_PAPER_SERVICE_DIRECTORY_UNSAFE"})
         return 1
-    domain = f"gui/{os.getuid()}"
     bootstrapped = subprocess.run(
         [launchctl, "bootstrap", domain, str(plist_path)],
         cwd=root,
@@ -319,7 +394,7 @@ def _run(root: Path, env_file: Path) -> int:
         [
             _runtime_executable(),
             str(engine),
-            "--service-preflight",
+            "--service-startup-preflight",
             *_engine_arguments(root, env_file),
         ],
         cwd=root,
@@ -373,9 +448,7 @@ def _launchctl_inspection(
     else:
         raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
     expected = _program_arguments(root, env_file, project)
-    current = (
-        working_directories[0] == _service_working_directory() and registered == expected
-    )
+    current = working_directories[0] == _service_working_directory() and registered == expected
     legacy_arguments = len(registered) == 3 and registered[1:] == expected[1:3]
     legacy = (
         allow_legacy
@@ -504,12 +577,27 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"error_code": "LOCAL_ENV_UNSAFE"})
         return 1
     if args.action == "start":
-        return _start(root, env_file, args.project_name)
+        try:
+            with _service_control_lock():
+                return _start(root, env_file, args.project_name)
+        except RuntimeError as error:
+            _emit({"error_code": str(error)})
+            return 1
     if args.action == "run":
         return _run(root, env_file)
     if args.action == "status":
         return _status(root, env_file, args.project_name)
-    return _stop(root, env_file, args.project_name, acknowledge=args.acknowledge_unconfirmed)
+    try:
+        with _service_control_lock():
+            return _stop(
+                root,
+                env_file,
+                args.project_name,
+                acknowledge=args.acknowledge_unconfirmed,
+            )
+    except RuntimeError as error:
+        _emit({"error_code": str(error)})
+        return 1
 
 
 if __name__ == "__main__":

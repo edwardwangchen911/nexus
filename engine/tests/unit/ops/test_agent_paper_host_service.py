@@ -1,5 +1,6 @@
 """Exercise the real adapter with an isolated launchctl executable, never launchd."""
 
+import fcntl
 import json
 import os
 import plistlib
@@ -53,7 +54,7 @@ def _service_root(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 log('engine', sys.argv[1:])
 if options.get('record_launcher'):
     log('prefix', [sys.prefix])
-if '--service-preflight' in sys.argv: sys.exit(options.get('preflight_exit', 0))
+if '--service-startup-preflight' in sys.argv: sys.exit(options.get('preflight_exit', 0))
 log('environment', sorted(os.environ))
 sys.exit(options.get('run_exit', 0))
 """,
@@ -167,7 +168,7 @@ def test_start_binds_exact_config_and_repeated_start_is_idempotent(tmp_path):
         ["launchctl", "print", LABEL],
         [
             "engine",
-            "--service-preflight",
+            "--service-startup-preflight",
             "--repo-root",
             str(root),
             "--env-file",
@@ -202,6 +203,28 @@ def test_start_binds_exact_config_and_repeated_start_is_idempotent(tmp_path):
     assert _invoke(root, env, "start").returncode == 0
     assert _calls(root)[count:] == [["launchctl", "print", LABEL]]
     assert path.stat().st_mtime_ns == before
+
+
+def test_service_control_lock_serializes_launchd_owner_mutations(tmp_path):
+    root, env = _service_root(tmp_path)
+    lock_directory = Path(env["HOME"]) / "Library" / "Application Support" / "NEXUS" / "runtime"
+    lock_directory.mkdir(mode=0o700, parents=True)
+    descriptor = os.open(
+        lock_directory / "agent-paper-service-control.lock",
+        os.O_RDWR | os.O_CREAT,
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        result = _invoke(root, env, "start")
+
+        assert result.returncode == 1
+        assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_CONTROL_BUSY"}
+        assert _calls(root) == []
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 @pytest.mark.parametrize("action", ["start", "status", "stop"])
@@ -269,6 +292,33 @@ def test_start_does_not_report_an_inactive_failed_registration_as_running(tmp_pa
     assert result.returncode == 1
     assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_START_FAILED"}
     assert _calls(root) == [["launchctl", "print", LABEL]]
+
+
+@pytest.mark.parametrize("exit_code", [None, 0])
+def test_start_kickstarts_same_owner_after_clean_inactive_exit(tmp_path, exit_code):
+    root, env = _service_root(tmp_path)
+    _register(root, state="inactive", exit_code=exit_code)
+
+    result = _invoke(root, env, "start")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {
+        "label": "com.nexus.agent-paper-loop",
+        "status": "started",
+    }
+    assert _calls(root) == [
+        ["launchctl", "print", LABEL],
+        [
+            "engine",
+            "--service-startup-preflight",
+            "--repo-root",
+            str(root),
+            "--env-file",
+            str(root / "infra/.env.test"),
+        ],
+        ["launchctl", "kickstart", LABEL],
+        ["launchctl", "print", LABEL],
+    ]
 
 
 def test_start_requires_the_kickstarted_registration_to_be_running(tmp_path):
@@ -501,7 +551,10 @@ def test_run_uses_exact_config_and_only_runtime_environment(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     explicit = ["--repo-root", str(root), "--env-file", str(root / "infra/.env.test")]
     calls = _calls(root)
-    assert calls[:2] == [["engine", "--service-preflight", *explicit], ["engine", *explicit]]
+    assert calls[:2] == [
+        ["engine", "--service-startup-preflight", *explicit],
+        ["engine", *explicit],
+    ]
     names = set(calls[2][1:])
     assert {
         "PATH",

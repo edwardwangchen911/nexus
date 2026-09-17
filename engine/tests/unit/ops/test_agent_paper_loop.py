@@ -371,6 +371,245 @@ def test_policy_is_slot_based_restart_safe_and_fail_closed(
     assert loop.choose_loop_action(snapshot(**changes)) == expected
 
 
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        (
+            {
+                "now": SLOT - timedelta(seconds=30),
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "evaluation_waiting",
+            },
+            A.WAIT_FOR_EVALUATION,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "evaluation_complete",
+            },
+            A.FINALIZE_EVALUATION,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "evaluation_pending",
+            },
+            A.ADVANCE_EVALUATION,
+        ),
+        (
+            {
+                "now": SLOT + timedelta(seconds=61),
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "evaluation_pending",
+            },
+            A.CLOSE_INCOMPLETE_EVALUATION,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "researching",
+                "research_job_status": "queued",
+                "research_job_id": UUID(int=102),
+            },
+            A.RUN_EVALUATION_RESEARCH_JOB,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "researching",
+                "research_job_status": "running",
+                "research_job_id": UUID(int=102),
+                "research_job_lease_expires_at": SLOT + timedelta(seconds=30),
+            },
+            A.WAIT_FOR_EVALUATION_JOB,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "researching",
+                "research_job_status": "running_expired",
+                "research_job_id": UUID(int=102),
+                "research_job_lease_expires_at": SLOT - timedelta(seconds=1),
+            },
+            A.RUN_EVALUATION_RESEARCH_JOB,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "completed",
+            },
+            A.RESUME_EVALUATION,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "awaiting_market",
+                "has_open_order": True,
+                "market_window_end_at": SLOT + timedelta(seconds=30),
+            },
+            A.WAIT_FOR_MARKET,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "awaiting_market",
+                "has_open_order": True,
+                "market_window_ready": True,
+                "action_account_id": UUID(int=103),
+            },
+            A.ADVANCE_ORDER,
+        ),
+    ],
+)
+def test_evaluation_policy_never_replays_a_missed_registered_slot(
+    changes: dict[str, object], expected: loop.AgentPaperLoopAction
+) -> None:
+    assert loop.choose_loop_action(snapshot(**changes)) == expected
+
+
+def test_foreground_loop_keeps_heartbeat_while_waiting_for_evaluation_slot() -> None:
+    start = SLOT - timedelta(seconds=30)
+    states = iter(
+        (
+            snapshot(
+                now=start,
+                evaluation_id=UUID(int=101),
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_waiting",
+            ),
+            snapshot(now=SLOT, enabled=False),
+        )
+    )
+    elapsed = 0.0
+    sleeps: list[float] = []
+    heartbeats: list[datetime] = []
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    async def execute(*_args: object) -> None:
+        raise AssertionError("evaluation waiting must not trigger ordinary paper work")
+
+    async def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    async def heartbeat(seen_at: datetime) -> None:
+        heartbeats.append(seen_at)
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: start + timedelta(seconds=elapsed),
+            monotonic=lambda: elapsed,
+        )
+    )
+
+    assert result == A.STOP_DISABLED
+
+
+def test_foreground_loop_keeps_heartbeat_while_waiting_for_evaluation_job_lease() -> None:
+    lease_expires_at = SLOT + timedelta(seconds=30)
+    states = iter(
+        (
+            snapshot(
+                evaluation_id=UUID(int=101),
+                evaluation_slot_at=SLOT,
+                cycle_status="researching",
+                research_job_status="running",
+                research_job_id=UUID(int=102),
+                research_job_lease_expires_at=lease_expires_at,
+            ),
+            snapshot(now=lease_expires_at, enabled=False),
+        )
+    )
+    elapsed = 0.0
+    sleeps: list[float] = []
+    heartbeats: list[datetime] = []
+
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return next(states)
+
+    async def execute(*_args: object) -> None:
+        raise AssertionError("an active evaluation lease must only be observed")
+
+    async def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    async def heartbeat(seen_at: datetime) -> None:
+        heartbeats.append(seen_at)
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: SLOT + timedelta(seconds=elapsed),
+            monotonic=lambda: elapsed,
+        )
+    )
+
+    assert result == A.STOP_DISABLED
+    assert sleeps == [15.0, 15.0]
+    assert len(heartbeats) == 3
+
+
+def test_expired_evaluation_job_reclaims_same_job_without_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job_id = UUID(int=102)
+    calls: list[tuple[UUID, ...]] = []
+
+    async def ready() -> None:
+        return None
+
+    async def reclaim(_settings, *, job_ids):
+        calls.append(job_ids)
+        return False
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", ready)
+    monkeypatch.setattr(loop, "local_settings", lambda *_args, **_kwargs: loop.EngineSettings())
+    monkeypatch.setattr(loop, "run_agent_worker_once", reclaim)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.RUN_EVALUATION_RESEARCH_JOB,
+            snapshot=snapshot(
+                evaluation_id=UUID(int=101),
+                evaluation_slot_at=SLOT,
+                cycle_status="researching",
+                research_job_status="running_expired",
+                research_job_id=job_id,
+                research_job_lease_expires_at=SLOT - timedelta(seconds=1),
+            ),
+        )
+    )
+
+    assert result is None
+    assert calls == [(job_id,)]
+
+
 def test_foreground_loop_executes_persisted_action_then_stops() -> None:
     states = iter(
         (
@@ -1548,6 +1787,10 @@ def test_explicit_loop_reinspection_and_action_keep_registered_config(monkeypatc
     monkeypatch.setenv("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
     seen = []
 
+    @contextmanager
+    def isolated_lock():
+        yield
+
     async def model_ready():
         return None
 
@@ -1560,6 +1803,9 @@ def test_explicit_loop_reinspection_and_action_keep_registered_config(monkeypatc
         seen.append("inspect")
         return snapshot()
 
+    async def inspect_evaluation(_settings, **_kwargs):
+        return None
+
     async def execute(settings, *, env_file, **kwargs):
         assert env_file == tmp_path / "infra/.env.service"
         seen.append("execute")
@@ -1570,8 +1816,10 @@ def test_explicit_loop_reinspection_and_action_keep_registered_config(monkeypatc
         return A.STOP_REQUESTED
 
     monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
     monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", initial)
     monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "inspect_agent_version_evaluation_loop", inspect_evaluation)
     monkeypatch.setattr(loop, "execute_agent_paper_loop_action", execute)
     monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
     result = asyncio.run(
@@ -1639,10 +1887,14 @@ def test_explicit_trigger_forwards_registered_schwab_config_after_prerequisites(
         assert process_environment["NEXUS_SCHWAB_APP_SECRET"] == "schwab-secret"
         seen.append(request.account_id)
 
+    async def unexpected_model_preflight():
+        raise AssertionError("trigger only persists cycle and Job; it must not require model login")
+
     monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
     monkeypatch.setattr(loop, "prepare_macro_once", ready)
     monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
     monkeypatch.setattr(loop, "trigger_once", trigger)
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", unexpected_model_preflight)
     result = asyncio.run(
         loop.execute_agent_paper_loop_action(
             loop.EngineSettings(),
@@ -1699,6 +1951,10 @@ def test_local_loop_reinspection_uses_service_environment_loader(
     environment = enabled_environment()
     service_loads: list[object] = []
 
+    @contextmanager
+    def isolated_lock():
+        yield
+
     def load_service(repo_root, process_environment):
         assert repo_root == tmp_path
         service_loads.append(process_environment)
@@ -1708,6 +1964,9 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         assert account_id == UUID(int=1)
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return snapshot()
+
+    async def inspect_evaluation(_settings, **_kwargs):
+        return None
 
     async def select_initial(_settings):
         return CALENDAR_AUTHORITY_ID
@@ -1720,6 +1979,7 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         return None
 
     monkeypatch.setattr(loop, "load_agent_paper_service_environment", load_service)
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
     monkeypatch.setattr(
         loop,
         "load_local_environment",
@@ -1728,6 +1988,7 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         ),
     )
     monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(loop, "inspect_agent_version_evaluation_loop", inspect_evaluation)
     monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
     monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_initial)
     monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
@@ -1786,6 +2047,39 @@ def test_service_preflight_accepts_complete_local_configuration(
     environment = service_ready_environment() | {"FRED_API_KEY": "fred-secret"}
 
     assert loop.agent_paper_service_preflight(environment, repo_root=tmp_path, now=NOW) == {
+        "status": "ready",
+        "execution_locked": True,
+        "external_requests": 0,
+        "blocking_codes": [],
+        "optional_codes": [],
+    }
+
+
+def test_service_startup_preflight_defers_dynamic_model_and_market_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_directory = tmp_path / ".secrets" / "nexus-agent-paper"
+    output_directory.mkdir(parents=True, mode=0o700)
+    output_directory.chmod(0o700)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("startup waiting must not inspect model or market credentials")
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker", unexpected)
+    monkeypatch.setattr(loop, "load_schwab_app_config", unexpected)
+    environment = service_ready_environment()
+    environment.pop("ALPACA_API_KEY_ID")
+    environment.pop("ALPACA_API_SECRET_KEY")
+    environment.pop("NEXUS_SCHWAB_APP_KEY")
+    environment.pop("NEXUS_SCHWAB_APP_SECRET")
+
+    result = loop.agent_paper_service_startup_preflight(
+        environment,
+        repo_root=tmp_path,
+    )
+
+    assert result == {
         "status": "ready",
         "execution_locked": True,
         "external_requests": 0,

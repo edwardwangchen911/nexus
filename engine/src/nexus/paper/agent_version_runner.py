@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
@@ -32,6 +32,7 @@ from nexus.paper.models import LedgerEntry, LedgerTransaction
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agent_versions import (
     AgentVersionCyclePairRecord,
+    AgentVersionEvaluationDecisionRecord,
     AgentVersionEvaluationRecord,
 )
 from nexus.persistence.models.agents import AgentResearchRunRecord
@@ -97,6 +98,12 @@ async def advance_agent_version_slot(
     )
     if evaluation is None:
         raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    await _require_open_current_slot(
+        session,
+        evaluation=evaluation,
+        decision_slot_at=decision_slot_at,
+        enforce_start_deadline=True,
+    )
     phase = _phase(evaluation, decision_slot_at)
     pair = await session.scalar(
         select(AgentVersionCyclePairRecord).where(
@@ -145,6 +152,12 @@ async def advance_agent_version_slot(
             reason_code="PAIR_START_STATE_MISMATCH",
         )
 
+    await _require_open_current_slot(
+        session,
+        evaluation=evaluation,
+        decision_slot_at=decision_slot_at,
+        enforce_start_deadline=True,
+    )
     try:
         async with session.begin_nested():
             incumbent = await start_schwab_agent_paper_cycle(
@@ -236,6 +249,12 @@ async def resume_agent_version_slot(
     )
     if evaluation is None:
         raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    await _require_open_current_slot(
+        session,
+        evaluation=evaluation,
+        decision_slot_at=decision_slot_at,
+        enforce_start_deadline=False,
+    )
     phase = _phase(evaluation, decision_slot_at)
     existing_pair = await _pair(session, evaluation.id, decision_slot_at)
     if existing_pair is not None:
@@ -420,6 +439,65 @@ async def resolve_internal_agent_version_source(
         prompt_hash=run.prompt_hash,
         model_hash=run.model_hash,
     )
+
+
+async def _require_open_current_slot(
+    session: AsyncSession,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+    decision_slot_at: datetime,
+    enforce_start_deadline: bool,
+) -> None:
+    """Recheck mutable evaluation state while its advisory lock is held."""
+    closed = await session.scalar(
+        select(AgentVersionEvaluationDecisionRecord.id).where(
+            AgentVersionEvaluationDecisionRecord.evaluation_id == evaluation.id
+        )
+    )
+    if closed is not None:
+        raise ValueError("AGENT_VERSION_EVALUATION_CLOSED")
+    registered_slots = tuple(evaluation.train_slots) + tuple(evaluation.oos_slots)
+    if decision_slot_at not in registered_slots:
+        raise ValueError("AGENT_VERSION_SLOT_INVALID")
+    paired_slots = set(
+        await session.scalars(
+            select(AgentVersionCyclePairRecord.decision_slot_at).where(
+                AgentVersionCyclePairRecord.evaluation_id == evaluation.id
+            )
+        )
+    )
+    if decision_slot_at in paired_slots:
+        return
+    current_slot = next((slot for slot in registered_slots if slot not in paired_slots), None)
+    if current_slot != decision_slot_at:
+        raise ValueError("AGENT_VERSION_SLOT_NOT_CURRENT")
+    if not enforce_start_deadline:
+        return
+    cycle_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(AgentPaperCycleRecord)
+            .where(
+                AgentPaperCycleRecord.account_id.in_(
+                    (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+                ),
+                AgentPaperCycleRecord.decision_slot_at == decision_slot_at,
+            )
+        )
+        or 0
+    )
+    if cycle_count:
+        return
+    database_now = await _database_now(session)
+    if database_now > decision_slot_at + timedelta(seconds=60):
+        raise ValueError("AGENT_VERSION_SLOT_MISSED")
+
+
+async def _database_now(session: AsyncSession) -> datetime:
+    value = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(value, datetime):
+        raise RuntimeError("AGENT_VERSION_TIME_UNAVAILABLE")
+    return value
 
 
 def _phase(

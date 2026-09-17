@@ -15,6 +15,7 @@ import nexus.ops.agent_paper_loop as agent_paper_loop
 import nexus.ops.agent_paper_once as agent_paper_once
 import nexus.paper.agent_cycle_authority as agent_cycle_authority
 import nexus.paper.agent_version_evaluation as agent_version_evaluation
+import nexus.paper.agent_version_runner as agent_version_runner
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -1358,6 +1359,11 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
 
     train_slots = slots(train_dates)
     oos_slots = slots(oos_dates)
+
+    async def historical_database_now(_session: AsyncSession) -> datetime:
+        return train_slots[0]
+
+    monkeypatch.setattr(agent_version_runner, "_database_now", historical_database_now)
     try:
         from nexus.strategy.forward import load_forward_strategy_decision
 
@@ -1739,7 +1745,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                     order_id=order_by_account[account_id].id,
                     evaluated_at=evaluated_at,
                     idempotency_key=f"agent-version-fill:{account_id}",
-            )
+                )
             assert filled.action == "filled"
         assert provider.calls == 1
 
@@ -4278,6 +4284,13 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert projected.status == "partially_filled"
         assert projected.result_code == "PAPER_ORDERS_PARTIALLY_FILLED"
         second_window_start = window_start + timedelta(minutes=5)
+        async with sessions() as session:
+            second_scope = await resolve_agent_paper_market_scope(
+                session,
+                cycle_id=completed.cycle_id,
+            )
+        assert second_scope.window_start == second_window_start
+        assert second_scope.window_end == second_window_start + timedelta(minutes=5)
         second_evaluated_at = evaluated_at + timedelta(minutes=5)
         await collect_agent_paper_window(
             sessions,

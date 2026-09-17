@@ -37,6 +37,19 @@ def test_parser_accepts_bounded_legacy_invalidation() -> None:
     )
 
 
+def test_parser_accepts_missed_slot_closure() -> None:
+    values = vars(
+        parser().parse_args(
+            ["close-incomplete", "--evaluation-id", str(EVALUATION_ID)]
+        )
+    )
+
+    assert cli._request(values) == cli.EvaluationRequest(
+        action="close-incomplete",
+        evaluation_id=EVALUATION_ID,
+    )
+
+
 def test_register_requires_exact_frozen_window() -> None:
     with pytest.raises(ValidationError):
         RegisterRequest(

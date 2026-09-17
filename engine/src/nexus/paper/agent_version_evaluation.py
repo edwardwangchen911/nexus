@@ -3,7 +3,7 @@
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
@@ -65,6 +65,18 @@ from nexus.reconciliation.persistence_errors import IdempotencyConflict
 _ROUTE = "agent-version-evaluation:register"
 _SCHEMA_VERSION = "agent_version_eval_reg_v1"
 _NEW_YORK = ZoneInfo("America/New_York")
+_UNRECOVERABLE_SLOT_REASONS = frozenset(
+    {
+        "PAIR_AUTHORITY_UNAVAILABLE",
+        "PAIR_START_STATE_MISMATCH",
+        "PAIR_PREPARATION_UNAVAILABLE",
+        "PAIR_CYCLES_UNAVAILABLE",
+        "PAIR_RUN_BINDING_INVALID",
+        "PAIR_EVIDENCE_MISMATCH",
+        "PAIR_LANE_TERMINAL_FAILURE",
+        "PAIR_PREVIOUS_SLOT_INCOMPLETE",
+    }
+)
 
 
 async def register_agent_version_evaluation(
@@ -361,6 +373,142 @@ async def invalidate_agent_version_evaluation(
         status="UNKNOWN",
         reason_code="CALENDAR_PRIOR_SESSION_MISSING",
         metric_report=report.model_dump(mode="json"),
+        selected_run_id=evaluation.incumbent_version_source_run_id,
+    )
+
+
+async def close_incomplete_agent_version_evaluation(
+    session: AsyncSession,
+    *,
+    evaluation_id: UUID,
+    now: datetime,
+) -> AgentVersionEvaluationDecision:
+    """Close an evaluation after an unstarted registered slot was missed."""
+    if now.tzinfo is None or now.utcoffset() != UTC.utcoffset(now):
+        raise ValueError("AGENT_VERSION_TIME_INVALID")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-version-evaluation:{evaluation_id}"},
+    )
+    evaluation = await session.get(
+        AgentVersionEvaluationRecord,
+        evaluation_id,
+        populate_existing=True,
+    )
+    if evaluation is None:
+        raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    existing = await session.scalar(
+        select(AgentVersionEvaluationDecisionRecord).where(
+            AgentVersionEvaluationDecisionRecord.evaluation_id == evaluation.id
+        )
+    )
+    if existing is not None:
+        return _decision_result(existing, evaluation=evaluation, replayed=True)
+
+    paired_slots = set(
+        await session.scalars(
+            select(AgentVersionCyclePairRecord.decision_slot_at).where(
+                AgentVersionCyclePairRecord.evaluation_id == evaluation.id
+            )
+        )
+    )
+    registered_slots = tuple(evaluation.train_slots) + tuple(evaluation.oos_slots)
+    missing_slot = next((slot for slot in registered_slots if slot not in paired_slots), None)
+    if missing_slot is None or now <= missing_slot + timedelta(seconds=60):
+        raise ValueError("AGENT_VERSION_SLOT_NOT_MISSED")
+    cycle_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(AgentPaperCycleRecord)
+            .where(
+                AgentPaperCycleRecord.account_id.in_(
+                    (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+                ),
+                AgentPaperCycleRecord.decision_slot_at == missing_slot,
+            )
+        )
+        or 0
+    )
+    if cycle_count:
+        raise ValueError("AGENT_VERSION_INCOMPLETE_CLOSE_UNSAFE")
+
+    facts = await _load_agent_version_metric_facts(
+        session,
+        evaluation=evaluation,
+        now=now,
+    )
+    report = evaluate_agent_version_metrics(facts)
+    return await _persist_evaluation_decision(
+        session,
+        evaluation=evaluation,
+        status="UNKNOWN",
+        reason_code="REGISTERED_SLOT_MISSED",
+        metric_report=report.model_dump(mode="json"),
+        selected_run_id=evaluation.incumbent_version_source_run_id,
+    )
+
+
+async def close_unrecoverable_agent_version_evaluation(
+    session: AsyncSession,
+    *,
+    evaluation_id: UUID,
+    decision_slot_at: datetime,
+    reason_code: str,
+    now: datetime,
+) -> AgentVersionEvaluationDecision:
+    """Close one current slot whose paired runner found a terminal invariant failure."""
+    if (
+        now.tzinfo is None
+        or now.utcoffset() != UTC.utcoffset(now)
+        or reason_code not in _UNRECOVERABLE_SLOT_REASONS
+    ):
+        raise ValueError("AGENT_VERSION_UNRECOVERABLE_CLOSE_INVALID")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-version-evaluation:{evaluation_id}"},
+    )
+    evaluation = await session.get(
+        AgentVersionEvaluationRecord,
+        evaluation_id,
+        populate_existing=True,
+    )
+    if evaluation is None:
+        raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    existing = await session.scalar(
+        select(AgentVersionEvaluationDecisionRecord).where(
+            AgentVersionEvaluationDecisionRecord.evaluation_id == evaluation.id
+        )
+    )
+    if existing is not None:
+        return _decision_result(existing, evaluation=evaluation, replayed=True)
+    paired_slots = set(
+        await session.scalars(
+            select(AgentVersionCyclePairRecord.decision_slot_at).where(
+                AgentVersionCyclePairRecord.evaluation_id == evaluation.id
+            )
+        )
+    )
+    registered_slots = tuple(evaluation.train_slots) + tuple(evaluation.oos_slots)
+    current_slot = next((slot for slot in registered_slots if slot not in paired_slots), None)
+    if current_slot != decision_slot_at:
+        raise ValueError("AGENT_VERSION_SLOT_NOT_CURRENT")
+    facts = await _load_agent_version_metric_facts(
+        session,
+        evaluation=evaluation,
+        now=now,
+    )
+    report = evaluate_agent_version_metrics(facts)
+    metric_report = report.model_dump(mode="json")
+    metric_report["terminal_slot"] = {
+        "decision_slot_at": decision_slot_at.isoformat(),
+        "reason_code": reason_code,
+    }
+    return await _persist_evaluation_decision(
+        session,
+        evaluation=evaluation,
+        status="UNKNOWN",
+        reason_code=reason_code,
+        metric_report=metric_report,
         selected_run_id=evaluation.incumbent_version_source_run_id,
     )
 

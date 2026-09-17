@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.fosun_local import load_local_environment
 from nexus.paper.agent_version_evaluation import (
+    close_incomplete_agent_version_evaluation,
     finalize_agent_version_evaluation,
     invalidate_agent_version_evaluation,
     register_agent_version_evaluation,
@@ -56,7 +57,7 @@ class SlotRequest(_Request):
 
 
 class EvaluationRequest(_Request):
-    action: Literal["finalize", "invalidate", "status"]
+    action: Literal["close-incomplete", "finalize", "invalidate", "status"]
     evaluation_id: UUID
 
 
@@ -89,7 +90,7 @@ def parser() -> argparse.ArgumentParser:
         slot = commands.add_parser(action)
         slot.add_argument("--evaluation-id", required=True)
         slot.add_argument("--decision-slot", required=True)
-    for action in ("finalize", "invalidate", "status"):
+    for action in ("close-incomplete", "finalize", "invalidate", "status"):
         evaluation = commands.add_parser(action)
         evaluation.add_argument("--evaluation-id", required=True)
     return root
@@ -152,6 +153,12 @@ async def execute(
                 )
             if request.action == "invalidate":
                 return await invalidate_agent_version_evaluation(
+                    session,
+                    evaluation_id=request.evaluation_id,
+                    now=now,
+                )
+            if request.action == "close-incomplete":
+                return await close_incomplete_agent_version_evaluation(
                     session,
                     evaluation_id=request.evaluation_id,
                     now=now,
