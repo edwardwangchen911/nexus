@@ -21,7 +21,12 @@ class _StrictSchema(BaseModel):
 
 class WorkbenchLoopResponse(_StrictSchema):
     status: Literal["online", "offline", "unknown"]
-    reason_code: Literal["HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"] | None
+    reason_code: (
+        Literal[
+            "HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE", "HEARTBEAT_INVALID"
+        ]
+        | None
+    )
     started_at: AwareDatetime | None
     last_seen_at: AwareDatetime | None
     stale_after_seconds: Literal[30]
@@ -59,10 +64,55 @@ class WorkbenchAccountSummaryResponse(_StrictSchema):
     unrealized_pnl: DecimalString | None
 
 
+WorkbenchBlocker = Literal[
+    "none",
+    "data_missing",
+    "stale",
+    "unbound",
+    "research_not_actionable",
+    "risk_rejected",
+    "result_unknown",
+    "incompatible",
+    "unknown",
+]
+WorkbenchStage = Literal[
+    "window",
+    "data",
+    "agent",
+    "risk",
+    "execution",
+    "recovery",
+    "completed",
+    "unknown",
+]
+
+
+class WorkbenchReadinessResponse(_StrictSchema):
+    stage: WorkbenchStage
+    blocker: WorkbenchBlocker
+    reason_code: str = Field(min_length=1, max_length=100)
+    previous_cycle_id: UUID | None
+    previous_result_code: str | None = Field(default=None, min_length=1, max_length=100)
+    changes: tuple[Literal["stage", "blocker", "result", "risk", "orders"], ...] = Field(
+        max_length=5
+    )
+
+
+class WorkbenchCompatibilityResponse(_StrictSchema):
+    status: Literal["compatible", "incompatible", "unknown"]
+    expected_process_version: str = Field(max_length=100)
+    expected_migration_head: str = Field(max_length=100)
+    reported_process_version: str | None = Field(max_length=100)
+    reported_migration_head: str | None = Field(max_length=100)
+    database_migration_heads: tuple[str, ...] = Field(max_length=10)
+
+
 class WorkbenchResponse(_StrictSchema):
     mode: Literal["internal_paper"]
     execution_locked: Literal[True]
     loop: WorkbenchLoopResponse
+    readiness: WorkbenchReadinessResponse | None = None
+    compatibility: WorkbenchCompatibilityResponse | None = None
     session: AgentPaperSessionSummaryResponse
     latest_cycle: AgentPaperCycleResponse | None
     active_orders: tuple[PaperOrderResponse, ...] = Field(max_length=20)

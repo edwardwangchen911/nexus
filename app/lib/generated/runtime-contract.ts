@@ -13758,6 +13758,72 @@ export const runtimeContractSchemas = {
     "title": "WorkbenchAttentionResponse",
     "type": "object"
   },
+  "WorkbenchCompatibilityResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "database_migration_heads": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 10,
+        "title": "Database Migration Heads",
+        "type": "array"
+      },
+      "expected_migration_head": {
+        "maxLength": 100,
+        "title": "Expected Migration Head",
+        "type": "string"
+      },
+      "expected_process_version": {
+        "maxLength": 100,
+        "title": "Expected Process Version",
+        "type": "string"
+      },
+      "reported_migration_head": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reported Migration Head"
+      },
+      "reported_process_version": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reported Process Version"
+      },
+      "status": {
+        "enum": [
+          "compatible",
+          "incompatible",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "expected_process_version",
+      "expected_migration_head",
+      "reported_process_version",
+      "reported_migration_head",
+      "database_migration_heads"
+    ],
+    "title": "WorkbenchCompatibilityResponse",
+    "type": "object"
+  },
   "WorkbenchLoopResponse": {
     "additionalProperties": false,
     "properties": {
@@ -13779,7 +13845,8 @@ export const runtimeContractSchemas = {
             "enum": [
               "HEARTBEAT_MISSING",
               "HEARTBEAT_STALE",
-              "HEARTBEAT_INCOMPATIBLE"
+              "HEARTBEAT_INCOMPATIBLE",
+              "HEARTBEAT_INVALID"
             ],
             "type": "string"
           },
@@ -13826,6 +13893,95 @@ export const runtimeContractSchemas = {
     "title": "WorkbenchLoopResponse",
     "type": "object"
   },
+  "WorkbenchReadinessResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "blocker": {
+        "enum": [
+          "none",
+          "data_missing",
+          "stale",
+          "unbound",
+          "research_not_actionable",
+          "risk_rejected",
+          "result_unknown",
+          "incompatible",
+          "unknown"
+        ],
+        "title": "Blocker",
+        "type": "string"
+      },
+      "changes": {
+        "items": {
+          "enum": [
+            "stage",
+            "blocker",
+            "result",
+            "risk",
+            "orders"
+          ],
+          "type": "string"
+        },
+        "maxItems": 5,
+        "title": "Changes",
+        "type": "array"
+      },
+      "previous_cycle_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Previous Cycle Id"
+      },
+      "previous_result_code": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Previous Result Code"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "stage": {
+        "enum": [
+          "window",
+          "data",
+          "agent",
+          "risk",
+          "execution",
+          "recovery",
+          "completed",
+          "unknown"
+        ],
+        "title": "Stage",
+        "type": "string"
+      }
+    },
+    "required": [
+      "stage",
+      "blocker",
+      "reason_code",
+      "previous_cycle_id",
+      "changes"
+    ],
+    "title": "WorkbenchReadinessResponse",
+    "type": "object"
+  },
   "WorkbenchResponse": {
     "additionalProperties": false,
     "properties": {
@@ -13855,6 +14011,16 @@ export const runtimeContractSchemas = {
         "title": "Attention",
         "type": "array"
       },
+      "compatibility": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/WorkbenchCompatibilityResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "execution_locked": {
         "const": true,
         "title": "Execution Locked",
@@ -13877,6 +14043,16 @@ export const runtimeContractSchemas = {
         "const": "internal_paper",
         "title": "Mode",
         "type": "string"
+      },
+      "readiness": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/WorkbenchReadinessResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "session": {
         "$ref": "#/components/schemas/AgentPaperSessionSummaryResponse"

@@ -33,6 +33,7 @@ from nexus.paper.models import (
     LedgerTransaction,
     exact_decimal,
 )
+from nexus.paper.session_summary_publication import enqueue_paper_session_summary
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -1004,6 +1005,9 @@ async def publish_paper_performance_snapshot(
 ) -> PublishedPaperPerformance:
     """Atomically publish one internal-paper close from frozen PostgreSQL facts."""
     effective_at = _utc(as_of, field="as_of")
+    publication_time = await session.scalar(select(func.clock_timestamp()))
+    if publication_time is None or effective_at > publication_time:
+        raise PaperPerformanceError("PAPER_PERFORMANCE_INVALID")
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1919))"),
         {"scope": f"internal-paper-performance:{account_id}"},
@@ -1285,4 +1289,7 @@ async def publish_paper_performance_snapshot(
         )
     ):
         raise PaperPerformanceError("PAPER_PERFORMANCE_CONFLICT")
+    await enqueue_paper_session_summary(
+        session, account=account, snapshot=snapshot, calendar=calendar
+    )
     return persisted

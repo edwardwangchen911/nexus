@@ -1202,3 +1202,8 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
   .decision-stage__heading { align-items: flex-start; }
   .decision-execution li { grid-template-columns: 1fr; gap: var(--space-1); }
 }
+
+.workbench-readiness-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: var(--space-4); }
+.workbench-readiness-facts > div { min-inline-size: 0; }
+.workbench-readiness-facts dd { margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
+.workbench-readiness details > summary { min-block-size: 44px; padding-block: var(--space-3); cursor: pointer; }

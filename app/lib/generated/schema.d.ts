@@ -6932,6 +6932,24 @@ export interface components {
             /** Title Code */
             title_code: string;
         };
+        /** WorkbenchCompatibilityResponse */
+        WorkbenchCompatibilityResponse: {
+            /** Database Migration Heads */
+            database_migration_heads: string[];
+            /** Expected Migration Head */
+            expected_migration_head: string;
+            /** Expected Process Version */
+            expected_process_version: string;
+            /** Reported Migration Head */
+            reported_migration_head: string | null;
+            /** Reported Process Version */
+            reported_process_version: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "compatible" | "incompatible" | "unknown";
+        };
         /** WorkbenchEnvelope */
         WorkbenchEnvelope: {
             data: components["schemas"]["WorkbenchResponse"];
@@ -6942,7 +6960,7 @@ export interface components {
             /** Last Seen At */
             last_seen_at: string | null;
             /** Reason Code */
-            reason_code: ("HEARTBEAT_MISSING" | "HEARTBEAT_STALE" | "HEARTBEAT_INCOMPATIBLE") | null;
+            reason_code: ("HEARTBEAT_MISSING" | "HEARTBEAT_STALE" | "HEARTBEAT_INCOMPATIBLE" | "HEARTBEAT_INVALID") | null;
             /**
              * Stale After Seconds
              * @constant
@@ -6956,6 +6974,27 @@ export interface components {
              */
             status: "online" | "offline" | "unknown";
         };
+        /** WorkbenchReadinessResponse */
+        WorkbenchReadinessResponse: {
+            /**
+             * Blocker
+             * @enum {string}
+             */
+            blocker: "none" | "data_missing" | "stale" | "unbound" | "research_not_actionable" | "risk_rejected" | "result_unknown" | "incompatible" | "unknown";
+            /** Changes */
+            changes: ("stage" | "blocker" | "result" | "risk" | "orders")[];
+            /** Previous Cycle Id */
+            previous_cycle_id: string | null;
+            /** Previous Result Code */
+            previous_result_code?: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "window" | "data" | "agent" | "risk" | "execution" | "recovery" | "completed" | "unknown";
+        };
         /** WorkbenchResponse */
         WorkbenchResponse: {
             account: components["schemas"]["WorkbenchAccountSummaryResponse"] | null;
@@ -6963,6 +7002,7 @@ export interface components {
             active_orders: components["schemas"]["PaperOrderResponse"][];
             /** Attention */
             attention: components["schemas"]["WorkbenchAttentionResponse"][];
+            compatibility?: components["schemas"]["WorkbenchCompatibilityResponse"] | null;
             /**
              * Execution Locked
              * @constant
@@ -6975,6 +7015,7 @@ export interface components {
              * @constant
              */
             mode: "internal_paper";
+            readiness?: components["schemas"]["WorkbenchReadinessResponse"] | null;
             session: components["schemas"]["AgentPaperSessionSummaryResponse"];
         };
     };

@@ -18,7 +18,7 @@ export type ProductPresentation<Key extends string> = {
 };
 
 type CandidateKey = "buy" | "sell" | "hold" | "watch" | "data_insufficient";
-type DecisionSummaryKey = "in_progress" | "decision_recorded" | "data_insufficient" | "model_failed";
+type DecisionSummaryKey = "research_not_actionable" | "unknown" | "in_progress" | "decision_recorded" | "data_insufficient" | "model_failed";
 type RiskKey = "not_evaluated" | "risk_no_change" | "risk_approved" | "risk_reduced" | "risk_rejected";
 type ExecutionKey = "no_order" | "waiting_market" | "submitted" | "partially_filled" | "filled"
   | "cancelled" | "rejected" | "reconciling" | "result_unknown" | "unknown";
@@ -38,14 +38,7 @@ export type ActionableProductPresentation<Key extends string> = ProductPresentat
   safeActions: SafeAction[];
 };
 
-const DATA_REASON_CODES = new Set([
-  "OPEN_ORDER_EXISTS",
-  "NO_ELIGIBLE_CANDIDATE",
-  "RISK_INPUT_REQUIRED",
-  "RESEARCH_ADMISSION_UNAVAILABLE",
-  "RESEARCH_OUTPUT_NOT_ACTIONABLE",
-  "PAPER_MARKET_WINDOW_UNAVAILABLE",
-]);
+const DATA_REASON_CODES = new Set(["AGENT_PAPER_CALENDAR_UNAVAILABLE"]);
 const MODEL_REASON_CODES = new Set(["AGENT_DECISION_CONFLICT", "PAPER_BATCH_CONFLICT"]);
 
 export function cycleDecisionPresentation(cycle: Cycle): CycleDecisionPresentation {
@@ -119,13 +112,16 @@ export function loopPresentation(loop: Loop, session: Session): ProductPresentat
     return presentation("online", "循环在线", `30 秒内收到心跳；已保存会话状态为${sessionLabel}。`, "positive", loop.reason_code);
   }
   if (loop.reason_code === "HEARTBEAT_INCOMPATIBLE") {
-    return presentation("offline", "循环版本不兼容", `运行版本与当前数据库版本不匹配；已保存会话状态为${sessionLabel}。`, "warning", loop.reason_code);
+    return presentation("offline", "循环版本不兼容", `循环报告的版本与当前代码预期不匹配，或数据库迁移不兼容；已保存会话状态为${sessionLabel}。`, "warning", loop.reason_code);
   }
   if (loop.reason_code === "HEARTBEAT_STALE") {
     return presentation("offline", "循环离线", `心跳已经过期；已保存会话状态仍为${sessionLabel}。`, "warning", loop.reason_code);
   }
+  if (loop.reason_code === "HEARTBEAT_INVALID") {
+    return presentation("unknown", "心跳证据无效", "心跳身份或时间无效，无法确认循环在线。", "warning", loop.reason_code);
+  }
   if (loop.reason_code === "HEARTBEAT_MISSING") {
-    return presentation("unknown", "循环未启动", `尚未保存过循环心跳；已保存会话状态为${sessionLabel}。`, "neutral", loop.reason_code);
+    return presentation("unknown", "循环状态未知", `未找到循环心跳；已保存会话状态为${sessionLabel}。`, "neutral", loop.reason_code);
   }
   return presentation("unknown", "循环状态未知", `当前无法确认循环心跳；已保存会话状态为${sessionLabel}。`, "neutral", loop.reason_code);
 }
@@ -152,11 +148,17 @@ export function attentionPresentation(item: Attention): ActionableProductPresent
 }
 
 function decisionSummary(cycle: Cycle): ProductPresentation<DecisionSummaryKey> {
+  if (cycle.status === "unavailable" && cycle.result_code === "RESEARCH_OUTPUT_NOT_ACTIONABLE") {
+    return presentation("research_not_actionable", "研究未通过交易准入", "研究未形成符合交易准入条件的结论；不等同于有充分证据的不调整。", "warning", cycle.result_code);
+  }
+  if (cycle.status === "unavailable" && !DATA_REASON_CODES.has(cycle.result_code)) {
+    return presentation("unknown", "阻断原因待核对", "现有记录不足以区分资料、绑定或运行故障，请核对原始结果。", "warning", cycle.result_code);
+  }
   if (cycle.status === "unavailable") {
     return presentation("data_insufficient", "数据不足", "当前证据不足，未形成可执行决策。", "warning", cycle.result_code);
   }
   if (cycle.status === "failed") {
-    return presentation("model_failed", "模型失败", "Agent 决策流程失败，未把失败解释为不交易。", "critical", cycle.result_code);
+    return presentation("model_failed", "运行失败", "Agent 决策流程失败，未把失败解释为不交易。", "critical", cycle.result_code);
   }
   if (cycle.status === "prepared" || cycle.status === "researching") {
     return presentation("in_progress", "决策进行中", "Agent 正在形成或补充本周期决策。", "neutral", cycle.result_code);
@@ -180,12 +182,15 @@ function candidatePresentation(candidate: Cycle["candidates"][number]): ProductP
   return presentation("watch", "观察", "Agent 建议继续观察，当前不调整仓位。", "neutral");
 }
 
-function knownAttention(item: Attention): ActionableProductPresentation<Exclude<AttentionKey, "unknown">> | null {
+function knownAttention(item: Attention): ActionableProductPresentation<AttentionKey> | null {
+  if (item.reason_code === "RESEARCH_OUTPUT_NOT_ACTIONABLE") {
+    return actionable("unknown", "研究未通过交易准入", "研究结果未满足交易准入，不能据此推断具体资料缺口。", "warning", item.reason_code, ["view_evidence"]);
+  }
   if (item.kind === "data" && item.title_code === "AGENT_PAPER_DATA_UNAVAILABLE" && DATA_REASON_CODES.has(item.reason_code)) {
     return actionable("data_insufficient", "数据不足", "决策所需证据尚未齐备。", "warning", item.reason_code, ["view_evidence"]);
   }
   if (item.kind === "model" && item.title_code === "AGENT_PAPER_MODEL_FAILED" && MODEL_REASON_CODES.has(item.reason_code)) {
-    return actionable("model_failed", "模型失败", "Agent 决策流程未正常完成。", "critical", item.reason_code, ["view_decision"]);
+    return actionable("model_failed", "运行失败", "Agent 决策流程未正常完成。", "critical", item.reason_code, ["view_decision"]);
   }
   if (item.kind === "risk" && item.title_code === "AGENT_PAPER_RISK_REJECTED" && item.reason_code === "RISK_REJECTED") {
     return actionable("risk_rejected", "风控拒绝", "确定性风控拒绝了本次调整。", "warning", item.reason_code, ["view_decision"]);

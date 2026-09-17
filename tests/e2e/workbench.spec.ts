@@ -28,10 +28,9 @@ const readyWorkbench = (): WorkbenchPayload => ({
       market_value: paperPortfolio.performance!.market_value, realized_pnl: paperPortfolio.performance!.realized_pnl,
       unrealized_pnl: paperPortfolio.performance!.unrealized_pnl,
     },
-    attention: [{
-      kind: "risk", severity: "warning", title_code: "AGENT_PAPER_RISK_REJECTED", reason_code: "RISK_REJECTED",
-      safe_action: "view_decision", href: `/decisions/${agentPaperCycle.cycle_id}`, cycle_id: agentPaperCycle.cycle_id,
-    }],
+    readiness: { stage: "completed", blocker: "none", reason_code: "NO_ORDER_REQUIRED", previous_cycle_id: null, changes: [] },
+    compatibility: { status: "compatible", expected_process_version: "agent-paper-loop-v1", expected_migration_head: "0064_prompt_release_channel", reported_process_version: "agent-paper-loop-v1", reported_migration_head: "0064_prompt_release_channel", database_migration_heads: ["0064_prompt_release_channel"] },
+    attention: [],
   },
   meta: { ...meta(), schema_version: "1" as const },
 });
@@ -48,6 +47,13 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
     await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
     await expect(page.getByText("内部模拟", { exact: true })).toBeVisible();
     await expect(page.getByText("实盘锁定")).toBeVisible();
+    const readiness = page.getByRole("region", { name: "运行就绪与阻断" });
+    await expect(readiness.getByText("本周期已完成", { exact: true })).toBeVisible();
+    await expect(readiness).toContainText("下一五分钟槽");
+    await readiness.getByText("查看版本与迁移证据", { exact: true }).click();
+    await expect(readiness.getByText("代码预期迁移", { exact: true })).toBeVisible();
+    await readiness.getByText("查看版本与迁移证据", { exact: true }).click();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const decision = page.getByRole("region", { name: "最新决策" });
     const attention = page.getByRole("region", { name: "需要处理" });
     await expect(decision.getByText("AAPL")).toBeVisible();
@@ -78,6 +84,7 @@ test("workbench presents offline and unknown results as distinct safe states", a
   payload.data.loop.reason_code = "HEARTBEAT_STALE";
   payload.data.latest_cycle = { ...agentPaperCycle, status: "partially_filled", order_ids: [] };
   payload.data.active_orders = [];
+  payload.data.readiness = { stage: "recovery", blocker: "result_unknown", reason_code: "ORDER_RESULT_UNKNOWN", previous_cycle_id: null, changes: [] };
   payload.data.attention = [{
     kind: "execution", severity: "critical", title_code: "PAPER_ORDER_RECONCILING", reason_code: "ORDER_RESULT_UNKNOWN",
     safe_action: "verify_original_result", href: "/paper", cycle_id: agentPaperCycle.cycle_id,
