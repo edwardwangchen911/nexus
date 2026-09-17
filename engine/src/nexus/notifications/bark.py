@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from pydantic import ValidationError
 
 from nexus.outbox.models import OutboxMessage
 from nexus.paper.notification import (
@@ -20,8 +21,10 @@ from nexus.paper.notification import (
     PaperOrderNotificationSnapshot,
     parse_notification_snapshot,
 )
+from nexus.paper.session_summary import PaperSessionSummarySnapshot
 
 BARK_EVENT_SCHEMAS: tuple[tuple[str, str], ...] = (
+    ("paper.session.summary.ready", "paper_session_summary_v1"),
     ("paper.order.risk_rejected", "paper_event_v1"),
     ("paper.execution.advance.filled", "paper_execution_v1"),
     ("paper.execution.advance.cancelled", "paper_execution_v1"),
@@ -81,6 +84,29 @@ def map_bark_notification(
     read_only_url: str | None,
 ) -> dict[str, str]:
     """Render one validated event-time order outcome without later data lookups."""
+    if (message.event_type, message.schema_version) == (
+        "paper.session.summary.ready",
+        "paper_session_summary_v1",
+    ):
+        try:
+            summary = PaperSessionSummarySnapshot.model_validate(
+                message.payload.get("notification_snapshot")
+            )
+        except (ValueError, TypeError, ValidationError):
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID") from None
+        if summary.account_id != message.aggregate_id:
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID")
+        title, body = _render_session_summary(summary)
+        notification = {
+            "title": title,
+            "body": body,
+            "group": "NEXUS",
+            "id": f"{summary.account_id}:{summary.market}:{summary.session_date}",
+        }
+        if read_only_url is not None:
+            validate_bark_read_only_url(read_only_url)
+            notification["url"] = read_only_url
+        return notification
     expected_status = _EVENT_STATUS.get((message.event_type, message.schema_version))
     if expected_status is None:
         raise BarkPublishError("BARK_EVENT_UNSUPPORTED")
@@ -105,6 +131,48 @@ def map_bark_notification(
 
 def _quantity(value: Decimal) -> str:
     return str(int(value))
+
+
+def _summary_money(value: Decimal | None, currency: str) -> str:
+    if value is None:
+        return "暂不可用"
+    return ("-" if value < 0 else "") + _money(abs(value), currency)
+
+
+def _summary_ratio(value: Decimal | None) -> str:
+    if value is None:
+        return "暂不可用"
+    rendered = format(value * 100, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return f"{rendered}%"
+
+
+def _render_session_summary(snapshot: PaperSessionSummarySnapshot) -> tuple[str, str]:
+    def money(value: Decimal | None) -> str:
+        return _summary_money(value, snapshot.currency)
+
+    ratio = _summary_ratio
+    return (
+        f"[内部模拟] 日终简报 · {snapshot.session_date}",
+        "\n".join(
+            (
+                f"XNYS 交易日 {snapshot.session_date}｜绩效截至收盘 {snapshot.as_of:%H:%M} UTC",
+                f"运行状态截至 {snapshot.frozen_at:%Y-%m-%d %H:%M} UTC",
+                f"周期 {snapshot.cycle_count}｜完成 {snapshot.completed_count}｜"
+                f"不可用 {snapshot.unavailable_count}｜未完成 {snapshot.pending_count}",
+                f"合理不交易 {snapshot.no_order_count}（完成中）｜订单 {snapshot.order_count}｜"
+                f"成交 {snapshot.fill_count} 笔｜风控拒绝 {snapshot.risk_rejected_count}",
+                f"组合净值 {money(snapshot.nav)}｜当日盈亏：{money(snapshot.daily_pnl)}",
+                f"当日收益率：{ratio(snapshot.daily_return_ratio)}（分母：前一交易日净值）",
+                f"当日费用 {money(snapshot.daily_fees)}｜收盘回撤 {ratio(snapshot.drawdown_ratio)}",
+                f"累计对照（起点 {snapshot.comparison_start}，分母：初始资金）：",
+                f"hold_current（初始现金）：{money(snapshot.hold_current_nav)}｜"
+                f"{ratio(snapshot.hold_current_return_ratio)}",
+                f"SPY：{money(snapshot.spy_nav)}｜{ratio(snapshot.spy_return_ratio)}",
+            )
+        ),
+    )
 
 
 def _money(value: Decimal, currency: str) -> str:

@@ -169,8 +169,9 @@ def test_risk_rejected_notification_distinguishes_unchanged_account() -> None:
     )
 
 
-def test_first_delivery_consumes_only_meaningful_terminal_order_outcomes() -> None:
+def test_first_delivery_consumes_terminal_outcomes_and_session_summary() -> None:
     assert BARK_EVENT_SCHEMAS == (
+        ("paper.session.summary.ready", "paper_session_summary_v1"),
         ("paper.order.risk_rejected", "paper_event_v1"),
         ("paper.execution.advance.filled", "paper_execution_v1"),
         ("paper.execution.advance.cancelled", "paper_execution_v1"),
