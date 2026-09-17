@@ -166,7 +166,8 @@ def test_freeze_proposal_rejects_a_suggestion_for_different_history() -> None:
 
 
 def test_provider_projection_catalogs_text_without_merging_reviews() -> None:
-    compact = compact_agent_challenger_retrospective(_retrospective())
+    retrospective = _retrospective()
+    compact = compact_agent_challenger_retrospective(retrospective)
 
     assert len(compact["text_catalog"]) == 4  # type: ignore[arg-type]
     cycles = compact["cycles"]
@@ -177,6 +178,25 @@ def test_provider_projection_catalogs_text_without_merging_reviews() -> None:
     assert reviews[1][0] == "evidence_audit:0"
     assert reviews[0][4] == reviews[1][4]
     assert len(reviews[0][3]) == 64
+    text_catalog = compact["text_catalog"]
+    assert isinstance(text_catalog, list)
+    for cycle, projected_cycle in zip(retrospective.cycles, cycles, strict=True):
+        projected_reviews = projected_cycle[8]
+        assert len(projected_reviews) == len(cycle.reviews)
+        for review, projected in zip(cycle.reviews, projected_reviews, strict=True):
+            evidence_payload = [item.model_dump(mode="json") for item in review.evidence_refs]
+            evidence_hash = hashlib.sha256(
+                json.dumps(evidence_payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            assert projected[0] == review.claim_id
+            assert projected[1] == review.status
+            assert projected[2] is review.resolved
+            assert projected[3] == hashlib.sha256(review.rationale.encode()).hexdigest()
+            assert projected[4] == evidence_hash
+            assert tuple(text_catalog[index] for index in projected[5]) == review.missing_evidence
+            assert (
+                None if projected[6] is None else text_catalog[projected[6]]
+            ) == review.prevented_conclusion
 
 
 def test_suggestion_cannot_relax_execution_boundary() -> None:

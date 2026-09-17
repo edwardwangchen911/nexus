@@ -159,10 +159,12 @@ async def execute_propose(
             or job.payload.get("provider_projection_version") != PROVIDER_PROJECTION_VERSION
         ):
             raise AgentChallengerError("AGENT_CHALLENGER_PROMPT_AUTHORITY_CHANGED")
-        retrospective = AgentChallengerRetrospectiveV4.model_validate(job.payload["retrospective"])
         try:
+            retrospective = AgentChallengerRetrospectiveV4.model_validate(
+                job.payload["retrospective"]
+            )
             verify_agent_challenger_retrospective_v4(retrospective)
-        except ValueError as error:
+        except (KeyError, TypeError, ValueError) as error:
             raise AgentChallengerError("AGENT_CHALLENGER_JOB_AUTHORITY_INVALID") from error
         if (
             job.input_hash != job_input_hash(job.payload)

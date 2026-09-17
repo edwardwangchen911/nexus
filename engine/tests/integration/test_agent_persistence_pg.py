@@ -1,6 +1,7 @@
 """Real-PostgreSQL admission, budget, and evidence-authority tests for Agents."""
 
 import asyncio
+import copy
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -556,6 +557,94 @@ async def test_propose_job_calls_runtime_once_and_replays_only_exact_request(
             request.model_copy(update={"history_limit": 5}),
             runtime=runtime,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ("input_hash", "request_hash", "source_hash", "output_contract_hash", "model_hash"),
+)
+async def test_propose_job_rejects_tampered_queued_authority_before_runtime(
+    migrated_database_url: str,
+    mutation: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    retrospective = _challenger_retrospective_fixture()
+    request = ProposeRequest(
+        action="propose",
+        instrument_id=_INSTRUMENT_ID,
+        history_limit=4,
+        idempotency_key=f"tampered-{mutation}",
+    )
+    request_hash = job_input_hash(
+        {
+            "schema_version": "agent_challenger_request_v4",
+            "instrument_id": str(request.instrument_id),
+            "history_limit": request.history_limit,
+        }
+    )
+    payload: dict[str, object] = {
+        "schema_version": "agent_challenger_job_v4",
+        "idempotency_key": request.idempotency_key,
+        "request_hash": request_hash,
+        "history_limit": request.history_limit,
+        "retrospective": retrospective.model_dump(mode="json"),
+        "proposer_prompt_version": PROPOSER_PROMPT_VERSION,
+        "proposer_prompt_hash": PROPOSER_PROMPT_HASH,
+        "provider_projection_version": PROVIDER_PROJECTION_VERSION,
+    }
+    async with factory() as session, session.begin():
+        job = await enqueue_job(
+            session,
+            key=JobKeyV1(
+                job_type=JobType.AGENT_CHALLENGER_PROPOSE,
+                scope_kind="instrument",
+                scope_id=str(_INSTRUMENT_ID),
+                effective_at=max(item.decision_slot_at for item in retrospective.cycles),
+                input_hash=job_input_hash(payload),
+            ),
+            schema_version="agent_challenger_job_v4",
+            payload=payload,
+            queue=QueueName.GENERAL,
+            retry_policy=RetryPolicy.NEVER,
+            max_attempts=1,
+        )
+        if mutation == "input_hash":
+            job.input_hash = "f" * 64
+        else:
+            changed = copy.deepcopy(job.payload)
+            if mutation == "request_hash":
+                changed["request_hash"] = "f" * 64
+            else:
+                frozen = changed["retrospective"]
+                assert isinstance(frozen, dict)
+                field = {
+                    "source_hash": "source_hash",
+                    "output_contract_hash": "output_contract_hash",
+                    "model_hash": "incumbent_model_hash",
+                }[mutation]
+                frozen[field] = "f" * 64
+            job.payload = changed
+
+    class Runtime:
+        calls = 0
+
+        async def generate(self, source):  # type: ignore[no-untyped-def]
+            del source
+            self.calls += 1
+            raise AssertionError("tampered authority reached provider runtime")
+
+    runtime = Runtime()
+    with pytest.raises(
+        AgentChallengerError,
+        match="AGENT_CHALLENGER_(IDEMPOTENCY_CONFLICT|JOB_AUTHORITY_INVALID)",
+    ):
+        await execute_propose(
+            EngineSettings(database_url=migrated_database_url), request, runtime=runtime
+        )
+
+    assert runtime.calls == 0
 
 
 @pytest.mark.asyncio
