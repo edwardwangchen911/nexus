@@ -63,6 +63,7 @@ class JobType(StrEnum):
     AGENT_RESEARCH = "agent.research"
     AGENT_PAPER_RESEARCH = "agent.paper.research"
     AGENT_PORTFOLIO_DECISION = "agent.portfolio_decision"
+    AGENT_CHALLENGER_PROPOSE = "agent.challenger_propose"
     OPTIMIZATION_PROPOSE = "optimization.propose"
     PAPER_ADMIT_ORDERS = "paper.admit_orders"
     PAPER_PERFORMANCE = "paper.performance"
@@ -86,6 +87,7 @@ JOB_PRIORITIES: dict[JobType, int] = {
     JobType.AGENT_RESEARCH: 180,
     JobType.AGENT_PAPER_RESEARCH: 180,
     JobType.AGENT_PORTFOLIO_DECISION: 180,
+    JobType.AGENT_CHALLENGER_PROPOSE: 180,
     JobType.OPTIMIZATION_PROPOSE: 180,
     JobType.PAPER_ADMIT_ORDERS: 180,
     JobType.DAILY_PIPELINE: 280,

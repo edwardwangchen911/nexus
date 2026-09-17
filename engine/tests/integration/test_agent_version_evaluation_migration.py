@@ -20,19 +20,21 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ENGINE_ROOT = Path(__file__).parents[2]
-MIGRATION_HEAD = "0063_agent_version_pair_context"
+MIGRATION_HEAD = "0064_prompt_release_channel"
 EVALUATION_HEAD = "0062_agent_version_evaluation"
+PAIR_CONTEXT_HEAD = "0063_agent_version_pair_context"
 PREVIOUS_HEAD = "0061_agent_paper_job_isolation"
 
 
-def test_0063_is_the_single_head_and_declares_agent_version_authority() -> None:
+def test_current_head_retains_agent_version_authority_lineage() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ENGINE_ROOT / "alembic.ini")))
 
     assert CURRENT_MIGRATION_HEAD == MIGRATION_HEAD
     assert scripts.get_heads() == [MIGRATION_HEAD]
     revision = scripts.get_revision(MIGRATION_HEAD)
-    assert revision is not None
-    assert revision.down_revision == EVALUATION_HEAD
+    pair_revision = scripts.get_revision(PAIR_CONTEXT_HEAD)
+    assert revision is not None and revision.down_revision == PAIR_CONTEXT_HEAD
+    assert pair_revision is not None and pair_revision.down_revision == EVALUATION_HEAD
     assert {
         AgentVersionEvaluationRecord.__tablename__,
         AgentVersionCyclePairRecord.__tablename__,
@@ -105,6 +107,22 @@ async def _tables(database_url: str) -> set[str]:
         await engine.dispose()
 
 
+async def _referenced_prompt_channel(database_url: str) -> str | None:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return await connection.scalar(
+                text(
+                    "SELECT prompt.release_channel "
+                    "FROM agent_version_evaluations evaluation "
+                    "JOIN agent_prompt_versions prompt "
+                    "ON prompt.id=evaluation.challenger_prompt_version_id"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
 def test_0062_clean_upgrade_and_downgrade_round_trip(
     monkeypatch,
     temporary_database_url: str,
@@ -126,6 +144,33 @@ def test_0062_clean_upgrade_and_downgrade_round_trip(
         "agent_version_cycle_pairs",
         "agent_version_evaluation_decisions",
     } & asyncio.run(_tables(temporary_database_url))
+
+
+def test_0064_fails_closed_when_legacy_evaluation_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(ENGINE_ROOT / "alembic.ini"))
+    command.upgrade(config, PAIR_CONTEXT_HEAD)
+    asyncio.run(_seed_evaluation(temporary_database_url))
+
+    with pytest.raises(
+        DBAPIError,
+        match="existing agent version evaluations require explicit release-channel migration",
+    ):
+        command.upgrade(config, MIGRATION_HEAD)
+
+    engine = create_async_engine(temporary_database_url)
+
+    async def current_revision() -> str:
+        try:
+            async with engine.connect() as connection:
+                return str(await connection.scalar(text("SELECT version_num FROM alembic_version")))
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(current_revision()) == PAIR_CONTEXT_HEAD
 
 
 async def _seed_evaluation(database_url: str, *, invalid_slot: bool = False) -> None:
@@ -248,8 +293,8 @@ async def _seed_evaluation(database_url: str, *, invalid_slot: bool = False) -> 
             for suffix, role in (("10", "incumbent"), ("20", "challenger")):
                 params = {
                     "account_id": f"62000000-0000-0000-0000-0000000000{suffix}",
-                    "portfolio_id": f"62000000-0000-0000-0000-0000000000{int(suffix)+1}",
-                    "paper_id": f"62000000-0000-0000-0000-0000000000{int(suffix)+2}",
+                    "portfolio_id": f"62000000-0000-0000-0000-0000000000{int(suffix) + 1}",
+                    "paper_id": f"62000000-0000-0000-0000-0000000000{int(suffix) + 2}",
                     "name": f"Agent version {role}",
                     "code": f"agent_version_{role}_test",
                 }
@@ -450,9 +495,7 @@ async def _assert_cycle_guard_serializes(database_url: str) -> None:
                     "hashtextextended('nexus:agent-version-evaluation:v1',0))"
                 )
             )
-            insert_task = asyncio.create_task(
-                _add_cycle(database_url, frozen_slot=False)
-            )
+            insert_task = asyncio.create_task(_add_cycle(database_url, frozen_slot=False))
             await asyncio.sleep(0.05)
             assert not insert_task.done()
             await transaction.commit()

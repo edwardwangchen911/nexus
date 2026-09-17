@@ -32,6 +32,10 @@ class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
             name="role_allowed",
         ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        CheckConstraint(
+            "release_channel IN ('active','challenger')",
+            name="release_channel_allowed",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -39,6 +43,9 @@ class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
     version: Mapped[str] = mapped_column(String(100))
     content_hash: Mapped[str] = mapped_column(String(64))
     content: Mapped[str] = mapped_column(Text)
+    release_channel: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
 
 
 class AgentModelConfigRecord(ImmutableCreatedAt, Base):

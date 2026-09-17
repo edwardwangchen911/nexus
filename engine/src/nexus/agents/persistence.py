@@ -200,10 +200,70 @@ async def load_actionable_research_output(
 async def load_complete_prompt_authority(
     session: AsyncSession, *, orchestrator_id: UUID | None = None
 ) -> dict[AgentRole, AgentPromptVersionRecord] | None:
-    """Select one hash-valid version for every role as a complete admission unit."""
+    """Select the active authority or one explicit complete challenger bundle."""
+    explicit: AgentPromptVersionRecord | None = None
+    if orchestrator_id is not None:
+        explicit = await session.get(AgentPromptVersionRecord, orchestrator_id)
+        if explicit is None or explicit.role != "orchestrator":
+            return None
+        if explicit.release_channel == "challenger":
+            bundle = list(
+                await session.scalars(
+                    select(AgentPromptVersionRecord).where(
+                        AgentPromptVersionRecord.release_channel == "challenger",
+                        AgentPromptVersionRecord.version == explicit.version,
+                        AgentPromptVersionRecord.role.in_(ROLE_ORDER),
+                    )
+                )
+            )
+            selected_bundle = {
+                cast(AgentRole, record.role): record
+                for record in bundle
+                if record.role in ROLE_ORDER
+            }
+            if len(bundle) != len(ROLE_ORDER) or set(selected_bundle) != set(ROLE_ORDER):
+                return None
+            if selected_bundle["orchestrator"].id != orchestrator_id:
+                return None
+            if any(
+                hashlib.sha256(record.content.encode()).hexdigest() != record.content_hash
+                for record in selected_bundle.values()
+            ):
+                return None
+            return {role: selected_bundle[role] for role in ROLE_ORDER}
+        if explicit.release_channel == "active":
+            bundle = list(
+                await session.scalars(
+                    select(AgentPromptVersionRecord).where(
+                        AgentPromptVersionRecord.release_channel == "active",
+                        AgentPromptVersionRecord.version == explicit.version,
+                        AgentPromptVersionRecord.role.in_(ROLE_ORDER),
+                    )
+                )
+            )
+            selected_bundle = {
+                cast(AgentRole, record.role): record
+                for record in bundle
+                if record.role in ROLE_ORDER
+            }
+            if len(bundle) != len(ROLE_ORDER) or set(selected_bundle) != set(ROLE_ORDER):
+                return None
+            if selected_bundle["orchestrator"].id != orchestrator_id:
+                return None
+            if any(
+                hashlib.sha256(record.content.encode()).hexdigest() != record.content_hash
+                for record in selected_bundle.values()
+            ):
+                return None
+            return {role: selected_bundle[role] for role in ROLE_ORDER}
     records = list(
         await session.scalars(
-            select(AgentPromptVersionRecord).order_by(
+            select(AgentPromptVersionRecord)
+            .where(
+                AgentPromptVersionRecord.release_channel == "active",
+                AgentPromptVersionRecord.role.in_(ROLE_ORDER),
+            )
+            .order_by(
                 AgentPromptVersionRecord.role,
                 AgentPromptVersionRecord.created_at.desc(),
                 AgentPromptVersionRecord.id.desc(),
@@ -218,8 +278,6 @@ async def load_complete_prompt_authority(
             return None
         selected[cast(AgentRole, record.role)] = record
     if set(selected) != set(ROLE_ORDER):
-        return None
-    if orchestrator_id is not None and selected["orchestrator"].id != orchestrator_id:
         return None
     return {role: selected[role] for role in ROLE_ORDER}
 
@@ -499,10 +557,7 @@ async def admit_research_run(
         return ResearchAdmission(run=run, replayed=True)
     if reuse_latest_actor_agent_version:
         await session.execute(
-            text(
-                "SELECT pg_advisory_xact_lock("
-                "hashtextextended(:scope, 1415))"
-            ),
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1415))"),
             {"scope": f"agent-version:{actor_id}"},
         )
     instrument = await session.get(Instrument, request.instrument_id)
@@ -529,8 +584,7 @@ async def admit_research_run(
     if prior_run is not None:
         model = await session.get(AgentModelConfigRecord, prior_run.model_config_id)
         if model is not None and (
-            model.config_hash != prior_run.model_hash
-            or model.version != prior_run.pricing_version
+            model.config_hash != prior_run.model_hash or model.version != prior_run.pricing_version
         ):
             model = None
     elif model_config_id is not None:

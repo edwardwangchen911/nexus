@@ -47,11 +47,14 @@ Schwab 决策报价、按需执行窗口、API/BFF/`/paper` 回读和前台五�
 ### 2026-09-17 第三阶段验收对账
 
 - 业务库迁移已从 `0061_agent_paper_job_isolation` 正常升级到当前代码权威头
-  `0063_agent_version_pair_context`；历史 Agent 周期和决策仍可读取。
+  `0064_prompt_release_channel`；历史 Agent 周期和决策仍可读取。
 - 提交快照的 Engine API、BFF 和 `/paper` 已完成同库回读：11 个周期中 9 个 completed、2 个
   unavailable，最近结果为 `NO_ORDER_REQUIRED`，版本历史有 3 条，页面保持只读。
 - Agent 版本评价已具备固定 AAPL、冻结 incumbent/challenger、独立等额内部账户、4 个训练槽、
   20 个样本外槽、原 Job 恢复、配对、确定性 `PASS/FAIL/UNKNOWN` 门禁和只读页面投影。
+- challenger 生成已收敛为历史周期复盘、一次无工具 Agent 提案、精确 hash 人工确认和完整隔离
+  prompt bundle 发布；普通运行只读取 active，候选 bundle 不会隐式接管主线。提案只允许修改
+  `portfolio` 角色并复用现有输出合同，不引入新 proposal 表、轮换股票池或自动晋升生命周期。
 - 当前业务库没有已登记评价或评价终态，`version_evaluation=null`；所有 broker binding、broker
   execution intent、内部订单和成交计数均为 0，`execution_locked=true`。没有为了制造观察数据
   调用模型、Provider 或券商，也没有把历史提示复制成无意义 challenger。

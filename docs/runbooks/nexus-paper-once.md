@@ -22,6 +22,34 @@ uv run --project engine nexus-engine-agent-risk-authority \
 不把 Alpaca 标注的来源完整性未知改写为全球事实完备。该命令不调用模型，
 不创建周期、决策、订单、成交或账本记录；页面仍只读已持久化结果。
 
+## Agent challenger：复盘、人工确认、隔离发布
+
+只有固定 AAPL 已有至少 4 个使用同一完整 active prompt manifest 和同一模型权威的 completed
+周期时，才可生成 challenger 提案。`propose` 先固化 4–20 个周期及其决策、动作、成本和完整
+prompt/model hash，再执行一次无工具模型调用；同一幂等键如果处于 running、failed 或结果未知，
+不得重放：
+
+```sh
+uv run --project engine nexus-engine-agent-challenger propose \
+  --instrument-id <AAPL instrument UUID> \
+  --history-limit 20 \
+  --idempotency-key <固定键>
+```
+
+当前合同只允许提议修改 `portfolio` 角色，并须复用现有输出字段。提案本身不会发布提示、登记
+评价或创建账户。人工审阅 `observed_pattern`、`hypothesis`、`prompt_addendum` 和失效条件后，必须
+使用返回的精确 proposal hash 发布；不能用另一个 hash、旧版 orchestrator 提案或口头概述代替：
+
+```sh
+uv run --project engine nexus-engine-agent-challenger publish \
+  --proposal-hash <已审阅的64位hash>
+```
+
+发布会写入一个同 version 的完整 8 角色 `challenger` bundle：仅 `portfolio` 内容增加冻结
+addendum，其余 7 个角色逐字节复制 incumbent。默认 Agent 运行只读取 `active` bundle；显式
+challenger orchestrator ID 只作为整套 bundle 的锚，缺角色或混入 active 时 fail closed。发布
+不会切换 active、注册或推进 4+20、启动调度、创建订单或改变 `execution_locked=true`。
+
 ## Agent 版本并行评价：先查持久化状态
 
 版本评价只允许固定 AAPL、两个冻结版本、独立内部账户以及预先登记的 4 个训练槽和 20 个

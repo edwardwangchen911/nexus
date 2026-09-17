@@ -13,9 +13,30 @@ from nexus.agents.committee import ROLE_ORDER, load_prompt_assets
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import (
     admit_research_run,
+    load_complete_prompt_authority,
     release_daily_budget,
     reserve_daily_budget,
     settle_daily_budget,
+)
+from nexus.agents.responses_budget import UsageSnapshot
+from nexus.audit.service import append_audit_event
+from nexus.domain.evidence import EvidenceRef
+from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy, job_input_hash
+from nexus.jobs.repository import claim_next_job, enqueue_job, finalize_job
+from nexus.ops.agent_challenger import ProposeRequest, execute_propose
+from nexus.paper.agent_challenger import (
+    AGENT_CHALLENGER_PROPOSAL_ACTION,
+    PROPOSER_PROMPT_HASH,
+    PROPOSER_PROMPT_VERSION,
+    PROVIDER_PROJECTION_VERSION,
+    AgentChallengerCycleFactV4,
+    AgentChallengerError,
+    AgentChallengerJobOutputV4,
+    AgentChallengerReviewFactV4,
+    AgentChallengerSuggestionV4,
+    freeze_agent_challenger_proposal_v4,
+    freeze_agent_challenger_retrospective_v4,
+    publish_agent_challenger,
 )
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -27,7 +48,7 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.market import Instrument
+from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
@@ -44,6 +65,540 @@ _MODEL_ID = UUID("0198d500-1000-7000-8000-000000001504")
 _EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001505")
 _PORTFOLIO_MODEL_ID = UUID("0198d500-1000-7000-8000-000000001599")
 _RUN_IDS = tuple(UUID(f"0198d500-1000-7000-8000-0000000015{index:02d}") for index in range(10, 20))
+
+
+def _challenger_reviews() -> tuple[AgentChallengerReviewFactV4, ...]:
+    evidence = EvidenceRef(
+        source="test",
+        object_id="challenger-evidence",
+        available_at=_NOW,
+        location="fixture",
+        content_hash="e" * 64,
+    )
+    return (
+        AgentChallengerReviewFactV4(
+            claim_id="bear:0",
+            status="unresolved",
+            rationale="The claim lacks current catalyst evidence.",
+            evidence_refs=(evidence,),
+            resolved=False,
+            missing_evidence=("Current catalyst evidence",),
+            prevented_conclusion="Cannot distinguish watch from a buy candidate.",
+        ),
+        AgentChallengerReviewFactV4(
+            claim_id="evidence_audit:0",
+            status="unresolved",
+            rationale="The audit found the same gap for its own claim.",
+            evidence_refs=(evidence,),
+            resolved=False,
+            missing_evidence=("Current catalyst evidence",),
+            prevented_conclusion="Cannot mark the evidence audit complete.",
+        ),
+    )
+
+
+def _challenger_retrospective_fixture():  # type: ignore[no-untyped-def]
+    prompt_assets = load_prompt_assets()
+    facts = tuple(
+        AgentChallengerCycleFactV4(
+            cycle_id=UUID(f"0198d500-1000-7000-8000-{9600 + index:012d}"),
+            decision_slot_at=_NOW + timedelta(minutes=index),
+            result_code="NO_ORDER_REQUIRED",
+            strategy_decision_id=UUID(f"0198d500-1000-7000-8000-{9700 + index:012d}"),
+            decision_hash=f"{index + 1:064x}",
+            sizing_actions=("none",),
+            research_run_ids=(UUID(f"0198d500-1000-7000-8000-{9800 + index:012d}"),),
+            settled_cost_usd="0",
+            stance="watch",
+            exposure_action="none",
+            quality_status="partial",
+            evidence_audit="partial",
+            uncertainties=("Catalyst evidence is missing.",),
+            disagreement="The evidence remains unresolved.",
+            role_votes=("portfolio:abstain",),
+            reviews=_challenger_reviews(),
+            invalidation_signals=(),
+            entry_signals=(),
+            exit_signals=(),
+        )
+        for index in range(4)
+    )
+    manifest = {
+        role: {
+            "id": str(
+                _PROMPT_ID
+                if role == "orchestrator"
+                else UUID(f"0198d500-1000-7000-8000-0000000016{20 + index:02d}")
+            ),
+            "version": prompt_assets[role].version,
+            "content_hash": prompt_assets[role].content_hash,
+        }
+        for index, role in enumerate(ROLE_ORDER)
+    }
+    prompt_hash = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return freeze_agent_challenger_retrospective_v4(
+        instrument_id=_INSTRUMENT_ID,
+        as_of=_NOW + timedelta(hours=1),
+        incumbent_prompt_manifest=manifest,
+        incumbent_prompt_hash=prompt_hash,
+        incumbent_portfolio_prompt=prompt_assets["portfolio"].content,
+        output_contract={"type": "object", "properties": {"uncertainties": {"type": "array"}}},
+        incumbent_model_config_id=_MODEL_ID,
+        incumbent_model_hash="2" * 64,
+        cycles=facts,
+    )
+
+
+def _challenger_suggestion(retrospective):  # type: ignore[no-untyped-def]
+    return AgentChallengerSuggestionV4(
+        source_hash=retrospective.source_hash,
+        observed_pattern="Four completed cycles repeated watch/none.",
+        hypothesis="Make the missing evidence and reversal condition explicit.",
+        target_role="portfolio",
+        prompt_addendum=(
+            "For repeated watch decisions, name the missing evidence and the exact "
+            "observation that would change the sizing action using existing fields."
+        ),
+        expected_behavior_changes=("Specific reversal conditions",),
+        invalidation_conditions=("No output difference",),
+        execution_locked=True,
+        fixed_aapl_scope=True,
+        deterministic_risk_unchanged=True,
+        broker_writes_forbidden=True,
+        output_schema_unchanged=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_challenger_prompt_is_explicit_only_authority(
+    migrated_database_url: str,
+) -> None:
+    """A published challenger must not silently replace the normal active prompt."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    challenger_id = UUID("0198d500-1000-7000-8000-000000001999")
+    incomplete_id = UUID("0198d500-1000-7000-8000-000000001998")
+    corrupt_id = UUID("0198d500-1000-7000-8000-000000001997")
+    prompts = load_prompt_assets()
+    async with factory() as session, session.begin():
+        session.add_all(
+            AgentPromptVersionRecord(
+                id=(
+                    challenger_id
+                    if role == "orchestrator"
+                    else UUID(f"0198d500-1000-7000-8000-0000000018{index:02d}")
+                ),
+                role=role,
+                version="challenger-bundle-v1",
+                release_channel="challenger",
+                content_hash=hashlib.sha256(
+                    f"{prompts[role].content}\nbundle".encode()
+                ).hexdigest(),
+                content=f"{prompts[role].content}\nbundle",
+            )
+            for index, role in enumerate(ROLE_ORDER)
+        )
+        auxiliary_content = "Auxiliary strategy research prompt."
+        session.add(
+            AgentPromptVersionRecord(
+                id=UUID("0198d500-1000-7000-8000-000000002099"),
+                role="strategy_rnd",
+                version=prompts["orchestrator"].version,
+                release_channel="active",
+                content_hash=hashlib.sha256(auxiliary_content.encode()).hexdigest(),
+                content=auxiliary_content,
+            )
+        )
+        session.add(
+            AgentPromptVersionRecord(
+                id=incomplete_id,
+                role="orchestrator",
+                version="challenger-incomplete-v1",
+                release_channel="challenger",
+                content_hash=prompts["orchestrator"].content_hash,
+                content=prompts["orchestrator"].content,
+            )
+        )
+        session.add_all(
+            AgentPromptVersionRecord(
+                id=(
+                    corrupt_id
+                    if role == "orchestrator"
+                    else UUID(f"0198d500-1000-7000-8000-0000000019{80 + index:02d}")
+                ),
+                role=role,
+                version="challenger-corrupt-v1",
+                release_channel="challenger",
+                content_hash=("f" * 64 if role == "portfolio" else prompts[role].content_hash),
+                content=prompts[role].content,
+            )
+            for index, role in enumerate(ROLE_ORDER)
+        )
+
+    async with factory() as session:
+        active = await load_complete_prompt_authority(session)
+        challenger = await load_complete_prompt_authority(session, orchestrator_id=challenger_id)
+        incomplete = await load_complete_prompt_authority(session, orchestrator_id=incomplete_id)
+        corrupt = await load_complete_prompt_authority(session, orchestrator_id=corrupt_id)
+
+    assert active is not None
+    assert active["orchestrator"].id == _PROMPT_ID
+    assert challenger is not None
+    assert challenger["orchestrator"].id == challenger_id
+    assert all(challenger[role].release_channel == "challenger" for role in ROLE_ORDER)
+    assert len({challenger[role].version for role in ROLE_ORDER}) == 1
+    assert incomplete is None
+    assert corrupt is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_active_prompt_loads_its_complete_version_without_mixing(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    prompts = load_prompt_assets()
+    async with factory() as session, session.begin():
+        session.add_all(
+            AgentPromptVersionRecord(
+                id=UUID(f"0198d500-1000-7000-8000-0000000020{index:02d}"),
+                role=role,
+                version="new-active-v2",
+                release_channel="active",
+                content_hash=hashlib.sha256(
+                    f"{prompts[role].content}\nnew active".encode()
+                ).hexdigest(),
+                content=f"{prompts[role].content}\nnew active",
+            )
+            for index, role in enumerate(ROLE_ORDER)
+        )
+
+    async with factory() as session:
+        explicit_old = await load_complete_prompt_authority(session, orchestrator_id=_PROMPT_ID)
+
+    assert explicit_old is not None
+    assert explicit_old["orchestrator"].id == _PROMPT_ID
+    assert {item.version for item in explicit_old.values()} == {prompts["orchestrator"].version}
+
+
+@pytest.mark.asyncio
+async def test_publish_challenger_requires_exact_proposal_and_does_not_activate_it(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    prompt_assets = load_prompt_assets()
+    facts = tuple(
+        AgentChallengerCycleFactV4(
+            cycle_id=UUID(f"0198d500-1000-7000-8000-{9600 + index:012d}"),
+            decision_slot_at=_NOW + timedelta(minutes=index),
+            result_code="NO_ORDER_REQUIRED",
+            strategy_decision_id=UUID(f"0198d500-1000-7000-8000-{9700 + index:012d}"),
+            decision_hash=f"{index + 1:064x}",
+            sizing_actions=("none",),
+            research_run_ids=(UUID(f"0198d500-1000-7000-8000-{9800 + index:012d}"),),
+            settled_cost_usd="0",
+            stance="watch",
+            exposure_action="none",
+            quality_status="partial",
+            evidence_audit="partial",
+            uncertainties=("Catalyst evidence is missing.",),
+            disagreement="The evidence remains unresolved.",
+            role_votes=("portfolio:abstain",),
+            reviews=_challenger_reviews(),
+            invalidation_signals=(),
+            entry_signals=(),
+            exit_signals=(),
+        )
+        for index in range(4)
+    )
+    incumbent_manifest = {
+        role: {
+            "id": str(
+                _PROMPT_ID
+                if role == "orchestrator"
+                else UUID(f"0198d500-1000-7000-8000-0000000016{20 + index:02d}")
+            ),
+            "version": prompt_assets[role].version,
+            "content_hash": prompt_assets[role].content_hash,
+        }
+        for index, role in enumerate(ROLE_ORDER)
+    }
+    incumbent_prompt_hash = hashlib.sha256(
+        json.dumps(incumbent_manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    retrospective = freeze_agent_challenger_retrospective_v4(
+        instrument_id=_INSTRUMENT_ID,
+        as_of=_NOW + timedelta(hours=1),
+        incumbent_prompt_manifest=incumbent_manifest,
+        incumbent_prompt_hash=incumbent_prompt_hash,
+        incumbent_portfolio_prompt=prompt_assets["portfolio"].content,
+        output_contract={"type": "object", "properties": {"uncertainties": {"type": "array"}}},
+        incumbent_model_config_id=_MODEL_ID,
+        incumbent_model_hash="2" * 64,
+        cycles=facts,
+    )
+    proposal = freeze_agent_challenger_proposal_v4(
+        retrospective,
+        AgentChallengerSuggestionV4(
+            source_hash=retrospective.source_hash,
+            observed_pattern="Four completed cycles repeated watch/none.",
+            hypothesis="Make the missing evidence and reversal condition explicit.",
+            target_role="portfolio",
+            prompt_addendum=(
+                "For repeated watch decisions, name the missing evidence and the exact "
+                "observation that would change the sizing action using existing fields."
+            ),
+            expected_behavior_changes=("Specific reversal conditions",),
+            invalidation_conditions=("No output difference",),
+            execution_locked=True,
+            fixed_aapl_scope=True,
+            deterministic_risk_unchanged=True,
+            broker_writes_forbidden=True,
+            output_schema_unchanged=True,
+        ),
+    )
+    job_payload = {
+        "schema_version": "agent_challenger_job_v4",
+        "idempotency_key": "challenger-publish-test",
+        "request_hash": job_input_hash(
+            {
+                "schema_version": "agent_challenger_request_v4",
+                "instrument_id": str(_INSTRUMENT_ID),
+                "history_limit": 4,
+            }
+        ),
+        "history_limit": 4,
+        "retrospective": retrospective.model_dump(mode="json"),
+        "proposer_prompt_version": PROPOSER_PROMPT_VERSION,
+        "proposer_prompt_hash": PROPOSER_PROMPT_HASH,
+        "provider_projection_version": PROVIDER_PROJECTION_VERSION,
+    }
+    async with factory() as session, session.begin():
+        job = await enqueue_job(
+            session,
+            key=JobKeyV1(
+                job_type=JobType.AGENT_CHALLENGER_PROPOSE,
+                scope_kind="instrument",
+                scope_id=str(_INSTRUMENT_ID),
+                effective_at=_NOW + timedelta(minutes=3),
+                input_hash=job_input_hash(job_payload),
+            ),
+            schema_version="agent_challenger_job_v4",
+            payload=job_payload,
+            queue=QueueName.GENERAL,
+            retry_policy=RetryPolicy.NEVER,
+            max_attempts=1,
+        )
+    async with factory() as session, session.begin():
+        claim = await claim_next_job(
+            session,
+            queue=QueueName.GENERAL,
+            worker_id="challenger-test-worker",
+            now=_NOW + timedelta(hours=1),
+            job_ids=(job.id,),
+            job_types=(JobType.AGENT_CHALLENGER_PROPOSE.value,),
+        )
+        assert claim is not None
+    output = AgentChallengerJobOutputV4(
+        schema_version="agent_challenger_job_output_v4",
+        job_id=job.id,
+        proposer_prompt_version=PROPOSER_PROMPT_VERSION,
+        proposer_prompt_hash=PROPOSER_PROMPT_HASH,
+        proposal=proposal,
+        input_tokens=10,
+        output_tokens=10,
+        provider_calls=1,
+        tool_calls=0,
+    )
+
+    async def persist_output(session) -> None:  # type: ignore[no-untyped-def]
+        await append_audit_event(
+            session,
+            actor_id="agent-challenger-test",
+            action=AGENT_CHALLENGER_PROPOSAL_ACTION,
+            schema_version=output.schema_version,
+            payload=output.model_dump(mode="json"),
+            occurred_at=_NOW + timedelta(hours=1, seconds=1),
+        )
+
+    async with factory() as session, session.begin():
+        await finalize_job(
+            session,
+            claim=claim,
+            now=_NOW + timedelta(hours=1, seconds=1),
+            outcome="succeeded",
+            result_code="AGENT_CHALLENGER_PROPOSED",
+            apply=persist_output,
+        )
+
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="AGENT_CHALLENGER_PROPOSAL_UNKNOWN"):
+            await publish_agent_challenger(
+                session,
+                proposal_hash="f" * 64,
+                actor_id="human-local",
+                now=_NOW + timedelta(hours=2),
+            )
+
+    protected_tables = (
+        "agent_version_evaluations",
+        "paper_orders",
+        "broker_commands",
+        "jobs",
+    )
+    async with factory() as session:
+        before_counts = {
+            table: await session.scalar(text(f"SELECT count(*) FROM {table}"))  # noqa: S608
+            for table in protected_tables
+        }
+
+    async def concurrent_publish(actor_id: str):  # type: ignore[no-untyped-def]
+        async with factory() as session, session.begin():
+            return await publish_agent_challenger(
+                session,
+                proposal_hash=proposal.proposal_hash,
+                actor_id=actor_id,
+                now=_NOW + timedelta(hours=2),
+            )
+
+    first, second = await asyncio.gather(
+        concurrent_publish("human-local-1"), concurrent_publish("human-local-2")
+    )
+    published = first if not first.replayed else second
+    async with factory() as session:
+        active = await load_complete_prompt_authority(session)
+        explicit = await load_complete_prompt_authority(
+            session, orchestrator_id=published.challenger_prompt_version_id
+        )
+        after_counts = {
+            table: await session.scalar(text(f"SELECT count(*) FROM {table}"))  # noqa: S608
+            for table in protected_tables
+        }
+
+    assert published.replayed is False
+    assert sorted((first.replayed, second.replayed)) == [False, True]
+    assert published.challenger_model_config_id == _MODEL_ID
+    assert active is not None and active["orchestrator"].id == _PROMPT_ID
+    assert after_counts == before_counts
+    assert explicit is not None
+    assert explicit["orchestrator"].id == published.challenger_prompt_version_id
+    assert all(explicit[role].release_channel == "challenger" for role in ROLE_ORDER)
+    assert "using existing fields" in explicit["portfolio"].content
+    assert "using existing fields" not in explicit["orchestrator"].content
+    for role in ROLE_ORDER:
+        if role != "portfolio":
+            assert explicit[role].content == prompt_assets[role].content
+            assert explicit[role].content_hash == prompt_assets[role].content_hash
+
+    async with factory() as session, session.begin():
+        replay = await publish_agent_challenger(
+            session,
+            proposal_hash=proposal.proposal_hash,
+            actor_id="human-local",
+            now=_NOW + timedelta(hours=3),
+        )
+    assert replay.replayed is True
+    assert replay.challenger_prompt_version_id == published.challenger_prompt_version_id
+
+
+@pytest.mark.asyncio
+async def test_propose_job_calls_runtime_once_and_replays_only_exact_request(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    retrospective = _challenger_retrospective_fixture()
+
+    async def collect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        return retrospective
+
+    monkeypatch.setattr(
+        "nexus.ops.agent_challenger.collect_agent_challenger_retrospective", collect
+    )
+
+    class Runtime:
+        calls = 0
+
+        async def generate(self, source):  # type: ignore[no-untyped-def]
+            assert source == retrospective
+            self.calls += 1
+            return _challenger_suggestion(retrospective), UsageSnapshot(
+                input_tokens=10,
+                output_tokens=10,
+                provider_calls=1,
+                tool_calls=0,
+            )
+
+    runtime = Runtime()
+    request = ProposeRequest(
+        action="propose",
+        instrument_id=_INSTRUMENT_ID,
+        history_limit=4,
+        idempotency_key="exact-request",
+    )
+    first = await execute_propose(
+        EngineSettings(database_url=migrated_database_url), request, runtime=runtime
+    )
+    replay = await execute_propose(
+        EngineSettings(database_url=migrated_database_url), request, runtime=runtime
+    )
+
+    assert runtime.calls == 1
+    assert replay == first
+    with pytest.raises(AgentChallengerError, match="AGENT_CHALLENGER_IDEMPOTENCY_CONFLICT"):
+        await execute_propose(
+            EngineSettings(database_url=migrated_database_url),
+            request.model_copy(update={"history_limit": 5}),
+            runtime=runtime,
+        )
+
+
+@pytest.mark.asyncio
+async def test_failed_propose_job_is_not_replayed(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    retrospective = _challenger_retrospective_fixture()
+
+    async def collect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        return retrospective
+
+    monkeypatch.setattr(
+        "nexus.ops.agent_challenger.collect_agent_challenger_retrospective", collect
+    )
+
+    class FailingRuntime:
+        calls = 0
+
+        async def generate(self, source):  # type: ignore[no-untyped-def]
+            assert source == retrospective
+            self.calls += 1
+            raise RuntimeError("bounded fixture failure")
+
+    runtime = FailingRuntime()
+    request = ProposeRequest(
+        action="propose",
+        instrument_id=_INSTRUMENT_ID,
+        history_limit=4,
+        idempotency_key="failed-request",
+    )
+    with pytest.raises(AgentChallengerError, match="AGENT_CHALLENGER_RESULT_UNKNOWN"):
+        await execute_propose(
+            EngineSettings(database_url=migrated_database_url), request, runtime=runtime
+        )
+    with pytest.raises(AgentChallengerError, match="AGENT_CHALLENGER_RESULT_UNKNOWN"):
+        await execute_propose(
+            EngineSettings(database_url=migrated_database_url), request, runtime=runtime
+        )
+    assert runtime.calls == 1
 
 
 @pytest.mark.asyncio
@@ -696,9 +1251,7 @@ async def test_agent_job_payload_is_frozen_and_job_cannot_be_deleted(
         )
     async with factory() as session:
         job_key = await session.scalar(
-            select(Job.job_key).where(
-                Job.payload["run_id"].as_string() == str(admission.run_id)
-            )
+            select(Job.job_key).where(Job.payload["run_id"].as_string() == str(admission.run_id))
         )
     assert isinstance(job_key, str)
     with pytest.raises(IntegrityError, match="job authority is immutable"):
@@ -841,6 +1394,13 @@ async def _seed_authority(factory, *, snapshot_available_at: datetime = _NOW) ->
                     currency="USD",
                     tick_size=Decimal("0.01"),
                     risk_bucket="equity",
+                ),
+                InstrumentAlias(
+                    instrument_id=_INSTRUMENT_ID,
+                    symbol="AAPL",
+                    alias_type="ticker",
+                    valid_from=_NOW.date() - timedelta(days=1),
+                    valid_to=None,
                 ),
                 DataSnapshot(
                     id=_SNAPSHOT_ID,
