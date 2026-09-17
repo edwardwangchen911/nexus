@@ -292,6 +292,36 @@ describe("integrations vertical slice", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "返回集成状态" })).toHaveClass("button");
   });
+
+  it("reads persisted live-evaluation gates while keeping execution locked", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      data: {
+        status: "not_ready",
+        execution_locked: true,
+        live_write: false,
+        user_decision_required: true,
+        gates: [
+          { key: "internal_paper_execution", status: "not_ready", reason_code: "AGENT_PAPER_EXECUTION_EVIDENCE_MISSING", evidence: [{ key: "agent_orders", count: 0 }] },
+          { key: "oos_agent_version", status: "not_ready", reason_code: "AGENT_VERSION_PASS_MISSING", evidence: [{ key: "pass_decisions", count: 0 }] },
+          { key: "broker_simulation_lifecycle", status: "not_ready", reason_code: "BROKER_SIMULATION_LIFECYCLE_MISSING", evidence: [{ key: "completed_intents", count: 0 }] },
+          { key: "broker_fee_variance", status: "unknown", reason_code: "BROKER_FEE_EVIDENCE_UNSUPPORTED", evidence: [{ key: "broker_fee_observations", count: 0 }] },
+          { key: "broker_recovery_drill", status: "not_ready", reason_code: "BROKER_RECOVERY_EVIDENCE_MISSING", evidence: [{ key: "reconciled_unknown_commands", count: 0 }] },
+        ],
+      },
+      meta: { request_id: "0198f7a0-1111-7777-8111-111111111114", schema_version: "1", as_of: "2026-09-17T01:00:00Z" },
+    })));
+
+    render(<LiveApprovalsPage />);
+
+    expect(await screen.findByRole("heading", { name: "实盘评估门禁" })).toBeVisible();
+    expect(screen.getByText("尚未具备实盘评估条件")).toBeVisible();
+    for (const label of ["内部模拟成交证据", "样本外版本验证", "券商模拟生命周期", "费用与偏差证据", "异常恢复演练"]) {
+      expect(screen.getByRole("heading", { name: label })).toBeVisible();
+    }
+    expect(screen.getByText("执行锁定 · 实盘写入关闭")).toBeVisible();
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
 });
 
 function responseMeta() {

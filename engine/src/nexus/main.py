@@ -14,6 +14,7 @@ from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.api.routes.evolution import router as evolution_router
 from nexus.api.routes.health import router as health_router
 from nexus.api.routes.integrations import router as integrations_router
+from nexus.api.routes.live_evaluation import router as live_evaluation_router
 from nexus.api.routes.market import router as market_router
 from nexus.api.routes.news import router as news_router
 from nexus.api.routes.optimization import router as optimization_router
@@ -102,6 +103,7 @@ def create_engine_app(
     app.include_router(system_router)
     app.include_router(health_router)
     app.include_router(integrations_router)
+    app.include_router(live_evaluation_router)
     app.include_router(market_router)
     app.include_router(news_router)
     app.include_router(portfolios_router)

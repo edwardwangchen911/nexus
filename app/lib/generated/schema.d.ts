@@ -348,6 +348,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/live-evaluation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Live Evaluation */
+        get: operations["getLiveEvaluation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/market": {
         parameters: {
             query?: never;
@@ -2990,6 +3007,63 @@ export interface components {
              * Format: date
              */
             window_start: string;
+        };
+        /** LiveEvaluationEnvelope */
+        LiveEvaluationEnvelope: {
+            data: components["schemas"]["LiveEvaluationResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** LiveEvaluationEvidenceCountResponse */
+        LiveEvaluationEvidenceCountResponse: {
+            /** Count */
+            count: number;
+            /** Key */
+            key: string;
+        };
+        /** LiveEvaluationGateResponse */
+        LiveEvaluationGateResponse: {
+            /** Evidence */
+            evidence: components["schemas"]["LiveEvaluationEvidenceCountResponse"][];
+            /**
+             * Key
+             * @enum {string}
+             */
+            key: "internal_paper_execution" | "oos_agent_version" | "broker_simulation_lifecycle" | "broker_fee_variance" | "broker_recovery_drill";
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "not_ready" | "unknown";
+        };
+        /** LiveEvaluationResponse */
+        LiveEvaluationResponse: {
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /** Gates */
+            gates: components["schemas"]["LiveEvaluationGateResponse"][];
+            /**
+             * Live Write
+             * @default false
+             * @constant
+             */
+            live_write: false;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_ready" | "eligible_for_user_review";
+            /**
+             * User Decision Required
+             * @default true
+             * @constant
+             */
+            user_decision_required: true;
         };
         /**
          * MarketBarResponse
@@ -7948,6 +8022,44 @@ export interface operations {
             };
             /** @description Stable NEXUS error envelope. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getLiveEvaluation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LiveEvaluationEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -3,6 +3,7 @@ import "server-only";
 import { v7 as uuidv7, validate as validateUuid, version as uuidVersion } from "uuid";
 import {
   integrationStatusRuntimeSchema,
+  liveEvaluationRuntimeSchema,
   brokerSyncRunRuntimeSchema,
   brokerSimulationRuntimeSchema,
   brokerIntentRuntimeSchema,
@@ -192,6 +193,13 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     return requestMethod?.toUpperCase() === "GET"
       && matchesRuntimeSchema(data, brokerSimulationRuntimeSchema) && isPlain(data)
       && brokerSimulationValid(data)
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/live-evaluation") {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, liveEvaluationRuntimeSchema) && isPlain(data)
+      && liveEvaluationValid(data)
       ? data
       : INVALID_DATA;
   }
@@ -1262,6 +1270,22 @@ function brokerSimulationValid(data: Record<string, unknown>): boolean {
     if (data.events.some((event) => !isPlain(event) || !orderIds.has(event.order_id))) return false;
   } else if (data.events.length > 0) return false;
   return true;
+}
+
+function liveEvaluationValid(data: Record<string, unknown>): boolean {
+  if (data.execution_locked !== true || data.live_write !== false
+    || data.user_decision_required !== true || !Array.isArray(data.gates)
+    || data.gates.length !== 5) return false;
+  const keys = data.gates.map((gate) => isPlain(gate) ? gate.key : null);
+  return keys.every((key) => typeof key === "string")
+    && new Set(keys).size === keys.length
+    && [
+      "internal_paper_execution",
+      "oos_agent_version",
+      "broker_simulation_lifecycle",
+      "broker_fee_variance",
+      "broker_recovery_drill",
+    ].every((key) => keys.includes(key));
 }
 
 function brokerIntentValid(data: Record<string, unknown>): boolean {

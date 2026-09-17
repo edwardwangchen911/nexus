@@ -233,6 +233,7 @@ def test_openapi_keeps_agent_decision_and_execution_market_authorities_distinct(
     assert set(schemas["AgentPaperCyclePageResponse"]["required"]) == {
         "items",
         "summary",
+        "version_evaluation",
         "version_history",
         "version_observation",
     }

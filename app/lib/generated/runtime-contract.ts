@@ -4453,6 +4453,122 @@ export const runtimeContractSchemas = {
     "title": "LiquidityObservation",
     "type": "object"
   },
+  "LiveEvaluationEvidenceCountResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "count": {
+        "minimum": 0,
+        "title": "Count",
+        "type": "integer"
+      },
+      "key": {
+        "maxLength": 64,
+        "minLength": 1,
+        "title": "Key",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "count"
+    ],
+    "title": "LiveEvaluationEvidenceCountResponse",
+    "type": "object"
+  },
+  "LiveEvaluationGateResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "evidence": {
+        "items": {
+          "$ref": "#/components/schemas/LiveEvaluationEvidenceCountResponse"
+        },
+        "maxItems": 8,
+        "minItems": 1,
+        "title": "Evidence",
+        "type": "array"
+      },
+      "key": {
+        "enum": [
+          "internal_paper_execution",
+          "oos_agent_version",
+          "broker_simulation_lifecycle",
+          "broker_fee_variance",
+          "broker_recovery_drill"
+        ],
+        "title": "Key",
+        "type": "string"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "ready",
+          "not_ready",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "status",
+      "reason_code",
+      "evidence"
+    ],
+    "title": "LiveEvaluationGateResponse",
+    "type": "object"
+  },
+  "LiveEvaluationResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "gates": {
+        "items": {
+          "$ref": "#/components/schemas/LiveEvaluationGateResponse"
+        },
+        "maxItems": 5,
+        "minItems": 5,
+        "title": "Gates",
+        "type": "array"
+      },
+      "live_write": {
+        "const": false,
+        "default": false,
+        "title": "Live Write",
+        "type": "boolean"
+      },
+      "status": {
+        "enum": [
+          "not_ready",
+          "eligible_for_user_review"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "user_decision_required": {
+        "const": true,
+        "default": true,
+        "title": "User Decision Required",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "status",
+      "gates"
+    ],
+    "title": "LiveEvaluationResponse",
+    "type": "object"
+  },
   "MarketBarResponse": {
     "additionalProperties": false,
     "description": "Exact selected-source OHLCV evidence for a semantic chart table.",
@@ -13814,6 +13930,8 @@ export const brokerSimulationRuntimeSchema = runtimeContractSchemas.BrokerSimula
 export const brokerIntentRuntimeSchema = runtimeContractSchemas.BrokerIntentResponse;
 
 export const brokerActionRuntimeSchema = runtimeContractSchemas.BrokerActionResponse;
+
+export const liveEvaluationRuntimeSchema = runtimeContractSchemas.LiveEvaluationResponse;
 
 export const watchlistMembershipRuntimeSchema = runtimeContractSchemas.WatchlistMembershipResponse;
 

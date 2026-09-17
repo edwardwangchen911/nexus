@@ -230,7 +230,7 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const news = /^\/internal\/v1\/instruments\/([^/]+)\/news$/.exec(path);
   if (news && validateUuid(news[1])) return template === "/internal/v1/instruments/{instrument_id}/news";
   if (template === "/internal/v1/optimization-proposal-drafts") return path === template;
-  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/workbench", "/internal/v1/paper/cycles", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
+  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/live-evaluation", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/workbench", "/internal/v1/paper/cycles", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -513,7 +513,8 @@ function isAnalysisPath(pathname: string): boolean {
     || pathname.includes("/strategy-evolution")
     || pathname.includes("/strategy-experiments")
     || pathname.includes("/strategy-registry/")
-    || pathname.includes("/broker-simulation");
+    || pathname.includes("/broker-simulation")
+    || pathname.includes("/live-evaluation");
 }
 function engineConfig(): { baseUrl: string; keyId: string; secret: string } { const baseUrl = process.env.NEXUS_ENGINE_BASE_URL; const keyId = process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID ?? "current"; const secret = process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET ?? process.env.NEXUS_ENGINE_HMAC_SECRET; if (!baseUrl || !secret) throw new Error("NEXUS engine service configuration is incomplete"); return { baseUrl, keyId, secret }; }
 function exactBodyBytes(body: EngineBody | undefined): Uint8Array { if (body === undefined) return new Uint8Array(); if (typeof body === "string") return new TextEncoder().encode(body); if (body instanceof Uint8Array) return body; if (body instanceof ArrayBuffer) return new Uint8Array(body); throw new TypeError("engine request bodies must have exact byte representation"); }

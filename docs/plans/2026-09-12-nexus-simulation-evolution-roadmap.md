@@ -1,6 +1,6 @@
 # NEXUS Agent 模拟交易与策略进化路线图
 
-**状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段本地版本评价路径已收口；第四阶段已达本地券商模拟接入就绪；第五阶段已完成评估门禁核查，待补只读产品投影
+**状态：** 第二阶段已有连续多槽与中断恢复证据；第三阶段本地版本评价路径已收口；第四阶段已达本地券商模拟接入就绪；第五阶段只读评估投影已完成，当前仍为 `not_ready`
 
 **核查日期：** 2026-09-17
 
@@ -404,12 +404,19 @@ broker binding、intent、command、attempt、event、reconciliation 和有效�
 4. **费用与偏差证据：** 保留券商实际费用及本地模拟差异；当前的 zero/fixture 费用假设不得冒称实际费用。
 5. **异常恢复演练：** 证明单次提交、结果未知不重发、Webhook/轮询冲突锁定和对账后恢复。
 
-现有 `/live-approvals` 只是静态锁定页，尚未从持久化事实显示上述五项门禁。下一个最小代码切片是复用该页增加只读评估投影：
+现有 `/live-approvals` 已复用为上述五项门禁的只读评估投影：
 
 - 不新增表、迁移、实盘账户、凭据、下单路由或提交按钮；
 - 每项返回持久化证据数量、`ready / not_ready / unknown` 及稳定原因码；
 - 总状态只能是五项全部 `ready` 时的 `eligible_for_user_review`，否则是 `not_ready`；
 - 即使未来达到 `eligible_for_user_review`，仍固定 `execution_locked=true`、`live_write=false`，只能由用户开始新的安全设计与逐笔批准阶段。
+
+2026-09-17 已完成 Engine API、BFF 和页面接线，并用当前代码直接只读业务库核验：总状态为
+`not_ready`，内部订单/成交、版本 `PASS`、券商生命周期、费用观察和异常恢复事实均为 0；费用门禁因
+当前数据合同不保存券商实际费用而明确返回 `unknown / BROKER_FEE_EVIDENCE_UNSUPPORTED`。接口始终
+返回 `execution_locked=true`、`live_write=false`、`user_decision_required=true`，页面不包含表单、提交按钮
+或解锁动作。隔离 PostgreSQL API、HMAC/非法查询、BFF、运行时响应边界和页面回读均已通过验证；本次未
+调用模型、Provider 或券商，也未创建任何交易事实。
 
 ## 已完成的第一阶段代码级技术方案范围
 
