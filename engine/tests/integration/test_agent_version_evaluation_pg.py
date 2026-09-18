@@ -1181,9 +1181,12 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hosted_without_batch", [False, True])
 async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    hosted_without_batch,
 ) -> None:
     factory, engine = await _factory(migrated_database_url)
     slot = _slots(TRAIN_DATES)[0]
@@ -1231,14 +1234,52 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
                 now=NOW,
             )
 
-        async with factory.begin() as session:
-            result = await advance_agent_version_slot(
-                session,
-                evaluation_id=registration.evaluation_id,
-                decision_slot_at=slot,
-                daily_limit_usd=Decimal("3"),
-                now=slot,
+        if hosted_without_batch:
+            from nexus.ops import agent_paper_loop as loop
+
+            output = tmp_path / ".secrets" / "nexus-agent-paper"
+            output.mkdir(parents=True, mode=0o700)
+            environment = {
+                "DATABASE_URL": migrated_database_url,
+                "AGENT_RUNTIME_MODE": "codex_sdk",
+                "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+                "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(registration.incumbent_account_id),
+            }
+            readiness = loop.agent_paper_service_startup_preflight(environment, repo_root=tmp_path)
+            assert readiness["status"] == "ready"
+            assert readiness["normal_cycle_status"] == "blocked"
+            assert readiness["normal_cycle_blocking_codes"] == ["CANDIDATE_BATCH_REQUIRED"]
+            observed = []
+
+            async def observe_advance(*args, **kwargs):
+                value = await advance_agent_version_slot(*args, **kwargs)
+                observed.append(value)
+                return value
+
+            monkeypatch.setattr(loop, "advance_agent_version_slot", observe_advance)
+            await loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=registration.incumbent_account_id,
+                repo_root=tmp_path,
+                action=loop.AgentPaperLoopAction.ADVANCE_EVALUATION,
+                snapshot=loop.AgentPaperLoopSnapshot(
+                    now=slot,
+                    evaluation_id=registration.evaluation_id,
+                    evaluation_slot_at=slot,
+                    cycle_status="evaluation_pending",
+                ),
             )
+            assert len(observed) == 1
+            result = observed[0]
+        else:
+            async with factory.begin() as session:
+                result = await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=slot,
+                    daily_limit_usd=Decimal("3"),
+                    now=slot,
+                )
 
         assert result.status == "running"
         assert result.reason_code == "PAIR_JOBS_PREPARED"

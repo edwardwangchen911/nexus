@@ -503,10 +503,6 @@ def agent_paper_service_startup_preflight(
 ) -> dict[str, object]:
     """Validate only static prerequisites needed to wait and inspect persistence."""
     blocking_codes: set[str] = set()
-    try:
-        _candidate_batch_setting(environment)
-    except ValueError as error:
-        blocking_codes.add(str(error))
     if environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false").strip().lower() in {
         "",
         "0",
@@ -548,6 +544,7 @@ def agent_paper_service_startup_preflight(
         "external_requests": 0,
         "blocking_codes": sorted(blocking_codes),
         "optional_codes": [],
+        **_normal_cycle_config_readiness(environment),
     }
 
 
@@ -571,10 +568,6 @@ def agent_paper_service_preflight(
 ) -> dict[str, object]:
     """Validate local service prerequisites without network or persistence access."""
     blocking_codes: set[str] = set()
-    try:
-        _candidate_batch_setting(environment)
-    except ValueError as error:
-        blocking_codes.add(str(error))
     optional_codes: list[str] = []
     requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
     requested_normalized = requested.strip().lower()
@@ -635,6 +628,7 @@ def agent_paper_service_preflight(
         "external_requests": 0,
         "blocking_codes": sorted(blocking_codes),
         "optional_codes": optional_codes,
+        **_normal_cycle_config_readiness(environment),
     }
 
 
@@ -875,6 +869,8 @@ async def prepare_prior_daily_once(
         return "ready"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "daily"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if candidate.symbol == "AAPL" and (parent / scope.prior_session.isoformat()).exists():
+        return "unavailable"
     output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
         output_dir.mkdir(mode=0o700)
@@ -1293,6 +1289,8 @@ async def prepare_current_trends_once(
         return "prepared"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if candidate.symbol == "AAPL" and (parent / scope.prior_session.isoformat()).exists():
+        return "unavailable"
     output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
         output_dir.mkdir(mode=0o700)
@@ -1724,6 +1722,13 @@ async def run_foreground_loop(
                 wait_until = _portfolio_slot(snapshot.decision_window_start_at)
             else:
                 wait_until = _portfolio_slot(snapshot.next_decision_window_start_at)
+            # Reinspect at today's frozen close so performance/summary publication
+            # is not postponed to the next decision (possibly after a weekend).
+            if (
+                snapshot.decision_window_end_at is not None
+                and snapshot.now < snapshot.decision_window_end_at < wait_until
+            ):
+                wait_until = snapshot.decision_window_end_at
             deadline = monotonic() + (wait_until - snapshot.now).total_seconds()
             while (remaining := deadline - monotonic()) > 0:
                 duration = min(remaining, interval_seconds)
@@ -2127,6 +2132,21 @@ def _candidate_batch_setting(environment: Mapping[str, str]) -> UUID:
         return UUID(raw)
     except ValueError:
         raise ValueError("CANDIDATE_BATCH_INVALID") from None
+
+
+def _normal_cycle_config_readiness(environment: Mapping[str, str]) -> dict[str, object]:
+    """Host readiness does not authorize starting a new ordinary cycle."""
+    try:
+        _candidate_batch_setting(environment)
+    except ValueError as error:
+        return {
+            "normal_cycle_status": "blocked",
+            "normal_cycle_blocking_codes": [str(error)],
+        }
+    return {
+        "normal_cycle_status": "requires_batch_validation",
+        "normal_cycle_blocking_codes": [],
+    }
 
 
 async def _load_loop_candidates(

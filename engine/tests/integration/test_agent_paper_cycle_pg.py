@@ -202,7 +202,7 @@ async def _advance_legacy_cycle_fixture(session, **kwargs):
     "missing", [False, True], ids=["complete-shared-artifact", "missing-msft-rejects-all"]
 )
 async def test_bounded_batch_capture_requires_quote_for_every_symbol(
-    migrated_database_url, tmp_path, missing
+    migrated_database_url, tmp_path, missing, monkeypatch
 ):
     from nexus.ops import schwab_market_stream as stream
     from nexus.persistence.models.market import InstrumentAlias
@@ -217,7 +217,16 @@ async def test_bounded_batch_capture_requires_quote_for_every_symbol(
     assert hasattr(stream, "capture_and_import_schwab_level_one_batch"), "batch capture missing"
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    at = datetime.now(UTC) - timedelta(seconds=1)
+    async with sessions() as clock_session:
+        database_now = await clock_session.scalar(select(func.clock_timestamp()))
+    assert isinstance(database_now, datetime)
+    capture_at = database_now - timedelta(seconds=1)
+    at = capture_at - timedelta(seconds=1)
+
+    class CaptureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return capture_at if tz is None else capture_at.astimezone(tz)
     bindings = {"AAPL": UUID(int=101), "MSFT": UUID(int=102)}
     captures = []
     sent = []
@@ -233,14 +242,18 @@ async def test_bounded_batch_capture_requires_quote_for_every_symbol(
             frames[2]["data"][0]["content"].append(
                 {**frames[2]["data"][0]["content"][0], "key": "MSFT"}
             )
-        return await stream.collect_schwab_stream(
-            symbols=tuple(arguments.symbol),
-            directory=arguments.output_dir,
-            streamer_url="wss://streamer-api.schwab.com/ws",
-            credentials=CREDENTIALS,
-            max_frames=3,
-            connector=lambda *a, **kw: RecordingSocket(frames),
-        )
+        # Synthetic capture uses one database-derived clock; the real importer
+        # still reads PostgreSQL time and enforces completed_at <= imported_at.
+        with monkeypatch.context() as capture_patch:
+            capture_patch.setattr(stream, "datetime", CaptureClock)
+            return await stream.collect_schwab_stream(
+                symbols=tuple(arguments.symbol),
+                directory=arguments.output_dir,
+                streamer_url="wss://streamer-api.schwab.com/ws",
+                credentials=CREDENTIALS,
+                max_frames=3,
+                connector=lambda *a, **kw: RecordingSocket(frames),
+            )
 
     try:
         async with sessions.begin() as session:

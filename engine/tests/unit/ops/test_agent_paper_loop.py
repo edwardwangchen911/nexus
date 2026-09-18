@@ -179,6 +179,157 @@ async def noop_heartbeat(_seen_at: datetime) -> None:
     return None
 
 
+@pytest.mark.parametrize("close_hour", [20, 17], ids=["friday-close", "friday-half-day"])
+def test_daily_wait_wakes_at_frozen_close_before_monday_without_busy_loop(close_hour):
+    start = datetime(2026, 9, 18, 14, 5, tzinfo=UTC)
+    close = start.replace(hour=close_hour, minute=0)
+    elapsed = 0.0
+    inspected = []
+    published = []
+    sleeps = []
+
+    async def inspect():
+        now = start + timedelta(seconds=elapsed)
+        inspected.append(now)
+        assert len(inspected) <= 3, "no repeated inspection between calendar wakeups"
+        return loop.AgentPaperLoopSnapshot(
+            now=now,
+            enabled=not published,
+            calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            decision_window_start_at=start.replace(hour=11, minute=0),
+            decision_window_end_at=close,
+            next_decision_window_start_at=datetime(2026, 9, 21, 11, tzinfo=UTC),
+            performance_due_at=close if now >= close else None,
+        )
+
+    async def execute(action, state):
+        assert action == A.PUBLISH_PERFORMANCE
+        assert state.now == close, (
+            "performance and its existing summary publication must not wait until Monday"
+        )
+        published.append(state.performance_due_at)
+
+    async def sleep(seconds):
+        nonlocal elapsed
+        assert 0 < seconds <= 15
+        assert start + timedelta(seconds=elapsed + seconds) <= close
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=noop_heartbeat,
+            monotonic=lambda: elapsed,
+            clock=lambda: start + timedelta(seconds=elapsed),
+        )
+    )
+    assert result == A.STOP_DISABLED
+    assert published == [close]
+    assert inspected == [start, close, close]
+    assert sum(sleeps) == (close - start).total_seconds()
+
+
+@pytest.mark.parametrize("kind", ["daily", "trends"])
+@pytest.mark.parametrize("ready", [False, True])
+def test_aapl_legacy_attempt_fences_provider_but_reuses_qualified_facts(
+    monkeypatch, tmp_path, kind, ready
+):
+    prior = date(2026, 9, 11)
+    legacy = tmp_path / ".secrets" / "nexus-agent-paper" / kind / prior.isoformat()
+    legacy.mkdir(parents=True)
+
+    async def inspect(*_args, **_kwargs):
+        return SimpleNamespace(
+            instrument_id=TEST_CANDIDATE.instrument_id,
+            prior_session=prior,
+            start_session=prior - timedelta(days=366),
+            authority_ready=ready,
+            evidence_ready=ready,
+            snapshot_ready=ready,
+        )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("legacy AAPL attempt must not repeat provider work")
+
+    monkeypatch.setattr(
+        loop,
+        "_inspect_prior_daily_scope" if kind == "daily" else "_inspect_current_trends_scope",
+        inspect,
+    )
+    monkeypatch.setattr(loop, "collection_window", forbidden)
+    monkeypatch.setattr(loop, "collect_prices", forbidden)
+    prepare = loop.prepare_prior_daily_once if kind == "daily" else loop.prepare_current_trends_once
+    result = asyncio.run(
+        prepare(
+            SimpleNamespace(),
+            candidate=TEST_CANDIDATE,
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            now=NOW,
+            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        )
+    )
+    assert result == ("ready" if ready else "unavailable")
+    assert not (legacy.parent / f"{prior}-{TEST_CANDIDATE.instrument_id}").exists()
+
+
+def test_host_startup_without_batch_can_inspect_legacy_and_evaluation(monkeypatch, tmp_path):
+    output = tmp_path / ".secrets" / "nexus-agent-paper"
+    output.mkdir(parents=True, mode=0o700)
+    environment = service_ready_environment()
+    environment.pop("NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID")
+    result = loop.agent_paper_service_startup_preflight(environment, repo_root=tmp_path)
+    assert result["status"] == "ready"
+    assert result["blocking_codes"] == []
+    assert result["normal_cycle_status"] == "blocked"
+    assert result["normal_cycle_blocking_codes"] == ["CANDIDATE_BATCH_REQUIRED"]
+
+
+@pytest.mark.parametrize("kind", ["daily", "trends"])
+def test_other_candidate_does_not_inherit_aapl_legacy_attempt(monkeypatch, tmp_path, kind):
+    prior = date(2026, 9, 11)
+    legacy = tmp_path / ".secrets" / "nexus-agent-paper" / kind / prior.isoformat()
+    legacy.mkdir(parents=True)
+    candidate = TEST_CANDIDATE.model_copy(update={"symbol": "MSFT", "instrument_id": UUID(int=21)})
+
+    async def inspect(*_args, **_kwargs):
+        return SimpleNamespace(
+            instrument_id=candidate.instrument_id,
+            prior_session=prior,
+            start_session=prior - timedelta(days=366),
+            authority_ready=False,
+            evidence_ready=False,
+            snapshot_ready=False,
+        )
+
+    def window(instrument_id, *_args, **_kwargs):
+        assert instrument_id == candidate.instrument_id
+        raise RuntimeError("reached-explicit-candidate-preparation")
+
+    monkeypatch.setattr(
+        loop,
+        "_inspect_prior_daily_scope" if kind == "daily" else "_inspect_current_trends_scope",
+        inspect,
+    )
+    monkeypatch.setattr(loop, "collection_window", window)
+    prepare = loop.prepare_prior_daily_once if kind == "daily" else loop.prepare_current_trends_once
+    with pytest.raises(RuntimeError, match="reached-explicit-candidate-preparation"):
+        asyncio.run(
+            prepare(
+                SimpleNamespace(),
+                candidate=candidate,
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            )
+        )
+    assert (legacy.parent / f"{prior}-{candidate.instrument_id}").exists()
+
+
 def test_agent_paper_lock_is_shared_across_spawned_worktrees(tmp_path: Path) -> None:
     runtime_root = tmp_path / "shared-runtime"
     side_effect_path = tmp_path / "loser-side-effects"
@@ -2341,10 +2492,11 @@ def test_service_preflight_aggregates_safe_blockers_without_external_requests(
             "AGENT_PAPER_MODEL_CONFIG_REQUIRED",
             "AGENT_PAPER_OUTPUT_DIRECTORY_INVALID",
             "AGENT_PAPER_SCHWAB_APP_CONFIG_INVALID",
-            "CANDIDATE_BATCH_REQUIRED",
             "SCHWAB_OAUTH_TOKEN_STORE_INVALID",
         ],
         "optional_codes": ["AGENT_PAPER_FRED_OPTIONAL_UNCONFIGURED"],
+        "normal_cycle_status": "blocked",
+        "normal_cycle_blocking_codes": ["CANDIDATE_BATCH_REQUIRED"],
     }
 
 
@@ -2372,6 +2524,8 @@ def test_service_preflight_accepts_complete_local_configuration(
         "external_requests": 0,
         "blocking_codes": [],
         "optional_codes": [],
+        "normal_cycle_status": "requires_batch_validation",
+        "normal_cycle_blocking_codes": [],
     }
 
 
@@ -2405,6 +2559,8 @@ def test_service_startup_preflight_defers_dynamic_model_and_market_readiness(
         "external_requests": 0,
         "blocking_codes": [],
         "optional_codes": [],
+        "normal_cycle_status": "requires_batch_validation",
+        "normal_cycle_blocking_codes": [],
     }
 
 
@@ -2492,6 +2648,8 @@ def test_service_preflight_treats_expired_access_token_as_refreshable_warning(
         "external_requests": 0,
         "blocking_codes": [],
         "optional_codes": ["SCHWAB_OAUTH_ACCESS_TOKEN_REFRESH_REQUIRED"],
+        "normal_cycle_status": "requires_batch_validation",
+        "normal_cycle_blocking_codes": [],
     }
 
 
