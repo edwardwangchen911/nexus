@@ -366,6 +366,12 @@ class PaperReadService:
             if pair is not None:
                 slot_status = "paired"
                 reason_code = "PAIR_RECORDED"
+            elif incumbent.status in ("unavailable", "failed") or challenger.status in (
+                "unavailable",
+                "failed",
+            ):
+                slot_status = "attention"
+                reason_code = "PAIR_LANE_TERMINAL_FAILURE"
             elif incumbent.status != "pending" and challenger.status != "pending":
                 slot_status = "running"
                 reason_code = "PAIR_PENDING"

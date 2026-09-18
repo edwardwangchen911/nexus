@@ -17,7 +17,7 @@ from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION, aggregate_inp
 from nexus.agents.committee import ROLE_ORDER
 from nexus.ops.agent_version_evaluation import EvaluationRequest, StatusResult, execute
 from nexus.paper.agent_cycle_authority import CycleAuthority
-from nexus.paper.agent_cycle_models import AgentPaperCycleResult
+from nexus.paper.agent_cycle_models import AgentPaperCycleResult, candidate_manifest_hash
 from nexus.paper.agent_version_evaluation import (
     close_incomplete_agent_version_evaluation,
     finalize_agent_version_evaluation,
@@ -53,6 +53,9 @@ from nexus.persistence.models.backtest import (
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias, UniverseSnapshot
 from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     PaperAccountRecord,
     PaperDrawdownLockEventRecord,
@@ -580,6 +583,120 @@ async def test_registered_evaluation_projects_as_locked_read_only_fact(
         assert isinstance(cli_status, StatusResult)
         assert cli_status.status == "observing"
         assert cli_status.execution_locked is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_read_projection_marks_terminal_lane_failure_for_attention(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    slot = _slots(TRAIN_DATES)[0]
+    universe_id = UUID("72000000-0000-0000-0000-000000000701")
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-terminal-lane-readback-v1",
+                now=NOW,
+            )
+            session.add(
+                UniverseSnapshot(
+                    id=universe_id,
+                    key="us_liquid",
+                    version="us_liquid_v1",
+                    effective_from=TRAIN_DATES[0],
+                    source="fosun_local_read_only",
+                    content_hash="7" * 64,
+                    published_at=NOW,
+                )
+            )
+            accounts = {
+                account.id: account
+                for account in await session.scalars(
+                    select(PaperAccountRecord).where(
+                        PaperAccountRecord.id.in_(
+                            (
+                                registration.incumbent_account_id,
+                                registration.challenger_account_id,
+                            )
+                        )
+                    )
+                )
+            }
+            for index, (account_id, status, result_code) in enumerate(
+                (
+                    (registration.incumbent_account_id, "failed", "AGENT_FAILED"),
+                    (
+                        registration.challenger_account_id,
+                        "unavailable",
+                        "AUTHORITY_UNAVAILABLE",
+                    ),
+                ),
+                start=1,
+            ):
+                cycle_id = UUID(f"72000000-0000-0000-0000-{710 + index:012d}")
+                session.add(
+                    AgentPaperCycleRecord(
+                        id=cycle_id,
+                        account_id=account_id,
+                        portfolio_id=accounts[account_id].portfolio_id,
+                        decision_session=TRAIN_DATES[0],
+                        decision_time=slot,
+                        decision_slot_at=slot,
+                        execution_session=TRAIN_DATES[0],
+                        universe_snapshot_id=universe_id,
+                        quality_report_id=None,
+                        decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                        execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                        candidate_manifest=[],
+                        candidate_hash=candidate_manifest_hash(()),
+                        sizing_policy_version="agent_paper_sizing_v1",
+                        sizing_policy_hash=f"{index}" * 64,
+                        execution_locked=True,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    AgentPaperCycleEventRecord(
+                        cycle_id=cycle_id,
+                        sequence=1,
+                        from_status=None,
+                        to_status="prepared",
+                        result_code="CYCLE_PREPARED",
+                        fact_ids={},
+                        event_hash=f"{index + 2}" * 64,
+                        occurred_at=slot,
+                    )
+                )
+                session.add(
+                    AgentPaperCycleEventRecord(
+                        cycle_id=cycle_id,
+                        sequence=2,
+                        from_status="prepared",
+                        to_status=status,
+                        result_code=result_code,
+                        fact_ids={},
+                        event_hash=f"{index + 4}" * 64,
+                        occurred_at=slot + timedelta(seconds=1),
+                    )
+                )
+
+        async with factory() as session:
+            page = await PaperReadService(session, slot + timedelta(seconds=10)).agent_cycles(
+                decision_session=TRAIN_DATES[0], limit=20
+            )
+
+        assert page.version_evaluation is not None
+        first_slot = page.version_evaluation.slots[0]
+        assert first_slot.status == "attention"
+        assert first_slot.reason_code == "PAIR_LANE_TERMINAL_FAILURE"
+        assert first_slot.incumbent.status == "failed"
+        assert first_slot.challenger.status == "unavailable"
     finally:
         await engine.dispose()
 
