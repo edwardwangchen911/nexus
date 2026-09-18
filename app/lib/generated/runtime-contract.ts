@@ -1030,6 +1030,15 @@ export const runtimeContractSchemas = {
         "title": "Reason Code",
         "type": "string"
       },
+      "slots": {
+        "items": {
+          "$ref": "#/components/schemas/AgentVersionSlotResponse"
+        },
+        "maxItems": 24,
+        "minItems": 24,
+        "title": "Slots",
+        "type": "array"
+      },
       "status": {
         "enum": [
           "observing",
@@ -1058,6 +1067,7 @@ export const runtimeContractSchemas = {
       "oos_completed",
       "oos_missing",
       "oos_incomparable",
+      "slots",
       "incumbent_metrics",
       "challenger_metrics",
       "comparisons",
@@ -1202,6 +1212,96 @@ export const runtimeContractSchemas = {
       "hard_risk_count"
     ],
     "title": "AgentVersionLaneMetricsResponse",
+    "type": "object"
+  },
+  "AgentVersionSlotLaneResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "result_code": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Result Code"
+      },
+      "status": {
+        "enum": [
+          "pending",
+          "prepared",
+          "researching",
+          "decision_recorded",
+          "risk_evaluated",
+          "awaiting_market",
+          "partially_filled",
+          "completed",
+          "unavailable",
+          "failed"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status"
+    ],
+    "title": "AgentVersionSlotLaneResponse",
+    "type": "object"
+  },
+  "AgentVersionSlotResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "challenger": {
+        "$ref": "#/components/schemas/AgentVersionSlotLaneResponse"
+      },
+      "decision_slot_at": {
+        "format": "date-time",
+        "title": "Decision Slot At",
+        "type": "string"
+      },
+      "incumbent": {
+        "$ref": "#/components/schemas/AgentVersionSlotLaneResponse"
+      },
+      "phase": {
+        "enum": [
+          "train",
+          "oos"
+        ],
+        "title": "Phase",
+        "type": "string"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "scheduled",
+          "due",
+          "running",
+          "paired",
+          "attention"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "phase",
+      "decision_slot_at",
+      "status",
+      "incumbent",
+      "challenger",
+      "reason_code"
+    ],
+    "title": "AgentVersionSlotResponse",
     "type": "object"
   },
   "AggregateMetric": {

@@ -418,6 +418,7 @@ function validVersionEvaluation(value: AgentVersionEvaluationFact): boolean {
     || value.oos_completed < 0 || value.oos_completed > 20
     || value.oos_missing < 0 || value.oos_incomparable < 0
     || value.oos_completed + value.oos_missing + value.oos_incomparable !== 20
+    || !validVersionSlots(value)
     || value.comparisons.length !== 3
     || value.comparisons.map((row) => row.key).join(":") !== "hold_current:baseline_v1:market_benchmark"
     || value.gates.length > 12) return false;
@@ -426,6 +427,25 @@ function validVersionEvaluation(value: AgentVersionEvaluationFact): boolean {
   if (value.status === "PASS") return value.reason_code === "OOS_IMPROVEMENT_PROVEN" && value.gates.every((gate) => gate.status === "PASS");
   if (value.status === "FAIL") return value.gates.some((gate) => gate.status === "FAIL");
   return value.gates.some((gate) => gate.status === "UNKNOWN");
+}
+function validVersionSlots(value: AgentVersionEvaluationFact): boolean {
+  if (value.slots.length !== 24) return false;
+  let previous = Number.NEGATIVE_INFINITY;
+  let trainPairs = 0;
+  let oosPairs = 0;
+  for (const [index, slot] of value.slots.entries()) {
+    const timestamp = Date.parse(slot.decision_slot_at);
+    if (slot.phase !== (index < 4 ? "train" : "oos")
+      || !Number.isFinite(timestamp) || timestamp <= previous
+      || (slot.incumbent.status === "pending") !== (slot.incumbent.result_code === null)
+      || (slot.challenger.status === "pending") !== (slot.challenger.result_code === null)) return false;
+    previous = timestamp;
+    if (slot.status === "paired") {
+      if (slot.phase === "train") trainPairs += 1;
+      else oosPairs += 1;
+    }
+  }
+  return trainPairs === value.train_completed && oosPairs === value.oos_completed;
 }
 function sameVersionObservation(left: AgentPaperVersionObservationFact, right: AgentPaperVersionObservationFact): boolean {
   return left.prompt_version === right.prompt_version && left.prompt_hash === right.prompt_hash

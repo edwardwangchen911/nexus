@@ -1499,6 +1499,8 @@ export interface components {
             oos_missing: number;
             /** Reason Code */
             reason_code: string;
+            /** Slots */
+            slots: components["schemas"]["AgentVersionSlotResponse"][];
             /**
              * Status
              * @enum {string}
@@ -1544,6 +1546,38 @@ export interface components {
             total_return_ratio: string;
             /** Turnover Ratio */
             turnover_ratio: string;
+        };
+        /** AgentVersionSlotLaneResponse */
+        AgentVersionSlotLaneResponse: {
+            /** Result Code */
+            result_code?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "prepared" | "researching" | "decision_recorded" | "risk_evaluated" | "awaiting_market" | "partially_filled" | "completed" | "unavailable" | "failed";
+        };
+        /** AgentVersionSlotResponse */
+        AgentVersionSlotResponse: {
+            challenger: components["schemas"]["AgentVersionSlotLaneResponse"];
+            /**
+             * Decision Slot At
+             * Format: date-time
+             */
+            decision_slot_at: string;
+            incumbent: components["schemas"]["AgentVersionSlotLaneResponse"];
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "train" | "oos";
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "scheduled" | "due" | "running" | "paired" | "attention";
         };
         /**
          * AggregateMetric

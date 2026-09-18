@@ -3,6 +3,17 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { agentPaperCycle, cancellableOrder, filledOrder, meta, paperPortfolio } from "../unit/paper/fixtures";
 
+function evaluationSlots(paired = 0): Array<Record<string, unknown>> {
+  return Array.from({ length: 24 }, (_, index) => ({
+    phase: index < 4 ? "train" : "oos",
+    decision_slot_at: new Date(Date.UTC(2026, 8, 18 + index, 14, 5)).toISOString(),
+    status: index < paired ? "paired" : "scheduled",
+    incumbent: { status: index < paired ? "completed" : "pending", result_code: index < paired ? "NO_ORDER_REQUIRED" : null },
+    challenger: { status: index < paired ? "completed" : "pending", result_code: index < paired ? "NO_ORDER_REQUIRED" : null },
+    reason_code: index < paired ? "PAIR_RECORDED" : "REGISTERED_SLOT_SCHEDULED",
+  }));
+}
+
 for (const viewport of [
   { name: "desktop", width: 1440, height: 1000 },
   { name: "mobile", width: 390, height: 844 },
@@ -195,6 +206,7 @@ async function installPaperFixtures(
       incumbent_prompt_hash: "a".repeat(64), incumbent_model_hash: "b".repeat(64),
       challenger_prompt_hash: "c".repeat(64), challenger_model_hash: "d".repeat(64),
       train_completed: 2, oos_completed: 0, oos_missing: 20, oos_incomparable: 0,
+      slots: evaluationSlots(2),
       incumbent_metrics: null, challenger_metrics: null,
       comparisons: [
         { key: "hold_current", data_state: "READY", reason_code: "CASH_HOLD_CURRENT" },

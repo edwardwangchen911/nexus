@@ -28,6 +28,8 @@ from nexus.api.schemas.paper import (
     AgentVersionEvaluationResponse,
     AgentVersionGateResponse,
     AgentVersionLaneMetricsResponse,
+    AgentVersionSlotLaneResponse,
+    AgentVersionSlotResponse,
     PaperAttributionResponse,
     PaperComparisonResponse,
     PaperComparisonRowResponse,
@@ -311,6 +313,84 @@ class PaperReadService:
         )
         train_completed = sum(pair.phase == "train" for pair in pairs)
         oos_completed = sum(pair.phase == "oos" for pair in pairs)
+        registered_slots = tuple(evaluation.train_slots) + tuple(evaluation.oos_slots)
+        cycles = tuple(
+            await self._session.scalars(
+                select(AgentPaperCycleRecord).where(
+                    AgentPaperCycleRecord.account_id.in_(
+                        (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+                    ),
+                    AgentPaperCycleRecord.decision_slot_at.in_(registered_slots),
+                    AgentPaperCycleRecord.created_at <= self._request_time,
+                )
+            )
+        )
+        cycle_by_lane_slot = {(cycle.account_id, cycle.decision_slot_at): cycle for cycle in cycles}
+        cycle_ids = tuple(cycle.id for cycle in cycles)
+        cycle_events = (
+            tuple(
+                await self._session.scalars(
+                    select(AgentPaperCycleEventRecord)
+                    .where(
+                        AgentPaperCycleEventRecord.cycle_id.in_(cycle_ids),
+                        AgentPaperCycleEventRecord.occurred_at <= self._request_time,
+                        AgentPaperCycleEventRecord.created_at <= self._request_time,
+                    )
+                    .order_by(
+                        AgentPaperCycleEventRecord.cycle_id,
+                        AgentPaperCycleEventRecord.sequence,
+                    )
+                )
+            )
+            if cycle_ids
+            else ()
+        )
+        latest_event_by_cycle = {event.cycle_id: event for event in cycle_events}
+        pair_by_slot = {pair.decision_slot_at: pair for pair in pairs}
+
+        def lane(account_id: UUID, slot: datetime) -> AgentVersionSlotLaneResponse:
+            cycle = cycle_by_lane_slot.get((account_id, slot))
+            event = None if cycle is None else latest_event_by_cycle.get(cycle.id)
+            if cycle is None or event is None:
+                return AgentVersionSlotLaneResponse(status="pending", result_code=None)
+            return AgentVersionSlotLaneResponse(
+                status=cast(Any, event.to_status),
+                result_code=event.result_code,
+            )
+
+        slots: list[AgentVersionSlotResponse] = []
+        for index, slot in enumerate(registered_slots):
+            incumbent = lane(evaluation.incumbent_account_id, slot)
+            challenger = lane(evaluation.challenger_account_id, slot)
+            pair = pair_by_slot.get(slot)
+            if pair is not None:
+                slot_status = "paired"
+                reason_code = "PAIR_RECORDED"
+            elif incumbent.status != "pending" and challenger.status != "pending":
+                slot_status = "running"
+                reason_code = "PAIR_PENDING"
+            elif incumbent.status != "pending" or challenger.status != "pending":
+                slot_status = "attention"
+                reason_code = "PAIR_LANE_MISSING"
+            elif slot > self._request_time:
+                slot_status = "scheduled"
+                reason_code = "REGISTERED_SLOT_SCHEDULED"
+            elif self._request_time <= slot + timedelta(seconds=60):
+                slot_status = "due"
+                reason_code = "REGISTERED_SLOT_DUE"
+            else:
+                slot_status = "attention"
+                reason_code = "REGISTERED_SLOT_CYCLES_MISSING"
+            slots.append(
+                AgentVersionSlotResponse(
+                    phase="train" if index < len(evaluation.train_slots) else "oos",
+                    decision_slot_at=slot,
+                    status=cast(Any, slot_status),
+                    incumbent=incumbent,
+                    challenger=challenger,
+                    reason_code=reason_code,
+                )
+            )
         incumbent_metrics = await self._agent_version_lane_metrics(
             account_id=evaluation.incumbent_account_id,
             window_start=evaluation.train_slots[0],
@@ -353,6 +433,7 @@ class PaperReadService:
             oos_completed=oos_completed,
             oos_missing=20 - oos_completed,
             oos_incomparable=0,
+            slots=tuple(slots),
             incumbent_metrics=incumbent_metrics,
             challenger_metrics=challenger_metrics,
             comparisons=comparisons,

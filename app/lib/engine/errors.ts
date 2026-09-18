@@ -861,6 +861,7 @@ function agentVersionEvaluationValid(value: unknown): boolean {
     || Number(value.oos_completed) < 0 || Number(value.oos_completed) > 20
     || Number(value.oos_missing) < 0 || Number(value.oos_incomparable) < 0
     || Number(value.oos_completed) + Number(value.oos_missing) + Number(value.oos_incomparable) !== 20
+    || !agentVersionSlotsValid(value.slots, Number(value.train_completed), Number(value.oos_completed))
     || !Array.isArray(value.comparisons)
     || value.comparisons.map((row) => isPlain(row) ? row.key : null).join(":") !== "hold_current:baseline_v1:market_benchmark"
     || !Array.isArray(value.gates)) return false;
@@ -878,6 +879,32 @@ function agentVersionEvaluationValid(value: unknown): boolean {
   if (value.status === "FAIL") return value.gates.some((gate) => isPlain(gate) && gate.status === "FAIL");
   return value.status === "UNKNOWN"
     && value.gates.some((gate) => isPlain(gate) && gate.status === "UNKNOWN");
+}
+
+function agentVersionSlotsValid(value: unknown, trainCompleted: number, oosCompleted: number): boolean {
+  if (!Array.isArray(value) || value.length !== 24) return false;
+  let previous = Number.NEGATIVE_INFINITY;
+  let trainPairs = 0;
+  let oosPairs = 0;
+  for (const [index, slot] of value.entries()) {
+    if (!isPlain(slot) || slot.phase !== (index < 4 ? "train" : "oos")
+      || typeof slot.decision_slot_at !== "string" || typeof slot.reason_code !== "string"
+      || !["scheduled", "due", "running", "paired", "attention"].includes(String(slot.status))
+      || !agentVersionLaneValid(slot.incumbent) || !agentVersionLaneValid(slot.challenger)) return false;
+    const timestamp = Date.parse(slot.decision_slot_at);
+    if (!Number.isFinite(timestamp) || timestamp <= previous) return false;
+    previous = timestamp;
+    if (slot.status === "paired") {
+      if (index < 4) trainPairs += 1;
+      else oosPairs += 1;
+    }
+  }
+  return trainPairs === trainCompleted && oosPairs === oosCompleted;
+}
+
+function agentVersionLaneValid(value: unknown): boolean {
+  if (!isPlain(value) || !["pending", "prepared", "researching", "decision_recorded", "risk_evaluated", "awaiting_market", "partially_filled", "completed", "unavailable", "failed"].includes(String(value.status))) return false;
+  return value.status === "pending" ? value.result_code === null : typeof value.result_code === "string" && value.result_code.length > 0;
 }
 
 function agentPaperVersionHistoryValid(observation: unknown, history: unknown): boolean {

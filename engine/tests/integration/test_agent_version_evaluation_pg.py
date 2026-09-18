@@ -509,7 +509,7 @@ async def test_registered_evaluation_projects_as_locked_read_only_fact(
                 idempotency_key="register-readback-v1",
                 now=NOW,
             )
-        request_time = _request(prompt_id, model_id).oos_slots[-1] + timedelta(days=1)
+        request_time = NOW
         async with factory() as session:
             visible_accounts = (
                 await session.execute(
@@ -534,6 +534,14 @@ async def test_registered_evaluation_projects_as_locked_read_only_fact(
         assert evaluation.train_completed == 0
         assert evaluation.oos_completed == 0
         assert evaluation.oos_missing == 20
+        assert len(evaluation.slots) == 24
+        assert tuple(slot.phase for slot in evaluation.slots[:4]) == ("train",) * 4
+        assert tuple(slot.phase for slot in evaluation.slots[4:]) == ("oos",) * 20
+        assert all(slot.status == "scheduled" for slot in evaluation.slots)
+        assert all(slot.incumbent.status == "pending" for slot in evaluation.slots)
+        assert all(slot.challenger.status == "pending" for slot in evaluation.slots)
+        assert evaluation.slots[0].decision_slot_at == _request(prompt_id, model_id).train_slots[0]
+        assert evaluation.slots[0].reason_code == "REGISTERED_SLOT_SCHEDULED"
         assert tuple(row.key for row in evaluation.comparisons) == (
             "hold_current",
             "baseline_v1",
@@ -556,6 +564,8 @@ async def test_registered_evaluation_projects_as_locked_read_only_fact(
         api_evaluation = response.json()["data"]["version_evaluation"]
         assert api_evaluation["evaluation_id"] == str(registration.evaluation_id)
         assert api_evaluation["status"] == "observing"
+        assert len(api_evaluation["slots"]) == 24
+        assert api_evaluation["slots"][0]["status"] == "scheduled"
         assert api_evaluation["execution_locked"] is True
         assert api_evaluation["broker_write"] is False
         assert api_evaluation["live_write"] is False
@@ -671,9 +681,7 @@ async def test_metric_facts_use_one_official_close_per_oos_session(
                 session,
                 evaluation=evaluation,
             )
-            closes = tuple(
-                datetime.combine(day, time(20, tzinfo=UTC)) for day in OOS_DATES
-            )
+            closes = tuple(datetime.combine(day, time(20, tzinfo=UTC)) for day in OOS_DATES)
             monkeypatch.setattr(
                 "nexus.paper.performance.func",
                 type(

@@ -18,6 +18,17 @@ const states: Array<[DataStateKind, string]> = [
   ["forbidden", "无权访问"],
 ];
 
+function evaluationSlots(paired = 0): Array<Record<string, unknown>> {
+  return Array.from({ length: 24 }, (_, index) => ({
+    phase: index < 4 ? "train" : "oos",
+    decision_slot_at: new Date(Date.UTC(2026, 8, 18 + index, 14, 5)).toISOString(),
+    status: index < paired ? "paired" : "scheduled",
+    incumbent: { status: index < paired ? "completed" : "pending", result_code: index < paired ? "NO_ORDER_REQUIRED" : null },
+    challenger: { status: index < paired ? "completed" : "pending", result_code: index < paired ? "NO_ORDER_REQUIRED" : null },
+    reason_code: index < paired ? "PAIR_RECORDED" : "REGISTERED_SLOT_SCHEDULED",
+  }));
+}
+
 describe("internal paper page", () => {
   it("renders a read-only paired Agent version evaluation with all write paths closed", () => {
     render(<AgentVersionEvaluation evaluation={{
@@ -26,6 +37,14 @@ describe("internal paper page", () => {
       incumbent_prompt_hash: "a".repeat(64), incumbent_model_hash: "b".repeat(64),
       challenger_prompt_hash: "c".repeat(64), challenger_model_hash: "d".repeat(64),
       train_completed: 2, oos_completed: 0, oos_missing: 20, oos_incomparable: 0,
+      slots: Array.from({ length: 24 }, (_, index) => ({
+        phase: index < 4 ? "train" as const : "oos" as const,
+        decision_slot_at: new Date(Date.UTC(2026, 8, 18 + index, 14, 5)).toISOString(),
+        status: index < 2 ? "paired" as const : "scheduled" as const,
+        incumbent: { status: index < 2 ? "completed" as const : "pending" as const, result_code: index < 2 ? "NO_ORDER_REQUIRED" : null },
+        challenger: { status: index < 2 ? "completed" as const : "pending" as const, result_code: index < 2 ? "NO_ORDER_REQUIRED" : null },
+        reason_code: index < 2 ? "PAIR_RECORDED" : "REGISTERED_SLOT_SCHEDULED",
+      })),
       incumbent_metrics: null, challenger_metrics: null,
       comparisons: [
         { key: "hold_current", data_state: "READY", reason_code: "CASH_HOLD_CURRENT" },
@@ -38,6 +57,10 @@ describe("internal paper page", () => {
 
     const region = screen.getByRole("region", { name: "Agent 版本并行评价" });
     expect(region).toHaveTextContent("训练槽2 / 4 已配对");
+    expect(region).toHaveTextContent("评价运行时间线");
+    expect(region).toHaveTextContent("训练 1");
+    expect(region).toHaveTextContent("已配对");
+    expect(region).toHaveTextContent("等待登记时间");
     expect(region).toHaveTextContent("执行锁定 · 券商写入关闭 · 实盘写入关闭");
     expect(region).toHaveTextContent("尚未终结，不展示推测性门禁结果");
     expect(within(region).queryByRole("button")).not.toBeInTheDocument();
@@ -206,6 +229,7 @@ describe("internal paper page", () => {
           incumbent_prompt_hash: "a".repeat(64), incumbent_model_hash: "b".repeat(64),
           challenger_prompt_hash: "c".repeat(64), challenger_model_hash: "d".repeat(64),
           train_completed: 0, oos_completed: 0, oos_missing: 19, oos_incomparable: 0,
+          slots: evaluationSlots(),
           incumbent_metrics: null, challenger_metrics: null,
           comparisons: [
             { key: "hold_current", data_state: "READY", reason_code: "READY" },

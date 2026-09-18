@@ -404,6 +404,37 @@ class AgentVersionGateResponse(_StrictSchema):
     reason_code: str = Field(min_length=1, max_length=100)
 
 
+class AgentVersionSlotLaneResponse(_StrictSchema):
+    status: Literal[
+        "pending",
+        "prepared",
+        "researching",
+        "decision_recorded",
+        "risk_evaluated",
+        "awaiting_market",
+        "partially_filled",
+        "completed",
+        "unavailable",
+        "failed",
+    ]
+    result_code: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def _result_matches_status(self) -> AgentVersionSlotLaneResponse:
+        if (self.status == "pending") != (self.result_code is None):
+            raise ValueError("pending Agent version lane cannot expose a result")
+        return self
+
+
+class AgentVersionSlotResponse(_StrictSchema):
+    phase: Literal["train", "oos"]
+    decision_slot_at: AwareDatetime
+    status: Literal["scheduled", "due", "running", "paired", "attention"]
+    incumbent: AgentVersionSlotLaneResponse
+    challenger: AgentVersionSlotLaneResponse
+    reason_code: str = Field(min_length=1, max_length=100)
+
+
 class AgentVersionEvaluationResponse(_StrictSchema):
     evaluation_id: UUID
     status: Literal["observing", "PASS", "FAIL", "UNKNOWN"]
@@ -415,6 +446,7 @@ class AgentVersionEvaluationResponse(_StrictSchema):
     oos_completed: int = Field(ge=0, le=20)
     oos_missing: int = Field(ge=0, le=20)
     oos_incomparable: int = Field(ge=0, le=20)
+    slots: tuple[AgentVersionSlotResponse, ...] = Field(min_length=24, max_length=24)
     incumbent_metrics: AgentVersionLaneMetricsResponse | None
     challenger_metrics: AgentVersionLaneMetricsResponse | None
     comparisons: tuple[AgentVersionComparisonResponse, ...] = Field(min_length=3, max_length=3)
@@ -434,6 +466,19 @@ class AgentVersionEvaluationResponse(_StrictSchema):
             "market_benchmark",
         ):
             raise ValueError("Agent version comparisons must use the fixed order")
+        if tuple(slot.phase for slot in self.slots) != ("train",) * 4 + ("oos",) * 20:
+            raise ValueError("Agent version slots must use the fixed phase order")
+        if any(
+            left.decision_slot_at >= right.decision_slot_at
+            for left, right in zip(self.slots, self.slots[1:], strict=False)
+        ):
+            raise ValueError("Agent version slots must be strictly ordered")
+        if self.train_completed != sum(
+            slot.phase == "train" and slot.status == "paired" for slot in self.slots
+        ) or self.oos_completed != sum(
+            slot.phase == "oos" and slot.status == "paired" for slot in self.slots
+        ):
+            raise ValueError("Agent version slot states must match pair counts")
         if self.status == "observing" and self.gates:
             raise ValueError("observing Agent version evaluation cannot expose final gates")
         if self.status != "observing" and not self.gates:

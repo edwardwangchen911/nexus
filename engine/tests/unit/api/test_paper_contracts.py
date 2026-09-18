@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -71,6 +72,18 @@ def test_agent_version_evaluation_rejects_inconsistent_counts_and_pass() -> None
         "oos_completed": 0,
         "oos_missing": 20,
         "oos_incomparable": 0,
+        "slots": tuple(
+            {
+                "phase": "train" if index < 4 else "oos",
+                "decision_slot_at": datetime(2026, 9, 18, 14, 5, tzinfo=UTC)
+                + timedelta(minutes=15 * index),
+                "status": "scheduled",
+                "incumbent": {"status": "pending", "result_code": None},
+                "challenger": {"status": "pending", "result_code": None},
+                "reason_code": "REGISTERED_SLOT_SCHEDULED",
+            }
+            for index in range(24)
+        ),
         "incumbent_metrics": None,
         "challenger_metrics": None,
         "comparisons": (
@@ -155,6 +168,8 @@ def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_cre
     evaluation_schema = AgentVersionEvaluationResponse.model_json_schema()
     assert evaluation_schema["properties"]["comparisons"]["maxItems"] == 3
     assert evaluation_schema["properties"]["gates"]["maxItems"] == 12
+    assert evaluation_schema["properties"]["slots"]["minItems"] == 24
+    assert evaluation_schema["properties"]["slots"]["maxItems"] == 24
     evaluation_wire = str(evaluation_schema).lower()
     assert "account_id" not in evaluation_wire
     assert "prompt_content" not in evaluation_wire
