@@ -295,6 +295,7 @@ async def test_bounded_batch_capture_requires_quote_for_every_symbol(
                         repo_root=tmp_path,
                         client=client,
                         bindings=bindings,
+                        max_instruments=5,
                         capture=capture,
                     )
                 assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
@@ -306,6 +307,7 @@ async def test_bounded_batch_capture_requires_quote_for_every_symbol(
                     repo_root=tmp_path,
                     client=client,
                     bindings=bindings,
+                    max_instruments=5,
                     capture=capture,
                 )
                 assert set(result.quote_ids) == {"AAPL", "MSFT"}
@@ -316,6 +318,77 @@ async def test_bounded_batch_capture_requires_quote_for_every_symbol(
         ] == [("LOGIN", None), ("SUBS", "AAPL,MSFT")]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("binding_count", "max_instruments", "error_code"),
+    [
+        (6, 5, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (11, 10, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (31, 30, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (1, 31, "AGENT_PAPER_PROVIDER_CAPACITY_INVALID"),
+    ],
+)
+async def test_schwab_batch_rejects_capacity_before_capture(
+    tmp_path,
+    binding_count,
+    max_instruments,
+    error_code,
+):
+    from nexus.ops import schwab_market_stream as stream
+
+    captures = 0
+
+    async def forbidden_capture(*_args, **_kwargs):
+        nonlocal captures
+        captures += 1
+        raise AssertionError("provider capture must not start")
+
+    bindings = {f"T{index}": UUID(int=index + 1) for index in range(binding_count)}
+    with pytest.raises(stream.ProviderMarketStreamError, match=f"^{error_code}$"):
+        await stream.capture_and_import_schwab_level_one_batch(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            repo_root=tmp_path,
+            client=object(),  # type: ignore[arg-type]
+            bindings=bindings,
+            max_instruments=max_instruments,
+            capture=forbidden_capture,
+        )
+
+    assert captures == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_instruments", [5, 10, 30])
+async def test_schwab_batch_dispatches_once_at_configured_capacity(
+    tmp_path, max_instruments
+):
+    from nexus.ops import schwab_market_stream as stream
+
+    captures = 0
+
+    async def incomplete_capture(*_args, **_kwargs):
+        nonlocal captures
+        captures += 1
+        return {"status": "incomplete"}
+
+    bindings = {f"T{index:02d}": UUID(int=index + 1) for index in range(max_instruments)}
+    with pytest.raises(
+        stream.ProviderMarketStreamError, match="^PROVIDER_MARKET_STREAM_INCOMPLETE$"
+    ):
+        await stream.capture_and_import_schwab_level_one_batch(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            repo_root=tmp_path,
+            client=object(),  # type: ignore[arg-type]
+            bindings=bindings,
+            max_instruments=max_instruments,
+            capture=incomplete_capture,
+        )
+
+    assert captures == 1
 
 
 async def _seed_two_candidate_authority(
@@ -942,10 +1015,15 @@ def test_service_status_reads_one_heartbeat_without_producers_or_business_writes
 portfolio_slot = datetime(2026, 8, 26, 14, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    "failure_code",
+    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
+)
 def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    failure_code: str,
 ) -> None:
     current = portfolio_slot
     elapsed = 0.0
@@ -993,7 +1071,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
             next_decision_window_start_at=current.replace(hour=14, minute=0, second=0)
             + timedelta(days=1),
             trigger_attempt_slot_at=failed_slot,
-            trigger_failure_code=("SCHWAB_L1_INCOMPLETE" if failed_slot else None),
+            trigger_failure_code=(failure_code if failed_slot else None),
         )
 
     async def ready(*_args, **_kwargs) -> str:
@@ -1005,7 +1083,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
         trigger_slots.append(slot)
         if len(trigger_slots) == 1:
             failed_slot = slot
-            raise ValueError("SCHWAB_L1_INCOMPLETE")
+            raise ValueError(failure_code)
         completed = True
         return request
 
@@ -1014,7 +1092,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
     ) -> str | None:
         assert account_id == UUID(int=1)
         assert decision_slot_at == failed_slot
-        return "SCHWAB_L1_INCOMPLETE"
+        return failure_code
 
     async def candidates(*_args, **_kwargs):
         return (
@@ -3461,9 +3539,10 @@ async def test_cycle_loader_rejects_authority_switch(
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
         "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
     ],
 )
-async def test_trigger_once_persists_and_replays_calendar_failure(
+async def test_trigger_once_persists_and_replays_safe_terminal_failure(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     failure_code: str,
@@ -3609,9 +3688,14 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_code",
+    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
+)
 async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
     fixed_now = datetime(2026, 8, 26, 20, 0, 30, tzinfo=UTC)
@@ -3629,7 +3713,7 @@ async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
                     schema_version="agent_paper_schwab_trigger_v2",
                     response_payload={
                         "outcome": "failed",
-                        "error_code": "SCHWAB_L1_INCOMPLETE",
+                        "error_code": failure_code,
                     },
                 )
             )
@@ -3647,7 +3731,7 @@ async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
         await engine.dispose()
 
     assert snapshot.trigger_attempt_slot_at == slot
-    assert snapshot.trigger_failure_code == "SCHWAB_L1_INCOMPLETE"
+    assert snapshot.trigger_failure_code == failure_code
 
 
 @pytest.mark.asyncio
@@ -3656,6 +3740,7 @@ async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
     [
         {},
         {"outcome": "failed", "error_code": "UNRECOGNIZED"},
+        {"outcome": "failed", "error_code": "AGENT_PAPER_PROVIDER_CAPACITY_INVALID"},
         {"outcome": "failed"},
     ],
 )

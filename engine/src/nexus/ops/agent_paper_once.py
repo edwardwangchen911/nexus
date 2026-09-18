@@ -636,6 +636,7 @@ async def prepare_schwab_decision_authority(
                 RiskCandidate(symbol=item.symbol, instrument_id=item.instrument_id)
                 for item in execution_identities
             ),
+            max_instruments=settings.intraday_max_symbols,
             decision_session=decision_session,
             key_id=settings.alpaca_key,
             secret=settings.alpaca_secret,
@@ -652,6 +653,7 @@ async def prepare_schwab_decision_authority(
             repo_root=repo_root,
             client=client,
             bindings={item.symbol: item.instrument_id for item in execution_identities},
+            max_instruments=settings.intraday_max_symbols,
             process_environment=process_environment,
         )
     except (

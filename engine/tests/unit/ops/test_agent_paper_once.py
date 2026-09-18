@@ -275,9 +275,11 @@ def test_non_internal_account_emits_stable_boundary_code(
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
         "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
     ],
 )
-def test_trigger_command_exposes_persisted_calendar_failure_codes(
+def test_trigger_command_exposes_safe_failure_codes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     error_code: str,
@@ -680,11 +682,15 @@ def test_trigger_and_resume_requests_exclude_client_time_symbol_and_provider() -
             )
 
 
-@pytest.mark.parametrize("two_candidates", [False, True])
+@pytest.mark.parametrize(
+    ("two_candidates", "max_symbols"),
+    [(False, 12), (True, 12), (True, 2)],
+)
 def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     two_candidates: bool,
+    max_symbols: int,
 ) -> None:
     account_id = UUID(int=1)
     portfolio_id = UUID(int=2)
@@ -786,6 +792,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         )
 
     async def risk(**_kwargs):
+        assert _kwargs["max_instruments"] == max_symbols
         assert {
             item.symbol: item.instrument_id for item in _kwargs["candidates"]
         } == execution_bindings
@@ -799,6 +806,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         }
 
     async def level_one(*_args, **_kwargs):
+        assert _kwargs["max_instruments"] == max_symbols
         assert _kwargs["bindings"] == execution_bindings
         assert _kwargs["process_environment"] == {"NEXUS_SCHWAB_APP_KEY": "registered-key"}
         events.append("level-one")
@@ -819,7 +827,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         assert kwargs["decision_slot_at"] == initial
         assert kwargs["requested_instrument_ids"] == tuple(bindings.values())
         assert kwargs["candidate_batch_id"] == UUID(int=20)
-        assert kwargs["execution_scope_max_symbols"] == 12
+        assert kwargs["execution_scope_max_symbols"] == max_symbols
         events.append("cycle-job")
         return AgentPaperCycleResult(
             cycle_id=cycle_id,
@@ -884,20 +892,44 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
         alpaca_key=SecretStr("key"),
         alpaca_secret=SecretStr("secret"),
-        intraday_max_symbols=12,
+        intraday_max_symbols=max_symbols,
     )
+
+    request = AgentPaperTriggerRequest(
+        candidate_batch_id=UUID(int=20),
+        action="trigger",
+        account_id=account_id,
+        idempotency_key="trigger-1",
+    )
+    if max_symbols < len(execution_bindings):
+        with pytest.raises(ValueError, match="^AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED$"):
+            asyncio.run(
+                trigger_in_session(
+                    Session(),
+                    object(),
+                    settings,
+                    request,
+                    reservation=reservation,
+                    repo_root=tmp_path,
+                    client=object(),
+                    process_environment={"NEXUS_SCHWAB_APP_KEY": "registered-key"},
+                )
+            )
+        assert events == [
+            "clock-1",
+            "select-calendar",
+            "service-calendar",
+            "root",
+            "clock-2",
+        ]
+        return
 
     result = asyncio.run(
         trigger_in_session(
             Session(),
             object(),
             settings,
-            AgentPaperTriggerRequest(
-                candidate_batch_id=UUID(int=20),
-                action="trigger",
-                account_id=account_id,
-                idempotency_key="trigger-1",
-            ),
+            request,
             reservation=reservation,
             repo_root=tmp_path,
             client=object(),

@@ -3014,6 +3014,8 @@ def test_loop_command_exposes_only_safe_stop_reasons(
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
@@ -4609,6 +4611,33 @@ def test_trigger_failure_snapshot_requires_complete_known_identity(changes):
     assert loop.choose_loop_action(snapshot(**changes)) == A.STOP_RESULT_UNKNOWN
 
 
+def test_capacity_exceeded_is_terminal_for_current_slot_and_allows_future_slot() -> None:
+    current = snapshot(
+        trigger_attempt_slot_at=SLOT,
+        trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+    )
+    future = snapshot(
+        now=NOW + timedelta(days=1),
+        trigger_attempt_slot_at=SLOT,
+        trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+    )
+
+    assert loop.choose_loop_action(current) == A.WAIT_FOR_SLOT
+    assert loop.choose_loop_action(future) == A.TRIGGER
+
+
+def test_capacity_invalid_is_not_a_persisted_terminal_slot() -> None:
+    assert (
+        loop.choose_loop_action(
+            snapshot(
+                trigger_attempt_slot_at=SLOT,
+                trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
+            )
+        )
+        == A.STOP_RESULT_UNKNOWN
+    )
+
+
 @pytest.mark.parametrize("at", [NOW, NOW + timedelta(days=1)])
 def test_policy_unconfirmed_keeps_host_waiting_across_slots(at):
     state = snapshot(
@@ -4889,8 +4918,13 @@ def test_evaluation_closes_exactly_when_prior_daily_preparation_is_unavailable(
     assert closed == ["PAIR_PRIOR_DAILY_UNAVAILABLE"]
 
 
+@pytest.mark.parametrize(
+    "failure_code",
+    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
+)
 def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
     monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
 ) -> None:
     monkeypatch.setattr(
         loop,
@@ -4906,13 +4940,13 @@ def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
         return "ready"
 
     async def fail_known(*_args, **_kwargs):
-        raise ValueError("SCHWAB_L1_INCOMPLETE")
+        raise ValueError(failure_code)
 
     async def persisted_failure(database_url, *, account_id, decision_slot_at):
         assert database_url == loop.EngineSettings().database_url
         assert account_id == UUID(int=1)
         assert decision_slot_at == SLOT
-        return "SCHWAB_L1_INCOMPLETE"
+        return failure_code
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
     monkeypatch.setattr(loop, "prepare_macro_once", ready)

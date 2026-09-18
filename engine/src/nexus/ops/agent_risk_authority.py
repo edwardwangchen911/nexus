@@ -35,7 +35,10 @@ from nexus.providers.corporate_actions.alpaca_http import CorporateActionsReques
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.news import validate_symbol
 from nexus.research.alpaca_actions_archive import load_action_collection
-from nexus.risk.authority import canonical_query_authority_hash
+from nexus.risk.authority import (
+    canonical_query_authority_hash,
+    require_schwab_execution_scope_capacity,
+)
 from nexus.risk.query_authority_producer import (
     RiskSourceProof,
     inspect_query_authority_scope,
@@ -71,6 +74,7 @@ class _SharedNasdaqSources:
 async def collect_source_proofs_batch(
     *,
     candidates: tuple[RiskCandidate, ...],
+    max_instruments: int = 5,
     decision_session: date,
     key_id: SecretStr,
     secret: SecretStr,
@@ -78,9 +82,12 @@ async def collect_source_proofs_batch(
     cutoff_at: datetime | None,
 ) -> dict[UUID, tuple[RiskSourceProof, ...]]:
     """Collect shared Nasdaq bytes once and bounded actions for each exact candidate."""
+    require_schwab_execution_scope_capacity(
+        tuple(candidate.instrument_id for candidate in candidates),
+        max_instruments=max_instruments,
+    )
     if (
-        not 1 <= len(candidates) <= 5
-        or len({c.instrument_id for c in candidates}) != len(candidates)
+        len({c.instrument_id for c in candidates}) != len(candidates)
         or len({c.symbol for c in candidates}) != len(candidates)
     ):
         raise ValueError("AGENT_RISK_CANDIDATE_INVALID")

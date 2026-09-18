@@ -69,6 +69,7 @@ from nexus.providers.market.snapshot_contracts import (
     SnapshotTrade,
 )
 from nexus.providers.news import validate_symbol
+from nexus.risk.authority import require_schwab_execution_scope_capacity
 from nexus.settings import EngineSettings
 
 SCHEMA = "nexus_provider_market_stream_receipt_v1"
@@ -397,14 +398,20 @@ async def capture_and_import_schwab_level_one_batch(
     repo_root: Path,
     client: httpx.AsyncClient,
     bindings: Mapping[str, UUID],
+    max_instruments: int = 5,
     checked_at: datetime | None = None,
     capture: Callable[..., Awaitable[dict[str, Any]]] = run_schwab_stream,
     process_environment: Mapping[str, str] | None = None,
 ) -> SchwabMarketStreamImportResult:
     """Freeze one capture only after every explicitly bound candidate has a fresh quote."""
+    try:
+        require_schwab_execution_scope_capacity(
+            tuple(bindings.values()), max_instruments=max_instruments
+        )
+    except ValueError as error:
+        raise ProviderMarketStreamError(str(error)) from None
     if (
-        not 1 <= len(bindings) <= 5
-        or any(not isinstance(value, UUID) for value in bindings.values())
+        any(not isinstance(value, UUID) for value in bindings.values())
         or len(set(bindings.values())) != len(bindings)
     ):
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")

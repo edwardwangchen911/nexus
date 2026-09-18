@@ -356,6 +356,7 @@ def test_batch_fetches_shared_nasdaq_once_and_actions_once_per_instrument(tmp_pa
     proofs = asyncio.run(
         cli.collect_source_proofs_batch(
             candidates=candidates,
+            max_instruments=5,
             decision_session=decision_session,
             key_id=SecretStr("synthetic-key"),
             secret=SecretStr("synthetic-secret"),
@@ -379,3 +380,89 @@ def test_batch_fetches_shared_nasdaq_once_and_actions_once_per_instrument(tmp_pa
     assert sorted(
         r.url.params["symbols"] for r in requested if r.url.host == "data.alpaca.markets"
     ) == ["AAPL", "MSFT"]
+
+
+@pytest.mark.parametrize("max_instruments", [5, 10, 30])
+def test_batch_dispatches_once_at_configured_capacity(
+    tmp_path, monkeypatch, max_instruments
+):
+    published = datetime.now(UTC) - timedelta(seconds=5)
+    decision_session = published.astimezone(ZoneInfo("America/New_York")).date()
+    _, halt, directory = _responses(published)
+    requested = []
+
+    async def respond(request):
+        requested.append(request)
+        if request.url.host == "data.alpaca.markets":
+            return httpx.Response(200, json={"corporate_actions": {}, "next_page_token": None})
+        return httpx.Response(200, content=halt if request.url.path == "/rss.aspx" else directory)
+
+    original = httpx.AsyncClient
+
+    def client(**kwargs):
+        return original(**kwargs, transport=httpx.MockTransport(respond))
+
+    monkeypatch.setattr(cli.httpx, "AsyncClient", client)
+    candidates = tuple(
+        cli.RiskCandidate(f"T{index:02d}", UUID(int=index + 1))
+        for index in range(max_instruments)
+    )
+    proofs = asyncio.run(
+        cli.collect_source_proofs_batch(
+            candidates=candidates,
+            max_instruments=max_instruments,
+            decision_session=decision_session,
+            key_id=SecretStr("synthetic-key"),
+            secret=SecretStr("synthetic-secret"),
+            output_dir=tmp_path / f"capacity-{max_instruments}",
+            cutoff_at=None,
+        )
+    )
+
+    assert len(proofs) == max_instruments
+    assert [r.url.path for r in requested].count("/dynamic/SymDir/nasdaqlisted.txt") == 1
+    assert [r.url.path for r in requested].count("/rss.aspx") == 1
+    assert sum(r.url.host == "data.alpaca.markets" for r in requested) == max_instruments
+
+
+@pytest.mark.parametrize(
+    ("candidate_count", "max_instruments", "error_code"),
+    [
+        (6, 5, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (1, 31, "AGENT_PAPER_PROVIDER_CAPACITY_INVALID"),
+    ],
+)
+def test_batch_rejects_provider_capacity_before_any_source_dispatch(
+    tmp_path,
+    monkeypatch,
+    candidate_count,
+    max_instruments,
+    error_code,
+):
+    dispatched = 0
+
+    def forbidden_client(**_kwargs):
+        nonlocal dispatched
+        dispatched += 1
+        raise AssertionError("source dispatch must not start")
+
+    monkeypatch.setattr(cli.httpx, "AsyncClient", forbidden_client)
+    candidates = tuple(
+        cli.RiskCandidate(f"T{index}", UUID(int=index + 1))
+        for index in range(candidate_count)
+    )
+
+    with pytest.raises(ValueError, match=f"^{error_code}$"):
+        asyncio.run(
+            cli.collect_source_proofs_batch(
+                candidates=candidates,
+                max_instruments=max_instruments,
+                decision_session=date(2026, 9, 19),
+                key_id=SecretStr("synthetic-key"),
+                secret=SecretStr("synthetic-secret"),
+                output_dir=tmp_path / "capacity",
+                cutoff_at=None,
+            )
+        )
+
+    assert dispatched == 0

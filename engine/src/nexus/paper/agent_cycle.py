@@ -112,7 +112,6 @@ _TRIGGER_FAILURE_CODES = frozenset(
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
         "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
-        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
@@ -723,6 +722,8 @@ async def _start_cycle(
             )
         except ValueError as error:
             code = str(error)
+            if code == "AGENT_PAPER_PROVIDER_CAPACITY_INVALID":
+                raise
             await _append_event(
                 session,
                 cycle,
@@ -730,11 +731,7 @@ async def _start_cycle(
                 "unavailable",
                 (
                     code
-                    if code
-                    in {
-                        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
-                        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
-                    }
+                    if code == "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"
                     else "RISK_INPUT_REQUIRED"
                 ),
                 {},

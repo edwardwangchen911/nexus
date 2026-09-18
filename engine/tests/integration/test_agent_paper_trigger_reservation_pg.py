@@ -149,6 +149,43 @@ async def test_failed_trigger_reservation_replays_safe_error(
 
 
 @pytest.mark.asyncio
+async def test_invalid_provider_capacity_cannot_be_sealed_as_terminal_failure(
+    migrated_database_url: str,
+) -> None:
+    seed = await _seed_trigger(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    now = datetime(2026, 9, 18, 14, 1, tzinfo=UTC)
+    try:
+        async with sessions.begin() as session:
+            reservation = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                session,
+                account_id=seed.account_id,
+                candidate_batch_id=seed.batch_id,
+                client_idempotency_key="invalid-capacity",
+                now=now,
+            )
+            with pytest.raises(ValueError, match="^AGENT_PAPER_REQUEST_INVALID$"):
+                await agent_cycle.finish_schwab_agent_paper_trigger(
+                    session,
+                    reservation=reservation,
+                    error_code="AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
+                )
+
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match="^AGENT_PAPER_RESULT_UNKNOWN$"):
+                await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=seed.account_id,
+                    candidate_batch_id=seed.batch_id,
+                    client_idempotency_key="invalid-capacity",
+                    now=now,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_trigger_reservation_rejects_another_key_but_allows_next_slot(
     migrated_database_url: str,
 ) -> None:
