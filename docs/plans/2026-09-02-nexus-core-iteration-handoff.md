@@ -4,6 +4,26 @@
 > `docs/plans/2026-09-12-nexus-simulation-evolution-roadmap.md`。该文档优先于本文下方
 > 历史 Shadow 阶段和本轮未提交的过程性核查记录；后续开发应从其“下一份技术方案的唯一范围”开始。
 
+## 2026-09-19 主线与组合分支集成交接
+
+- 共享 Agent Paper 运行逻辑由主线任务统一负责，冻结同步点为 `main@2fc4aca7`；
+  组合管理第一切片仍由任务 `01a09987-af26-7692-95ec-a9e9483a13d2` 负责，
+  实现分支为 `edward/portfolio-management-first-slice-implementation@f4fc10d5`，
+  共同基线为 `576eba79`。组合代码未验收，不整体合回主线。
+- 组合分支扩大 `agent_paper_loop.py`、`agent_paper_once.py`、`agent_version_runner.py`
+  或对应测试前，先语义适配主线 `54e4ecd9`、`83cdf303`、`2560ecdc`、
+  `e5fdd25b`、`05c7e0b9`、`ec29c1a6`、`a332fbba`、`2fc4aca7`；不整文件覆盖
+  组合分支已有的收盘唤醒、synthesis exactly-once/orphan 恢复与结果未知处理。
+- 必须保留的主线语义：版本评价共用一次冻结市场事实并用持久化准备声明防重；
+  宿主不因单个 terminal cycle 退出；同槽 `failed/unavailable` 不直接停宿主；
+  仅在精确同槽的 Schwab 终态失败已持久化时等待下一槽，未知或字段不成对仍 fail-closed；
+  评价快照在 pending、researching、completed 及成交阶段始终携带冻结 calendar authority。
+- 加速演练覆盖：跨槽继续、研究失败后原 Job 恢复、未知运行 Job 停止且不重放、
+  宿主重启只领取原 Job、收盘仅发布一次并跨到下一交易日、双版本不完整 pair 关闭且不创建替代事实。
+  `main@2fc4aca7` 已通过 203 个循环单测、38 个 PostgreSQL 生命周期集成测试、Ruff 和 Mypy。
+- 待办：组合负责人回报实际吸收方式、冲突文件与聚焦验证；主线继续验收
+  `01a0b599-a36e-7f1d-a332-7b264b1ac2be` 的真实 4+20 评价。本交接不授权 push、部署、迁移或交易。
+
 ## 当前迭代方向：Agent 模拟交易与策略进化（2026-09-13）
 
 本节优先于下方历史阶段的“人工接受候选后开发手动 Shadow”路线。状态为产品迭代计划，
