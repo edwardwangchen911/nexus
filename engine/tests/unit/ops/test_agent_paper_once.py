@@ -1010,6 +1010,11 @@ def test_trigger_rejects_after_bound_half_day_close_before_provider_calls(
     async def forbidden(*_args, **_kwargs):
         raise AssertionError("closed bound session must not call a provider or create a cycle")
 
+    async def batch(*_args, **_kwargs):
+        return SimpleNamespace(batch_id=None, batch_hash=None, universe_snapshot_id=UUID(int=3)), ()
+
+    monkeypatch.setattr(cli, "validate_agent_paper_candidate_batch", batch)
+
     monkeypatch.setattr(cli, "load_agent_paper_service_calendar_authority", load_calendar)
     monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", forbidden)
     monkeypatch.setattr(cli, "collect_source_proofs_batch", forbidden)

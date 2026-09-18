@@ -6,12 +6,13 @@ import json
 import re
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
@@ -19,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from nexus.jobs.models import JobType
+from nexus.jobs.models import JobType, job_input_hash
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.agent_risk_authority import RiskCandidate, collect_source_proofs_batch
 from nexus.ops.fosun_local import load_local_environment
@@ -39,6 +40,7 @@ from nexus.paper.agent_cycle import (
     start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import (
+    CycleAuthority,
     load_agent_paper_service_calendar_authority,
     load_quasi_realtime_cycle_authority,
     select_agent_paper_service_calendar_authority,
@@ -49,6 +51,8 @@ from nexus.paper.agent_market import (
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
 )
+from nexus.paper.agent_version_models import AgentVersionSlotResult
+from nexus.paper.agent_version_runner import advance_agent_version_slot
 from nexus.paper.candidate_batch import (
     CandidateBatchResult,
     CandidateInstrumentIdentity,
@@ -57,15 +61,21 @@ from nexus.paper.candidate_batch import (
     resolve_agent_paper_candidate_identities,
     validate_agent_paper_candidate_batch,
 )
+from nexus.persistence.models.agent_versions import (
+    AgentVersionCyclePairRecord,
+    AgentVersionEvaluationDecisionRecord,
+    AgentVersionEvaluationRecord,
+)
 from nexus.persistence.models.agents import AgentResearchOutputRecord
 from nexus.persistence.models.data import DataArtifact
-from nexus.persistence.models.market import LatestQuote
+from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQuote
 from nexus.persistence.models.paper import (
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
+    AgentPaperCycleRecord,
 )
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.providers.base import MarketDataProvider
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider
@@ -73,6 +83,7 @@ from nexus.providers.market.alpaca_http import AlpacaHttpTransport, SqlInstrumen
 from nexus.providers.market.schwab_oauth import SchwabOAuthError
 from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
 from nexus.providers.market.schwab_stream import SchwabStreamError
+from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.risk.query_authority_producer import (
     inspect_query_authority_scope,
     persist_query_authorities,
@@ -131,6 +142,14 @@ _SAFE_SCHWAB_CAPTURE_STOP_REASONS = _SAFE_SCHWAB_FAILURE_CODES | {
     "DISCONNECTED",
     "DURATION_LIMIT",
     "FRAME_LIMIT",
+}
+
+_AGENT_VERSION_PREPARATION_ROUTE = "agent-version-evaluation:prepare-slot"
+_AGENT_VERSION_PREPARATION_SCHEMA = "agent_version_slot_prepare_v1"
+_AGENT_VERSION_PREPARATION_FAILURES = {
+    "RISK_INPUT_REQUIRED": "PAIR_RISK_INPUT_REQUIRED",
+    "SCHWAB_L1_FRESHNESS_UNPROVEN": "PAIR_SCHWAB_L1_FRESHNESS_UNPROVEN",
+    "SCHWAB_L1_INCOMPLETE": "PAIR_SCHWAB_L1_INCOMPLETE",
 }
 
 
@@ -444,24 +463,28 @@ def _raise_schwab_l1_incomplete(error: Exception, *, diagnostic_path: Path) -> N
     raise ValueError("SCHWAB_L1_INCOMPLETE") from error
 
 
-async def trigger_in_session(
+async def prepare_schwab_decision_authority(
     session: AsyncSession,
     store: S3ProviderEvidenceStore,
     settings: AgentPaperTriggerSettings,
-    request: AgentPaperTriggerRequest,
     *,
-    reservation: AgentPaperTriggerReservation,
+    account_id: UUID,
+    decision_session: date,
+    decision_slot_at: datetime,
+    idempotency_key: str,
+    identities: tuple[CandidateInstrumentIdentity, ...],
+    expected_universe_snapshot_id: UUID | None = None,
+    initial_time: datetime | None = None,
     repo_root: Path,
     client: httpx.AsyncClient,
     expected_calendar_authority_id: UUID | None = None,
     process_environment: Mapping[str, str] | None = None,
-) -> AgentPaperCycleResult:
-    """Run one bounded provider pass, freeze DB time, and create one research Job."""
-    initial_time = await session.scalar(select(func.clock_timestamp()))
+) -> CycleAuthority:
+    """Freeze one exact shared provider pass for portfolio or registered evaluation."""
+    if initial_time is None:
+        initial_time = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(initial_time, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    decision_session = reservation.decision_session
-    decision_slot_at = reservation.decision_slot_at
 
     selected = (
         await select_agent_paper_service_calendar_authority(session, now=initial_time)
@@ -484,25 +507,20 @@ async def trigger_in_session(
     ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
 
-    batch, identities = await validate_agent_paper_candidate_batch(
-        session,
-        batch_id=request.candidate_batch_id,
-        account_id=request.account_id,
-        as_of=initial_time,
-    )
     initial_authority = await load_quasi_realtime_cycle_authority(
         session,
-        account_id=request.account_id,
+        account_id=account_id,
         now=initial_time,
         expected_calendar_authority_id=calendar_authority_id,
     )
     if initial_authority.calendar_authority_id != calendar_authority_id:
         raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
     if (
-        reservation.candidate_batch_id != batch.batch_id
-        or reservation.candidate_batch_hash != batch.batch_hash
-        or batch.universe_snapshot_id != initial_authority.universe_snapshot_id
+        expected_universe_snapshot_id is not None
+        and initial_authority.universe_snapshot_id != expected_universe_snapshot_id
     ):
+        raise ValueError("CANDIDATE_BATCH_INVALID")
+    if not identities or len(identities) > 5:
         raise ValueError("CANDIDATE_BATCH_INVALID")
     for identity in identities:
         scope = await inspect_query_authority_scope(
@@ -510,12 +528,12 @@ async def trigger_in_session(
             decision_session=decision_session,
             symbol=identity.symbol,
             as_of=initial_time,
-            universe_snapshot_id=batch.universe_snapshot_id,
+            universe_snapshot_id=initial_authority.universe_snapshot_id,
             source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
         )
         if scope.instrument_id != identity.instrument_id:
             raise ValueError("CANDIDATE_BATCH_INVALID")
-    digest = sha256(request.idempotency_key.encode()).hexdigest()[:16]
+    digest = sha256(idempotency_key.encode()).hexdigest()[:16]
     output_parent = repo_root / ".secrets" / "nexus-agent-paper"
     output_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     attempt_directory = output_parent / f"{decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}"
@@ -584,12 +602,12 @@ async def trigger_in_session(
         )
 
     try:
-        if set(proofs) != set(batch.instrument_ids):
+        if set(proofs) != {item.instrument_id for item in identities}:
             raise ValueError("RISK_INPUT_REQUIRED")
         for identity in identities:
             await persist_query_authorities(
                 session,
-                universe_snapshot_id=batch.universe_snapshot_id,
+                universe_snapshot_id=initial_authority.universe_snapshot_id,
                 decision_session=decision_session,
                 symbol=identity.symbol,
                 proofs=proofs[identity.instrument_id],
@@ -599,16 +617,61 @@ async def trigger_in_session(
         raise ValueError("RISK_INPUT_REQUIRED") from error
     authority = await load_quasi_realtime_cycle_authority(
         session,
-        account_id=request.account_id,
+        account_id=account_id,
         now=decision_time,
         expected_calendar_authority_id=calendar_authority_id,
     )
     if authority.calendar_authority_id != calendar_authority_id:
         raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
+    return authority
+
+
+async def trigger_in_session(
+    session: AsyncSession,
+    store: S3ProviderEvidenceStore,
+    settings: AgentPaperTriggerSettings,
+    request: AgentPaperTriggerRequest,
+    *,
+    reservation: AgentPaperTriggerReservation,
+    repo_root: Path,
+    client: httpx.AsyncClient,
+    expected_calendar_authority_id: UUID | None = None,
+    process_environment: Mapping[str, str] | None = None,
+) -> AgentPaperCycleResult:
+    now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(now, datetime):
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    batch, identities = await validate_agent_paper_candidate_batch(
+        session,
+        batch_id=request.candidate_batch_id,
+        account_id=request.account_id,
+        as_of=now,
+    )
+    if (
+        reservation.candidate_batch_id != batch.batch_id
+        or reservation.candidate_batch_hash != batch.batch_hash
+    ):
+        raise ValueError("CANDIDATE_BATCH_INVALID")
+    authority = await prepare_schwab_decision_authority(
+        session,
+        store,
+        settings,
+        account_id=request.account_id,
+        decision_session=reservation.decision_session,
+        decision_slot_at=reservation.decision_slot_at,
+        idempotency_key=request.idempotency_key,
+        identities=identities,
+        initial_time=now,
+        expected_universe_snapshot_id=batch.universe_snapshot_id,
+        repo_root=repo_root,
+        client=client,
+        expected_calendar_authority_id=expected_calendar_authority_id,
+        process_environment=process_environment,
+    )
     return await start_schwab_agent_paper_cycle(
         session,
         authority=authority,
-        decision_slot_at=decision_slot_at,
+        decision_slot_at=reservation.decision_slot_at,
         idempotency_key=request.idempotency_key,
         daily_limit_usd=settings.agent_daily_budget_usd,
         requested_instrument_ids=batch.instrument_ids,
@@ -624,20 +687,7 @@ async def trigger_once(
     expected_calendar_authority_id: UUID | None = None,
     process_environment: Mapping[str, str] | None = None,
 ) -> AgentPaperCycleResult:
-    _validate_local_database(settings.database_url)
-    endpoint = urlsplit(settings.object_store_endpoint or "")
-    if (
-        endpoint.scheme not in {"http", "https"}
-        or endpoint.hostname not in _LOCAL_HOSTS
-        or endpoint.username is not None
-        or endpoint.password is not None
-        or endpoint.path not in {"", "/"}
-        or endpoint.query
-        or endpoint.fragment
-        or not settings.alpaca_key.get_secret_value().strip()
-        or not settings.alpaca_secret.get_secret_value().strip()
-    ):
-        raise ValueError("AGENT_PAPER_MARKET_CONFIG_INVALID")
+    _validate_trigger_dependencies(settings)
     assert settings.database_url is not None
     engine = create_async_engine(settings.database_url)
     try:
@@ -692,6 +742,272 @@ async def trigger_once(
             except Exception:
                 pass
             raise
+    finally:
+        await engine.dispose()
+
+
+def _validate_trigger_dependencies(settings: AgentPaperTriggerSettings) -> None:
+    _validate_local_database(settings.database_url)
+    endpoint = urlsplit(settings.object_store_endpoint or "")
+    if (
+        endpoint.scheme not in {"http", "https"}
+        or endpoint.hostname not in _LOCAL_HOSTS
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or endpoint.path not in {"", "/"}
+        or endpoint.query
+        or endpoint.fragment
+        or not settings.alpaca_key.get_secret_value().strip()
+        or not settings.alpaca_secret.get_secret_value().strip()
+    ):
+        raise ValueError("AGENT_PAPER_MARKET_CONFIG_INVALID")
+
+
+async def _evaluation_candidate(
+    session: AsyncSession,
+    *,
+    evaluation: AgentVersionEvaluationRecord,
+    now: datetime,
+) -> CandidateInstrumentIdentity:
+    # Registered evaluation scope is separate from ordinary candidate batches.
+    rows = list(
+        await session.execute(
+            select(Instrument, InstrumentAlias)
+            .join(InstrumentAlias, InstrumentAlias.instrument_id == Instrument.id)
+            .where(
+                Instrument.id == evaluation.instrument_id,
+                InstrumentAlias.symbol == "AAPL",
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.created_at <= now,
+                InstrumentAlias.valid_from <= now.date(),
+                (InstrumentAlias.valid_to.is_(None) | (InstrumentAlias.valid_to >= now.date())),
+            )
+        )
+    )
+    if len(rows) != 1:
+        raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+    instrument, alias = rows[0]
+    return CandidateInstrumentIdentity(
+        instrument_id=instrument.id,
+        symbol=alias.symbol,
+        asset_type=instrument.asset_type,
+        exchange=instrument.exchange,
+        currency=instrument.currency,
+    )
+
+
+async def load_agent_version_candidate(
+    settings: EngineSettings,
+    *,
+    evaluation_id: UUID,
+    expected_calendar_authority_id: UUID,
+    now: datetime,
+) -> CandidateInstrumentIdentity:
+    _validate_local_database(settings.database_url)
+    assert settings.database_url is not None
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with async_sessionmaker(engine)() as session:
+            evaluation = await session.get(AgentVersionEvaluationRecord, evaluation_id)
+            if (
+                evaluation is None
+                or evaluation.calendar_authority_id != expected_calendar_authority_id
+            ):
+                raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+            return await _evaluation_candidate(session, evaluation=evaluation, now=now)
+    finally:
+        await engine.dispose()
+
+
+async def _reserve_agent_version_slot_preparation(
+    session: AsyncSession,
+    *,
+    evaluation_id: UUID,
+    decision_slot_at: datetime,
+) -> tuple[UUID, AgentVersionSlotResult | None]:
+    request_hash = job_input_hash(
+        {
+            "schema": _AGENT_VERSION_PREPARATION_SCHEMA,
+            "evaluation_id": str(evaluation_id),
+            "decision_slot_at": decision_slot_at.isoformat(),
+            "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
+        }
+    )
+    claim, inserted = await claim_or_lock(
+        session,
+        f"local-agent-version-evaluation:{evaluation_id}",
+        _AGENT_VERSION_PREPARATION_ROUTE,
+        decision_slot_at.isoformat(),
+        request_hash,
+        _AGENT_VERSION_PREPARATION_SCHEMA,
+    )
+    if (
+        claim.request_hash != request_hash
+        or claim.schema_version != _AGENT_VERSION_PREPARATION_SCHEMA
+    ):
+        raise ValueError("AGENT_VERSION_IDEMPOTENCY_CONFLICT")
+    if inserted:
+        return claim.id, None
+    raw = claim.response_payload.get("result")
+    if not isinstance(raw, dict):
+        raise ValueError("AGENT_VERSION_RESULT_UNKNOWN")
+    try:
+        replay = AgentVersionSlotResult.model_validate(raw)
+    except ValueError:
+        raise ValueError("AGENT_VERSION_RESULT_UNKNOWN") from None
+    if replay.evaluation_id != evaluation_id or replay.decision_slot_at != decision_slot_at:
+        raise ValueError("AGENT_VERSION_RESULT_UNKNOWN")
+    return claim.id, replay.model_copy(update={"replayed": True})
+
+
+async def _finish_agent_version_slot_preparation(
+    session: AsyncSession,
+    *,
+    claim_id: UUID,
+    result: AgentVersionSlotResult,
+) -> None:
+    claim = await session.scalar(
+        select(IdempotencyRecord).where(IdempotencyRecord.id == claim_id).with_for_update()
+    )
+    if (
+        claim is None
+        or claim.route != _AGENT_VERSION_PREPARATION_ROUTE
+        or claim.schema_version != _AGENT_VERSION_PREPARATION_SCHEMA
+        or claim.idempotency_key != result.decision_slot_at.isoformat()
+    ):
+        raise ValueError("AGENT_VERSION_RESULT_UNKNOWN")
+    payload: dict[str, object] = {"result": result.model_dump(mode="json")}
+    if claim.response_payload and claim.response_payload != payload:
+        raise ValueError("AGENT_VERSION_IDEMPOTENCY_CONFLICT")
+    claim.response_payload = payload
+    await session.flush()
+
+
+async def prepare_agent_version_slot_once(
+    settings: AgentPaperTriggerSettings,
+    *,
+    evaluation_id: UUID,
+    decision_slot_at: datetime,
+    repo_root: Path,
+    expected_calendar_authority_id: UUID,
+    process_environment: Mapping[str, str] | None = None,
+) -> AgentVersionSlotResult:
+    """Freeze one shared provider pass, then atomically start both frozen lanes."""
+    _validate_trigger_dependencies(settings)
+    assert settings.database_url is not None
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as claim_session, claim_session.begin():
+            evaluation = await claim_session.get(AgentVersionEvaluationRecord, evaluation_id)
+            if (
+                evaluation is None
+                or evaluation.calendar_authority_id != expected_calendar_authority_id
+                or decision_slot_at
+                not in tuple(evaluation.train_slots) + tuple(evaluation.oos_slots)
+            ):
+                raise ValueError("AGENT_VERSION_EVALUATION_UNKNOWN")
+            claim_id, replay = await _reserve_agent_version_slot_preparation(
+                claim_session,
+                evaluation_id=evaluation_id,
+                decision_slot_at=decision_slot_at,
+            )
+            if replay is not None:
+                return replay
+            decision = await claim_session.scalar(
+                select(AgentVersionEvaluationDecisionRecord.id).where(
+                    AgentVersionEvaluationDecisionRecord.evaluation_id == evaluation_id
+                )
+            )
+            pair = await claim_session.scalar(
+                select(AgentVersionCyclePairRecord.id).where(
+                    AgentVersionCyclePairRecord.evaluation_id == evaluation_id,
+                    AgentVersionCyclePairRecord.decision_slot_at == decision_slot_at,
+                )
+            )
+            cycle_count = int(
+                await claim_session.scalar(
+                    select(func.count())
+                    .select_from(AgentPaperCycleRecord)
+                    .where(
+                        AgentPaperCycleRecord.account_id.in_(
+                            (
+                                evaluation.incumbent_account_id,
+                                evaluation.challenger_account_id,
+                            )
+                        ),
+                        AgentPaperCycleRecord.decision_slot_at == decision_slot_at,
+                    )
+                )
+                or 0
+            )
+            if decision is not None or pair is not None or cycle_count:
+                raise ValueError("AGENT_VERSION_RESULT_UNKNOWN")
+
+        store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+        try:
+            async with (
+                factory() as session,
+                session.begin(),
+                httpx.AsyncClient(follow_redirects=False, timeout=30) as client,
+            ):
+                identities = (
+                    await _evaluation_candidate(
+                        session,
+                        evaluation=evaluation,
+                        now=decision_slot_at,
+                    ),
+                )
+                authority = await prepare_schwab_decision_authority(
+                    session,
+                    store,
+                    settings,
+                    account_id=evaluation.incumbent_account_id,
+                    identities=identities,
+                    decision_session=decision_slot_at.astimezone(
+                        ZoneInfo("America/New_York")
+                    ).date(),
+                    decision_slot_at=decision_slot_at,
+                    idempotency_key=(
+                        f"agent-version:{evaluation_id}:{decision_slot_at.isoformat()}"
+                    ),
+                    repo_root=repo_root,
+                    client=client,
+                    expected_calendar_authority_id=expected_calendar_authority_id,
+                    process_environment=process_environment,
+                )
+                result = await advance_agent_version_slot(
+                    session,
+                    evaluation_id=evaluation_id,
+                    decision_slot_at=decision_slot_at,
+                    daily_limit_usd=settings.agent_daily_budget_usd,
+                    now=authority.decision_time,
+                )
+                await _finish_agent_version_slot_preparation(
+                    session,
+                    claim_id=claim_id,
+                    result=result,
+                )
+                return result
+        except ValueError as error:
+            reason_code = _AGENT_VERSION_PREPARATION_FAILURES.get(str(error))
+            if reason_code is None:
+                raise
+            result = AgentVersionSlotResult(
+                evaluation_id=evaluation_id,
+                decision_slot_at=decision_slot_at,
+                phase=("train" if decision_slot_at in evaluation.train_slots else "oos"),
+                status="incomparable",
+                reason_code=reason_code,
+                replayed=False,
+            )
+            async with factory() as failure_session, failure_session.begin():
+                await _finish_agent_version_slot_preparation(
+                    failure_session,
+                    claim_id=claim_id,
+                    result=result,
+                )
+            return result
     finally:
         await engine.dispose()
 

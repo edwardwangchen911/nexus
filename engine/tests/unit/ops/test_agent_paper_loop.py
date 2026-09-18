@@ -42,6 +42,11 @@ def isolated_loop_candidates(monkeypatch):
 
     monkeypatch.setattr(loop, "_load_loop_candidates", candidates)
 
+    async def evaluation_candidate(*args, **kwargs):
+        return TEST_CANDIDATE
+
+    monkeypatch.setattr(loop, "load_agent_version_candidate", evaluation_candidate)
+
 
 @pytest.mark.parametrize(
     "slot", [datetime(2026, 7, 6, 14, tzinfo=UTC), datetime(2026, 12, 1, 15, tzinfo=UTC)]
@@ -696,8 +701,8 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
             },
             A.PUBLISH_PERFORMANCE,
         ),
-        ({"cycle_status": "unavailable", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
-        ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
+        ({"cycle_status": "unavailable", "cycle_slot_at": SLOT}, A.WAIT_FOR_SLOT),
+        ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.WAIT_FOR_SLOT),
         (
             {
                 "now": NOW + timedelta(minutes=5),
@@ -4590,3 +4595,312 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
             market_scope=market_scope.model_copy(update={"cycle_id": UUID(int=5)}),
             calendar=calendar,
         )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"trigger_attempt_slot_at": SLOT},
+        {"trigger_failure_code": "SCHWAB_L1_INCOMPLETE"},
+        {"trigger_attempt_slot_at": SLOT, "trigger_failure_code": "UNRECOGNIZED"},
+    ],
+)
+def test_trigger_failure_snapshot_requires_complete_known_identity(changes):
+    assert loop.choose_loop_action(snapshot(**changes)) == A.STOP_RESULT_UNKNOWN
+
+
+@pytest.mark.parametrize("persisted", [None, "SCHWAB_L1_FRESHNESS_UNPROVEN"])
+def test_trigger_failure_without_matching_persistence_stops_unknown(monkeypatch, persisted):
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+
+    async def ready(*args, **kwargs):
+        return "ready"
+
+    async def failure(*args, **kwargs):
+        raise ValueError("SCHWAB_L1_INCOMPLETE")
+
+    async def read(*args, **kwargs):
+        return persisted
+
+    for name in ("prepare_prior_daily_once", "prepare_macro_once", "prepare_current_trends_once"):
+        monkeypatch.setattr(loop, name, ready)
+    monkeypatch.setattr(loop, "trigger_once", failure)
+    monkeypatch.setattr(loop, "_load_persisted_trigger_failure", read)
+    with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=Path("/repo"),
+                action=A.TRIGGER,
+                snapshot=snapshot(),
+            )
+        )
+
+
+def test_foreground_loop_logs_safe_execution_phase(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot(
+            evaluation_id=UUID(int=8),
+            evaluation_slot_at=NOW,
+            cycle_status="evaluation_pending",
+        )
+
+    async def execute(*_args) -> None:
+        error = RuntimeError("private-evaluation-canary")
+        loop._annotate_agent_paper_failure(error, phase="prepare_pair")
+        raise error
+
+    with pytest.raises(RuntimeError, match="private-evaluation-canary"):
+        asyncio.run(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=noop_heartbeat,
+                clock=lambda: NOW,
+            )
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+        "event": "agent_paper_loop_failure",
+        "failure_action": "advance_evaluation",
+        "failure_phase": "prepare_pair",
+        "failure_stage": "execute",
+        "occurred_at": NOW.isoformat(),
+    }
+    assert "private-evaluation-canary" not in captured.err
+
+
+def test_local_runner_forwards_deterministic_runtime_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def isolated_lock():
+        yield
+
+    async def select_calendar(_settings) -> UUID:
+        return CALENDAR_AUTHORITY_ID
+
+    async def controlled_sleep(_seconds: float) -> None:
+        return None
+
+    def clock() -> datetime:
+        return NOW
+
+    def monotonic() -> float:
+        return 42.0
+
+    async def run_loop(**kwargs) -> loop.AgentPaperLoopAction:
+        assert kwargs["sleep"] is controlled_sleep
+        assert kwargs["clock"] is clock
+        assert kwargs["monotonic"] is monotonic
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_calendar)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=controlled_sleep,
+            clock=clock,
+            monotonic=monotonic,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+
+
+def test_evaluation_advance_freezes_shared_market_facts_before_creating_lanes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+    evaluation_id = UUID(int=101)
+    seen: list[tuple[UUID, datetime]] = []
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def prepare_slot(
+        settings,
+        *,
+        evaluation_id,
+        decision_slot_at,
+        repo_root,
+        expected_calendar_authority_id,
+        process_environment,
+    ):
+        assert settings.alpaca_key.get_secret_value() == "alpaca-key"
+        assert repo_root == tmp_path
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
+        assert process_environment["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
+        seen.append((evaluation_id, decision_slot_at))
+        return SimpleNamespace(status="running")
+
+    def unexpected_database(*_args, **_kwargs):
+        pytest.fail("evaluation advance must freeze shared market facts first")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", prepare_slot, raising=False)
+    monkeypatch.setattr(loop, "create_async_engine", unexpected_database)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.ADVANCE_EVALUATION,
+            snapshot=snapshot(
+                evaluation_id=evaluation_id,
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_pending",
+            ),
+            env_file=env_file,
+        )
+    )
+
+    assert result is None
+    assert seen == [(evaluation_id, SLOT)]
+
+
+def test_evaluation_advance_annotates_prepare_pair_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("private-pair-canary")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", fail)
+
+    with pytest.raises(RuntimeError, match="private-pair-canary") as caught:
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                action=A.ADVANCE_EVALUATION,
+                snapshot=snapshot(
+                    evaluation_id=UUID(int=101),
+                    evaluation_slot_at=SLOT,
+                    cycle_status="evaluation_pending",
+                ),
+                env_file=env_file,
+            )
+        )
+
+    assert getattr(caught.value, "_nexus_agent_paper_failure_phase") == "prepare_pair"
+
+
+def test_evaluation_closes_exactly_when_prior_daily_preparation_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+    evaluation_id = UUID(int=101)
+    closed: list[str] = []
+
+    async def unavailable(*_args, **_kwargs):
+        return "unavailable"
+
+    async def close(*_args, reason_code, **_kwargs):
+        closed.append(reason_code)
+
+    async def unexpected(*_args, **_kwargs):
+        pytest.fail("unavailable prior daily authority must not call realtime providers")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", unavailable)
+    monkeypatch.setattr(loop, "_close_unrecoverable_evaluation_once", close, raising=False)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", unexpected)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.ADVANCE_EVALUATION,
+            snapshot=snapshot(
+                evaluation_id=evaluation_id,
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_pending",
+            ),
+            env_file=env_file,
+        )
+    )
+
+    assert result is None
+    assert closed == ["PAIR_PRIOR_DAILY_UNAVAILABLE"]
+
+
+def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def fail_known(*_args, **_kwargs):
+        raise ValueError("SCHWAB_L1_INCOMPLETE")
+
+    async def persisted_failure(database_url, *, account_id, decision_slot_at):
+        assert database_url == loop.EngineSettings().database_url
+        assert account_id == UUID(int=1)
+        assert decision_slot_at == SLOT
+        return "SCHWAB_L1_INCOMPLETE"
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "trigger_once", fail_known)
+    monkeypatch.setattr(
+        loop,
+        "_load_persisted_trigger_failure",
+        persisted_failure,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=loop.AgentPaperLoopAction.TRIGGER,
+            snapshot=snapshot(),
+        )
+    )
+
+    assert result is None

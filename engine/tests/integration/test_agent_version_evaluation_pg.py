@@ -8,6 +8,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import httpx
+import nexus.ops.agent_paper_once as agent_paper_once
 import nexus.paper.agent_version_evaluation as agent_version_evaluation
 import nexus.paper.agent_version_runner as agent_version_runner
 import pytest
@@ -20,6 +21,7 @@ from nexus.paper.agent_cycle_authority import CycleAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult, candidate_manifest_hash
 from nexus.paper.agent_version_evaluation import (
     close_incomplete_agent_version_evaluation,
+    close_unrecoverable_agent_version_evaluation,
     finalize_agent_version_evaluation,
     load_selected_internal_agent_version,
     register_agent_version_evaluation,
@@ -27,6 +29,7 @@ from nexus.paper.agent_version_evaluation import (
 from nexus.paper.agent_version_models import (
     AgentVersionEvaluationRegistration,
     AgentVersionEvaluationRequest,
+    AgentVersionSlotResult,
     evaluation_policy_hash,
 )
 from nexus.paper.agent_version_runner import (
@@ -1039,6 +1042,39 @@ async def test_incomplete_evaluation_cannot_close_before_first_slot_is_missed(
 
 
 @pytest.mark.asyncio
+async def test_known_shared_market_preparation_failure_closes_with_exact_reason(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    first_slot = _slots(TRAIN_DATES)[0]
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-market-preparation-failure-v1",
+                now=NOW,
+            )
+
+        async with factory.begin() as session:
+            closed = await close_unrecoverable_agent_version_evaluation(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=first_slot,
+                reason_code="PAIR_SCHWAB_L1_INCOMPLETE",
+                now=first_slot + timedelta(seconds=1),
+            )
+
+        assert closed.status == "UNKNOWN"
+        assert closed.reason_code == "PAIR_SCHWAB_L1_INCOMPLETE"
+        assert closed.execution_locked is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_first_slot_initializes_equal_internal_accounts_without_work_replay(
     migrated_database_url: str,
 ) -> None:
@@ -1190,6 +1226,7 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
 ) -> None:
     factory, engine = await _factory(migrated_database_url)
     slot = _slots(TRAIN_DATES)[0]
+    prepared_at = slot + timedelta(seconds=30)
     calls: list[dict[str, object]] = []
     incumbent_cycle_id = UUID("72000000-0000-0000-0000-000000000801")
     challenger_cycle_id = UUID("72000000-0000-0000-0000-000000000802")
@@ -1241,6 +1278,9 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
             output.mkdir(parents=True, mode=0o700)
             environment = {
                 "DATABASE_URL": migrated_database_url,
+                "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
                 "AGENT_RUNTIME_MODE": "codex_sdk",
                 "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
                 "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(registration.incumbent_account_id),
@@ -1256,7 +1296,39 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
                 observed.append(value)
                 return value
 
-            monkeypatch.setattr(loop, "advance_agent_version_slot", observe_advance)
+            async def ready(*args, candidate, **kwargs):
+                assert candidate.instrument_id == INSTRUMENT_ID
+                return "ready"
+
+            async def shared_authority(session, *args, identities, **kwargs):
+                assert tuple(item.instrument_id for item in identities) == (INSTRUMENT_ID,)
+                account = await session.get(PaperAccountRecord, registration.incumbent_account_id)
+                return CycleAuthority(
+                    account_id=registration.incumbent_account_id,
+                    portfolio_id=account.portfolio_id,
+                    decision_session=slot.date(),
+                    decision_time=prepared_at,
+                    execution_session=slot.date(),
+                    calendar_authority_id=CALENDAR_ID,
+                    universe_snapshot_id=UUID("72000000-0000-0000-0000-000000000805"),
+                )
+
+            monkeypatch.setattr(
+                loop, "load_agent_paper_service_environment", lambda *args, **kwargs: environment
+            )
+            for name in (
+                "prepare_prior_daily_once",
+                "prepare_macro_once",
+                "prepare_current_trends_once",
+            ):
+                monkeypatch.setattr(loop, name, ready)
+            monkeypatch.setattr(
+                agent_paper_once, "prepare_schwab_decision_authority", shared_authority
+            )
+            monkeypatch.setattr(
+                agent_paper_once, "S3ProviderEvidenceStore", lambda *args, **kwargs: object()
+            )
+            monkeypatch.setattr(agent_paper_once, "advance_agent_version_slot", observe_advance)
             await loop.execute_agent_paper_loop_action(
                 EngineSettings(database_url=migrated_database_url),
                 account_id=registration.incumbent_account_id,
@@ -1264,6 +1336,7 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
                 action=loop.AgentPaperLoopAction.ADVANCE_EVALUATION,
                 snapshot=loop.AgentPaperLoopSnapshot(
                     now=slot,
+                    calendar_authority_id=CALENDAR_ID,
                     evaluation_id=registration.evaluation_id,
                     evaluation_slot_at=slot,
                     cycle_status="evaluation_pending",
@@ -1278,7 +1351,7 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
                     evaluation_id=registration.evaluation_id,
                     decision_slot_at=slot,
                     daily_limit_usd=Decimal("3"),
-                    now=slot,
+                    now=prepared_at,
                 )
 
         assert result.status == "running"
@@ -1301,9 +1374,129 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
         assert isinstance(incumbent_authority, CycleAuthority)
         assert isinstance(challenger_authority, CycleAuthority)
         assert incumbent_authority.calendar_authority_id == CALENDAR_ID
+        assert incumbent_authority.decision_time == prepared_at
+        assert challenger_authority.decision_time == prepared_at
         assert challenger_authority.universe_snapshot_id == UUID(
             "72000000-0000-0000-0000-000000000805"
         )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_slot_preparation_replays_persisted_result_without_provider_call(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    slot = _slots(TRAIN_DATES)[0]
+    universe_id = UUID("72000000-0000-0000-0000-000000000806")
+    provider_calls = 0
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            session.add(
+                UniverseSnapshot(
+                    id=universe_id,
+                    key="us_liquid",
+                    version="us_liquid_v1",
+                    effective_from=TRAIN_DATES[0],
+                    source="fosun_local_read_only",
+                    content_hash="8" * 64,
+                    published_at=NOW,
+                )
+            )
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-preparation-replay-v1",
+                now=NOW,
+            )
+            incumbent = await session.get(PaperAccountRecord, registration.incumbent_account_id)
+            assert incumbent is not None
+
+        async def prepare(*_args, **_kwargs) -> CycleAuthority:
+            nonlocal provider_calls
+            provider_calls += 1
+            return CycleAuthority(
+                account_id=registration.incumbent_account_id,
+                portfolio_id=incumbent.portfolio_id,
+                decision_session=TRAIN_DATES[0],
+                decision_time=slot + timedelta(seconds=20),
+                execution_session=TRAIN_DATES[0],
+                calendar_authority_id=CALENDAR_ID,
+                universe_snapshot_id=universe_id,
+            )
+
+        async def advance(*_args, **_kwargs) -> AgentVersionSlotResult:
+            return AgentVersionSlotResult(
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=slot,
+                phase="train",
+                incumbent_cycle_id=UUID(int=801),
+                challenger_cycle_id=UUID(int=802),
+                incumbent_run_id=UUID(int=803),
+                challenger_run_id=UUID(int=804),
+                status="running",
+                reason_code="PAIR_JOBS_PREPARED",
+                replayed=False,
+            )
+
+        monkeypatch.setattr(
+            agent_paper_once, "S3ProviderEvidenceStore", lambda *_args, **_kwargs: object()
+        )
+        monkeypatch.setattr(agent_paper_once, "prepare_schwab_decision_authority", prepare)
+        monkeypatch.setattr(agent_paper_once, "advance_agent_version_slot", advance)
+        settings = agent_paper_once.AgentPaperTriggerSettings(
+            database_url=migrated_database_url,
+            object_store_endpoint="http://127.0.0.1:9000",
+            alpaca_key="key",
+            alpaca_secret="secret",
+        )
+
+        first = await agent_paper_once.prepare_agent_version_slot_once(
+            settings,
+            evaluation_id=registration.evaluation_id,
+            decision_slot_at=slot,
+            repo_root=agent_paper_once.Path.cwd(),
+            expected_calendar_authority_id=CALENDAR_ID,
+        )
+        assert first.status == "running"
+
+        async with factory.begin() as session:
+            session.add(
+                AgentPaperCycleRecord(
+                    id=UUID("72000000-0000-0000-0000-000000000807"),
+                    account_id=registration.incumbent_account_id,
+                    portfolio_id=incumbent.portfolio_id,
+                    decision_session=TRAIN_DATES[0],
+                    decision_time=slot + timedelta(seconds=20),
+                    decision_slot_at=slot,
+                    execution_session=TRAIN_DATES[0],
+                    universe_snapshot_id=universe_id,
+                    quality_report_id=None,
+                    decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                    candidate_manifest=[],
+                    candidate_hash=candidate_manifest_hash(()),
+                    sizing_policy_version="agent_paper_sizing_v1",
+                    sizing_policy_hash="1" * 64,
+                    execution_locked=True,
+                )
+            )
+
+        replay = await agent_paper_once.prepare_agent_version_slot_once(
+            settings,
+            evaluation_id=registration.evaluation_id,
+            decision_slot_at=slot,
+            repo_root=agent_paper_once.Path.cwd(),
+            expected_calendar_authority_id=CALENDAR_ID,
+        )
+
+        assert replay.model_copy(update={"replayed": False}) == first
+        assert replay.replayed is True
+        assert provider_calls == 1
     finally:
         await engine.dispose()
 
