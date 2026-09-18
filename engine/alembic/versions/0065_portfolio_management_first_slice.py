@@ -489,7 +489,33 @@ def _create_guards() -> None:
     op.execute("""
         CREATE FUNCTION nexus_portfolio_proposal_synthesis_valid() RETURNS trigger LANGUAGE plpgsql
         SET search_path TO pg_catalog, public, pg_temp AS $$
+        DECLARE decision_cycle public.agent_paper_cycles%ROWTYPE;
         BEGIN
+          IF NEW.decision_origin = 'agent_research' THEN
+            SELECT * INTO decision_cycle FROM public.agent_paper_cycles
+            WHERE id=NEW.agent_paper_cycle_id FOR SHARE;
+            IF (
+              decision_cycle.id IS NOT NULL
+              AND decision_cycle.account_id=NEW.account_id
+              AND decision_cycle.portfolio_id=NEW.portfolio_id
+              AND (
+                (decision_cycle.candidate_batch_id IS NULL
+                 AND decision_cycle.sizing_policy_version='agent_paper_sizing_v1'
+                 AND NEW.strategy_version='agent_paper_decision_v1'
+                 AND NEW.portfolio_synthesis_output_id IS NULL)
+                OR
+                (decision_cycle.candidate_batch_id IS NOT NULL
+                 AND decision_cycle.sizing_policy_version='portfolio_allocation_v1'
+                 AND NEW.strategy_version='agent_portfolio_proposal_v1'
+                 AND NEW.portfolio_synthesis_output_id IS NOT NULL
+                 AND NEW.strategy_parameters_hash=
+                   'd7b719f47edbf3cb7ebb40dbe555a51f717ca581162a72d05c23391b8b083dd7'
+                 AND decision_cycle.sizing_policy_hash=NEW.strategy_parameters_hash)
+              )
+            ) IS NOT TRUE THEN
+              RAISE EXCEPTION 'cycle decision identity mismatch' USING ERRCODE='23514';
+            END IF;
+          END IF;
           IF NEW.portfolio_synthesis_output_id IS NOT NULL AND (
              NEW.decision_origin <> 'agent_research'
              OR NEW.strategy_version <> 'agent_portfolio_proposal_v1'
@@ -512,7 +538,8 @@ def _create_guards() -> None:
         END; $$
     """)
     op.execute(
-        "CREATE TRIGGER trg_portfolio_proposal_synthesis_valid BEFORE INSERT ON strategy_decisions "
+        "CREATE TRIGGER trg_portfolio_proposal_synthesis_valid BEFORE INSERT OR UPDATE "
+        "ON strategy_decisions "
         "FOR EACH ROW EXECUTE FUNCTION nexus_portfolio_proposal_synthesis_valid()"
     )
 

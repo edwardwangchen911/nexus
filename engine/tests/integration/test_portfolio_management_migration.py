@@ -230,6 +230,26 @@ async def _proposal(url: str, original: UUID, cycle: UUID, output: UUID) -> UUID
     )
 
 
+async def _legacy_agent_decision(url: str, original: UUID, cycle: UUID) -> UUID:
+    return await _clone_decision(
+        url,
+        original,
+        decision_origin="agent_research",
+        strategy_id="agent_research",
+        strategy_version="agent_paper_decision_v1",
+        strategy_definition_id=None,
+        registry_event_id=None,
+        champion_generation=None,
+        agent_paper_cycle_id=cycle,
+        portfolio_synthesis_output_id=None,
+        decision_session="2026-08-26",
+        source_policy_id=UUID("2573d63a-fb6d-53d3-8d44-207766a78322"),
+        execution_source_policy_id=UUID("e99532cc-e24c-52a8-8165-c8076325fbd2"),
+        quality_report_id=None,
+        reason="AGENT_RESEARCH",
+    )
+
+
 @pytest.mark.asyncio
 async def test_0065_adds_portfolio_management_facts(migrated_database_url: str) -> None:
     """Missing tables or non-null legacy links prevent additive rollout."""
@@ -378,6 +398,41 @@ async def test_proposal_requires_completed_synthesis_from_its_own_cycle(
     else:
         with pytest.raises(IntegrityError, match="completed bound synthesis"):
             await _proposal(migrated_database_url, seed.decision_id, cycle, output)
+
+
+@pytest.mark.asyncio
+async def test_new_cycle_rejects_legacy_decision_without_synthesis(
+    migrated_database_url: str,
+) -> None:
+    """A legacy decision must not occupy a new portfolio cycle's only decision slot."""
+    seed = await seed_paper_batch(migrated_database_url)
+    batch = await _batch(migrated_database_url)
+    cycle = await _cycle(migrated_database_url, batch)
+    with pytest.raises(IntegrityError, match="cycle decision identity mismatch"):
+        await _legacy_agent_decision(migrated_database_url, seed.decision_id, cycle)
+
+
+@pytest.mark.asyncio
+async def test_legacy_cycle_accepts_legacy_decision_without_synthesis(
+    migrated_database_url: str,
+) -> None:
+    """Binding new cycles must preserve the historical Agent decision insertion path."""
+    seed = await seed_paper_batch(migrated_database_url)
+    cycle = await _cycle(migrated_database_url, None)
+    decision = await _legacy_agent_decision(migrated_database_url, seed.decision_id, cycle)
+    engine = create_async_engine(migrated_database_url)
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    "SELECT strategy_version,portfolio_synthesis_output_id "
+                    "FROM strategy_decisions WHERE id=:id"
+                ),
+                {"id": decision},
+            )
+            assert result.one() == ("agent_paper_decision_v1", None)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
