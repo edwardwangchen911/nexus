@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 from nexus.risk.models import exact_decimal
 
-_V1_CONTENT_HASH = "461253c4d8b5aeb5db834f0d11f85c092ef46c03fb01838389516b202e67e949"
+_V1_CONTENT_HASH = "d7b719f47edbf3cb7ebb40dbe555a51f717ca581162a72d05c23391b8b083dd7"
 _DECIMAL_QUANTUM = Decimal("0.000000000001")
 
 
@@ -34,6 +34,7 @@ class PortfolioAllocationPolicyV1(BaseModel):
     rebalance_drift: Decimal = Decimal("0.03")
     research_valid_days: int = 7
     decision_local_time: time = time(10, 0)
+    decision_timezone: Literal["America/New_York"] = "America/New_York"
 
     @field_validator(
         "core_target",
@@ -79,6 +80,7 @@ def canonical_portfolio_allocation_policy_hash(
         "rebalance_drift": _decimal_string(policy.rebalance_drift),
         "research_valid_days": policy.research_valid_days,
         "decision_local_time": policy.decision_local_time.isoformat(),
+        "decision_timezone": policy.decision_timezone,
     }
     encoded = json.dumps(
         payload,
