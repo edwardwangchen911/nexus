@@ -14,12 +14,15 @@ from nexus.paper.execution_service import (
     advance_internal_paper_order,
     cancel_internal_paper_order,
 )
+from nexus.paper.service import PaperOrderBatchResult
 from nexus.persistence.models.paper import (
     PaperOrderBatchRecord,
     PaperOrderRecord,
     PaperRequestIdempotencyRecord,
 )
+from nexus.persistence.models.runtime import IdempotencyRecord
 from nexus.persistence.session import session_factory
+from nexus.risk.canonical import canonical_paper_order_batch_hash
 from sqlalchemy import select, text
 
 
@@ -52,7 +55,11 @@ async def _database_fingerprint(session) -> tuple[tuple[int, str], ...]:
     tables = (
         "idempotency_records",
         "paper_accounts",
+        "agent_portfolio_synthesis_runs",
+        "agent_portfolio_synthesis_outputs",
+        "agent_portfolio_synthesis_budget_reservations",
         "strategy_decisions",
+        "strategy_decision_agent_outputs",
         "strategy_decision_targets",
         "risk_policies",
         "risk_no_change_evaluations",
@@ -98,6 +105,31 @@ async def _seed_partial_order(database_url: str):
     )
     factory = session_factory(settings(database_url))
     async with factory() as session, session.begin():
+        batch = await session.scalar(
+            select(PaperOrderBatchRecord)
+            .join(PaperOrderRecord, PaperOrderRecord.batch_id == PaperOrderBatchRecord.id)
+            .where(PaperOrderRecord.id == seed.order_id)
+        )
+        assert batch is not None
+        decision_hash = await session.scalar(
+            text("SELECT decision_hash FROM strategy_decisions WHERE id=:decision_id"),
+            {"decision_id": batch.strategy_decision_id},
+        )
+        idempotency = await session.get(IdempotencyRecord, batch.idempotency_record_id)
+        assert decision_hash is not None and idempotency is not None
+        stored = PaperOrderBatchResult.model_validate(idempotency.response_payload)
+        batch_hash = canonical_paper_order_batch_hash(
+            account_id=stored.account_id,
+            decision_hash=decision_hash,
+            risk_input_hash=stored.risk_input_hash,
+            evaluations=stored.evaluations,
+        )
+        await session.execute(text("ALTER TABLE paper_order_batches DISABLE TRIGGER USER"))
+        batch.batch_hash = batch_hash
+        idempotency.response_payload = stored.model_copy(
+            update={"decision_hash": decision_hash, "batch_hash": batch_hash}
+        ).model_dump(mode="json")
+        await session.flush()
         partial = await advance_internal_paper_order(
             session,
             order_id=seed.order_id,
@@ -181,6 +213,165 @@ async def _insert_extra_risk_evaluation(session, *, batch_id, orphan: bool) -> N
         },
     )
     await session.execute(text("ALTER TABLE risk_evaluations ENABLE TRIGGER USER"))
+
+
+async def _seed_target_associated_plan(database_url: str, monkeypatch: pytest.MonkeyPatch):
+    import integration.test_portfolio_synthesis_persistence_pg as seed_module
+    from integration.test_paper_target_activation_pg import _include_first
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesis
+    from nexus.paper.agent_decision_store import persist_portfolio_proposal
+    from nexus.paper.target_service import activate_portfolio_target
+
+    original_intent = seed_module._safe_no_trade_intent
+
+    def complete_buy(**kwargs):
+        source = original_intent(**kwargs)
+        assessment = source.synthesis_assessment.model_copy(
+            update={
+                "stance": "buy_candidate",
+                "review_conclusion": "sufficient",
+                "reviews": tuple(
+                    review.model_copy(
+                        update={
+                            "resolved": True,
+                            "status": "accepted",
+                            "missing_evidence": (),
+                            "prevented_conclusion": None,
+                        }
+                    )
+                    for review in source.synthesis_assessment.reviews
+                ),
+            }
+        )
+        return source.model_copy(
+            update={
+                "quality_status": "complete",
+                "stance": "buy_candidate",
+                "exposure_action": "eligible_for_increase",
+                "evidence_audit": "complete",
+                "synthesis_assessment": assessment,
+                "role_votes": tuple(
+                    vote.model_copy(update={"vote": "support"})
+                    for vote in source.role_votes
+                ),
+            }
+        )
+
+    monkeypatch.setattr(seed_module, "_safe_no_trade_intent", complete_buy)
+    seeded = await _seed_normal_synthesis(database_url, monkeypatch)
+    engine, sessions, args = await proposal_source(
+        database_url,
+        seeded=seeded,
+        intent_factory=_include_first,
+    )
+    async with sessions.begin() as session:
+        proposal = await persist_portfolio_proposal(session, **args)
+        activated = await activate_portfolio_target(
+            session,
+            account_id=proposal.account_id,
+            strategy_decision_id=proposal.decision_id,
+            request_time=args["now"] + timedelta(seconds=1),
+            idempotency_key="task10-target-plan",
+        )
+    assert activated.batch_id is not None
+    return engine, sessions, args, proposal, activated
+
+
+async def _corrupt_target_proposal_authority(session, *, decision_id, corruption: str) -> None:
+    async def drop_fk_to(table: str, referenced_table: str) -> None:
+        constraint = await session.scalar(
+            text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = CAST(:table AS regclass) AND contype = 'f' "
+                "AND pg_get_constraintdef(oid) LIKE :reference"
+            ),
+            {"table": table, "reference": f"%{referenced_table}%"},
+        )
+        assert constraint is not None and constraint.replace("_", "").isalnum()
+        await session.execute(text(f'ALTER TABLE {table} DROP CONSTRAINT "{constraint}"'))
+
+    if corruption == "decision_hash":
+        await _corrupt_append_only_fact(
+            session,
+            table="strategy_decisions",
+            statement="UPDATE strategy_decisions SET decision_hash = repeat('a', 64) "
+            "WHERE id = :order_id",
+            order_id=decision_id,
+        )
+        return
+    if corruption == "proposal":
+        await _corrupt_append_only_fact(
+            session,
+            table="strategy_decisions",
+            statement="UPDATE strategy_decisions SET cash_weight = cash_weight + 0.01 "
+            "WHERE id = :order_id",
+            order_id=decision_id,
+        )
+        return
+    if corruption == "binding":
+        await _corrupt_append_only_fact(
+            session,
+            table="strategy_decision_agent_outputs",
+            statement="UPDATE strategy_decision_agent_outputs "
+            "SET binding_hash = repeat('a', 64) "
+            "WHERE strategy_decision_id = :order_id",
+            order_id=decision_id,
+        )
+        return
+    if corruption == "missing_output":
+        await session.execute(
+            text(
+                "ALTER TABLE strategy_decisions DROP CONSTRAINT "
+                "fk_strategy_decisions_portfolio_synthesis"
+            )
+        )
+        await session.execute(
+            text("ALTER TABLE agent_portfolio_synthesis_outputs DISABLE TRIGGER USER")
+        )
+        await session.execute(
+            text(
+                "DELETE FROM agent_portfolio_synthesis_outputs WHERE id = ("
+                "SELECT portfolio_synthesis_output_id FROM strategy_decisions "
+                "WHERE id = :decision_id)"
+            ),
+            {"decision_id": decision_id},
+        )
+        return
+    if corruption == "missing_run":
+        await drop_fk_to(
+            "agent_portfolio_synthesis_outputs",
+            "agent_portfolio_synthesis_runs",
+        )
+        await drop_fk_to(
+            "agent_portfolio_synthesis_budget_reservations",
+            "agent_portfolio_synthesis_runs",
+        )
+        for table in (
+            "agent_portfolio_synthesis_budget_reservations",
+            "agent_portfolio_synthesis_runs",
+        ):
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+        run_id = await session.scalar(
+            text(
+                "SELECT output.run_id FROM strategy_decisions decision "
+                "JOIN agent_portfolio_synthesis_outputs output "
+                "ON output.id = decision.portfolio_synthesis_output_id "
+                "WHERE decision.id = :decision_id"
+            ),
+            {"decision_id": decision_id},
+        )
+        assert run_id is not None
+        await session.execute(
+            text("DELETE FROM agent_portfolio_synthesis_budget_reservations WHERE run_id=:run_id"),
+            {"run_id": run_id},
+        )
+        await session.execute(
+            text("DELETE FROM agent_portfolio_synthesis_runs WHERE id=:run_id"),
+            {"run_id": run_id},
+        )
+        return
+    raise AssertionError(f"unsupported corruption: {corruption}")
 
 
 @pytest.mark.asyncio
@@ -611,65 +802,11 @@ async def test_plan_preserves_target_and_proposal_identity_without_merging_actua
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import integration.test_portfolio_synthesis_persistence_pg as seed_module
-    from integration.test_paper_target_activation_pg import _include_first
-    from integration.test_portfolio_proposal_pg import proposal_source
-    from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesis
-    from nexus.paper.agent_decision_store import persist_portfolio_proposal
-    from nexus.paper.target_service import activate_portfolio_target
-
-    original_intent = seed_module._safe_no_trade_intent
-
-    def complete_buy(**kwargs):
-        source = original_intent(**kwargs)
-        assessment = source.synthesis_assessment.model_copy(
-            update={
-                "stance": "buy_candidate",
-                "review_conclusion": "sufficient",
-                "reviews": tuple(
-                    review.model_copy(
-                        update={
-                            "resolved": True,
-                            "status": "accepted",
-                            "missing_evidence": (),
-                            "prevented_conclusion": None,
-                        }
-                    )
-                    for review in source.synthesis_assessment.reviews
-                ),
-            }
-        )
-        return source.model_copy(
-            update={
-                "quality_status": "complete",
-                "stance": "buy_candidate",
-                "exposure_action": "eligible_for_increase",
-                "evidence_audit": "complete",
-                "synthesis_assessment": assessment,
-                "role_votes": tuple(
-                    vote.model_copy(update={"vote": "support"}) for vote in source.role_votes
-                ),
-            }
-        )
-
-    monkeypatch.setattr(seed_module, "_safe_no_trade_intent", complete_buy)
-    seeded = await _seed_normal_synthesis(migrated_database_url, monkeypatch)
-    engine, sessions, args = await proposal_source(
+    engine, _, args, proposal, activated = await _seed_target_associated_plan(
         migrated_database_url,
-        seeded=seeded,
-        intent_factory=_include_first,
+        monkeypatch,
     )
     try:
-        async with sessions.begin() as session:
-            proposal = await persist_portfolio_proposal(session, **args)
-            activated = await activate_portfolio_target(
-                session,
-                account_id=proposal.account_id,
-                strategy_decision_id=proposal.decision_id,
-                request_time=args["now"] + timedelta(seconds=1),
-                idempotency_key="task10-target-plan",
-            )
-        assert activated.batch_id is not None
         path = f"/internal/v1/paper/plans/{activated.batch_id}"
         request_now = args["now"] + timedelta(minutes=1)
         async with httpx.AsyncClient(
@@ -688,6 +825,49 @@ async def test_plan_preserves_target_and_proposal_identity_without_merging_actua
         assert data["target"]["as_of"] != data["actual"]["as_of"]
         assert data["plan"]["reconciliation_as_of"] == data["plan"]["plan_created_at"]
         assert data["plan"]["occupation_state"] == "occupied"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("decision_hash", "proposal", "binding", "missing_run", "missing_output"),
+)
+@pytest.mark.asyncio
+async def test_target_plan_maps_proposal_authority_corruption_to_pure_read_409(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    engine, sessions, args, proposal, activated = await _seed_target_associated_plan(
+        migrated_database_url,
+        monkeypatch,
+    )
+    try:
+        async with sessions.begin() as session:
+            await _corrupt_target_proposal_authority(
+                session,
+                decision_id=proposal.decision_id,
+                corruption=corruption,
+            )
+        path = f"/internal/v1/paper/plans/{activated.batch_id}"
+        async with sessions() as session:
+            before = await _database_fingerprint(session)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(minutes=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            first = await client.get(path, headers=headers("GET", path))
+            repeated = await client.get(path, headers=headers("GET", path))
+        async with sessions() as session:
+            after = await _database_fingerprint(session)
+
+        assert first.status_code == repeated.status_code == 409
+        assert first.json()["error"]["code"] == "DATA_PARTIAL"
+        assert repeated.json()["error"]["code"] == "DATA_PARTIAL"
+        assert before == after
     finally:
         await engine.dispose()
 

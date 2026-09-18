@@ -2244,11 +2244,18 @@ class PaperReadService:
                     PaperTargetVersionRecord.activated_at <= self._request_time,
                 )
             )
-            proposal_authority = await load_portfolio_proposal(
-                self._session,
-                account_id=account.id,
-                decision_id=decision.id,
-            )
+            try:
+                proposal_authority = await load_portfolio_proposal(
+                    self._session,
+                    account_id=account.id,
+                    decision_id=decision.id,
+                )
+            except ValueError as error:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The paper plan proposal authority is incomplete.",
+                    status_code=409,
+                ) from error
             previous = (
                 None
                 if target_row is None or target_row.previous_target_version_id is None

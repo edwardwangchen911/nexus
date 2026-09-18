@@ -649,7 +649,8 @@ async def load_portfolio_proposal(
             AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
         )
     )
-    assert run is not None
+    if run is None:
+        raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
     frozen = _frozen_run(run)
     bindings = await _portfolio_bindings(
         session, frozen=frozen, decision_hash=proposal.decision_hash, at=frozen.admitted_at
@@ -734,7 +735,8 @@ async def persist_portfolio_proposal(
             AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
         )
     )
-    assert run is not None
+    if run is None:
+        raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
     frozen = _frozen_run(run)
     decision_id = new_uuid7()
     session.add(

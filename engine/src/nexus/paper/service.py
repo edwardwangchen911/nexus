@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Literal, cast
 from uuid import UUID
 
@@ -128,6 +128,61 @@ class PaperOrderBatchResult(BaseModel):
     evaluated_at: datetime
     order_ids: tuple[UUID, ...]
     evaluations: tuple[RiskEvaluation, ...]
+
+    @field_validator("evaluations", mode="before")
+    @classmethod
+    def _stored_evaluations_are_exact(cls, value: object) -> object:
+        if not isinstance(value, tuple | list):
+            return value
+        decimal_fields = (
+            "desired_quantity",
+            "approved_quantity",
+            "target_weight",
+            "reference_close",
+            "worst_price",
+            "reserve_amount",
+            "projected_available_cash",
+            "projected_cash_ratio",
+            "projected_name_ratio",
+        )
+
+        def stored_decimal(item: object) -> object:
+            if not isinstance(item, str):
+                return item
+            try:
+                return Decimal(item)
+            except (InvalidOperation, ValueError) as error:
+                raise ValueError("stored batch decimal is invalid") from error
+
+        evaluations: list[object] = []
+        for raw in value:
+            if isinstance(raw, RiskEvaluation) or not isinstance(raw, Mapping):
+                evaluations.append(raw)
+                continue
+            evaluation = dict(raw)
+            for field in decimal_fields:
+                if field in evaluation:
+                    evaluation[field] = stored_decimal(evaluation[field])
+            ratios = evaluation.get("projected_sector_ratios")
+            if isinstance(ratios, tuple | list):
+                evaluation["projected_sector_ratios"] = tuple(
+                    (sector, stored_decimal(ratio)) for sector, ratio in ratios
+                )
+            rules = evaluation.get("rules")
+            if isinstance(rules, tuple | list):
+                converted_rules = []
+                for raw_rule in rules:
+                    if not isinstance(raw_rule, Mapping):
+                        converted_rules.append(raw_rule)
+                        continue
+                    rule = dict(raw_rule)
+                    for field in ("limit", "observed", "remaining"):
+                        if field in rule:
+                            rule[field] = stored_decimal(rule[field])
+                    converted_rules.append(rule)
+                evaluation["rules"] = tuple(converted_rules)
+            evaluations.append(evaluation)
+        return tuple(evaluations)
 
     @field_validator("evaluated_at")
     @classmethod
@@ -496,11 +551,33 @@ async def load_paper_order_batch_result(
         )
     ):
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
-    stored_decision_hash = idempotency.response_payload.get("decision_hash")
+    try:
+        stored_result = PaperOrderBatchResult.model_validate(idempotency.response_payload)
+        if idempotency.response_payload != stored_result.model_dump(mode="json"):
+            raise ValueError("stored batch result is not canonical")
+        if decision.strategy_version == "agent_portfolio_proposal_v1":
+            proposal = await load_portfolio_proposal(
+                session,
+                account_id=account_id,
+                decision_id=strategy_decision_id,
+            )
+            if proposal is None:
+                raise ValueError("portfolio proposal is missing")
+            current_decision_hash = proposal.proposal.decision_hash
+        else:
+            persisted = await load_paper_decision(
+                session,
+                account_id=account_id,
+                decision_id=strategy_decision_id,
+            )
+            if persisted is None:
+                raise ValueError("paper decision is missing")
+            current_decision_hash = persisted.decision.decision_hash
+    except ValueError as error:
+        raise PaperBatchError("PAPER_BATCH_CONFLICT") from error
     if (
-        not isinstance(stored_decision_hash, str)
-        or len(stored_decision_hash) != 64
-        or any(character not in "0123456789abcdef" for character in stored_decision_hash)
+        decision.decision_hash != current_decision_hash
+        or stored_result.decision_hash != current_decision_hash
     ):
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
     orders = tuple(
@@ -616,7 +693,7 @@ async def load_paper_order_batch_result(
     if (
         canonical_paper_order_batch_hash(
             account_id=account_id,
-            decision_hash=stored_decision_hash,
+            decision_hash=current_decision_hash,
             risk_input_hash=batch.risk_input_hash,
             evaluations=ordered,
         )
@@ -662,7 +739,7 @@ async def load_paper_order_batch_result(
         batch_id=batch.id,
         account_id=batch.account_id,
         strategy_decision_id=batch.strategy_decision_id,
-        decision_hash=stored_decision_hash,
+        decision_hash=current_decision_hash,
         projection_hash=batch.projection_hash,
         request_hash=batch.request_hash,
         risk_input_hash=batch.risk_input_hash,
@@ -672,6 +749,8 @@ async def load_paper_order_batch_result(
         order_ids=order_ids,
         evaluations=ordered,
     )
+    if stored_result != result:
+        raise PaperBatchError("PAPER_BATCH_CONFLICT")
     return result
 
 
