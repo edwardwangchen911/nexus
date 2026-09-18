@@ -1963,6 +1963,9 @@ async def run_local_agent_paper_loop(
     account_id: UUID,
     repo_root: Path,
     env_file: Path | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], datetime] = _utc_now,
+    monotonic: Callable[[], float] = monotonic_clock,
 ) -> AgentPaperLoopAction:
     """Run the concrete local loop through persisted inspection and scoped actions."""
 
@@ -1976,7 +1979,7 @@ async def run_local_agent_paper_loop(
     ):
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     worker_id = f"agent-paper-loop-{new_uuid7()}"
-    started_at = datetime.now(UTC)
+    started_at = clock()
     with acquire_agent_paper_lock():
         shutdown = asyncio.Event()
         event_loop = asyncio.get_running_loop()
@@ -2007,7 +2010,7 @@ async def run_local_agent_paper_loop(
                     )
                 )
                 if not current.agent_paper_cycle_enabled:
-                    return AgentPaperLoopSnapshot(now=datetime.now(UTC), enabled=False)
+                    return AgentPaperLoopSnapshot(now=clock(), enabled=False)
                 evaluation = await inspect_agent_version_evaluation_loop(
                     current,
                     expected_calendar_authority_id=calendar_authority_id,
@@ -2058,10 +2061,12 @@ async def run_local_agent_paper_loop(
                 return await run_foreground_loop(
                     inspect=inspect,
                     execute=execute,
-                    sleep=asyncio.sleep,
+                    sleep=sleep,
                     heartbeat=heartbeat,
                     shutdown_requested=shutdown.is_set,
                     confirm_shutdown=confirm_shutdown,
+                    clock=clock,
+                    monotonic=monotonic,
                 )
             except ValueError as error:
                 if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
@@ -3240,14 +3245,20 @@ def main(argv: list[str] | None = None) -> int:
         if not settings.agent_paper_cycle_enabled:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
             return 1
-        reason = asyncio.run(
-            run_local_agent_paper_loop(
+        if env_file is None:
+            loop_result = run_local_agent_paper_loop(
                 settings,
                 account_id=account_id,
                 repo_root=root,
-                **({"env_file": env_file} if env_file is not None else {}),
             )
-        )
+        else:
+            loop_result = run_local_agent_paper_loop(
+                settings,
+                account_id=account_id,
+                repo_root=root,
+                env_file=env_file,
+            )
+        reason = asyncio.run(loop_result)
         if reason == AgentPaperLoopAction.STOP_UNCONFIRMED:
             print(json.dumps({"error_code": "AGENT_PAPER_LOOP_STOP_UNCONFIRMED"}))
             return 75

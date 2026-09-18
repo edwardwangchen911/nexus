@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -238,6 +239,123 @@ def test_service_status_reads_one_heartbeat_without_producers_or_business_writes
     assert not any(
         sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql in statements
     )
+
+
+def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = DECISION_TIME
+    elapsed = 0.0
+    failed_slot: datetime | None = None
+    completed = False
+    trigger_slots: list[datetime] = []
+    environment = {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "DATABASE_URL": migrated_database_url,
+        "AGENT_RUNTIME_MODE": "codex_sdk",
+        "ALPACA_API_KEY_ID": "synthetic-test-key",
+        "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
+    }
+
+    def clock() -> datetime:
+        return current
+
+    def monotonic() -> float:
+        return elapsed
+
+    async def sleep(seconds: float) -> None:
+        nonlocal current, elapsed
+        current += timedelta(seconds=seconds)
+        elapsed += seconds
+
+    def load_environment(*_args, **_kwargs) -> dict[str, str]:
+        if completed:
+            return {**environment, "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false"}
+        return environment
+
+    async def select_calendar(_settings: EngineSettings) -> UUID:
+        return CALENDAR_ID
+
+    async def inspect_evaluation(*_args, **_kwargs):
+        return None
+
+    async def inspect_cycle(*_args, **_kwargs):
+        return agent_paper_loop.AgentPaperLoopSnapshot(
+            now=current,
+            calendar_authority_id=CALENDAR_ID,
+            decision_window_start_at=DECISION_TIME,
+            decision_window_end_at=DECISION_TIME + timedelta(hours=6),
+            next_decision_window_start_at=DECISION_TIME + timedelta(days=1),
+            trigger_attempt_slot_at=failed_slot,
+            trigger_failure_code=("SCHWAB_L1_INCOMPLETE" if failed_slot else None),
+        )
+
+    async def ready(*_args, **_kwargs) -> str:
+        return "ready"
+
+    async def trigger(_settings, request, **_kwargs):
+        nonlocal failed_slot, completed
+        slot = floor_decision_slot(current)
+        trigger_slots.append(slot)
+        if len(trigger_slots) == 1:
+            failed_slot = slot
+            raise ValueError("SCHWAB_L1_INCOMPLETE")
+        completed = True
+        return request
+
+    async def persisted_failure(
+        _database_url: str | None, *, account_id: UUID, decision_slot_at: datetime
+    ) -> str | None:
+        assert account_id == UUID(int=1)
+        assert decision_slot_at == failed_slot
+        return "SCHWAB_L1_INCOMPLETE"
+
+    monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(
+        agent_paper_loop, "load_agent_paper_service_environment", load_environment
+    )
+    monkeypatch.setattr(
+        agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
+    )
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "inspect_agent_version_evaluation_loop",
+        inspect_evaluation,
+    )
+    monkeypatch.setattr(agent_paper_loop, "inspect_agent_paper_loop", inspect_cycle)
+    monkeypatch.setattr(agent_paper_loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "trigger_once", trigger)
+    monkeypatch.setattr(
+        agent_paper_loop, "_load_persisted_trigger_failure", persisted_failure
+    )
+
+    result = asyncio.run(
+        agent_paper_loop.run_local_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=sleep,
+            clock=clock,
+            monotonic=monotonic,
+        )
+    )
+
+    assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
+    assert trigger_slots == [DECISION_TIME, DECISION_TIME + timedelta(minutes=5)]
+
+    async def heartbeat_count() -> int:
+        engine = create_async_engine(migrated_database_url)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                return int(await session.scalar(select(func.count()).select_from(WorkerHeartbeat)))
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(heartbeat_count()) == 1
 
 
 @pytest.mark.parametrize(

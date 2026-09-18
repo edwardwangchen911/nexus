@@ -1266,6 +1266,52 @@ def test_local_runner_holds_lock_and_coalesces_signals_before_calendar_selection
     ]
 
 
+def test_local_runner_forwards_deterministic_runtime_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def isolated_lock():
+        yield
+
+    async def select_calendar(_settings) -> UUID:
+        return CALENDAR_AUTHORITY_ID
+
+    async def controlled_sleep(_seconds: float) -> None:
+        return None
+
+    def clock() -> datetime:
+        return NOW
+
+    def monotonic() -> float:
+        return 42.0
+
+    async def run_loop(**kwargs) -> loop.AgentPaperLoopAction:
+        assert kwargs["sleep"] is controlled_sleep
+        assert kwargs["clock"] is clock
+        assert kwargs["monotonic"] is monotonic
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_calendar)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(
+                database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"
+            ),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=controlled_sleep,
+            clock=clock,
+            monotonic=monotonic,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
+
+
 def test_local_runner_lock_contention_stops_before_calendar_selection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
