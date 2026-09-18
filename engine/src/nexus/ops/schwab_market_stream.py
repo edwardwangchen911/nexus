@@ -91,9 +91,7 @@ class ProviderMarketStreamError(ValueError):
         capture_summary: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(code)
-        self.capture_summary = (
-            None if capture_summary is None else dict(capture_summary)
-        )
+        self.capture_summary = None if capture_summary is None else dict(capture_summary)
 
 
 @dataclass(frozen=True)
@@ -389,6 +387,83 @@ async def capture_and_import_schwab_level_one_once(
             bindings={"AAPL": instrument_id},
             directory=directory,
             imported_at=imported_at,
+        )
+
+
+async def capture_and_import_schwab_level_one_batch(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    *,
+    repo_root: Path,
+    client: httpx.AsyncClient,
+    bindings: Mapping[str, UUID],
+    checked_at: datetime | None = None,
+    capture: Callable[..., Awaitable[dict[str, Any]]] = run_schwab_stream,
+    process_environment: Mapping[str, str] | None = None,
+) -> SchwabMarketStreamImportResult:
+    """Freeze one capture only after every explicitly bound candidate has a fresh quote."""
+    if (
+        not 1 <= len(bindings) <= 5
+        or any(not isinstance(value, UUID) for value in bindings.values())
+        or len(set(bindings.values())) != len(bindings)
+    ):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
+    symbols = tuple(sorted(bindings))
+    for symbol in symbols:
+        validate_symbol(symbol)
+    with tempfile.TemporaryDirectory(prefix="nexus-agent-schwab-") as raw_directory:
+        directory = Path(raw_directory) / "capture"
+        summary = await capture(
+            argparse.Namespace(
+                repo_root=repo_root,
+                symbol=list(symbols),
+                output_dir=directory,
+                duration=30.0,
+                max_frames=100,
+            ),
+            client,
+            now=checked_at,
+            **(
+                {"process_environment": process_environment}
+                if process_environment is not None
+                else {}
+            ),
+        )
+        if summary.get("status") != "bounded_complete":
+            raise ProviderMarketStreamError(
+                "PROVIDER_MARKET_STREAM_INCOMPLETE", capture_summary=summary
+            )
+        raw = pack_provider_market_stream_archive(directory)
+        archive = _unpack_provider_market_stream_archive(raw)
+        completed_at = datetime.fromisoformat(archive["receipt"]["ended_at"]).astimezone(UTC)
+        try:
+            batch = parse_schwab_snapshot_batch(
+                raw,
+                IntradaySnapshotRequest(
+                    instruments=tuple(
+                        SnapshotInstrument(instrument_id=InstrumentId(bindings[s]), symbol=s)
+                        for s in symbols
+                    ),
+                    symbol_as_of=completed_at.date(),
+                    feed="l1",
+                    delivery_mode="real_time",
+                ),
+            )
+        except MarketProviderPayloadError as error:
+            raise ProviderMarketStreamError(str(error)) from None
+        if {row.symbol for row in batch.snapshots} != set(symbols) or any(
+            row.quote is None
+            or not timedelta(0) <= completed_at - row.quote.observed_at <= timedelta(seconds=60)
+            for row in batch.snapshots
+        ):
+            raise ProviderMarketStreamError(
+                "PROVIDER_MARKET_STREAM_INCOMPLETE", capture_summary=summary
+            )
+        imported_at = await session.scalar(select(func.clock_timestamp()))
+        if not isinstance(imported_at, datetime):
+            raise RuntimeError("SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID")
+        return await import_schwab_market_stream(
+            session, store, bindings=dict(bindings), directory=directory, imported_at=imported_at
         )
 
 

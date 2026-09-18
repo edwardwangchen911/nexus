@@ -52,6 +52,7 @@ from nexus.paper.errors import PaperBatchError
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.market import InstrumentAlias, UniverseMember
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
@@ -228,11 +229,7 @@ async def start_schwab_agent_paper_cycle(
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     explicit_version = version_prompt_id is not None or version_model_id is not None
     if version_evaluation_id is None:
-        if (
-            version_lane is not None
-            or version_source_run_id is not None
-            or explicit_version
-        ):
+        if version_lane is not None or version_source_run_id is not None or explicit_version:
             raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
     elif (
         version_lane not in {"incumbent", "challenger"}
@@ -353,11 +350,7 @@ async def advance_agent_paper_cycle(
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
     explicit_version = version_prompt_id is not None or version_model_id is not None
     if version_evaluation_id is None:
-        if (
-            version_lane is not None
-            or version_source_run_id is not None
-            or explicit_version
-        ):
+        if version_lane is not None or version_source_run_id is not None or explicit_version:
             raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
     elif (
         version_lane not in {"incumbent", "challenger"}
@@ -464,6 +457,31 @@ async def advance_agent_paper_cycle(
     return await _resume_batch(session, cycle=cycle, events=events)
 
 
+async def _legacy_aapl_candidate_ids(
+    session: AsyncSession,
+    authority: CycleAuthority,
+) -> tuple[UUID, ...]:
+    """Temporary pre-batch bridge; version evaluation retains its explicit AAPL scope."""
+    ids = tuple(
+        await session.scalars(
+            select(InstrumentAlias.instrument_id)
+            .join(UniverseMember, UniverseMember.instrument_id == InstrumentAlias.instrument_id)
+            .where(
+                UniverseMember.universe_snapshot_id == authority.universe_snapshot_id,
+                UniverseMember.created_at <= authority.decision_time,
+                InstrumentAlias.symbol == "AAPL",
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.valid_from <= authority.decision_session,
+                InstrumentAlias.valid_to.is_(None)
+                | (InstrumentAlias.valid_to >= authority.decision_session),
+                InstrumentAlias.created_at <= authority.decision_time,
+            )
+            .limit(2)
+        )
+    )
+    return ids if len(ids) == 1 else ()
+
+
 async def _start_cycle(
     session: AsyncSession,
     *,
@@ -480,7 +498,15 @@ async def _start_cycle(
         session, account_id=authority.account_id, as_of=authority.decision_time
     )
     has_open_order = bool(projection.open_orders)
-    manifest = () if has_open_order else await prepare_candidates(session, authority=authority)
+    manifest = (
+        ()
+        if has_open_order
+        else await prepare_candidates(
+            session,
+            authority=authority,
+            requested_instrument_ids=await _legacy_aapl_candidate_ids(session, authority),
+        )
+    )
     same_session = authority.execution_session == authority.decision_session
     cycle = AgentPaperCycleRecord(
         id=new_uuid7(),

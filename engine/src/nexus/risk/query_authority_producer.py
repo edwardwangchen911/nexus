@@ -1,4 +1,4 @@
-"""Strict parsers for the bounded AAPL/Nasdaq risk-authority sources."""
+"""Strict parsers for bounded Nasdaq instrument risk-authority sources."""
 
 from __future__ import annotations
 
@@ -199,9 +199,9 @@ async def inspect_query_authority_scope(
     universe_snapshot_id: UUID | None = None,
     source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
 ) -> RiskQueryScope:
-    """Resolve the one supported frozen AAPL universe and any persisted result."""
+    """Resolve one explicit ticker within the frozen universe and its persisted result."""
     if (
-        symbol != "AAPL"
+        not _valid_symbol(symbol)
         or type(decision_session) is not date
         or as_of.tzinfo is None
         or as_of.utcoffset() != UTC.utcoffset(as_of)
@@ -282,6 +282,7 @@ async def inspect_query_authority_scope(
                 RiskQueryAuthorityRecord.source_policy_id == source_policy_id,
                 RiskQueryAuthorityRecord.universe_snapshot_id == universe_snapshot_id,
                 RiskQueryAuthorityRecord.decision_session == decision_session,
+                RiskQueryAuthorityRecord.required_instrument_ids == [instrument_id],
                 RiskQueryAuthorityRecord.available_at <= as_of,
             )
             .order_by(
@@ -312,10 +313,10 @@ async def persist_query_authorities(
     proofs: tuple[RiskSourceProof, ...],
     source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
 ) -> tuple[RiskQueryAuthorityRecord, ...]:
-    """Append or verify the exact three source-backed proofs for one AAPL scope."""
+    """Append or verify three source-backed proofs for one exact instrument scope."""
     kinds = {proof.kind for proof in proofs}
     if (
-        symbol != "AAPL"
+        not _valid_symbol(symbol)
         or type(decision_session) is not date
         or len(proofs) != 3
         or kinds != {"corporate_action", "suspension", "delisting"}
@@ -378,9 +379,8 @@ async def persist_query_authorities(
                 RiskQueryAuthorityRecord.universe_snapshot_id == universe_snapshot_id,
                 RiskQueryAuthorityRecord.decision_session == decision_session,
                 RiskQueryAuthorityRecord.kind.in_(kinds),
-                RiskQueryAuthorityRecord.available_at.in_(
-                    proof.available_at for proof in proofs
-                ),
+                RiskQueryAuthorityRecord.required_instrument_ids == [instrument_id],
+                RiskQueryAuthorityRecord.available_at.in_(proof.available_at for proof in proofs),
             )
         )
     )

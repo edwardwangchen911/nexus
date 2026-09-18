@@ -360,6 +360,21 @@ def _replace_check(table: str, name: str, expression: str) -> None:
 
 
 def upgrade() -> None:
+    op.drop_constraint(
+        "uq_risk_query_authorities_scope_available", "risk_query_authorities", type_="unique"
+    )
+    op.create_unique_constraint(
+        "uq_risk_query_authorities_scope_available",
+        "risk_query_authorities",
+        [
+            "source_policy_id",
+            "universe_snapshot_id",
+            "decision_session",
+            "kind",
+            "available_at",
+            "required_instrument_ids",
+        ],
+    )
     _create_tables()
     for table, column, _ in _LINKS:
         op.add_column(table, sa.Column(column, sa.UUID(), nullable=True))
@@ -545,6 +560,13 @@ def _create_guards() -> None:
 
 
 def downgrade() -> None:
+    op.execute("LOCK TABLE risk_query_authorities IN ACCESS EXCLUSIVE MODE")
+    op.execute("""DO $$ BEGIN IF EXISTS (
+        SELECT 1 FROM risk_query_authorities
+        GROUP BY source_policy_id, universe_snapshot_id, decision_session, kind, available_at
+        HAVING count(*) > 1
+    ) THEN RAISE EXCEPTION 'instrument-scoped risk facts prevent downgrade'
+        USING ERRCODE='P3D01'; END IF; END $$""")
     op.execute(
         "LOCK TABLE "
         + ", ".join(_TABLES + tuple(x[0] for x in _LINKS))
@@ -580,3 +602,11 @@ def downgrade() -> None:
         "nexus_portfolio_synthesis_scope_valid",
     ):
         op.execute(f"DROP FUNCTION {function}()")
+    op.drop_constraint(
+        "uq_risk_query_authorities_scope_available", "risk_query_authorities", type_="unique"
+    )
+    op.create_unique_constraint(
+        "uq_risk_query_authorities_scope_available",
+        "risk_query_authorities",
+        ["source_policy_id", "universe_snapshot_id", "decision_session", "kind", "available_at"],
+    )

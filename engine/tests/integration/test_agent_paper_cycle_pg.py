@@ -132,6 +132,387 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 ENGINE_ROOT = Path(__file__).parents[2]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "missing", [False, True], ids=["complete-shared-artifact", "missing-msft-rejects-all"]
+)
+async def test_bounded_batch_capture_requires_quote_for_every_symbol(
+    migrated_database_url, tmp_path, missing
+):
+    from nexus.ops import schwab_market_stream as stream
+    from nexus.persistence.models.market import InstrumentAlias
+
+    from tests.integration.test_schwab_market_stream_import import (
+        CREDENTIALS,
+        Socket,
+        Store,
+        _frames,
+    )
+
+    assert hasattr(stream, "capture_and_import_schwab_level_one_batch"), "batch capture missing"
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    at = datetime.now(UTC) - timedelta(seconds=1)
+    bindings = {"AAPL": UUID(int=101), "MSFT": UUID(int=102)}
+    captures = []
+    sent = []
+
+    class RecordingSocket(Socket):
+        async def send(self, message):
+            sent.extend(json.loads(message)["requests"])
+
+    async def capture(arguments, client, **kwargs):
+        captures.append(tuple(arguments.symbol))
+        frames = _frames(at)
+        if not missing:
+            frames[2]["data"][0]["content"].append(
+                {**frames[2]["data"][0]["content"][0], "key": "MSFT"}
+            )
+        return await stream.collect_schwab_stream(
+            symbols=tuple(arguments.symbol),
+            directory=arguments.output_dir,
+            streamer_url="wss://streamer-api.schwab.com/ws",
+            credentials=CREDENTIALS,
+            max_frames=3,
+            connector=lambda *a, **kw: RecordingSocket(frames),
+        )
+
+    try:
+        async with sessions.begin() as session:
+            for symbol, iid in bindings.items():
+                session.add(
+                    Instrument(
+                        id=iid,
+                        asset_type="common_stock",
+                        exchange="XNAS",
+                        currency="USD",
+                        tick_size=Decimal("0.01"),
+                        risk_bucket="us_equity",
+                        created_at=at - timedelta(days=1),
+                    )
+                )
+                session.add(
+                    InstrumentAlias(
+                        instrument_id=iid,
+                        symbol=symbol,
+                        alias_type="ticker",
+                        valid_from=date(2020, 1, 1),
+                        created_at=at - timedelta(days=1),
+                    )
+                )
+        store = Store()
+        async with sessions.begin() as session, httpx.AsyncClient() as client:
+            if missing:
+                with pytest.raises(
+                    stream.ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_INCOMPLETE"
+                ):
+                    await stream.capture_and_import_schwab_level_one_batch(
+                        session,
+                        store,
+                        repo_root=tmp_path,
+                        client=client,
+                        bindings=bindings,
+                        capture=capture,
+                    )
+                assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+                assert store.objects == {}
+            else:
+                result = await stream.capture_and_import_schwab_level_one_batch(
+                    session,
+                    store,
+                    repo_root=tmp_path,
+                    client=client,
+                    bindings=bindings,
+                    capture=capture,
+                )
+                assert set(result.quote_ids) == {"AAPL", "MSFT"}
+                assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
+        assert captures == [("AAPL", "MSFT")]
+        assert [
+            (request["command"], request.get("parameters", {}).get("keys")) for request in sent
+        ] == [("LOGIN", None), ("SUBS", "AAPL,MSFT")]
+    finally:
+        await engine.dispose()
+
+
+async def _seed_two_candidate_authority(session, registered):
+    from nexus.paper.agent_cycle_authority import CycleAuthority
+    from nexus.persistence.models.data import PriceBarRecord
+
+    await _seed_cycle_research_authority(session, registered_decision=registered.decision)
+    authority = CycleAuthority(
+        account_id=registered.decision.account_id,
+        portfolio_id=registered.decision.portfolio_id,
+        decision_session=DECISION_TIME.date(),
+        decision_time=DECISION_TIME,
+        execution_session=DECISION_TIME.date() + timedelta(days=1),
+        calendar_authority_id=CALENDAR_ID,
+        universe_snapshot_id=registered.decision.universe_snapshot_id,
+    )
+    second = INSTRUMENTS[1][0]
+    quote = await session.get(LatestQuote, UUID("63000000-0000-0000-0000-000000000091"))
+    values = {
+        column.name: getattr(quote, column.name)
+        for column in LatestQuote.__table__.columns
+        if column.name != "id"
+    }
+    values.update(instrument_id=second, content_hash="d" * 64)
+    session.add(LatestQuote(**values))
+    prior = await session.scalar(
+        select(PriceBarRecord).where(
+            PriceBarRecord.instrument_id == INSTRUMENTS[0][0],
+            PriceBarRecord.session == DECISION_TIME.date() - timedelta(days=1),
+        )
+    )
+    await ingest_price_page(
+        session,
+        _ObjectStore(),
+        ProviderPage(
+            items=(
+                PriceBar(
+                    instrument_id=second,
+                    session=prior.session,
+                    open=prior.open,
+                    high=prior.high,
+                    low=prior.low,
+                    close=prior.close,
+                    volume=prior.volume,
+                    observed_at=prior.observed_at,
+                    available_at=prior.available_at,
+                    received_at=prior.received_at,
+                    revision="second-prior",
+                    quality_flags=(),
+                ),
+            ),
+            next_cursor=None,
+            raw_payload=b'{"prior":"second"}',
+            source_request_id=None,
+            as_of=prior.available_at,
+            provenance=MarketDataProvenance(
+                source="alpaca",
+                feed="sip",
+                adjustment="all",
+                interval="1Day",
+                mode="delayed",
+                delivery_mode="delayed",
+            ),
+        ),
+        commit=False,
+        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    )
+    for row in tuple(
+        await session.scalars(
+            select(RiskQueryAuthorityRecord).where(
+                RiskQueryAuthorityRecord.required_instrument_ids == [INSTRUMENTS[0][0]]
+            )
+        )
+    ):
+        values = {
+            column.name: getattr(row, column.name)
+            for column in RiskQueryAuthorityRecord.__table__.columns
+            if column.name != "id"
+        }
+        values.update(
+            required_instrument_ids=[second],
+            blocked_instrument_ids=[],
+            available_at=row.available_at + timedelta(seconds=1),
+        )
+        values["content_hash"] = canonical_query_authority_hash(
+            **{
+                key: values[key]
+                for key in (
+                    "source_policy_id",
+                    "universe_snapshot_id",
+                    "decision_session",
+                    "kind",
+                    "required_instrument_ids",
+                    "blocked_instrument_ids",
+                    "complete",
+                    "source_watermark_hash",
+                    "available_at",
+                )
+            }
+        )
+        session.add(RiskQueryAuthorityRecord(**values))
+    await session.flush()
+    return authority
+
+
+@pytest.mark.asyncio
+async def test_manifest_prepares_exact_two_candidates_and_rejects_invalid_sets(
+    migrated_database_url,
+):
+    from nexus.paper.agent_cycle_authority import validate_candidate_manifest
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            ids = (INSTRUMENTS[1][0], INSTRUMENTS[0][0])
+            manifest = await prepare_candidates(
+                session, authority=authority, requested_instrument_ids=ids
+            )
+            assert tuple(row.instrument_id for row in manifest) == tuple(sorted(ids))
+            assert await validate_candidate_manifest(
+                session, authority=authority, manifest=manifest, requested_instrument_ids=ids
+            )
+            for invalid in (
+                (),
+                (ids[0], ids[0]),
+                (*ids, UUID(int=999)),
+                tuple(UUID(int=i) for i in range(6)),
+            ):
+                assert (
+                    await prepare_candidates(
+                        session, authority=authority, requested_instrument_ids=invalid
+                    )
+                    == ()
+                )
+            for bad in (
+                (manifest[0], manifest[0]),
+                (manifest[0], manifest[1].model_copy(update={"symbol": "AAPL"})),
+                (manifest[0],),
+                (manifest[0].model_copy(update={"symbol": "MSFT"}), manifest[1]),
+                (
+                    manifest[0],
+                    manifest[1].model_copy(
+                        update={"risk_query_authority_ids": manifest[0].risk_query_authority_ids}
+                    ),
+                ),
+            ):
+                assert not await validate_candidate_manifest(
+                    session, authority=authority, manifest=bad, requested_instrument_ids=ids
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_risk_authorities_same_timestamp_remain_instrument_scoped_on_replay(
+    migrated_database_url,
+):
+    from nexus.risk.query_authority_producer import RiskSourceProof, persist_query_authorities
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            proofs = tuple(
+                RiskSourceProof(kind, False, "f" * 64, DECISION_TIME)
+                for kind in ("corporate_action", "suspension", "delisting")
+            )
+            persisted = {}
+            for symbol, iid in (("AAPL", INSTRUMENTS[0][0]), ("T2", INSTRUMENTS[1][0])):
+                for _ in range(2):
+                    rows = await persist_query_authorities(
+                        session,
+                        universe_snapshot_id=authority.universe_snapshot_id,
+                        decision_session=authority.decision_session,
+                        symbol=symbol,
+                        proofs=proofs,
+                    )
+                    assert len(rows) == 3
+                    assert all(row.required_instrument_ids == [iid] for row in rows)
+                    ids = tuple(row.id for row in rows)
+                    assert persisted.setdefault(symbol, ids) == ids
+            assert set(persisted["AAPL"]).isdisjoint(persisted["T2"])
+        with pytest.raises(DBAPIError, match="instrument-scoped risk facts prevent downgrade"):
+            await asyncio.to_thread(
+                command.downgrade,
+                Config(str(ENGINE_ROOT / "alembic.ini")),
+                "0064_prompt_release_channel",
+            )
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(RiskQueryAuthorityRecord)
+                    .where(RiskQueryAuthorityRecord.id.in_((*persisted["AAPL"], *persisted["T2"])))
+                )
+                == 6
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gap", ["quote", "research", "risk", "risk_hash"])
+async def test_manifest_never_shrinks_candidate_set_when_one_authority_missing(
+    migrated_database_url, gap
+):
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            table, condition, assignment = {
+                "quote": (
+                    "latest_quotes",
+                    "instrument_id=:iid",
+                    "observed_at=observed_at-interval '5 minutes'",
+                ),
+                "research": (
+                    "data_snapshots",
+                    "provider_object_id=:iid_text",
+                    "available_at=available_at+interval '10 days'",
+                ),
+                "risk": (
+                    "risk_query_authorities",
+                    "required_instrument_ids=ARRAY[:iid]::uuid[] AND kind='suspension'",
+                    "available_at=available_at+interval '10 days'",
+                ),
+                "risk_hash": (
+                    "risk_query_authorities",
+                    "required_instrument_ids=ARRAY[:iid]::uuid[]",
+                    "content_hash=repeat('0',64)",
+                ),
+            }[gap]
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+            await session.execute(
+                text(f"UPDATE {table} SET {assignment} WHERE {condition}"),
+                {"iid": INSTRUMENTS[1][0], "iid_text": str(INSTRUMENTS[1][0])},
+            )
+            await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+            session.expire_all()
+            assert (
+                await prepare_candidates(
+                    session,
+                    authority=authority,
+                    requested_instrument_ids=(INSTRUMENTS[0][0], INSTRUMENTS[1][0]),
+                )
+                == ()
+            )
+    finally:
+        await engine.dispose()
+
+
 async def _wait_for_advisory_wait(
     sessions: async_sessionmaker[AsyncSession], backend_pid: int
 ) -> None:
@@ -3452,7 +3833,9 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                     await session.execute(
                         text("ALTER TABLE exchange_calendar_sessions ENABLE TRIGGER USER")
                     )
-            manifest = await prepare_candidates(session, authority=authority)
+            manifest = await prepare_candidates(
+                session, authority=authority, requested_instrument_ids=(INSTRUMENTS[0][0],)
+            )
             assert len(manifest) == 1
             assert set(manifest[0].risk_query_authority_ids) == newest_risk_ids
             cycle = AgentPaperCycleRecord(

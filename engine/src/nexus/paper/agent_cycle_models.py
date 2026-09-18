@@ -40,7 +40,7 @@ class CandidateManifestEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instrument_id: UUID
-    symbol: Literal["AAPL"]
+    symbol: Annotated[str, StringConstraints(pattern=r"^[A-Z][A-Z0-9.-]{0,14}$")]
     inclusion_reason: str
     research_snapshot_id: UUID
     prior_daily_price_authority_id: UUID

@@ -149,9 +149,7 @@ def test_prior_session_directory_fails_closed_and_preserves_original(tmp_path, m
     assert manifest["execution_locked"] is True
 
 
-def test_halt_response_received_after_decision_cutoff_is_rejected(
-    tmp_path, monkeypatch
-) -> None:
+def test_halt_response_received_after_decision_cutoff_is_rejected(tmp_path, monkeypatch) -> None:
     cutoff = datetime(2026, 9, 14, 20, 30, tzinfo=UTC)
     action, halt, directory = _responses(cutoff - timedelta(seconds=30))
     received_times = iter(
@@ -266,9 +264,7 @@ def test_cli_emits_only_bounded_result_and_never_requires_cycle_enablement(
     assert seen["source_policy_id"] == cli.PAPER_DECISION_SOURCE_POLICY_ID
 
 
-def test_cli_selects_same_session_schwab_policy_explicitly(
-    tmp_path, monkeypatch, capsys
-) -> None:
+def test_cli_selects_same_session_schwab_policy_explicitly(tmp_path, monkeypatch, capsys) -> None:
     environment = {
         "DATABASE_URL": "postgresql+asyncpg://user:password@127.0.0.1:55433/nexus",
         "ALPACA_API_KEY_ID": "synthetic-key",
@@ -334,3 +330,52 @@ def test_cli_invalid_date_returns_fixed_code_without_echoing_input(
     assert code == 1
     assert json.loads(captured.out) == {"error_code": "AGENT_RISK_ARGUMENT_INVALID"}
     assert secret_input not in captured.out + captured.err
+
+
+def test_batch_fetches_shared_nasdaq_once_and_actions_once_per_instrument(tmp_path, monkeypatch):
+    published = datetime.now(UTC) - timedelta(seconds=5)
+    decision_session = published.astimezone(ZoneInfo("America/New_York")).date()
+    _, halt, directory = _responses(published)
+    directory = directory.replace(b"File Creation", b"MSFT|Microsoft|Q|N|N|100|N|N\nFile Creation")
+    requested = []
+
+    async def respond(request):
+        requested.append(request)
+        if request.url.host == "data.alpaca.markets":
+            return httpx.Response(200, json={"corporate_actions": {}, "next_page_token": None})
+        return httpx.Response(200, content=halt if request.url.path == "/rss.aspx" else directory)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        cli.httpx,
+        "AsyncClient",
+        lambda **kw: original(**kw, transport=httpx.MockTransport(respond)),
+    )
+    assert hasattr(cli, "collect_source_proofs_batch"), "bounded batch collector missing"
+    candidates = (cli.RiskCandidate("AAPL", UUID(int=1)), cli.RiskCandidate("MSFT", UUID(int=2)))
+    proofs = asyncio.run(
+        cli.collect_source_proofs_batch(
+            candidates=candidates,
+            decision_session=decision_session,
+            key_id=SecretStr("synthetic-key"),
+            secret=SecretStr("synthetic-secret"),
+            output_dir=tmp_path / "batch",
+            cutoff_at=None,
+        )
+    )
+    assert set(proofs) == {UUID(int=1), UUID(int=2)}
+    assert [(p.kind, p.blocked) for p in proofs[UUID(int=1)]] == [
+        ("corporate_action", False),
+        ("delisting", False),
+        ("suspension", False),
+    ]
+    assert [(p.kind, p.blocked) for p in proofs[UUID(int=2)]] == [
+        ("corporate_action", False),
+        ("delisting", False),
+        ("suspension", True),
+    ]
+    assert [r.url.path for r in requested].count("/dynamic/SymDir/nasdaqlisted.txt") == 1
+    assert [r.url.path for r in requested].count("/rss.aspx") == 1
+    assert sorted(
+        r.url.params["symbols"] for r in requested if r.url.host == "data.alpaca.markets"
+    ) == ["AAPL", "MSFT"]

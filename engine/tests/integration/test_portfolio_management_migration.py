@@ -11,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 from helpers.paper_batch import PAPER_ACCOUNT_ID, PORTFOLIO_ID, UNIVERSE_ID, seed_paper_batch
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH
+from nexus.persistence.models.paper import RiskQueryAuthorityRecord
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -256,6 +257,9 @@ async def test_0065_adds_portfolio_management_facts(migrated_database_url: str) 
     engine = create_async_engine(migrated_database_url)
     try:
         async with engine.connect() as connection:
+            risk_constraints = await connection.run_sync(
+                lambda c: inspect(c).get_unique_constraints("risk_query_authorities")
+            )
             tables, columns = await connection.run_sync(
                 lambda connection: (
                     set(inspect(connection).get_table_names()),
@@ -269,6 +273,32 @@ async def test_0065_adds_portfolio_management_facts(migrated_database_url: str) 
                 )
             )
         assert NEW_TABLES <= tables
+        expected_risk_key = [
+            "source_policy_id",
+            "universe_snapshot_id",
+            "decision_session",
+            "kind",
+            "available_at",
+            "required_instrument_ids",
+        ]
+        assert (
+            next(
+                c["column_names"]
+                for c in risk_constraints
+                if c["name"] == "uq_risk_query_authorities_scope_available"
+            )
+            == expected_risk_key
+        )
+        assert (
+            list(
+                next(
+                    c
+                    for c in RiskQueryAuthorityRecord.__table__.constraints
+                    if c.name == "uq_risk_query_authorities_scope_available"
+                ).columns.keys()
+            )
+            == expected_risk_key
+        )
         for table, column in LINKS.items():
             assert columns[table][column]["nullable"] is True
     finally:

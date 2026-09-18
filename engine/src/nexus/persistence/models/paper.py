@@ -1103,6 +1103,7 @@ class RiskQueryAuthorityRecord(ImmutableCreatedAt, Base):
             "decision_session",
             "kind",
             "available_at",
+            "required_instrument_ids",
             name="uq_risk_query_authorities_scope_available",
         ),
         UniqueConstraint(
