@@ -1090,11 +1090,16 @@ async def _resume_portfolio_synthesis(
             session, cycle_id=cycle.id, synthesis_output_id=output.id, now=now
         )
     except ValueError as error:
-        code = (
-            "POLICY_UNCONFIRMED"
-            if str(error) == "POLICY_UNCONFIRMED"
-            else "PORTFOLIO_PROPOSAL_UNAVAILABLE"
-        )
+        if str(error) == "POLICY_UNCONFIRMED":
+            # Missing initial authority is a durable-input wait, not a terminal
+            # research failure. Preserve the completed synthesis for exact resume.
+            return _result(cycle.id, events, replayed=True).model_copy(
+                update={
+                    "result_code": "POLICY_UNCONFIRMED",
+                    "portfolio_synthesis_output_id": output.id,
+                }
+            )
+        code = "PORTFOLIO_PROPOSAL_UNAVAILABLE"
         await _append_event(
             session,
             cycle,

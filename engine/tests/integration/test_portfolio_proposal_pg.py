@@ -165,7 +165,7 @@ async def test_cycle_handoff_is_recorded_once_and_never_executes(migrated_databa
             assert result.result_code == (
                 "TARGET_ACTIVATION_PENDING" if approved else "POLICY_UNCONFIRMED"
             )
-            assert result.status == ("decision_recorded" if approved else "unavailable")
+            assert result.status == ("decision_recorded" if approved else "researching")
             if approved:
                 count = len(await _events(session, cycle.id))
                 replay = await _resume_batch(
@@ -210,6 +210,233 @@ async def test_cycle_handoff_is_recorded_once_and_never_executes(migrated_databa
                 assert len(await _events(session, cycle.id)) == count
             for model in (PaperTargetVersionRecord, PaperOrderBatchRecord, PaperOrderRecord):
                 assert await session.scalar(select(func.count()).select_from(model)) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_terminal", [False, True])
+async def test_persisted_policy_block_survives_restart_and_next_slot(
+    migrated_database_url,
+    legacy_terminal,
+):
+    from dataclasses import replace
+
+    from helpers.paper_batch import CALENDAR_ID
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.paper.agent_cycle import _append_event, _events, _resume_portfolio_synthesis
+    from nexus.paper.agent_cycle_authority import ServiceCalendarAuthority
+    from nexus.persistence.models.runtime import Job
+
+    engine, sessions, args = await proposal_source(migrated_database_url, approve=False)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            original_events = len(await _events(session, cycle.id))
+            result = await _resume_portfolio_synthesis(
+                session,
+                cycle=cycle,
+                events=await _events(session, cycle.id),
+                run_ids=(),
+                now=args["now"],
+                daily_limit_usd=None,
+            )
+            assert result.result_code == "POLICY_UNCONFIRMED"
+            assert result.status == "researching"
+            assert len(await _events(session, cycle.id)) == original_events
+            if legacy_terminal:
+                await _append_event(
+                    session,
+                    cycle,
+                    "researching",
+                    "unavailable",
+                    "POLICY_UNCONFIRMED",
+                    {"portfolio_synthesis_output_id": str(args["synthesis_output_id"])},
+                )
+            original_jobs = set(await session.scalars(select(Job.id)))
+            original_cycles = set(await session.scalars(select(AgentPaperCycleRecord.id)))
+        trigger_calls = []
+        for at in (
+            args["now"],
+            args["now"] + timedelta(seconds=1),
+            args["now"] + timedelta(days=1),
+        ):
+            calendar = ServiceCalendarAuthority(
+                calendar_authority_id=CALENDAR_ID,
+                as_of=at,
+                local_date=at.date(),
+                session=at.date(),
+                decision_window_start_at=at.replace(hour=11, minute=0, second=0),
+                market_open_at=at.replace(hour=13, minute=30, second=0),
+                market_close_at=at.replace(hour=22, minute=0, second=0),
+                next_session=(at + timedelta(days=1)).date(),
+                next_decision_window_start_at=at.replace(hour=11, minute=0, second=0)
+                + timedelta(days=1),
+                next_market_close_at=at.replace(hour=22, minute=0, second=0) + timedelta(days=1),
+            )
+            async with sessions() as session:
+                state = await loop._inspect_portfolio_batch(
+                    session,
+                    account_id=cycle.account_id,
+                    now=at,
+                    calendar=calendar,
+                    performance_due_at=None,
+                )
+                assert state is not None
+                assert state.cycle_result_code == "POLICY_UNCONFIRMED"
+                assert state.cycle_id == cycle.id
+                assert loop.choose_loop_action(state) == loop.AgentPaperLoopAction.WAIT_FOR_SLOT
+                # Also inspect at the next day's normal 10:00 NY decision instant.
+                assert (
+                    loop.choose_loop_action(
+                        replace(
+                            state,
+                            now=at.replace(hour=14, minute=0, second=0),
+                        )
+                    )
+                    == loop.AgentPaperLoopAction.WAIT_FOR_SLOT
+                )
+            waited = False
+
+            async def inspect():
+                return replace(state, enabled=not waited)
+
+            async def execute(*_args):
+                trigger_calls.append(_args)
+                pytest.fail("policy-blocked host must not dispatch any provider, Job or new cycle")
+
+            async def sleep(_seconds):
+                nonlocal waited
+                waited = True
+
+            async def heartbeat(_now):
+                pass
+
+            assert (
+                await loop.run_foreground_loop(
+                    inspect=inspect,
+                    execute=execute,
+                    sleep=sleep,
+                    heartbeat=heartbeat,
+                )
+                == loop.AgentPaperLoopAction.STOP_DISABLED
+            )
+        assert trigger_calls == []
+        if legacy_terminal:
+            from nexus.paper.projection import load_paper_projection
+
+            async with sessions.begin() as session:
+                projection = await load_paper_projection(
+                    session,
+                    account_id=cycle.account_id,
+                    as_of=cycle.decision_time,
+                )
+                await approve_initial_target_projection(
+                    session,
+                    account_id=cycle.account_id,
+                    projection_as_of=projection.as_of,
+                    expected_projection_hash=projection.projection_hash,
+                    approved_by="local-user",
+                    approved_at=at,
+                    idempotency_key="legacy-terminal-approval",
+                )
+            async with sessions() as session:
+                state = await loop._inspect_portfolio_batch(
+                    session,
+                    account_id=cycle.account_id,
+                    now=at,
+                    calendar=calendar,
+                    performance_due_at=None,
+                )
+                assert state is not None
+                assert state.cycle_status == "unavailable"
+                assert state.cycle_result_code == "POLICY_UNCONFIRMED"
+                assert loop.choose_loop_action(state) == loop.AgentPaperLoopAction.WAIT_FOR_SLOT
+        async with sessions() as session:
+            assert set(await session.scalars(select(Job.id))) == original_jobs
+            assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == original_cycles
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_approval_resumes_original_cycle_from_completed_synthesis(migrated_database_url):
+    from helpers.paper_batch import CALENDAR_ID
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.paper.agent_cycle import _events, _resume_research
+    from nexus.paper.agent_cycle_authority import ServiceCalendarAuthority
+    from nexus.paper.projection import load_paper_projection
+    from nexus.persistence.models.runtime import Job
+
+    engine, sessions, args = await proposal_source(migrated_database_url, approve=False)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            original_events = len(await _events(session, cycle.id))
+            original_jobs = set(await session.scalars(select(Job.id)))
+            original_cycles = set(await session.scalars(select(AgentPaperCycleRecord.id)))
+            blocked = await _resume_research(
+                session,
+                cycle=cycle,
+                authority=None,
+                events=await _events(session, cycle.id),
+                now=args["now"],
+            )
+            assert blocked.result_code == "POLICY_UNCONFIRMED"
+            assert blocked.status == "researching"
+            assert len(await _events(session, cycle.id)) == original_events
+            projection = await load_paper_projection(
+                session,
+                account_id=cycle.account_id,
+                as_of=cycle.decision_time,
+            )
+            await approve_initial_target_projection(
+                session,
+                account_id=cycle.account_id,
+                projection_as_of=projection.as_of,
+                expected_projection_hash=projection.projection_hash,
+                approved_by="local-user",
+                approved_at=args["now"],
+                idempotency_key="approval-after-policy-wait",
+            )
+        at = args["now"] + timedelta(seconds=1)
+        calendar = ServiceCalendarAuthority(
+            calendar_authority_id=CALENDAR_ID,
+            as_of=at,
+            local_date=at.date(),
+            session=at.date(),
+            decision_window_start_at=cycle.decision_time,
+            market_open_at=cycle.decision_time,
+            market_close_at=cycle.decision_time + timedelta(hours=1),
+            next_session=(at + timedelta(days=1)).date(),
+            next_decision_window_start_at=cycle.decision_time + timedelta(days=1),
+            next_market_close_at=cycle.decision_time + timedelta(days=1, hours=1),
+        )
+        async with sessions.begin() as session:
+            snapshot = await loop._inspect_portfolio_batch(
+                session,
+                account_id=cycle.account_id,
+                now=at,
+                calendar=calendar,
+                performance_due_at=None,
+            )
+            assert snapshot is not None
+            assert snapshot.cycle_id == cycle.id
+            assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RESUME
+            resumed = await _resume_research(
+                session,
+                cycle=cycle,
+                authority=None,
+                events=await _events(session, cycle.id),
+                now=at,
+            )
+            assert resumed.cycle_id == cycle.id
+            assert resumed.status == "decision_recorded"
+            assert resumed.result_code == "TARGET_ACTIVATION_PENDING"
+            assert resumed.portfolio_synthesis_output_id == args["synthesis_output_id"]
+            assert len(await _events(session, cycle.id)) == original_events + 1
+            assert set(await session.scalars(select(Job.id))) == original_jobs
+            assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == original_cycles
     finally:
         await engine.dispose()
 

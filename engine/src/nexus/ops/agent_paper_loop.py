@@ -1494,6 +1494,10 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     """Choose one safe next action without performing I/O or retrying unknown work."""
     if not snapshot.enabled:
         return AgentPaperLoopAction.STOP_DISABLED
+    if snapshot.evaluation_id is None and snapshot.cycle_result_code == "POLICY_UNCONFIRMED":
+        if snapshot.cycle_id is None or snapshot.cycle_status not in {"researching", "unavailable"}:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        return AgentPaperLoopAction.WAIT_FOR_SLOT
     if snapshot.evaluation_id is None and snapshot.cycle_result_code == "TARGET_ACTIVATION_PENDING":
         return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
 
@@ -2608,6 +2612,12 @@ async def execute_agent_paper_loop_action(
                 idempotency_key=f"agent-paper-loop-resume:{snapshot.cycle_id}",
             ),
         )
+        if (
+            resumed is not None
+            and resumed.status == "researching"
+            and resumed.result_code == "POLICY_UNCONFIRMED"
+        ):
+            return None
         if resumed is not None and resumed.result_code in {
             "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
             "PORTFOLIO_PROPOSAL_UNAVAILABLE",
@@ -3185,10 +3195,17 @@ async def _inspect_portfolio_batch(
             cycle_slot_at=cycle.decision_slot_at,
             calendar_authority_id=calendar.calendar_authority_id,
         )
-    if event is None or event.to_status != "researching":
+    legacy_policy_block = (
+        event is not None
+        and event.to_status == "unavailable"
+        and event.result_code == "POLICY_UNCONFIRMED"
+    )
+    if event is None or (event.to_status != "researching" and not legacy_policy_block):
         return None
     job = await read_synthesis_job(session, cycle_id=cycle.id)
     if job is None:
+        if legacy_policy_block:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         job = await _read_portfolio_security_job(session, cycle)
         return AgentPaperLoopSnapshot(
             now=now,
@@ -3225,6 +3242,58 @@ async def _inspect_portfolio_batch(
         or job.manual_retry_count != 0
     ):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    policy_block = False
+    if run.status == "completed" and job.status == "succeeded":
+        from nexus.paper.agent_decision_store import _rebuild_portfolio_proposal
+        from nexus.persistence.models.agents import AgentPortfolioSynthesisOutputRecord
+        from nexus.persistence.models.paper import (
+            PaperInitialTargetApprovalRecord,
+            StrategyDecisionRecord,
+        )
+
+        output = await session.scalar(
+            select(AgentPortfolioSynthesisOutputRecord).where(
+                AgentPortfolioSynthesisOutputRecord.run_id == run.id,
+            )
+        )
+        proposal_id = await session.scalar(
+            select(StrategyDecisionRecord.id).where(
+                StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+            )
+        )
+        if output is not None and output.status == "completed" and proposal_id is None:
+            approval = await session.scalar(
+                select(PaperInitialTargetApprovalRecord).where(
+                    PaperInitialTargetApprovalRecord.account_id == account_id,
+                )
+            )
+            if (
+                output.created_at > now
+                or approval is not None
+                and (approval.approved_at > now or approval.created_at > now)
+            ):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            try:
+                # Reuse the immutable source/baseline checks without admitting a
+                # fresh proposal. The actual resume still applies current expiry.
+                await _rebuild_portfolio_proposal(
+                    session,
+                    cycle=cycle,
+                    output_id=output.id,
+                    now=None,
+                )
+            except ValueError as error:
+                if str(error) != "POLICY_UNCONFIRMED":
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
+                policy_block = True
+            if legacy_policy_block:
+                if event.fact_ids != {"portfolio_synthesis_output_id": str(output.id)}:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                policy_block = True
+        elif legacy_policy_block:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    elif legacy_policy_block:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     status = job.status
     lease = None
     if status == "running":
@@ -3241,6 +3310,7 @@ async def _inspect_portfolio_batch(
         next_decision_window_start_at=calendar.next_decision_window_start_at,
         cycle_id=cycle.id,
         cycle_status=event.to_status,
+        cycle_result_code="POLICY_UNCONFIRMED" if policy_block else None,
         cycle_slot_at=cycle.decision_slot_at,
         research_job_id=job.id,
         research_job_status=status,

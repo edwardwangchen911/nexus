@@ -4609,6 +4609,18 @@ def test_trigger_failure_snapshot_requires_complete_known_identity(changes):
     assert loop.choose_loop_action(snapshot(**changes)) == A.STOP_RESULT_UNKNOWN
 
 
+@pytest.mark.parametrize("at", [NOW, NOW + timedelta(days=1)])
+def test_policy_unconfirmed_keeps_host_waiting_across_slots(at):
+    state = snapshot(
+        now=at,
+        cycle_id=UUID(int=101),
+        cycle_status="unavailable",
+        cycle_result_code="POLICY_UNCONFIRMED",
+        cycle_slot_at=SLOT,
+    )
+    assert loop.choose_loop_action(state) == A.WAIT_FOR_SLOT
+
+
 @pytest.mark.parametrize("persisted", [None, "SCHWAB_L1_FRESHNESS_UNPROVEN"])
 def test_trigger_failure_without_matching_persistence_stops_unknown(monkeypatch, persisted):
     monkeypatch.setattr(

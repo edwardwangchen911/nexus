@@ -472,10 +472,10 @@ async def test_cycle_admits_once_and_resumes_exact_output_without_legacy_decisio
                     events=await _events(session, cycle.id),
                     now=kwargs["now"],
                 )
-                assert result.status == "unavailable"
+                assert result.status == "researching"
                 assert result.result_code == "POLICY_UNCONFIRMED"
                 assert result.portfolio_synthesis_output_id == output.id
-            assert len(await _events(session, cycle.id)) == len(events) + 1
+            assert len(await _events(session, cycle.id)) == len(events)
             assert (
                 await session.scalar(
                     select(func.count()).select_from(AgentPortfolioSynthesisRunRecord)
@@ -716,15 +716,8 @@ async def test_product_dispatch_executes_synthesis_and_recovers_committed_output
                 settings, account_id=cycle.account_id, expected_calendar_authority_id=CALENDAR_ID
             )
             assert snapshot.research_job_status == "succeeded"
-            assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RESUME
-            with pytest.raises(ValueError, match="^POLICY_UNCONFIRMED$"):
-                await loop.execute_agent_paper_loop_action(
-                    settings,
-                    account_id=cycle.account_id,
-                    repo_root=tmp_path,
-                    action=loop.AgentPaperLoopAction.RESUME,
-                    snapshot=snapshot,
-                )
+            assert snapshot.cycle_result_code == "POLICY_UNCONFIRMED"
+            assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.WAIT_FOR_SLOT
         replay = await once.resume_once(
             settings,
             once.AgentPaperResumeRequest(
@@ -910,25 +903,23 @@ async def test_host_from_security_jobs_through_synthesis_handoff(
         expected = [loop.AgentPaperLoopAction.RUN_RESEARCH_JOB] * 2 + [
             loop.AgentPaperLoopAction.RESUME,
             loop.AgentPaperLoopAction.RUN_RESEARCH_JOB,
-            loop.AgentPaperLoopAction.RESUME,
+            loop.AgentPaperLoopAction.WAIT_FOR_SLOT,
         ]
         for index, action in enumerate(expected):
             snapshot = await loop.inspect_agent_paper_loop(
                 settings, account_id=cycle.account_id, expected_calendar_authority_id=CALENDAR_ID
             )
             assert loop.choose_loop_action(snapshot) == action
-            operation = loop.execute_agent_paper_loop_action(
+            if action == loop.AgentPaperLoopAction.WAIT_FOR_SLOT:
+                assert snapshot.cycle_result_code == "POLICY_UNCONFIRMED"
+                continue
+            await loop.execute_agent_paper_loop_action(
                 settings,
                 account_id=cycle.account_id,
                 repo_root=tmp_path,
                 action=action,
                 snapshot=snapshot,
             )
-            if index == 4:
-                with pytest.raises(ValueError, match="^POLICY_UNCONFIRMED$"):
-                    await operation
-            else:
-                await operation
         assert calls == [runs[0].id, runs[1].id, "synthesis"]
         for _ in range(2):
             replay = await once.resume_once(
@@ -938,6 +929,51 @@ async def test_host_from_security_jobs_through_synthesis_handoff(
                 ),
             )
             assert replay.result_code == "POLICY_UNCONFIRMED"
+        assert len(calls) == 3
+        from nexus.paper.agent_cycle import _events
+        from nexus.paper.projection import load_paper_projection
+        from nexus.paper.target_service import approve_initial_target_projection
+
+        async with sessions.begin() as session:
+            original_jobs = set(await session.scalars(select(Job.id)))
+            original_cycles = set(await session.scalars(select(AgentPaperCycleRecord.id)))
+            prior_events = len(await _events(session, cycle.id))
+            projection = await load_paper_projection(
+                session,
+                account_id=cycle.account_id,
+                as_of=cycle.decision_time,
+            )
+            await approve_initial_target_projection(
+                session,
+                account_id=cycle.account_id,
+                projection_as_of=projection.as_of,
+                expected_projection_hash=projection.projection_hash,
+                approved_by="local-user",
+                approved_at=Clock.now(),
+                idempotency_key="host-policy-approval",
+            )
+        snapshot = await loop.inspect_agent_paper_loop(
+            settings,
+            account_id=cycle.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+        )
+        assert snapshot.cycle_id == cycle.id
+        assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RESUME
+        with pytest.raises(ValueError, match="^TARGET_ACTIVATION_PENDING$"):
+            await loop.execute_agent_paper_loop_action(
+                settings,
+                account_id=cycle.account_id,
+                repo_root=tmp_path,
+                action=loop.AgentPaperLoopAction.RESUME,
+                snapshot=snapshot,
+            )
+        async with sessions() as session:
+            events = await _events(session, cycle.id)
+            assert len(events) == prior_events + 1
+            assert events[-1].to_status == "decision_recorded"
+            assert events[-1].result_code == "TARGET_ACTIVATION_PENDING"
+            assert set(await session.scalars(select(Job.id))) == original_jobs
+            assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == original_cycles
         assert len(calls) == 3
     finally:
         await engine.dispose()
