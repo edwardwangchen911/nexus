@@ -65,6 +65,7 @@ from nexus.paper.agent_market import (
 from nexus.paper.agent_version_evaluation import register_agent_version_evaluation
 from nexus.paper.agent_version_models import (
     AgentVersionEvaluationRequest,
+    AgentVersionSlotResult,
     FrozenAgentVersionSelection,
 )
 from nexus.paper.agent_version_runner import (
@@ -470,6 +471,388 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
     assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
     assert resume_requests == [(cycle_id, f"agent-paper-loop-resume:{cycle_id}")]
     assert trigger_slots == [DECISION_TIME + timedelta(minutes=5)]
+
+
+def test_accelerated_host_stops_unknown_job_without_replay(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job_id = UUID(int=302)
+    environment = {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "DATABASE_URL": migrated_database_url,
+        "AGENT_RUNTIME_MODE": "codex_sdk",
+    }
+
+    async def select_calendar(_settings: EngineSettings) -> UUID:
+        return CALENDAR_ID
+
+    async def inspect_evaluation(*_args, **_kwargs):
+        return None
+
+    async def inspect_cycle(*_args, **_kwargs):
+        return agent_paper_loop.AgentPaperLoopSnapshot(
+            now=DECISION_TIME,
+            calendar_authority_id=CALENDAR_ID,
+            decision_window_start_at=DECISION_TIME,
+            decision_window_end_at=DECISION_TIME + timedelta(hours=6),
+            next_decision_window_start_at=DECISION_TIME + timedelta(days=1),
+            cycle_id=UUID(int=301),
+            cycle_status="researching",
+            cycle_slot_at=DECISION_TIME,
+            research_job_status="running",
+            research_job_id=job_id,
+        )
+
+    async def unexpected(*_args, **_kwargs):
+        pytest.fail("unknown Job state must not execute, replay, or create work")
+
+    monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "load_agent_paper_service_environment",
+        lambda *_args, **_kwargs: environment,
+    )
+    monkeypatch.setattr(
+        agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
+    )
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "inspect_agent_version_evaluation_loop",
+        inspect_evaluation,
+    )
+    monkeypatch.setattr(agent_paper_loop, "inspect_agent_paper_loop", inspect_cycle)
+    monkeypatch.setattr(agent_paper_loop, "execute_agent_paper_loop_action", unexpected)
+
+    result = asyncio.run(
+        agent_paper_loop.run_local_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=unexpected,
+            clock=lambda: DECISION_TIME,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result is agent_paper_loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+
+    async def business_fact_counts() -> tuple[int, int]:
+        engine = create_async_engine(migrated_database_url)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                cycles = await session.scalar(
+                    select(func.count()).select_from(AgentPaperCycleRecord)
+                )
+                jobs = await session.scalar(select(func.count()).select_from(Job))
+                return int(cycles or 0), int(jobs or 0)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(business_fact_counts()) == (0, 0)
+
+
+def test_restarted_host_runs_only_the_existing_cycle_job(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cycle_id = UUID(int=401)
+    job_id = UUID(int=402)
+    stage = "queued"
+    claimed_job_ids: list[tuple[UUID, ...]] = []
+    resumed_cycle_ids: list[UUID] = []
+    environment = {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "DATABASE_URL": migrated_database_url,
+        "AGENT_RUNTIME_MODE": "codex_sdk",
+    }
+
+    def load_environment(*_args, **_kwargs) -> dict[str, str]:
+        if stage == "completed":
+            return {**environment, "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false"}
+        return environment
+
+    async def select_calendar(_settings: EngineSettings) -> UUID:
+        return CALENDAR_ID
+
+    async def inspect_evaluation(*_args, **_kwargs):
+        return None
+
+    async def inspect_cycle(*_args, **_kwargs):
+        return agent_paper_loop.AgentPaperLoopSnapshot(
+            now=DECISION_TIME,
+            calendar_authority_id=CALENDAR_ID,
+            decision_window_start_at=DECISION_TIME,
+            decision_window_end_at=DECISION_TIME + timedelta(hours=6),
+            next_decision_window_start_at=DECISION_TIME + timedelta(days=1),
+            cycle_id=cycle_id,
+            cycle_status="researching",
+            cycle_slot_at=DECISION_TIME,
+            research_job_status=stage,
+            research_job_id=job_id,
+        )
+
+    async def model_ready() -> None:
+        return None
+
+    async def run_worker(_settings, *, job_ids):
+        nonlocal stage
+        claimed_job_ids.append(job_ids)
+        stage = "succeeded"
+        return True
+
+    async def resume(_settings, request):
+        nonlocal stage
+        resumed_cycle_ids.append(request.cycle_id)
+        stage = "completed"
+        return None
+
+    monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(
+        agent_paper_loop, "load_agent_paper_service_environment", load_environment
+    )
+    monkeypatch.setattr(
+        agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
+    )
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "inspect_agent_version_evaluation_loop",
+        inspect_evaluation,
+    )
+    monkeypatch.setattr(agent_paper_loop, "inspect_agent_paper_loop", inspect_cycle)
+    monkeypatch.setattr(agent_paper_loop, "_codex_sdk_preflight_blocker_async", model_ready)
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "local_settings",
+        lambda *_args, **_kwargs: EngineSettings(database_url=migrated_database_url),
+    )
+    monkeypatch.setattr(agent_paper_loop, "run_agent_worker_once", run_worker)
+    monkeypatch.setattr(agent_paper_loop, "resume_once", resume)
+
+    result = asyncio.run(
+        agent_paper_loop.run_local_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            clock=lambda: DECISION_TIME,
+        )
+    )
+
+    assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
+    assert claimed_job_ids == [(job_id,)]
+    assert resumed_cycle_ids == [cycle_id]
+
+
+def test_accelerated_host_publishes_close_once_then_enters_next_session(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = datetime(2026, 8, 26, 23, 59, 30, tzinfo=UTC)
+    elapsed = 0.0
+    close_at = current - timedelta(hours=1)
+    next_session_start = datetime(2026, 8, 27, 0, 0, tzinfo=UTC)
+    cycle_id = UUID(int=501)
+    published = False
+    next_session_triggered = False
+    publish_calls: list[tuple[UUID, datetime]] = []
+    trigger_slots: list[datetime] = []
+    environment = {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "DATABASE_URL": migrated_database_url,
+        "AGENT_RUNTIME_MODE": "codex_sdk",
+        "ALPACA_API_KEY_ID": "synthetic-test-key",
+        "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
+    }
+
+    def clock() -> datetime:
+        return current
+
+    def monotonic() -> float:
+        return elapsed
+
+    async def sleep(seconds: float) -> None:
+        nonlocal current, elapsed
+        current += timedelta(seconds=seconds)
+        elapsed += seconds
+
+    def load_environment(*_args, **_kwargs) -> dict[str, str]:
+        if next_session_triggered:
+            return {**environment, "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false"}
+        return environment
+
+    async def select_calendar(_settings: EngineSettings) -> UUID:
+        return CALENDAR_ID
+
+    async def inspect_evaluation(*_args, **_kwargs):
+        return None
+
+    async def inspect_cycle(*_args, **_kwargs):
+        return agent_paper_loop.AgentPaperLoopSnapshot(
+            now=current,
+            calendar_authority_id=CALENDAR_ID,
+            decision_window_start_at=next_session_start,
+            decision_window_end_at=next_session_start + timedelta(hours=6),
+            next_decision_window_start_at=next_session_start + timedelta(days=1),
+            cycle_id=cycle_id,
+            cycle_status="completed",
+            cycle_slot_at=DECISION_TIME,
+            performance_due_at=(None if published else close_at),
+        )
+
+    async def publish(_settings, *, account_id, as_of):
+        nonlocal published
+        publish_calls.append((account_id, as_of))
+        published = True
+        return True
+
+    async def ready(*_args, **_kwargs) -> str:
+        return "ready"
+
+    async def trigger(_settings, request, **_kwargs):
+        nonlocal next_session_triggered
+        trigger_slots.append(floor_decision_slot(current))
+        next_session_triggered = True
+        return request
+
+    monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(
+        agent_paper_loop, "load_agent_paper_service_environment", load_environment
+    )
+    monkeypatch.setattr(
+        agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
+    )
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "inspect_agent_version_evaluation_loop",
+        inspect_evaluation,
+    )
+    monkeypatch.setattr(agent_paper_loop, "inspect_agent_paper_loop", inspect_cycle)
+    monkeypatch.setattr(agent_paper_loop, "publish_due_performance_once", publish)
+    monkeypatch.setattr(agent_paper_loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "trigger_once", trigger)
+
+    result = asyncio.run(
+        agent_paper_loop.run_local_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=sleep,
+            clock=clock,
+            monotonic=monotonic,
+        )
+    )
+
+    assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
+    assert publish_calls == [(UUID(int=1), close_at)]
+    assert trigger_slots == [next_session_start]
+
+
+def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    evaluation_id = UUID(int=601)
+    incumbent_cycle_id = UUID(int=602)
+    closed = False
+    close_calls: list[tuple[UUID, datetime, str]] = []
+    environment = {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "DATABASE_URL": migrated_database_url,
+        "AGENT_RUNTIME_MODE": "codex_sdk",
+        "ALPACA_API_KEY_ID": "synthetic-test-key",
+        "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
+    }
+
+    def load_environment(*_args, **_kwargs) -> dict[str, str]:
+        if closed:
+            return {**environment, "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false"}
+        return environment
+
+    async def select_calendar(_settings: EngineSettings) -> UUID:
+        return CALENDAR_ID
+
+    async def inspect_evaluation(*_args, **_kwargs):
+        return agent_paper_loop.AgentPaperLoopSnapshot(
+            now=DECISION_TIME,
+            calendar_authority_id=CALENDAR_ID,
+            evaluation_id=evaluation_id,
+            evaluation_slot_at=DECISION_TIME,
+            cycle_status="evaluation_pending",
+        )
+
+    async def ready(*_args, **_kwargs) -> str:
+        return "ready"
+
+    async def prepare_slot(*_args, **_kwargs) -> AgentVersionSlotResult:
+        return AgentVersionSlotResult(
+            evaluation_id=evaluation_id,
+            decision_slot_at=DECISION_TIME,
+            phase="train",
+            incumbent_cycle_id=incumbent_cycle_id,
+            status="incomparable",
+            reason_code="PAIR_CYCLES_UNAVAILABLE",
+            replayed=False,
+        )
+
+    async def close(
+        *, database_url, evaluation_id, decision_slot_at, reason_code
+    ) -> None:
+        nonlocal closed
+        assert database_url == migrated_database_url
+        close_calls.append((evaluation_id, decision_slot_at, reason_code))
+        closed = True
+
+    monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(
+        agent_paper_loop, "load_agent_paper_service_environment", load_environment
+    )
+    monkeypatch.setattr(
+        agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
+    )
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "inspect_agent_version_evaluation_loop",
+        inspect_evaluation,
+    )
+    monkeypatch.setattr(agent_paper_loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_agent_version_slot_once", prepare_slot)
+    monkeypatch.setattr(agent_paper_loop, "_close_unrecoverable_evaluation_once", close)
+
+    result = asyncio.run(
+        agent_paper_loop.run_local_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            clock=lambda: DECISION_TIME,
+        )
+    )
+
+    assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
+    assert close_calls == [
+        (evaluation_id, DECISION_TIME, "PAIR_CYCLES_UNAVAILABLE")
+    ]
+
+    async def replacement_fact_counts() -> tuple[int, int]:
+        engine = create_async_engine(migrated_database_url)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                pairs = await session.scalar(
+                    select(func.count()).select_from(AgentVersionCyclePairRecord)
+                )
+                jobs = await session.scalar(select(func.count()).select_from(Job))
+                return int(pairs or 0), int(jobs or 0)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(replacement_fact_counts()) == (0, 0)
 
 
 @pytest.mark.parametrize(
