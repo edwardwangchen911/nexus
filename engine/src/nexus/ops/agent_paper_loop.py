@@ -42,6 +42,7 @@ from nexus.ops.agent_paper_once import (
     AgentPaperTriggerSettings,
     collect_window_once,
     resume_once,
+    run_cycle_job_once,
     trigger_once,
 )
 from nexus.ops.alpaca_adjusted_authority_import import import_adjusted_authority
@@ -252,6 +253,7 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
         "CANDIDATE_BATCH_REQUIRED",
         "CANDIDATE_BATCH_INVALID",
         "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
+        "PORTFOLIO_PROPOSAL_UNAVAILABLE",
     }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
@@ -2389,10 +2391,7 @@ async def execute_agent_paper_loop_action(
             if env_file is not None
             else local_settings(repo_root, backend="codex_sdk")
         )
-        worked = await run_agent_worker_once(
-            research_settings,
-            job_ids=(snapshot.research_job_id,),
-        )
+        worked = await run_cycle_job_once(research_settings, job_id=snapshot.research_job_id)
         if not worked:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return None
@@ -2430,8 +2429,11 @@ async def execute_agent_paper_loop_action(
                 idempotency_key=f"agent-paper-loop-resume:{snapshot.cycle_id}",
             ),
         )
-        if resumed is not None and resumed.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE":
-            raise ValueError("PORTFOLIO_SYNTHESIS_UNAVAILABLE")
+        if resumed is not None and resumed.result_code in {
+            "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
+            "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+        }:
+            raise ValueError(resumed.result_code)
         return None
     if action == AgentPaperLoopAction.COLLECT_WINDOW:
         environment = (
@@ -2946,6 +2948,12 @@ async def inspect_agent_paper_loop(
                         )
                     )
             research_job = resolve_cycle_research_job(events=events, jobs=jobs)
+            if view.status == "researching":
+                from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
+
+                synthesis_job = await read_synthesis_job(session, cycle_id=view.cycle_id)
+                if synthesis_job is not None:
+                    research_job = (synthesis_job.id, synthesis_job.status)
             market_scope = None
             market_window = None
             if (

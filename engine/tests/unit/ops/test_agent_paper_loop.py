@@ -2328,7 +2328,7 @@ def test_explicit_action_uses_registered_config_through_product_boundary(
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", producer)
     monkeypatch.setattr(loop, "collect_window_once", producer)
-    monkeypatch.setattr(loop, "run_agent_worker_once", producer)
+    monkeypatch.setattr(loop, "run_cycle_job_once", producer)
     result = asyncio.run(
         loop.execute_agent_paper_loop_action(
             loop.EngineSettings(),
@@ -3124,12 +3124,12 @@ def test_executor_claims_only_persisted_job(
     job_id = UUID(int=11)
     received: list[tuple[UUID, ...] | None] = []
 
-    async def run_worker(_settings, *, job_ids=None):
-        received.append(job_ids)
+    async def run_worker(_settings, *, job_id):
+        received.append((job_id,))
         return True
 
     monkeypatch.setattr(loop, "local_settings", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(loop, "run_agent_worker_once", run_worker)
+    monkeypatch.setattr(loop, "run_cycle_job_once", run_worker)
     asyncio.run(
         loop.execute_agent_paper_loop_action(
             loop.EngineSettings(),

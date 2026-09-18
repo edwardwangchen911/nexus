@@ -447,9 +447,18 @@ async def persist_portfolio_synthesis_terminal(
     input_tokens: int | None,
     output_tokens: int | None,
     now: datetime,
+    provider_call_started: bool | None = None,
 ) -> AgentPortfolioSynthesisOutputRecord:
     """Commit one bound terminal; unknown post-call usage retains the full reservation."""
     require_utc(now)
+    if provider_call_started is not None and (
+        type(provider_call_started) is not bool
+        or provider_call_started is not False
+        or status != "failed"
+        or input_tokens is not None
+        or output_tokens is not None
+    ):
+        raise ValueError("PORTFOLIO_SYNTHESIS_USAGE_INVALID")
     run = await session.get(AgentPortfolioSynthesisRunRecord, run_id)
     cycle = None if run is None else await session.get(AgentPaperCycleRecord, run.cycle_id)
     if run is None or cycle is None:
@@ -534,7 +543,7 @@ async def persist_portfolio_synthesis_terminal(
         if cost is not None:
             reservation.state = "settled"
             reservation.settled_usd = cost
-        elif run.status == "prepared":
+        elif run.status == "prepared" or provider_call_started is False:
             reservation.state = "released"
             reservation.settled_usd = Decimal("0")
             cost = Decimal("0")

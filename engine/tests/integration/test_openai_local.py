@@ -37,7 +37,7 @@ async def test_prepare_is_idempotent_and_does_not_create_research_or_market_evid
     await prepare_database(settings, staged=staged, strategy_rnd=strategy_rnd)
     async with session_factory(settings)() as session:
         assert await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord)) == (
-            10 if strategy_rnd else 9
+            11 if strategy_rnd else 10
         )
         expected_models = 2 if backend == "codex_sdk" else 1
         assert (
@@ -90,8 +90,7 @@ async def test_codex_setup_registers_a_separate_bounded_portfolio_model(
 
     async with session_factory(settings)() as session:
         models = {
-            model.version: model
-            for model in await session.scalars(select(AgentModelConfigRecord))
+            model.version: model for model in await session.scalars(select(AgentModelConfigRecord))
         }
     decision = models[PORTFOLIO_DECISION_CONFIG_VERSION]
     assert decision.model_id == "gpt-5.6-terra"
@@ -99,6 +98,26 @@ async def test_codex_setup_registers_a_separate_bounded_portfolio_model(
     assert decision.max_output_tokens == 16_384
     assert decision.max_tool_calls == 1
     assert decision.worst_case_cost_usd == 0
+    from hashlib import sha256
+    from pathlib import Path
+
+    await prepare_database(settings)
+    async with session_factory(settings)() as session:
+        prompts = tuple(
+            await session.scalars(
+                select(AgentPromptVersionRecord).where(
+                    AgentPromptVersionRecord.role == "portfolio_decision",
+                    AgentPromptVersionRecord.version == "portfolio-management-synthesis-v1",
+                )
+            )
+        )
+        assert len(prompts) == 1
+        asset = (
+            Path(__file__).parents[2]
+            / "src/nexus/agents/prompts/portfolio-management-synthesis-v1.md"
+        ).read_text()
+        assert prompts[0].content == asset
+        assert prompts[0].content_hash == sha256(asset.encode()).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -133,10 +152,11 @@ async def test_strategy_rnd_setup_preserves_existing_committee_model_versions(
         prompt_count = await session.scalar(
             select(func.count()).select_from(AgentPromptVersionRecord)
         )
-        assert prompt_count == 10
+        assert prompt_count == 11
         portfolio_prompt = await session.scalar(
             select(AgentPromptVersionRecord).where(
-                AgentPromptVersionRecord.role == "portfolio_decision"
+                AgentPromptVersionRecord.role == "portfolio_decision",
+                AgentPromptVersionRecord.version == "portfolio-decision-v1",
             )
         )
         assert portfolio_prompt is not None
@@ -173,8 +193,7 @@ async def test_inline_setup_is_idempotent_and_preserves_old_config(migrated_data
         new = next(
             row
             for row in models
-            if row.id != before["id"]
-            and row.version != PORTFOLIO_DECISION_CONFIG_VERSION
+            if row.id != before["id"] and row.version != PORTFOLIO_DECISION_CONFIG_VERSION
         )
         assert new.version == "codex-sdk-chatgpt-v3-input96k-wire64k-cite1"
         assert new.config_hash != before["config_hash"]

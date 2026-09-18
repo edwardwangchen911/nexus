@@ -78,7 +78,7 @@ from nexus.risk.query_authority_producer import (
     persist_query_authorities,
 )
 from nexus.settings import AgentRuntimeMode, EngineSettings
-from nexus.worker import run_agent_worker_once
+from nexus.worker import run_agent_worker_once, run_portfolio_synthesis_worker_once
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _SAFE_SCHWAB_FAILURE_CODES = frozenset(
@@ -706,7 +706,11 @@ async def resume_once(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session, session.begin():
             return await resume_schwab_agent_paper_cycle(
-                session, cycle_id=request.cycle_id, idempotency_key=request.idempotency_key
+                session,
+                cycle_id=request.cycle_id,
+                idempotency_key=request.idempotency_key,
+                now=datetime.now(UTC),
+                daily_limit_usd=settings.agent_daily_budget_usd,
             )
     finally:
         await engine.dispose()
@@ -778,6 +782,18 @@ async def _resolve_queued_research_job_id(database_url: str, *, requested_cycle_
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
+            from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
+
+            synthesis = await read_synthesis_job(session, cycle_id=requested_cycle_id)
+            if synthesis is not None:
+                if (
+                    synthesis.status != "queued"
+                    or synthesis.attempt_count != 0
+                    or synthesis.manual_retry_count != 0
+                    or synthesis.max_attempts != 1
+                ):
+                    raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+                return synthesis.id
             events = tuple(
                 await session.scalars(
                     select(AgentPaperCycleEventRecord)
@@ -835,10 +851,24 @@ async def run_research_once(
     worker_settings = local_settings(repo_root, backend=backend)
     if worker_settings.database_url != settings.database_url:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    worked = await run_agent_worker_once(worker_settings, job_ids=(job_id,))
+    worked = await run_cycle_job_once(worker_settings, job_id=job_id)
     if not worked:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     return AgentPaperRunResearchResult(cycle_id=request.cycle_id, job_id=job_id)
+
+
+async def run_cycle_job_once(settings: EngineSettings, *, job_id: UUID) -> bool:
+    """Route only this persisted Job type through its dedicated fenced worker."""
+    from nexus.persistence.session import session_factory
+
+    async with session_factory(settings)() as session:
+        job = await session.get(Job, job_id)
+        kind = None if job is None else job.job_type
+    if kind == JobType.AGENT_PORTFOLIO_SYNTHESIS.value:
+        return await run_portfolio_synthesis_worker_once(settings, job_ids=(job_id,))
+    if kind == JobType.AGENT_PAPER_RESEARCH.value:
+        return await run_agent_worker_once(settings, job_ids=(job_id,))
+    raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
 
 
 async def collect_window_once(

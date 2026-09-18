@@ -273,11 +273,12 @@ async def test_normal_occupied_cycle_prepares_every_research_and_stops_at_guard(
             await session.flush()
             events = await agent_cycle._events(session, cycle.id)
             for _ in range(2):
-                resumed = await agent_cycle._resume_research(
-                    session, cycle=cycle, authority=authority, events=events
-                )
-                assert resumed.status == "researching"
-                assert resumed.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+                with pytest.raises(
+                    ValueError, match="PORTFOLIO_SYNTHESIS_ADMISSION_CONTEXT_REQUIRED"
+                ):
+                    await agent_cycle._resume_research(
+                        session, cycle=cycle, authority=authority, events=events
+                    )
             assert len(await agent_cycle._events(session, cycle.id)) == len(events)
             assert [
                 await session.scalar(select(func.count()).select_from(model))

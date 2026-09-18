@@ -73,6 +73,7 @@ class AgentPaperCycleResult(BaseModel):
     result_code: str
     research_run_ids: tuple[UUID, ...] = ()
     strategy_decision_id: UUID | None = None
+    portfolio_synthesis_output_id: UUID | None = None
     batch_id: UUID | None = None
     order_ids: tuple[UUID, ...] = ()
     replayed: bool

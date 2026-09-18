@@ -492,8 +492,8 @@ def test_run_research_claims_only_resolved_job_and_exits(
         assert requested_cycle_id == cycle_id
         return job_id
 
-    async def run_worker(_settings: object, *, job_ids=None) -> bool:
-        received.append(job_ids)
+    async def run_worker(_settings: object, *, job_id) -> bool:
+        received.append((job_id,))
         return True
 
     monkeypatch.setattr(cli, "_resolve_queued_research_job_id", resolve)
@@ -509,7 +509,7 @@ def test_run_research_claims_only_resolved_job_and_exits(
         )
 
     monkeypatch.setattr(cli, "local_settings", settings)
-    monkeypatch.setattr(cli, "run_agent_worker_once", run_worker)
+    monkeypatch.setattr(cli, "run_cycle_job_once", run_worker)
 
     result = asyncio.run(
         cli.run_research_once(

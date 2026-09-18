@@ -321,6 +321,8 @@ async def resume_schwab_agent_paper_cycle(
     *,
     cycle_id: UUID,
     idempotency_key: str,
+    now: datetime | None = None,
+    daily_limit_usd: Decimal | None = None,
 ) -> AgentPaperCycleResult:
     """Resume only from the persisted Job/Run/Output state of a Schwab cycle."""
     if not idempotency_key or len(idempotency_key) > 255:
@@ -363,7 +365,14 @@ async def resume_schwab_agent_paper_cycle(
     if candidate_manifest_hash(manifest) != cycle.candidate_hash or not valid_manifest:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
     if events[-1].to_status == "researching":
-        return await _resume_research(session, cycle=cycle, authority=authority, events=events)
+        return await _resume_research(
+            session,
+            cycle=cycle,
+            authority=authority,
+            events=events,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+        )
     return await _resume_batch(session, cycle=cycle, events=events)
 
 
@@ -373,8 +382,9 @@ async def advance_agent_paper_cycle(
     account_id: UUID,
     decision_time: datetime,
     idempotency_key: str,
-    daily_limit_usd: Decimal = Decimal("3.00"),
+    daily_limit_usd: Decimal | None = None,
     candidate_batch_id: UUID | None = None,
+    now: datetime | None = None,
     version_evaluation_id: UUID | None = None,
     version_lane: str | None = None,
     version_source_run_id: UUID | None = None,
@@ -474,7 +484,7 @@ async def advance_agent_paper_cycle(
             session,
             authority=authority,
             decision_slot_at=decision_slot_at,
-            daily_limit_usd=daily_limit_usd,
+            daily_limit_usd=Decimal("3.00") if daily_limit_usd is None else daily_limit_usd,
             requested_instrument_ids=requested_ids,
             candidate_batch_id=candidate_batch_id,
             version_evaluation_id=version_evaluation_id,
@@ -514,7 +524,7 @@ async def advance_agent_paper_cycle(
                 account_id=cycle.account_id,
                 as_of=cycle.decision_time,
             ),
-            daily_limit_usd=daily_limit_usd,
+            daily_limit_usd=Decimal("3.00") if daily_limit_usd is None else daily_limit_usd,
             version_evaluation_id=version_evaluation_id,
             version_lane=version_lane,
             version_source_run_id=version_source_run_id,
@@ -522,7 +532,14 @@ async def advance_agent_paper_cycle(
             version_model_id=version_model_id,
         )
     if events[-1].to_status == "researching":
-        return await _resume_research(session, cycle=cycle, authority=authority, events=events)
+        return await _resume_research(
+            session,
+            cycle=cycle,
+            authority=authority,
+            events=events,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+        )
     return await _resume_batch(session, cycle=cycle, events=events)
 
 
@@ -754,6 +771,8 @@ async def _resume_research(
     cycle: AgentPaperCycleRecord,
     authority: CycleAuthority,
     events: tuple[AgentPaperCycleEventRecord, ...],
+    now: datetime | None = None,
+    daily_limit_usd: Decimal | None = None,
 ) -> AgentPaperCycleResult:
     run_ids = _fact_uuids(events, "research_run_ids")
     jobs = tuple(
@@ -775,9 +794,13 @@ async def _resume_research(
     if any(job.finished_at is None for job in jobs):
         return await _stop_unavailable(session, cycle, events)
     if cycle.candidate_batch_id is not None:
-        # Task 7 supplies synthesis; keep this frozen cycle resumable meanwhile.
-        return _result(cycle.id, events, replayed=True).model_copy(
-            update={"result_code": "PORTFOLIO_SYNTHESIS_UNAVAILABLE"}
+        return await _resume_portfolio_synthesis(
+            session,
+            cycle=cycle,
+            events=events,
+            run_ids=run_ids,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
         )
     output_available_at = max(
         cycle.decision_time,
@@ -923,6 +946,125 @@ async def _resume_batch(
         )
         events = await _events(session, cycle.id)
     return _result(cycle.id, events, replayed=False)
+
+
+async def _resume_portfolio_synthesis(
+    session: AsyncSession,
+    *,
+    cycle: AgentPaperCycleRecord,
+    events: tuple[AgentPaperCycleEventRecord, ...],
+    run_ids: tuple[UUID, ...],
+    now: datetime | None,
+    daily_limit_usd: Decimal | None,
+) -> AgentPaperCycleResult:
+    from nexus.agents.portfolio_synthesis_contracts import (
+        PortfolioSynthesisIntentV1,
+        canonical_portfolio_synthesis_hash,
+        validate_portfolio_synthesis_intent,
+    )
+    from nexus.agents.portfolio_synthesis_persistence import _frozen_run, admit_portfolio_synthesis
+    from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
+    from nexus.persistence.models.agents import (
+        AgentPortfolioSynthesisOutputRecord,
+        AgentPortfolioSynthesisRunRecord,
+    )
+    from nexus.persistence.models.paper import PaperTargetVersionRecord
+
+    run = await session.scalar(
+        select(AgentPortfolioSynthesisRunRecord).where(
+            AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
+        )
+    )
+    if run is None and (now is None or daily_limit_usd is None):
+        raise ValueError("PORTFOLIO_SYNTHESIS_ADMISSION_CONTEXT_REQUIRED")
+    try:
+        if run is None:
+            assert now is not None and daily_limit_usd is not None
+            actions = tuple(
+                [
+                    await load_actionable_research_output(
+                        session, run_id=run_id, decision_time=now, allow_safe_no_trade=True
+                    )
+                    for run_id in run_ids
+                ]
+            )
+            projection = await load_paper_projection(
+                session, account_id=cycle.account_id, as_of=cycle.decision_time
+            )
+            target_id = await session.scalar(
+                select(PaperTargetVersionRecord.id)
+                .where(PaperTargetVersionRecord.account_id == cycle.account_id)
+                .order_by(PaperTargetVersionRecord.version_seq.desc())
+                .limit(1)
+            )
+            run = (
+                await admit_portfolio_synthesis(
+                    session,
+                    cycle_id=cycle.id,
+                    research_output_ids=tuple(action.output_id for action in actions),
+                    active_target_version_id=target_id,
+                    projection_hash=projection.projection_hash,
+                    daily_limit_usd=daily_limit_usd,
+                    now=now,
+                )
+            ).run
+        frozen = _frozen_run(run)
+        job = await read_synthesis_job(session, cycle_id=cycle.id)
+        output = await session.scalar(
+            select(AgentPortfolioSynthesisOutputRecord).where(
+                AgentPortfolioSynthesisOutputRecord.run_id == run.id
+            )
+        )
+        if job is None:
+            raise ValueError("PORTFOLIO_SYNTHESIS_JOB_INVALID")
+        if (
+            output is None
+            and job.status in {"queued", "running"}
+            and run.status in {"prepared", "running"}
+        ):
+            return _result(cycle.id, events, replayed=True).model_copy(
+                update={"result_code": "PORTFOLIO_SYNTHESIS_PENDING"}
+            )
+        if (
+            output is None
+            or output.status != "completed"
+            or run.status != "completed"
+            or job.status != "succeeded"
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_UNAVAILABLE")
+        intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
+        validate_portfolio_synthesis_intent(intent, frozen)
+        content_hash = canonical_portfolio_synthesis_hash(
+            {
+                "schema_version": "portfolio_synthesis_terminal_v1",
+                "status": "completed",
+                "intent": intent.model_dump(mode="json"),
+            }
+        )
+        if (
+            output.content_hash != content_hash
+            or output.binding_hash
+            != canonical_portfolio_synthesis_hash(
+                {
+                    "schema_version": "portfolio_synthesis_binding_v1",
+                    "run_id": run.id,
+                    "input_hash": run.input_hash,
+                    "content_hash": content_hash,
+                }
+            )
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_OUTPUT_INVALID")
+        return _result(cycle.id, events, replayed=True).model_copy(
+            update={
+                "result_code": "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+                "portfolio_synthesis_output_id": output.id,
+            }
+        )
+    except ValueError:
+        await _append_event(
+            session, cycle, "researching", "unavailable", "PORTFOLIO_SYNTHESIS_UNAVAILABLE", {}
+        )
+        return _result(cycle.id, await _events(session, cycle.id), replayed=False)
 
 
 async def _stop_unavailable(
