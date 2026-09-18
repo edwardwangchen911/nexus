@@ -53,6 +53,7 @@ from nexus.paper.candidate_batch import (
     CandidateBatchResult,
     CandidateInstrumentIdentity,
     create_agent_paper_candidate_batch,
+    preflight_agent_paper_candidate_batch,
     resolve_agent_paper_candidate_identities,
 )
 from nexus.persistence.models.agents import AgentResearchOutputRecord
@@ -303,11 +304,22 @@ async def prepare_candidates_once(
             created_at = await session.scalar(select(func.clock_timestamp()))
             if created_at is None:
                 raise ValueError("CANDIDATE_BATCH_INVALID")
-            identities = await resolve_agent_paper_candidate_identities(
+            replay = await preflight_agent_paper_candidate_batch(
                 session,
+                account_id=request.account_id,
                 universe_snapshot_id=request.universe_snapshot_id,
                 instrument_ids=request.instrument_ids,
-                created_at=created_at,
+                idempotency_key=request.idempotency_key,
+            )
+            identities = (
+                replay[1]
+                if replay is not None
+                else await resolve_agent_paper_candidate_identities(
+                    session,
+                    universe_snapshot_id=request.universe_snapshot_id,
+                    instrument_ids=request.instrument_ids,
+                    created_at=created_at,
+                )
             )
             print(
                 json.dumps(

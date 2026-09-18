@@ -19,6 +19,8 @@ from nexus.persistence.models.market import (
     UniverseSnapshot,
 )
 from nexus.persistence.models.paper import AgentPaperCandidateBatchRecord, PaperAccountRecord
+from nexus.persistence.models.portfolio import Account
+from nexus.persistence.models.runtime import IdempotencyRecord
 
 _ROUTE = "agent-paper-candidate-batch-v1"
 _SCHEMA = "agent_paper_candidate_batch_v1"
@@ -211,6 +213,79 @@ async def load_agent_paper_candidate_batch(
     return None if record is None else _result(record)
 
 
+async def _lock_candidate_batch_account(session: AsyncSession, *, account_id: UUID) -> None:
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1818))"),
+        {"scope": f"internal-paper:{account_id}"},
+    )
+
+
+async def _load_idempotency_claim(
+    session: AsyncSession, *, account_id: UUID, idempotency_key: str
+) -> IdempotencyRecord | None:
+    claim: IdempotencyRecord | None = await session.scalar(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.actor_id == f"internal-paper:{account_id}",
+            IdempotencyRecord.route == _ROUTE,
+            IdempotencyRecord.idempotency_key == idempotency_key,
+        )
+    )
+    return claim
+
+
+async def _load_claim_result(
+    session: AsyncSession,
+    *,
+    claim: IdempotencyRecord,
+    batch_hash: str,
+) -> CandidateBatchResult:
+    if claim.request_hash != batch_hash:
+        raise ValueError("IDEMPOTENCY_CONFLICT")
+    if claim.schema_version != _SCHEMA or not claim.response_payload:
+        raise ValueError("CANDIDATE_BATCH_INVALID")
+    try:
+        replay = CandidateBatchResult.model_validate(claim.response_payload)
+    except ValueError:
+        raise ValueError("CANDIDATE_BATCH_INVALID") from None
+    persisted = await load_agent_paper_candidate_batch(session, batch_id=replay.batch_id)
+    if persisted is None or persisted != replay:
+        raise ValueError("CANDIDATE_BATCH_INVALID")
+    return persisted
+
+
+async def preflight_agent_paper_candidate_batch(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    universe_snapshot_id: UUID,
+    instrument_ids: tuple[UUID, ...],
+    idempotency_key: str,
+) -> tuple[CandidateBatchResult, tuple[CandidateInstrumentIdentity, ...]] | None:
+    """Read an existing exact replay before a CLI previews current identities."""
+    canonical = CandidateBatchInput(instrument_ids=instrument_ids).instrument_ids
+    if not 1 <= len(idempotency_key) <= 255:
+        raise ValueError("IDEMPOTENCY_CONFLICT")
+    batch_hash = _canonical_hash(
+        account_id=account_id,
+        universe_snapshot_id=universe_snapshot_id,
+        instrument_ids=canonical,
+    )
+    await _lock_candidate_batch_account(session, account_id=account_id)
+    claim = await _load_idempotency_claim(
+        session, account_id=account_id, idempotency_key=idempotency_key
+    )
+    if claim is None:
+        return None
+    batch = await _load_claim_result(session, claim=claim, batch_hash=batch_hash)
+    identities = await resolve_agent_paper_candidate_identities(
+        session,
+        universe_snapshot_id=batch.universe_snapshot_id,
+        instrument_ids=batch.instrument_ids,
+        created_at=batch.created_at,
+    )
+    return batch, identities
+
+
 async def create_agent_paper_candidate_batch(
     session: AsyncSession,
     *,
@@ -230,20 +305,35 @@ async def create_agent_paper_candidate_batch(
         universe_snapshot_id=universe_snapshot_id,
         instrument_ids=canonical,
     )
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1818))"),
-        {"scope": f"internal-paper:{account_id}"},
+    await _lock_candidate_batch_account(session, account_id=account_id)
+    existing_claim = await _load_idempotency_claim(
+        session, account_id=account_id, idempotency_key=idempotency_key
     )
+    if existing_claim is not None:
+        return await _load_claim_result(
+            session, claim=existing_claim, batch_hash=batch_hash
+        )
     account = await session.scalar(
         select(PaperAccountRecord)
         .where(PaperAccountRecord.id == account_id)
         .with_for_update()
+    )
+    underlying_account = (
+        None
+        if account is None
+        else await session.scalar(
+            select(Account).where(Account.id == account.account_id).with_for_update()
+        )
     )
     if (
         account is None
         or account.capability != "simulation_write_internal"
         or account.currency != "USD"
         or account.created_at > created_at
+        or underlying_account is None
+        or underlying_account.provider != "internal"
+        or underlying_account.status != "ACTIVE"
+        or underlying_account.created_at > created_at
     ):
         raise ValueError("CANDIDATE_BATCH_INVALID")
     try:
@@ -258,16 +348,7 @@ async def create_agent_paper_candidate_batch(
     except IdempotencyClaimError as error:
         raise ValueError("IDEMPOTENCY_CONFLICT") from error
     if not created:
-        if claim.schema_version != _SCHEMA or not claim.response_payload:
-            raise ValueError("CANDIDATE_BATCH_INVALID")
-        try:
-            replay = CandidateBatchResult.model_validate(claim.response_payload)
-        except ValueError:
-            raise ValueError("CANDIDATE_BATCH_INVALID") from None
-        persisted = await load_agent_paper_candidate_batch(session, batch_id=replay.batch_id)
-        if persisted is None or persisted != replay:
-            raise ValueError("CANDIDATE_BATCH_INVALID")
-        return persisted
+        return await _load_claim_result(session, claim=claim, batch_hash=batch_hash)
     await resolve_agent_paper_candidate_identities(
         session,
         universe_snapshot_id=universe_snapshot_id,

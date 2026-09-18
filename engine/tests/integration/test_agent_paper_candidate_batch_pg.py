@@ -1,8 +1,12 @@
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from nexus.ops import agent_paper_once as candidate_cli
+from nexus.ops.agent_paper_once import AgentPaperPrepareCandidatesRequest
 from nexus.paper.candidate_batch import (
     create_agent_paper_candidate_batch,
     load_agent_paper_candidate_batch,
@@ -30,7 +34,7 @@ from nexus.persistence.models.portfolio import Account, Portfolio
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select, text
+from sqlalchemy import func, literal, select, text
 
 NOW = datetime(2026, 9, 18, 14, tzinfo=UTC)
 ACCOUNT_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -45,9 +49,12 @@ OUTSIDE_ID = UUID("20000000-0000-0000-0000-000000000003")
 async def _seed_scope(
     database_url: str,
     *,
+    account_provider: str = "internal",
+    account_status: str = "ACTIVE",
     aapl_currency: str = "USD",
     aapl_asset_type: str = "common_stock",
     aapl_alias: str = "current",
+    aapl_valid_to: date | None = None,
     include_aapl: bool = True,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=database_url))
@@ -57,8 +64,8 @@ async def _seed_scope(
             [
                 Account(
                     id=BROKER_ACCOUNT_ID,
-                    provider="internal",
-                    status="ACTIVE",
+                    provider=account_provider,
+                    status=account_status,
                     created_at=created,
                 ),
                 UniverseSnapshot(
@@ -167,7 +174,9 @@ async def _seed_scope(
                     symbol="AAPL",
                     alias_type="ticker",
                     valid_from=date(2020, 1, 1),
-                    valid_to=(date(2026, 9, 17) if aapl_alias == "expired" else None),
+                    valid_to=(
+                        date(2026, 9, 17) if aapl_alias == "expired" else aapl_valid_to
+                    ),
                     created_at=created,
                 )
             )
@@ -311,6 +320,199 @@ async def test_candidate_batch_same_key_rejects_changed_scope(
                 idempotency_key="same-key",
                 created_at=NOW,
             )
+
+
+@pytest.mark.asyncio
+async def test_cli_replay_uses_persisted_creation_identity_after_alias_expiry(
+    migrated_database_url: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_scope(migrated_database_url, aapl_valid_to=NOW.date())
+    settings = EngineSettings(database_url=migrated_database_url)
+    request = AgentPaperPrepareCandidatesRequest(
+        action="prepare-candidates",
+        account_id=ACCOUNT_ID,
+        universe_snapshot_id=UNIVERSE_ID,
+        instrument_ids=(AAPL_ID,),
+        idempotency_key="cli-replay-identity",
+    )
+
+    monkeypatch.setattr(
+        candidate_cli,
+        "func",
+        SimpleNamespace(clock_timestamp=lambda: literal(NOW)),
+    )
+    first = await candidate_cli.prepare_candidates_once(settings, request)
+    assert json.loads(capsys.readouterr().err) == {
+        "candidate_identities": [
+            {
+                "asset_type": "common_stock",
+                "currency": "USD",
+                "exchange": "XNAS",
+                "instrument_id": str(AAPL_ID),
+                "symbol": "AAPL",
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        candidate_cli,
+        "func",
+        SimpleNamespace(clock_timestamp=lambda: literal(NOW.replace(day=19))),
+    )
+    replay = await candidate_cli.prepare_candidates_once(settings, request)
+    replay_display = json.loads(capsys.readouterr().err)
+    factory = session_factory(settings)
+    async with factory() as session:
+        counts = {
+            "batch": await session.scalar(
+                select(func.count()).select_from(AgentPaperCandidateBatchRecord)
+            ),
+            "claim": await session.scalar(select(func.count()).select_from(IdempotencyRecord)),
+            "job": await session.scalar(select(func.count()).select_from(Job)),
+            "model_run": await session.scalar(
+                select(func.count()).select_from(AgentResearchRunRecord)
+            ),
+            "target": await session.scalar(
+                select(func.count()).select_from(PaperTargetVersionRecord)
+            ),
+            "plan": await session.scalar(
+                select(func.count()).select_from(PaperOrderBatchRecord)
+            ),
+            "order": await session.scalar(
+                select(func.count()).select_from(PaperOrderRecord)
+            ),
+        }
+
+    assert replay.batch == first.batch
+    assert replay.identities == first.identities
+    assert replay_display == {
+        "candidate_identities": [
+            {
+                "asset_type": "common_stock",
+                "currency": "USD",
+                "exchange": "XNAS",
+                "instrument_id": str(AAPL_ID),
+                "symbol": "AAPL",
+            }
+        ]
+    }
+    assert counts == {
+        "batch": 1,
+        "claim": 1,
+        "job": 0,
+        "model_run": 0,
+        "target": 0,
+        "plan": 0,
+        "order": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_cli_conflict_preflight_emits_no_changed_identity_preview(
+    migrated_database_url: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await _seed_scope(migrated_database_url)
+    settings = EngineSettings(database_url=migrated_database_url)
+    await candidate_cli.prepare_candidates_once(
+        settings,
+        AgentPaperPrepareCandidatesRequest(
+            action="prepare-candidates",
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            instrument_ids=(AAPL_ID,),
+            idempotency_key="cli-conflict",
+        ),
+    )
+    capsys.readouterr()
+
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        await candidate_cli.prepare_candidates_once(
+            settings,
+            AgentPaperPrepareCandidatesRequest(
+                action="prepare-candidates",
+                account_id=ACCOUNT_ID,
+                universe_snapshot_id=UNIVERSE_ID,
+                instrument_ids=(SPY_ID,),
+                idempotency_key="cli-conflict",
+            ),
+        )
+
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "status"),
+    [
+        ("internal", "DISABLED"),
+        ("paper", "ACTIVE"),
+        ("internal_paper_evaluation", "ACTIVE"),
+    ],
+    ids=["disabled", "wrong-provider", "evaluation-account"],
+)
+async def test_new_candidate_batch_requires_active_normal_internal_account(
+    migrated_database_url: str,
+    provider: str,
+    status: str,
+) -> None:
+    await _seed_scope(
+        migrated_database_url,
+        account_provider=provider,
+        account_status=status,
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+
+    with pytest.raises(ValueError, match="CANDIDATE_BATCH_INVALID"):
+        async with factory() as session, session.begin():
+            await create_agent_paper_candidate_batch(
+                session,
+                account_id=ACCOUNT_ID,
+                universe_snapshot_id=UNIVERSE_ID,
+                instrument_ids=(AAPL_ID,),
+                idempotency_key="invalid-account-authority",
+                created_at=NOW,
+            )
+
+
+@pytest.mark.asyncio
+async def test_persisted_candidate_batch_replays_after_underlying_account_is_disabled(
+    migrated_database_url: str,
+) -> None:
+    await _seed_scope(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        created = await create_agent_paper_candidate_batch(
+            session,
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            instrument_ids=(AAPL_ID,),
+            idempotency_key="replay-disabled-account",
+            created_at=NOW,
+        )
+    async with factory() as session, session.begin():
+        await session.execute(
+            text("ALTER TABLE accounts DISABLE TRIGGER trg_accounts_immutable")
+        )
+        await session.execute(
+            text("UPDATE accounts SET status='DISABLED' WHERE id=:id"),
+            {"id": BROKER_ACCOUNT_ID},
+        )
+        await session.execute(
+            text("ALTER TABLE accounts ENABLE TRIGGER trg_accounts_immutable")
+        )
+    async with factory() as session, session.begin():
+        replay = await create_agent_paper_candidate_batch(
+            session,
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            instrument_ids=(AAPL_ID,),
+            idempotency_key="replay-disabled-account",
+            created_at=NOW,
+        )
+
+    assert replay == created
 
 
 @pytest.mark.asyncio

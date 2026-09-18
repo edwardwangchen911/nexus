@@ -142,6 +142,16 @@ def test_prepare_candidates_resolves_display_identities_before_creation(
         created_at=now,
     )
 
+    async def preflight(*_args, **kwargs):
+        events.append("preflight")
+        assert kwargs == {
+            "account_id": account_id,
+            "universe_snapshot_id": universe_id,
+            "instrument_ids": (instrument_id,),
+            "idempotency_key": "scope-1",
+        }
+        return None
+
     async def resolve(*_args, **kwargs):
         events.append("resolve-identities")
         assert kwargs == {
@@ -164,6 +174,7 @@ def test_prepare_candidates_resolves_display_identities_before_creation(
 
     monkeypatch.setattr(cli, "create_async_engine", lambda *_args, **_kwargs: Engine())
     monkeypatch.setattr(cli, "async_sessionmaker", lambda *_args, **_kwargs: Factory())
+    monkeypatch.setattr(cli, "preflight_agent_paper_candidate_batch", preflight)
     monkeypatch.setattr(cli, "resolve_agent_paper_candidate_identities", resolve)
     monkeypatch.setattr(cli, "create_agent_paper_candidate_batch", create)
 
@@ -180,7 +191,7 @@ def test_prepare_candidates_resolves_display_identities_before_creation(
         )
     )
 
-    assert events == ["resolve-identities", "create-batch"]
+    assert events == ["preflight", "resolve-identities", "create-batch"]
     assert result.batch == batch
     assert result.identities == (identity,)
 
