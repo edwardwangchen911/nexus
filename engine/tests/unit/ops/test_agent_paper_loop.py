@@ -398,8 +398,8 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
             },
             A.PUBLISH_PERFORMANCE,
         ),
-        ({"cycle_status": "unavailable", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
-        ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.STOP_CYCLE_UNAVAILABLE),
+        ({"cycle_status": "unavailable", "cycle_slot_at": SLOT}, A.WAIT_FOR_SLOT),
+        ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.WAIT_FOR_SLOT),
         (
             {
                 "now": NOW + timedelta(minutes=5),

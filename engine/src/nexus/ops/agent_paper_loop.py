@@ -1516,11 +1516,6 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
         return AgentPaperLoopAction.WAIT_FOR_SESSION
 
     current_slot = floor_decision_slot(snapshot.now)
-    if snapshot.cycle_status in {"unavailable", "failed"} and (
-        snapshot.cycle_slot_at is None or snapshot.cycle_slot_at == current_slot
-    ):
-        return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
-
     if snapshot.cycle_status not in {None, "completed", "unavailable", "failed"}:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
