@@ -41,6 +41,7 @@ from nexus.ops.agent_paper_once import (
     AgentPaperTriggerRequest,
     AgentPaperTriggerSettings,
     collect_window_once,
+    prepare_agent_version_slot_once,
     resume_once,
     trigger_once,
 )
@@ -70,10 +71,7 @@ from nexus.paper.agent_version_evaluation import (
     finalize_agent_version_evaluation,
     load_oos_session_closes,
 )
-from nexus.paper.agent_version_runner import (
-    advance_agent_version_slot,
-    resume_agent_version_slot,
-)
+from nexus.paper.agent_version_runner import resume_agent_version_slot
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
@@ -2065,6 +2063,33 @@ async def run_local_agent_paper_loop(
                 event_loop.remove_signal_handler(installed_signal)
 
 
+async def _close_unrecoverable_evaluation_once(
+    *,
+    database_url: str | None,
+    evaluation_id: UUID,
+    decision_slot_at: datetime,
+    reason_code: str,
+) -> None:
+    if not database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            database_now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(database_now, datetime):
+                raise RuntimeError("AGENT_VERSION_TIME_UNAVAILABLE")
+            await close_unrecoverable_agent_version_evaluation(
+                session,
+                evaluation_id=evaluation_id,
+                decision_slot_at=decision_slot_at,
+                reason_code=reason_code,
+                now=database_now,
+            )
+    finally:
+        await engine.dispose()
+
+
 async def execute_agent_paper_loop_action(
     settings: EngineSettings,
     *,
@@ -2075,8 +2100,94 @@ async def execute_agent_paper_loop_action(
     env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
+    if action == AgentPaperLoopAction.ADVANCE_EVALUATION:
+        if (
+            snapshot.evaluation_id is None
+            or snapshot.evaluation_slot_at is None
+            or snapshot.calendar_authority_id is None
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        environment = (
+            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            if env_file is not None
+            else load_agent_paper_service_environment(repo_root, os.environ)
+        )
+        trigger_settings = (
+            _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
+        ).model_validate(environment)
+        if env_file is not None:
+            _require_explicit_schwab_config(environment)
+        macro_settings = (
+            _FileDailySettings if env_file is not None else DailyOnceSettings
+        ).model_validate(environment)
+        prior_daily = await prepare_prior_daily_once(
+            trigger_settings,
+            account_id=account_id,
+            repo_root=repo_root,
+            now=snapshot.now,
+            expected_calendar_authority_id=snapshot.calendar_authority_id,
+        )
+        if prior_daily == "prepared":
+            return None
+        if prior_daily == "unavailable":
+            await _close_unrecoverable_evaluation_once(
+                database_url=trigger_settings.database_url,
+                evaluation_id=snapshot.evaluation_id,
+                decision_slot_at=snapshot.evaluation_slot_at,
+                reason_code="PAIR_PRIOR_DAILY_UNAVAILABLE",
+            )
+            return None
+        if prior_daily != "ready":
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        macro = await prepare_macro_once(
+            macro_settings,
+            fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+            account_id=account_id,
+            repo_root=repo_root,
+            now=snapshot.now,
+            expected_calendar_authority_id=snapshot.calendar_authority_id,
+        )
+        if macro == "prepared":
+            return None
+        if macro not in {"ready", "unavailable"}:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        current_trends = await prepare_current_trends_once(
+            trigger_settings,
+            account_id=account_id,
+            repo_root=repo_root,
+            now=snapshot.now,
+            expected_calendar_authority_id=snapshot.calendar_authority_id,
+        )
+        if current_trends == "prepared":
+            return None
+        if current_trends == "unavailable":
+            await _close_unrecoverable_evaluation_once(
+                database_url=trigger_settings.database_url,
+                evaluation_id=snapshot.evaluation_id,
+                decision_slot_at=snapshot.evaluation_slot_at,
+                reason_code="PAIR_CURRENT_TRENDS_UNAVAILABLE",
+            )
+            return None
+        if current_trends != "ready":
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        evaluation_result = await prepare_agent_version_slot_once(
+            trigger_settings,
+            evaluation_id=snapshot.evaluation_id,
+            decision_slot_at=snapshot.evaluation_slot_at,
+            repo_root=repo_root,
+            expected_calendar_authority_id=snapshot.calendar_authority_id,
+            **({"process_environment": environment} if env_file is not None else {}),
+        )
+        if evaluation_result.status != "incomparable":
+            return None
+        await _close_unrecoverable_evaluation_once(
+            database_url=trigger_settings.database_url,
+            evaluation_id=snapshot.evaluation_id,
+            decision_slot_at=snapshot.evaluation_slot_at,
+            reason_code=evaluation_result.reason_code,
+        )
+        return None
     if action in {
-        AgentPaperLoopAction.ADVANCE_EVALUATION,
         AgentPaperLoopAction.CLOSE_INCOMPLETE_EVALUATION,
         AgentPaperLoopAction.FINALIZE_EVALUATION,
         AgentPaperLoopAction.RESUME_EVALUATION,
@@ -2103,34 +2214,12 @@ async def execute_agent_paper_loop_action(
                         now=snapshot.now,
                     )
                     return None
-                if action == AgentPaperLoopAction.ADVANCE_EVALUATION:
-                    try:
-                        evaluation_result = await advance_agent_version_slot(
-                            session,
-                            evaluation_id=snapshot.evaluation_id,
-                            decision_slot_at=snapshot.evaluation_slot_at,
-                            daily_limit_usd=settings.agent_daily_budget_usd,
-                            now=snapshot.now,
-                        )
-                    except ValueError as error:
-                        if str(error) != "AGENT_VERSION_SLOT_MISSED":
-                            raise
-                        database_now = await session.scalar(select(func.clock_timestamp()))
-                        if not isinstance(database_now, datetime):
-                            raise RuntimeError("AGENT_VERSION_TIME_UNAVAILABLE") from error
-                        await close_incomplete_agent_version_evaluation(
-                            session,
-                            evaluation_id=snapshot.evaluation_id,
-                            now=database_now,
-                        )
-                        return None
-                else:
-                    evaluation_result = await resume_agent_version_slot(
-                        session,
-                        evaluation_id=snapshot.evaluation_id,
-                        decision_slot_at=snapshot.evaluation_slot_at,
-                        now=snapshot.now,
-                    )
+                evaluation_result = await resume_agent_version_slot(
+                    session,
+                    evaluation_id=snapshot.evaluation_id,
+                    decision_slot_at=snapshot.evaluation_slot_at,
+                    now=snapshot.now,
+                )
                 if evaluation_result.status == "incomparable":
                     database_now = await session.scalar(select(func.clock_timestamp()))
                     if not isinstance(database_now, datetime):

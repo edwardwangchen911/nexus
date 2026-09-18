@@ -2078,6 +2078,99 @@ def test_explicit_trigger_forwards_registered_schwab_config_after_prerequisites(
     assert result is None and seen == [UUID(int=1)]
 
 
+def test_evaluation_advance_freezes_shared_market_facts_before_creating_lanes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+    evaluation_id = UUID(int=101)
+    seen: list[tuple[UUID, datetime]] = []
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def prepare_slot(
+        settings,
+        *,
+        evaluation_id,
+        decision_slot_at,
+        repo_root,
+        expected_calendar_authority_id,
+        process_environment,
+    ):
+        assert settings.alpaca_key.get_secret_value() == "alpaca-key"
+        assert repo_root == tmp_path
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
+        assert process_environment["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
+        seen.append((evaluation_id, decision_slot_at))
+        return SimpleNamespace(status="running")
+
+    def unexpected_database(*_args, **_kwargs):
+        pytest.fail("evaluation advance must freeze shared market facts first")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", prepare_slot, raising=False)
+    monkeypatch.setattr(loop, "create_async_engine", unexpected_database)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.ADVANCE_EVALUATION,
+            snapshot=snapshot(
+                evaluation_id=evaluation_id,
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_pending",
+            ),
+            env_file=env_file,
+        )
+    )
+
+    assert result is None
+    assert seen == [(evaluation_id, SLOT)]
+
+
+def test_evaluation_closes_exactly_when_prior_daily_preparation_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+    evaluation_id = UUID(int=101)
+    closed: list[str] = []
+
+    async def unavailable(*_args, **_kwargs):
+        return "unavailable"
+
+    async def close(*_args, reason_code, **_kwargs):
+        closed.append(reason_code)
+
+    async def unexpected(*_args, **_kwargs):
+        pytest.fail("unavailable prior daily authority must not call realtime providers")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", unavailable)
+    monkeypatch.setattr(loop, "_close_unrecoverable_evaluation_once", close, raising=False)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", unexpected)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.ADVANCE_EVALUATION,
+            snapshot=snapshot(
+                evaluation_id=evaluation_id,
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_pending",
+            ),
+            env_file=env_file,
+        )
+    )
+
+    assert result is None
+    assert closed == ["PAIR_PRIOR_DAILY_UNAVAILABLE"]
+
+
 def test_preflight_cannot_fill_missing_schwab_config_from_default_file(monkeypatch, tmp_path):
     explicit_service_config(tmp_path)
     (tmp_path / "infra/.env.local").write_text("NEXUS_SCHWAB_APP_KEY=default-key\n")

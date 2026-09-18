@@ -130,6 +130,7 @@ async def advance_agent_version_slot(
         session,
         evaluation=evaluation,
         decision_slot_at=decision_slot_at,
+        decision_time=now,
     )
     if authorities is None:
         return _incomparable(
@@ -142,7 +143,7 @@ async def advance_agent_version_slot(
     if decision_slot_at == evaluation.train_slots[0] and not await _equal_initial_state(
         session,
         evaluation=evaluation,
-        decision_slot_at=decision_slot_at,
+        decision_slot_at=now,
     ):
         return _incomparable(
             evaluation=evaluation,
@@ -708,7 +709,9 @@ async def _slot_authorities(
     *,
     evaluation: AgentVersionEvaluationRecord,
     decision_slot_at: datetime,
+    decision_time: datetime | None = None,
 ) -> tuple[CycleAuthority, CycleAuthority] | None:
+    frozen_at = decision_slot_at if decision_time is None else decision_time
     decision_session = decision_slot_at.astimezone(_NEW_YORK).date()
     calendar = await session.scalar(
         select(ExchangeCalendarSessionRecord).where(
@@ -717,7 +720,7 @@ async def _slot_authorities(
             ExchangeCalendarSessionRecord.session == decision_session,
             ExchangeCalendarSessionRecord.market_open_at <= decision_slot_at,
             ExchangeCalendarSessionRecord.market_close_at >= decision_slot_at,
-            ExchangeCalendarSessionRecord.created_at <= decision_slot_at,
+            ExchangeCalendarSessionRecord.created_at <= frozen_at,
         )
     )
     universe = await session.scalar(
@@ -727,8 +730,8 @@ async def _slot_authorities(
             UniverseSnapshot.version == "us_liquid_v1",
             UniverseSnapshot.source == "fosun_local_read_only",
             UniverseSnapshot.effective_from <= decision_session,
-            UniverseSnapshot.published_at <= decision_slot_at,
-            UniverseSnapshot.created_at <= decision_slot_at,
+            UniverseSnapshot.published_at <= frozen_at,
+            UniverseSnapshot.created_at <= frozen_at,
         )
         .order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id.desc())
         .limit(1)
@@ -750,7 +753,7 @@ async def _slot_authorities(
             account_id=account_id,
             portfolio_id=account_by_id[account_id].portfolio_id,
             decision_session=decision_session,
-            decision_time=decision_slot_at,
+            decision_time=frozen_at,
             execution_session=decision_session,
             calendar_authority_id=evaluation.calendar_authority_id,
             universe_snapshot_id=universe.id,
