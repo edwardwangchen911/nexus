@@ -1540,21 +1540,45 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     return AgentPaperLoopAction.TRIGGER
 
 
-def _emit_agent_paper_unknown_failure(stage: str, occurred_at: datetime) -> None:
+_SAFE_EVALUATION_FAILURE_PHASES = frozenset(
+    {"configuration", "prior_daily", "macro", "current_trends", "prepare_pair"}
+)
+
+
+def _annotate_agent_paper_failure(error: Exception, *, phase: str) -> None:
+    """Attach one allowlisted diagnostic phase without exposing exception details."""
+    if phase not in _SAFE_EVALUATION_FAILURE_PHASES:
+        return
+    try:
+        setattr(error, "_nexus_agent_paper_failure_phase", phase)
+    except Exception:
+        return
+
+
+def _emit_agent_paper_unknown_failure(
+    stage: str,
+    occurred_at: datetime,
+    *,
+    action: AgentPaperLoopAction | None = None,
+    error: Exception | None = None,
+) -> None:
     """Best-effort safe stage evidence for one fail-closed unknown result."""
     if stage not in {"execute", "heartbeat", "inspect", "planner"}:
         stage = "unknown"
     try:
+        payload = {
+            "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+            "event": "agent_paper_loop_failure",
+            "failure_stage": stage,
+            "occurred_at": occurred_at.isoformat(),
+        }
+        if action is not None:
+            payload["failure_action"] = action.value
+        phase = getattr(error, "_nexus_agent_paper_failure_phase", None)
+        if phase in _SAFE_EVALUATION_FAILURE_PHASES:
+            payload["failure_phase"] = phase
         print(
-            json.dumps(
-                {
-                    "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
-                    "event": "agent_paper_loop_failure",
-                    "failure_stage": stage,
-                    "occurred_at": occurred_at.isoformat(),
-                },
-                sort_keys=True,
-            ),
+            json.dumps(payload, sort_keys=True),
             file=sys.stderr,
             flush=True,
         )
@@ -1749,7 +1773,9 @@ async def run_foreground_loop(
                 return AgentPaperLoopAction.STOP_UNCONFIRMED
             return AgentPaperLoopAction.STOP_REQUESTED
         if action_error is not None:
-            _emit_agent_paper_unknown_failure("execute", clock())
+            _emit_agent_paper_unknown_failure(
+                "execute", clock(), action=action, error=action_error
+            )
             raise action_error
         if heartbeat_failed:
             return stop_unknown("heartbeat")
@@ -2123,26 +2149,34 @@ async def execute_agent_paper_loop_action(
             or snapshot.calendar_authority_id is None
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-        environment = (
-            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
-            if env_file is not None
-            else load_agent_paper_service_environment(repo_root, os.environ)
-        )
-        trigger_settings = (
-            _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
-        ).model_validate(environment)
-        if env_file is not None:
-            _require_explicit_schwab_config(environment)
-        macro_settings = (
-            _FileDailySettings if env_file is not None else DailyOnceSettings
-        ).model_validate(environment)
-        prior_daily = await prepare_prior_daily_once(
-            trigger_settings,
-            account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
-            expected_calendar_authority_id=snapshot.calendar_authority_id,
-        )
+        try:
+            environment = (
+                load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                if env_file is not None
+                else load_agent_paper_service_environment(repo_root, os.environ)
+            )
+            trigger_settings = (
+                _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
+            ).model_validate(environment)
+            if env_file is not None:
+                _require_explicit_schwab_config(environment)
+            macro_settings = (
+                _FileDailySettings if env_file is not None else DailyOnceSettings
+            ).model_validate(environment)
+        except Exception as error:
+            _annotate_agent_paper_failure(error, phase="configuration")
+            raise
+        try:
+            prior_daily = await prepare_prior_daily_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+            )
+        except Exception as error:
+            _annotate_agent_paper_failure(error, phase="prior_daily")
+            raise
         if prior_daily == "prepared":
             return None
         if prior_daily == "unavailable":
@@ -2155,25 +2189,33 @@ async def execute_agent_paper_loop_action(
             return None
         if prior_daily != "ready":
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        macro = await prepare_macro_once(
-            macro_settings,
-            fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
-            account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
-            expected_calendar_authority_id=snapshot.calendar_authority_id,
-        )
+        try:
+            macro = await prepare_macro_once(
+                macro_settings,
+                fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+            )
+        except Exception as error:
+            _annotate_agent_paper_failure(error, phase="macro")
+            raise
         if macro == "prepared":
             return None
         if macro not in {"ready", "unavailable"}:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        current_trends = await prepare_current_trends_once(
-            trigger_settings,
-            account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
-            expected_calendar_authority_id=snapshot.calendar_authority_id,
-        )
+        try:
+            current_trends = await prepare_current_trends_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+            )
+        except Exception as error:
+            _annotate_agent_paper_failure(error, phase="current_trends")
+            raise
         if current_trends == "prepared":
             return None
         if current_trends == "unavailable":
@@ -2186,14 +2228,18 @@ async def execute_agent_paper_loop_action(
             return None
         if current_trends != "ready":
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        evaluation_result = await prepare_agent_version_slot_once(
-            trigger_settings,
-            evaluation_id=snapshot.evaluation_id,
-            decision_slot_at=snapshot.evaluation_slot_at,
-            repo_root=repo_root,
-            expected_calendar_authority_id=snapshot.calendar_authority_id,
-            **({"process_environment": environment} if env_file is not None else {}),
-        )
+        try:
+            evaluation_result = await prepare_agent_version_slot_once(
+                trigger_settings,
+                evaluation_id=snapshot.evaluation_id,
+                decision_slot_at=snapshot.evaluation_slot_at,
+                repo_root=repo_root,
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+                **({"process_environment": environment} if env_file is not None else {}),
+            )
+        except Exception as error:
+            _annotate_agent_paper_failure(error, phase="prepare_pair")
+            raise
         if evaluation_result.status != "incomparable":
             return None
         await _close_unrecoverable_evaluation_once(

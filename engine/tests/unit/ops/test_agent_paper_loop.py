@@ -316,8 +316,53 @@ def test_foreground_loop_logs_safe_execution_failure_stage(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert json.loads(captured.err)["failure_stage"] == "execute"
+    assert json.loads(captured.err) == {
+        "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+        "event": "agent_paper_loop_failure",
+        "failure_action": "trigger",
+        "failure_stage": "execute",
+        "occurred_at": NOW.isoformat(),
+    }
     assert "private-execution-canary" not in captured.err
+
+
+def test_foreground_loop_logs_safe_execution_phase(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot(
+            evaluation_id=UUID(int=8),
+            evaluation_slot_at=NOW,
+            cycle_status="evaluation_pending",
+        )
+
+    async def execute(*_args) -> None:
+        error = RuntimeError("private-evaluation-canary")
+        loop._annotate_agent_paper_failure(error, phase="prepare_pair")
+        raise error
+
+    with pytest.raises(RuntimeError, match="private-evaluation-canary"):
+        asyncio.run(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=noop_heartbeat,
+                clock=lambda: NOW,
+            )
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+        "event": "agent_paper_loop_failure",
+        "failure_action": "advance_evaluation",
+        "failure_phase": "prepare_pair",
+        "failure_stage": "execute",
+        "occurred_at": NOW.isoformat(),
+    }
+    assert "private-evaluation-canary" not in captured.err
 
 
 def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() -> None:
@@ -2191,6 +2236,41 @@ def test_evaluation_advance_freezes_shared_market_facts_before_creating_lanes(
 
     assert result is None
     assert seen == [(evaluation_id, SLOT)]
+
+
+def test_evaluation_advance_annotates_prepare_pair_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("private-pair-canary")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", fail)
+
+    with pytest.raises(RuntimeError, match="private-pair-canary") as caught:
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                action=A.ADVANCE_EVALUATION,
+                snapshot=snapshot(
+                    evaluation_id=UUID(int=101),
+                    evaluation_slot_at=SLOT,
+                    cycle_status="evaluation_pending",
+                ),
+                env_file=env_file,
+            )
+        )
+
+    assert getattr(caught.value, "_nexus_agent_paper_failure_phase") == "prepare_pair"
 
 
 def test_evaluation_closes_exactly_when_prior_daily_preparation_is_unavailable(
