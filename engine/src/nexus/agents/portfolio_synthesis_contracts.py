@@ -22,10 +22,18 @@ SYNTHESIS_PROMPT_VERSION: Final = "portfolio-management-synthesis-v1"
 SYNTHESIS_TOOL_HASH = canonical_portfolio_decision_hash(
     {"schema_version": "portfolio_synthesis_tools_v1", "tools": []}
 )
+_NUMBER = r"(?:\d+(?:[,.]\d+)*|[一二两三四五六七八九十百千万]+)"
+_MONEY = rf"(?:(?:USD\s*|\$\s*){_NUMBER}|{_NUMBER}\s*(?:美元|元|USD\b|dollars?\b))"
 _UNSAFE = re.compile(
     # Prose is evidence, never an instruction channel. Match explicit configuration
     # or execution phrases, not ordinary prices, percentages or business metrics.
     r"(?:\b(?:allocate|deploy|invest)\b[^.;\n]{0,100}\b(?:capital|cash|funds|portfolio)\b|"
+    # Numeric allocation commands, not company investment/capex observations.
+    r"(?:^|[.!?;。；！？\n])\s*(?:please\s+)?(?:allocate|deploy|invest|配置|分配|投入)\s*"
+    rf"(?:USD\s*|\$\s*)?{_NUMBER}|"
+    rf"\btarget\s+weight\s*(?:[:=]|is\b|to\b)\s*{_NUMBER}|"
+    rf"(?:目标权重|仓位比例)\s*(?:为|[：:=])\s*{_NUMBER}|"
+    rf"(?:\b(?:buy|sell)\b|买入|卖出|增持|减持)[^.;。；\n]{{0,80}}{_MONEY}|"
     r"\b(?:buy|sell)\b[^.;\n]{0,80}(?:\bshares?\b|\blimit\s+price\b|\$\s*\d)|"
     r"\b(?:increase|reduce|set|assign)\s+(?:the\s+)?(?:target\s+)?"
     r"(?:position|weight|quantity|allocation)\b|"
