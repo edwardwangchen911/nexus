@@ -52,6 +52,51 @@ describe("internal-paper Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json({ data: { ...data, candidate_count: 2 }, meta }), undefined, path, "GET")).status).toBe(500);
     expect((await sanitizeEngineResponse(json({ data: { ...data, execution_market: { ...data.execution_market, source: "schwab" } }, meta }), undefined, path, "GET")).status).toBe(500);
 
+    const detailPath = `/internal/v1/paper/cycles/${portfolioId}`;
+    const detail = {
+      cycle: data,
+      orders: [],
+      candidate_batch: null,
+      security_research: [],
+      synthesis: null,
+      proposal: null,
+      active_target: null,
+      activation_result: null,
+      blocker: null,
+      blocking_plan: null,
+      plan_summary: null,
+    };
+    expect((await sanitizeEngineResponse(json({ data: detail, meta }), undefined, detailPath, "GET")).status).toBe(200);
+    const conflated = structuredClone(detail) as Record<string, unknown>;
+    conflated.proposal = { target_version_id: portfolioId };
+    expect((await sanitizeEngineResponse(json({ data: conflated, meta }), undefined, detailPath, "GET")).status).toBe(500);
+
+    const capacityBlocked = structuredClone(detail) as Record<string, unknown>;
+    capacityBlocked.blocker = {
+      code: "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+      source_stage: "provider",
+      category: "provider_capacity",
+      proposal_rejection_code: null,
+      as_of: "2026-08-26T21:00:00Z",
+    };
+    expect((await sanitizeEngineResponse(json({ data: capacityBlocked, meta }), undefined, detailPath, "GET")).status).toBe(200);
+    const rawBlocked = structuredClone(capacityBlocked) as Record<string, unknown>;
+    (rawBlocked.blocker as Record<string, unknown>).code = "RAW_PROVIDER_ERROR";
+    expect((await sanitizeEngineResponse(json({ data: rawBlocked, meta }), undefined, detailPath, "GET")).status).toBe(500);
+
+    const proposalBlocked = structuredClone(detail) as Record<string, unknown>;
+    proposalBlocked.blocker = {
+      code: "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+      source_stage: "proposal",
+      category: "proposal_rejected",
+      proposal_rejection_code: "PORTFOLIO_DEPENDENCY_CONFLICT",
+      as_of: "2026-08-26T21:00:00Z",
+    };
+    expect((await sanitizeEngineResponse(json({ data: proposalBlocked, meta }), undefined, detailPath, "GET")).status).toBe(200);
+    const unknownRejection = structuredClone(proposalBlocked) as Record<string, unknown>;
+    (unknownRejection.blocker as Record<string, unknown>).proposal_rejection_code = "UNREVIEWED_REJECTION";
+    expect((await sanitizeEngineResponse(json({ data: unknownRejection, meta }), undefined, detailPath, "GET")).status).toBe(500);
+
     const listPath = "/internal/v1/paper/cycles";
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null, version_history: [], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(200);
     const versionEvaluation = {
@@ -316,6 +361,12 @@ function portfolio() {
       slippage: "5.000000000000",
       completeness: "FULL" as const,
     }],
+    management_summary: {
+      current_target: null,
+      occupying_plan: null,
+      latest_proposal: null,
+      read_as_of: "2026-08-26T20:00:00Z",
+    },
   };
 }
 

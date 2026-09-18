@@ -585,6 +585,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/orders/{order_id}/cancel-result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Paper Order Cancel Result */
+        get: operations["getInternalPaperOrderCancelResult"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/paper/plans/{batch_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Paper Plan */
+        get: operations["getInternalPaperPlan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/portfolio": {
         parameters: {
             query?: never;
@@ -1151,6 +1185,25 @@ export interface components {
              */
             universe_policy: "current_holdings_only";
         };
+        /** AgentPaperActivationResultResponse */
+        AgentPaperActivationResultResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Batch Id */
+            batch_id: string | null;
+            /**
+             * Result Code
+             * @enum {string}
+             */
+            result_code: "TARGET_ACTIVATION_BLOCKED" | "PLAN_CREATED" | "NO_ORDER_REQUIRED";
+            /** Strategy Decision Id */
+            strategy_decision_id: string | null;
+            /** Target Version Id */
+            target_version_id: string | null;
+        };
         /** AgentPaperAlpacaExecutionMarketResponse */
         AgentPaperAlpacaExecutionMarketResponse: {
             /**
@@ -1179,6 +1232,33 @@ export interface components {
              */
             window_minutes: 5;
         };
+        /** AgentPaperCandidateBatchResponse */
+        AgentPaperCandidateBatchResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Batch Hash */
+            batch_hash: string;
+            /**
+             * Candidate Batch Id
+             * Format: uuid
+             */
+            candidate_batch_id: string;
+            /** Candidate Instrument Ids */
+            candidate_instrument_ids: string[];
+            /**
+             * Source
+             * @constant
+             */
+            source: "explicit_research_scope";
+            /**
+             * Universe Snapshot Id
+             * Format: uuid
+             */
+            universe_snapshot_id: string;
+        };
         /** AgentPaperCandidateResponse */
         AgentPaperCandidateResponse: {
             /**
@@ -1206,6 +1286,31 @@ export interface components {
             /** Symbol */
             symbol: string;
         };
+        /** AgentPaperCycleBlockerResponse */
+        AgentPaperCycleBlockerResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /**
+             * Category
+             * @enum {string}
+             */
+            category: "provider_capacity" | "policy_unconfirmed" | "proposal_rejected" | "resource_occupied";
+            /**
+             * Code
+             * @enum {string}
+             */
+            code: "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED" | "POLICY_UNCONFIRMED" | "PORTFOLIO_PROPOSAL_UNAVAILABLE" | "TARGET_ACTIVATION_BLOCKED";
+            /** Proposal Rejection Code */
+            proposal_rejection_code: ("EXIT_TURNOVER_CONFLICT" | "REDUCTION_TURNOVER_CONFLICT" | "PORTFOLIO_DEPENDENCY_CONFLICT") | null;
+            /**
+             * Source Stage
+             * @enum {string}
+             */
+            source_stage: "provider" | "policy" | "proposal" | "activation";
+        };
         /** AgentPaperCycleDetailEnvelope */
         AgentPaperCycleDetailEnvelope: {
             data: components["schemas"]["AgentPaperCycleDetailResponse"];
@@ -1213,9 +1318,19 @@ export interface components {
         };
         /** AgentPaperCycleDetailResponse */
         AgentPaperCycleDetailResponse: {
+            activation_result: components["schemas"]["AgentPaperActivationResultResponse"] | null;
+            active_target: components["schemas"]["PaperTargetSummaryResponse"] | null;
+            blocker: components["schemas"]["AgentPaperCycleBlockerResponse"] | null;
+            blocking_plan: components["schemas"]["PaperPlanSummaryResponse"] | null;
+            candidate_batch: components["schemas"]["AgentPaperCandidateBatchResponse"] | null;
             cycle: components["schemas"]["AgentPaperCycleResponse"];
             /** Orders */
             orders: components["schemas"]["PaperOrderResponse"][];
+            plan_summary: components["schemas"]["PaperPlanSummaryResponse"] | null;
+            proposal: components["schemas"]["AgentPaperPortfolioProposalResponse"] | null;
+            /** Security Research */
+            security_research: components["schemas"]["AgentPaperSecurityResearchResponse"][];
+            synthesis: components["schemas"]["AgentPaperSynthesisResponse"] | null;
         };
         /** AgentPaperCycleEnvelope */
         AgentPaperCycleEnvelope: {
@@ -1332,6 +1447,66 @@ export interface components {
             /** Target Cash Weight */
             target_cash_weight: string;
         };
+        /** AgentPaperPortfolioProposalResponse */
+        AgentPaperPortfolioProposalResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Baseline Target Version Id */
+            baseline_target_version_id: string | null;
+            /** Cash Weight */
+            cash_weight: string;
+            /** Decision Hash */
+            decision_hash: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Initial Approval Id */
+            initial_approval_id: string | null;
+            /** Policy Hash */
+            policy_hash: string;
+            /**
+             * Strategy Decision Id
+             * Format: uuid
+             */
+            strategy_decision_id: string;
+            /**
+             * Synthesis Output Id
+             * Format: uuid
+             */
+            synthesis_output_id: string;
+            /** Targets */
+            targets: components["schemas"]["AgentPaperProposalTargetResponse"][];
+        };
+        /** AgentPaperProposalTargetResponse */
+        AgentPaperProposalTargetResponse: {
+            /** Depends On Instrument Ids */
+            depends_on_instrument_ids: string[];
+            /** Exit */
+            exit: boolean;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Rank */
+            rank?: number | null;
+            /** Reason Code */
+            reason_code: string;
+            /** Replaces Instrument Id */
+            replaces_instrument_id: string | null;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "core" | "tactical" | "none";
+            /** Target Weight */
+            target_weight: string;
+        };
         /** AgentPaperSchwabExecutionMarketResponse */
         AgentPaperSchwabExecutionMarketResponse: {
             /**
@@ -1360,6 +1535,48 @@ export interface components {
              */
             window_minutes: 5;
         };
+        /** AgentPaperSecurityResearchResponse */
+        AgentPaperSecurityResearchResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Intent Hash */
+            intent_hash: string;
+            /**
+             * Quality Status
+             * @enum {string}
+             */
+            quality_status: "complete" | "partial";
+            /**
+             * Research Output Id
+             * Format: uuid
+             */
+            research_output_id: string;
+            /**
+             * Research Run Id
+             * Format: uuid
+             */
+            research_run_id: string;
+            /**
+             * Stance
+             * @enum {string}
+             */
+            stance: "buy_candidate" | "reduce_candidate" | "hold" | "watch";
+            /**
+             * Status
+             * @constant
+             */
+            status: "completed";
+        };
         /** AgentPaperSessionSummaryResponse */
         AgentPaperSessionSummaryResponse: {
             /** Completed Count */
@@ -1386,6 +1603,74 @@ export interface components {
              * @enum {string}
              */
             status: "calendar_unavailable" | "not_started" | "ready" | "in_progress" | "completed" | "stopped" | "closed" | "historical";
+        };
+        /** AgentPaperSynthesisChoiceResponse */
+        AgentPaperSynthesisChoiceResponse: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "include" | "increase" | "reduce" | "exit" | "maintain" | "defer";
+            /** Counter Thesis */
+            counter_thesis: string;
+            /** Depends On Instrument Ids */
+            depends_on_instrument_ids: string[];
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Invalidation */
+            invalidation: string;
+            /** Rank */
+            rank?: number | null;
+            /** Replaces Instrument Id */
+            replaces_instrument_id: string | null;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "core" | "tactical" | "none";
+            /** Thesis */
+            thesis: string;
+        };
+        /** AgentPaperSynthesisResponse */
+        AgentPaperSynthesisResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Binding Hash */
+            binding_hash: string;
+            /**
+             * Candidate Batch Id
+             * Format: uuid
+             */
+            candidate_batch_id: string;
+            /** Cash Rationale */
+            cash_rationale?: string | null;
+            /** Choices */
+            choices: components["schemas"]["AgentPaperSynthesisChoiceResponse"][];
+            /** Content Hash */
+            content_hash: string;
+            /** Input Hash */
+            input_hash: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "completed" | "abstained" | "failed";
+            /**
+             * Synthesis Output Id
+             * Format: uuid
+             */
+            synthesis_output_id: string;
+            /**
+             * Synthesis Run Id
+             * Format: uuid
+             */
+            synthesis_run_id: string;
         };
         /** AgentPaperVersionObservationResponse */
         AgentPaperVersionObservationResponse: {
@@ -3582,10 +3867,49 @@ export interface components {
             data: components["schemas"]["PaperCancelResponse"];
             meta: components["schemas"]["SuccessMetaResponse"];
         };
+        /** PaperCancelOrderFactResponse */
+        PaperCancelOrderFactResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Current Event Seq */
+            current_event_seq?: number | null;
+            /** Filled Quantity */
+            filled_quantity: string;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /** Remaining Quantity */
+            remaining_quantity: string;
+            /** Status */
+            status: ("proposed" | "risk_rejected" | "risk_approved" | "awaiting_approval" | "submitted" | "partially_filled" | "filled" | "cancelled" | "rejected" | "reconciling") | null;
+        };
         /** PaperCancelRequest */
         PaperCancelRequest: {
             /** Expected Event Seq */
             expected_event_seq: number;
+        };
+        /** PaperCancelReservationFactResponse */
+        PaperCancelReservationFactResponse: {
+            /** Amount */
+            amount: string;
+            /** As Of */
+            as_of: string | null;
+            /** Outstanding Amount */
+            outstanding_amount: string | null;
+            /** Released */
+            released: boolean | null;
+            /**
+             * Reservation Id
+             * Format: uuid
+             */
+            reservation_id: string;
+            /**
+             * Reservation Type
+             * @enum {string}
+             */
+            reservation_type: "cash" | "position";
         };
         /** PaperCancelResponse */
         PaperCancelResponse: {
@@ -3607,6 +3931,27 @@ export interface components {
              * @constant
              */
             status: "cancelled";
+        };
+        /** PaperCancelResultEnvelope */
+        PaperCancelResultEnvelope: {
+            data: components["schemas"]["PaperCancelResultResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PaperCancelResultResponse */
+        PaperCancelResultResponse: {
+            /** Committed At */
+            committed_at: string | null;
+            order: components["schemas"]["PaperCancelOrderFactResponse"];
+            reservation: components["schemas"]["PaperCancelReservationFactResponse"] | null;
+            /** Reservation Released */
+            reservation_released: boolean | null;
+            /** Result Event Seq */
+            result_event_seq?: number | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "NOT_RECORDED" | "COMMITTED" | "CONFLICT" | "UNKNOWN";
         };
         /** PaperComparisonResponse */
         PaperComparisonResponse: {
@@ -3696,6 +4041,17 @@ export interface components {
              * Format: date-time
              */
             source_as_of: string;
+        };
+        /** PaperManagementSummaryResponse */
+        PaperManagementSummaryResponse: {
+            current_target: components["schemas"]["PaperTargetSummaryResponse"] | null;
+            latest_proposal: components["schemas"]["AgentPaperPortfolioProposalResponse"] | null;
+            occupying_plan: components["schemas"]["PaperPlanSummaryResponse"] | null;
+            /**
+             * Read As Of
+             * Format: date-time
+             */
+            read_as_of: string;
         };
         /** PaperOrderEventResponse */
         PaperOrderEventResponse: {
@@ -3811,6 +4167,256 @@ export interface components {
             /** Unrealized Pnl */
             unrealized_pnl: string;
         };
+        /** PaperPlanActualPositionResponse */
+        PaperPlanActualPositionResponse: {
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Quantity */
+            quantity: string;
+            /** Reserved Quantity */
+            reserved_quantity: string;
+        };
+        /** PaperPlanActualResponse */
+        PaperPlanActualResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Available Cash */
+            available_cash: string | null;
+            /**
+             * Data State
+             * @enum {string}
+             */
+            data_state: "READY" | "UNKNOWN";
+            /** Nav */
+            nav: string | null;
+            /** Positions */
+            positions: components["schemas"]["PaperPlanActualPositionResponse"][] | null;
+            /** Reserved Cash */
+            reserved_cash: string | null;
+        };
+        /** PaperPlanConfirmedFillResponse */
+        PaperPlanConfirmedFillResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /**
+             * Fill Id
+             * Format: uuid
+             */
+            fill_id: string;
+            /** Notional Usd */
+            notional_usd: string;
+            /** Quantity */
+            quantity: string;
+        };
+        /** PaperPlanEnvelope */
+        PaperPlanEnvelope: {
+            data: components["schemas"]["PaperPlanResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PaperPlanFactsResponse */
+        PaperPlanFactsResponse: {
+            /** Items */
+            items: components["schemas"]["PaperPlanItemResponse"][];
+            /**
+             * Occupation State
+             * @enum {string}
+             */
+            occupation_state: "occupied" | "released" | "unknown";
+            /**
+             * Plan Created At
+             * Format: date-time
+             */
+            plan_created_at: string;
+            /**
+             * Reconciliation As Of
+             * Format: date-time
+             */
+            reconciliation_as_of: string;
+            /** Risk */
+            risk: components["schemas"]["PaperPlanRiskResponse"][];
+        };
+        /** PaperPlanItemResponse */
+        PaperPlanItemResponse: {
+            /** Cash Reservation Outstanding */
+            cash_reservation_outstanding: string | null;
+            /** Confirmed Fill Quantity */
+            confirmed_fill_quantity: string;
+            /** Confirmed Fills */
+            confirmed_fills: components["schemas"]["PaperPlanConfirmedFillResponse"][];
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Open Order Coverage Amount Usd */
+            open_order_coverage_amount_usd: string;
+            /** Open Order Coverage Quantity */
+            open_order_coverage_quantity: string;
+            /** Order As Of */
+            order_as_of: string | null;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /** Position Reservation Outstanding */
+            position_reservation_outstanding: string | null;
+            /** Remaining Target Gap Amount Usd */
+            remaining_target_gap_amount_usd: string | null;
+            /** Remaining Target Gap Quantity */
+            remaining_target_gap_quantity: string | null;
+            /** Reservation As Of */
+            reservation_as_of: string | null;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+            /** Status */
+            status: ("proposed" | "risk_rejected" | "risk_approved" | "awaiting_approval" | "submitted" | "partially_filled" | "filled" | "cancelled" | "rejected" | "reconciling") | null;
+        };
+        /** PaperPlanProposalResponse */
+        PaperPlanProposalResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Cash Weight */
+            cash_weight: string;
+            /** Decision Hash */
+            decision_hash: string;
+            /**
+             * Strategy Decision Id
+             * Format: uuid
+             */
+            strategy_decision_id: string;
+            /** Targets */
+            targets: components["schemas"]["PaperPlanProposalTargetResponse"][];
+        };
+        /** PaperPlanProposalTargetResponse */
+        PaperPlanProposalTargetResponse: {
+            /** Exit */
+            exit: boolean;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Target Weight */
+            target_weight: string;
+        };
+        /** PaperPlanResponse */
+        PaperPlanResponse: {
+            actual: components["schemas"]["PaperPlanActualResponse"];
+            /**
+             * Association State
+             * @enum {string}
+             */
+            association_state: "target_associated" | "legacy_unassociated";
+            /**
+             * Batch Id
+             * Format: uuid
+             */
+            batch_id: string;
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            plan: components["schemas"]["PaperPlanFactsResponse"];
+            proposal: components["schemas"]["PaperPlanProposalResponse"];
+            target: components["schemas"]["PaperPlanTargetResponse"] | null;
+        };
+        /** PaperPlanRiskResponse */
+        PaperPlanRiskResponse: {
+            /** Approved Amount Usd */
+            approved_amount_usd: string;
+            /** Approved Quantity */
+            approved_quantity: string;
+            /** Desired Amount Usd */
+            desired_amount_usd: string;
+            /** Desired Quantity */
+            desired_quantity: string;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "approved" | "reduced" | "rejected";
+            /** Reduced Amount Usd */
+            reduced_amount_usd: string;
+            /** Reduced Quantity */
+            reduced_quantity: string;
+            /** Rejected Amount Usd */
+            rejected_amount_usd: string;
+            /** Rejected Quantity */
+            rejected_quantity: string;
+        };
+        /** PaperPlanSummaryResponse */
+        PaperPlanSummaryResponse: {
+            /**
+             * Batch Id
+             * Format: uuid
+             */
+            batch_id: string;
+            /** Decision Hash */
+            decision_hash: string;
+            /**
+             * Occupation State
+             * @enum {string}
+             */
+            occupation_state: "occupied" | "released" | "unknown";
+            /**
+             * Plan Created At
+             * Format: date-time
+             */
+            plan_created_at: string;
+            /**
+             * Reconciliation As Of
+             * Format: date-time
+             */
+            reconciliation_as_of: string;
+            /**
+             * Strategy Decision Id
+             * Format: uuid
+             */
+            strategy_decision_id: string;
+            /** Target Version Id */
+            target_version_id: string | null;
+        };
+        /** PaperPlanTargetResponse */
+        PaperPlanTargetResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Target Content Hash */
+            target_content_hash: string;
+            /**
+             * Target Version Id
+             * Format: uuid
+             */
+            target_version_id: string;
+            /** Version Seq */
+            version_seq: number;
+        };
         /** PaperPortfolioEnvelope */
         PaperPortfolioEnvelope: {
             data: components["schemas"]["PaperPortfolioResponse"];
@@ -3833,6 +4439,7 @@ export interface components {
             data_state: "EMPTY" | "READY" | "PARTIAL" | "STALE";
             /** Initial Capital */
             initial_capital: string;
+            management_summary: components["schemas"]["PaperManagementSummaryResponse"];
             /**
              * Mode
              * @constant
@@ -3888,6 +4495,52 @@ export interface components {
             symbol: string | null;
             /** Unrealized Pnl */
             unrealized_pnl: string;
+        };
+        /** PaperTargetAllocationResponse */
+        PaperTargetAllocationResponse: {
+            /** Exit */
+            exit: boolean;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Role */
+            role: ("core" | "tactical" | "none") | null;
+            /** Target Weight */
+            target_weight: string;
+        };
+        /** PaperTargetSummaryResponse */
+        PaperTargetSummaryResponse: {
+            /** Activation Hash */
+            activation_hash: string;
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Cash Weight */
+            cash_weight: string;
+            /** Previous Target Version Id */
+            previous_target_version_id: string | null;
+            /**
+             * Strategy Decision Id
+             * Format: uuid
+             */
+            strategy_decision_id: string;
+            /** Target Content Hash */
+            target_content_hash: string;
+            /**
+             * Target Version Id
+             * Format: uuid
+             */
+            target_version_id: string;
+            /** Targets */
+            targets: components["schemas"]["PaperTargetAllocationResponse"][];
+            /** Version Seq */
+            version_seq: number;
         };
         /** PendingInstrumentIdentityResponse */
         PendingInstrumentIdentityResponse: {
@@ -8874,6 +9527,124 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PaperCancelEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPaperOrderCancelResult: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperCancelResultEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPaperPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperPlanEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */

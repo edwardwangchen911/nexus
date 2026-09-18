@@ -24,6 +24,22 @@ function cycle(suffix: string, changes: Partial<Cycle>): Cycle {
   return { ...structuredClone(agentPaperCycle), cycle_id: `0198f7a0-1111-7777-8111-1111111111${suffix}`, ...changes };
 }
 
+function detail(cycle: Cycle, orders = [cancellableOrder]): Detail {
+  return {
+    cycle,
+    orders,
+    candidate_batch: null,
+    security_research: [],
+    synthesis: null,
+    proposal: null,
+    active_target: null,
+    activation_result: null,
+    blocker: null,
+    blocking_plan: null,
+    plan_summary: null,
+  };
+}
+
 const cycles = (): Cycle[] => [
   cycle("20", { status: "completed", result_code: "NO_ORDER_REQUIRED", order_ids: [], candidates: [{ ...agentPaperCycle.candidates[0], stance: "hold", sizing_action: "maintain" }] }),
   cycle("21", { status: "completed", result_code: "NO_ORDER_REQUIRED", order_ids: [], candidates: [{ ...agentPaperCycle.candidates[0], stance: "watch", sizing_action: "none" }] }),
@@ -72,8 +88,7 @@ describe("decision records", () => {
   });
 
   it("renders every evidence-to-outcome stage in order", () => {
-    const detail: Detail = { cycle: agentPaperCycle, orders: [cancellableOrder] };
-    render(<DecisionDetailPanel state="ready" detail={detail} onRefresh={vi.fn()} />);
+    render(<DecisionDetailPanel state="ready" detail={detail(agentPaperCycle)} onRefresh={vi.fn()} />);
 
     const headings = screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent);
     expect(headings).toEqual([
@@ -91,7 +106,7 @@ describe("decision records", () => {
       status: "partially_filled", result_code: "PAPER_RESULT_INCOMPLETE", decision: null,
       decision_market: null, order_ids: [], candidates: [],
     });
-    render(<DecisionDetailPanel state="ready" detail={{ cycle: unknown, orders: [] }} onRefresh={vi.fn()} />);
+    render(<DecisionDetailPanel state="ready" detail={detail(unknown, [])} onRefresh={vi.fn()} />);
 
     expect(screen.getAllByText("未知").length).toBeGreaterThanOrEqual(4);
     expect(screen.getByRole("region", { name: "订单结论" })).toHaveTextContent("没有关联订单事实，无法证明订单结果");
@@ -104,7 +119,7 @@ describe("decision records", () => {
       status: "completed", result_code: "NO_ORDER_REQUIRED", order_ids: [],
       candidates: [{ ...agentPaperCycle.candidates[0], stance: "watch", sizing_action: "none" }],
     });
-    render(<DecisionDetailPanel state="ready" detail={{ cycle: noOrder, orders: [] }} onRefresh={vi.fn()} />);
+    render(<DecisionDetailPanel state="ready" detail={detail(noOrder, [])} onRefresh={vi.fn()} />);
 
     const execution = screen.getByRole("region", { name: "执行结果" });
     expect(execution).toHaveTextContent("无需下单");

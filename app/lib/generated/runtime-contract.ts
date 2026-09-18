@@ -116,6 +116,70 @@ export const runtimeContractSchemas = {
     "title": "ActiveFamilyResponse",
     "type": "object"
   },
+  "AgentPaperActivationResultResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "batch_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Batch Id"
+      },
+      "result_code": {
+        "enum": [
+          "TARGET_ACTIVATION_BLOCKED",
+          "PLAN_CREATED",
+          "NO_ORDER_REQUIRED"
+        ],
+        "title": "Result Code",
+        "type": "string"
+      },
+      "strategy_decision_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Strategy Decision Id"
+      },
+      "target_version_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Target Version Id"
+      }
+    },
+    "required": [
+      "result_code",
+      "strategy_decision_id",
+      "target_version_id",
+      "batch_id",
+      "as_of"
+    ],
+    "title": "AgentPaperActivationResultResponse",
+    "type": "object"
+  },
   "AgentPaperAlpacaExecutionMarketResponse": {
     "additionalProperties": false,
     "properties": {
@@ -158,6 +222,56 @@ export const runtimeContractSchemas = {
       "status"
     ],
     "title": "AgentPaperAlpacaExecutionMarketResponse",
+    "type": "object"
+  },
+  "AgentPaperCandidateBatchResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "batch_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Batch Hash",
+        "type": "string"
+      },
+      "candidate_batch_id": {
+        "format": "uuid",
+        "title": "Candidate Batch Id",
+        "type": "string"
+      },
+      "candidate_instrument_ids": {
+        "items": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Candidate Instrument Ids",
+        "type": "array"
+      },
+      "source": {
+        "const": "explicit_research_scope",
+        "title": "Source",
+        "type": "string"
+      },
+      "universe_snapshot_id": {
+        "format": "uuid",
+        "title": "Universe Snapshot Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "candidate_batch_id",
+      "universe_snapshot_id",
+      "candidate_instrument_ids",
+      "source",
+      "batch_hash",
+      "as_of"
+    ],
+    "title": "AgentPaperCandidateBatchResponse",
     "type": "object"
   },
   "AgentPaperCandidateResponse": {
@@ -277,9 +391,124 @@ export const runtimeContractSchemas = {
     "title": "AgentPaperCandidateResponse",
     "type": "object"
   },
+  "AgentPaperCycleBlockerResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "category": {
+        "enum": [
+          "provider_capacity",
+          "policy_unconfirmed",
+          "proposal_rejected",
+          "resource_occupied"
+        ],
+        "title": "Category",
+        "type": "string"
+      },
+      "code": {
+        "enum": [
+          "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+          "POLICY_UNCONFIRMED",
+          "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+          "TARGET_ACTIVATION_BLOCKED"
+        ],
+        "title": "Code",
+        "type": "string"
+      },
+      "proposal_rejection_code": {
+        "anyOf": [
+          {
+            "enum": [
+              "EXIT_TURNOVER_CONFLICT",
+              "REDUCTION_TURNOVER_CONFLICT",
+              "PORTFOLIO_DEPENDENCY_CONFLICT"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Proposal Rejection Code"
+      },
+      "source_stage": {
+        "enum": [
+          "provider",
+          "policy",
+          "proposal",
+          "activation"
+        ],
+        "title": "Source Stage",
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "source_stage",
+      "category",
+      "proposal_rejection_code",
+      "as_of"
+    ],
+    "title": "AgentPaperCycleBlockerResponse",
+    "type": "object"
+  },
   "AgentPaperCycleDetailResponse": {
     "additionalProperties": false,
     "properties": {
+      "activation_result": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperActivationResultResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "active_target": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperTargetSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "blocker": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperCycleBlockerResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "blocking_plan": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperPlanSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "candidate_batch": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperCandidateBatchResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "cycle": {
         "$ref": "#/components/schemas/AgentPaperCycleResponse"
       },
@@ -290,11 +519,58 @@ export const runtimeContractSchemas = {
         "maxItems": 50,
         "title": "Orders",
         "type": "array"
+      },
+      "plan_summary": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperPlanSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperPortfolioProposalResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "security_research": {
+        "items": {
+          "$ref": "#/components/schemas/AgentPaperSecurityResearchResponse"
+        },
+        "maxItems": 5,
+        "title": "Security Research",
+        "type": "array"
+      },
+      "synthesis": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperSynthesisResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
       "cycle",
-      "orders"
+      "orders",
+      "candidate_batch",
+      "security_research",
+      "synthesis",
+      "proposal",
+      "active_target",
+      "activation_result",
+      "blocker",
+      "blocking_plan",
+      "plan_summary"
     ],
     "title": "AgentPaperCycleDetailResponse",
     "type": "object"
@@ -569,6 +845,173 @@ export const runtimeContractSchemas = {
     "title": "AgentPaperDecisionResponse",
     "type": "object"
   },
+  "AgentPaperPortfolioProposalResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "baseline_target_version_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Baseline Target Version Id"
+      },
+      "cash_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cash Weight",
+        "type": "string"
+      },
+      "decision_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Decision Hash",
+        "type": "string"
+      },
+      "expires_at": {
+        "format": "date-time",
+        "title": "Expires At",
+        "type": "string"
+      },
+      "initial_approval_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Initial Approval Id"
+      },
+      "policy_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Policy Hash",
+        "type": "string"
+      },
+      "strategy_decision_id": {
+        "format": "uuid",
+        "title": "Strategy Decision Id",
+        "type": "string"
+      },
+      "synthesis_output_id": {
+        "format": "uuid",
+        "title": "Synthesis Output Id",
+        "type": "string"
+      },
+      "targets": {
+        "items": {
+          "$ref": "#/components/schemas/AgentPaperProposalTargetResponse"
+        },
+        "maxItems": 50,
+        "title": "Targets",
+        "type": "array"
+      }
+    },
+    "required": [
+      "strategy_decision_id",
+      "synthesis_output_id",
+      "decision_hash",
+      "policy_hash",
+      "baseline_target_version_id",
+      "initial_approval_id",
+      "cash_weight",
+      "targets",
+      "expires_at",
+      "as_of"
+    ],
+    "title": "AgentPaperPortfolioProposalResponse",
+    "type": "object"
+  },
+  "AgentPaperProposalTargetResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "depends_on_instrument_ids": {
+        "items": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "maxItems": 4,
+        "title": "Depends On Instrument Ids",
+        "type": "array"
+      },
+      "exit": {
+        "title": "Exit",
+        "type": "boolean"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "rank": {
+        "anyOf": [
+          {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Rank"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "replaces_instrument_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Replaces Instrument Id"
+      },
+      "role": {
+        "enum": [
+          "core",
+          "tactical",
+          "none"
+        ],
+        "title": "Role",
+        "type": "string"
+      },
+      "target_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Target Weight",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "target_weight",
+      "exit",
+      "role",
+      "reason_code",
+      "replaces_instrument_id",
+      "depends_on_instrument_ids"
+    ],
+    "title": "AgentPaperProposalTargetResponse",
+    "type": "object"
+  },
   "AgentPaperSchwabExecutionMarketResponse": {
     "additionalProperties": false,
     "properties": {
@@ -611,6 +1054,77 @@ export const runtimeContractSchemas = {
       "status"
     ],
     "title": "AgentPaperSchwabExecutionMarketResponse",
+    "type": "object"
+  },
+  "AgentPaperSecurityResearchResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Content Hash",
+        "type": "string"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "intent_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Intent Hash",
+        "type": "string"
+      },
+      "quality_status": {
+        "enum": [
+          "complete",
+          "partial"
+        ],
+        "title": "Quality Status",
+        "type": "string"
+      },
+      "research_output_id": {
+        "format": "uuid",
+        "title": "Research Output Id",
+        "type": "string"
+      },
+      "research_run_id": {
+        "format": "uuid",
+        "title": "Research Run Id",
+        "type": "string"
+      },
+      "stance": {
+        "enum": [
+          "buy_candidate",
+          "reduce_candidate",
+          "hold",
+          "watch"
+        ],
+        "title": "Stance",
+        "type": "string"
+      },
+      "status": {
+        "const": "completed",
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "research_run_id",
+      "research_output_id",
+      "status",
+      "content_hash",
+      "intent_hash",
+      "stance",
+      "quality_status",
+      "as_of"
+    ],
+    "title": "AgentPaperSecurityResearchResponse",
     "type": "object"
   },
   "AgentPaperSessionSummaryResponse": {
@@ -727,6 +1241,184 @@ export const runtimeContractSchemas = {
       "execution_locked"
     ],
     "title": "AgentPaperSessionSummaryResponse",
+    "type": "object"
+  },
+  "AgentPaperSynthesisChoiceResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "include",
+          "increase",
+          "reduce",
+          "exit",
+          "maintain",
+          "defer"
+        ],
+        "title": "Action",
+        "type": "string"
+      },
+      "counter_thesis": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Counter Thesis",
+        "type": "string"
+      },
+      "depends_on_instrument_ids": {
+        "items": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "maxItems": 4,
+        "title": "Depends On Instrument Ids",
+        "type": "array"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "invalidation": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Invalidation",
+        "type": "string"
+      },
+      "rank": {
+        "anyOf": [
+          {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Rank"
+      },
+      "replaces_instrument_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Replaces Instrument Id"
+      },
+      "role": {
+        "enum": [
+          "core",
+          "tactical",
+          "none"
+        ],
+        "title": "Role",
+        "type": "string"
+      },
+      "thesis": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Thesis",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "action",
+      "role",
+      "replaces_instrument_id",
+      "depends_on_instrument_ids",
+      "thesis",
+      "counter_thesis",
+      "invalidation"
+    ],
+    "title": "AgentPaperSynthesisChoiceResponse",
+    "type": "object"
+  },
+  "AgentPaperSynthesisResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "binding_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Binding Hash",
+        "type": "string"
+      },
+      "candidate_batch_id": {
+        "format": "uuid",
+        "title": "Candidate Batch Id",
+        "type": "string"
+      },
+      "cash_rationale": {
+        "anyOf": [
+          {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cash Rationale"
+      },
+      "choices": {
+        "items": {
+          "$ref": "#/components/schemas/AgentPaperSynthesisChoiceResponse"
+        },
+        "maxItems": 5,
+        "title": "Choices",
+        "type": "array"
+      },
+      "content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Content Hash",
+        "type": "string"
+      },
+      "input_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Input Hash",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "completed",
+          "abstained",
+          "failed"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "synthesis_output_id": {
+        "format": "uuid",
+        "title": "Synthesis Output Id",
+        "type": "string"
+      },
+      "synthesis_run_id": {
+        "format": "uuid",
+        "title": "Synthesis Run Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "synthesis_run_id",
+      "synthesis_output_id",
+      "candidate_batch_id",
+      "input_hash",
+      "content_hash",
+      "binding_hash",
+      "status",
+      "choices",
+      "as_of"
+    ],
+    "title": "AgentPaperSynthesisResponse",
     "type": "object"
   },
   "AgentPaperVersionObservationResponse": {
@@ -6106,6 +6798,54 @@ export const runtimeContractSchemas = {
     "title": "PaperFillResponse",
     "type": "object"
   },
+  "PaperManagementSummaryResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "current_target": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperTargetSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "latest_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperPortfolioProposalResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "occupying_plan": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperPlanSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "read_as_of": {
+        "format": "date-time",
+        "title": "Read As Of",
+        "type": "string"
+      }
+    },
+    "required": [
+      "current_target",
+      "occupying_plan",
+      "latest_proposal",
+      "read_as_of"
+    ],
+    "title": "PaperManagementSummaryResponse",
+    "type": "object"
+  },
   "PaperOrderEventResponse": {
     "additionalProperties": false,
     "properties": {
@@ -6439,6 +7179,68 @@ export const runtimeContractSchemas = {
     "title": "PaperPerformanceResponse",
     "type": "object"
   },
+  "PaperPlanSummaryResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "batch_id": {
+        "format": "uuid",
+        "title": "Batch Id",
+        "type": "string"
+      },
+      "decision_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Decision Hash",
+        "type": "string"
+      },
+      "occupation_state": {
+        "enum": [
+          "occupied",
+          "released",
+          "unknown"
+        ],
+        "title": "Occupation State",
+        "type": "string"
+      },
+      "plan_created_at": {
+        "format": "date-time",
+        "title": "Plan Created At",
+        "type": "string"
+      },
+      "reconciliation_as_of": {
+        "format": "date-time",
+        "title": "Reconciliation As Of",
+        "type": "string"
+      },
+      "strategy_decision_id": {
+        "format": "uuid",
+        "title": "Strategy Decision Id",
+        "type": "string"
+      },
+      "target_version_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Target Version Id"
+      }
+    },
+    "required": [
+      "batch_id",
+      "target_version_id",
+      "strategy_decision_id",
+      "decision_hash",
+      "plan_created_at",
+      "reconciliation_as_of",
+      "occupation_state"
+    ],
+    "title": "PaperPlanSummaryResponse",
+    "type": "object"
+  },
   "PaperPortfolioResponse": {
     "additionalProperties": false,
     "properties": {
@@ -6480,6 +7282,9 @@ export const runtimeContractSchemas = {
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Initial Capital",
         "type": "string"
+      },
+      "management_summary": {
+        "$ref": "#/components/schemas/PaperManagementSummaryResponse"
       },
       "mode": {
         "const": "internal_paper",
@@ -6526,7 +7331,8 @@ export const runtimeContractSchemas = {
       "performance",
       "comparison",
       "positions",
-      "attributions"
+      "attributions",
+      "management_summary"
     ],
     "title": "PaperPortfolioResponse",
     "type": "object"
@@ -6645,6 +7451,131 @@ export const runtimeContractSchemas = {
       "price_as_of"
     ],
     "title": "PaperPositionResponse",
+    "type": "object"
+  },
+  "PaperTargetAllocationResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "exit": {
+        "title": "Exit",
+        "type": "boolean"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "role": {
+        "anyOf": [
+          {
+            "enum": [
+              "core",
+              "tactical",
+              "none"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Role"
+      },
+      "target_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Target Weight",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "target_weight",
+      "exit",
+      "role",
+      "reason_code"
+    ],
+    "title": "PaperTargetAllocationResponse",
+    "type": "object"
+  },
+  "PaperTargetSummaryResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "activation_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Activation Hash",
+        "type": "string"
+      },
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "cash_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cash Weight",
+        "type": "string"
+      },
+      "previous_target_version_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Previous Target Version Id"
+      },
+      "strategy_decision_id": {
+        "format": "uuid",
+        "title": "Strategy Decision Id",
+        "type": "string"
+      },
+      "target_content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Target Content Hash",
+        "type": "string"
+      },
+      "target_version_id": {
+        "format": "uuid",
+        "title": "Target Version Id",
+        "type": "string"
+      },
+      "targets": {
+        "items": {
+          "$ref": "#/components/schemas/PaperTargetAllocationResponse"
+        },
+        "maxItems": 50,
+        "title": "Targets",
+        "type": "array"
+      },
+      "version_seq": {
+        "minimum": 1,
+        "title": "Version Seq",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "target_version_id",
+      "version_seq",
+      "strategy_decision_id",
+      "previous_target_version_id",
+      "target_content_hash",
+      "activation_hash",
+      "cash_weight",
+      "targets",
+      "as_of"
+    ],
+    "title": "PaperTargetSummaryResponse",
     "type": "object"
   },
   "PendingInstrumentIdentityResponse": {

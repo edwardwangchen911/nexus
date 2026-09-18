@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const actor = { userId: "allowed-user", requestId: "0198f7a0-1111-7777-8111-111111111111" };
 const cycleId = "0198f7a0-1111-7777-8111-111111111110";
 const orderId = "0198f7a0-1111-7777-8111-111111111112";
+const planId = "0198f7a0-1111-7777-8111-111111111113";
 const engineFetch = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../app/lib/auth/nexus-user", () => ({
@@ -91,6 +92,61 @@ describe("internal-paper BFF routes", () => {
     engineFetch.mockClear();
     const rejected = await GET(new Request("https://nexus.test/api/v1/paper/portfolio?account_id=secret"));
     expect(rejected.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
+  it("forwards one exact plan read and never calls a mutation", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/plans/[planId]/route");
+    await GET(new Request(`https://nexus.test/api/v1/paper/plans/${planId}`));
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/paper/plans/{batch_id}",
+      path: `/internal/v1/paper/plans/${planId}`,
+    }, { method: "GET", actor });
+    expect(engineFetch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ template: expect.stringContaining("cancel") }),
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    engineFetch.mockClear();
+    for (const url of [
+      "https://nexus.test/api/v1/paper/plans/not-a-uuid",
+      `https://nexus.test/api/v1/paper/plans/${planId}?account_id=secret`,
+    ]) {
+      expect((await GET(new Request(url))).status).toBe(400);
+    }
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
+  it("reads only the existing cancellation attempt and never retries cancellation", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/orders/[orderId]/cancel-result/route");
+    await GET(new Request(`https://nexus.test/api/v1/paper/orders/${orderId}/cancel-result`, {
+      headers: { "idempotency-key": "cancel-paper-19", authorization: "must-not-forward" },
+    }));
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/paper/orders/{order_id}/cancel-result",
+      path: `/internal/v1/paper/orders/${orderId}/cancel-result`,
+    }, {
+      method: "GET",
+      actor,
+      headers: { "idempotency-key": "cancel-paper-19" },
+    });
+    expect(engineFetch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ template: "/internal/v1/paper/orders/{order_id}/cancel" }),
+      expect.anything(),
+    );
+
+    engineFetch.mockClear();
+    for (const request of [
+      new Request("https://nexus.test/api/v1/paper/orders/not-a-uuid/cancel-result", {
+        headers: { "idempotency-key": "cancel-paper-19" },
+      }),
+      new Request(`https://nexus.test/api/v1/paper/orders/${orderId}/cancel-result?retry=true`, {
+        headers: { "idempotency-key": "cancel-paper-19" },
+      }),
+      new Request(`https://nexus.test/api/v1/paper/orders/${orderId}/cancel-result`),
+    ]) {
+      expect((await GET(request)).status).toBe(400);
+    }
     expect(engineFetch).not.toHaveBeenCalled();
   });
 

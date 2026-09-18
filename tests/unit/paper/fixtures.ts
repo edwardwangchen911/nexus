@@ -104,6 +104,12 @@ export const paperPortfolio: PaperPortfolio = {
     slippage: "0.420000000000",
     completeness: "FULL",
   }],
+  management_summary: {
+    current_target: null,
+    occupying_plan: null,
+    latest_proposal: null,
+    read_as_of: "2026-08-26T20:00:00Z",
+  },
 };
 
 export const cancellableOrder: PaperOrder = {

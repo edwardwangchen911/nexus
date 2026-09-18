@@ -14,15 +14,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.paper import (
+    AgentPaperActivationResultResponse,
     AgentPaperAlpacaExecutionMarketResponse,
+    AgentPaperCandidateBatchResponse,
     AgentPaperCandidateResponse,
+    AgentPaperCycleBlockerResponse,
     AgentPaperCycleDetailResponse,
     AgentPaperCyclePageResponse,
     AgentPaperCycleResponse,
     AgentPaperDecisionMarketResponse,
     AgentPaperDecisionResponse,
+    AgentPaperPortfolioProposalResponse,
+    AgentPaperProposalTargetResponse,
     AgentPaperSchwabExecutionMarketResponse,
+    AgentPaperSecurityResearchResponse,
     AgentPaperSessionSummaryResponse,
+    AgentPaperSynthesisChoiceResponse,
+    AgentPaperSynthesisResponse,
     AgentPaperVersionObservationResponse,
     AgentVersionComparisonResponse,
     AgentVersionEvaluationResponse,
@@ -37,6 +45,7 @@ from nexus.api.schemas.paper import (
     PaperComparisonResponse,
     PaperComparisonRowResponse,
     PaperFillResponse,
+    PaperManagementSummaryResponse,
     PaperOrderEventResponse,
     PaperOrderPageResponse,
     PaperOrderResponse,
@@ -50,9 +59,12 @@ from nexus.api.schemas.paper import (
     PaperPlanProposalTargetResponse,
     PaperPlanResponse,
     PaperPlanRiskResponse,
+    PaperPlanSummaryResponse,
     PaperPlanTargetResponse,
     PaperPortfolioResponse,
     PaperPositionResponse,
+    PaperTargetAllocationResponse,
+    PaperTargetSummaryResponse,
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
@@ -82,7 +94,12 @@ from nexus.persistence.models.agent_versions import (
     AgentVersionEvaluationDecisionRecord,
     AgentVersionEvaluationRecord,
 )
-from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
+from nexus.persistence.models.agents import (
+    AgentPortfolioSynthesisOutputRecord,
+    AgentPortfolioSynthesisRunRecord,
+    AgentResearchOutputRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -100,12 +117,14 @@ from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    AgentPaperCandidateBatchRecord,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
     PaperAccountRecord,
     PaperExecutionWindowAuthorityRecord,
     PaperFillRecord,
+    PaperInitialTargetApprovalRecord,
     PaperLedgerTransactionRecord,
     PaperOrderBatchRecord,
     PaperOrderEventRecord,
@@ -233,10 +252,578 @@ class PaperReadService:
         )
         if cycle is None:
             return None
-        return AgentPaperCycleDetailResponse(
-            cycle=await self._agent_cycle(cycle),
-            orders=await self._orders_for_cycle(cycle_id),
+        cycle_response = await self._agent_cycle(cycle)
+        candidate_batch = None
+        if cycle.candidate_batch_id is not None:
+            row = await self._session.get(AgentPaperCandidateBatchRecord, cycle.candidate_batch_id)
+            if (
+                row is None
+                or row.account_id != cycle.account_id
+                or row.universe_snapshot_id != cycle.universe_snapshot_id
+                or row.created_at > self._request_time
+            ):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent paper candidate batch is incomplete.",
+                    status_code=409,
+                )
+            candidate_batch = AgentPaperCandidateBatchResponse(
+                candidate_batch_id=row.id,
+                universe_snapshot_id=row.universe_snapshot_id,
+                candidate_instrument_ids=tuple(row.candidate_instrument_ids),
+                source="explicit_research_scope",
+                batch_hash=row.batch_hash,
+                as_of=row.created_at,
+            )
+        synthesis_run = await self._session.scalar(
+            select(AgentPortfolioSynthesisRunRecord).where(
+                AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id,
+                AgentPortfolioSynthesisRunRecord.created_at <= self._request_time,
+            )
         )
+        synthesis_output = (
+            None
+            if synthesis_run is None
+            else await self._session.scalar(
+                select(AgentPortfolioSynthesisOutputRecord).where(
+                    AgentPortfolioSynthesisOutputRecord.run_id == synthesis_run.id,
+                    AgentPortfolioSynthesisOutputRecord.created_at <= self._request_time,
+                )
+            )
+        )
+        security_research = await self._portfolio_security_research(synthesis_run)
+        synthesis = self._portfolio_synthesis(synthesis_run, synthesis_output)
+        decision = await self._session.scalar(
+            select(StrategyDecisionRecord).where(
+                StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+                StrategyDecisionRecord.decision_origin == "agent_research",
+                StrategyDecisionRecord.created_at <= self._request_time,
+            )
+        )
+        proposal = await self._portfolio_proposal(decision, synthesis_run, synthesis_output)
+        active_target = await self._current_target_summary(cycle.account_id)
+        latest_event = await self._latest_cycle_event(cycle.id)
+        activation_event = await self._cycle_activation_event(cycle.id)
+        activation_facts = (
+            {}
+            if activation_event is None or not isinstance(activation_event.fact_ids, dict)
+            else activation_event.fact_ids
+        )
+        activated_target_id = _optional_uuid(activation_facts.get("target_version_id"))
+        cycle_target_row = None
+        if (
+            activation_event is not None
+            and activation_event.result_code != "TARGET_ACTIVATION_BLOCKED"
+        ):
+            identity_filter = None
+            if activated_target_id is not None:
+                identity_filter = PaperTargetVersionRecord.id == activated_target_id
+            elif decision is not None:
+                identity_filter = PaperTargetVersionRecord.strategy_decision_id == decision.id
+            if identity_filter is not None:
+                cycle_target_row = await self._session.scalar(
+                    select(PaperTargetVersionRecord).where(
+                        PaperTargetVersionRecord.account_id == cycle.account_id,
+                        identity_filter,
+                        PaperTargetVersionRecord.activated_at <= self._request_time,
+                        PaperTargetVersionRecord.created_at <= self._request_time,
+                    )
+                )
+        cycle_target = (
+            None
+            if cycle_target_row is None
+            else await self._target_summary(cycle_target_row, account_id=cycle.account_id)
+        )
+        batch = (
+            None
+            if decision is None
+            else await self._session.scalar(
+                select(PaperOrderBatchRecord).where(
+                    PaperOrderBatchRecord.account_id == cycle.account_id,
+                    PaperOrderBatchRecord.strategy_decision_id == decision.id,
+                    PaperOrderBatchRecord.created_at <= self._request_time,
+                )
+            )
+        )
+        plan_summary = None if batch is None else await self._plan_summary(batch.id)
+        blocking_plan = await self._occupying_plan_summary(cycle.account_id)
+        return AgentPaperCycleDetailResponse(
+            cycle=cycle_response,
+            orders=await self._orders_for_cycle(cycle_id),
+            candidate_batch=candidate_batch,
+            security_research=security_research,
+            synthesis=synthesis,
+            proposal=proposal,
+            active_target=active_target,
+            activation_result=self._activation_result(
+                event=activation_event,
+                decision=decision,
+                target=cycle_target,
+                batch=batch,
+            ),
+            blocker=self._cycle_blocker(
+                event=latest_event,
+                synthesis_output=synthesis_output,
+                decision=decision,
+            ),
+            blocking_plan=blocking_plan,
+            plan_summary=plan_summary,
+        )
+
+    async def _latest_cycle_event(self, cycle_id: UUID) -> AgentPaperCycleEventRecord:
+        event = await self._session.scalar(
+            select(AgentPaperCycleEventRecord)
+            .where(
+                AgentPaperCycleEventRecord.cycle_id == cycle_id,
+                AgentPaperCycleEventRecord.occurred_at <= self._request_time,
+                AgentPaperCycleEventRecord.created_at <= self._request_time,
+            )
+            .order_by(AgentPaperCycleEventRecord.sequence.desc())
+            .limit(1)
+        )
+        if event is None:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper cycle is incomplete.",
+                status_code=409,
+            )
+        return event
+
+    async def _cycle_activation_event(
+        self, cycle_id: UUID
+    ) -> AgentPaperCycleEventRecord | None:
+        events = tuple(
+            await self._session.scalars(
+                select(AgentPaperCycleEventRecord)
+                .where(
+                    AgentPaperCycleEventRecord.cycle_id == cycle_id,
+                    AgentPaperCycleEventRecord.result_code.in_(
+                        ("TARGET_ACTIVATION_BLOCKED", "PAPER_BATCH_EVALUATED", "NO_ORDER_REQUIRED")
+                    ),
+                    AgentPaperCycleEventRecord.occurred_at <= self._request_time,
+                    AgentPaperCycleEventRecord.created_at <= self._request_time,
+                )
+                .order_by(AgentPaperCycleEventRecord.sequence.desc())
+                .limit(10)
+            )
+        )
+        for event in events:
+            facts = event.fact_ids if isinstance(event.fact_ids, dict) else {}
+            if event.result_code == "TARGET_ACTIVATION_BLOCKED" or facts.get(
+                "target_version_id"
+            ) is not None:
+                return event
+        return None
+
+    async def _portfolio_security_research(
+        self, run: AgentPortfolioSynthesisRunRecord | None
+    ) -> tuple[AgentPaperSecurityResearchResponse, ...]:
+        if run is None:
+            return ()
+        from nexus.agents.portfolio_synthesis_contracts import PortfolioSynthesisInputV1
+
+        try:
+            frozen = PortfolioSynthesisInputV1.model_validate(run.frozen_input)
+        except ValueError as error:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "Portfolio research is incomplete.",
+                status_code=409,
+            ) from error
+        results = []
+        for source in frozen.security_outputs:
+            output = await self._session.get(AgentResearchOutputRecord, source.research_output_id)
+            research = (
+                None
+                if output is None
+                else await self._session.get(AgentResearchRunRecord, output.run_id)
+            )
+            if (
+                output is None
+                or research is None
+                or research.instrument_id != source.instrument_id
+                or output.status != "completed"
+                or output.content_hash != source.content_hash
+                or output.created_at > self._request_time
+            ):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "Portfolio research is incomplete.",
+                    status_code=409,
+                )
+            results.append(
+                AgentPaperSecurityResearchResponse(
+                    instrument_id=source.instrument_id,
+                    research_run_id=research.id,
+                    research_output_id=output.id,
+                    status="completed",
+                    content_hash=output.content_hash,
+                    intent_hash=source.intent_hash,
+                    stance=source.intent.stance,
+                    quality_status=source.intent.quality_status,
+                    as_of=output.created_at,
+                )
+            )
+        return tuple(results)
+
+    def _portfolio_synthesis(
+        self,
+        run: AgentPortfolioSynthesisRunRecord | None,
+        output: AgentPortfolioSynthesisOutputRecord | None,
+    ) -> AgentPaperSynthesisResponse | None:
+        if run is None or output is None:
+            return None
+        from nexus.agents.portfolio_synthesis_contracts import PortfolioSynthesisIntentV1
+
+        intent = None
+        if output.status == "completed":
+            try:
+                intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
+            except ValueError as error:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "Portfolio synthesis is incomplete.",
+                    status_code=409,
+                ) from error
+        choices = (
+            ()
+            if intent is None
+            else tuple(
+                AgentPaperSynthesisChoiceResponse(
+                    instrument_id=choice.instrument_id,
+                    action=choice.action,
+                    role=choice.role,
+                    rank=choice.rank,
+                    replaces_instrument_id=choice.replaces_instrument_id,
+                    depends_on_instrument_ids=choice.depends_on_instrument_ids,
+                    thesis=choice.thesis.text,
+                    counter_thesis=choice.counter_thesis.text,
+                    invalidation=choice.invalidation.text,
+                )
+                for choice in intent.choices
+            )
+        )
+        return AgentPaperSynthesisResponse(
+            synthesis_run_id=run.id,
+            synthesis_output_id=output.id,
+            candidate_batch_id=run.candidate_batch_id,
+            input_hash=run.input_hash,
+            content_hash=output.content_hash,
+            binding_hash=output.binding_hash,
+            status=cast(Any, output.status),
+            choices=choices,
+            cash_rationale=None if intent is None else intent.cash_rationale.text,
+            as_of=output.created_at,
+        )
+
+    async def _portfolio_proposal(
+        self,
+        decision: StrategyDecisionRecord | None,
+        run: AgentPortfolioSynthesisRunRecord | None,
+        output: AgentPortfolioSynthesisOutputRecord | None,
+    ) -> AgentPaperPortfolioProposalResponse | None:
+        if decision is None or decision.strategy_version != "agent_portfolio_proposal_v1":
+            return None
+        if run is None or output is None or decision.portfolio_synthesis_output_id != output.id:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "Portfolio proposal is incomplete.",
+                status_code=409,
+            )
+        from nexus.agents.portfolio_synthesis_contracts import (
+            PortfolioSynthesisInputV1,
+            PortfolioSynthesisIntentV1,
+        )
+
+        try:
+            frozen = PortfolioSynthesisInputV1.model_validate(run.frozen_input)
+            intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
+        except ValueError as error:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "Portfolio proposal is incomplete.",
+                status_code=409,
+            ) from error
+        choices = {choice.instrument_id: choice for choice in intent.choices}
+        rows = tuple(
+            await self._session.scalars(
+                select(StrategyDecisionTargetRecord)
+                .where(StrategyDecisionTargetRecord.strategy_decision_id == decision.id)
+                .order_by(StrategyDecisionTargetRecord.instrument_id)
+                .limit(51)
+            )
+        )
+        _require_bounded("portfolio_proposal_targets", rows, 50)
+        approval_id = None
+        if frozen.active_target_version_id is None:
+            approval_id = await self._session.scalar(
+                select(PaperInitialTargetApprovalRecord.id).where(
+                    PaperInitialTargetApprovalRecord.account_id == decision.account_id,
+                    PaperInitialTargetApprovalRecord.created_at <= self._request_time,
+                )
+            )
+        return AgentPaperPortfolioProposalResponse(
+            strategy_decision_id=decision.id,
+            synthesis_output_id=output.id,
+            decision_hash=decision.decision_hash,
+            policy_hash=decision.strategy_parameters_hash,
+            baseline_target_version_id=frozen.active_target_version_id,
+            initial_approval_id=approval_id,
+            cash_weight=decimal_to_string(decision.cash_weight),
+            targets=tuple(
+                AgentPaperProposalTargetResponse(
+                    instrument_id=row.instrument_id,
+                    target_weight=decimal_to_string(row.target_weight),
+                    exit=row.exit,
+                    role=(
+                        choices[row.instrument_id].role if row.instrument_id in choices else "none"
+                    ),
+                    reason_code=row.reason,
+                    rank=(
+                        choices[row.instrument_id].rank if row.instrument_id in choices else None
+                    ),
+                    replaces_instrument_id=(
+                        choices[row.instrument_id].replaces_instrument_id
+                        if row.instrument_id in choices
+                        else None
+                    ),
+                    depends_on_instrument_ids=(
+                        choices[row.instrument_id].depends_on_instrument_ids
+                        if row.instrument_id in choices
+                        else ()
+                    ),
+                )
+                for row in rows
+            ),
+            expires_at=frozen.expires_at,
+            as_of=decision.created_at,
+        )
+
+    async def _current_target_summary(self, account_id: UUID) -> PaperTargetSummaryResponse | None:
+        row = await self._session.scalar(
+            select(PaperTargetVersionRecord)
+            .where(
+                PaperTargetVersionRecord.account_id == account_id,
+                PaperTargetVersionRecord.activated_at <= self._request_time,
+                PaperTargetVersionRecord.created_at <= self._request_time,
+            )
+            .order_by(PaperTargetVersionRecord.version_seq.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        return await self._target_summary(row, account_id=account_id)
+
+    async def _target_summary(
+        self,
+        row: PaperTargetVersionRecord,
+        *,
+        account_id: UUID,
+    ) -> PaperTargetSummaryResponse:
+        if row.account_id != account_id:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The active target is incomplete.",
+                status_code=409,
+            )
+        decision = await self._session.get(StrategyDecisionRecord, row.strategy_decision_id)
+        if decision is None or decision.account_id != account_id:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The active target is incomplete.",
+                status_code=409,
+            )
+        target_rows = tuple(
+            await self._session.scalars(
+                select(StrategyDecisionTargetRecord)
+                .where(StrategyDecisionTargetRecord.strategy_decision_id == decision.id)
+                .order_by(StrategyDecisionTargetRecord.instrument_id)
+                .limit(51)
+            )
+        )
+        _require_bounded("active_target_allocations", target_rows, 50)
+        roles: dict[UUID, str] = {}
+        if decision.portfolio_synthesis_output_id is not None:
+            synthesis_output = await self._session.get(
+                AgentPortfolioSynthesisOutputRecord, decision.portfolio_synthesis_output_id
+            )
+            if synthesis_output is None:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The active target is incomplete.",
+                    status_code=409,
+                )
+            from nexus.agents.portfolio_synthesis_contracts import PortfolioSynthesisIntentV1
+
+            try:
+                intent = PortfolioSynthesisIntentV1.model_validate(synthesis_output.intent)
+            except ValueError as error:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The active target is incomplete.",
+                    status_code=409,
+                ) from error
+            roles = {choice.instrument_id: choice.role for choice in intent.choices}
+        return PaperTargetSummaryResponse(
+            target_version_id=row.id,
+            version_seq=row.version_seq,
+            strategy_decision_id=row.strategy_decision_id,
+            previous_target_version_id=row.previous_target_version_id,
+            target_content_hash=row.target_content_hash,
+            activation_hash=row.activation_hash,
+            cash_weight=decimal_to_string(decision.cash_weight),
+            targets=tuple(
+                PaperTargetAllocationResponse(
+                    instrument_id=target.instrument_id,
+                    target_weight=decimal_to_string(target.target_weight),
+                    exit=target.exit,
+                    role=cast(Any, roles.get(target.instrument_id)),
+                    reason_code=target.reason,
+                )
+                for target in target_rows
+            ),
+            as_of=row.activated_at,
+        )
+
+    async def _plan_summary(self, batch_id: UUID) -> PaperPlanSummaryResponse | None:
+        projection = await self.plan(batch_id)
+        if projection is None:
+            return None
+        return PaperPlanSummaryResponse(
+            batch_id=projection.batch_id,
+            target_version_id=(
+                None if projection.target is None else projection.target.target_version_id
+            ),
+            strategy_decision_id=projection.proposal.strategy_decision_id,
+            decision_hash=projection.proposal.decision_hash,
+            plan_created_at=projection.plan.plan_created_at,
+            reconciliation_as_of=projection.plan.reconciliation_as_of,
+            occupation_state=projection.plan.occupation_state,
+        )
+
+    async def _occupying_plan_summary(self, account_id: UUID) -> PaperPlanSummaryResponse | None:
+        batch_ids = tuple(
+            await self._session.scalars(
+                select(PaperOrderBatchRecord.id)
+                .where(
+                    PaperOrderBatchRecord.account_id == account_id,
+                    PaperOrderBatchRecord.target_version_id.is_not(None),
+                    PaperOrderBatchRecord.created_at <= self._request_time,
+                )
+                .order_by(
+                    PaperOrderBatchRecord.evaluated_at.desc(), PaperOrderBatchRecord.id.desc()
+                )
+                .limit(51)
+            )
+        )
+        _require_bounded("paper_management_plans", batch_ids, 50)
+        for batch_id in batch_ids:
+            summary = await self._plan_summary(batch_id)
+            if summary is not None and summary.occupation_state in {"occupied", "unknown"}:
+                return summary
+        return None
+
+    def _activation_result(
+        self,
+        *,
+        event: AgentPaperCycleEventRecord | None,
+        decision: StrategyDecisionRecord | None,
+        target: PaperTargetSummaryResponse | None,
+        batch: PaperOrderBatchRecord | None,
+    ) -> AgentPaperActivationResultResponse | None:
+        if event is None:
+            return None
+        facts = event.fact_ids if isinstance(event.fact_ids, dict) else {}
+        decision_id = _optional_uuid(facts.get("strategy_decision_id"))
+        target_id = _optional_uuid(facts.get("target_version_id"))
+        batch_id = _optional_uuid(facts.get("batch_id"))
+        if event.result_code == "TARGET_ACTIVATION_BLOCKED":
+            return AgentPaperActivationResultResponse(
+                result_code="TARGET_ACTIVATION_BLOCKED",
+                strategy_decision_id=decision_id,
+                target_version_id=None,
+                batch_id=None,
+                as_of=event.occurred_at,
+            )
+        if decision is None or target is None:
+            return None
+        if decision_id is not None and decision_id != decision.id:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper activation identity is incomplete.",
+                status_code=409,
+            )
+        if target_id is None or target_id != target.target_version_id:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper activation identity is incomplete.",
+                status_code=409,
+            )
+        if batch_id is not None and (batch is None or batch_id != batch.id):
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper activation identity is incomplete.",
+                status_code=409,
+            )
+        return AgentPaperActivationResultResponse(
+            result_code="PLAN_CREATED" if batch is not None else "NO_ORDER_REQUIRED",
+            strategy_decision_id=decision.id,
+            target_version_id=target.target_version_id,
+            batch_id=None if batch is None else batch.id,
+            as_of=event.occurred_at,
+        )
+
+    def _cycle_blocker(
+        self,
+        *,
+        event: AgentPaperCycleEventRecord,
+        synthesis_output: AgentPortfolioSynthesisOutputRecord | None,
+        decision: StrategyDecisionRecord | None,
+    ) -> AgentPaperCycleBlockerResponse | None:
+        code = event.result_code
+        facts = event.fact_ids if isinstance(event.fact_ids, dict) else {}
+        rejection = facts.get("proposal_rejection_code")
+        if code == "PORTFOLIO_PROPOSAL_UNAVAILABLE" and rejection in {
+            "EXIT_TURNOVER_CONFLICT",
+            "REDUCTION_TURNOVER_CONFLICT",
+            "PORTFOLIO_DEPENDENCY_CONFLICT",
+        }:
+            return AgentPaperCycleBlockerResponse(
+                code="PORTFOLIO_PROPOSAL_UNAVAILABLE",
+                source_stage="proposal",
+                category="proposal_rejected",
+                proposal_rejection_code=cast(Any, rejection),
+                as_of=event.occurred_at,
+            )
+        if code == "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED":
+            return AgentPaperCycleBlockerResponse(
+                code="AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+                source_stage="provider",
+                category="provider_capacity",
+                proposal_rejection_code=None,
+                as_of=event.occurred_at,
+            )
+        if code == "TARGET_ACTIVATION_BLOCKED":
+            return AgentPaperCycleBlockerResponse(
+                code="TARGET_ACTIVATION_BLOCKED",
+                source_stage="activation",
+                category="resource_occupied",
+                proposal_rejection_code=None,
+                as_of=event.occurred_at,
+            )
+        if (
+            synthesis_output is not None
+            and synthesis_output.status == "completed"
+            and decision is None
+        ):
+            return AgentPaperCycleBlockerResponse(
+                code="POLICY_UNCONFIRMED",
+                source_stage="policy",
+                category="policy_unconfirmed",
+                proposal_rejection_code=None,
+                as_of=synthesis_output.created_at,
+            )
+        return None
 
     async def agent_cycles(
         self,
@@ -1402,11 +1989,19 @@ class PaperReadService:
                 status_code=409,
             )
         decision_market = None
-        if cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
+        if (
+            cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+            and cycle.candidate_batch_id is None
+        ):
             terminal_without_candidate = (
                 not manifest
                 and projected_status == "unavailable"
-                and projected_result_code in {"RISK_INPUT_REQUIRED", "OPEN_ORDER_EXISTS"}
+                and projected_result_code
+                in {
+                    "RISK_INPUT_REQUIRED",
+                    "OPEN_ORDER_EXISTS",
+                    "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+                }
             )
             if len(manifest) != 1 and not terminal_without_candidate:
                 raise NexusError(
@@ -1486,6 +2081,7 @@ class PaperReadService:
 
     async def portfolio(self) -> PaperPortfolioResponse:
         account, portfolio = await self.account()
+        management_summary = await self._management_summary(account.id)
         snapshot = await self._session.scalar(
             select(PaperPerformanceSnapshotRecord)
             .where(
@@ -1507,6 +2103,7 @@ class PaperReadService:
                 comparison=None,
                 positions=(),
                 attributions=(),
+                management_summary=management_summary,
             )
 
         projection = await load_paper_projection(
@@ -1640,6 +2237,43 @@ class PaperReadService:
             ),
             positions=positions,
             attributions=attributions,
+            management_summary=management_summary,
+        )
+
+    async def _management_summary(self, account_id: UUID) -> PaperManagementSummaryResponse:
+        current_target = await self._current_target_summary(account_id)
+        occupying_plan = await self._occupying_plan_summary(account_id)
+        decision = await self._session.scalar(
+            select(StrategyDecisionRecord)
+            .where(
+                StrategyDecisionRecord.account_id == account_id,
+                StrategyDecisionRecord.strategy_version == "agent_portfolio_proposal_v1",
+                StrategyDecisionRecord.created_at <= self._request_time,
+            )
+            .order_by(StrategyDecisionRecord.decision_time.desc(), StrategyDecisionRecord.id.desc())
+            .limit(1)
+        )
+        proposal = None
+        if decision is not None:
+            run = await self._session.scalar(
+                select(AgentPortfolioSynthesisRunRecord).where(
+                    AgentPortfolioSynthesisRunRecord.cycle_id == decision.agent_paper_cycle_id
+                )
+            )
+            output = (
+                None
+                if decision.portfolio_synthesis_output_id is None
+                else await self._session.get(
+                    AgentPortfolioSynthesisOutputRecord,
+                    decision.portfolio_synthesis_output_id,
+                )
+            )
+            proposal = await self._portfolio_proposal(decision, run, output)
+        return PaperManagementSummaryResponse(
+            current_target=current_target,
+            occupying_plan=occupying_plan,
+            latest_proposal=proposal,
+            read_as_of=self._request_time,
         )
 
     async def _paper_comparison(
@@ -2310,10 +2944,7 @@ class PaperReadService:
                 )
             except ValueError:
                 legacy_authority = None
-            if (
-                legacy_authority is None
-                or legacy_authority.decision_id != decision.id
-            ):
+            if legacy_authority is None or legacy_authority.decision_id != decision.id:
                 raise NexusError(
                     ErrorCode.DATA_PARTIAL,
                     "The legacy paper plan decision is incomplete.",
@@ -2747,6 +3378,9 @@ class PaperReadService:
                     StrategyRegistryEventRecord.to_definition_id,
                     StrategyRegistryEventRecord.champion_generation,
                     StrategyRegistryEventRecord.event_type,
+                    StrategyDecisionRecord.decision_origin,
+                    StrategyDecisionRecord.agent_paper_cycle_id,
+                    PaperOrderBatchRecord.target_version_id,
                 )
                 .join(
                     PaperOrderBatchRecord,
@@ -2756,25 +3390,35 @@ class PaperReadService:
                     RiskPolicyRecord,
                     RiskPolicyRecord.id == PaperOrderBatchRecord.risk_policy_id,
                 )
-                .join(
+                .outerjoin(
                     StrategyDefinitionRecord,
                     StrategyDefinitionRecord.id == StrategyDecisionRecord.strategy_definition_id,
                 )
-                .join(
+                .outerjoin(
                     StrategyRegistryEventRecord,
                     StrategyRegistryEventRecord.id == StrategyDecisionRecord.registry_event_id,
                 )
                 .where(PaperOrderBatchRecord.id == order.batch_id)
             )
         ).one_or_none()
-        if (
-            authority is None
-            or not events
-            or authority[0] != authority[5]
-            or authority[2] != authority[6]
-            or authority[4] != authority[7]
-            or authority[8] not in {"GENESIS", "PROMOTE", "ROLLBACK"}
-        ):
+        registered_authority = authority is not None and (
+            authority[9] == "registered_strategy"
+            and authority[0] == authority[5]
+            and authority[2] == authority[6]
+            and authority[4] == authority[7]
+            and authority[8] in {"GENESIS", "PROMOTE", "ROLLBACK"}
+        )
+        agent_authority = authority is not None and (
+            authority[9] == "agent_research"
+            and authority[10] is not None
+            and (
+                authority[0] == "agent_paper_decision_v1"
+                and authority[11] is None
+                or authority[0] == "agent_portfolio_proposal_v1"
+                and authority[11] is not None
+            )
+        )
+        if authority is None or not events or not (registered_authority or agent_authority):
             raise NexusError(
                 ErrorCode.DATA_PARTIAL,
                 "The internal paper order projection is incomplete.",
@@ -3078,8 +3722,19 @@ def _reservation_chain_is_valid(
                 "occurred_at": _paper_time(event.occurred_at),
                 "reason_code": reason_code,
             }
-        if event.payload_hash != canonical_paper_fact_hash(
-            "paper_reservation_event", payload
-        ):
+        if event.payload_hash != canonical_paper_fact_hash("paper_reservation_event", payload):
             return False
     return True
+
+
+def _optional_uuid(value: object) -> UUID | None:
+    if value is None:
+        return None
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "The Agent paper fact identity is incomplete.",
+            status_code=409,
+        ) from error
