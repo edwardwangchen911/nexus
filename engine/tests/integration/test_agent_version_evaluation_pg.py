@@ -1248,6 +1248,8 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
         assert result.challenger_run_id == challenger_run_id
         assert result.replayed is False
         assert [call["version_lane"] for call in calls] == ["incumbent", "challenger"]
+        assert all(call["requested_instrument_ids"] == (INSTRUMENT_ID,) for call in calls)
+        assert all(call.get("candidate_batch_id") is None for call in calls)
         assert calls[0]["version_source_run_id"] == INCUMBENT_RUN_ID
         assert calls[0].get("version_prompt_id") is None
         assert calls[1].get("version_source_run_id") is None

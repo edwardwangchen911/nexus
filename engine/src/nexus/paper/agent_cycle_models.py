@@ -84,6 +84,8 @@ class AgentPaperTriggerReservation(BaseModel):
     claim_id: UUID
     decision_session: date
     decision_slot_at: datetime
+    candidate_batch_id: UUID | None = None
+    candidate_batch_hash: str | None = None
     replay: AgentPaperCycleResult | None = None
 
 

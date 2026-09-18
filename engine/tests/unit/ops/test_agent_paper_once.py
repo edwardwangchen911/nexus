@@ -38,6 +38,23 @@ from nexus.settings import EngineSettings
 from pydantic import SecretStr, ValidationError
 
 
+def test_trigger_requires_explicit_batch_before_configuration_or_provider() -> None:
+    with pytest.raises(ValueError, match="CANDIDATE_BATCH_REQUIRED"):
+        AgentPaperTriggerRequest(
+            action="trigger", account_id=UUID(int=1), idempotency_key="missing"
+        )
+
+
+def test_trigger_accepts_explicit_candidate_batch() -> None:
+    request = AgentPaperTriggerRequest(
+        action="trigger",
+        account_id=UUID(int=1),
+        candidate_batch_id=UUID(int=20),
+        idempotency_key="explicit",
+    )
+    assert request.candidate_batch_id == UUID(int=20)
+
+
 def test_request_requires_explicit_utc_time() -> None:
     with pytest.raises(ValueError, match="explicit UTC time is required"):
         AgentPaperRunRequest(
@@ -285,6 +302,8 @@ def test_trigger_command_exposes_persisted_calendar_failure_codes(
     exit_code = main(
         [
             "trigger",
+            "--candidate-batch-id",
+            str(UUID(int=20)),
             "--account-id",
             str(UUID(int=1)),
             "--idempotency-key",
@@ -428,6 +447,37 @@ def test_run_research_resolves_only_one_queued_cycle_bound_paper_job() -> None:
             cli.resolve_queued_cycle_research_job(events=events, jobs=jobs, output_run_ids=outputs)
     with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
         cli.resolve_queued_cycle_research_job(events=(), jobs=(), output_run_ids=())
+
+
+def test_run_research_selects_next_unstarted_job_after_confirmed_output() -> None:
+    first, second = UUID(int=10), UUID(int=11)
+    events = (
+        SimpleNamespace(
+            to_status="researching", fact_ids={"research_run_ids": [str(first), str(second)]}
+        ),
+    )
+    done = SimpleNamespace(
+        id=UUID(int=20),
+        job_type="agent.paper.research",
+        status="succeeded",
+        payload={"run_id": str(first)},
+    )
+    queued = SimpleNamespace(
+        id=UUID(int=21),
+        job_type="agent.paper.research",
+        status="queued",
+        payload={"run_id": str(second)},
+        attempt_count=0,
+        manual_retry_count=0,
+        max_attempts=1,
+        started_at=None,
+        finished_at=None,
+    )
+    assert cli.resolve_queued_cycle_research_job(
+        events=events, jobs=(queued, done), output_run_ids=(first,)
+    ) == UUID(int=21)
+    with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
+        cli.resolve_queued_cycle_research_job(events=events, jobs=(queued, done), output_run_ids=())
 
 
 def test_run_research_claims_only_resolved_job_and_exits(
@@ -589,6 +639,7 @@ def test_trigger_and_resume_requests_exclude_client_time_symbol_and_provider() -
     cycle_id = UUID(int=2)
 
     trigger = AgentPaperTriggerRequest(
+        candidate_batch_id=UUID(int=20),
         action="trigger",
         account_id=account_id,
         idempotency_key="trigger-1",
@@ -629,13 +680,17 @@ def test_trigger_and_resume_requests_exclude_client_time_symbol_and_provider() -
             )
 
 
+@pytest.mark.parametrize("two_candidates", [False, True])
 def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    two_candidates: bool,
 ) -> None:
     account_id = UUID(int=1)
     portfolio_id = UUID(int=2)
     universe_id = UUID(int=3)
     instrument_id = UUID(int=4)
+    bindings = {"AAPL": instrument_id, **({"MSFT": UUID(int=14)} if two_candidates else {})}
     artifact_id = UUID(int=5)
     quote_id = UUID(int=6)
     cycle_id = UUID(int=7)
@@ -666,6 +721,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     )
     reservation = AgentPaperTriggerReservation(
         claim_id=UUID(int=9),
+        candidate_batch_id=UUID(int=20),
+        candidate_batch_hash="a" * 64,
         decision_session=authority.decision_session,
         decision_slot_at=initial,
     )
@@ -702,22 +759,29 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     async def scope(*_args, **_kwargs):
         events.append("scope")
         return RiskQueryScope(
-            instrument_id,
+            bindings[_kwargs["symbol"]],
             universe_id,
             (object(), object(), object()),  # type: ignore[arg-type]
         )
 
     async def risk(**_kwargs):
+        assert {item.symbol: item.instrument_id for item in _kwargs["candidates"]} == bindings
         events.append("risk-action-delisting-halt")
-        return tuple(
-            RiskSourceProof(kind, False, "a" * 64, initial)
-            for kind in ("corporate_action", "delisting", "suspension")
-        )
+        return {
+            identity: tuple(
+                RiskSourceProof(kind, False, "a" * 64, initial)
+                for kind in ("corporate_action", "delisting", "suspension")
+            )
+            for identity in bindings.values()
+        }
 
     async def level_one(*_args, **_kwargs):
+        assert _kwargs["bindings"] == bindings
         assert _kwargs["process_environment"] == {"NEXUS_SCHWAB_APP_KEY": "registered-key"}
         events.append("level-one")
-        return SchwabMarketStreamImportResult("b" * 64, 1, 1, artifact_id, {"AAPL": quote_id}, {})
+        return SchwabMarketStreamImportResult(
+            "b" * 64, 1, 1, artifact_id, {symbol: quote_id for symbol in bindings}, {}
+        )
 
     async def persist(*_args, **_kwargs):
         events.append("persist-risk")
@@ -725,6 +789,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
 
     async def start(*_args, **kwargs):
         assert kwargs["decision_slot_at"] == initial
+        assert kwargs["requested_instrument_ids"] == tuple(bindings.values())
+        assert kwargs["candidate_batch_id"] == UUID(int=20)
         events.append("cycle-job")
         return AgentPaperCycleResult(
             cycle_id=cycle_id,
@@ -733,6 +799,31 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             replayed=False,
         )
 
+    async def batch_scope(*_args, **kwargs):
+        assert kwargs["batch_id"] == UUID(int=20)
+        return (
+            CandidateBatchResult(
+                batch_id=UUID(int=20),
+                account_id=account_id,
+                universe_snapshot_id=universe_id,
+                instrument_ids=tuple(bindings.values()),
+                source="explicit_research_scope",
+                batch_hash="a" * 64,
+                created_at=initial,
+            ),
+            tuple(
+                CandidateInstrumentIdentity(
+                    instrument_id=identity,
+                    symbol=symbol,
+                    asset_type="common_stock",
+                    exchange="XNAS",
+                    currency="USD",
+                )
+                for symbol, identity in bindings.items()
+            ),
+        )
+
+    monkeypatch.setattr(cli, "validate_agent_paper_candidate_batch", batch_scope)
     monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", root)
     monkeypatch.setattr(
         cli,
@@ -745,8 +836,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         load_service_calendar,
     )
     monkeypatch.setattr(cli, "inspect_query_authority_scope", scope)
-    monkeypatch.setattr(cli, "collect_source_proofs", risk)
-    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", level_one)
+    monkeypatch.setattr(cli, "collect_source_proofs_batch", risk)
+    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_batch", level_one)
     monkeypatch.setattr(cli, "persist_query_authorities", persist)
     monkeypatch.setattr(
         cli,
@@ -766,7 +857,10 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             object(),
             settings,
             AgentPaperTriggerRequest(
-                action="trigger", account_id=account_id, idempotency_key="trigger-1"
+                candidate_batch_id=UUID(int=20),
+                action="trigger",
+                account_id=account_id,
+                idempotency_key="trigger-1",
             ),
             reservation=reservation,
             repo_root=tmp_path,
@@ -781,13 +875,13 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         "select-calendar",
         "service-calendar",
         "root",
-        "scope",
+        *(["scope"] * len(bindings)),
         "risk-action-delisting-halt",
         "level-one",
         "clock-2",
         "service-calendar",
-        "validate-l1",
-        "persist-risk",
+        *(["validate-l1"] * len(bindings)),
+        *(["persist-risk"] * len(bindings)),
         "root",
         "cycle-job",
     ]
@@ -795,7 +889,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     async def rejected_level_one(*_args, **_kwargs):
         raise cli.ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY")
 
-    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", rejected_level_one)
+    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_batch", rejected_level_one)
 
     async def forbidden_calendar_reselection(*_args, **_kwargs):
         raise AssertionError("service-bound calendar authority must not be reselected")
@@ -806,7 +900,10 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         forbidden_calendar_reselection,
     )
     failed_request = AgentPaperTriggerRequest(
-        action="trigger", account_id=account_id, idempotency_key="trigger-failure"
+        candidate_batch_id=UUID(int=20),
+        action="trigger",
+        account_id=account_id,
+        idempotency_key="trigger-failure",
     )
     with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
         asyncio.run(
@@ -849,9 +946,10 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             raise _error
 
         monkeypatch.setattr(
-            cli, "capture_and_import_schwab_level_one_once", rejected_before_archive
+            cli, "capture_and_import_schwab_level_one_batch", rejected_before_archive
         )
         request = AgentPaperTriggerRequest(
+            candidate_batch_id=UUID(int=20),
             action="trigger",
             account_id=account_id,
             idempotency_key=f"trigger-provider-failure-{index}",
@@ -914,8 +1012,8 @@ def test_trigger_rejects_after_bound_half_day_close_before_provider_calls(
 
     monkeypatch.setattr(cli, "load_agent_paper_service_calendar_authority", load_calendar)
     monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", forbidden)
-    monkeypatch.setattr(cli, "collect_source_proofs", forbidden)
-    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_once", forbidden)
+    monkeypatch.setattr(cli, "collect_source_proofs_batch", forbidden)
+    monkeypatch.setattr(cli, "capture_and_import_schwab_level_one_batch", forbidden)
 
     with pytest.raises(ValueError, match="AGENT_PAPER_OUTSIDE_WINDOW"):
         asyncio.run(
@@ -928,6 +1026,7 @@ def test_trigger_rejects_after_bound_half_day_close_before_provider_calls(
                     alpaca_secret=SecretStr("secret"),
                 ),
                 AgentPaperTriggerRequest(
+                    candidate_batch_id=UUID(int=20),
                     action="trigger",
                     account_id=UUID(int=1),
                     idempotency_key="half-day-close",
@@ -1013,7 +1112,10 @@ def test_trigger_replay_returns_before_any_provider_call(
         cli.trigger_once(
             settings,
             AgentPaperTriggerRequest(
-                action="trigger", account_id=UUID(int=1), idempotency_key="trigger-replay"
+                candidate_batch_id=UUID(int=20),
+                action="trigger",
+                account_id=UUID(int=1),
+                idempotency_key="trigger-replay",
             ),
             repo_root=Path("/unused"),
         )
@@ -1035,6 +1137,7 @@ def test_trigger_quote_distinguishes_incomplete_from_stale() -> None:
     )
     quote = SimpleNamespace(
         id=quote_id,
+        instrument_id=UUID(int=4),
         data_artifact_id=artifact_id,
         source="schwab",
         feed="l1",
@@ -1055,6 +1158,8 @@ def test_trigger_quote_distinguishes_incomplete_from_stale() -> None:
             artifact,
             imported,
             decision_time=received,
+            symbol="AAPL",
+            instrument_id=UUID(int=4),
         )
     with pytest.raises(ValueError, match="SCHWAB_L1_FRESHNESS_UNPROVEN"):
         cli._validate_trigger_quote(
@@ -1062,6 +1167,8 @@ def test_trigger_quote_distinguishes_incomplete_from_stale() -> None:
             artifact,
             imported,
             decision_time=received.replace(minute=2),
+            symbol="AAPL",
+            instrument_id=UUID(int=4),
         )
 
 

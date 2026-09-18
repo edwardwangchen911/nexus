@@ -74,8 +74,13 @@ from nexus.paper.agent_version_runner import (
     advance_agent_version_slot,
     resume_agent_version_slot,
 )
+from nexus.paper.candidate_batch import (
+    CandidateInstrumentIdentity,
+    validate_agent_paper_candidate_batch,
+)
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
+from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import (
     AGENT_PAPER_LOOP_PROCESS_VERSION,
@@ -244,6 +249,9 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
         "CODEX_CHATGPT_LOGIN_REQUIRED",
+        "CANDIDATE_BATCH_REQUIRED",
+        "CANDIDATE_BATCH_INVALID",
+        "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
     }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
@@ -495,6 +503,10 @@ def agent_paper_service_startup_preflight(
 ) -> dict[str, object]:
     """Validate only static prerequisites needed to wait and inspect persistence."""
     blocking_codes: set[str] = set()
+    try:
+        _candidate_batch_setting(environment)
+    except ValueError as error:
+        blocking_codes.add(str(error))
     if environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false").strip().lower() in {
         "",
         "0",
@@ -559,6 +571,10 @@ def agent_paper_service_preflight(
 ) -> dict[str, object]:
     """Validate local service prerequisites without network or persistence access."""
     blocking_codes: set[str] = set()
+    try:
+        _candidate_batch_setting(environment)
+    except ValueError as error:
+        blocking_codes.add(str(error))
     optional_codes: list[str] = []
     requested = environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false")
     requested_normalized = requested.strip().lower()
@@ -743,6 +759,7 @@ async def _inspect_prior_daily_scope(
     account_id: UUID,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> PriorDailyScope:
     require_utc(now)
     if not settings.database_url:
@@ -780,11 +797,13 @@ async def _inspect_prior_daily_scope(
             scope = await inspect_query_authority_scope(
                 session,
                 decision_session=authority.decision_session,
-                symbol="AAPL",
+                symbol=candidate.symbol,
                 as_of=database_now,
                 universe_snapshot_id=authority.universe_snapshot_id,
                 source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
             )
+            if scope.instrument_id != candidate.instrument_id:
+                raise ValueError("CANDIDATE_BATCH_INVALID")
             prior_session = await session.scalar(
                 select(ExchangeCalendarSessionRecord.session)
                 .where(
@@ -842,6 +861,7 @@ async def prepare_prior_daily_once(
     repo_root: Path,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Create at most one exact prior-session daily authority before a cycle."""
     scope = await _inspect_prior_daily_scope(
@@ -849,12 +869,13 @@ async def prepare_prior_daily_once(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if scope.authority_ready:
         return "ready"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "daily"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output_dir = parent / scope.prior_session.isoformat()
+    output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
         output_dir.mkdir(mode=0o700)
     except FileExistsError:
@@ -869,7 +890,7 @@ async def prepare_prior_daily_once(
         )
         collected = await collect_prices(
             request,
-            symbol="AAPL",
+            symbol=candidate.symbol,
             calendar=calendar,
             resolved_at=now,
             key_id=settings.alpaca_key,
@@ -895,6 +916,7 @@ async def prepare_prior_daily_once(
         account_id=account_id,
         now=datetime.now(UTC),
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if (
         not verified.authority_ready
@@ -911,6 +933,7 @@ async def _inspect_macro_scope(
     account_id: UUID,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> MacroScope:
     require_utc(now)
     prior = await _inspect_prior_daily_scope(
@@ -918,6 +941,7 @@ async def _inspect_macro_scope(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -1006,6 +1030,7 @@ async def prepare_macro_once(
     repo_root: Path,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Best-effort daily macro preparation; unavailable macro does not block a cycle."""
     scope = await _inspect_macro_scope(
@@ -1013,6 +1038,7 @@ async def prepare_macro_once(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if scope.ready_series == _PAPER_MACRO_SERIES:
         if scope.snapshot_ready:
@@ -1028,6 +1054,7 @@ async def prepare_macro_once(
             account_id=account_id,
             now=datetime.now(UTC),
             expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
         )
         if (
             verified.instrument_id != scope.instrument_id
@@ -1082,6 +1109,7 @@ async def prepare_macro_once(
         account_id=account_id,
         now=datetime.now(UTC),
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if (
         verified.instrument_id != scope.instrument_id
@@ -1099,6 +1127,7 @@ async def _inspect_current_trends_scope(
     account_id: UUID,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> CurrentTrendsScope:
     require_utc(now)
     prior = await _inspect_prior_daily_scope(
@@ -1106,6 +1135,7 @@ async def _inspect_current_trends_scope(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -1228,6 +1258,7 @@ async def prepare_current_trends_once(
     repo_root: Path,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Create at most one current-trends evidence record for the prior session."""
     scope = await _inspect_current_trends_scope(
@@ -1235,6 +1266,7 @@ async def prepare_current_trends_once(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if scope.snapshot_ready:
         return "ready"
@@ -1249,6 +1281,7 @@ async def prepare_current_trends_once(
             account_id=account_id,
             now=datetime.now(UTC),
             expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
         )
         if (
             not verified.evidence_ready
@@ -1260,7 +1293,7 @@ async def prepare_current_trends_once(
         return "prepared"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output_dir = parent / scope.prior_session.isoformat()
+    output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
         output_dir.mkdir(mode=0o700)
     except FileExistsError:
@@ -1277,7 +1310,7 @@ async def prepare_current_trends_once(
         return "unavailable"
     collected = await collect_prices(
         request,
-        symbol="AAPL",
+        symbol=candidate.symbol,
         calendar=calendar,
         resolved_at=now,
         key_id=settings.alpaca_key,
@@ -1307,6 +1340,7 @@ async def prepare_current_trends_once(
         account_id=account_id,
         now=datetime.now(UTC),
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if (
         not verified.evidence_ready
@@ -1321,27 +1355,48 @@ async def prepare_current_trends_once(
 def resolve_cycle_research_job(
     *, events: Sequence[object], jobs: Sequence[object]
 ) -> tuple[UUID, str] | None:
-    """Resolve exactly one Job whose persisted run ID belongs to the cycle."""
+    """Select one next Job only after accounting for the complete frozen run set."""
     run_ids: list[str] = []
     for event in events:
         fact_ids = getattr(event, "fact_ids", None)
         raw = fact_ids.get("research_run_ids") if isinstance(fact_ids, dict) else None
         if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
             run_ids.extend(raw)
-    if len(run_ids) != 1 or len(jobs) != 1:
+    if not 1 <= len(run_ids) <= 5 or len(set(run_ids)) != len(run_ids) or len(jobs) != len(run_ids):
         return None
-    job = jobs[0]
-    payload = getattr(job, "payload", None)
-    job_id = getattr(job, "id", None)
-    status = getattr(job, "status", None)
-    if (
-        not isinstance(payload, dict)
-        or payload.get("run_id") != run_ids[0]
-        or not isinstance(job_id, UUID)
-        or not isinstance(status, str)
-    ):
+    matched: dict[str, tuple[UUID, str]] = {}
+    for job in jobs:
+        payload = getattr(job, "payload", None)
+        job_id, status = getattr(job, "id", None), getattr(job, "status", None)
+        run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        if (
+            run_id not in run_ids
+            or run_id in matched
+            or not isinstance(job_id, UUID)
+            or not isinstance(status, str)
+        ):
+            return None
+        matched[run_id] = (job_id, status)
+    if set(matched) != set(run_ids):
         return None
-    return job_id, status
+    ordered = [matched[run_id] for run_id in run_ids]
+    # Unknown/running work blocks dispatch; never advance past a still-running job.
+    for job in ordered:
+        if job[1] not in _TERMINAL_JOB_STATUSES and job[1] != "queued":
+            return job
+    for job in ordered:
+        if job[1] in _TERMINAL_JOB_STATUSES and job[1] != "succeeded":
+            return job
+    return next((job for job in ordered if job[1] == "queued"), ordered[0])
+
+
+def _portfolio_slot(window_start: datetime) -> datetime:
+    zone = ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone)
+    return datetime.combine(
+        window_start.astimezone(zone).date(),
+        PORTFOLIO_ALLOCATION_V1.decision_local_time,
+        tzinfo=zone,
+    ).astimezone(UTC)
 
 
 def snapshot_from_cycle_view(
@@ -1433,10 +1488,7 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
         if snapshot.cycle_status == "evaluation_waiting":
             return AgentPaperLoopAction.WAIT_FOR_EVALUATION
         if snapshot.cycle_status == "evaluation_performance_due":
-            if (
-                snapshot.performance_due_at is None
-                or snapshot.action_account_id is None
-            ):
+            if snapshot.performance_due_at is None or snapshot.action_account_id is None:
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
             return AgentPaperLoopAction.PUBLISH_EVALUATION_PERFORMANCE
         if snapshot.cycle_status == "evaluation_complete":
@@ -1512,9 +1564,12 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.performance_due_at is not None:
         return AgentPaperLoopAction.PUBLISH_PERFORMANCE
 
-    if snapshot.now < snapshot.decision_window_start_at:
+    decision_slot = _portfolio_slot(snapshot.decision_window_start_at)
+    if snapshot.now < decision_slot:
         return AgentPaperLoopAction.WAIT_FOR_SESSION
     if snapshot.now >= snapshot.decision_window_end_at:
+        return AgentPaperLoopAction.WAIT_FOR_SESSION
+    if snapshot.now >= decision_slot + timedelta(minutes=5):
         return AgentPaperLoopAction.WAIT_FOR_SESSION
 
     current_slot = floor_decision_slot(snapshot.now)
@@ -1665,10 +1720,10 @@ async def run_foreground_loop(
         if action == AgentPaperLoopAction.WAIT_FOR_SESSION:
             assert snapshot.decision_window_start_at is not None
             assert snapshot.next_decision_window_start_at is not None
-            if snapshot.now < snapshot.decision_window_start_at:
-                wait_until = snapshot.decision_window_start_at
+            if snapshot.now < _portfolio_slot(snapshot.decision_window_start_at):
+                wait_until = _portfolio_slot(snapshot.decision_window_start_at)
             else:
-                wait_until = snapshot.next_decision_window_start_at
+                wait_until = _portfolio_slot(snapshot.next_decision_window_start_at)
             deadline = monotonic() + (wait_until - snapshot.now).total_seconds()
             while (remaining := deadline - monotonic()) > 0:
                 duration = min(remaining, interval_seconds)
@@ -1848,8 +1903,7 @@ async def confirm_agent_paper_shutdown(
                         return False
                     persisted = await session.scalar(
                         select(PaperPerformanceSnapshotRecord.id).where(
-                            PaperPerformanceSnapshotRecord.account_id
-                            == performance_account_id,
+                            PaperPerformanceSnapshotRecord.account_id == performance_account_id,
                             PaperPerformanceSnapshotRecord.as_of
                             == before_snapshot.performance_due_at,
                         )
@@ -2065,6 +2119,51 @@ async def run_local_agent_paper_loop(
                 event_loop.remove_signal_handler(installed_signal)
 
 
+def _candidate_batch_setting(environment: Mapping[str, str]) -> UUID:
+    raw = environment.get("NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID", "").strip()
+    if not raw:
+        raise ValueError("CANDIDATE_BATCH_REQUIRED")
+    try:
+        return UUID(raw)
+    except ValueError:
+        raise ValueError("CANDIDATE_BATCH_INVALID") from None
+
+
+async def _load_loop_candidates(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    batch_id: UUID,
+    expected_calendar_authority_id: UUID,
+) -> tuple[CandidateInstrumentIdentity, ...]:
+    if not settings.database_url:
+        raise ValueError("AGENT_PAPER_DATABASE_UNCONFIGURED")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(now, datetime):
+                raise ValueError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            batch, identities = await validate_agent_paper_candidate_batch(
+                session,
+                batch_id=batch_id,
+                account_id=account_id,
+                as_of=now,
+            )
+            authority = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=account_id,
+                now=now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+            )
+            if batch.universe_snapshot_id != authority.universe_snapshot_id:
+                raise ValueError("CANDIDATE_BATCH_INVALID")
+            return identities
+    finally:
+        await engine.dispose()
+
+
 async def execute_agent_paper_loop_action(
     settings: EngineSettings,
     *,
@@ -2187,49 +2286,63 @@ async def execute_agent_paper_loop_action(
         macro_settings = (
             _FileDailySettings if env_file is not None else DailyOnceSettings
         ).model_validate(environment)
-        prior_daily = await prepare_prior_daily_once(
+        batch_id = _candidate_batch_setting(environment)
+        candidates = await _load_loop_candidates(
             trigger_settings,
             account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
+            batch_id=batch_id,
             expected_calendar_authority_id=expected_calendar_authority_id,
         )
-        if prior_daily == "prepared":
-            return None
-        if prior_daily == "unavailable":
-            return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
-        if prior_daily != "ready":
-            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        macro = await prepare_macro_once(
-            macro_settings,
-            fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
-            account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
-            expected_calendar_authority_id=expected_calendar_authority_id,
-        )
-        if macro == "prepared":
-            return None
-        if macro not in {"ready", "unavailable"}:
-            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        current_trends = await prepare_current_trends_once(
-            trigger_settings,
-            account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
-            expected_calendar_authority_id=expected_calendar_authority_id,
-        )
-        if current_trends == "prepared":
-            return None
-        if current_trends == "unavailable":
-            return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
-        if current_trends != "ready":
-            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            prior_daily = await prepare_prior_daily_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            )
+            if prior_daily == "prepared":
+                return None
+            if prior_daily == "unavailable":
+                return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+            if prior_daily != "ready":
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            macro = await prepare_macro_once(
+                macro_settings,
+                fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            )
+            if macro == "prepared":
+                return None
+            if macro not in {"ready", "unavailable"}:
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            current_trends = await prepare_current_trends_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            )
+            if current_trends == "prepared":
+                return None
+            if current_trends == "unavailable":
+                return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+            if current_trends != "ready":
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         await trigger_once(
             trigger_settings,
             AgentPaperTriggerRequest(
                 action="trigger",
                 account_id=account_id,
+                candidate_batch_id=batch_id,
                 idempotency_key=(
                     f"agent-paper-loop:{floor_decision_slot(snapshot.now).isoformat()}"
                 ),
@@ -2289,7 +2402,7 @@ async def execute_agent_paper_loop_action(
     if snapshot.cycle_id is None:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     if action == AgentPaperLoopAction.RESUME:
-        await resume_once(
+        resumed = await resume_once(
             settings,
             AgentPaperResumeRequest(
                 action="resume",
@@ -2297,6 +2410,8 @@ async def execute_agent_paper_loop_action(
                 idempotency_key=f"agent-paper-loop-resume:{snapshot.cycle_id}",
             ),
         )
+        if resumed is not None and resumed.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE":
+            raise ValueError("PORTFOLIO_SYNTHESIS_UNAVAILABLE")
         return None
     if action == AgentPaperLoopAction.COLLECT_WINDOW:
         environment = (

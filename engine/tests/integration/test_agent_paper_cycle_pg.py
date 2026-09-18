@@ -41,10 +41,11 @@ from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.ops.agent_paper_loop import inspect_agent_paper_loop
 from nexus.paper.agent_cycle import (
-    advance_agent_paper_cycle,
+    advance_agent_paper_cycle as _advance_agent_paper_cycle,
+)
+from nexus.paper.agent_cycle import (
     reserve_schwab_agent_paper_trigger,
     resume_schwab_agent_paper_cycle,
-    start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import (
     load_agent_paper_service_calendar_authority,
@@ -130,6 +131,70 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 ENGINE_ROOT = Path(__file__).parents[2]
+
+
+async def _seed_legacy_prepared_cycle(session, *, authority, decision_slot_at):
+    """Historical fixture only: reproduce the pre-batch persisted cycle schema."""
+    from nexus.paper import agent_cycle
+    from nexus.paper.agent_decision import AGENT_PAPER_SIZING_POLICY_HASH, AGENT_PAPER_SIZING_V1
+
+    same_session = authority.execution_session == authority.decision_session
+    manifest = await prepare_candidates(
+        session, authority=authority, requested_instrument_ids=(INSTRUMENTS[0][0],)
+    )
+    assert len(manifest) == 1
+    cycle = AgentPaperCycleRecord(
+        id=uuid4(),
+        account_id=authority.account_id,
+        portfolio_id=authority.portfolio_id,
+        decision_session=authority.decision_session,
+        decision_time=authority.decision_time,
+        decision_slot_at=decision_slot_at,
+        execution_session=authority.execution_session,
+        universe_snapshot_id=authority.universe_snapshot_id,
+        quality_report_id=authority.quality_report_id,
+        decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        if same_session
+        else PAPER_DECISION_SOURCE_POLICY_ID,
+        execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        if same_session
+        else PAPER_EXECUTION_SOURCE_POLICY_ID,
+        candidate_manifest=[row.model_dump(mode="json") for row in manifest],
+        candidate_hash=candidate_manifest_hash(manifest),
+        candidate_batch_id=None,
+        sizing_policy_version=AGENT_PAPER_SIZING_V1.version,
+        sizing_policy_hash=AGENT_PAPER_SIZING_POLICY_HASH,
+        execution_locked=True,
+    )
+    session.add(cycle)
+    await session.flush()
+    await agent_cycle._append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", {})
+    if same_session:
+        await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+    return cycle
+
+
+async def _advance_legacy_cycle_fixture(session, **kwargs):
+    """Seed old facts, then exercise the real public legacy resume path."""
+    from nexus.paper.agent_cycle_authority import load_cycle_authority
+
+    cycle = await session.scalar(
+        select(AgentPaperCycleRecord).where(
+            AgentPaperCycleRecord.account_id == kwargs["account_id"],
+            AgentPaperCycleRecord.decision_slot_at == floor_decision_slot(kwargs["decision_time"]),
+        )
+    )
+    if cycle is None:
+        authority = await load_cycle_authority(
+            session, account_id=kwargs["account_id"], decision_time=kwargs["decision_time"]
+        )
+        cycle = await _seed_legacy_prepared_cycle(
+            session,
+            authority=authority,
+            decision_slot_at=floor_decision_slot(kwargs["decision_time"]),
+        )
+    assert cycle.candidate_batch_id is None
+    return await _advance_agent_paper_cycle(session, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -607,6 +672,121 @@ async def test_nasdaq_candidate_asset_type_risk_replay_and_exact_manifest(
                     manifest=manifest,
                     requested_instrument_ids=requested,
                 )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_batch_persists_two_research_jobs_and_remains_resumable(
+    migrated_database_url, monkeypatch
+):
+    from nexus.paper import agent_cycle
+    from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+    from nexus.paper.projection import load_paper_projection
+    from nexus.paper.service import create_paper_order_batch
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available", lambda: True
+    )
+    try:
+        async with sessions.begin() as session:
+            plan = await create_paper_order_batch(
+                session,
+                account_id=seed.account_id,
+                strategy_decision_id=seed.decision_id,
+                idempotency_key="prior-plan",
+                request_time=seed.request_time,
+            )
+            assert plan.order_ids
+        async with sessions.begin() as session:
+            # A pre-existing plan at the new research cutoff is a real occupied projection.
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            authority = authority.model_copy(update={"decision_time": seed.request_time})
+            projection = await load_paper_projection(
+                session, account_id=seed.account_id, as_of=seed.request_time
+            )
+            assert projection.open_orders
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=seed.account_id,
+                universe_snapshot_id=authority.universe_snapshot_id,
+                instrument_ids=(INSTRUMENTS[1][0], INSTRUMENTS[0][0]),
+                idempotency_key="two-candidates",
+                created_at=seed.request_time,
+            )
+            before_decisions = await session.scalar(
+                select(func.count()).select_from(StrategyDecisionRecord)
+            )
+            before_orders = await session.scalar(select(func.count()).select_from(PaperOrderRecord))
+            result = await agent_cycle._start_cycle(
+                session,
+                authority=authority,
+                decision_slot_at=floor_decision_slot(DECISION_TIME),
+                daily_limit_usd=Decimal("3"),
+                candidate_batch_id=batch.batch_id,
+                requested_instrument_ids=batch.instrument_ids,
+            )
+            assert result.status == "researching"
+            assert len(result.research_run_ids) == 2
+            cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
+            assert cycle.candidate_batch_id == batch.batch_id
+            assert cycle.sizing_policy_version == "portfolio_allocation_v1"
+            assert (
+                tuple(UUID(row["instrument_id"]) for row in cycle.candidate_manifest)
+                == batch.instrument_ids
+            )
+            jobs = tuple(
+                await session.scalars(
+                    select(Job).where(
+                        Job.payload["run_id"]
+                        .as_string()
+                        .in_([str(value) for value in result.research_run_ids])
+                    )
+                )
+            )
+            assert len(jobs) == 2
+            events = await agent_cycle._events(session, cycle.id)
+            first = await agent_cycle._resume_research(
+                session, cycle=cycle, authority=authority, events=events
+            )
+            assert first.status == "researching"
+            # Simulate persisted terminal worker facts, without invoking any model.
+            for job in jobs:
+                job.status = "running"
+                job.started_at = seed.request_time
+                job.attempt_count = 1
+                job.version += 1
+            await session.flush()
+            for job in jobs:
+                job.status = "succeeded"
+                job.finished_at = seed.request_time
+                job.version += 1
+            await session.flush()
+            for _ in range(2):
+                resumed = await agent_cycle._resume_research(
+                    session, cycle=cycle, authority=authority, events=events
+                )
+                assert resumed.status == "researching"
+                assert resumed.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+            assert len(await agent_cycle._events(session, cycle.id)) == len(events)
+            assert (
+                await session.scalar(select(func.count()).select_from(StrategyDecisionRecord))
+                == before_decisions
+            )
+            assert (
+                await session.scalar(select(func.count()).select_from(PaperOrderRecord))
+                == before_orders
+            )
     finally:
         await engine.dispose()
 
@@ -1290,7 +1470,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
 
         evaluation_id = uuid4()
         async with sessions.begin() as session:
-            started = await advance_agent_paper_cycle(
+            started = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -1420,7 +1600,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
         assert pinned_replay.replayed is True
 
         async with sessions.begin() as session:
-            versioned_replay = await advance_agent_paper_cycle(
+            versioned_replay = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -1531,7 +1711,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
 
         async with sessions.begin() as session:
-            started = await advance_agent_paper_cycle(
+            started = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -1616,7 +1796,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             )
 
         async with sessions.begin() as session:
-            completed = await advance_agent_paper_cycle(
+            completed = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -2522,8 +2702,10 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
     monkeypatch: pytest.MonkeyPatch,
     failure_code: str,
 ) -> None:
-    seed = await seed_paper_batch(migrated_database_url)
-    fixed_now = datetime(2026, 8, 26, 13, tzinfo=UTC)
+    from engine.tests.integration.test_agent_paper_trigger_reservation_pg import _seed_trigger
+
+    seed = await _seed_trigger(migrated_database_url)
+    fixed_now = datetime(2026, 9, 18, 14, tzinfo=UTC)
     provider_calls = 0
 
     async def reserve_with_fixed_time(
@@ -2532,6 +2714,7 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
         account_id: UUID,
         client_idempotency_key: str,
         now: datetime,
+        candidate_batch_id: UUID,
     ):
         del now
         return await reserve_schwab_agent_paper_trigger(
@@ -2539,6 +2722,7 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
             account_id=account_id,
             client_idempotency_key=client_idempotency_key,
             now=fixed_now,
+            candidate_batch_id=candidate_batch_id,
         )
 
     async def reject_calendar(*_args, **_kwargs):
@@ -2564,6 +2748,7 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
         action="trigger",
         account_id=seed.account_id,
         idempotency_key=failure_code.lower(),
+        candidate_batch_id=seed.batch_id,
     )
 
     with pytest.raises(ValueError, match=failure_code):
@@ -2602,8 +2787,10 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seed = await seed_paper_batch(migrated_database_url)
-    fixed_now = datetime(2026, 8, 26, 13, 5, tzinfo=UTC)
+    from engine.tests.integration.test_agent_paper_trigger_reservation_pg import _seed_trigger
+
+    seed = await _seed_trigger(migrated_database_url)
+    fixed_now = datetime(2026, 9, 18, 14, 5, tzinfo=UTC)
     provider_calls = 0
 
     async def reserve_with_fixed_time(
@@ -2612,6 +2799,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         account_id: UUID,
         client_idempotency_key: str,
         now: datetime,
+        candidate_batch_id: UUID,
     ):
         del now
         return await reserve_schwab_agent_paper_trigger(
@@ -2619,6 +2807,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
             account_id=account_id,
             client_idempotency_key=client_idempotency_key,
             now=fixed_now,
+            candidate_batch_id=candidate_batch_id,
         )
 
     async def reject_provider(*_args, **_kwargs):
@@ -2643,6 +2832,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         action="trigger",
         account_id=seed.account_id,
         idempotency_key="unknown-provider-failure",
+        candidate_batch_id=seed.batch_id,
     )
 
     with pytest.raises(RuntimeError, match="private-provider-failure"):
@@ -2933,6 +3123,7 @@ async def test_current_trends_rejects_short_bound_calendar_before_provider_call(
                     alpaca_secret=object(),
                 ),
                 account_id=UUID(int=1),
+                candidate=SimpleNamespace(instrument_id=instrument_id, symbol="AAPL"),
                 repo_root=tmp_path,
                 now=database_now,
                 expected_calendar_authority_id=authority_id,
@@ -3200,6 +3391,7 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         )
         daily = await agent_paper_loop.prepare_prior_daily_once(
             trigger_settings,
+            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
@@ -3207,16 +3399,24 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         )
         macro = await agent_paper_loop.prepare_macro_once(
             agent_paper_loop.DailyOnceSettings(database_url=migrated_database_url),
+            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
             fred_key=agent_paper_loop.SecretStr("test-key"),
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
             expected_calendar_authority_id=bound_id,
         )
-        trends_attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "trends" / friday.isoformat()
+        trends_attempt = (
+            tmp_path
+            / ".secrets"
+            / "nexus-agent-paper"
+            / "trends"
+            / f"{friday.isoformat()}-{INSTRUMENTS[0][0]}"
+        )
         trends_attempt.mkdir(mode=0o700, parents=True)
         trends = await agent_paper_loop.prepare_current_trends_once(
             trigger_settings,
+            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
@@ -3241,13 +3441,13 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
             observed_trigger_ids.append(received_id)
             return await real_cycle_loader(*args, **kwargs)
 
-        async def collect_proofs(*_args: object, **_kwargs: object) -> tuple[()]:
-            return ()
+        async def collect_proofs(*_args: object, **_kwargs: object):
+            return {INSTRUMENTS[0][0]: ()}
 
         artifact_id = UUID("63000000-0000-0000-0000-000000000101")
 
         async def capture_stream(*_args: object, **_kwargs: object) -> object:
-            return SimpleNamespace(quote_ids={}, artifact_id=artifact_id)
+            return SimpleNamespace(quote_ids={"AAPL": uuid4()}, artifact_id=artifact_id)
 
         async def persist_proofs(*_args: object, **_kwargs: object) -> tuple[()]:
             return ()
@@ -3267,16 +3467,26 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
             "load_quasi_realtime_cycle_authority",
             observed_cycle_loader,
         )
-        monkeypatch.setattr(agent_paper_once, "collect_source_proofs", collect_proofs)
+        monkeypatch.setattr(agent_paper_once, "collect_source_proofs_batch", collect_proofs)
         monkeypatch.setattr(
             agent_paper_once,
-            "capture_and_import_schwab_level_one_once",
+            "capture_and_import_schwab_level_one_batch",
             capture_stream,
         )
         monkeypatch.setattr(agent_paper_once, "persist_query_authorities", persist_proofs)
         monkeypatch.setattr(agent_paper_once, "_validate_trigger_quote", lambda *_a, **_k: None)
         monkeypatch.setattr(agent_paper_once, "start_schwab_agent_paper_cycle", start_cycle)
         async with sessions.begin() as session:
+            from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=seed.account_id,
+                universe_snapshot_id=decision.universe_snapshot_id,
+                instrument_ids=(INSTRUMENTS[0][0],),
+                created_at=monday_at,
+                idempotency_key="calendar-batch",
+            )
             result = await agent_paper_once.trigger_in_session(
                 session,
                 object(),
@@ -3285,11 +3495,14 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
                     action="trigger",
                     account_id=seed.account_id,
                     idempotency_key="bound-calendar-next-session",
+                    candidate_batch_id=batch.batch_id,
                 ),
                 reservation=agent_paper_once.AgentPaperTriggerReservation(
                     claim_id=UUID("63000000-0000-0000-0000-000000000103"),
                     decision_session=monday,
                     decision_slot_at=monday_at.replace(minute=0),
+                    candidate_batch_id=batch.batch_id,
+                    candidate_batch_hash=batch.batch_hash,
                 ),
                 repo_root=tmp_path,
                 client=object(),
@@ -3976,11 +4189,21 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         )
         migration_config = Config(str(ENGINE_ROOT / "alembic.ini"))
         async with sessions.begin() as session:
-            first = await start_schwab_agent_paper_cycle(
+            from nexus.paper import agent_cycle
+
+            legacy_cycle = await _seed_legacy_prepared_cycle(
                 session,
                 authority=authority,
                 decision_slot_at=floor_decision_slot(authority.decision_time),
-                idempotency_key="schwab-trigger-1",
+            )
+            first = await agent_cycle._admit_cycle_research(
+                session,
+                cycle=legacy_cycle,
+                authority=authority,
+                projection=await agent_cycle.load_paper_projection(
+                    session, account_id=authority.account_id, as_of=authority.decision_time
+                ),
+                daily_limit_usd=Decimal("5"),
             )
             run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])
             assert run is not None
@@ -4007,10 +4230,9 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             assert await session.scalar(select(Job.job_type)) == "agent.paper.research"
         await asyncio.to_thread(command.upgrade, migration_config, "head")
         async with sessions.begin() as session:
-            replay = await start_schwab_agent_paper_cycle(
+            replay = await resume_schwab_agent_paper_cycle(
                 session,
-                authority=authority,
-                decision_slot_at=floor_decision_slot(authority.decision_time),
+                cycle_id=first.cycle_id,
                 idempotency_key="schwab-trigger-1",
             )
             job_count = await session.scalar(select(func.count()).select_from(Job))
@@ -4556,7 +4778,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
 
         async with sessions.begin() as session:
-            first = await advance_agent_paper_cycle(
+            first = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -4583,7 +4805,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
                 await session.flush()
             finally:
                 await session.execute(text("ALTER TABLE agent_paper_cycles ENABLE TRIGGER USER"))
-            second = await advance_agent_paper_cycle(
+            second = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -4612,7 +4834,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             )
         async with sessions.begin() as session:
             with pytest.raises(ValueError, match="AGENT_PAPER_IDEMPOTENCY_CONFLICT"):
-                await advance_agent_paper_cycle(
+                await _advance_legacy_cycle_fixture(
                     session,
                     account_id=seed.account_id,
                     decision_time=DECISION_TIME + timedelta(seconds=1),
@@ -4697,7 +4919,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             fake_load_actionable,
         )
         async with sessions.begin() as session:
-            completed = await advance_agent_paper_cycle(
+            completed = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -4719,7 +4941,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert legacy_scope.window_end == window_start + timedelta(minutes=5)
 
         async with sessions.begin() as session:
-            replayed = await advance_agent_paper_cycle(
+            replayed = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -4848,7 +5070,7 @@ async def test_agent_version_history_groups_exact_identity_and_keeps_latest_twen
             )
 
         async with sessions.begin() as session:
-            started = await advance_agent_paper_cycle(
+            started = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -5051,7 +5273,7 @@ async def test_mixed_terminal_research_jobs_stop_without_replacement_runs(
             assert registered is not None
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
         async with sessions.begin() as session:
-            first = await advance_agent_paper_cycle(
+            first = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -5075,7 +5297,7 @@ async def test_mixed_terminal_research_jobs_stop_without_replacement_runs(
             finally:
                 await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER USER"))
         async with sessions.begin() as session:
-            stopped = await advance_agent_paper_cycle(
+            stopped = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -5122,7 +5344,7 @@ async def test_shutdown_confirmation_reads_back_exact_trigger_slot_from_postgres
                 )
             )
         async with sessions.begin() as session:
-            created = await advance_agent_paper_cycle(
+            created = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,

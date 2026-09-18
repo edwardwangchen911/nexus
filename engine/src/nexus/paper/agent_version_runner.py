@@ -162,6 +162,7 @@ async def advance_agent_version_slot(
         async with session.begin_nested():
             incumbent = await start_schwab_agent_paper_cycle(
                 session,
+                requested_instrument_ids=(evaluation.instrument_id,),
                 authority=authorities[0],
                 decision_slot_at=decision_slot_at,
                 idempotency_key=(
@@ -174,6 +175,7 @@ async def advance_agent_version_slot(
             )
             challenger = await start_schwab_agent_paper_cycle(
                 session,
+                requested_instrument_ids=(evaluation.instrument_id,),
                 authority=authorities[1],
                 decision_slot_at=decision_slot_at,
                 idempotency_key=(

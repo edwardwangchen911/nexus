@@ -46,6 +46,114 @@ SPY_ID = UUID("20000000-0000-0000-0000-000000000002")
 OUTSIDE_ID = UUID("20000000-0000-0000-0000-000000000003")
 
 
+@pytest.mark.asyncio
+async def test_trigger_freezes_batch_identity_and_never_replays_other_candidates(
+    migrated_database_url,
+):
+    from nexus.paper.agent_cycle import (
+        finish_schwab_agent_paper_trigger,
+        reserve_schwab_agent_paper_trigger,
+    )
+    from nexus.paper.agent_cycle_models import AgentPaperCycleResult
+
+    await _seed_scope(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        first = await create_agent_paper_candidate_batch(
+            session,
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            instrument_ids=(AAPL_ID,),
+            idempotency_key="first",
+            created_at=NOW,
+        )
+        second = await create_agent_paper_candidate_batch(
+            session,
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            instrument_ids=(SPY_ID,),
+            idempotency_key="second",
+            created_at=NOW,
+        )
+        reservation = await reserve_schwab_agent_paper_trigger(
+            session,
+            account_id=ACCOUNT_ID,
+            candidate_batch_id=first.batch_id,
+            client_idempotency_key="one-slot",
+            now=NOW,
+        )
+        assert reservation.candidate_batch_hash == first.batch_hash
+        assert reservation.candidate_batch_id == first.batch_id
+        result = AgentPaperCycleResult(
+            cycle_id=uuid4(),
+            status="unavailable",
+            result_code="RISK_INPUT_REQUIRED",
+            replayed=False,
+        )
+        await finish_schwab_agent_paper_trigger(session, reservation=reservation, result=result)
+    async with factory() as session, session.begin():
+        replay = await reserve_schwab_agent_paper_trigger(
+            session,
+            account_id=ACCOUNT_ID,
+            candidate_batch_id=first.batch_id,
+            client_idempotency_key="one-slot",
+            now=NOW,
+        )
+        assert replay.replay == result.model_copy(update={"replayed": True})
+    with pytest.raises(ValueError, match="AGENT_PAPER_IDEMPOTENCY_CONFLICT"):
+        async with factory() as session, session.begin():
+            await reserve_schwab_agent_paper_trigger(
+                session,
+                account_id=ACCOUNT_ID,
+                candidate_batch_id=second.batch_id,
+                client_idempotency_key="one-slot",
+                now=NOW,
+            )
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Job)) == 0
+        assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["missing", "unknown", "wrong_account", "wrong_universe", "future"]
+)
+async def test_trigger_candidate_scope_rejects_before_any_provider_or_job(
+    migrated_database_url, case
+):
+    from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
+
+    await _seed_scope(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        batch = await create_agent_paper_candidate_batch(
+            session,
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            instrument_ids=(AAPL_ID, SPY_ID),
+            idempotency_key="batch",
+            created_at=NOW,
+        )
+    async with factory() as session:
+        with pytest.raises(
+            ValueError,
+            match="CANDIDATE_BATCH_REQUIRED" if case == "missing" else "CANDIDATE_BATCH_INVALID",
+        ):
+            await validate_agent_paper_candidate_batch(
+                session,
+                batch_id=None
+                if case == "missing"
+                else uuid4()
+                if case == "unknown"
+                else batch.batch_id,
+                account_id=uuid4() if case == "wrong_account" else ACCOUNT_ID,
+                universe_snapshot_id=uuid4() if case == "wrong_universe" else UNIVERSE_ID,
+                as_of=NOW.replace(hour=13) if case == "future" else NOW,
+            )
+        assert await session.scalar(select(func.count()).select_from(Job)) == 0
+        assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
+
+
 async def _seed_scope(
     database_url: str,
     *,
@@ -174,9 +282,7 @@ async def _seed_scope(
                     symbol="AAPL",
                     alias_type="ticker",
                     valid_from=date(2020, 1, 1),
-                    valid_to=(
-                        date(2026, 9, 17) if aapl_alias == "expired" else aapl_valid_to
-                    ),
+                    valid_to=(date(2026, 9, 17) if aapl_alias == "expired" else aapl_valid_to),
                     created_at=created,
                 )
             )
@@ -225,21 +331,15 @@ async def test_candidate_batch_persists_canonical_scope_and_replays_exact_result
             "synthesis_run": await session.scalar(
                 select(func.count()).select_from(AgentPortfolioSynthesisRunRecord)
             ),
-            "cycle": await session.scalar(
-                select(func.count()).select_from(AgentPaperCycleRecord)
-            ),
+            "cycle": await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)),
             "decision": await session.scalar(
                 select(func.count()).select_from(StrategyDecisionRecord)
             ),
             "target": await session.scalar(
                 select(func.count()).select_from(PaperTargetVersionRecord)
             ),
-            "plan": await session.scalar(
-                select(func.count()).select_from(PaperOrderBatchRecord)
-            ),
-            "order": await session.scalar(
-                select(func.count()).select_from(PaperOrderRecord)
-            ),
+            "plan": await session.scalar(select(func.count()).select_from(PaperOrderBatchRecord)),
+            "order": await session.scalar(select(func.count()).select_from(PaperOrderRecord)),
         }
 
     assert replay == created
@@ -376,12 +476,8 @@ async def test_cli_replay_uses_persisted_creation_identity_after_alias_expiry(
             "target": await session.scalar(
                 select(func.count()).select_from(PaperTargetVersionRecord)
             ),
-            "plan": await session.scalar(
-                select(func.count()).select_from(PaperOrderBatchRecord)
-            ),
-            "order": await session.scalar(
-                select(func.count()).select_from(PaperOrderRecord)
-            ),
+            "plan": await session.scalar(select(func.count()).select_from(PaperOrderBatchRecord)),
+            "order": await session.scalar(select(func.count()).select_from(PaperOrderRecord)),
         }
 
     assert replay.batch == first.batch
@@ -492,16 +588,12 @@ async def test_persisted_candidate_batch_replays_after_underlying_account_is_dis
             created_at=NOW,
         )
     async with factory() as session, session.begin():
-        await session.execute(
-            text("ALTER TABLE accounts DISABLE TRIGGER trg_accounts_immutable")
-        )
+        await session.execute(text("ALTER TABLE accounts DISABLE TRIGGER trg_accounts_immutable"))
         await session.execute(
             text("UPDATE accounts SET status='DISABLED' WHERE id=:id"),
             {"id": BROKER_ACCOUNT_ID},
         )
-        await session.execute(
-            text("ALTER TABLE accounts ENABLE TRIGGER trg_accounts_immutable")
-        )
+        await session.execute(text("ALTER TABLE accounts ENABLE TRIGGER trg_accounts_immutable"))
     async with factory() as session, session.begin():
         replay = await create_agent_paper_candidate_batch(
             session,
@@ -559,9 +651,7 @@ async def test_candidate_batch_rejects_non_authoritative_scope_without_side_effe
 
     async with factory() as session:
         assert (
-            await session.scalar(
-                select(func.count()).select_from(AgentPaperCandidateBatchRecord)
-            )
+            await session.scalar(select(func.count()).select_from(AgentPaperCandidateBatchRecord))
             == 0
         )
         assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 0

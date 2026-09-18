@@ -14,21 +14,21 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.jobs.models import JobType
 from nexus.market.object_store import S3ProviderEvidenceStore
-from nexus.ops.agent_risk_authority import collect_source_proofs
+from nexus.ops.agent_risk_authority import RiskCandidate, collect_source_proofs_batch
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.ops.openai_local import local_settings
 from nexus.ops.schwab_market_stream import (
     ProviderMarketStreamError,
     SchwabMarketStreamImportResult,
-    capture_and_import_schwab_level_one_once,
+    capture_and_import_schwab_level_one_batch,
 )
 from nexus.paper.agent_cycle import (
     AgentPaperCycleResult,
@@ -55,6 +55,7 @@ from nexus.paper.candidate_batch import (
     create_agent_paper_candidate_batch,
     preflight_agent_paper_candidate_batch,
     resolve_agent_paper_candidate_identities,
+    validate_agent_paper_candidate_batch,
 )
 from nexus.persistence.models.agents import AgentResearchOutputRecord
 from nexus.persistence.models.data import DataArtifact
@@ -140,6 +141,7 @@ class AgentPaperRunRequest(BaseModel):
     account_id: UUID
     decision_time: datetime
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
+    candidate_batch_id: UUID | None = None
 
     @field_validator("decision_time")
     @classmethod
@@ -154,7 +156,15 @@ class AgentPaperTriggerRequest(BaseModel):
 
     action: Literal["trigger"]
     account_id: UUID
+    candidate_batch_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _require_batch(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("candidate_batch_id") is None:
+            raise ValueError("CANDIDATE_BATCH_REQUIRED")
+        return value
 
 
 class AgentPaperResumeRequest(BaseModel):
@@ -223,9 +233,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--account-id", required=True)
     run.add_argument("--decision-time", required=True)
     run.add_argument("--idempotency-key", required=True)
+    run.add_argument("--candidate-batch-id")
     trigger = commands.add_parser("trigger")
     trigger.add_argument("--account-id", required=True)
     trigger.add_argument("--idempotency-key", required=True)
+    trigger.add_argument("--candidate-batch-id")
     resume = commands.add_parser("resume")
     resume.add_argument("--cycle-id", required=True)
     resume.add_argument("--idempotency-key", required=True)
@@ -273,6 +285,7 @@ async def run_once(
                 decision_time=request.decision_time,
                 idempotency_key=request.idempotency_key,
                 daily_limit_usd=settings.agent_daily_budget_usd,
+                candidate_batch_id=request.candidate_batch_id,
             )
     finally:
         await engine.dispose()
@@ -352,11 +365,14 @@ def _validate_trigger_quote(
     result: SchwabMarketStreamImportResult,
     *,
     decision_time: datetime,
+    symbol: str,
+    instrument_id: UUID,
 ) -> None:
     if (
         quote is None
         or artifact is None
-        or result.quote_ids.get("AAPL") != quote.id
+        or result.quote_ids.get(symbol) != quote.id
+        or quote.instrument_id != instrument_id
         or result.artifact_id != artifact.id
         or quote.data_artifact_id != artifact.id
         or quote.source != "schwab"
@@ -468,6 +484,12 @@ async def trigger_in_session(
     ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
 
+    batch, identities = await validate_agent_paper_candidate_batch(
+        session,
+        batch_id=request.candidate_batch_id,
+        account_id=request.account_id,
+        as_of=initial_time,
+    )
     initial_authority = await load_quasi_realtime_cycle_authority(
         session,
         account_id=request.account_id,
@@ -476,22 +498,33 @@ async def trigger_in_session(
     )
     if initial_authority.calendar_authority_id != calendar_authority_id:
         raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
-    scope = await inspect_query_authority_scope(
-        session,
-        decision_session=decision_session,
-        symbol="AAPL",
-        as_of=initial_time,
-        universe_snapshot_id=initial_authority.universe_snapshot_id,
-        source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
-    )
+    if (
+        reservation.candidate_batch_id != batch.batch_id
+        or reservation.candidate_batch_hash != batch.batch_hash
+        or batch.universe_snapshot_id != initial_authority.universe_snapshot_id
+    ):
+        raise ValueError("CANDIDATE_BATCH_INVALID")
+    for identity in identities:
+        scope = await inspect_query_authority_scope(
+            session,
+            decision_session=decision_session,
+            symbol=identity.symbol,
+            as_of=initial_time,
+            universe_snapshot_id=batch.universe_snapshot_id,
+            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+        )
+        if scope.instrument_id != identity.instrument_id:
+            raise ValueError("CANDIDATE_BATCH_INVALID")
     digest = sha256(request.idempotency_key.encode()).hexdigest()[:16]
     output_parent = repo_root / ".secrets" / "nexus-agent-paper"
     output_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     attempt_directory = output_parent / f"{decision_slot_at.strftime('%Y%m%dT%H%MZ')}-{digest}"
     try:
-        proofs = await collect_source_proofs(
-            symbol="AAPL",
-            instrument_id=scope.instrument_id,
+        proofs = await collect_source_proofs_batch(
+            candidates=tuple(
+                RiskCandidate(symbol=item.symbol, instrument_id=item.instrument_id)
+                for item in identities
+            ),
             decision_session=decision_session,
             key_id=settings.alpaca_key,
             secret=settings.alpaca_secret,
@@ -502,12 +535,12 @@ async def trigger_in_session(
         raise ValueError("RISK_INPUT_REQUIRED") from error
 
     try:
-        stream = await capture_and_import_schwab_level_one_once(
+        stream = await capture_and_import_schwab_level_one_batch(
             session,
             store,
             repo_root=repo_root,
             client=client,
-            instrument_id=scope.instrument_id,
+            bindings={item.symbol: item.instrument_id for item in identities},
             process_environment=process_environment,
         )
     except (
@@ -536,20 +569,32 @@ async def trigger_in_session(
         or decision_time >= final_calendar.market_close_at
     ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
-    quote_id = stream.quote_ids.get("AAPL")
-    quote = None if quote_id is None else await session.get(LatestQuote, quote_id)
     artifact = await session.get(DataArtifact, stream.artifact_id)
-    _validate_trigger_quote(quote, artifact, stream, decision_time=decision_time)
+    if set(stream.quote_ids) != {item.symbol for item in identities}:
+        raise ValueError("SCHWAB_L1_INCOMPLETE")
+    for identity in identities:
+        quote = await session.get(LatestQuote, stream.quote_ids[identity.symbol])
+        _validate_trigger_quote(
+            quote,
+            artifact,
+            stream,
+            decision_time=decision_time,
+            symbol=identity.symbol,
+            instrument_id=identity.instrument_id,
+        )
 
     try:
-        await persist_query_authorities(
-            session,
-            universe_snapshot_id=scope.universe_snapshot_id,
-            decision_session=decision_session,
-            symbol="AAPL",
-            proofs=proofs,
-            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
-        )
+        if set(proofs) != set(batch.instrument_ids):
+            raise ValueError("RISK_INPUT_REQUIRED")
+        for identity in identities:
+            await persist_query_authorities(
+                session,
+                universe_snapshot_id=batch.universe_snapshot_id,
+                decision_session=decision_session,
+                symbol=identity.symbol,
+                proofs=proofs[identity.instrument_id],
+                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            )
     except ValueError as error:
         raise ValueError("RISK_INPUT_REQUIRED") from error
     authority = await load_quasi_realtime_cycle_authority(
@@ -566,6 +611,8 @@ async def trigger_in_session(
         decision_slot_at=decision_slot_at,
         idempotency_key=request.idempotency_key,
         daily_limit_usd=settings.agent_daily_budget_usd,
+        requested_instrument_ids=batch.instrument_ids,
+        candidate_batch_id=batch.batch_id,
     )
 
 
@@ -604,6 +651,7 @@ async def trigger_once(
                 account_id=request.account_id,
                 client_idempotency_key=request.idempotency_key,
                 now=now,
+                candidate_batch_id=request.candidate_batch_id,
             )
         if reservation.replay is not None:
             return reservation.replay
@@ -679,15 +727,34 @@ def resolve_queued_cycle_research_job(
         raw = fact_ids.get("research_run_ids") if isinstance(fact_ids, dict) else None
         if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
             raw_run_ids.extend(raw)
-    if len(raw_run_ids) != 1:
+    if not 1 <= len(raw_run_ids) <= 5 or len(set(raw_run_ids)) != len(raw_run_ids):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     try:
-        run_id = UUID(raw_run_ids[0])
+        run_ids = tuple(UUID(value) for value in raw_run_ids)
     except ValueError as error:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN") from error
-    if output_run_ids or len(jobs) != 1:
+    if len(jobs) != len(run_ids) or not set(output_run_ids) <= set(run_ids):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    job = jobs[0]
+    by_run: dict[str, object] = {}
+    for item in jobs:
+        payload = getattr(item, "payload", None)
+        item_run = payload.get("run_id") if isinstance(payload, dict) else None
+        if item_run not in raw_run_ids or item_run in by_run:
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+        by_run[item_run] = item
+    pending = []
+    for run_id in run_ids:
+        item = by_run[str(run_id)]
+        if getattr(item, "job_type", None) != JobType.AGENT_PAPER_RESEARCH.value:
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+        if run_id in output_run_ids and getattr(item, "status", None) == "succeeded":
+            continue
+        if run_id in output_run_ids or getattr(item, "status", None) != "queued":
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+        pending.append((run_id, item))
+    if not pending:
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    run_id, job = pending[0]
     payload = getattr(job, "payload", None)
     job_id = getattr(job, "id", None)
     if (
@@ -873,6 +940,8 @@ def main(argv: list[str] | None = None) -> int:
         if action == "run":
             request = AgentPaperRunRequest.model_validate(values)
         elif action == "trigger":
+            if values.get("candidate_batch_id") is None:
+                return _emit_error("CANDIDATE_BATCH_REQUIRED")
             request = AgentPaperTriggerRequest.model_validate(values)
         elif action == "resume":
             request = AgentPaperResumeRequest.model_validate(values)
@@ -926,6 +995,7 @@ def main(argv: list[str] | None = None) -> int:
             "RESEARCH_ADMISSION_UNAVAILABLE",
             "PAPER_MARKET_WINDOW_UNAVAILABLE",
             "CANDIDATE_BATCH_INVALID",
+            "CANDIDATE_BATCH_REQUIRED",
             "IDEMPOTENCY_CONFLICT",
         }:
             code = "AGENT_PAPER_RESULT_UNKNOWN"

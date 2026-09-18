@@ -92,9 +92,7 @@ def _canonical_hash(
         "source": _SOURCE,
         "universe_snapshot_id": str(universe_snapshot_id),
     }
-    return sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 async def resolve_agent_paper_candidate_identities(
@@ -213,6 +211,45 @@ async def load_agent_paper_candidate_batch(
     return None if record is None else _result(record)
 
 
+async def validate_agent_paper_candidate_batch(
+    session: AsyncSession,
+    *,
+    batch_id: UUID | None,
+    account_id: UUID,
+    as_of: datetime,
+    universe_snapshot_id: UUID | None = None,
+) -> tuple[CandidateBatchResult, tuple[CandidateInstrumentIdentity, ...]]:
+    """Revalidate the complete explicit scope before a new cycle can collect evidence."""
+    if batch_id is None:
+        raise ValueError("CANDIDATE_BATCH_REQUIRED")
+    as_of = _require_utc(as_of)
+    batch = await load_agent_paper_candidate_batch(session, batch_id=batch_id)
+    account = await session.get(PaperAccountRecord, account_id)
+    underlying = None if account is None else await session.get(Account, account.account_id)
+    if (
+        batch is None
+        or batch.account_id != account_id
+        or batch.created_at > as_of
+        or (universe_snapshot_id is not None and batch.universe_snapshot_id != universe_snapshot_id)
+        or account is None
+        or account.capability != "simulation_write_internal"
+        or account.currency != "USD"
+        or account.created_at > as_of
+        or underlying is None
+        or underlying.provider != "internal"
+        or underlying.status != "ACTIVE"
+        or underlying.created_at > as_of
+    ):
+        raise ValueError("CANDIDATE_BATCH_INVALID")
+    identities = await resolve_agent_paper_candidate_identities(
+        session,
+        universe_snapshot_id=batch.universe_snapshot_id,
+        instrument_ids=batch.instrument_ids,
+        created_at=as_of,
+    )
+    return batch, identities
+
+
 async def _lock_candidate_batch_account(session: AsyncSession, *, account_id: UUID) -> None:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1818))"),
@@ -310,13 +347,9 @@ async def create_agent_paper_candidate_batch(
         session, account_id=account_id, idempotency_key=idempotency_key
     )
     if existing_claim is not None:
-        return await _load_claim_result(
-            session, claim=existing_claim, batch_hash=batch_hash
-        )
+        return await _load_claim_result(session, claim=existing_claim, batch_hash=batch_hash)
     account = await session.scalar(
-        select(PaperAccountRecord)
-        .where(PaperAccountRecord.id == account_id)
-        .with_for_update()
+        select(PaperAccountRecord).where(PaperAccountRecord.id == account_id).with_for_update()
     )
     underlying_account = (
         None
