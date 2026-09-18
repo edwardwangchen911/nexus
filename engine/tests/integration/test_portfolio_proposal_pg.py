@@ -21,18 +21,34 @@ from nexus.persistence.models.paper import (
 from sqlalchemy import func, select
 
 
-async def proposal_source(url, *, approve=True, seeded=None, intent_factory=synthesis_intent):
+async def proposal_source(
+    url, *, approve=True, seeded=None, intent_factory=synthesis_intent, approval_offset=0
+):
     engine, sessions, kwargs = seeded or await seed_synthesis(url)
     async with sessions.begin() as session:
         cycle = await session.get(AgentPaperCycleRecord, kwargs["cycle_id"])
         if approve:
+            approval_time = cycle.decision_time
+            approval_hash = kwargs["projection_hash"]
+            if approval_offset:
+                from nexus.paper.projection import load_paper_projection
+
+                approved_projection = await load_paper_projection(
+                    session,
+                    account_id=cycle.account_id,
+                    as_of=cycle.decision_time + timedelta(seconds=approval_offset),
+                )
+                approval_time, approval_hash = (
+                    approved_projection.as_of,
+                    approved_projection.projection_hash,
+                )
             await approve_initial_target_projection(
                 session,
                 account_id=cycle.account_id,
-                projection_as_of=cycle.decision_time,
-                expected_projection_hash=kwargs["projection_hash"],
+                projection_as_of=approval_time,
+                expected_projection_hash=approval_hash,
                 approved_by="local-user",
-                approved_at=kwargs["now"],
+                approved_at=approval_time if approval_offset < 0 else kwargs["now"],
                 idempotency_key="first-baseline",
             )
         admission = await admit_portfolio_synthesis(session, **kwargs)
@@ -70,6 +86,31 @@ async def proposal_source(url, *, approve=True, seeded=None, intent_factory=synt
             now=kwargs["now"] + timedelta(seconds=2),
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_approval_one_second_before_cycle_remains_authoritative(migrated_database_url):
+    from nexus.paper.agent_cycle import _events, _resume_research
+
+    engine, sessions, args = await proposal_source(migrated_database_url, approval_offset=-1)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            result = await _resume_research(
+                session,
+                cycle=cycle,
+                authority=None,
+                events=await _events(session, cycle.id),
+                now=args["now"],
+            )
+            assert result.result_code == "TARGET_ACTIVATION_PENDING"
+            stored = await load_portfolio_proposal(
+                session, account_id=cycle.account_id, decision_id=result.strategy_decision_id
+            )
+            assert stored.proposal.baseline.initial_approval_id is not None
+            assert stored.proposal.cash_weight == 1
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -360,7 +401,10 @@ async def test_persisted_policy_block_survives_restart_and_next_slot(
 
 
 @pytest.mark.asyncio
-async def test_approval_resumes_original_cycle_from_completed_synthesis(migrated_database_url):
+@pytest.mark.parametrize("approval_offset", [0, -1])
+async def test_approval_resumes_original_cycle_from_completed_synthesis(
+    migrated_database_url, approval_offset
+):
     from helpers.paper_batch import CALENDAR_ID
     from nexus.ops import agent_paper_loop as loop
     from nexus.paper.agent_cycle import _events, _resume_research
@@ -388,7 +432,7 @@ async def test_approval_resumes_original_cycle_from_completed_synthesis(migrated
             projection = await load_paper_projection(
                 session,
                 account_id=cycle.account_id,
-                as_of=cycle.decision_time,
+                as_of=cycle.decision_time + timedelta(seconds=approval_offset),
             )
             await approve_initial_target_projection(
                 session,
@@ -546,8 +590,9 @@ async def test_policy_wait_publishes_one_persisted_close_and_summary(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rejection", ["EXIT_TURNOVER_CONFLICT", "PORTFOLIO_DEPENDENCY_CONFLICT"])
 async def test_host_inspection_leaves_legal_exit_allocation_rejection_to_coordinator(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, rejection
 ):
     """Real PG source/worker/host/coordinator; a synthetic frozen 15% exposure boundary."""
     from datetime import datetime
@@ -627,7 +672,15 @@ async def test_host_inspection_leaves_legal_exit_allocation_rejection_to_coordin
     def exit_intent(run):
         intent = synthesis_intent(run)
         choices = list(intent.choices)
-        choices[0] = choices[0].model_copy(update={"action": "exit", "role": "core"})
+        if rejection == "EXIT_TURNOVER_CONFLICT":
+            choices[0] = choices[0].model_copy(update={"action": "exit", "role": "core"})
+        else:
+            choices[0] = choices[0].model_copy(
+                update={"depends_on_instrument_ids": (choices[1].instrument_id,)}
+            )
+            choices[1] = choices[1].model_copy(
+                update={"depends_on_instrument_ids": (choices[0].instrument_id,)}
+            )
         return intent.model_copy(update={"choices": tuple(choices)})
 
     from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesis
@@ -658,7 +711,7 @@ async def test_host_inspection_leaves_legal_exit_allocation_rejection_to_coordin
             count = len(await agent_cycle._events(session, cycle.id))
             # Establish the genuine deterministic rejection, rather than mock a
             # builder error. The host must not execute this computation itself.
-            with pytest.raises(ValueError, match="^EXIT_TURNOVER_CONFLICT$"):
+            with pytest.raises(ValueError, match=f"^{rejection}$"):
                 await agent_decision_store._rebuild_portfolio_proposal(
                     session, cycle=cycle, output_id=args["synthesis_output_id"], now=args["now"]
                 )
@@ -705,7 +758,7 @@ async def test_host_inspection_leaves_legal_exit_allocation_rejection_to_coordin
             assert len(events) == count + 1
             assert events[-1].fact_ids == {
                 "portfolio_synthesis_output_id": str(args["synthesis_output_id"]),
-                "proposal_rejection_code": "EXIT_TURNOVER_CONFLICT",
+                "proposal_rejection_code": rejection,
             }
             assert set(await session.scalars(select(Job.id))) == jobs
             assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == cycles
@@ -829,8 +882,12 @@ async def test_first_synthesis_knows_actual_exposure_without_granting_target_aut
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "activate_first", [True, False], ids=["active-target", "first-cycle-rejected"]
+)
 async def test_later_proposal_uses_active_target_and_preserves_historical_replay(
     migrated_database_url,
+    activate_first,
 ):
     """Seed a second immutable research checkpoint, then use real synthesis/proposal services."""
     import json
@@ -839,7 +896,7 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
     from hashlib import sha256
     from uuid import uuid4
 
-    from nexus.paper.agent_cycle import _append_event
+    from nexus.paper.agent_cycle import _append_event, _events, _resume_research
     from nexus.paper.portfolio_proposal import canonical_portfolio_target_content_hash
     from nexus.paper.projection import load_paper_projection
     from nexus.persistence.models.agents import (
@@ -850,7 +907,22 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
     )
     from nexus.persistence.models.runtime import Job
 
-    engine, sessions, args = await proposal_source(migrated_database_url)
+    def first_intent(run):
+        result = synthesis_intent(run)
+        if activate_first:
+            return result
+        choices = list(result.choices)
+        choices[0] = choices[0].model_copy(
+            update={"depends_on_instrument_ids": (choices[1].instrument_id,)}
+        )
+        choices[1] = choices[1].model_copy(
+            update={"depends_on_instrument_ids": (choices[0].instrument_id,)}
+        )
+        return result.model_copy(update={"choices": tuple(choices)})
+
+    engine, sessions, args = await proposal_source(
+        migrated_database_url, intent_factory=first_intent
+    )
 
     def values(record):
         return {
@@ -861,21 +933,41 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
 
     try:
         async with sessions.begin() as session:
-            first = await persist_portfolio_proposal(session, **args)
             cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
-            target = PaperTargetVersionRecord(
-                account_id=first.account_id,
-                portfolio_id=cycle.portfolio_id,
-                version_seq=1,
-                strategy_decision_id=first.decision_id,
-                previous_target_version_id=None,
-                target_content_hash=canonical_portfolio_target_content_hash(first.proposal),
-                activation_hash="a" * 64,
-                activated_at=args["now"],
-                created_at=args["now"],
-            )
-            session.add(target)
-            await session.flush()
+            target = None
+            if activate_first:
+                first = await persist_portfolio_proposal(session, **args)
+                target = PaperTargetVersionRecord(
+                    account_id=first.account_id,
+                    portfolio_id=cycle.portfolio_id,
+                    version_seq=1,
+                    strategy_decision_id=first.decision_id,
+                    previous_target_version_id=None,
+                    target_content_hash=canonical_portfolio_target_content_hash(first.proposal),
+                    activation_hash="a" * 64,
+                    activated_at=args["now"],
+                    created_at=args["now"],
+                )
+                session.add(target)
+                await session.flush()
+            else:
+                rejected = await _resume_research(
+                    session,
+                    cycle=cycle,
+                    authority=None,
+                    events=await _events(session, cycle.id),
+                    now=args["now"],
+                )
+                assert rejected.result_code == "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+                assert rejected.status == "unavailable"
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(StrategyDecisionRecord)
+                        .where(StrategyDecisionRecord.agent_paper_cycle_id == cycle.id)
+                    )
+                    == 0
+                )
             shift = timedelta(minutes=5)
             new_time = cycle.decision_time + shift
             second = AgentPaperCycleRecord(
@@ -985,13 +1077,13 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
                 {"research_run_ids": list(map(str, run_ids))},
             )
             projection = await load_paper_projection(
-                session, account_id=first.account_id, as_of=new_time
+                session, account_id=cycle.account_id, as_of=new_time
             )
             admitted = await admit_portfolio_synthesis(
                 session,
                 cycle_id=second.id,
                 research_output_ids=tuple(output_ids),
-                active_target_version_id=target.id,
+                active_target_version_id=target.id if target is not None else None,
                 projection_hash=projection.projection_hash,
                 daily_limit_usd=Decimal(1),
                 now=new_time + timedelta(minutes=2),
@@ -1022,10 +1114,42 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
                 synthesis_output_id=output.id,
                 now=at + timedelta(seconds=1),
             )
-            assert latest.proposal.baseline.target_version_id == target.id
-            assert latest.proposal.baseline.initial_approval_id is None
-            assert latest.proposal.weights == first.proposal.weights
-            assert latest.proposal.cash_weight == first.proposal.cash_weight
-            assert await persist_portfolio_proposal(session, **args) == first
+            if activate_first:
+                assert latest.proposal.baseline.target_version_id == target.id
+                assert latest.proposal.baseline.initial_approval_id is None
+                assert latest.proposal.weights == first.proposal.weights
+                assert latest.proposal.cash_weight == first.proposal.cash_weight
+                assert await persist_portfolio_proposal(session, **args) == first
+            else:
+                from nexus.persistence.models.paper import PaperInitialTargetApprovalRecord
+
+                approval = await session.scalar(select(PaperInitialTargetApprovalRecord))
+                assert latest.proposal.baseline.initial_approval_id == approval.id
+                assert approval.projection_as_of == cycle.decision_time < second.decision_time
+                assert latest.proposal.cash_weight == 1
+                assert (
+                    await session.scalar(
+                        select(func.count()).select_from(PaperInitialTargetApprovalRecord)
+                    )
+                    == 1
+                )
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(StrategyDecisionRecord)
+                        .where(
+                            StrategyDecisionRecord.agent_paper_cycle_id.in_((cycle.id, second.id))
+                        )
+                    )
+                    == 1
+                )
+                for model in (
+                    PaperTargetVersionRecord,
+                    PaperOrderBatchRecord,
+                    PaperOrderRecord,
+                    PaperReservationRecord,
+                    PaperFillRecord,
+                ):
+                    assert await session.scalar(select(func.count()).select_from(model)) == 0
     finally:
         await engine.dispose()

@@ -57,6 +57,7 @@ from nexus.paper.candidate_batch import (
 )
 from nexus.paper.errors import PaperBatchError
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH, PORTFOLIO_ALLOCATION_V1
+from nexus.paper.portfolio_proposal import KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
@@ -1101,7 +1102,7 @@ async def _resume_portfolio_synthesis(
             )
         code = "PORTFOLIO_PROPOSAL_UNAVAILABLE"
         facts: dict[str, object] = {"portfolio_synthesis_output_id": str(output.id)}
-        if str(error) in {"EXIT_TURNOVER_CONFLICT", "REDUCTION_TURNOVER_CONFLICT"}:
+        if str(error) in KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS:
             facts["proposal_rejection_code"] = str(error)
         await _append_event(
             session,

@@ -34,10 +34,8 @@ from nexus.paper.portfolio_proposal import (
 )
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.target_service import (
-    initial_approval_hash,
-    initial_approval_result,
+    load_initial_approval_projection,
     lock_portfolio_account,
-    require_unoccupied_projection,
 )
 from nexus.persistence.models.agents import (
     AgentPortfolioSynthesisOutputRecord,
@@ -552,19 +550,15 @@ async def _rebuild_portfolio_proposal(
         )
         if approval is None:
             raise ValueError("POLICY_UNCONFIRMED")
-        if (
-            approval.portfolio_id != cycle.portfolio_id
-            or approval.projection_as_of != cycle.decision_time
-            or approval.projection_hash != projection.projection_hash
-            or approval.allocation_policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
-            or initial_approval_hash(initial_approval_result(approval)) != approval.approval_hash
-            or now is not None
-            and approval.approved_at > now
-        ):
-            raise ValueError("PORTFOLIO_PROPOSAL_INITIAL_APPROVAL_CONFLICT")
-        require_unoccupied_projection(projection)
+        approved_projection = await load_initial_approval_projection(
+            session,
+            approval=approval,
+            portfolio_id=cycle.portfolio_id,
+            decision_time=cycle.decision_time,
+            now=now,
+        )
         baseline = initial_projection_baseline(
-            projection, approval_id=approval.id, approval_hash=approval.approval_hash
+            approved_projection, approval_id=approval.id, approval_hash=approval.approval_hash
         )
     else:
         target = await session.get(PaperTargetVersionRecord, frozen.active_target_version_id)

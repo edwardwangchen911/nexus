@@ -57,6 +57,125 @@ def build(base, choices):
     )
 
 
+def with_dependencies(choices, dependencies, replacements=None):
+    document = choices.model_dump()
+    for row in document["choices"]:
+        row["depends_on_instrument_ids"] = dependencies.get(row["instrument_id"], ())
+        row["replaces_instrument_id"] = (replacements or {}).get(row["instrument_id"])
+    return PortfolioSynthesisIntentV1.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "action,old,want",
+    [("reduce", "0.025", "0"), ("reduce", "0.05", "0.05"), ("exit", "0.025", "0.05")],
+)
+def test_replacement_requires_the_declared_reduction_to_apply(action, old, want):
+    choices = with_dependencies(
+        intent((A, action, "core", None), (B, "include", "tactical", 1)), {}, {B: A}
+    )
+    result = build(baseline({A: Decimal(old)}, str(1 - Decimal(old))), choices)
+    assert result.weights[B] == Decimal(want)
+    assert result.reasons[B] == ("DEPENDENCY_NOT_APPLIED" if want == "0" else "INCLUDE")
+    assert result.synthesis.choices[1].replaces_instrument_id == A
+    assert build(result.baseline, choices) == result
+
+
+@pytest.mark.parametrize(
+    "weights,cash,choices,blocked,reason",
+    [
+        (
+            {A: Decimal("0.15")},
+            "0.85",
+            ((A, "increase", "core", 1), (B, "include", "tactical", 2)),
+            A,
+            "SINGLE_NAME_CAP",
+        ),
+        (
+            {C: Decimal("0.775")},
+            "0.225",
+            ((A, "include", "core", 1), (B, "include", "tactical", 2)),
+            A,
+            "CASH_FLOOR",
+        ),
+        (
+            {},
+            "1",
+            (
+                (C, "include", "core", 1),
+                (A, "include", "tactical", 2),
+                (B, "include", "tactical", 3),
+            ),
+            A,
+            "TURNOVER_LIMIT",
+        ),
+    ],
+)
+def test_dependent_increase_does_not_ignore_constraint_deferred_predecessor(
+    weights, cash, choices, blocked, reason
+):
+    result = build(baseline(weights, cash), with_dependencies(intent(*choices), {B: (blocked,)}))
+    assert result.reasons[blocked] == reason
+    assert result.weights[B] == 0
+    assert result.reasons[B] == "DEPENDENCY_NOT_APPLIED"
+
+
+def test_transitive_dependency_deferral_and_maintain_semantics():
+    choices = with_dependencies(
+        intent(
+            (A, "reduce", "core", None),
+            (B, "include", "tactical", 1),
+            (C, "include", "tactical", 2),
+        ),
+        {B: (A,), C: (B,)},
+    )
+    result = build(baseline({A: Decimal("0.025")}, "0.975"), choices)
+    assert result.weights == {A: Decimal("0.025"), B: Decimal(0), C: Decimal(0)}
+    assert result.reasons[B] == result.reasons[C] == "DEPENDENCY_NOT_APPLIED"
+    satisfied = build(baseline({A: Decimal("0.05")}, "0.95"), choices)
+    assert satisfied.weights == {A: Decimal(0), B: Decimal("0.05"), C: Decimal("0.05")}
+    assert satisfied.cash_weight == Decimal("0.90")
+    assert build(satisfied.baseline, choices) == satisfied
+    maintained = with_dependencies(
+        intent((A, "maintain", "core", None), (B, "include", "tactical", 1)), {B: (A,)}
+    )
+    assert build(baseline({A: Decimal("0.025")}, "0.975"), maintained).weights[B] == Decimal("0.05")
+
+
+def test_replacement_cannot_bypass_exit_turnover_rejection():
+    choices = with_dependencies(
+        intent((A, "exit", "none", None), (B, "include", "tactical", 1)), {}, {B: A}
+    )
+    with pytest.raises(ValueError, match="^EXIT_TURNOVER_CONFLICT$"):
+        build(baseline({A: Decimal("0.15")}, "0.85"), choices)
+
+
+@pytest.mark.parametrize("kind", ["cycle", "rank_inversion", "missing"])
+def test_unsafe_dependency_graph_is_a_known_rejection(kind):
+    source = intent((A, "include", "tactical", 1), (B, "include", "tactical", 2))
+    if kind == "missing":
+        # An unchecked in-process object must not bypass the proposal boundary.
+        source = source.model_copy(
+            update={
+                "choices": (
+                    source.choices[0].model_copy(update={"depends_on_instrument_ids": (C,)}),
+                    source.choices[1],
+                )
+            }
+        )
+    else:
+        source = with_dependencies(source, {A: (B,), **({B: (A,)} if kind == "cycle" else {})})
+    with pytest.raises(ValueError, match="^PORTFOLIO_DEPENDENCY_CONFLICT$"):
+        build(baseline({}, "1"), source)
+
+
+def test_unmet_exit_dependency_rejects_instead_of_silently_retaining_exit():
+    choices = with_dependencies(
+        intent((A, "defer", "none", None), (B, "exit", "none", None)), {B: (A,)}
+    )
+    with pytest.raises(ValueError, match="^PORTFOLIO_DEPENDENCY_CONFLICT$"):
+        build(baseline({A: Decimal("0.05"), B: Decimal("0.05")}, "0.90"), choices)
+
+
 @pytest.mark.parametrize(
     "action,role,old,cash,want,want_cash",
     [

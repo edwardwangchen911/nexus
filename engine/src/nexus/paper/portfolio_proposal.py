@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nexus.agents.portfolio_synthesis_contracts import (
+    PortfolioChoiceV1,
     PortfolioSynthesisIntentV1,
     canonical_portfolio_synthesis_hash,
 )
@@ -21,6 +22,61 @@ from nexus.paper.portfolio_policy import (
     canonical_portfolio_allocation_policy_hash,
 )
 from nexus.risk.models import PaperPortfolioProjection, exact_decimal
+
+KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS = frozenset(
+    {
+        "EXIT_TURNOVER_CONFLICT",
+        "REDUCTION_TURNOVER_CONFLICT",
+        "PORTFOLIO_DEPENDENCY_CONFLICT",
+    }
+)
+
+
+def _choice_dependencies(choice: PortfolioChoiceV1) -> set[UUID]:
+    return set(choice.depends_on_instrument_ids) | (
+        {choice.replaces_instrument_id} if choice.replaces_instrument_id is not None else set()
+    )
+
+
+def _dependency_order(synthesis: PortfolioSynthesisIntentV1) -> tuple[PortfolioChoiceV1, ...]:
+    """Order non-competing prerequisites, never reorder competing increase ranks."""
+    choices = {choice.instrument_id: choice for choice in synthesis.choices}
+    depths: dict[UUID, int] = {}
+    visiting: set[UUID] = set()
+
+    def depth(key: UUID) -> int:
+        if key not in choices or key in visiting:
+            raise ValueError("PORTFOLIO_DEPENDENCY_CONFLICT")
+        if key in depths:
+            return depths[key]
+        visiting.add(key)
+        choice = choices[key]
+        dependencies = _choice_dependencies(choice)
+        if choice.replaces_instrument_id is not None and (
+            choice.replaces_instrument_id not in choices
+            or choices[choice.replaces_instrument_id].action not in {"reduce", "exit"}
+        ):
+            raise ValueError("PORTFOLIO_DEPENDENCY_CONFLICT")
+        result = 0
+        for predecessor in dependencies:
+            result = max(result, depth(predecessor) + 1)
+            prior_rank = choices[predecessor].rank
+            if prior_rank is not None and (choice.rank is None or prior_rank >= choice.rank):
+                raise ValueError("PORTFOLIO_DEPENDENCY_CONFLICT")
+        visiting.remove(key)
+        depths[key] = result
+        return result
+
+    for key in choices:
+        depth(key)
+    return tuple(
+        sorted(
+            synthesis.choices,
+            key=lambda choice: (0, depths[choice.instrument_id])
+            if choice.rank is None
+            else (1, choice.rank),
+        )
+    )
 
 
 class PortfolioBaselineV1(BaseModel):
@@ -141,12 +197,14 @@ def build_portfolio_proposal(
     if canonical_portfolio_allocation_policy_hash(policy) != PORTFOLIO_ALLOCATION_POLICY_HASH:
         raise ValueError("PORTFOLIO_POLICY_INVALID")
     base = PortfolioBaselineV1.model_validate(active_target.model_dump())
+    ordered_choices = _dependency_order(synthesis)
     synthesis = PortfolioSynthesisIntentV1.model_validate(synthesis.model_dump())
     weights = dict(base.weights)
     roles = {key: base.roles.get(key, "none") for key in weights}
     reasons = {key: "INHERITED_TARGET" for key in weights}
     priorities = {key: 100 for key in weights}
-    for choice in synthesis.choices:
+    applied: set[UUID] = set()
+    for choice in ordered_choices:
         old = weights.setdefault(choice.instrument_id, Decimal(0))
         roles.setdefault(choice.instrument_id, "none")
         priorities[choice.instrument_id] = choice.rank or 100
@@ -155,13 +213,24 @@ def build_portfolio_proposal(
         ):
             raise ValueError("PORTFOLIO_BASELINE_ACTION_CONFLICT")
         reasons[choice.instrument_id] = choice.action.upper()
+        if choice.rank is not None:
+            continue
+        if not _choice_dependencies(choice) <= applied:
+            if choice.action == "exit":
+                raise ValueError("PORTFOLIO_DEPENDENCY_CONFLICT")
+            reasons[choice.instrument_id] = "DEPENDENCY_NOT_APPLIED"
+            continue
         if choice.action == "exit":
             weights[choice.instrument_id] = Decimal(0)
+            applied.add(choice.instrument_id)
         elif choice.action == "reduce":
             if old < policy.adjustment_step:
                 reasons[choice.instrument_id] = "ATOMIC_STEP_REQUIRED"
             else:
                 weights[choice.instrument_id] = old - policy.adjustment_step
+                applied.add(choice.instrument_id)
+        elif choice.action == "maintain":
+            applied.add(choice.instrument_id)
     reductions = sum(
         (base.weights.get(key, Decimal(0)) - value for key, value in weights.items()), Decimal(0)
     )
@@ -186,7 +255,9 @@ def build_portfolio_proposal(
         )
         delta = desired - old
         reason = None
-        if desired > policy.single_name_target_cap:
+        if not _choice_dependencies(choice) <= applied:
+            reason = "DEPENDENCY_NOT_APPLIED"
+        elif desired > policy.single_name_target_cap:
             reason = "SINGLE_NAME_CAP"
         elif increases >= policy.max_increases:
             reason = "MAX_INCREASES"
@@ -202,6 +273,7 @@ def build_portfolio_proposal(
         cash -= delta
         added += delta
         increases += 1
+        applied.add(key)
     breaches = []
     if base.cash_weight < policy.target_cash_floor:
         breaches.append("INHERITED_CASH_BELOW_FLOOR")

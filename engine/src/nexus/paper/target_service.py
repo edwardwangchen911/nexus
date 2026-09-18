@@ -78,6 +78,44 @@ def initial_approval_hash(result: InitialTargetApprovalResult) -> str:
     )
 
 
+async def load_initial_approval_projection(
+    session: AsyncSession,
+    *,
+    approval: PaperInitialTargetApprovalRecord,
+    portfolio_id: UUID,
+    decision_time: datetime,
+    now: datetime | None,
+) -> PaperPortfolioProjection:
+    """The one-time baseline keeps its own timestamp, independent of later research."""
+    if (
+        approval.portfolio_id != portfolio_id
+        or approval.projection_as_of > decision_time
+        or approval.projection_as_of > approval.approved_at
+        or approval.allocation_policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+        or initial_approval_hash(initial_approval_result(approval)) != approval.approval_hash
+        or now is not None
+        and max(approval.approved_at, approval.created_at) > now
+    ):
+        raise ValueError("PORTFOLIO_PROPOSAL_INITIAL_APPROVAL_CONFLICT")
+    projection = await load_paper_projection(
+        session, account_id=approval.account_id, as_of=approval.projection_as_of
+    )
+    approved = await load_paper_projection(
+        session, account_id=approval.account_id, as_of=approval.approved_at
+    )
+    require_unoccupied_projection(projection)
+    require_unoccupied_projection(approved)
+    if (
+        projection.portfolio_id != portfolio_id
+        or projection.projection_hash != approval.projection_hash
+        or projection.source_facts_hash != approved.source_facts_hash
+        or projection.model_dump(exclude={"as_of", "projection_hash"})
+        != approved.model_dump(exclude={"as_of", "projection_hash"})
+    ):
+        raise ValueError("PORTFOLIO_PROPOSAL_INITIAL_APPROVAL_CONFLICT")
+    return projection
+
+
 async def approve_initial_target_projection(
     session: AsyncSession,
     *,

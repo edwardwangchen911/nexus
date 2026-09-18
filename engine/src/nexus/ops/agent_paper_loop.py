@@ -83,6 +83,7 @@ from nexus.paper.candidate_batch import (
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
+from nexus.paper.portfolio_proposal import KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import (
     AGENT_PAPER_LOOP_PROCESS_VERSION,
@@ -3247,7 +3248,7 @@ async def _inspect_portfolio_batch(
             validate_portfolio_synthesis_intent,
         )
         from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH
-        from nexus.paper.target_service import initial_approval_hash, initial_approval_result
+        from nexus.paper.target_service import load_initial_approval_projection
         from nexus.persistence.models.agents import AgentPortfolioSynthesisOutputRecord
         from nexus.persistence.models.paper import (
             PaperInitialTargetApprovalRecord,
@@ -3320,17 +3321,17 @@ async def _inspect_portfolio_batch(
                 )
             )
             policy_block = approval is None
-            if approval is not None and (
-                approval.portfolio_id != cycle.portfolio_id
-                or approval.projection_as_of != cycle.decision_time
-                or approval.projection_hash != frozen.projection_hash
-                or approval.allocation_policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
-                or approval.approved_at > now
-                or approval.created_at > now
-                or initial_approval_hash(initial_approval_result(approval))
-                != approval.approval_hash
-            ):
-                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            if approval is not None:
+                try:
+                    await load_initial_approval_projection(
+                        session,
+                        approval=approval,
+                        portfolio_id=cycle.portfolio_id,
+                        decision_time=cycle.decision_time,
+                        now=now,
+                    )
+                except ValueError as error:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
         else:
             target = await session.get(PaperTargetVersionRecord, frozen.active_target_version_id)
             target_decision = (
@@ -3371,10 +3372,10 @@ async def _inspect_portfolio_batch(
             expected_facts = {"portfolio_synthesis_output_id": str(output.id)}
             rejection = event.fact_ids.get("proposal_rejection_code")
             if rejection is not None:
-                if not isinstance(rejection, str) or rejection not in {
-                    "EXIT_TURNOVER_CONFLICT",
-                    "REDUCTION_TURNOVER_CONFLICT",
-                }:
+                if (
+                    not isinstance(rejection, str)
+                    or rejection not in KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
+                ):
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                 expected_facts["proposal_rejection_code"] = rejection
             if proposal is not None or event.fact_ids != expected_facts:
