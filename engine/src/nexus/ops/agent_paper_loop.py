@@ -2673,6 +2673,7 @@ async def inspect_agent_version_evaluation_loop(
             if not cycles:
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=slot,
                     cycle_status="evaluation_pending",
@@ -2726,6 +2727,7 @@ async def inspect_agent_version_evaluation_loop(
                         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                     return AgentPaperLoopSnapshot(
                         now=now,
+                        calendar_authority_id=evaluation.calendar_authority_id,
                         evaluation_id=evaluation.id,
                         evaluation_slot_at=slot,
                         cycle_id=cycle.id,
@@ -2740,6 +2742,7 @@ async def inspect_agent_version_evaluation_loop(
                 else:
                     return AgentPaperLoopSnapshot(
                         now=now,
+                        calendar_authority_id=evaluation.calendar_authority_id,
                         evaluation_id=evaluation.id,
                         evaluation_slot_at=slot,
                         cycle_id=cycle.id,
@@ -2752,6 +2755,7 @@ async def inspect_agent_version_evaluation_loop(
                 cycle, job_id = queued[0]
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=slot,
                     cycle_id=cycle.id,
@@ -2764,6 +2768,7 @@ async def inspect_agent_version_evaluation_loop(
             if researching_terminal or statuses & {"decision_recorded", "risk_evaluated"}:
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=slot,
                     cycle_status="completed",
@@ -2781,6 +2786,7 @@ async def inspect_agent_version_evaluation_loop(
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=slot,
                     cycle_id=cycle.id,
@@ -2806,6 +2812,7 @@ async def inspect_agent_version_evaluation_loop(
                         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                     return AgentPaperLoopSnapshot(
                         now=now,
+                        calendar_authority_id=evaluation.calendar_authority_id,
                         evaluation_id=evaluation.id,
                         evaluation_slot_at=slot,
                         cycle_id=cycle.id,
@@ -2847,6 +2854,7 @@ async def inspect_agent_version_evaluation_loop(
                 window = unused_windows[0]
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=slot,
                     cycle_id=cycle.id,
@@ -2864,6 +2872,7 @@ async def inspect_agent_version_evaluation_loop(
             }:
                 return AgentPaperLoopSnapshot(
                     now=now,
+                    calendar_authority_id=evaluation.calendar_authority_id,
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=slot,
                     cycle_status="completed",

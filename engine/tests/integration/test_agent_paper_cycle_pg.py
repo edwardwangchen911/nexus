@@ -2122,6 +2122,14 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                 now=evaluation_start,
             )
 
+        pending = await agent_paper_loop.inspect_agent_version_evaluation_loop(
+            EngineSettings(database_url=migrated_database_url),
+            expected_calendar_authority_id=evaluation_calendar_id,
+        )
+        assert pending is not None
+        assert pending.cycle_status == "evaluation_pending"
+        assert pending.calendar_authority_id == evaluation_calendar_id
+
         async with sessions.begin() as session:
             prepared = await advance_agent_version_slot(
                 session,
