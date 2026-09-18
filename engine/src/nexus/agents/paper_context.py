@@ -30,6 +30,7 @@ from nexus.persistence.models.data import (
 from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.risk.canonical import canonical_paper_projection_hash
 from nexus.risk.models import PaperPortfolioProjection
 
 SOURCE = "nexus_agent_paper_context"
@@ -158,7 +159,9 @@ async def prepare_agent_paper_research_snapshot(
         or len(base_evidence) > MAX_FROZEN_EVIDENCE - 2
         or projection.as_of != decision_time
         or projection.nav <= 0
-        or projection.open_orders
+        # Research may observe occupied resources; activation/execution still owns
+        # that guard. Freeze the full projection digest, including open orders.
+        or canonical_paper_projection_hash(projection) != projection.projection_hash
         or quote.instrument_id != candidate.instrument_id
         or quote.source != "schwab"
         or quote.feed != "l1"

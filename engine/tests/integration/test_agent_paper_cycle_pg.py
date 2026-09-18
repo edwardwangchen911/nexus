@@ -227,6 +227,7 @@ async def test_bounded_batch_capture_requires_quote_for_every_symbol(
         @classmethod
         def now(cls, tz=None):
             return capture_at if tz is None else capture_at.astimezone(tz)
+
     bindings = {"AAPL": UUID(int=101), "MSFT": UUID(int=102)}
     captures = []
     sent = []
@@ -313,17 +314,36 @@ async def test_bounded_batch_capture_requires_quote_for_every_symbol(
         await engine.dispose()
 
 
-async def _seed_two_candidate_authority(session, registered):
+async def _seed_two_candidate_authority(
+    session,
+    registered,
+    *,
+    decision_time=DECISION_TIME,
+    source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+):
     from nexus.paper.agent_cycle_authority import CycleAuthority
     from nexus.persistence.models.data import PriceBarRecord
 
-    await _seed_cycle_research_authority(session, registered_decision=registered.decision)
+    same_day = source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+    decision = registered.decision.model_copy(
+        update={
+            "decision_session": decision_time.date(),
+            "decision_time": decision_time,
+        }
+    )
+    await _seed_cycle_research_authority(
+        session,
+        registered_decision=decision,
+        source_policy_id=source_policy_id,
+        quote_received_at=decision_time,
+        price_available_at=decision_time if same_day else None,
+    )
     authority = CycleAuthority(
         account_id=registered.decision.account_id,
         portfolio_id=registered.decision.portfolio_id,
-        decision_session=DECISION_TIME.date(),
-        decision_time=DECISION_TIME,
-        execution_session=DECISION_TIME.date() + timedelta(days=1),
+        decision_session=decision_time.date(),
+        decision_time=decision_time,
+        execution_session=decision_time.date() + timedelta(days=0 if same_day else 1),
         calendar_authority_id=CALENDAR_ID,
         universe_snapshot_id=registered.decision.universe_snapshot_id,
     )
@@ -339,7 +359,8 @@ async def _seed_two_candidate_authority(session, registered):
     prior = await session.scalar(
         select(PriceBarRecord).where(
             PriceBarRecord.instrument_id == INSTRUMENTS[0][0],
-            PriceBarRecord.session == DECISION_TIME.date() - timedelta(days=1),
+            PriceBarRecord.session == decision_time.date() - timedelta(days=1),
+            PriceBarRecord.revision == "agent-prior-all-aapl",
         )
     )
     await ingest_price_page(
@@ -381,7 +402,8 @@ async def _seed_two_candidate_authority(session, registered):
     for row in tuple(
         await session.scalars(
             select(RiskQueryAuthorityRecord).where(
-                RiskQueryAuthorityRecord.required_instrument_ids == [INSTRUMENTS[0][0]]
+                RiskQueryAuthorityRecord.required_instrument_ids == [INSTRUMENTS[0][0]],
+                RiskQueryAuthorityRecord.source_policy_id == source_policy_id,
             )
         )
     ):
@@ -393,7 +415,7 @@ async def _seed_two_candidate_authority(session, registered):
         values.update(
             required_instrument_ids=[second],
             blocked_instrument_ids=[],
-            available_at=row.available_at + timedelta(seconds=1),
+            available_at=row.available_at if same_day else row.available_at + timedelta(seconds=1),
         )
         values["content_hash"] = canonical_query_authority_hash(
             **{
@@ -1202,13 +1224,20 @@ async def _seed_cycle_research_authority(
         select(ExchangeCalendarSessionRecord.calendar_authority_id).limit(1)
     )
     assert calendar_authority_id is not None
-    session.add(
-        ExchangeCalendarSessionRecord(
-            calendar_authority_id=calendar_authority_id,
-            session=authority_time.date() - timedelta(days=1),
-            decision_at=DECISION_TIME - timedelta(days=1),
+    if (
+        await session.get(
+            ExchangeCalendarSessionRecord,
+            (calendar_authority_id, authority_time.date() - timedelta(days=1)),
         )
-    )
+        is None
+    ):
+        session.add(
+            ExchangeCalendarSessionRecord(
+                calendar_authority_id=calendar_authority_id,
+                session=authority_time.date() - timedelta(days=1),
+                decision_at=(authority_time - timedelta(days=1)).replace(hour=21, minute=0),
+            )
+        )
     session.add_all(
         AgentPromptVersionRecord(
             id=UUID(int=0x63000000000000000000000000000100 + index),

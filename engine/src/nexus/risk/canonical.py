@@ -254,8 +254,23 @@ def _market_payload(market: RiskMarketSnapshot) -> dict[str, Any]:
                 "complete": proof.complete,
                 "content_hash": _hash(proof.content_hash),
                 "kind": proof.kind,
+                **(
+                    {
+                        "required_instrument_ids": [
+                            _uuid(value) for value in proof.required_instrument_ids
+                        ]
+                    }
+                    if proof.required_instrument_ids is not None
+                    else {}
+                ),
             }
-            for proof in sorted(market.query_proofs, key=lambda item: item.kind)
+            for proof in sorted(
+                market.query_proofs,
+                key=lambda item: (
+                    tuple(value.int for value in item.required_instrument_ids or ()),
+                    item.kind,
+                ),
+            )
         ],
         "required_instrument_ids": sorted(
             _uuid(instrument_id) for instrument_id in market.required_instrument_ids

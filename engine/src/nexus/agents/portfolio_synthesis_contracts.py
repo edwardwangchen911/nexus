@@ -23,9 +23,23 @@ SYNTHESIS_TOOL_HASH = canonical_portfolio_decision_hash(
     {"schema_version": "portfolio_synthesis_tools_v1", "tools": []}
 )
 _UNSAFE = re.compile(
-    r"(?:\b(?:weights?|percent(?:age)?|amounts?|quantit(?:y|ies)|orders?|prices?|"
-    r"shares?|risk[_ -]?override)\b|\d\s*[%％]|\$\s*\d|"
-    r"(?:目标权重|仓位比例|金额|股数|下单|限价|市价|绕过风控|修改风控))",
+    # Prose is evidence, never an instruction channel. Match explicit configuration
+    # or execution phrases, not ordinary prices, percentages or business metrics.
+    r"(?:\b(?:allocate|deploy|invest)\b[^.;\n]{0,100}\b(?:capital|cash|funds|portfolio)\b|"
+    r"\b(?:buy|sell)\b[^.;\n]{0,80}(?:\bshares?\b|\blimit\s+price\b|\$\s*\d)|"
+    r"\b(?:increase|reduce|set|assign)\s+(?:the\s+)?(?:target\s+)?"
+    r"(?:position|weight|quantity|allocation)\b|"
+    r"\b(?:place|submit|execute|cancel|amend)\b[^.;\n]{0,40}\b(?:order|trade)s?\b|"
+    r"\b(?:raise|change|override|bypass|disable|relax)\b[^.;\n]{0,40}"
+    r"\b(?:risk|limit|guard)s?\b|\brisk[_ -]?override\b|"
+    r"(?:买入|卖出|增持|减持)[^。；\n]{0,30}(?:\d|[一二两三四五六七八九十百千]+)\s*股|"
+    r"(?:配置|分配|投入)[^。；\n]{0,30}(?:资金|现金|仓位)|"
+    r"(?:仓位|权重|股数|数量)[^。；\n]{0,12}(?:设为|设置为|上调|下调|减至|增至)|"
+    r"(?:设置|设定|调整)[^。；\n]{0,12}(?:仓位|权重|股数|数量)|"
+    r"(?:提交|发送|执行|撤销|修改)[^。；\n]{0,12}(?:买单|卖单|订单|交易)|"
+    r"(?:限价|市价)[^。；\n]{0,20}(?:买入|卖出|下单)|"
+    r"(?:风险限额|风控)[^。；\n]{0,12}(?:上调|下调|修改|放宽|关闭)|"
+    r"(?:绕过|修改|放宽|关闭)[^。；\n]{0,12}(?:风控|风险限额))",
     re.IGNORECASE,
 )
 

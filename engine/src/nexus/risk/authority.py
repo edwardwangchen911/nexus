@@ -301,7 +301,15 @@ def build_risk_market_snapshot(
                 ),
             )
         ),
-        query_proofs=tuple(sorted(query_proofs, key=lambda item: item.kind)),
+        query_proofs=tuple(
+            sorted(
+                query_proofs,
+                key=lambda item: (
+                    tuple(value.int for value in item.required_instrument_ids or ()),
+                    item.kind,
+                ),
+            )
+        ),
         authority_hash="0" * 64,
     )
     return draft.model_copy(update={"authority_hash": canonical_risk_market_authority_hash(draft)})
@@ -611,10 +619,7 @@ async def _load_query_proofs(
     if (
         {record.kind for record in records} != _QUERY_KINDS
         or len(records) != 3
-        or (
-            authority_ids is not None
-            and {record.id for record in records} != set(authority_ids)
-        )
+        or (authority_ids is not None and {record.id for record in records} != set(authority_ids))
     ):
         raise ValueError("risk query proofs are incomplete")
     proofs: list[AuthorityQueryProof] = []
@@ -628,8 +633,7 @@ async def _load_query_proofs(
             or (
                 decision.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
                 and record.kind == "suspension"
-                and decision.decision_time - record.available_at
-                > timedelta(minutes=2)
+                and decision.decision_time - record.available_at > timedelta(minutes=2)
             )
             or canonical_query_authority_hash(
                 source_policy_id=record.source_policy_id,
@@ -670,8 +674,7 @@ async def _load_frozen_prior_daily_price(
     previous_session = await session.scalar(
         select(ExchangeCalendarSessionRecord.session)
         .where(
-            ExchangeCalendarSessionRecord.calendar_authority_id
-            == authority.calendar_authority_id,
+            ExchangeCalendarSessionRecord.calendar_authority_id == authority.calendar_authority_id,
             ExchangeCalendarSessionRecord.session < authority.decision_session,
         )
         .order_by(ExchangeCalendarSessionRecord.session.desc())
@@ -764,9 +767,13 @@ async def prepare_schwab_realtime_risk_snapshot(
     ):
         raise ValueError("risk Schwab cycle authority is invalid")
     manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
-    if len(manifest) != 1 or candidate_manifest_hash(manifest) != cycle.candidate_hash:
+    required = {candidate.instrument_id for candidate in manifest}
+    if (
+        not 1 <= len(manifest) <= 5
+        or len(required) != len(manifest)
+        or candidate_manifest_hash(manifest) != cycle.candidate_hash
+    ):
         raise ValueError("risk Schwab candidate authority is invalid")
-    candidate = manifest[0]
     calendar = await session.scalar(
         select(ExchangeCalendarAuthorityRecord)
         .join(
@@ -800,26 +807,36 @@ async def prepare_schwab_realtime_risk_snapshot(
         universe_snapshot_id=cycle.universe_snapshot_id,
         quality_report_id=cycle.quality_report_id,
     )
-    required = {candidate.instrument_id}
     whitelist = await _validate_root_authorities(session, authority, required)
-    return build_risk_market_snapshot(
-        decision=authority,
-        required_instrument_ids=(candidate.instrument_id,),
-        whitelisted_instrument_ids=whitelist,
-        prices=(
+    prices: list[RiskPrice] = []
+    proofs: list[AuthorityQueryProof] = []
+    for candidate in sorted(manifest, key=lambda item: item.instrument_id.int):
+        prices.append(
             await _load_frozen_prior_daily_price(
                 session,
                 authority=authority,
                 candidate=candidate,
-            ),
-        ),
-        sector_exposures=await _load_sectors(session, authority, required),
-        query_proofs=await _load_query_proofs(
+            )
+        )
+        candidate_proofs = await _load_query_proofs(
             session,
             authority,
-            required,
+            {candidate.instrument_id},
             candidate.risk_query_authority_ids,
-        ),
+        )
+        proofs.extend(
+            proof.model_copy(update={"required_instrument_ids": (candidate.instrument_id,)})
+            if len(manifest) > 1
+            else proof
+            for proof in candidate_proofs
+        )
+    return build_risk_market_snapshot(
+        decision=authority,
+        required_instrument_ids=tuple(required),
+        whitelisted_instrument_ids=whitelist,
+        prices=prices,
+        sector_exposures=await _load_sectors(session, authority, required),
+        query_proofs=proofs,
     )
 
 

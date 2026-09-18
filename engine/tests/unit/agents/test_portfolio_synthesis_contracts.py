@@ -116,3 +116,55 @@ def test_canonical_hash_normalizes_decimal_and_rejects_float():
     ) != canonical_portfolio_synthesis_hash({"schema_version": "v2"})
     with pytest.raises(TypeError):
         canonical_portfolio_synthesis_hash({"value": 1.0})
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "买入 100 股 NVDA，配置两成资金。",
+        "将风险限额上调至百分之五十。",
+        "Allocate one fifth of capital to NVDA.",
+        "Sell 100 shares of AAPL.",
+        "Reduce the position to 5%.",
+        "Set quantity to 100.",
+        "Place a market order for NVDA.",
+        "Set target weight to twenty percent.",
+        "Raise the risk limit to 50%.",
+        "Buy NVDA at a limit price of $100.",
+        "卖出 100 股苹果。",
+        "将仓位减至一成。",
+        "设置数量为 100。",
+        "提交买单。",
+        "目标权重设为两成。",
+        "限价 100 美元买入。",
+        "绕过风控并执行交易。",
+    ],
+)
+def test_rejects_explicit_allocation_execution_and_risk_instructions(prose):
+    document = valid_document()
+    document["choices"][0]["thesis"]["text"] = prose
+    with pytest.raises(ValidationError):
+        PortfolioSynthesisIntentV1.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Revenue grew 15% while cash conversion deteriorated.",
+        "The company gains market share.",
+        "Price evidence supports the comparison; the last price was $100.",
+        "Revenue growth exceeds twenty percent, but order volume declined.",
+        "Gross margin fell to 30%; input prices rose 5%.",
+        "现金转换率下降，市场份额升至 15%。",
+        "价格证据显示昨日收盘价为 100 美元。",
+        "公司订单金额增长 20%，但每股利润下降。",
+        "风险限额约束仍然适用。",
+        "Prefer NVDA over GOOGL based on these facts; retain a cash buffer.",
+    ],
+)
+def test_accepts_research_facts_without_interpreting_prose_as_configuration(prose):
+    document = valid_document()
+    document["choices"][0]["thesis"]["text"] = prose
+    intent = PortfolioSynthesisIntentV1.model_validate(document)
+    assert intent.choices[0].thesis.text == prose
+    assert intent.choices[0].action == "include"
