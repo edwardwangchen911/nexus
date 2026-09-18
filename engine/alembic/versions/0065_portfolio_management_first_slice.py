@@ -42,6 +42,57 @@ _OLD_ORIGIN = _NEW_ORIGIN.replace(
 )
 
 
+def _cycle_event_chain_sql(*, portfolio_completion: bool) -> str:
+    targets = (
+        "'risk_evaluated','completed','failed'"
+        if portfolio_completion
+        else "'risk_evaluated','failed'"
+    )
+    return f"""
+        CREATE OR REPLACE FUNCTION nexus_agent_paper_cycle_event_chain_valid()
+        RETURNS trigger LANGUAGE plpgsql
+        SET search_path TO pg_catalog, public, pg_temp AS $$
+        DECLARE
+          account_ref uuid;
+          prior_sequence integer;
+          prior_status varchar(30);
+          transition_valid boolean;
+        BEGIN
+          SELECT account_id INTO account_ref FROM public.agent_paper_cycles WHERE id=NEW.cycle_id;
+          PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended('nexus:agent-paper-cycle:' || account_ref::text, 0)
+          );
+          SELECT sequence,to_status INTO prior_sequence,prior_status
+          FROM public.agent_paper_cycle_events WHERE cycle_id=NEW.cycle_id
+          ORDER BY sequence DESC LIMIT 1;
+          IF prior_sequence IS NULL THEN
+            transition_valid := NEW.sequence=1 AND NEW.from_status IS NULL
+              AND NEW.to_status='prepared';
+          ELSE
+            transition_valid := NEW.sequence=prior_sequence+1
+              AND NEW.from_status=prior_status
+              AND (
+                (prior_status='prepared' AND NEW.to_status IN ('researching','unavailable','failed'))
+                OR (prior_status='researching' AND NEW.to_status IN
+                    ('decision_recorded','unavailable','failed'))
+                OR (prior_status='decision_recorded' AND NEW.to_status IN ({targets}))
+                OR (prior_status='risk_evaluated' AND NEW.to_status IN
+                    ('awaiting_market','completed','failed'))
+                OR (prior_status='awaiting_market' AND NEW.to_status IN
+                    ('partially_filled','completed','failed'))
+                OR (prior_status='partially_filled' AND NEW.to_status IN
+                    ('partially_filled','completed','failed'))
+              );
+          END IF;
+          IF NOT COALESCE(transition_valid,FALSE) THEN
+            RAISE EXCEPTION 'agent paper cycle event chain is invalid' USING ERRCODE='23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+    """
+
+
 def _create_tables() -> None:
     op.create_table(
         "agent_paper_candidate_batches",
@@ -557,6 +608,7 @@ def _create_guards() -> None:
         "ON strategy_decisions "
         "FOR EACH ROW EXECUTE FUNCTION nexus_portfolio_proposal_synthesis_valid()"
     )
+    op.execute(_cycle_event_chain_sql(portfolio_completion=True))
 
 
 def downgrade() -> None:
@@ -582,6 +634,7 @@ def downgrade() -> None:
         + " THEN RAISE EXCEPTION 'portfolio management facts prevent downgrade' "
         "USING ERRCODE='P3D01'; END IF; END $$"
     )
+    op.execute(_cycle_event_chain_sql(portfolio_completion=False))
     op.execute("DROP TRIGGER trg_portfolio_proposal_synthesis_valid ON strategy_decisions")
     op.execute("DROP FUNCTION nexus_portfolio_proposal_synthesis_valid()")
     _replace_check(

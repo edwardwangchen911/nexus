@@ -103,7 +103,7 @@ async def test_approval_one_second_before_cycle_remains_authoritative(migrated_d
                 events=await _events(session, cycle.id),
                 now=args["now"],
             )
-            assert result.result_code == "TARGET_ACTIVATION_PENDING"
+            assert result.result_code == "NO_ORDER_REQUIRED"
             stored = await load_portfolio_proposal(
                 session, account_id=cycle.account_id, decision_id=result.strategy_decision_id
             )
@@ -203,53 +203,20 @@ async def test_cycle_handoff_is_recorded_once_and_never_executes(migrated_databa
                 now=args["now"],
                 daily_limit_usd=None,
             )
-            assert result.result_code == (
-                "TARGET_ACTIVATION_PENDING" if approved else "POLICY_UNCONFIRMED"
-            )
-            assert result.status == ("decision_recorded" if approved else "researching")
+            assert result.result_code == ("NO_ORDER_REQUIRED" if approved else "POLICY_UNCONFIRMED")
+            assert result.status == ("completed" if approved else "researching")
             if approved:
                 count = len(await _events(session, cycle.id))
                 replay = await _resume_batch(
                     session, cycle=cycle, events=await _events(session, cycle.id)
                 )
-                assert replay.result_code == "TARGET_ACTIVATION_PENDING"
+                assert replay.result_code == "NO_ORDER_REQUIRED"
                 assert replay.strategy_decision_id == result.strategy_decision_id
                 assert len(await _events(session, cycle.id)) == count
-                from helpers.paper_batch import CALENDAR_ID
-                from nexus.ops.agent_paper_loop import (
-                    AgentPaperLoopAction,
-                    _inspect_portfolio_batch,
-                    choose_loop_action,
-                )
-                from nexus.paper.agent_cycle_authority import ServiceCalendarAuthority
-
-                calendar = ServiceCalendarAuthority(
-                    calendar_authority_id=CALENDAR_ID,
-                    as_of=args["now"],
-                    local_date=cycle.decision_session,
-                    session=cycle.decision_session,
-                    decision_window_start_at=cycle.decision_time,
-                    market_open_at=cycle.decision_time,
-                    market_close_at=args["now"] + timedelta(hours=1),
-                    next_session=(args["now"] + timedelta(days=1)).date(),
-                    next_decision_window_start_at=args["now"] + timedelta(days=1),
-                    next_market_close_at=args["now"] + timedelta(days=1, hours=1),
-                )
-                for _ in range(2):
-                    snapshot = await _inspect_portfolio_batch(
-                        session,
-                        account_id=cycle.account_id,
-                        now=args["now"],
-                        calendar=calendar,
-                        performance_due_at=None,
-                    )
-                    assert snapshot is not None
-                    assert snapshot.cycle_result_code == "TARGET_ACTIVATION_PENDING"
-                    assert (
-                        choose_loop_action(snapshot) == AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
-                    )
-                assert len(await _events(session, cycle.id)) == count
-            for model in (PaperTargetVersionRecord, PaperOrderBatchRecord, PaperOrderRecord):
+            assert await session.scalar(
+                select(func.count()).select_from(PaperTargetVersionRecord)
+            ) == (1 if approved else 0)
+            for model in (PaperOrderBatchRecord, PaperOrderRecord):
                 assert await session.scalar(select(func.count()).select_from(model)) == 0
     finally:
         await engine.dispose()
@@ -475,10 +442,10 @@ async def test_approval_resumes_original_cycle_from_completed_synthesis(
                 now=at,
             )
             assert resumed.cycle_id == cycle.id
-            assert resumed.status == "decision_recorded"
-            assert resumed.result_code == "TARGET_ACTIVATION_PENDING"
+            assert resumed.status == "completed"
+            assert resumed.result_code == "NO_ORDER_REQUIRED"
             assert resumed.portfolio_synthesis_output_id == args["synthesis_output_id"]
-            assert len(await _events(session, cycle.id)) == original_events + 1
+            assert len(await _events(session, cycle.id)) == original_events + 2
             assert set(await session.scalars(select(Job.id))) == original_jobs
             assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == original_cycles
     finally:

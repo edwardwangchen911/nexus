@@ -70,6 +70,8 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     PaperAccountRecord,
+    PaperOrderBatchRecord,
+    PaperOrderRecord,
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
@@ -392,7 +394,7 @@ async def resume_schwab_agent_paper_cycle(
             now=now,
             daily_limit_usd=daily_limit_usd,
         )
-    return await _resume_batch(session, cycle=cycle, events=events)
+    return await _resume_batch(session, cycle=cycle, events=events, now=now)
 
 
 async def advance_agent_paper_cycle(
@@ -559,7 +561,7 @@ async def advance_agent_paper_cycle(
             now=now,
             daily_limit_usd=daily_limit_usd,
         )
-    return await _resume_batch(session, cycle=cycle, events=events)
+    return await _resume_batch(session, cycle=cycle, events=events, now=now)
 
 
 async def _start_cycle(
@@ -907,7 +909,9 @@ async def _resume_research(
             "research_output_ids": [str(action.output_id) for action in actions],
         },
     )
-    return await _resume_batch(session, cycle=cycle, events=await _events(session, cycle.id))
+    return await _resume_batch(
+        session, cycle=cycle, events=await _events(session, cycle.id), now=now
+    )
 
 
 async def _resume_batch(
@@ -915,7 +919,10 @@ async def _resume_batch(
     *,
     cycle: AgentPaperCycleRecord,
     events: tuple[AgentPaperCycleEventRecord, ...],
+    now: datetime | None = None,
 ) -> AgentPaperCycleResult:
+    if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
+        return _result(cycle.id, events, replayed=True)
     decision_id = _fact_uuid(events, "strategy_decision_id") or await session.scalar(
         select(StrategyDecisionRecord.id).where(
             StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
@@ -925,9 +932,72 @@ async def _resume_batch(
     if decision_id is None:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     if cycle.candidate_batch_id is not None:
-        return _result(cycle.id, events, replayed=True).model_copy(
-            update={"result_code": "TARGET_ACTIVATION_PENDING"}
+        if events[-1].to_status != "decision_recorded" or now is None:
+            return _result(cycle.id, events, replayed=True).model_copy(
+                update={"result_code": "TARGET_ACTIVATION_PENDING"}
+            )
+        from nexus.paper.target_service import activate_portfolio_target
+
+        try:
+            activation = await activate_portfolio_target(
+                session,
+                account_id=cycle.account_id,
+                strategy_decision_id=decision_id,
+                request_time=now,
+                idempotency_key=f"portfolio-target:{cycle.id}",
+            )
+        except ValueError as error:
+            if str(error) not in {
+                "INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN",
+                "PORTFOLIO_PROPOSAL_BASELINE_CONFLICT",
+            }:
+                raise
+            await _append_event(
+                session,
+                cycle,
+                "decision_recorded",
+                "completed",
+                "TARGET_ACTIVATION_BLOCKED",
+                {"strategy_decision_id": str(decision_id)},
+            )
+            return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+        if activation.batch_id is None:
+            await _append_event(
+                session,
+                cycle,
+                "decision_recorded",
+                "completed",
+                "NO_ORDER_REQUIRED",
+                {
+                    "strategy_decision_id": str(decision_id),
+                    "target_version_id": str(activation.target_version_id),
+                },
+            )
+            return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+        stored_batch = await session.get(PaperOrderBatchRecord, activation.batch_id)
+        if stored_batch is None:
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+        order_ids = tuple(
+            await session.scalars(
+                select(PaperOrderRecord.id)
+                .where(PaperOrderRecord.batch_id == stored_batch.id)
+                .order_by(PaperOrderRecord.id)
+            )
         )
+        await _append_event(
+            session,
+            cycle,
+            "decision_recorded",
+            "risk_evaluated",
+            "PAPER_BATCH_EVALUATED",
+            {
+                "strategy_decision_id": str(decision_id),
+                "target_version_id": str(activation.target_version_id),
+                "batch_id": str(stored_batch.id),
+                "order_ids": [str(value) for value in order_ids],
+            },
+        )
+        events = await _events(session, cycle.id)
     if events[-1].to_status == "decision_recorded":
         try:
             batch = await create_paper_order_batch(
@@ -1124,7 +1194,12 @@ async def _resume_portfolio_synthesis(
             "portfolio_synthesis_output_id": str(output.id),
         },
     )
-    return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    return await _resume_batch(
+        session,
+        cycle=cycle,
+        events=await _events(session, cycle.id),
+        now=now,
+    )
 
 
 async def _stop_unavailable(

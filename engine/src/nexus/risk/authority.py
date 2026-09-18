@@ -612,22 +612,46 @@ async def _load_query_proofs(
         )
     records = tuple((await session.scalars(query)).all())
     if authority_ids is None:
-        latest: dict[str, RiskQueryAuthorityRecord] = {}
+        latest: dict[tuple[UUID | None, str], RiskQueryAuthorityRecord] = {}
         for record in records:
-            latest.setdefault(record.kind, record)
-        records = tuple(latest[kind] for kind in sorted(latest))
+            instrument_id = (
+                record.required_instrument_ids[0]
+                if len(record.required_instrument_ids) == 1
+                and record.required_instrument_ids[0] in required
+                else None
+            )
+            if len(required) > 1 and instrument_id is None:
+                continue
+            latest.setdefault((instrument_id, record.kind), record)
+        if len(required) > 1:
+            records = tuple(
+                latest[(instrument_id, kind)]
+                for instrument_id in sorted(required, key=lambda value: value.int)
+                for kind in sorted(_QUERY_KINDS)
+                if (instrument_id, kind) in latest
+            )
+        else:
+            instrument_id = next(iter(required))
+            selected: list[RiskQueryAuthorityRecord] = []
+            for kind in sorted(_QUERY_KINDS):
+                selected_record = latest.get((instrument_id, kind), latest.get((None, kind)))
+                if selected_record is not None:
+                    selected.append(selected_record)
+            records = tuple(selected)
+    bound = authority_ids is None and len(required) > 1
     if (
         {record.kind for record in records} != _QUERY_KINDS
-        or len(records) != 3
+        or len(records) != (3 * len(required) if bound else 3)
         or (authority_ids is not None and {record.id for record in records} != set(authority_ids))
     ):
         raise ValueError("risk query proofs are incomplete")
     proofs: list[AuthorityQueryProof] = []
     for record in records:
+        record_required = {record.required_instrument_ids[0]} if bound else required
         if (
-            set(record.required_instrument_ids) != required
-            or len(record.required_instrument_ids) != len(required)
-            or not set(record.blocked_instrument_ids) <= required
+            set(record.required_instrument_ids) != record_required
+            or len(record.required_instrument_ids) != len(record_required)
+            or not set(record.blocked_instrument_ids) <= record_required
             or not record.complete
             or record.available_at > decision.decision_time
             or (
@@ -660,9 +684,18 @@ async def _load_query_proofs(
                 blocked=bool(record.blocked_instrument_ids),
                 available_at=record.available_at,
                 content_hash=record.content_hash,
+                required_instrument_ids=(record.required_instrument_ids[0],) if bound else None,
             )
         )
-    return tuple(sorted(proofs, key=lambda item: item.kind))
+    return tuple(
+        sorted(
+            proofs,
+            key=lambda item: (
+                tuple(value.int for value in item.required_instrument_ids or ()),
+                item.kind,
+            ),
+        )
+    )
 
 
 async def _load_frozen_prior_daily_price(

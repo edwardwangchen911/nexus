@@ -156,33 +156,37 @@ async def _seed_adjusted_authority(session: AsyncSession, decision) -> None:
             )
             assert result.price_authority is not None
     required = tuple(item[0] for item in INSTRUMENTS)
-    for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
-        content_hash = canonical_query_authority_hash(
-            source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
-            universe_snapshot_id=decision.universe_snapshot_id,
-            decision_session=decision.decision_session,
-            kind=kind,
-            required_instrument_ids=required,
-            blocked_instrument_ids=(),
-            complete=True,
-            source_watermark_hash=f"{index + 6}" * 64,
-            available_at=available_at,
-        )
-        session.add(
-            RiskQueryAuthorityRecord(
-                id=UUID(int=0x62000000000000000000000000000400 + index),
+    for instrument_index, instrument_id in enumerate(required, start=1):
+        for kind_index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
+            source_watermark_hash = f"{(instrument_index + kind_index + 5) % 10}" * 64
+            content_hash = canonical_query_authority_hash(
                 source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
                 universe_snapshot_id=decision.universe_snapshot_id,
                 decision_session=decision.decision_session,
                 kind=kind,
-                required_instrument_ids=list(required),
-                blocked_instrument_ids=[],
+                required_instrument_ids=(instrument_id,),
+                blocked_instrument_ids=(),
                 complete=True,
-                source_watermark_hash=f"{index + 6}" * 64,
+                source_watermark_hash=source_watermark_hash,
                 available_at=available_at,
-                content_hash=content_hash,
             )
-        )
+            session.add(
+                RiskQueryAuthorityRecord(
+                    id=UUID(
+                        int=0x62000000000000000000000000000400 + instrument_index * 16 + kind_index
+                    ),
+                    source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+                    universe_snapshot_id=decision.universe_snapshot_id,
+                    decision_session=decision.decision_session,
+                    kind=kind,
+                    required_instrument_ids=[instrument_id],
+                    blocked_instrument_ids=[],
+                    complete=True,
+                    source_watermark_hash=source_watermark_hash,
+                    available_at=available_at,
+                    content_hash=content_hash,
+                )
+            )
     await session.flush()
 
 

@@ -19,6 +19,7 @@ def test_public_batch_request_has_no_caller_supplied_order_fields() -> None:
         "strategy_decision_id",
         "idempotency_key",
         "request_time",
+        "target_version_id",
         "hooks",
     )
     assert not {
