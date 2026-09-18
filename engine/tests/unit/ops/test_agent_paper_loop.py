@@ -402,6 +402,21 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
         ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.WAIT_FOR_SLOT),
         (
             {
+                "trigger_attempt_slot_at": SLOT,
+                "trigger_failure_code": "SCHWAB_L1_INCOMPLETE",
+            },
+            A.WAIT_FOR_SLOT,
+        ),
+        (
+            {
+                "now": NOW + timedelta(minutes=5),
+                "trigger_attempt_slot_at": SLOT,
+                "trigger_failure_code": "SCHWAB_L1_INCOMPLETE",
+            },
+            A.TRIGGER,
+        ),
+        (
+            {
                 "now": NOW + timedelta(minutes=5),
                 "cycle_status": "unavailable",
                 "cycle_slot_at": SLOT,
@@ -3081,6 +3096,57 @@ def test_executor_stops_before_cycle_when_prior_daily_is_unavailable(
     )
 
     assert result == "stop_prerequisite_unavailable"
+
+
+def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def fail_known(*_args, **_kwargs):
+        raise ValueError("SCHWAB_L1_INCOMPLETE")
+
+    async def persisted_failure(
+        database_url, *, account_id, decision_slot_at
+    ):
+        assert database_url == loop.EngineSettings().database_url
+        assert account_id == UUID(int=1)
+        assert decision_slot_at == SLOT
+        return "SCHWAB_L1_INCOMPLETE"
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "trigger_once", fail_known)
+    monkeypatch.setattr(
+        loop,
+        "_load_persisted_trigger_failure",
+        persisted_failure,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=loop.AgentPaperLoopAction.TRIGGER,
+            snapshot=snapshot(),
+        )
+    )
+
+    assert result is None
 
 
 @pytest.mark.parametrize(

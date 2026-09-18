@@ -2174,6 +2174,48 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
 
 
 @pytest.mark.asyncio
+async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    fixed_now = datetime(2026, 8, 26, 20, 0, 30, tzinfo=UTC)
+    slot = datetime(2026, 8, 26, 20, 0, tzinfo=UTC)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            session.add(
+                IdempotencyRecord(
+                    actor_id=f"local-agent-paper-schwab:{seed.account_id}",
+                    route="agent-paper-schwab-trigger-v2",
+                    idempotency_key=slot.isoformat(),
+                    request_hash="a" * 64,
+                    schema_version="agent_paper_schwab_trigger_v2",
+                    response_payload={
+                        "outcome": "failed",
+                        "error_code": "SCHWAB_L1_INCOMPLETE",
+                    },
+                )
+            )
+        monkeypatch.setattr(
+            agent_paper_loop,
+            "func",
+            SimpleNamespace(clock_timestamp=lambda: literal(fixed_now), max=func.max),
+        )
+        snapshot = await inspect_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+        )
+    finally:
+        await engine.dispose()
+
+    assert snapshot.trigger_attempt_slot_at == slot
+    assert snapshot.trigger_failure_code == "SCHWAB_L1_INCOMPLETE"
+
+
+@pytest.mark.asyncio
 async def test_service_calendar_selector_observes_half_day_dst_and_weekend(
     migrated_database_url: str,
 ) -> None:

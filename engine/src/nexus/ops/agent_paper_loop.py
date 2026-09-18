@@ -106,7 +106,7 @@ from nexus.persistence.models.paper import (
     PaperPerformanceSnapshotRecord,
     PaperRequestIdempotencyRecord,
 )
-from nexus.persistence.models.runtime import Job, JobLease, WorkerHeartbeat
+from nexus.persistence.models.runtime import IdempotencyRecord, Job, JobLease, WorkerHeartbeat
 from nexus.providers.http import HttpPolicyError
 from nexus.providers.market.schwab_oauth import (
     SchwabOAuthError,
@@ -167,6 +167,8 @@ class AgentPaperLoopSnapshot:
     cycle_id: UUID | None = None
     cycle_status: str | None = None
     cycle_slot_at: datetime | None = None
+    trigger_attempt_slot_at: datetime | None = None
+    trigger_failure_code: str | None = None
     research_job_status: str | None = None
     research_job_id: UUID | str | None = None
     research_job_lease_expires_at: datetime | None = None
@@ -243,6 +245,9 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
         "SCHWAB_L1_INCOMPLETE",
         "CODEX_CHATGPT_LOGIN_REQUIRED",
     }
+)
+_SLOT_TERMINAL_TRIGGER_FAILURE_CODES = frozenset(
+    {"SCHWAB_L1_FRESHNESS_UNPROVEN", "SCHWAB_L1_INCOMPLETE"}
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
 _PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
@@ -1351,6 +1356,8 @@ def snapshot_from_cycle_view(
     calendar: ServiceCalendarAuthority,
     market_window: object | None = None,
     performance_due_at: datetime | None = None,
+    trigger_attempt_slot_at: datetime | None = None,
+    trigger_failure_code: str | None = None,
 ) -> AgentPaperLoopSnapshot:
     """Map the bounded read projection into the scheduler's fail-closed contract."""
     cycle_id = getattr(view, "cycle_id", None)
@@ -1408,6 +1415,8 @@ def snapshot_from_cycle_view(
         cycle_id=cycle_id,
         cycle_status=cycle_status,
         cycle_slot_at=cycle_slot_at,
+        trigger_attempt_slot_at=trigger_attempt_slot_at,
+        trigger_failure_code=trigger_failure_code,
         research_job_status=None if research_job is None else research_job[1],
         research_job_id=None if research_job is None else research_job[0],
         market_window_ready=market_window_ready,
@@ -1516,6 +1525,13 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
         return AgentPaperLoopAction.WAIT_FOR_SESSION
 
     current_slot = floor_decision_slot(snapshot.now)
+    if (snapshot.trigger_attempt_slot_at is None) != (snapshot.trigger_failure_code is None):
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    if snapshot.trigger_failure_code is not None:
+        if snapshot.trigger_failure_code not in _SLOT_TERMINAL_TRIGGER_FAILURE_CODES:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        if snapshot.trigger_attempt_slot_at == current_slot:
+            return AgentPaperLoopAction.WAIT_FOR_SLOT
     if snapshot.cycle_status not in {None, "completed", "unavailable", "failed"}:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
@@ -2309,19 +2325,30 @@ async def execute_agent_paper_loop_action(
             return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
         if current_trends != "ready":
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        await trigger_once(
-            trigger_settings,
-            AgentPaperTriggerRequest(
-                action="trigger",
-                account_id=account_id,
-                idempotency_key=(
-                    f"agent-paper-loop:{floor_decision_slot(snapshot.now).isoformat()}"
+        decision_slot_at = floor_decision_slot(snapshot.now)
+        try:
+            await trigger_once(
+                trigger_settings,
+                AgentPaperTriggerRequest(
+                    action="trigger",
+                    account_id=account_id,
+                    idempotency_key=f"agent-paper-loop:{decision_slot_at.isoformat()}",
                 ),
-            ),
-            repo_root=repo_root,
-            expected_calendar_authority_id=expected_calendar_authority_id,
-            **({"process_environment": environment} if env_file is not None else {}),
-        )
+                repo_root=repo_root,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                **({"process_environment": environment} if env_file is not None else {}),
+            )
+        except ValueError as error:
+            error_code = str(error)
+            if error_code not in _SLOT_TERMINAL_TRIGGER_FAILURE_CODES:
+                raise
+            persisted = await _load_persisted_trigger_failure(
+                settings.database_url,
+                account_id=account_id,
+                decision_slot_at=decision_slot_at,
+            )
+            if persisted != error_code:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
         return None
     if action == AgentPaperLoopAction.RUN_RESEARCH_JOB:
         if not isinstance(snapshot.research_job_id, UUID):
@@ -2795,6 +2822,57 @@ async def inspect_agent_version_evaluation_loop(
         await engine.dispose()
 
 
+async def _read_persisted_trigger_failure(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    decision_slot_at: datetime,
+) -> str | None:
+    claim = await session.scalar(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account_id}",
+            IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+            IdempotencyRecord.idempotency_key == decision_slot_at.isoformat(),
+            IdempotencyRecord.schema_version == "agent_paper_schwab_trigger_v2",
+        )
+    )
+    if claim is None:
+        return None
+    payload = claim.response_payload
+    error_code = payload.get("error_code") if payload.get("outcome") == "failed" else None
+    if isinstance(error_code, str) and error_code in _SLOT_TERMINAL_TRIGGER_FAILURE_CODES:
+        return error_code
+    return None
+
+
+async def _load_persisted_trigger_failure(
+    database_url: str | None,
+    *,
+    account_id: UUID,
+    decision_slot_at: datetime,
+) -> str | None:
+    if not database_url:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    database = make_url(database_url)
+    if (
+        database.drivername != "postgresql+asyncpg"
+        or database.host not in {"localhost", "127.0.0.1", "::1"}
+        or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    engine = create_async_engine(database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            return await _read_persisted_trigger_failure(
+                session,
+                account_id=account_id,
+                decision_slot_at=decision_slot_at,
+            )
+    finally:
+        await engine.dispose()
+
+
 async def inspect_agent_paper_loop(
     settings: EngineSettings,
     *,
@@ -2827,6 +2905,15 @@ async def inspect_agent_paper_loop(
             account, _ = await service.account()
             if account.id != account_id:
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            current_trigger_slot = floor_decision_slot(now)
+            trigger_failure_code = await _read_persisted_trigger_failure(
+                session,
+                account_id=account_id,
+                decision_slot_at=current_trigger_slot,
+            )
+            trigger_attempt_slot_at: datetime | None = (
+                current_trigger_slot if trigger_failure_code is not None else None
+            )
             latest_completed_close = await session.scalar(
                 select(func.max(ExchangeCalendarSessionRecord.market_close_at))
                 .join(
@@ -2862,6 +2949,8 @@ async def inspect_agent_paper_loop(
                     decision_window_end_at=calendar.market_close_at,
                     next_decision_window_start_at=calendar.next_decision_window_start_at,
                     performance_due_at=performance_due_at,
+                    trigger_attempt_slot_at=trigger_attempt_slot_at,
+                    trigger_failure_code=trigger_failure_code,
                 )
 
             events: tuple[object, ...] = ()
@@ -2947,6 +3036,8 @@ async def inspect_agent_paper_loop(
                 calendar=calendar,
                 market_window=market_window,
                 performance_due_at=performance_due_at,
+                trigger_attempt_slot_at=trigger_attempt_slot_at,
+                trigger_failure_code=trigger_failure_code,
             )
     finally:
         await engine.dispose()
