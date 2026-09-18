@@ -4621,6 +4621,26 @@ def test_policy_unconfirmed_keeps_host_waiting_across_slots(at):
     assert loop.choose_loop_action(state) == A.WAIT_FOR_SLOT
 
 
+@pytest.mark.parametrize("status", ["researching", "unavailable"])
+@pytest.mark.parametrize("close_hour", [20, 17], ids=["normal-close", "half-day"])
+def test_policy_wait_publishes_close_once_then_keeps_waiting(status, close_hour):
+    close = NOW.replace(hour=close_hour)
+    state = snapshot(
+        now=close,
+        cycle_id=UUID(int=101),
+        cycle_status=status,
+        cycle_result_code="POLICY_UNCONFIRMED",
+        cycle_slot_at=SLOT,
+        performance_due_at=close,
+    )
+    assert loop.choose_loop_action(state) == A.PUBLISH_PERFORMANCE
+    for at in (close, close + timedelta(seconds=1), NOW + timedelta(days=1)):
+        assert (
+            loop.choose_loop_action(replace(state, now=at, performance_due_at=None))
+            == A.WAIT_FOR_SLOT
+        )
+
+
 @pytest.mark.parametrize("persisted", [None, "SCHWAB_L1_FRESHNESS_UNPROVEN"])
 def test_trigger_failure_without_matching_persistence_stops_unknown(monkeypatch, persisted):
     monkeypatch.setattr(

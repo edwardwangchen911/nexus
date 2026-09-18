@@ -21,8 +21,8 @@ from nexus.persistence.models.paper import (
 from sqlalchemy import func, select
 
 
-async def proposal_source(url, *, approve=True):
-    engine, sessions, kwargs = await seed_synthesis(url)
+async def proposal_source(url, *, approve=True, seeded=None, intent_factory=synthesis_intent):
+    engine, sessions, kwargs = seeded or await seed_synthesis(url)
     async with sessions.begin() as session:
         cycle = await session.get(AgentPaperCycleRecord, kwargs["cycle_id"])
         if approve:
@@ -36,7 +36,7 @@ async def proposal_source(url, *, approve=True):
                 idempotency_key="first-baseline",
             )
         admission = await admit_portfolio_synthesis(session, **kwargs)
-        raw = synthesis_intent(admission.run).model_dump_json()
+        raw = intent_factory(admission.run).model_dump_json()
         job = await read_synthesis_job(session, cycle_id=kwargs["cycle_id"])
         assert job is not None
 
@@ -437,6 +437,325 @@ async def test_approval_resumes_original_cycle_from_completed_synthesis(migrated
             assert len(await _events(session, cycle.id)) == original_events + 1
             assert set(await session.scalars(select(Job.id))) == original_jobs
             assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == original_cycles
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_hour", [20, 17], ids=["normal-close", "half-day"])
+@pytest.mark.parametrize("legacy_terminal", [False, True])
+async def test_policy_wait_publishes_one_persisted_close_and_summary(
+    migrated_database_url, monkeypatch, tmp_path, close_hour, legacy_terminal
+):
+    from types import SimpleNamespace
+
+    from helpers.paper_batch import CALENDAR_ID
+    from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesis
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.paper.agent_cycle import _append_event
+    from nexus.persistence.models.paper import PaperPerformanceSnapshotRecord
+    from nexus.persistence.models.runtime import Job, OutboxEvent
+    from nexus.settings import EngineSettings
+    from sqlalchemy import literal, text
+
+    seeded = await _seed_normal_synthesis(migrated_database_url, monkeypatch)
+    engine, sessions, args = await proposal_source(
+        migrated_database_url, approve=False, seeded=seeded
+    )
+    try:
+        close = args["now"].replace(hour=close_hour, minute=0, second=0)
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            await session.execute(
+                text("ALTER TABLE exchange_calendar_sessions DISABLE TRIGGER USER")
+            )
+            await session.execute(
+                text(
+                    "UPDATE exchange_calendar_sessions SET market_close_at=:close, "
+                    "decision_at=:close WHERE calendar_authority_id=:calendar AND session=:day"
+                ),
+                {"close": close, "calendar": CALENDAR_ID, "day": cycle.decision_session},
+            )
+            await session.execute(
+                text("ALTER TABLE exchange_calendar_sessions ENABLE TRIGGER USER")
+            )
+            if legacy_terminal:
+                await _append_event(
+                    session,
+                    cycle,
+                    "researching",
+                    "unavailable",
+                    "POLICY_UNCONFIRMED",
+                    {"portfolio_synthesis_output_id": str(args["synthesis_output_id"])},
+                )
+            jobs = set(await session.scalars(select(Job.id)))
+            cycles = set(await session.scalars(select(AgentPaperCycleRecord.id)))
+
+        settings = EngineSettings(database_url=migrated_database_url)
+        monkeypatch.setattr(
+            loop, "func", SimpleNamespace(clock_timestamp=lambda: literal(close), max=func.max)
+        )
+        monkeypatch.setattr(loop, "local_settings", lambda *a, **k: settings)
+        publications = []
+        for _ in range(3):
+            state = await loop.inspect_agent_paper_loop(
+                settings, account_id=cycle.account_id, expected_calendar_authority_id=CALENDAR_ID
+            )
+            assert state.cycle_result_code == "POLICY_UNCONFIRMED"
+            action = loop.choose_loop_action(state)
+            if not publications:
+                assert action == loop.AgentPaperLoopAction.PUBLISH_PERFORMANCE
+                assert state.performance_due_at == close
+                await loop.execute_agent_paper_loop_action(
+                    settings,
+                    account_id=cycle.account_id,
+                    repo_root=tmp_path,
+                    action=action,
+                    snapshot=state,
+                )
+                publications.append(close)
+            else:
+                assert action == loop.AgentPaperLoopAction.WAIT_FOR_SLOT
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaperPerformanceSnapshotRecord)
+                    .where(
+                        PaperPerformanceSnapshotRecord.account_id == cycle.account_id,
+                        PaperPerformanceSnapshotRecord.as_of == close,
+                    )
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(OutboxEvent)
+                    .where(
+                        OutboxEvent.event_type == "paper.session.summary.ready",
+                    )
+                )
+                == 1
+            )
+            assert set(await session.scalars(select(Job.id))) == jobs
+            assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == cycles
+        assert publications == [close]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_host_inspection_leaves_legal_exit_allocation_rejection_to_coordinator(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    """Real PG source/worker/host/coordinator; a synthetic frozen 15% exposure boundary."""
+    from datetime import datetime
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from helpers.paper_batch import CALENDAR_ID, INSTRUMENTS
+    from integration import test_portfolio_synthesis_persistence_pg as seed_module
+    from nexus.agents import portfolio_synthesis_persistence as persistence
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.ops import agent_paper_once as once
+    from nexus.paper import agent_cycle, agent_decision_store, target_service
+    from nexus.paper.projection import load_paper_projection
+    from nexus.persistence.models.runtime import Job
+    from nexus.risk.canonical import canonical_paper_projection_hash
+    from nexus.risk.models import PaperPortfolioProjection, PaperPositionBalance
+    from nexus.settings import EngineSettings
+    from sqlalchemy import literal
+
+    async def exposure(session, **kwargs):
+        original = await load_paper_projection(session, **kwargs)
+        data = original.model_dump()
+        data.update(
+            available_cash=Decimal("8500"),
+            positions=(
+                PaperPositionBalance(
+                    instrument_id=INSTRUMENTS[0][0],
+                    quantity=Decimal(15),
+                    reserved_quantity=Decimal(0),
+                    cost_basis=Decimal(1500),
+                    reference_close=Decimal(100),
+                ),
+            ),
+        )
+        projection = PaperPortfolioProjection.model_validate(data)
+        data["projection_hash"] = canonical_paper_projection_hash(projection)
+        return PaperPortfolioProjection.model_validate(data)
+
+    for module in (seed_module, persistence, agent_cycle, agent_decision_store, target_service):
+        monkeypatch.setattr(module, "load_paper_projection", exposure)
+    original_intent = seed_module._safe_no_trade_intent
+
+    def complete_hold(**kwargs):
+        source = original_intent(**kwargs)
+        assessment = source.synthesis_assessment.model_copy(
+            update={
+                "stance": "hold",
+                "review_conclusion": "sufficient",
+                "reviews": tuple(
+                    review.model_copy(
+                        update={
+                            "resolved": True,
+                            "status": "accepted",
+                            "missing_evidence": (),
+                            "prevented_conclusion": None,
+                        }
+                    )
+                    for review in source.synthesis_assessment.reviews
+                ),
+            }
+        )
+        return source.model_copy(
+            update={
+                "quality_status": "complete",
+                "stance": "hold",
+                "exposure_action": "maintain",
+                "evidence_audit": "complete",
+                "synthesis_assessment": assessment,
+                "role_votes": tuple(
+                    vote.model_copy(update={"vote": "support"}) for vote in source.role_votes
+                ),
+            }
+        )
+
+    monkeypatch.setattr(seed_module, "_safe_no_trade_intent", complete_hold)
+
+    def exit_intent(run):
+        intent = synthesis_intent(run)
+        choices = list(intent.choices)
+        choices[0] = choices[0].model_copy(update={"action": "exit", "role": "core"})
+        return intent.model_copy(update={"choices": tuple(choices)})
+
+    from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesis
+
+    seeded = await _seed_normal_synthesis(migrated_database_url, monkeypatch)
+    engine, sessions, args = await proposal_source(
+        migrated_database_url, seeded=seeded, intent_factory=exit_intent
+    )
+    try:
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return args["now"]
+
+        settings = EngineSettings(database_url=migrated_database_url)
+        monkeypatch.setattr(
+            loop,
+            "func",
+            SimpleNamespace(clock_timestamp=lambda: literal(args["now"]), max=func.max),
+        )
+        monkeypatch.setattr(loop, "local_settings", lambda *a, **k: settings)
+        monkeypatch.setattr(once, "datetime", Clock)
+        async with sessions() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            jobs = set(await session.scalars(select(Job.id)))
+            cycles = set(await session.scalars(select(AgentPaperCycleRecord.id)))
+            count = len(await agent_cycle._events(session, cycle.id))
+            # Establish the genuine deterministic rejection, rather than mock a
+            # builder error. The host must not execute this computation itself.
+            with pytest.raises(ValueError, match="^EXIT_TURNOVER_CONFLICT$"):
+                await agent_decision_store._rebuild_portfolio_proposal(
+                    session, cycle=cycle, output_id=args["synthesis_output_id"], now=args["now"]
+                )
+
+        def forbidden_allocation(**kwargs):
+            pytest.fail("inspection must not perform allocation mathematics")
+
+        with monkeypatch.context() as inspection:
+            inspection.setattr(
+                agent_decision_store, "build_portfolio_proposal", forbidden_allocation
+            )
+            state = await loop.inspect_agent_paper_loop(
+                settings, account_id=cycle.account_id, expected_calendar_authority_id=CALENDAR_ID
+            )
+        assert loop.choose_loop_action(state) == loop.AgentPaperLoopAction.RESUME
+        with pytest.raises(ValueError, match="^PORTFOLIO_PROPOSAL_UNAVAILABLE$"):
+            await loop.execute_agent_paper_loop_action(
+                settings,
+                account_id=cycle.account_id,
+                repo_root=tmp_path,
+                action=loop.AgentPaperLoopAction.RESUME,
+                snapshot=state,
+            )
+        for _ in range(2):
+            restarted = await loop.inspect_agent_paper_loop(
+                settings, account_id=cycle.account_id, expected_calendar_authority_id=CALENDAR_ID
+            )
+            assert restarted.cycle_status == "unavailable"
+            assert loop.choose_loop_action(restarted) not in {
+                loop.AgentPaperLoopAction.RESUME,
+                loop.AgentPaperLoopAction.TRIGGER,
+                loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
+            }
+            result = await once.resume_once(
+                settings,
+                once.AgentPaperResumeRequest(
+                    action="resume", cycle_id=cycle.id, idempotency_key="exit-rejection-replay"
+                ),
+            )
+            assert result.status == "unavailable"
+            assert result.result_code == "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+        async with sessions() as session:
+            events = await agent_cycle._events(session, cycle.id)
+            assert len(events) == count + 1
+            assert events[-1].fact_ids == {
+                "portfolio_synthesis_output_id": str(args["synthesis_output_id"]),
+                "proposal_rejection_code": "EXIT_TURNOVER_CONFLICT",
+            }
+            assert set(await session.scalars(select(Job.id))) == jobs
+            assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == cycles
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["source_hash", "output_hash", "approval_hash"])
+async def test_host_inspection_rejects_corrupt_policy_source_bindings(
+    migrated_database_url, corruption
+):
+    from helpers.paper_batch import CALENDAR_ID
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.paper.agent_cycle_authority import ServiceCalendarAuthority
+    from sqlalchemy import text
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        table, field = {
+            "source_hash": ("agent_portfolio_synthesis_runs", "input_hash"),
+            "output_hash": ("agent_portfolio_synthesis_outputs", "content_hash"),
+            "approval_hash": ("paper_initial_target_approvals", "approval_hash"),
+        }[corruption]
+        async with sessions.begin() as session:
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+            await session.execute(text(f"UPDATE {table} SET {field}=:value"), {"value": "f" * 64})
+            await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+        async with sessions() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            calendar = ServiceCalendarAuthority(
+                calendar_authority_id=CALENDAR_ID,
+                as_of=args["now"],
+                local_date=cycle.decision_session,
+                session=cycle.decision_session,
+                decision_window_start_at=cycle.decision_time,
+                market_open_at=cycle.decision_time,
+                market_close_at=cycle.decision_time + timedelta(hours=1),
+                next_session=cycle.decision_session + timedelta(days=1),
+                next_decision_window_start_at=cycle.decision_time + timedelta(days=1),
+                next_market_close_at=cycle.decision_time + timedelta(days=1, hours=1),
+            )
+            with pytest.raises(RuntimeError, match="^AGENT_PAPER_LOOP_RESULT_UNKNOWN$"):
+                await loop._inspect_portfolio_batch(
+                    session,
+                    account_id=cycle.account_id,
+                    now=args["now"],
+                    calendar=calendar,
+                    performance_due_at=None,
+                )
     finally:
         await engine.dispose()
 

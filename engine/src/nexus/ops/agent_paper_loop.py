@@ -1497,6 +1497,8 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.evaluation_id is None and snapshot.cycle_result_code == "POLICY_UNCONFIRMED":
         if snapshot.cycle_id is None or snapshot.cycle_status not in {"researching", "unavailable"}:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        if snapshot.performance_due_at is not None:
+            return AgentPaperLoopAction.PUBLISH_PERFORMANCE
         return AgentPaperLoopAction.WAIT_FOR_SLOT
     if snapshot.evaluation_id is None and snapshot.cycle_result_code == "TARGET_ACTIVATION_PENDING":
         return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
@@ -3172,39 +3174,31 @@ async def _inspect_portfolio_batch(
         .order_by(AgentPaperCycleEventRecord.sequence.desc())
         .limit(1)
     )
-    if (
+    activation_pending = (
         event is not None
         and event.to_status == "decision_recorded"
         and event.result_code == "TARGET_ACTIVATION_PENDING"
-    ):
-        from nexus.paper.agent_decision_store import load_portfolio_proposal
-
-        decision_id = event.fact_ids.get("strategy_decision_id")
-        if not isinstance(decision_id, str):
-            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-        proposal = await load_portfolio_proposal(
-            session, account_id=account_id, decision_id=UUID(decision_id)
-        )
-        if proposal is None or proposal.cycle_id != cycle.id:
-            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-        return AgentPaperLoopSnapshot(
-            now=now,
-            cycle_id=cycle.id,
-            cycle_status=event.to_status,
-            cycle_result_code=event.result_code,
-            cycle_slot_at=cycle.decision_slot_at,
-            calendar_authority_id=calendar.calendar_authority_id,
-        )
+    )
     legacy_policy_block = (
         event is not None
         and event.to_status == "unavailable"
         and event.result_code == "POLICY_UNCONFIRMED"
     )
-    if event is None or (event.to_status != "researching" and not legacy_policy_block):
+    proposal_unavailable = (
+        event is not None
+        and event.to_status == "unavailable"
+        and event.result_code == "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+    )
+    if event is None or (
+        event.to_status != "researching"
+        and not legacy_policy_block
+        and not activation_pending
+        and not proposal_unavailable
+    ):
         return None
     job = await read_synthesis_job(session, cycle_id=cycle.id)
     if job is None:
-        if legacy_policy_block:
+        if legacy_policy_block or activation_pending or proposal_unavailable:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         job = await _read_portfolio_security_job(session, cycle)
         return AgentPaperLoopSnapshot(
@@ -3222,7 +3216,10 @@ async def _inspect_portfolio_batch(
         )
     run = await session.get(AgentPortfolioSynthesisRunRecord, UUID(str(job.payload["run_id"])))
     assert run is not None
-    frozen = _frozen_run(run)
+    try:
+        frozen = _frozen_run(run)
+    except ValueError as error:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
     if (
         frozen.account_id != account_id
         or frozen.portfolio_id != cycle.portfolio_id
@@ -3244,10 +3241,17 @@ async def _inspect_portfolio_batch(
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     policy_block = False
     if run.status == "completed" and job.status == "succeeded":
-        from nexus.paper.agent_decision_store import _rebuild_portfolio_proposal
+        from nexus.agents.portfolio_synthesis_contracts import (
+            PortfolioSynthesisIntentV1,
+            canonical_portfolio_synthesis_hash,
+            validate_portfolio_synthesis_intent,
+        )
+        from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH
+        from nexus.paper.target_service import initial_approval_hash, initial_approval_result
         from nexus.persistence.models.agents import AgentPortfolioSynthesisOutputRecord
         from nexus.persistence.models.paper import (
             PaperInitialTargetApprovalRecord,
+            PaperTargetVersionRecord,
             StrategyDecisionRecord,
         )
 
@@ -3256,43 +3260,129 @@ async def _inspect_portfolio_batch(
                 AgentPortfolioSynthesisOutputRecord.run_id == run.id,
             )
         )
-        proposal_id = await session.scalar(
-            select(StrategyDecisionRecord.id).where(
+        proposal = await session.scalar(
+            select(StrategyDecisionRecord).where(
                 StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
             )
         )
-        if output is not None and output.status == "completed" and proposal_id is None:
+        if (
+            output is None
+            or output.status != "completed"
+            or output.created_at > now
+            or cycle.sizing_policy_version != "portfolio_allocation_v1"
+            or cycle.sizing_policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+            or frozen.policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        try:
+            intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
+            validate_portfolio_synthesis_intent(intent, frozen)
+        except ValueError as error:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
+        content_hash = canonical_portfolio_synthesis_hash(
+            {
+                "schema_version": "portfolio_synthesis_terminal_v1",
+                "status": "completed",
+                "intent": intent.model_dump(mode="json"),
+            }
+        )
+        if (
+            output.content_hash != content_hash
+            or output.binding_hash
+            != canonical_portfolio_synthesis_hash(
+                {
+                    "schema_version": "portfolio_synthesis_binding_v1",
+                    "run_id": run.id,
+                    "input_hash": run.input_hash,
+                    "content_hash": content_hash,
+                }
+            )
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if proposal is not None and (
+            proposal.account_id != cycle.account_id
+            or proposal.portfolio_id != cycle.portfolio_id
+            or proposal.strategy_version != "agent_portfolio_proposal_v1"
+            or proposal.portfolio_synthesis_output_id != output.id
+            or proposal.authority_hash != run.input_hash
+            or proposal.strategy_parameters_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+            or proposal.portfolio_projection_hash != frozen.projection_hash
+            or proposal.decision_time != cycle.decision_time
+            or proposal.created_at > now
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        # Only identity and frozen authority are inspected here. Allocation and
+        # current admissibility belong to the coordinator's persisted outcome.
+        if frozen.active_target_version_id is None:
             approval = await session.scalar(
                 select(PaperInitialTargetApprovalRecord).where(
                     PaperInitialTargetApprovalRecord.account_id == account_id,
                 )
             )
-            if (
-                output.created_at > now
-                or approval is not None
-                and (approval.approved_at > now or approval.created_at > now)
+            policy_block = approval is None
+            if approval is not None and (
+                approval.portfolio_id != cycle.portfolio_id
+                or approval.projection_as_of != cycle.decision_time
+                or approval.projection_hash != frozen.projection_hash
+                or approval.allocation_policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+                or approval.approved_at > now
+                or approval.created_at > now
+                or initial_approval_hash(initial_approval_result(approval))
+                != approval.approval_hash
             ):
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-            try:
-                # Reuse the immutable source/baseline checks without admitting a
-                # fresh proposal. The actual resume still applies current expiry.
-                await _rebuild_portfolio_proposal(
-                    session,
-                    cycle=cycle,
-                    output_id=output.id,
-                    now=None,
-                )
-            except ValueError as error:
-                if str(error) != "POLICY_UNCONFIRMED":
-                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
-                policy_block = True
-            if legacy_policy_block:
-                if event.fact_ids != {"portfolio_synthesis_output_id": str(output.id)}:
+        else:
+            target = await session.get(PaperTargetVersionRecord, frozen.active_target_version_id)
+            target_decision = (
+                None
+                if target is None
+                else await session.get(StrategyDecisionRecord, target.strategy_decision_id)
+            )
+            if (
+                target is None
+                or target_decision is None
+                or target.account_id != cycle.account_id
+                or target.portfolio_id != cycle.portfolio_id
+                or target.target_content_hash != frozen.active_target_content_hash
+                or target.activated_at > cycle.decision_time
+                or target_decision.account_id != cycle.account_id
+                or target_decision.portfolio_id != cycle.portfolio_id
+                or target_decision.strategy_version != "agent_portfolio_proposal_v1"
+            ):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if activation_pending:
+            if (
+                policy_block
+                or proposal is None
+                or event.fact_ids
+                != {
+                    "strategy_decision_id": str(proposal.id),
+                    "portfolio_synthesis_output_id": str(output.id),
+                }
+            ):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if legacy_policy_block:
+            if proposal is not None or event.fact_ids != {
+                "portfolio_synthesis_output_id": str(output.id)
+            }:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            policy_block = True
+        if proposal_unavailable:
+            expected_facts = {"portfolio_synthesis_output_id": str(output.id)}
+            rejection = event.fact_ids.get("proposal_rejection_code")
+            if rejection is not None:
+                if not isinstance(rejection, str) or rejection not in {
+                    "EXIT_TURNOVER_CONFLICT",
+                    "REDUCTION_TURNOVER_CONFLICT",
+                }:
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-                policy_block = True
-        elif legacy_policy_block:
+                expected_facts["proposal_rejection_code"] = rejection
+            if proposal is not None or event.fact_ids != expected_facts:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            policy_block = False
+        if policy_block and proposal is not None:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-    elif legacy_policy_block:
+    elif legacy_policy_block or activation_pending or proposal_unavailable:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     status = job.status
     lease = None
@@ -3310,7 +3400,15 @@ async def _inspect_portfolio_batch(
         next_decision_window_start_at=calendar.next_decision_window_start_at,
         cycle_id=cycle.id,
         cycle_status=event.to_status,
-        cycle_result_code="POLICY_UNCONFIRMED" if policy_block else None,
+        cycle_result_code=(
+            "POLICY_UNCONFIRMED"
+            if policy_block
+            else "TARGET_ACTIVATION_PENDING"
+            if activation_pending
+            else "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+            if proposal_unavailable
+            else None
+        ),
         cycle_slot_at=cycle.decision_slot_at,
         research_job_id=job.id,
         research_job_status=status,

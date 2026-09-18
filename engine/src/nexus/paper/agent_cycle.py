@@ -1100,13 +1100,16 @@ async def _resume_portfolio_synthesis(
                 }
             )
         code = "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+        facts: dict[str, object] = {"portfolio_synthesis_output_id": str(output.id)}
+        if str(error) in {"EXIT_TURNOVER_CONFLICT", "REDUCTION_TURNOVER_CONFLICT"}:
+            facts["proposal_rejection_code"] = str(error)
         await _append_event(
             session,
             cycle,
             "researching",
             "unavailable",
             code,
-            {"portfolio_synthesis_output_id": str(output.id)},
+            facts,
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     await _append_event(

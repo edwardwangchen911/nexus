@@ -127,7 +127,7 @@ async def seed_synthesis(url, *, normal_path=None, complete_research=True):
                 }
             )
             document = intent.model_dump(mode="json")
-            payload = {"quality_status": "partial"}
+            payload = {"quality_status": intent.quality_status}
             content = {"status": "completed", "role": None, "payload": payload, "intent": document}
             output = AgentResearchOutputRecord(
                 id=uuid4(),

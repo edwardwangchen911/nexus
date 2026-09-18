@@ -19,9 +19,25 @@ from sqlalchemy import func, select
 async def _seed_normal_synthesis(url, monkeypatch, *, complete_research=True):
     from helpers.paper_batch import CALENDAR_ID
     from integration.test_portfolio_same_day_research_pg import seed_normal_path
+    from nexus.paper.performance import publish_paper_performance_snapshot
     from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 
     normal = await seed_normal_path(url, monkeypatch)
+    # The real host publishes a due prior close before starting new research.
+    # Match that order so a late historical publication cannot alter this test's
+    # already-frozen research projection during an unrelated resume assertion.
+    _, sessions, authority, _ = normal
+    async with sessions.begin() as session:
+        prior_close = await session.scalar(
+            select(func.max(ExchangeCalendarSessionRecord.market_close_at)).where(
+                ExchangeCalendarSessionRecord.calendar_authority_id == CALENDAR_ID,
+                ExchangeCalendarSessionRecord.market_close_at <= authority.decision_time,
+            )
+        )
+        if prior_close is not None:
+            await publish_paper_performance_snapshot(
+                session, account_id=authority.account_id, as_of=prior_close
+            )
     seeded = await seed_synthesis(url, normal_path=normal, complete_research=complete_research)
     _, sessions, kwargs = seeded
     async with sessions.begin() as session:
