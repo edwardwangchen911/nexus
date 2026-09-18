@@ -209,6 +209,117 @@ def test_foreground_loop_waits_for_session_without_product_side_effects() -> Non
     assert len(heartbeats) == 4
 
 
+def test_foreground_loop_logs_safe_heartbeat_failure_stage(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        raise AssertionError("inspection must not run after the initial heartbeat fails")
+
+    async def execute(*_args) -> None:
+        raise AssertionError("execution must not run after the initial heartbeat fails")
+
+    async def heartbeat(_seen_at: datetime) -> None:
+        raise RuntimeError("private-heartbeat-canary")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=asyncio.sleep,
+            heartbeat=heartbeat,
+            clock=lambda: NOW,
+        )
+    )
+
+    assert result is A.STOP_RESULT_UNKNOWN
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+        "event": "agent_paper_loop_failure",
+        "failure_stage": "heartbeat",
+        "occurred_at": NOW.isoformat(),
+    }
+    assert "private-heartbeat-canary" not in captured.err
+
+
+def test_foreground_loop_logs_safe_inspection_failure_stage(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        raise RuntimeError("private-inspection-canary")
+
+    async def execute(*_args) -> None:
+        raise AssertionError("execution must not run after inspection fails")
+
+    with pytest.raises(RuntimeError, match="private-inspection-canary"):
+        asyncio.run(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=noop_heartbeat,
+                clock=lambda: NOW,
+            )
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err)["failure_stage"] == "inspect"
+    assert "private-inspection-canary" not in captured.err
+
+
+def test_foreground_loop_logs_safe_planner_failure_stage(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot(cycle_status="researching", research_job_status="running")
+
+    async def execute(*_args) -> None:
+        raise AssertionError("execution must not run for an unknown planner result")
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=asyncio.sleep,
+            heartbeat=noop_heartbeat,
+            clock=lambda: NOW,
+        )
+    )
+
+    assert result is A.STOP_RESULT_UNKNOWN
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err)["failure_stage"] == "planner"
+
+
+def test_foreground_loop_logs_safe_execution_failure_stage(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot()
+
+    async def execute(*_args) -> None:
+        raise RuntimeError("private-execution-canary")
+
+    with pytest.raises(RuntimeError, match="private-execution-canary"):
+        asyncio.run(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=noop_heartbeat,
+                clock=lambda: NOW,
+            )
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err)["failure_stage"] == "execute"
+    assert "private-execution-canary" not in captured.err
+
+
 def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() -> None:
     start = datetime(2026, 7, 6, 11, tzinfo=UTC)
     states = iter(
