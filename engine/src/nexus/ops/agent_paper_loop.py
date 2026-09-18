@@ -1532,7 +1532,7 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.cycle_status == "researching":
         if snapshot.research_job_status == "queued":
             return AgentPaperLoopAction.RUN_RESEARCH_JOB
-        if snapshot.research_job_status in _TERMINAL_JOB_STATUSES:
+        if snapshot.research_job_status in _TERMINAL_JOB_STATUSES | {"running_expired"}:
             return AgentPaperLoopAction.RESUME
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
@@ -2848,6 +2848,194 @@ async def inspect_agent_version_evaluation_loop(
         await engine.dispose()
 
 
+async def _read_portfolio_security_job(session: AsyncSession, cycle: AgentPaperCycleRecord) -> Job:
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper.agent_cycle_models import candidate_manifest_hash, parse_candidate_manifest
+    from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
+    from nexus.persistence.models.agents import AgentResearchRunRecord
+
+    assert cycle.candidate_batch_id is not None
+    batch, _ = await validate_agent_paper_candidate_batch(
+        session,
+        batch_id=cycle.candidate_batch_id,
+        account_id=cycle.account_id,
+        as_of=cycle.decision_time,
+        universe_snapshot_id=cycle.universe_snapshot_id,
+    )
+    manifest = parse_candidate_manifest(cycle.candidate_manifest, allow_legacy=False)
+    events = tuple(
+        await session.scalars(
+            select(AgentPaperCycleEventRecord).where(
+                AgentPaperCycleEventRecord.cycle_id == cycle.id,
+                AgentPaperCycleEventRecord.result_code == "RESEARCH_JOBS_PREPARED",
+            )
+        )
+    )
+    if (
+        len(events) != 1
+        or not cycle.execution_locked
+        or tuple(item.instrument_id for item in manifest) != batch.instrument_ids
+        or candidate_manifest_hash(manifest) != cycle.candidate_hash
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    raw_ids = events[0].fact_ids.get("research_run_ids")
+    if not isinstance(raw_ids, list) or len(raw_ids) != len(batch.instrument_ids):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    run_ids = tuple(UUID(str(value)) for value in raw_ids)
+    runs = tuple(
+        await session.scalars(
+            select(AgentResearchRunRecord)
+            .where(AgentResearchRunRecord.id.in_(run_ids))
+            .order_by(AgentResearchRunRecord.instrument_id)
+        )
+    )
+    jobs = tuple(
+        await session.scalars(
+            select(Job).where(
+                Job.job_type == JobType.AGENT_PAPER_RESEARCH.value,
+                Job.payload["run_id"].as_string().in_(tuple(str(value) for value in run_ids)),
+            )
+        )
+    )
+    if (
+        tuple(run.id for run in runs) != run_ids
+        or tuple(run.instrument_id for run in runs) != batch.instrument_ids
+        or len(jobs) != len(run_ids)
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    by_run = {str(run.id): run for run in runs}
+    for job in jobs:
+        run = by_run.get(str(job.payload.get("run_id")))
+        if run is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        durable_hash = job_input_hash(
+            {
+                "instrument_id": str(run.instrument_id),
+                "data_snapshot_id": str(run.data_snapshot_id),
+                "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "request_hash": run.input_hash,
+                "schema_hash": run.schema_hash,
+                "model_hash": run.model_hash,
+                "prompt_hash": run.prompt_hash,
+                "evidence_hash": run.evidence_hash,
+                "tool_hash": run.tool_hash,
+                "pricing_version": run.pricing_version,
+            }
+        )
+        if (
+            run.actor_id != "local-agent-paper-cycle"
+            or run.idempotency_key != f"agent-paper:{cycle.id}:{run.instrument_id}"
+            or run.decision_time != cycle.decision_time
+            or job.payload != {"run_id": str(run.id)}
+            or job.queue != QueueName.GENERAL.value
+            or job.schema_version != "agent_research_job_v1"
+            or job.scope_kind != "instrument"
+            or job.scope_id != str(run.instrument_id)
+            or job.effective_at != cycle.decision_time
+            or job.input_hash != durable_hash
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    resolved = resolve_cycle_research_job(events=events, jobs=jobs)
+    if resolved is None:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    return next(job for job in jobs if job.id == resolved[0])
+
+
+async def _inspect_portfolio_batch(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    now: datetime,
+    calendar: ServiceCalendarAuthority,
+    performance_due_at: datetime | None,
+) -> AgentPaperLoopSnapshot | None:
+    """Read internal scheduling authority, not the legacy single-security display DTO."""
+    from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+    from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
+    from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
+
+    cycle = await session.scalar(
+        select(AgentPaperCycleRecord)
+        .where(
+            AgentPaperCycleRecord.account_id == account_id,
+            AgentPaperCycleRecord.decision_time <= now,
+            AgentPaperCycleRecord.created_at <= now,
+        )
+        .order_by(AgentPaperCycleRecord.decision_slot_at.desc(), AgentPaperCycleRecord.id.desc())
+        .limit(1)
+    )
+    if cycle is None or cycle.candidate_batch_id is None:
+        return None
+    event = await session.scalar(
+        select(AgentPaperCycleEventRecord)
+        .where(AgentPaperCycleEventRecord.cycle_id == cycle.id)
+        .order_by(AgentPaperCycleEventRecord.sequence.desc())
+        .limit(1)
+    )
+    if event is None or event.to_status != "researching":
+        return None
+    job = await read_synthesis_job(session, cycle_id=cycle.id)
+    if job is None:
+        job = await _read_portfolio_security_job(session, cycle)
+        return AgentPaperLoopSnapshot(
+            now=now,
+            calendar_authority_id=calendar.calendar_authority_id,
+            decision_window_start_at=calendar.decision_window_start_at,
+            decision_window_end_at=calendar.market_close_at,
+            next_decision_window_start_at=calendar.next_decision_window_start_at,
+            cycle_id=cycle.id,
+            cycle_status=event.to_status,
+            cycle_slot_at=cycle.decision_slot_at,
+            research_job_id=job.id,
+            research_job_status=job.status,
+            performance_due_at=performance_due_at,
+        )
+    run = await session.get(AgentPortfolioSynthesisRunRecord, UUID(str(job.payload["run_id"])))
+    assert run is not None
+    frozen = _frozen_run(run)
+    if (
+        frozen.account_id != account_id
+        or frozen.portfolio_id != cycle.portfolio_id
+        or frozen.cycle_id != cycle.id
+        or frozen.candidate_batch_id != cycle.candidate_batch_id
+        or frozen.decision_time != cycle.decision_time
+        or not cycle.execution_locked
+        or set(job.payload) != {"run_id"}
+        or job.input_hash != run.input_hash
+        or job.scope_kind != "portfolio"
+        or job.scope_id != str(frozen.portfolio_id)
+        or job.effective_at != frozen.decision_time
+        or job.queue != QueueName.GENERAL.value
+        or job.schema_version != "portfolio_synthesis_job_v1"
+        or job.retry_policy != "never"
+        or job.max_attempts != 1
+        or job.manual_retry_count != 0
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    status = job.status
+    lease = None
+    if status == "running":
+        lease = await session.scalar(select(JobLease).where(JobLease.job_id == job.id))
+        if lease is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if lease.expires_at <= now:
+            status = "running_expired"
+    return AgentPaperLoopSnapshot(
+        now=now,
+        calendar_authority_id=calendar.calendar_authority_id,
+        decision_window_start_at=calendar.decision_window_start_at,
+        decision_window_end_at=calendar.market_close_at,
+        next_decision_window_start_at=calendar.next_decision_window_start_at,
+        cycle_id=cycle.id,
+        cycle_status=event.to_status,
+        cycle_slot_at=cycle.decision_slot_at,
+        research_job_id=job.id,
+        research_job_status=status,
+        research_job_lease_expires_at=None if lease is None else lease.expires_at,
+        performance_due_at=performance_due_at,
+    )
+
+
 async def inspect_agent_paper_loop(
     settings: EngineSettings,
     *,
@@ -2906,6 +3094,15 @@ async def inspect_agent_paper_loop(
                 )
                 if existing_performance is None:
                     performance_due_at = latest_completed_close
+            synthesis = await _inspect_portfolio_batch(
+                session,
+                account_id=account_id,
+                now=now,
+                calendar=calendar,
+                performance_due_at=performance_due_at,
+            )
+            if synthesis is not None:
+                return synthesis
             view = await service.latest_agent_cycle()
             if view is None:
                 return AgentPaperLoopSnapshot(
@@ -2948,12 +3145,6 @@ async def inspect_agent_paper_loop(
                         )
                     )
             research_job = resolve_cycle_research_job(events=events, jobs=jobs)
-            if view.status == "researching":
-                from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
-
-                synthesis_job = await read_synthesis_job(session, cycle_id=view.cycle_id)
-                if synthesis_job is not None:
-                    research_job = (synthesis_job.id, synthesis_job.status)
             market_scope = None
             market_window = None
             if (

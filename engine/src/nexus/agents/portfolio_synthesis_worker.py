@@ -299,13 +299,7 @@ async def run_synthesis_job_once(
         status = "completed"
     except CodexInvocationError as error:
         usage = error.usage
-        pre_dispatch = usage is None and error.phase in {
-            "preflight",
-            "client_init",
-            "account",
-            "config_read",
-            "thread_start",
-        }
+        pre_dispatch = usage is None and error.provider_call_started is False
         error_code = (
             "PORTFOLIO_SYNTHESIS_PRE_DISPATCH_" + error.phase.upper()
             if pre_dispatch

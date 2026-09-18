@@ -352,6 +352,21 @@ async def resume_schwab_agent_paper_cycle(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
         {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
     )
+    if cycle.candidate_batch_id is not None and now is not None:
+        from nexus.agents.portfolio_synthesis_worker import (
+            read_synthesis_job,
+            reconcile_synthesis_orphans,
+        )
+        from nexus.jobs.models import QueueName
+        from nexus.jobs.repository import reclaim_expired_jobs
+
+        synthesis_job = await read_synthesis_job(session, cycle_id=cycle.id)
+        if synthesis_job is not None:
+            exact_job_ids = (synthesis_job.id,)
+            await reclaim_expired_jobs(
+                session, queue=QueueName.GENERAL, now=now, job_ids=exact_job_ids
+            )
+            await reconcile_synthesis_orphans(session, now=now, job_ids=exact_job_ids)
     events = await _events(session, cycle.id)
     if not events:
         raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")

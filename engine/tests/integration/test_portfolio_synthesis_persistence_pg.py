@@ -29,6 +29,7 @@ from nexus.agents.portfolio_synthesis_persistence import (
     admit_portfolio_synthesis,
     persist_portfolio_synthesis_terminal,
 )
+from nexus.domain.evidence import EvidenceRef
 from nexus.paper.agent_cycle import _start_cycle
 from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
@@ -49,18 +50,23 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
-async def seed_synthesis(url):
-    seed = await seed_paper_batch(url)
-    engine = create_async_engine(url)
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
+async def seed_synthesis(url, *, normal_path=None, complete_research=True):
+    if normal_path is None:
+        seed = await seed_paper_batch(url)
+        engine = create_async_engine(url)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+    else:
+        engine, sessions, authority, _ = normal_path
     async with sessions.begin() as session:
-        registered = await load_forward_strategy_decision(
-            session,
-            account_id=seed.account_id,
-            strategy_version="baseline_v1",
-            decision_session=DECISION_TIME.date(),
-        )
-        authority = await _seed_two_candidate_authority(session, registered)
+        if normal_path is None:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+        decision_time = authority.decision_time
         # A synthetic one-hour remaining session makes expiry deterministic, without wall time.
         await session.execute(text("ALTER TABLE exchange_calendar_sessions DISABLE TRIGGER USER"))
         await session.execute(
@@ -69,24 +75,24 @@ async def seed_synthesis(url):
                 "WHERE calendar_authority_id=:calendar AND session=:day"
             ),
             {
-                "close": DECISION_TIME + timedelta(hours=1),
+                "close": decision_time + timedelta(hours=1),
                 "calendar": CALENDAR_ID,
-                "day": DECISION_TIME.date(),
+                "day": decision_time.date(),
             },
         )
         await session.execute(text("ALTER TABLE exchange_calendar_sessions ENABLE TRIGGER USER"))
         batch = await create_agent_paper_candidate_batch(
             session,
-            account_id=seed.account_id,
+            account_id=authority.account_id,
             universe_snapshot_id=authority.universe_snapshot_id,
             instrument_ids=(INSTRUMENTS[0][0], INSTRUMENTS[1][0]),
             idempotency_key="synthesis-candidates",
-            created_at=DECISION_TIME,
+            created_at=decision_time,
         )
         started = await _start_cycle(
             session,
             authority=authority,
-            decision_slot_at=floor_decision_slot(DECISION_TIME),
+            decision_slot_at=floor_decision_slot(decision_time),
             daily_limit_usd=Decimal("1"),
             candidate_batch_id=batch.batch_id,
             requested_instrument_ids=batch.instrument_ids,
@@ -94,12 +100,32 @@ async def seed_synthesis(url):
         assert len(started.research_run_ids) == 2
         outputs = []
         for index, run_id in enumerate(started.research_run_ids):
+            if not complete_research:
+                continue
             run = await session.get(AgentResearchRunRecord, run_id)
             evidence = await session.get(ResearchEvidenceRef, UUID(run.evidence_manifest[0]["id"]))
             intent = _safe_no_trade_intent(
-                run=run, evidence=evidence, valid_until=DECISION_TIME + timedelta(days=1)
+                run=run, evidence=evidence, valid_until=decision_time + timedelta(days=1)
             )
             intent = intent.model_copy(update={"display_symbol": "AAPL" if index == 0 else "T2"})
+            bound_records = [
+                await session.get(ResearchEvidenceRef, UUID(frozen["id"]))
+                for frozen in run.evidence_manifest
+            ]
+            intent = intent.model_copy(
+                update={
+                    "evidence_refs": tuple(
+                        EvidenceRef(
+                            source=bound.source,
+                            object_id=bound.provider_object_id,
+                            available_at=bound.available_at,
+                            location=bound.location,
+                            content_hash=bound.content_hash,
+                        )
+                        for bound in bound_records
+                    )
+                }
+            )
             document = intent.model_dump(mode="json")
             payload = {"quality_status": "partial"}
             content = {"status": "completed", "role": None, "payload": payload, "intent": document}
@@ -115,22 +141,23 @@ async def seed_synthesis(url):
                 content_hash=sha256(
                     json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()
                 ).hexdigest(),
-                created_at=DECISION_TIME + timedelta(minutes=1),
+                created_at=decision_time + timedelta(minutes=1),
             )
             session.add(output)
             await session.flush()
-            session.add(
-                AgentResearchOutputEvidenceRecord(
-                    output_id=output.id,
-                    evidence_ref_id=evidence.id,
-                    source=evidence.source,
-                    provider_object_id=evidence.provider_object_id,
-                    revision=evidence.revision,
-                    available_at=evidence.available_at,
-                    location=evidence.location,
-                    content_hash=evidence.content_hash,
+            for bound in bound_records:
+                session.add(
+                    AgentResearchOutputEvidenceRecord(
+                        output_id=output.id,
+                        evidence_ref_id=bound.id,
+                        source=bound.source,
+                        provider_object_id=bound.provider_object_id,
+                        revision=bound.revision,
+                        available_at=bound.available_at,
+                        location=bound.location,
+                        content_hash=bound.content_hash,
+                    )
                 )
-            )
             await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             await session.execute(
                 text("UPDATE agent_research_runs SET status='completed' WHERE id=:id"),
@@ -141,12 +168,12 @@ async def seed_synthesis(url):
                 select(Job).where(Job.payload["run_id"].as_string() == str(run_id))
             )
             job.status = "running"
-            job.started_at = DECISION_TIME
+            job.started_at = decision_time
             job.attempt_count = 1
             job.version += 1
             await session.flush()
             job.status = "succeeded"
-            job.finished_at = DECISION_TIME + timedelta(minutes=1)
+            job.finished_at = decision_time + timedelta(minutes=1)
             job.version += 1
             outputs.append(output.id)
         content = "Synthetic frozen portfolio synthesis prompt."
@@ -156,11 +183,11 @@ async def seed_synthesis(url):
                 version="portfolio-management-synthesis-v1",
                 content=content,
                 content_hash=sha256(content.encode()).hexdigest(),
-                created_at=DECISION_TIME,
+                created_at=decision_time,
             )
         )
         projection = await load_paper_projection(
-            session, account_id=seed.account_id, as_of=DECISION_TIME
+            session, account_id=authority.account_id, as_of=decision_time
         )
     return (
         engine,
@@ -171,7 +198,7 @@ async def seed_synthesis(url):
             "active_target_version_id": None,
             "projection_hash": projection.projection_hash,
             "daily_limit_usd": Decimal("1"),
-            "now": DECISION_TIME + timedelta(minutes=2),
+            "now": decision_time + timedelta(minutes=2),
         },
     )
 
