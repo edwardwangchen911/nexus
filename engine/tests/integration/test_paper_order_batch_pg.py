@@ -645,6 +645,29 @@ async def _attempt_corrupt_existing_batch_replay(
                     payload["evaluations"][0]["desired_quantity"] = int(
                         Decimal(payload["evaluations"][0]["desired_quantity"])
                     )
+                elif corruption == "trailing_zero_decimal":
+                    value = payload["evaluations"][0]["desired_quantity"]
+                    payload["evaluations"][0]["desired_quantity"] = f"{value}0"
+                elif corruption == "exponent_decimal":
+                    value = payload["evaluations"][0]["desired_quantity"]
+                    payload["evaluations"][0]["desired_quantity"] = format(
+                        Decimal(value), "E"
+                    )
+                elif corruption == "signed_zero_decimal":
+                    changed = False
+                    for evaluation in payload["evaluations"]:
+                        for rule in evaluation["rules"]:
+                            for field in ("limit", "observed", "remaining"):
+                                value = rule[field]
+                                if isinstance(value, str) and Decimal(value) == 0:
+                                    rule[field] = "-0"
+                                    changed = True
+                                    break
+                            if changed:
+                                break
+                        if changed:
+                            break
+                    assert changed, "fixture must contain a zero-valued risk-rule decimal"
                 elif corruption == "extra_no_changes":
                     payload["no_changes"] = []
                 elif corruption == "extra_replayed":
@@ -686,6 +709,9 @@ async def _attempt_corrupt_existing_batch_replay(
         "order_ids",
         "evaluations",
         "noncanonical_decimal",
+        "trailing_zero_decimal",
+        "exponent_decimal",
+        "signed_zero_decimal",
         "extra_no_changes",
         "extra_replayed",
     ),

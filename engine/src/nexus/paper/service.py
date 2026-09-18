@@ -150,9 +150,12 @@ class PaperOrderBatchResult(BaseModel):
             if not isinstance(item, str):
                 return item
             try:
-                return Decimal(item)
+                decimal = Decimal(item)
             except (InvalidOperation, ValueError) as error:
                 raise ValueError("stored batch decimal is invalid") from error
+            if decimal == 0 and item.startswith("-"):
+                raise ValueError("stored batch decimal cannot be negative zero")
+            return decimal
 
         evaluations: list[object] = []
         for raw in value:
