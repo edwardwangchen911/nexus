@@ -1,5 +1,13 @@
 """Expected reflected schema after migration head."""
 
+PORTFOLIO_MANAGEMENT_TABLES = {
+    "agent_paper_candidate_batches",
+    "agent_portfolio_synthesis_runs",
+    "agent_portfolio_synthesis_outputs",
+    "agent_portfolio_synthesis_budget_reservations",
+    "paper_initial_target_approvals",
+    "paper_target_versions",
+}
 EXPECTED_TABLES = {
     "provider_runs",
     "provider_capabilities",
@@ -139,6 +147,7 @@ PAPER_TABLES = {
     "paper_performance_attributions",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | PAPER_TABLES
+EXPECTED_TABLES = EXPECTED_TABLES | PORTFOLIO_MANAGEMENT_TABLES
 AGENT_VERSION_EVALUATION_TABLES = {
     "agent_version_evaluations",
     "agent_version_cycle_pairs",
@@ -289,6 +298,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     ),
     frozenset(SHADOW_TABLES),
     frozenset(PAPER_TABLES),
+    frozenset(PORTFOLIO_MANAGEMENT_TABLES),
     frozenset(AGENT_VERSION_EVALUATION_TABLES),
     frozenset(AUTOMATION_TABLES),
     frozenset(EVOLUTION_TABLES),
@@ -300,6 +310,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
 
 EXPECTED_FOREIGN_KEYS = {
     "agent_paper_cycles": {
+        "fk_agent_paper_cycles_candidate_batch",
         "fk_agent_paper_cycles_paper_account",
         "fk_agent_paper_cycles_universe",
         "fk_agent_paper_cycles_quality",
@@ -312,6 +323,7 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_strategy_decision_agent_outputs_output",
     },
     "strategy_decisions": {
+        "fk_strategy_decisions_portfolio_synthesis",
         "fk_strategy_decisions_agent_paper_cycle",
         "fk_strategy_decisions_paper_account",
         "fk_strategy_decisions_source_policy",
