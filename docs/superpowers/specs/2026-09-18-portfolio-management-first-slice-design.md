@@ -151,7 +151,24 @@
 
 目标表不重复保存 strategy/policy version 或 parameters hash；这些继续由关联的 `StrategyDecisionRecord` 提供。目标内容由该 decision 的 targets 和 cash 读取，历史记录不可回写。
 
-### 5.4 调整计划关联
+### 5.4 `paper_initial_target_approvals`
+
+新增一张仅用于首次目标的不可变批准事实：
+
+- `id`
+- `account_id`、`portfolio_id`
+- `projection_as_of`、`projection_hash`
+- `allocation_policy_version`、`allocation_policy_hash`
+- `approved_by`、`approved_at`
+- `approval_hash`、`created_at`
+
+每个账户最多一条。创建时在账户锁内按 `projection_as_of` 重新加载现有内部模拟 projection，并验证 canonical hash、账户/组合、币种、持仓、现金、预留及未知状态；存在未结订单、未释放预留、未知结果或 hash 不一致时拒绝。批准入口只冻结这次基线，不创建目标、计划或订单。
+
+首次完整 proposal 必须引用该 approval，并以同一 projection hash 计算初始目标；后续 proposal 禁止继续读取 approval 来覆盖生效目标。政策确认不等于快照批准，实施后仍须先向用户展示实际快照，再由一次显式本地操作创建 approval。
+
+这不是通用人工审批流，不增加逐笔决策或订单审批。
+
+### 5.5 调整计划关联
 
 `PaperOrderBatchRecord` 新增可空 `target_version_id`：
 
@@ -317,7 +334,7 @@
 
 迁移只做加法：
 
-- 新增 candidate batch、synthesis run/output、target version 表及必要预算事实；
+- 新增 candidate batch、synthesis run/output、initial target approval、target version 表及必要预算事实；
 - `agent_paper_cycles.candidate_batch_id` 可空；
 - `strategy_decisions.portfolio_synthesis_output_id` 可空；
 - `paper_order_batches.target_version_id` 可空；
