@@ -432,7 +432,7 @@ async def prepare_candidates(
                 | (InstrumentAlias.valid_to >= authority.decision_session),
                 InstrumentAlias.created_at <= authority.decision_time,
             )
-            .limit(11)
+            .limit(max_instruments + 1)
         )
     ).all()
     if (

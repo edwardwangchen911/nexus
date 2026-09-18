@@ -7,7 +7,7 @@ from uuid import uuid4
 from nexus.paper.target_service import load_risk_remainder_coverage
 
 
-def test_risk_remainder_consumes_later_same_side_fills_once() -> None:
+def test_risk_remainder_is_fixed_and_does_not_double_count_later_fills() -> None:
     instrument_id = uuid4()
     first_order = SimpleNamespace(
         id=uuid4(), instrument_id=instrument_id, side="buy", reference_close=Decimal(100)
@@ -81,12 +81,14 @@ def test_risk_remainder_consumes_later_same_side_fills_once() -> None:
             self.calls += 1
             return Result(evaluations if self.calls == 1 else fills)
 
+    session = Session()
     coverage = asyncio.run(
         load_risk_remainder_coverage(
-            Session(), account_id=uuid4(), target_version_id=uuid4()  # type: ignore[arg-type]
+            session, account_id=uuid4(), target_version_id=uuid4()  # type: ignore[arg-type]
         )
     )
 
-    assert coverage[(instrument_id, "buy")].quantity == Decimal(4)
-    assert coverage[(instrument_id, "buy")].reference_close == Decimal(101)
+    assert session.calls == 1
+    assert coverage[(instrument_id, "buy")].quantity == Decimal(8)
+    assert set(type(coverage[(instrument_id, "buy")]).model_fields) == {"quantity"}
     assert (instrument_id, "sell") not in coverage

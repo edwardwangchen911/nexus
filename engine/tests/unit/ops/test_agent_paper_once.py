@@ -819,6 +819,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         assert kwargs["decision_slot_at"] == initial
         assert kwargs["requested_instrument_ids"] == tuple(bindings.values())
         assert kwargs["candidate_batch_id"] == UUID(int=20)
+        assert kwargs["execution_scope_max_symbols"] == 12
         events.append("cycle-job")
         return AgentPaperCycleResult(
             cycle_id=cycle_id,
@@ -883,6 +884,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
         alpaca_key=SecretStr("key"),
         alpaca_secret=SecretStr("secret"),
+        intraday_max_symbols=12,
     )
 
     result = asyncio.run(

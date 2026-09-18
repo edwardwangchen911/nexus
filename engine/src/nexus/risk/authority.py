@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID
@@ -807,6 +807,7 @@ async def prepare_schwab_realtime_risk_snapshot(
     *,
     cycle: AgentPaperCycleRecord,
     required_instrument_ids: Sequence[UUID] | None = None,
+    max_instruments: int,
 ) -> RiskMarketSnapshot:
     """Build the same-session risk snapshot only from one cycle's frozen IDs."""
     if (
@@ -860,9 +861,9 @@ async def prepare_schwab_realtime_risk_snapshot(
     required = (
         research_required if required_instrument_ids is None else set(required_instrument_ids)
     )
+    require_schwab_execution_scope_capacity(required, max_instruments=max_instruments)
     if (
         not research_required <= required
-        or not 1 <= len(required) <= 10
         or len(required) != len(tuple(required_instrument_ids or required))
     ):
         raise ValueError("risk Schwab execution scope is invalid")
@@ -883,7 +884,7 @@ async def prepare_schwab_realtime_risk_snapshot(
                 quality_report_id=cycle.quality_report_id,
             ),
             requested_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
-            max_instruments=10,
+            max_instruments=max_instruments,
         )
         if {item.instrument_id for item in execution_manifest} != required:
             raise ValueError("risk Schwab execution scope is incomplete")
@@ -918,6 +919,16 @@ async def prepare_schwab_realtime_risk_snapshot(
         sector_exposures=await _load_sectors(session, authority, required),
         query_proofs=proofs,
     )
+
+
+def require_schwab_execution_scope_capacity(
+    required_instrument_ids: Collection[UUID], *, max_instruments: int
+) -> None:
+    """Fail closed when a frozen execution scope exceeds provider capacity."""
+    if not 1 <= max_instruments <= 30:
+        raise ValueError("AGENT_PAPER_PROVIDER_CAPACITY_INVALID")
+    if not 1 <= len(required_instrument_ids) <= max_instruments:
+        raise ValueError("AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED")
 
 
 async def load_risk_market_snapshot(

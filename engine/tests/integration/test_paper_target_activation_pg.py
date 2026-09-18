@@ -127,7 +127,7 @@ async def test_direct_batch_rejects_superseded_target_version(migrated_database_
             )
             session.add(superseding)
             await session.flush()
-            with pytest.raises(PaperBatchError, match="STRATEGY_DECISION_INVALID"):
+            with pytest.raises(PaperBatchError, match="PORTFOLIO_ACTIVATION_REQUIRED"):
                 await create_paper_order_batch(
                     session,
                     account_id=proposal.account_id,
@@ -135,6 +135,26 @@ async def test_direct_batch_rejects_superseded_target_version(migrated_database_
                     request_time=args["now"] + timedelta(seconds=3),
                     idempotency_key="superseded-direct-batch",
                     target_version_id=target.id,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_public_batch_rejects_portfolio_decision_without_target_id(
+    migrated_database_url,
+):
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            proposal = await persist_portfolio_proposal(session, **args)
+            with pytest.raises(PaperBatchError, match="PORTFOLIO_ACTIVATION_REQUIRED"):
+                await create_paper_order_batch(
+                    session,
+                    account_id=proposal.account_id,
+                    strategy_decision_id=proposal.decision_id,
+                    request_time=args["now"] + timedelta(seconds=1),
+                    idempotency_key="portfolio-direct-batch",
                 )
     finally:
         await engine.dispose()
@@ -205,26 +225,22 @@ async def test_fresh_same_hash_decision_reuses_target_and_replay_never_creates_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("position_quantity", "covered_side", "covered_quantity", "expects_plan"),
+    ("position_quantity", "expects_plan"),
     [
-        (Decimal("5"), "sell", Decimal("5"), False),
-        (Decimal("8"), "sell", Decimal("5"), True),
-        (Decimal("5"), "buy", Decimal("5"), True),
+        (Decimal("5"), False),
+        (Decimal("8"), True),
     ],
 )
-async def test_same_target_risk_remainder_only_covers_same_side_quantity(
+async def test_same_target_raw_drift_delegates_remainder_to_private_batch(
     migrated_database_url,
     monkeypatch,
     position_quantity,
-    covered_side,
-    covered_quantity,
     expects_plan,
 ):
     from types import SimpleNamespace
 
     from nexus.paper import service, target_service
     from nexus.paper.projection import load_paper_projection
-    from nexus.paper.target_service import RiskRemainderCoverage
     from nexus.risk.canonical import canonical_paper_projection_hash
     from nexus.risk.models import PaperPositionBalance
 
@@ -285,36 +301,27 @@ async def test_same_target_risk_remainder_only_covers_same_side_quantity(
         async def load_projection(*_args, **_kwargs):
             return projection
 
-        async def load_coverage(*_args, **_kwargs):
-            return {
-                (instrument_id, covered_side): RiskRemainderCoverage(
-                    quantity=covered_quantity,
-                    reference_close=Decimal(100),
-                )
-            }
-
         calls = []
 
         async def create_batch(*_args, **_kwargs):
             calls.append(_kwargs)
-            return SimpleNamespace(batch_id=uuid4())
+            return SimpleNamespace(batch_id=uuid4()) if expects_plan else None
 
         monkeypatch.setattr(
             "nexus.paper.agent_decision_store.load_portfolio_proposal", load_fresh
         )
         monkeypatch.setattr(target_service, "load_paper_projection", load_projection)
-        monkeypatch.setattr(target_service, "load_risk_remainder_coverage", load_coverage)
-        monkeypatch.setattr(service, "create_paper_order_batch", create_batch)
+        monkeypatch.setattr(service, "_create_target_aware_paper_order_batch", create_batch)
         async with sessions.begin() as session:
             activated = await activate_portfolio_target(
                 session,
                 account_id=fresh.account_id,
                 strategy_decision_id=fresh.decision_id,
                 request_time=args["now"] + timedelta(seconds=3),
-                idempotency_key=f"risk-remainder-{covered_side}-{position_quantity}",
+                idempotency_key=f"risk-remainder-{position_quantity}",
             )
             assert (activated.batch_id is not None) is expects_plan
-            assert bool(calls) is expects_plan
+            assert bool(calls) is True
     finally:
         await engine.dispose()
 
@@ -577,7 +584,7 @@ async def test_batch_failure_rolls_back_target_insert(migrated_database_url, mon
         async def fail_batch(*args, **kwargs):
             raise RuntimeError("injected batch failure")
 
-        monkeypatch.setattr(service, "create_paper_order_batch", fail_batch)
+        monkeypatch.setattr(service, "_create_target_aware_paper_order_batch", fail_batch)
         with pytest.raises(RuntimeError, match="injected batch failure"):
             async with sessions.begin() as session:
                 await activate_portfolio_target(

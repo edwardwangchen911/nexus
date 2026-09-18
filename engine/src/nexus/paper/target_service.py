@@ -16,7 +16,6 @@ from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.paper import (
     PaperAccountRecord,
-    PaperFillRecord,
     PaperInitialTargetApprovalRecord,
     PaperOrderBatchRecord,
     PaperOrderRecord,
@@ -60,7 +59,6 @@ class RiskRemainderCoverage(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     quantity: Decimal
-    reference_close: Decimal
 
 
 async def load_risk_remainder_coverage(
@@ -91,64 +89,19 @@ async def load_risk_remainder_coverage(
             )
         ).tuples()
     )
-    outstanding: dict[
-        tuple[UUID, str], list[tuple[UUID, datetime, Decimal, Decimal]]
-    ] = {}
+    quantities: dict[tuple[UUID, str], Decimal] = {}
     for order, evaluation in rows:
         remainder = max(
             Decimal(0),
             evaluation.desired_quantity - evaluation.approved_quantity,
         )
         if remainder > 0:
-            outstanding.setdefault((order.instrument_id, order.side), []).append(
-                (order.id, evaluation.created_at, remainder, order.reference_close)
-            )
-    fill_rows = tuple(
-        (
-            await session.execute(
-                select(PaperOrderRecord, PaperFillRecord)
-                .join(PaperFillRecord, PaperFillRecord.order_id == PaperOrderRecord.id)
-                .join(
-                    PaperOrderBatchRecord,
-                    PaperOrderBatchRecord.id == PaperOrderRecord.batch_id,
-                )
-                .where(
-                    PaperOrderBatchRecord.account_id == account_id,
-                    PaperOrderBatchRecord.target_version_id == target_version_id,
-                )
-                .order_by(PaperFillRecord.occurred_at, PaperFillRecord.id)
-            )
-        ).tuples()
-    )
-    for fill_order, fill in fill_rows:
-        key = (fill_order.instrument_id, fill_order.side)
-        remaining_fill = fill.quantity
-        entries = outstanding.get(key, [])
-        for index, (source_order_id, created_at, quantity, reference_close) in enumerate(entries):
-            if (
-                remaining_fill <= 0
-                or source_order_id == fill_order.id
-                or created_at >= fill.occurred_at
-            ):
-                continue
-            consumed = min(quantity, remaining_fill)
-            entries[index] = (
-                source_order_id,
-                created_at,
-                quantity - consumed,
-                reference_close,
-            )
-            remaining_fill -= consumed
-    coverage: dict[tuple[UUID, str], RiskRemainderCoverage] = {}
-    for key, entries in outstanding.items():
-        remaining_entries = [entry for entry in entries if entry[2] > 0]
-        if not remaining_entries:
-            continue
-        coverage[key] = RiskRemainderCoverage(
-            quantity=sum((entry[2] for entry in remaining_entries), Decimal(0)),
-            reference_close=remaining_entries[-1][3],
-        )
-    return coverage
+            key = (order.instrument_id, order.side)
+            quantities[key] = quantities.get(key, Decimal(0)) + remainder
+    return {
+        key: RiskRemainderCoverage(quantity=quantity)
+        for key, quantity in quantities.items()
+    }
 
 
 def _activation_hash(
@@ -548,13 +501,6 @@ async def activate_portfolio_target(
         position.instrument_id: position.quantity * position.reference_close / projection.nav
         for position in projection.positions
     }
-    remainder_coverage = (
-        {}
-        if created
-        else await load_risk_remainder_coverage(
-            session, account_id=account_id, target_version_id=target.id
-        )
-    )
     gaps: list[Decimal] = []
     for instrument_id in set(proposal.weights) | set(actual_weights):
         delta = proposal.weights.get(instrument_id, Decimal(0)) - actual_weights.get(
@@ -562,20 +508,13 @@ async def activate_portfolio_target(
         )
         if delta == 0:
             continue
-        side = "buy" if delta > 0 else "sell"
-        covered = remainder_coverage.get((instrument_id, side))
-        covered_weight = (
-            Decimal(0)
-            if covered is None
-            else covered.quantity * covered.reference_close / projection.nav
-        )
-        gaps.append(max(Decimal(0), abs(delta) - covered_weight))
+        gaps.append(abs(delta))
     needs_plan = any(gap >= Decimal("0.03") for gap in gaps)
     batch_id = None
     if needs_plan:
-        from nexus.paper.service import create_paper_order_batch
+        from nexus.paper.service import _create_target_aware_paper_order_batch
 
-        batch = await create_paper_order_batch(
+        batch = await _create_target_aware_paper_order_batch(
             session,
             account_id=account_id,
             strategy_decision_id=strategy_decision_id,
@@ -583,7 +522,7 @@ async def activate_portfolio_target(
             idempotency_key=idempotency_key,
             request_time=request_time,
         )
-        batch_id = batch.batch_id
+        batch_id = None if batch is None else batch.batch_id
     result = TargetActivationResult(
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -156,6 +156,24 @@ class _PortfolioDecisionAuthority(BaseModel):
     decision_hash: str
     cash_weight: Decimal
     targets: tuple[ForwardStrategyTarget, ...]
+
+
+def _subtract_portfolio_risk_remainders(
+    candidates: Sequence[OrderCandidate],
+    remainder_quantities: Mapping[tuple[UUID, str], Decimal],
+) -> tuple[OrderCandidate, ...]:
+    """Subtract only fixed same-side unapproved quantities from current deltas."""
+    uncovered: list[OrderCandidate] = []
+    for candidate in candidates:
+        covered_quantity = remainder_quantities.get(
+            (candidate.instrument_id, candidate.side), Decimal(0)
+        )
+        desired_quantity = candidate.desired_quantity - min(
+            candidate.desired_quantity, covered_quantity
+        )
+        if desired_quantity > 0:
+            uncovered.append(candidate.model_copy(update={"desired_quantity": desired_quantity}))
+    return tuple(uncovered)
 
 
 def _observe(hooks: PaperBatchHooks | None, phase: str) -> None:
@@ -1125,7 +1143,58 @@ async def create_paper_order_batch(
     target_version_id: UUID | None = None,
     hooks: PaperBatchHooks | None = None,
 ) -> PaperOrderBatchResult:
-    """Create or replay one deterministic internal-paper order batch atomically."""
+    """Create a legacy batch; portfolio batches require the activation coordinator."""
+    if target_version_id is not None:
+        raise PaperBatchError("PORTFOLIO_ACTIVATION_REQUIRED")
+    result = await _create_paper_order_batch_impl(
+        session,
+        account_id=account_id,
+        strategy_decision_id=strategy_decision_id,
+        idempotency_key=idempotency_key,
+        request_time=request_time,
+        target_version_id=None,
+        portfolio_activation=False,
+        hooks=hooks,
+    )
+    assert result is not None
+    return result
+
+
+async def _create_target_aware_paper_order_batch(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    strategy_decision_id: UUID,
+    idempotency_key: str,
+    request_time: datetime,
+    target_version_id: UUID,
+    hooks: PaperBatchHooks | None = None,
+) -> PaperOrderBatchResult | None:
+    """Private activation-only target batch entrypoint; caller owns the transaction."""
+    return await _create_paper_order_batch_impl(
+        session,
+        account_id=account_id,
+        strategy_decision_id=strategy_decision_id,
+        idempotency_key=idempotency_key,
+        request_time=request_time,
+        target_version_id=target_version_id,
+        portfolio_activation=True,
+        hooks=hooks,
+    )
+
+
+async def _create_paper_order_batch_impl(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    strategy_decision_id: UUID,
+    idempotency_key: str,
+    request_time: datetime,
+    target_version_id: UUID | None,
+    portfolio_activation: bool,
+    hooks: PaperBatchHooks | None,
+) -> PaperOrderBatchResult | None:
+    """Shared deterministic batch implementation behind the two permission boundaries."""
     if not idempotency_key or len(idempotency_key) > 255:
         raise PaperBatchError("IDEMPOTENCY_CONFLICT")
     request_hash = canonical_paper_batch_request_hash(
@@ -1150,6 +1219,8 @@ async def create_paper_order_batch(
                 PaperOrderBatchRecord.id == existing.batch_id
             )
         )
+        if existing_target is not None and not portfolio_activation:
+            raise PaperBatchError("PORTFOLIO_ACTIVATION_REQUIRED")
         if existing_target != target_version_id:
             raise PaperBatchError("PAPER_BATCH_CONFLICT")
         idempotency, idempotency_is_new = await _claim_idempotency(
@@ -1178,6 +1249,8 @@ async def create_paper_order_batch(
     if newer_decision_id is not None:
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
     portfolio = decision_record.strategy_version == "agent_portfolio_proposal_v1"
+    if portfolio and not portfolio_activation:
+        raise PaperBatchError("PORTFOLIO_ACTIVATION_REQUIRED")
     decision: PaperDecisionAuthority
     try:
         if portfolio:
@@ -1320,6 +1393,7 @@ async def create_paper_order_batch(
                 session,
                 cycle=cycle,
                 required_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
+                max_instruments=len(required),
             )
             if set(market.required_instrument_ids) != required:
                 raise ValueError("Schwab Agent risk scope is incomplete")
@@ -1357,18 +1431,14 @@ async def create_paper_order_batch(
                 account_id=account_id,
                 target_version_id=target_version_id,
             )
-            uncovered: list[OrderCandidate] = []
-            for candidate in candidates:
-                coverage = remainder_coverage.get((candidate.instrument_id, candidate.side))
-                covered_quantity = Decimal(0) if coverage is None else coverage.quantity
-                desired_quantity = candidate.desired_quantity - min(
-                    candidate.desired_quantity, covered_quantity
-                )
-                if desired_quantity > 0:
-                    uncovered.append(
-                        candidate.model_copy(update={"desired_quantity": desired_quantity})
-                    )
-            candidates = tuple(uncovered)
+            candidates = _subtract_portfolio_risk_remainders(
+                candidates,
+                {key: value.quantity for key, value in remainder_coverage.items()},
+            )
+            if not candidates:
+                await session.delete(idempotency)
+                await session.flush()
+                return None
         no_changes = _derive_no_change_evidence(decision, projection, market)
         evaluations = evaluate_order_batch(candidates, projection, market, policy)
     except RiskBatchRejected as error:

@@ -140,10 +140,12 @@ async def test_normal_schwab_snapshot_binds_every_candidate(migrated_database_ur
     try:
         async with sessions() as session:
             market = await prepare_schwab_realtime_risk_snapshot(
-                session, cycle=frozen_cycle(authority, manifest)
+                session, cycle=frozen_cycle(authority, manifest), max_instruments=10
             )
             reverse = await prepare_schwab_realtime_risk_snapshot(
-                session, cycle=frozen_cycle(authority, tuple(reversed(manifest)))
+                session,
+                cycle=frozen_cycle(authority, tuple(reversed(manifest))),
+                max_instruments=10,
             )
             assert market == reverse
             assert market.required_instrument_ids == tuple(
@@ -308,6 +310,7 @@ async def test_later_single_candidate_risk_scope_includes_inherited_instruments(
                 session,
                 cycle=frozen_cycle(authority, research_manifest),
                 required_instrument_ids=(inherited_aapl, inherited_msft, later_nvda),
+                max_instruments=10,
             )
             assert len(research_manifest) == 1
             assert market.required_instrument_ids == tuple(
@@ -348,7 +351,9 @@ async def test_normal_schwab_snapshot_rejects_inexact_evidence(
         async with sessions() as session:
             with pytest.raises(ValueError):
                 await prepare_schwab_realtime_risk_snapshot(
-                    session, cycle=frozen_cycle(authority, changed)
+                    session,
+                    cycle=frozen_cycle(authority, changed),
+                    max_instruments=10,
                 )
     finally:
         await engine.dispose()

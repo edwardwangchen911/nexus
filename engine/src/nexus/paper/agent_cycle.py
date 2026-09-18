@@ -111,6 +111,8 @@ _TRIGGER_FAILURE_CODES = frozenset(
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
@@ -251,6 +253,7 @@ async def start_schwab_agent_paper_cycle(
     version_source_run_id: UUID | None = None,
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
+    execution_scope_max_symbols: int | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
     if (
@@ -320,6 +323,7 @@ async def start_schwab_agent_paper_cycle(
         version_source_run_id=version_source_run_id,
         version_prompt_id=version_prompt_id,
         version_model_id=version_model_id,
+        execution_scope_max_symbols=execution_scope_max_symbols,
     )
 
 
@@ -578,6 +582,7 @@ async def _start_cycle(
     version_source_run_id: UUID | None = None,
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
+    execution_scope_max_symbols: int | None = None,
 ) -> AgentPaperCycleResult:
     if version_evaluation_id is None:
         batch, _ = await validate_agent_paper_candidate_batch(
@@ -710,14 +715,28 @@ async def _start_cycle(
                 required_instrument_ids=tuple(
                     sorted(execution_required, key=lambda value: value.int)
                 ),
+                max_instruments=(
+                    len(execution_required)
+                    if execution_scope_max_symbols is None
+                    else execution_scope_max_symbols
+                ),
             )
-        except ValueError:
+        except ValueError as error:
+            code = str(error)
             await _append_event(
                 session,
                 cycle,
                 "prepared",
                 "unavailable",
-                "RISK_INPUT_REQUIRED",
+                (
+                    code
+                    if code
+                    in {
+                        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+                        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
+                    }
+                    else "RISK_INPUT_REQUIRED"
+                ),
                 {},
             )
             return _result(cycle.id, await _events(session, cycle.id), replayed=False)
@@ -912,7 +931,12 @@ async def _resume_research(
             )
         )
         if cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
-            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+            market = await prepare_schwab_realtime_risk_snapshot(
+                session,
+                cycle=cycle,
+                required_instrument_ids=required,
+                max_instruments=len(required),
+            )
         else:
             market = await prepare_risk_market_snapshot(
                 session,

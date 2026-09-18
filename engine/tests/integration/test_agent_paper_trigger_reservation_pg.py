@@ -110,8 +110,13 @@ async def test_finished_trigger_reservation_replays_fixed_result(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
+)
 async def test_failed_trigger_reservation_replays_safe_error(
     migrated_database_url: str,
+    error_code: str,
 ) -> None:
     seed = await _seed_trigger(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
@@ -127,11 +132,11 @@ async def test_failed_trigger_reservation_replays_safe_error(
                 now=now,
             )
             await agent_cycle.finish_schwab_agent_paper_trigger(
-                session, reservation=reservation, error_code="SCHWAB_L1_INCOMPLETE"
+                session, reservation=reservation, error_code=error_code
             )
 
         async with sessions.begin() as session:
-            with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+            with pytest.raises(ValueError, match=error_code):
                 await agent_cycle.reserve_schwab_agent_paper_trigger(
                     session,
                     account_id=seed.account_id,

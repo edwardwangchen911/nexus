@@ -7,6 +7,7 @@ from nexus.risk.authority import (
     RiskAuthorityInput,
     build_risk_market_snapshot,
     canonical_query_authority_hash,
+    require_schwab_execution_scope_capacity,
 )
 from nexus.risk.canonical import canonical_risk_market_authority_hash
 from nexus.risk.models import AuthorityQueryProof, RiskPrice, RiskSectorExposure
@@ -15,6 +16,33 @@ from nexus.strategy.forward import ForwardStrategyDecision, ForwardStrategyTarge
 NOW = datetime(2026, 8, 21, 20, tzinfo=UTC)
 FIRST_ID = UUID(int=10)
 SECOND_ID = UUID(int=11)
+
+
+@pytest.mark.parametrize(
+    ("required_count", "max_instruments", "error"),
+    [
+        (10, 10, None),
+        (11, 10, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (30, 30, None),
+        (31, 30, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (1, 31, "AGENT_PAPER_PROVIDER_CAPACITY_INVALID"),
+    ],
+)
+def test_schwab_execution_scope_uses_explicit_provider_capacity(
+    required_count: int, max_instruments: int, error: str | None
+) -> None:
+    required = {UUID(int=index + 1) for index in range(required_count)}
+
+    if error is None:
+        require_schwab_execution_scope_capacity(
+            required, max_instruments=max_instruments
+        )
+        return
+
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        require_schwab_execution_scope_capacity(
+            required, max_instruments=max_instruments
+        )
 
 
 def _decision() -> ForwardStrategyDecision:

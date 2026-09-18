@@ -128,7 +128,7 @@ from nexus.strategy.intents import (
     SynthesisClaimReview,
 )
 from nexus.worker import run_agent_worker_once
-from sqlalchemy import func, literal, select, text
+from sqlalchemy import delete, func, literal, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -172,7 +172,9 @@ async def _seed_legacy_prepared_cycle(session, *, authority, decision_slot_at):
     await session.flush()
     await agent_cycle._append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", {})
     if same_session:
-        await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+        await prepare_schwab_realtime_risk_snapshot(
+            session, cycle=cycle, max_instruments=5
+        )
     return cycle
 
 
@@ -5027,7 +5029,9 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 sizing_policy_hash="a" * 64,
                 execution_locked=True,
             )
-            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+            market = await prepare_schwab_realtime_risk_snapshot(
+                session, cycle=cycle, max_instruments=5
+            )
 
         assert market.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
         assert market.execution_session == market.decision_session
@@ -5079,6 +5083,22 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 )
             finally:
                 await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+            # This test next exercises the older job-isolation migration. Keep the
+            # selected singleton proof set, but remove alternative same-key proof
+            # rows that 0065 correctly refuses to collapse during downgrade.
+            await session.execute(text("ALTER TABLE risk_query_authorities DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    delete(RiskQueryAuthorityRecord).where(
+                        RiskQueryAuthorityRecord.id.not_in(
+                            tuple(manifest[0].risk_query_authority_ids)
+                        )
+                    )
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE risk_query_authorities ENABLE TRIGGER USER")
+                )
 
         await asyncio.to_thread(
             command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"

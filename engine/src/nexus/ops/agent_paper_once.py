@@ -90,6 +90,7 @@ from nexus.providers.market.schwab_oauth import SchwabOAuthError
 from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
 from nexus.providers.market.schwab_stream import SchwabStreamError
 from nexus.reconciliation.admission_claim import claim_or_lock
+from nexus.risk.authority import require_schwab_execution_scope_capacity
 from nexus.risk.query_authority_producer import (
     inspect_query_authority_scope,
     persist_query_authorities,
@@ -249,6 +250,12 @@ class AgentPaperMarketSettings(EngineSettings):
 class AgentPaperTriggerSettings(EngineSettings):
     alpaca_key: SecretStr = Field(validation_alias="ALPACA_API_KEY_ID")
     alpaca_secret: SecretStr = Field(validation_alias="ALPACA_API_SECRET_KEY")
+    intraday_max_symbols: int = Field(
+        default=10,
+        ge=1,
+        le=30,
+        validation_alias="NEXUS_INTRADAY_MAX_SYMBOLS",
+    )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -565,8 +572,9 @@ async def prepare_schwab_decision_authority(
             *(order.instrument_id for order in projection.open_orders),
             *target_ids,
         }
-        if not 1 <= len(execution_ids) <= 10:
-            raise ValueError("RISK_INPUT_REQUIRED")
+        require_schwab_execution_scope_capacity(
+            execution_ids, max_instruments=settings.intraday_max_symbols
+        )
         if execution_ids != {identity.instrument_id for identity in identities}:
             rows = tuple(
                 (
@@ -762,6 +770,7 @@ async def trigger_in_session(
         daily_limit_usd=settings.agent_daily_budget_usd,
         requested_instrument_ids=batch.instrument_ids,
         candidate_batch_id=batch.batch_id,
+        execution_scope_max_symbols=settings.intraday_max_symbols,
     )
 
 
@@ -1421,6 +1430,8 @@ def main(argv: list[str] | None = None) -> int:
             "AGENT_PAPER_TIME_IN_FUTURE",
             "AGENT_PAPER_MARKET_CONFIG_INVALID",
             "AGENT_PAPER_OUTSIDE_WINDOW",
+            "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+            "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
             "RISK_INPUT_REQUIRED",
             "SCHWAB_L1_FRESHNESS_UNPROVEN",
             "SCHWAB_L1_INCOMPLETE",
