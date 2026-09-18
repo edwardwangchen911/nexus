@@ -8,8 +8,11 @@ from nexus.api.schemas.paper import (
     AgentPaperCycleResponse,
     AgentVersionEvaluationResponse,
     PaperCancelRequest,
+    PaperCancelResultResponse,
     PaperComparisonRowResponse,
     PaperOrderPageResponse,
+    PaperPlanActualResponse,
+    PaperPlanResponse,
     PaperPortfolioResponse,
 )
 from nexus.main import create_engine_app
@@ -43,6 +46,74 @@ def test_available_paper_comparison_requires_every_metric() -> None:
             total_cost="0",
             reason_code="PERSISTED_AGENT_PERFORMANCE",
         )
+
+
+def test_cancel_result_requires_committed_fact_pair() -> None:
+    base = {
+        "status": "COMMITTED",
+        "order": {
+            "order_id": UUID(int=91),
+            "status": "cancelled",
+            "current_event_seq": 3,
+            "filled_quantity": "1",
+            "remaining_quantity": "2",
+            "as_of": datetime(2026, 9, 18, 15, tzinfo=UTC),
+        },
+        "reservation": None,
+        "reservation_released": None,
+        "result_event_seq": None,
+        "committed_at": None,
+    }
+    with pytest.raises(ValidationError, match="committed cancellation"):
+        PaperCancelResultResponse.model_validate(base)
+
+
+def test_plan_association_requires_exact_target_object() -> None:
+    with pytest.raises(ValidationError, match="target association"):
+        PaperPlanResponse.model_validate(
+            {
+                "batch_id": UUID(int=92),
+                "currency": "USD",
+                "association_state": "target_associated",
+                "target": None,
+                "proposal": {
+                    "strategy_decision_id": UUID(int=93),
+                    "decision_hash": "a" * 64,
+                    "cash_weight": "1",
+                    "targets": [],
+                    "as_of": datetime(2026, 9, 18, 14, tzinfo=UTC),
+                },
+                "plan": {
+                    "as_of": datetime(2026, 9, 18, 14, 1, tzinfo=UTC),
+                    "occupation_state": "released",
+                    "risk": [],
+                    "items": [],
+                },
+                "actual": {
+                    "data_state": "READY",
+                    "as_of": datetime(2026, 9, 18, 15, tzinfo=UTC),
+                    "available_cash": "10000",
+                    "reserved_cash": "0",
+                    "nav": "10000",
+                    "positions": [],
+                },
+            }
+        )
+
+
+def test_plan_actual_unknown_does_not_fabricate_zeroes() -> None:
+    actual = PaperPlanActualResponse.model_validate(
+        {
+            "data_state": "UNKNOWN",
+            "as_of": datetime(2026, 9, 18, 15, tzinfo=UTC),
+            "available_cash": None,
+            "reserved_cash": None,
+            "nav": None,
+            "positions": None,
+        }
+    )
+    assert actual.available_cash is None
+    assert actual.positions is None
 
 
 def test_persisted_market_benchmark_is_an_available_comparison_row() -> None:
@@ -177,6 +248,19 @@ def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_cre
     assert "promote" not in evaluation_wire
     assert "broker_order" not in evaluation_wire
 
+    cancel_result_schema = PaperCancelResultResponse.model_json_schema()
+    assert set(cancel_result_schema["properties"]["status"]["enum"]) == {
+        "NOT_RECORDED",
+        "COMMITTED",
+        "CONFLICT",
+        "UNKNOWN",
+    }
+    assert "idempotency_key" not in str(cancel_result_schema).lower()
+
+    plan_schema = PaperPlanResponse.model_json_schema()
+    assert {"target", "proposal", "plan", "actual"} <= set(plan_schema["properties"])
+    assert "account_id" not in str(plan_schema).lower()
+
 
 def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() -> None:
     document = create_engine_app(EngineSettings.for_test()).openapi()
@@ -186,6 +270,8 @@ def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() 
     assert set(paths["/internal/v1/paper/cycles/latest"]) == {"get"}
     assert set(paths["/internal/v1/paper/orders"]) == {"get"}
     assert set(paths["/internal/v1/paper/orders/{order_id}/cancel"]) == {"post"}
+    assert set(paths["/internal/v1/paper/orders/{order_id}/cancel-result"]) == {"get"}
+    assert set(paths["/internal/v1/paper/plans/{batch_id}"]) == {"get"}
     assert not any(
         forbidden in path
         for path in paths
@@ -198,3 +284,11 @@ def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() 
         if parameter["in"] == "header"
     }
     assert headers["Idempotency-Key"]["required"] is True
+    cancel_result = paths["/internal/v1/paper/orders/{order_id}/cancel-result"]["get"]
+    result_headers = {
+        parameter["name"]: parameter
+        for parameter in cancel_result["parameters"]
+        if parameter["in"] == "header"
+    }
+    assert result_headers["Idempotency-Key"]["required"] is True
+    assert not any(parameter["in"] == "query" for parameter in cancel_result["parameters"])

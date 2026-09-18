@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -31,6 +33,9 @@ from nexus.api.schemas.paper import (
     AgentVersionSlotLaneResponse,
     AgentVersionSlotResponse,
     PaperAttributionResponse,
+    PaperCancelOrderFactResponse,
+    PaperCancelReservationFactResponse,
+    PaperCancelResultResponse,
     PaperComparisonResponse,
     PaperComparisonRowResponse,
     PaperFillResponse,
@@ -38,6 +43,16 @@ from nexus.api.schemas.paper import (
     PaperOrderPageResponse,
     PaperOrderResponse,
     PaperPerformanceResponse,
+    PaperPlanActualPositionResponse,
+    PaperPlanActualResponse,
+    PaperPlanConfirmedFillResponse,
+    PaperPlanFactsResponse,
+    PaperPlanItemResponse,
+    PaperPlanProposalResponse,
+    PaperPlanProposalTargetResponse,
+    PaperPlanResponse,
+    PaperPlanRiskResponse,
+    PaperPlanTargetResponse,
     PaperPortfolioResponse,
     PaperPositionResponse,
 )
@@ -50,7 +65,14 @@ from nexus.paper.agent_cycle_models import (
     parse_candidate_manifest,
 )
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
-from nexus.paper.models import InternalOrderStatus
+from nexus.paper.models import (
+    InternalOrderStatus,
+    OrderEventInput,
+    PaperOrder,
+    Reservation,
+    ReservationEvent,
+)
+from nexus.paper.orders import current_order_status, fold_reservation_events
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agent_versions import (
     AgentVersionCyclePairRecord,
@@ -87,13 +109,16 @@ from nexus.persistence.models.paper import (
     PaperPerformanceAttributionRecord,
     PaperPerformanceSnapshotRecord,
     PaperPositionSnapshotRecord,
+    PaperRequestIdempotencyRecord,
     PaperReservationEventRecord,
     PaperReservationRecord,
+    PaperTargetVersionRecord,
     RiskEvaluationRecord,
     RiskNoChangeEvaluationRecord,
     RiskPolicyRecord,
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
+    StrategyDecisionTargetRecord,
 )
 from nexus.persistence.models.portfolio import Account, Portfolio
 
@@ -2003,6 +2028,508 @@ class PaperReadService:
             is not None
         )
 
+    async def cancel_result(
+        self,
+        order_id: UUID,
+        idempotency_key: str,
+    ) -> PaperCancelResultResponse | None:
+        """Read one prior cancellation attempt without changing persisted state."""
+        account, _ = await self.account()
+        order = await self._session.scalar(
+            select(PaperOrderRecord).where(
+                PaperOrderRecord.id == order_id,
+                PaperOrderRecord.account_id == account.id,
+                PaperOrderRecord.created_at <= self._request_time,
+            )
+        )
+        if order is None:
+            return None
+        events = tuple(
+            (
+                await self._session.scalars(
+                    select(PaperOrderEventRecord)
+                    .where(
+                        PaperOrderEventRecord.order_id == order.id,
+                        PaperOrderEventRecord.occurred_at <= self._request_time,
+                        PaperOrderEventRecord.created_at <= self._request_time,
+                    )
+                    .order_by(PaperOrderEventRecord.event_seq)
+                    .limit(_MAX_EVENTS + 1)
+                )
+            ).all()
+        )
+        _require_bounded("order_events", events, _MAX_EVENTS)
+        fills = tuple(
+            (
+                await self._session.scalars(
+                    select(PaperFillRecord)
+                    .where(
+                        PaperFillRecord.order_id == order.id,
+                        PaperFillRecord.occurred_at <= self._request_time,
+                        PaperFillRecord.created_at <= self._request_time,
+                    )
+                    .order_by(PaperFillRecord.fill_seq)
+                    .limit(_MAX_FILLS + 1)
+                )
+            ).all()
+        )
+        _require_bounded("fills", fills, _MAX_FILLS)
+        filled_quantity = sum((row.quantity for row in fills), start=Decimal(0))
+        latest_event = events[-1] if events else None
+        order_valid = _order_chain_is_valid(order, events)
+        order_fact = PaperCancelOrderFactResponse(
+            order_id=order.id,
+            status=(
+                cast(InternalOrderStatus, latest_event.to_status)
+                if latest_event is not None
+                else None
+            ),
+            current_event_seq=(latest_event.event_seq if latest_event is not None else None),
+            filled_quantity=decimal_to_string(filled_quantity),
+            remaining_quantity=decimal_to_string(order.quantity - filled_quantity),
+            as_of=(latest_event.occurred_at if latest_event is not None else None),
+        )
+        reservation_fact, reservation_valid = await self._cancel_reservation_fact(order.id)
+        claim = await self._session.scalar(
+            select(PaperRequestIdempotencyRecord).where(
+                PaperRequestIdempotencyRecord.account_id == account.id,
+                PaperRequestIdempotencyRecord.operation == "cancel",
+                PaperRequestIdempotencyRecord.idempotency_key == idempotency_key,
+                PaperRequestIdempotencyRecord.created_at <= self._request_time,
+            )
+        )
+        status: Literal["NOT_RECORDED", "COMMITTED", "CONFLICT", "UNKNOWN"]
+        committed_at: datetime | None = None
+        result_event_seq: int | None = None
+        if claim is None:
+            status = "NOT_RECORDED"
+        elif claim.order_id != order.id:
+            status = "CONFLICT"
+        elif claim.result_event_seq is None or claim.result_event_seq < 2:
+            status = "UNKNOWN"
+        else:
+            expected_request_hash = _cancel_request_hash(
+                order_id=order.id,
+                expected_event_seq=claim.result_event_seq - 1,
+            )
+            if claim.request_hash != expected_request_hash:
+                status = "CONFLICT"
+            else:
+                result_event = next(
+                    (event for event in events if event.event_seq == claim.result_event_seq),
+                    None,
+                )
+                if result_event is None or result_event.to_status != "cancelled":
+                    status = "UNKNOWN"
+                else:
+                    committed_fills = sum(
+                        (
+                            row.quantity
+                            for row in fills
+                            if row.occurred_at <= result_event.occurred_at
+                        ),
+                        start=Decimal(0),
+                    )
+                    expected_result_hash = _cancel_result_hash(
+                        order=order,
+                        filled_quantity=committed_fills,
+                        result_event_seq=result_event.event_seq,
+                    )
+                    if claim.result_hash != expected_result_hash:
+                        status = "UNKNOWN"
+                    else:
+                        status = "COMMITTED"
+                        committed_at = result_event.occurred_at
+                        result_event_seq = result_event.event_seq
+        if status != "CONFLICT" and (
+            not order_valid
+            or not reservation_valid
+            or (status == "COMMITTED" and reservation_fact is None)
+        ):
+            status = "UNKNOWN"
+            committed_at = None
+            result_event_seq = None
+        return PaperCancelResultResponse(
+            status=status,
+            order=order_fact,
+            reservation=reservation_fact,
+            reservation_released=(None if reservation_fact is None else reservation_fact.released),
+            result_event_seq=result_event_seq,
+            committed_at=committed_at,
+        )
+
+    async def plan(self, batch_id: UUID) -> PaperPlanResponse | None:
+        """Project one persisted paper plan without advancing its lifecycle."""
+        account, _ = await self.account()
+        batch = await self._session.scalar(
+            select(PaperOrderBatchRecord).where(
+                PaperOrderBatchRecord.id == batch_id,
+                PaperOrderBatchRecord.account_id == account.id,
+                PaperOrderBatchRecord.created_at <= self._request_time,
+            )
+        )
+        if batch is None:
+            return None
+        decision = await self._session.scalar(
+            select(StrategyDecisionRecord).where(
+                StrategyDecisionRecord.id == batch.strategy_decision_id,
+                StrategyDecisionRecord.account_id == account.id,
+                StrategyDecisionRecord.created_at <= self._request_time,
+            )
+        )
+        if decision is None:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The paper plan proposal is unavailable.",
+                status_code=409,
+            )
+        target = None
+        if batch.target_version_id is not None:
+            target_row = await self._session.scalar(
+                select(PaperTargetVersionRecord).where(
+                    PaperTargetVersionRecord.id == batch.target_version_id,
+                    PaperTargetVersionRecord.account_id == account.id,
+                    PaperTargetVersionRecord.activated_at <= self._request_time,
+                )
+            )
+            if target_row is None or target_row.strategy_decision_id != decision.id:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The paper plan target is unavailable.",
+                    status_code=409,
+                )
+            target = PaperPlanTargetResponse(
+                target_version_id=target_row.id,
+                version_seq=target_row.version_seq,
+                target_content_hash=target_row.target_content_hash,
+                as_of=target_row.activated_at,
+            )
+        proposal_targets = tuple(
+            (
+                await self._session.scalars(
+                    select(StrategyDecisionTargetRecord)
+                    .where(
+                        StrategyDecisionTargetRecord.strategy_decision_id == decision.id,
+                        StrategyDecisionTargetRecord.created_at <= self._request_time,
+                    )
+                    .order_by(StrategyDecisionTargetRecord.instrument_id)
+                    .limit(_MAX_AGENT_ORDERS_PER_CYCLE + 1)
+                )
+            ).all()
+        )
+        _require_bounded(
+            "strategy_decision_targets",
+            proposal_targets,
+            _MAX_AGENT_ORDERS_PER_CYCLE,
+        )
+        proposal = PaperPlanProposalResponse(
+            strategy_decision_id=decision.id,
+            decision_hash=decision.decision_hash,
+            cash_weight=decimal_to_string(decision.cash_weight),
+            targets=tuple(
+                PaperPlanProposalTargetResponse(
+                    instrument_id=row.instrument_id,
+                    target_weight=decimal_to_string(row.target_weight),
+                    exit=row.exit,
+                )
+                for row in proposal_targets
+            ),
+            as_of=decision.decision_time,
+        )
+        order_rows = tuple(
+            (
+                await self._session.scalars(
+                    select(PaperOrderRecord)
+                    .where(
+                        PaperOrderRecord.batch_id == batch.id,
+                        PaperOrderRecord.account_id == account.id,
+                        PaperOrderRecord.created_at <= self._request_time,
+                    )
+                    .order_by(PaperOrderRecord.id)
+                    .limit(_MAX_AGENT_ORDERS_PER_CYCLE + 1)
+                )
+            ).all()
+        )
+        _require_bounded("paper_plan_orders", order_rows, _MAX_AGENT_ORDERS_PER_CYCLE)
+        risk_rows = tuple(
+            (
+                await self._session.scalars(
+                    select(RiskEvaluationRecord)
+                    .where(
+                        RiskEvaluationRecord.batch_id == batch.id,
+                        RiskEvaluationRecord.account_id == account.id,
+                        RiskEvaluationRecord.created_at <= self._request_time,
+                    )
+                    .order_by(RiskEvaluationRecord.order_id)
+                    .limit(_MAX_AGENT_ORDERS_PER_CYCLE + 1)
+                )
+            ).all()
+        )
+        _require_bounded("paper_plan_risk", risk_rows, _MAX_AGENT_ORDERS_PER_CYCLE)
+        risk_by_order = {row.order_id: row for row in risk_rows}
+        risk = tuple(
+            PaperPlanRiskResponse(
+                order_id=row.order_id,
+                instrument_id=next(
+                    order.instrument_id for order in order_rows if order.id == row.order_id
+                ),
+                outcome=cast(Literal["approved", "reduced", "rejected"], row.outcome),
+                desired_quantity=decimal_to_string(row.desired_quantity),
+                approved_quantity=decimal_to_string(row.approved_quantity),
+                reduced_quantity=decimal_to_string(
+                    row.desired_quantity - row.approved_quantity
+                    if row.outcome == "reduced"
+                    else Decimal(0)
+                ),
+                rejected_quantity=decimal_to_string(
+                    row.desired_quantity if row.outcome == "rejected" else Decimal(0)
+                ),
+                desired_amount_usd=decimal_to_string(row.desired_quantity * row.worst_price),
+                approved_amount_usd=decimal_to_string(row.approved_quantity * row.worst_price),
+                reduced_amount_usd=decimal_to_string(
+                    (row.desired_quantity - row.approved_quantity) * row.worst_price
+                    if row.outcome == "reduced"
+                    else Decimal(0)
+                ),
+                rejected_amount_usd=decimal_to_string(
+                    row.desired_quantity * row.worst_price
+                    if row.outcome == "rejected"
+                    else Decimal(0)
+                ),
+            )
+            for row in risk_rows
+        )
+        items: list[PaperPlanItemResponse] = []
+        occupation_unknown = False
+        occupied = False
+        for order in order_rows:
+            events = tuple(
+                (
+                    await self._session.scalars(
+                        select(PaperOrderEventRecord)
+                        .where(
+                            PaperOrderEventRecord.order_id == order.id,
+                            PaperOrderEventRecord.occurred_at <= self._request_time,
+                            PaperOrderEventRecord.created_at <= self._request_time,
+                        )
+                        .order_by(PaperOrderEventRecord.event_seq)
+                        .limit(_MAX_EVENTS + 1)
+                    )
+                ).all()
+            )
+            _require_bounded("paper_plan_order_events", events, _MAX_EVENTS)
+            fills = tuple(
+                (
+                    await self._session.scalars(
+                        select(PaperFillRecord)
+                        .where(
+                            PaperFillRecord.order_id == order.id,
+                            PaperFillRecord.occurred_at <= self._request_time,
+                            PaperFillRecord.created_at <= self._request_time,
+                        )
+                        .order_by(PaperFillRecord.fill_seq)
+                        .limit(_MAX_FILLS + 1)
+                    )
+                ).all()
+            )
+            _require_bounded("paper_plan_fills", fills, _MAX_FILLS)
+            filled = sum((row.quantity for row in fills), start=Decimal(0))
+            latest = events[-1] if events else None
+            latest_status = (
+                cast(InternalOrderStatus, latest.to_status) if latest is not None else None
+            )
+            reservation_fact, reservation_valid = await self._cancel_reservation_fact(order.id)
+            if (
+                latest_status == "reconciling"
+                or not reservation_valid
+                or not _order_chain_is_valid(order, events)
+            ):
+                occupation_unknown = True
+            is_open = latest_status in {
+                "risk_approved",
+                "submitted",
+                "partially_filled",
+                "reconciling",
+            }
+            open_coverage = max(order.quantity - filled, Decimal(0)) if is_open else Decimal(0)
+            risk_row = risk_by_order.get(order.id)
+            desired = risk_row.desired_quantity if risk_row is not None else order.quantity
+            remaining_gap = max(desired - filled - open_coverage, Decimal(0))
+            outstanding = None if reservation_fact is None else reservation_fact.outstanding_amount
+            outstanding_decimal = Decimal(outstanding) if outstanding is not None else Decimal(0)
+            occupied = occupied or is_open or outstanding_decimal > 0
+            items.append(
+                PaperPlanItemResponse(
+                    order_id=order.id,
+                    instrument_id=order.instrument_id,
+                    side=cast(Literal["buy", "sell"], order.side),
+                    status=latest_status,
+                    confirmed_fill_quantity=decimal_to_string(filled),
+                    confirmed_fills=tuple(
+                        PaperPlanConfirmedFillResponse(
+                            fill_id=fill.id,
+                            quantity=decimal_to_string(fill.quantity),
+                            notional_usd=decimal_to_string(fill.notional),
+                            as_of=fill.occurred_at,
+                        )
+                        for fill in fills
+                    ),
+                    open_order_coverage_quantity=decimal_to_string(open_coverage),
+                    open_order_coverage_amount_usd=decimal_to_string(
+                        open_coverage * order.worst_price
+                    ),
+                    cash_reservation_outstanding=(
+                        reservation_fact.outstanding_amount
+                        if reservation_fact is not None
+                        and reservation_fact.reservation_type == "cash"
+                        else decimal_to_string(Decimal(0))
+                    ),
+                    position_reservation_outstanding=(
+                        reservation_fact.outstanding_amount
+                        if reservation_fact is not None
+                        and reservation_fact.reservation_type == "position"
+                        else decimal_to_string(Decimal(0))
+                    ),
+                    remaining_target_gap_quantity=(
+                        None if not reservation_valid else decimal_to_string(remaining_gap)
+                    ),
+                    remaining_target_gap_amount_usd=(
+                        None
+                        if not reservation_valid
+                        else decimal_to_string(remaining_gap * order.worst_price)
+                    ),
+                    order_as_of=(latest.occurred_at if latest is not None else None),
+                    reservation_as_of=(
+                        None if reservation_fact is None else reservation_fact.as_of
+                    ),
+                )
+            )
+        try:
+            actual_projection = await load_paper_projection(
+                self._session,
+                account_id=account.id,
+                as_of=self._request_time,
+            )
+        except ValueError:
+            actual = PaperPlanActualResponse(
+                data_state="UNKNOWN",
+                as_of=self._request_time,
+                available_cash=None,
+                reserved_cash=None,
+                nav=None,
+                positions=None,
+            )
+            occupation_unknown = True
+        else:
+            actual = PaperPlanActualResponse(
+                data_state="READY",
+                as_of=actual_projection.as_of,
+                available_cash=decimal_to_string(actual_projection.available_cash),
+                reserved_cash=decimal_to_string(actual_projection.reserved_cash),
+                nav=decimal_to_string(actual_projection.nav),
+                positions=tuple(
+                    PaperPlanActualPositionResponse(
+                        instrument_id=position.instrument_id,
+                        quantity=decimal_to_string(position.quantity),
+                        reserved_quantity=decimal_to_string(position.reserved_quantity),
+                    )
+                    for position in actual_projection.positions
+                ),
+            )
+        return PaperPlanResponse(
+            batch_id=batch.id,
+            currency="USD",
+            association_state=(
+                "target_associated"
+                if batch.target_version_id is not None
+                else "legacy_unassociated"
+            ),
+            target=target,
+            proposal=proposal,
+            plan=PaperPlanFactsResponse(
+                as_of=batch.evaluated_at,
+                occupation_state=(
+                    "unknown" if occupation_unknown else "occupied" if occupied else "released"
+                ),
+                risk=risk,
+                items=tuple(items),
+            ),
+            actual=actual,
+        )
+
+    async def _cancel_reservation_fact(
+        self,
+        order_id: UUID,
+    ) -> tuple[PaperCancelReservationFactResponse | None, bool]:
+        reservation = await self._session.scalar(
+            select(PaperReservationRecord).where(
+                PaperReservationRecord.order_id == order_id,
+                PaperReservationRecord.created_at <= self._request_time,
+            )
+        )
+        if reservation is None:
+            return None, True
+        events = tuple(
+            (
+                await self._session.scalars(
+                    select(PaperReservationEventRecord)
+                    .where(
+                        PaperReservationEventRecord.reservation_id == reservation.id,
+                        PaperReservationEventRecord.occurred_at <= self._request_time,
+                        PaperReservationEventRecord.created_at <= self._request_time,
+                    )
+                    .order_by(PaperReservationEventRecord.event_seq)
+                    .limit(_MAX_EVENTS + 1)
+                )
+            ).all()
+        )
+        _require_bounded("reservation_events", events, _MAX_EVENTS)
+        valid = True
+        try:
+            outstanding = fold_reservation_events(
+                Reservation(
+                    reservation_id=reservation.id,
+                    order_id=reservation.order_id,
+                    account_id=reservation.account_id,
+                    reservation_type=cast(
+                        Literal["cash", "position"], reservation.reservation_type
+                    ),
+                    currency=cast(Literal["USD"] | None, reservation.currency),
+                    instrument_id=reservation.instrument_id,
+                    amount=reservation.amount,
+                    events=tuple(
+                        ReservationEvent(
+                            event_id=event.id,
+                            event_seq=event.event_seq,
+                            event_type=cast(
+                                Literal["reserved", "consumed", "released"],
+                                event.event_type,
+                            ),
+                            amount=event.amount,
+                            occurred_at=event.occurred_at,
+                            payload_hash=event.payload_hash,
+                        )
+                        for event in events
+                    ),
+                )
+            )
+        except ValueError:
+            outstanding = None
+            valid = False
+        return (
+            PaperCancelReservationFactResponse(
+                reservation_id=reservation.id,
+                reservation_type=cast(Literal["cash", "position"], reservation.reservation_type),
+                amount=decimal_to_string(reservation.amount),
+                outstanding_amount=(
+                    None if outstanding is None else decimal_to_string(outstanding)
+                ),
+                released=(None if outstanding is None else outstanding == 0),
+                as_of=(events[-1].occurred_at if events else None),
+            ),
+            valid,
+        )
+
     async def _order(
         self,
         order: PaperOrderRecord,
@@ -2214,3 +2741,80 @@ def _require_bounded(name: str, values: Sequence[object], maximum: int) -> None:
         status_code=409,
         details={"collection": name, "maximum": maximum},
     )
+
+
+def _paper_digest(schema: str, payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {"schema": schema, **payload},
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
+def _cancel_request_hash(*, order_id: UUID, expected_event_seq: int) -> str:
+    return _paper_digest(
+        "paper_cancel_request_sha256_v1",
+        {"order_id": str(order_id), "expected_event_seq": expected_event_seq},
+    )
+
+
+def _cancel_result_hash(
+    *,
+    order: PaperOrderRecord,
+    filled_quantity: Decimal,
+    result_event_seq: int,
+) -> str:
+    unfilled_quantity = order.quantity - filled_quantity
+    return _paper_digest(
+        "paper_cancel_result_sha256_v1",
+        {
+            "order_id": str(order.id),
+            "account_id": str(order.account_id),
+            "status": "cancelled",
+            "filled_quantity": format(filled_quantity, ".12f"),
+            "unfilled_quantity": format(unfilled_quantity, ".12f"),
+            "result_event_seq": result_event_seq,
+        },
+    )
+
+
+def _order_chain_is_valid(
+    order: PaperOrderRecord,
+    events: tuple[PaperOrderEventRecord, ...],
+) -> bool:
+    try:
+        current_order_status(
+            PaperOrder(
+                order_id=order.id,
+                account_id=order.account_id,
+                strategy_decision_id=order.strategy_decision_id,
+                client_order_id=order.client_order_id,
+                instrument_id=order.instrument_id,
+                side=cast(Literal["buy", "sell"], order.side),
+                quantity=order.quantity,
+                worst_price=order.worst_price,
+                events=tuple(
+                    OrderEventInput(
+                        event_id=event.id,
+                        event_seq=event.event_seq,
+                        occurred_at=event.occurred_at,
+                        from_status=cast(InternalOrderStatus | None, event.from_status),
+                        to_status=cast(InternalOrderStatus, event.to_status),
+                        actor_kind=cast(
+                            Literal["task18", "task19", "user", "reconciliation"],
+                            event.actor_kind,
+                        ),
+                        reason_code=event.reason_code,
+                        payload_hash=event.payload_hash,
+                    )
+                    for event in events
+                ),
+            )
+        )
+    except ValueError:
+        return False
+    return True

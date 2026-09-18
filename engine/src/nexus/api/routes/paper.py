@@ -19,7 +19,9 @@ from nexus.api.schemas.paper import (
     PaperCancelEnvelope,
     PaperCancelRequest,
     PaperCancelResponse,
+    PaperCancelResultEnvelope,
     PaperOrderPageEnvelope,
+    PaperPlanEnvelope,
     PaperPortfolioEnvelope,
 )
 from nexus.domain.decimal import decimal_to_string
@@ -172,6 +174,71 @@ async def list_paper_orders(
     return PaperOrderPageEnvelope(
         data=data,
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=as_of),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/orders/{order_id}/cancel-result",
+    operation_id="getInternalPaperOrderCancelResult",
+    response_model=PaperCancelResultEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_paper_order_cancel_result(
+    order_id: UUID,
+    request: Request,
+    idempotency_key: _IdempotencyKey,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> PaperCancelResultEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR,
+            "The paper cancellation result query is invalid.",
+            status_code=422,
+        )
+    data = await PaperReadService(session, now).cancel_result(order_id, idempotency_key)
+    if data is None:
+        raise NexusError(
+            ErrorCode.NOT_FOUND,
+            "The internal paper order was not found.",
+            status_code=404,
+        )
+    return PaperCancelResultEnvelope(
+        data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/plans/{batch_id}",
+    operation_id="getInternalPaperPlan",
+    response_model=PaperPlanEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_paper_plan(
+    batch_id: UUID,
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> PaperPlanEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR,
+            "The paper plan query is invalid.",
+            status_code=422,
+        )
+    data = await PaperReadService(session, now).plan(batch_id)
+    if data is None:
+        raise NexusError(
+            ErrorCode.NOT_FOUND,
+            "The internal paper plan was not found.",
+            status_code=404,
+        )
+    return PaperPlanEnvelope(
+        data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
 
 
