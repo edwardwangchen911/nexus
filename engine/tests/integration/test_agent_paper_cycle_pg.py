@@ -513,6 +513,104 @@ async def test_manifest_never_shrinks_candidate_set_when_one_authority_missing(
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asset_type", ["ETF", "common_stock", "preferred_stock"])
+async def test_nasdaq_candidate_asset_type_risk_replay_and_exact_manifest(
+    migrated_database_url, asset_type
+):
+    from nexus.paper.agent_cycle_authority import validate_candidate_manifest
+    from nexus.risk.query_authority_producer import RiskSourceProof, persist_query_authorities
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    candidate_id = INSTRUMENTS[1][0]
+    symbol = "QQQ" if asset_type == "ETF" else "MSFT"
+    proofs = tuple(
+        RiskSourceProof(kind, False, "f" * 64, DECISION_TIME)
+        for kind in ("corporate_action", "suspension", "delisting")
+    )
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            # Synthetic test identities model the actual Nasdaq ETF/common-stock contract.
+            # Only the isolated fixture database is changed; source facts stay deterministic.
+            for table, assignment, values in (
+                (
+                    "instruments",
+                    "asset_type=:asset_type, exchange='XNAS'",
+                    {"asset_type": asset_type},
+                ),
+                ("instrument_aliases", "symbol=:symbol", {"symbol": symbol}),
+            ):
+                await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+                try:
+                    key = "id" if table == "instruments" else "instrument_id"
+                    await session.execute(
+                        text(f"UPDATE {table} SET {assignment} WHERE {key}=:iid"),
+                        {"iid": candidate_id, **values},
+                    )
+                finally:
+                    await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+            session.expire_all()
+        frozen_risk_ids = None
+        for _ in range(2):
+            async with sessions.begin() as session:
+                if asset_type == "preferred_stock":
+                    with pytest.raises(ValueError, match="RISK_QUERY_AUTHORITY_SCOPE_INVALID"):
+                        await persist_query_authorities(
+                            session,
+                            universe_snapshot_id=authority.universe_snapshot_id,
+                            decision_session=authority.decision_session,
+                            symbol=symbol,
+                            proofs=proofs,
+                        )
+                    assert (
+                        await prepare_candidates(
+                            session,
+                            authority=authority,
+                            requested_instrument_ids=(INSTRUMENTS[0][0], candidate_id),
+                        )
+                        == ()
+                    )
+                    continue
+                rows = await persist_query_authorities(
+                    session,
+                    universe_snapshot_id=authority.universe_snapshot_id,
+                    decision_session=authority.decision_session,
+                    symbol=symbol,
+                    proofs=proofs,
+                )
+                assert len(rows) == 3
+                assert all(row.required_instrument_ids == [candidate_id] for row in rows)
+                ids = {row.id for row in rows}
+                if frozen_risk_ids is None:
+                    frozen_risk_ids = ids
+                assert ids == frozen_risk_ids
+                requested = (INSTRUMENTS[0][0], candidate_id)
+                manifest = await prepare_candidates(
+                    session, authority=authority, requested_instrument_ids=requested
+                )
+                assert tuple(row.instrument_id for row in manifest) == requested
+                assert manifest[1].symbol == symbol
+                assert set(manifest[1].risk_query_authority_ids) == frozen_risk_ids
+                assert await validate_candidate_manifest(
+                    session,
+                    authority=authority,
+                    manifest=manifest,
+                    requested_instrument_ids=requested,
+                )
+    finally:
+        await engine.dispose()
+
+
 async def _wait_for_advisory_wait(
     sessions: async_sessionmaker[AsyncSession], backend_pid: int
 ) -> None:

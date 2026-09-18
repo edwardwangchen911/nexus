@@ -271,7 +271,7 @@ async def inspect_query_authority_scope(
         instrument is None
         or instrument.created_at > as_of
         or instrument.exchange not in US_EQUITY_EXCHANGES
-        or instrument.asset_type != "common_stock"
+        or instrument.asset_type not in {"ETF", "common_stock"}
         or instrument.currency != "USD"
     ):
         raise ValueError("RISK_QUERY_AUTHORITY_SCOPE_INVALID")
