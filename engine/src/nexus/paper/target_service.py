@@ -104,7 +104,7 @@ async def load_risk_remainder_coverage(
     }
 
 
-def _activation_hash(
+def canonical_target_activation_hash(
     *,
     account_id: UUID,
     portfolio_id: UUID,
@@ -480,7 +480,7 @@ async def activate_portfolio_target(
             previous_target_version_id=None if current is None else current.id,
             target_content_hash=content_hash,
             activated_at=request_time,
-            activation_hash=_activation_hash(
+            activation_hash=canonical_target_activation_hash(
                 account_id=account_id,
                 portfolio_id=projection.portfolio_id,
                 version_seq=sequence,

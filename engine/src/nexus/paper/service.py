@@ -462,7 +462,7 @@ async def _load_policy(session: AsyncSession) -> tuple[UUID, RiskPolicy]:
     return matching[0], policy
 
 
-async def _existing_batch_result(
+async def load_paper_order_batch_result(
     session: AsyncSession,
     *,
     account_id: UUID,
@@ -476,8 +476,32 @@ async def _existing_batch_result(
     )
     if batch is None:
         return None
+    idempotency = await session.get(IdempotencyRecord, batch.idempotency_record_id)
     decision = await session.get(StrategyDecisionRecord, strategy_decision_id)
-    if decision is None:
+    if (
+        decision is None
+        or batch.account_id != account_id
+        or batch.strategy_decision_id != strategy_decision_id
+        or idempotency is None
+        or idempotency.actor_id != f"internal-paper:{account_id}"
+        or idempotency.route != _ROUTE
+        or idempotency.schema_version != "paper_order_batch_result_v1"
+        or idempotency.request_hash != batch.request_hash
+        or batch.request_hash
+        != canonical_paper_batch_request_hash(
+            account_id=account_id,
+            strategy_decision_id=strategy_decision_id,
+            request_time=batch.evaluated_at,
+            target_version_id=batch.target_version_id,
+        )
+    ):
+        raise PaperBatchError("PAPER_BATCH_CONFLICT")
+    stored_decision_hash = idempotency.response_payload.get("decision_hash")
+    if (
+        not isinstance(stored_decision_hash, str)
+        or len(stored_decision_hash) != 64
+        or any(character not in "0123456789abcdef" for character in stored_decision_hash)
+    ):
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
     orders = tuple(
         (
@@ -492,10 +516,22 @@ async def _existing_batch_result(
         ).all()
     )
     evaluations: list[RiskEvaluation] = []
+    risk_rows = tuple(
+        (
+            await session.scalars(
+                select(RiskEvaluationRecord)
+                .where(RiskEvaluationRecord.batch_id == batch.id)
+                .order_by(RiskEvaluationRecord.order_id)
+            )
+        ).all()
+    )
+    if {row.order_id for row in risk_rows} != {order.id for order in orders} or len(
+        risk_rows
+    ) != len(orders):
+        raise PaperBatchError("PAPER_BATCH_CONFLICT")
+    risk_by_order = {row.order_id: row for row in risk_rows}
     for order in orders:
-        evaluation = await session.scalar(
-            select(RiskEvaluationRecord).where(RiskEvaluationRecord.order_id == order.id)
-        )
+        evaluation = risk_by_order.get(order.id)
         if evaluation is None:
             raise PaperBatchError("PAPER_BATCH_CONFLICT")
         rules = tuple(
@@ -538,7 +574,31 @@ async def _existing_batch_result(
             ),
             result_hash=evaluation.result_hash,
         )
-        if canonical_risk_evaluation_result_hash((domain,)) != domain.result_hash:
+        if (
+            evaluation.account_id != account_id
+            or evaluation.risk_policy_id != batch.risk_policy_id
+            or evaluation.input_hash != batch.risk_input_hash
+            or order.account_id != account_id
+            or order.batch_id != batch.id
+            or order.strategy_decision_id != strategy_decision_id
+            or order.instrument_id != domain.instrument_id
+            or order.side != domain.side
+            or order.risk_outcome != domain.outcome
+            or order.quantity
+            != (
+                domain.desired_quantity
+                if domain.outcome == "rejected"
+                else domain.approved_quantity
+            )
+            or order.target_weight != domain.target_weight
+            or order.reference_close != domain.reference_close
+            or order.worst_price != domain.worst_price
+            or any(
+                row.rule_seq != index or row.account_id != account_id
+                for index, row in enumerate(rules, start=1)
+            )
+            or canonical_risk_evaluation_result_hash((domain,)) != domain.result_hash
+        ):
             raise PaperBatchError("PAPER_BATCH_CONFLICT")
         evaluations.append(domain)
     ordered = tuple(
@@ -556,7 +616,7 @@ async def _existing_batch_result(
     if (
         canonical_paper_order_batch_hash(
             account_id=account_id,
-            decision_hash=decision.decision_hash,
+            decision_hash=stored_decision_hash,
             risk_input_hash=batch.risk_input_hash,
             evaluations=ordered,
         )
@@ -598,11 +658,11 @@ async def _existing_batch_result(
             raise PaperBatchError("PAPER_BATCH_CONFLICT")
     order_by_instrument = {order.instrument_id: order for order in orders}
     order_ids = tuple(order_by_instrument[item.instrument_id].id for item in ordered)
-    return PaperOrderBatchResult(
+    result = PaperOrderBatchResult(
         batch_id=batch.id,
         account_id=batch.account_id,
         strategy_decision_id=batch.strategy_decision_id,
-        decision_hash=decision.decision_hash,
+        decision_hash=stored_decision_hash,
         projection_hash=batch.projection_hash,
         request_hash=batch.request_hash,
         risk_input_hash=batch.risk_input_hash,
@@ -612,6 +672,7 @@ async def _existing_batch_result(
         order_ids=order_ids,
         evaluations=ordered,
     )
+    return result
 
 
 def _event_record(
@@ -1208,7 +1269,7 @@ async def _create_paper_order_batch_impl(
         account_id=account_id,
         hooks=hooks,
     )
-    existing = await _existing_batch_result(
+    existing = await load_paper_order_batch_result(
         session,
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,

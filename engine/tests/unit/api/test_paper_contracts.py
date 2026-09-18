@@ -84,7 +84,8 @@ def test_plan_association_requires_exact_target_object() -> None:
                     "as_of": datetime(2026, 9, 18, 14, tzinfo=UTC),
                 },
                 "plan": {
-                    "as_of": datetime(2026, 9, 18, 14, 1, tzinfo=UTC),
+                    "plan_created_at": datetime(2026, 9, 18, 14, 1, tzinfo=UTC),
+                    "reconciliation_as_of": datetime(2026, 9, 18, 14, 1, tzinfo=UTC),
                     "occupation_state": "released",
                     "risk": [],
                     "items": [],
@@ -105,7 +106,7 @@ def test_plan_actual_unknown_does_not_fabricate_zeroes() -> None:
     actual = PaperPlanActualResponse.model_validate(
         {
             "data_state": "UNKNOWN",
-            "as_of": datetime(2026, 9, 18, 15, tzinfo=UTC),
+            "as_of": None,
             "available_cash": None,
             "reserved_cash": None,
             "nav": None,
@@ -113,6 +114,7 @@ def test_plan_actual_unknown_does_not_fabricate_zeroes() -> None:
         }
     )
     assert actual.available_cash is None
+    assert actual.as_of is None
     assert actual.positions is None
 
 

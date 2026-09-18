@@ -50,14 +50,30 @@ def _cancel_request_hash(*, order_id, expected_event_seq: int) -> str:
 
 async def _database_fingerprint(session) -> tuple[tuple[int, str], ...]:
     tables = (
+        "idempotency_records",
+        "paper_accounts",
+        "strategy_decisions",
+        "strategy_decision_targets",
+        "risk_policies",
+        "risk_no_change_evaluations",
+        "risk_evaluations",
+        "risk_evaluation_rules",
+        "risk_evaluation_price_inputs",
+        "risk_evaluation_sector_inputs",
+        "risk_evaluation_query_proofs",
         "paper_orders",
         "paper_order_events",
+        "paper_execution_window_authorities",
+        "paper_execution_window_members",
         "paper_fills",
         "paper_request_idempotency",
         "paper_reservations",
         "paper_reservation_events",
+        "paper_ledger_accounts",
         "paper_ledger_transactions",
         "paper_ledger_entries",
+        "paper_position_adjustment_events",
+        "paper_position_snapshots",
         "paper_target_versions",
         "paper_order_batches",
     )
@@ -90,6 +106,81 @@ async def _seed_partial_order(database_url: str):
         )
     assert partial.action == "partially_filled"
     return seed, factory, partial.result_event_seq
+
+
+async def _corrupt_append_only_fact(session, *, table: str, statement: str, order_id) -> None:
+    await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+    try:
+        await session.execute(text(statement), {"order_id": order_id})
+    finally:
+        await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+
+
+async def _remove_one_risk_evaluation(session, *, batch_id) -> None:
+    child_tables = (
+        "risk_evaluation_rules",
+        "risk_evaluation_price_inputs",
+        "risk_evaluation_sector_inputs",
+        "risk_evaluation_query_proofs",
+    )
+    for table in (*child_tables, "risk_evaluations"):
+        await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+    try:
+        risk_id = await session.scalar(
+            text("SELECT id FROM risk_evaluations WHERE batch_id = :batch_id LIMIT 1"),
+            {"batch_id": batch_id},
+        )
+        assert risk_id is not None
+        for table in child_tables:
+            await session.execute(
+                text(f"DELETE FROM {table} WHERE risk_evaluation_id = :risk_id"),
+                {"risk_id": risk_id},
+            )
+        await session.execute(
+            text("DELETE FROM risk_evaluations WHERE id = :risk_id"),
+            {"risk_id": risk_id},
+        )
+    finally:
+        for table in reversed((*child_tables, "risk_evaluations")):
+            await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+
+
+async def _insert_extra_risk_evaluation(session, *, batch_id, orphan: bool) -> None:
+    await session.execute(text("ALTER TABLE risk_evaluations DISABLE TRIGGER USER"))
+    await session.execute(
+        text("ALTER TABLE risk_evaluations DROP CONSTRAINT uq_risk_evaluations_order")
+    )
+    if orphan:
+        await session.execute(
+            text("ALTER TABLE risk_evaluations DROP CONSTRAINT fk_risk_evaluations_order")
+        )
+    original_order_id = await session.scalar(
+        text("SELECT order_id FROM risk_evaluations WHERE batch_id = :batch_id LIMIT 1"),
+        {"batch_id": batch_id},
+    )
+    assert original_order_id is not None
+    await session.execute(
+        text(
+            "INSERT INTO risk_evaluations ("
+            "id, order_id, batch_id, account_id, risk_policy_id, outcome, "
+            "desired_quantity, approved_quantity, target_weight, strategy_priority, "
+            "reference_close, worst_price, reserve_amount, projected_available_cash, "
+            "projected_cash_ratio, projected_name_ratio, projected_sector_ratios, "
+            "input_hash, result_hash, created_at"
+            ") SELECT :new_id, :order_id, batch_id, account_id, risk_policy_id, outcome, "
+            "desired_quantity, approved_quantity, target_weight, strategy_priority, "
+            "reference_close, worst_price, reserve_amount, projected_available_cash, "
+            "projected_cash_ratio, projected_name_ratio, projected_sector_ratios, "
+            "input_hash, result_hash, created_at "
+            "FROM risk_evaluations WHERE batch_id = :batch_id LIMIT 1"
+        ),
+        {
+            "new_id": uuid4(),
+            "order_id": uuid4() if orphan else original_order_id,
+            "batch_id": batch_id,
+        },
+    )
+    await session.execute(text("ALTER TABLE risk_evaluations ENABLE TRIGGER USER"))
 
 
 @pytest.mark.asyncio
@@ -141,8 +232,16 @@ async def test_cancel_result_distinguishes_committed_conflict_and_unknown(
             requested_at=datetime(2026, 8, 27, 14, 0, tzinfo=UTC),
             idempotency_key=committed_key,
         )
+    async with factory() as session:
+        batch_id = await session.scalar(
+            select(PaperOrderBatchRecord.id)
+            .join(PaperOrderRecord, PaperOrderRecord.batch_id == PaperOrderBatchRecord.id)
+            .where(PaperOrderRecord.id == seed.order_id)
+        )
+    assert batch_id is not None
 
     path = f"/internal/v1/paper/orders/{seed.order_id}/cancel-result"
+    plan_path = f"/internal/v1/paper/plans/{batch_id}"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)),
         base_url="http://testserver",
@@ -151,6 +250,7 @@ async def test_cancel_result_distinguishes_committed_conflict_and_unknown(
             path,
             headers=headers("GET", path) | {"Idempotency-Key": committed_key},
         )
+        plan_response = await client.get(plan_path, headers=headers("GET", plan_path))
 
     assert committed_response.status_code == 200
     committed_data = committed_response.json()["data"]
@@ -158,6 +258,10 @@ async def test_cancel_result_distinguishes_committed_conflict_and_unknown(
     assert committed_data["result_event_seq"] == committed.result_event_seq
     assert committed_data["order"]["status"] == "cancelled"
     assert committed_data["reservation"]["released"] is True
+    assert plan_response.status_code == 200, plan_response.text
+    plan_times = plan_response.json()["data"]["plan"]
+    assert plan_times["reconciliation_as_of"] == committed_data["committed_at"]
+    assert plan_times["reconciliation_as_of"] > plan_times["plan_created_at"]
 
     async with factory() as session, session.begin():
         other_order = await session.scalar(
@@ -240,6 +344,83 @@ async def test_cancel_result_distinguishes_committed_conflict_and_unknown(
     assert before_repeated_reads == after_repeated_reads
 
 
+@pytest.mark.parametrize(
+    ("corruption", "table", "statement"),
+    (
+        (
+            "cancel actor",
+            "paper_order_events",
+            "UPDATE paper_order_events SET actor_kind = 'task19' "
+            "WHERE order_id = :order_id AND to_status = 'cancelled'",
+        ),
+        (
+            "cancel reason",
+            "paper_order_events",
+            "UPDATE paper_order_events SET reason_code = 'paper_timeout_cancelled' "
+            "WHERE order_id = :order_id AND to_status = 'cancelled'",
+        ),
+        (
+            "cancel payload",
+            "paper_order_events",
+            "UPDATE paper_order_events SET payload_hash = repeat('a', 64) "
+            "WHERE order_id = :order_id AND to_status = 'cancelled'",
+        ),
+        (
+            "fill payload",
+            "paper_fills",
+            "UPDATE paper_fills SET payload_hash = repeat('a', 64) "
+            "WHERE order_id = :order_id",
+        ),
+        (
+            "reservation payload",
+            "paper_reservation_events",
+            "UPDATE paper_reservation_events SET payload_hash = repeat('a', 64) "
+            "WHERE reservation_id = (SELECT id FROM paper_reservations "
+            "WHERE order_id = :order_id) AND event_type = 'released'",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_cancel_result_downgrades_corrupt_committed_fact_chain_to_unknown(
+    migrated_database_url: str,
+    corruption: str,
+    table: str,
+    statement: str,
+) -> None:
+    seed, factory, expected_event_seq = await _seed_partial_order(migrated_database_url)
+    key = f"cancel-read-corrupt-{corruption.replace(' ', '-')}"
+    async with factory() as session, session.begin():
+        await cancel_internal_paper_order(
+            session,
+            order_id=seed.order_id,
+            expected_event_seq=expected_event_seq,
+            requested_at=datetime(2026, 8, 27, 14, 0, tzinfo=UTC),
+            idempotency_key=key,
+        )
+    async with factory() as session, session.begin():
+        await _corrupt_append_only_fact(
+            session,
+            table=table,
+            statement=statement,
+            order_id=seed.order_id,
+        )
+
+    path = f"/internal/v1/paper/orders/{seed.order_id}/cancel-result"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(
+            path,
+            headers=headers("GET", path) | {"Idempotency-Key": key},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "UNKNOWN", corruption
+    assert response.json()["data"]["result_event_seq"] is None
+    assert response.json()["data"]["committed_at"] is None
+
+
 @pytest.mark.asyncio
 async def test_cancel_result_unknown_order_is_not_found(migrated_database_url: str) -> None:
     path = f"/internal/v1/paper/orders/{uuid4()}/cancel-result"
@@ -281,7 +462,7 @@ async def test_legacy_plan_separates_risk_execution_reservation_and_actual_facts
     async with factory() as session:
         after = await _database_fingerprint(session)
 
-    assert response.status_code == repeated.status_code == 200
+    assert response.status_code == repeated.status_code == 200, response.text
     assert response.json()["data"] == repeated.json()["data"]
     assert before == after
     data = response.json()["data"]
@@ -289,7 +470,9 @@ async def test_legacy_plan_separates_risk_execution_reservation_and_actual_facts
     assert data["target"] is None
     assert data["proposal"]["strategy_decision_id"]
     assert data["proposal"]["as_of"]
-    assert data["plan"]["as_of"]
+    assert data["plan"]["plan_created_at"]
+    assert data["plan"]["reconciliation_as_of"]
+    assert data["plan"]["reconciliation_as_of"] > data["plan"]["plan_created_at"]
     assert {item["outcome"] for item in data["plan"]["risk"]} == {
         "approved",
         "reduced",
@@ -310,6 +493,117 @@ async def test_legacy_plan_separates_risk_execution_reservation_and_actual_facts
     assert data["actual"]["as_of"]
     assert Decimal(data["actual"]["reserved_cash"]) > 0
     assert invalid.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("table", "statement"),
+    (
+        (
+            "paper_order_batches",
+            "UPDATE paper_order_batches SET batch_hash = repeat('a', 64) WHERE id = :order_id",
+        ),
+        (
+            "risk_evaluations",
+            "UPDATE risk_evaluations SET result_hash = repeat('a', 64) "
+            "WHERE batch_id = :order_id",
+        ),
+        (
+            "strategy_decisions",
+            "UPDATE strategy_decisions SET decision_hash = repeat('a', 64) "
+            "WHERE id = (SELECT strategy_decision_id FROM paper_order_batches "
+            "WHERE id = :order_id)",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_plan_rejects_corrupt_authority_hashes(
+    migrated_database_url: str,
+    table: str,
+    statement: str,
+) -> None:
+    seed, factory, _ = await _seed_partial_order(migrated_database_url)
+    async with factory() as session:
+        batch_id = await session.scalar(
+            select(PaperOrderBatchRecord.id)
+            .join(PaperOrderRecord, PaperOrderRecord.batch_id == PaperOrderBatchRecord.id)
+            .where(PaperOrderRecord.id == seed.order_id)
+        )
+    assert batch_id is not None
+    async with factory() as session, session.begin():
+        await _corrupt_append_only_fact(
+            session,
+            table=table,
+            statement=statement,
+            order_id=batch_id,
+        )
+
+    path = f"/internal/v1/paper/plans/{batch_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
+
+
+@pytest.mark.asyncio
+async def test_plan_rejects_missing_risk_evaluation_without_fallback(
+    migrated_database_url: str,
+) -> None:
+    seed, factory, _ = await _seed_partial_order(migrated_database_url)
+    async with factory() as session:
+        batch_id = await session.scalar(
+            select(PaperOrderBatchRecord.id)
+            .join(PaperOrderRecord, PaperOrderRecord.batch_id == PaperOrderBatchRecord.id)
+            .where(PaperOrderRecord.id == seed.order_id)
+        )
+    assert batch_id is not None
+    async with factory() as session, session.begin():
+        await _remove_one_risk_evaluation(session, batch_id=batch_id)
+
+    path = f"/internal/v1/paper/plans/{batch_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
+
+
+@pytest.mark.parametrize("orphan", (False, True), ids=("duplicate", "orphan"))
+@pytest.mark.asyncio
+async def test_plan_rejects_duplicate_or_orphan_risk_evaluation(
+    migrated_database_url: str,
+    orphan: bool,
+) -> None:
+    seed, factory, _ = await _seed_partial_order(migrated_database_url)
+    async with factory() as session:
+        batch_id = await session.scalar(
+            select(PaperOrderBatchRecord.id)
+            .join(PaperOrderRecord, PaperOrderRecord.batch_id == PaperOrderBatchRecord.id)
+            .where(PaperOrderRecord.id == seed.order_id)
+        )
+    assert batch_id is not None
+    async with factory() as session, session.begin():
+        await _insert_extra_risk_evaluation(
+            session,
+            batch_id=batch_id,
+            orphan=orphan,
+        )
+
+    path = f"/internal/v1/paper/plans/{batch_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
 
 
 @pytest.mark.asyncio
@@ -384,7 +678,7 @@ async def test_plan_preserves_target_and_proposal_identity_without_merging_actua
         ) as client:
             response = await client.get(path, headers=headers("GET", path))
 
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()["data"]
         assert data["association_state"] == "target_associated"
         assert data["target"]["target_version_id"] == str(activated.target_version_id)
@@ -392,6 +686,7 @@ async def test_plan_preserves_target_and_proposal_identity_without_merging_actua
         assert data["proposal"]["strategy_decision_id"] == str(proposal.decision_id)
         assert data["proposal"]["decision_hash"] == proposal.proposal.decision_hash
         assert data["target"]["as_of"] != data["actual"]["as_of"]
+        assert data["plan"]["reconciliation_as_of"] == data["plan"]["plan_created_at"]
         assert data["plan"]["occupation_state"] == "occupied"
     finally:
         await engine.dispose()
@@ -425,14 +720,5 @@ async def test_plan_preserves_unknown_actual_projection_without_fabricating_zero
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
 
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["plan"]["occupation_state"] == "unknown"
-    assert data["actual"] == {
-        "data_state": "UNKNOWN",
-        "as_of": response.json()["meta"]["as_of"],
-        "available_cash": None,
-        "reserved_cash": None,
-        "nav": None,
-        "positions": None,
-    }
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"

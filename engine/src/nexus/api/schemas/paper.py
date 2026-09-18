@@ -670,7 +670,8 @@ class PaperPlanItemResponse(_StrictSchema):
 
 
 class PaperPlanFactsResponse(_StrictSchema):
-    as_of: AwareDatetime
+    plan_created_at: AwareDatetime
+    reconciliation_as_of: AwareDatetime
     occupation_state: Literal["occupied", "released", "unknown"]
     risk: tuple[PaperPlanRiskResponse, ...] = Field(max_length=50)
     items: tuple[PaperPlanItemResponse, ...] = Field(max_length=50)
@@ -684,7 +685,7 @@ class PaperPlanActualPositionResponse(_StrictSchema):
 
 class PaperPlanActualResponse(_StrictSchema):
     data_state: Literal["READY", "UNKNOWN"]
-    as_of: AwareDatetime
+    as_of: AwareDatetime | None
     available_cash: DecimalString | None
     reserved_cash: DecimalString | None
     nav: DecimalString | None
@@ -697,6 +698,10 @@ class PaperPlanActualResponse(_StrictSchema):
             raise ValueError("ready actual projection requires every fact")
         if self.data_state == "UNKNOWN" and any(value is not None for value in facts):
             raise ValueError("unknown actual projection cannot fabricate facts")
+        if self.data_state == "READY" and self.as_of is None:
+            raise ValueError("ready actual projection requires its projection cutoff")
+        if self.data_state == "UNKNOWN" and self.as_of is not None:
+            raise ValueError("unknown actual projection has no authoritative cutoff")
         return self
 
 
