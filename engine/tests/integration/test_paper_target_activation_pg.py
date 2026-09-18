@@ -11,6 +11,7 @@ from nexus.paper.agent_decision_store import (
     persist_portfolio_proposal,
 )
 from nexus.paper.portfolio_proposal import PortfolioBaselineV1
+from nexus.paper.service import PaperBatchError, create_paper_order_batch
 from nexus.paper.target_service import activate_portfolio_target
 from nexus.persistence.models.paper import (
     PaperOrderBatchRecord,
@@ -18,6 +19,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError
 
 
 def _include_first(run):
@@ -92,6 +94,53 @@ async def test_activation_replay_and_new_key_reuse_same_target(migrated_database
 
 
 @pytest.mark.asyncio
+async def test_direct_batch_rejects_superseded_target_version(migrated_database_url):
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            proposal = await persist_portfolio_proposal(session, **args)
+            first = await activate_portfolio_target(
+                session,
+                account_id=proposal.account_id,
+                strategy_decision_id=proposal.decision_id,
+                request_time=args["now"] + timedelta(seconds=1),
+                idempotency_key="activate-first",
+            )
+            target = await session.get(PaperTargetVersionRecord, first.target_version_id)
+            other_decision = await session.scalar(
+                select(StrategyDecisionRecord).where(
+                    StrategyDecisionRecord.account_id == proposal.account_id,
+                    StrategyDecisionRecord.id != proposal.decision_id,
+                )
+            )
+            assert other_decision is not None
+            superseding = PaperTargetVersionRecord(
+                account_id=target.account_id,
+                portfolio_id=target.portfolio_id,
+                version_seq=2,
+                strategy_decision_id=other_decision.id,
+                previous_target_version_id=target.id,
+                target_content_hash="b" * 64,
+                activated_at=args["now"] + timedelta(seconds=2),
+                activation_hash="c" * 64,
+                created_at=args["now"] + timedelta(seconds=2),
+            )
+            session.add(superseding)
+            await session.flush()
+            with pytest.raises(PaperBatchError, match="STRATEGY_DECISION_INVALID"):
+                await create_paper_order_batch(
+                    session,
+                    account_id=proposal.account_id,
+                    strategy_decision_id=proposal.decision_id,
+                    request_time=args["now"] + timedelta(seconds=3),
+                    idempotency_key="superseded-direct-batch",
+                    target_version_id=target.id,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_fresh_same_hash_decision_reuses_target_and_replay_never_creates_plan(
     migrated_database_url, monkeypatch
 ):
@@ -150,6 +199,122 @@ async def test_fresh_same_hash_decision_reuses_target_and_replay_never_creates_p
                 await session.scalar(select(func.count()).select_from(PaperTargetVersionRecord))
                 == 1
             )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("position_quantity", "covered_side", "covered_quantity", "expects_plan"),
+    [
+        (Decimal("5"), "sell", Decimal("5"), False),
+        (Decimal("8"), "sell", Decimal("5"), True),
+        (Decimal("5"), "buy", Decimal("5"), True),
+    ],
+)
+async def test_same_target_risk_remainder_only_covers_same_side_quantity(
+    migrated_database_url,
+    monkeypatch,
+    position_quantity,
+    covered_side,
+    covered_quantity,
+    expects_plan,
+):
+    from types import SimpleNamespace
+
+    from nexus.paper import service, target_service
+    from nexus.paper.projection import load_paper_projection
+    from nexus.paper.target_service import RiskRemainderCoverage
+    from nexus.risk.canonical import canonical_paper_projection_hash
+    from nexus.risk.models import PaperPositionBalance
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            first_proposal = await persist_portfolio_proposal(session, **args)
+            first = await activate_portfolio_target(
+                session,
+                account_id=first_proposal.account_id,
+                strategy_decision_id=first_proposal.decision_id,
+                request_time=args["now"] + timedelta(seconds=1),
+                idempotency_key="activate-first",
+            )
+            target = await session.get(PaperTargetVersionRecord, first.target_version_id)
+            base = await load_paper_projection(
+                session,
+                account_id=first_proposal.account_id,
+                as_of=args["now"] + timedelta(seconds=2),
+            )
+        instrument_id = next(iter(first_proposal.proposal.weights))
+        fresh = PersistedPortfolioProposal(
+            decision_id=uuid4(),
+            account_id=first_proposal.account_id,
+            cycle_id=first_proposal.cycle_id,
+            proposal=first_proposal.proposal.model_copy(
+                update={
+                    "baseline": PortfolioBaselineV1(
+                        weights=first_proposal.proposal.weights,
+                        cash_weight=first_proposal.proposal.cash_weight,
+                        roles=first_proposal.proposal.roles,
+                        target_version_id=target.id,
+                        content_hash=target.target_content_hash,
+                    )
+                }
+            ),
+        )
+        projection = base.model_copy(
+            update={
+                "positions": (
+                    PaperPositionBalance(
+                        instrument_id=instrument_id,
+                        quantity=position_quantity,
+                        reserved_quantity=Decimal(0),
+                        cost_basis=position_quantity * Decimal(100),
+                        reference_close=Decimal(100),
+                    ),
+                )
+            }
+        )
+        projection = projection.model_copy(
+            update={"projection_hash": canonical_paper_projection_hash(projection)}
+        )
+
+        async def load_fresh(*_args, **_kwargs):
+            return fresh
+
+        async def load_projection(*_args, **_kwargs):
+            return projection
+
+        async def load_coverage(*_args, **_kwargs):
+            return {
+                (instrument_id, covered_side): RiskRemainderCoverage(
+                    quantity=covered_quantity,
+                    reference_close=Decimal(100),
+                )
+            }
+
+        calls = []
+
+        async def create_batch(*_args, **_kwargs):
+            calls.append(_kwargs)
+            return SimpleNamespace(batch_id=uuid4())
+
+        monkeypatch.setattr(
+            "nexus.paper.agent_decision_store.load_portfolio_proposal", load_fresh
+        )
+        monkeypatch.setattr(target_service, "load_paper_projection", load_projection)
+        monkeypatch.setattr(target_service, "load_risk_remainder_coverage", load_coverage)
+        monkeypatch.setattr(service, "create_paper_order_batch", create_batch)
+        async with sessions.begin() as session:
+            activated = await activate_portfolio_target(
+                session,
+                account_id=fresh.account_id,
+                strategy_decision_id=fresh.decision_id,
+                request_time=args["now"] + timedelta(seconds=3),
+                idempotency_key=f"risk-remainder-{covered_side}-{position_quantity}",
+            )
+            assert (activated.batch_id is not None) is expects_plan
+            assert bool(calls) is expects_plan
     finally:
         await engine.dispose()
 
@@ -462,6 +627,91 @@ async def test_candidate_cycle_activates_target_and_completes_without_orders(
             assert (
                 await session.scalar(select(func.count()).select_from(PaperOrderBatchRecord)) == 0
             )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_portfolio_cycle_cannot_use_unallowlisted_direct_completion_code(
+    migrated_database_url,
+):
+    from nexus.paper.agent_cycle import _append_event, _events
+    from nexus.persistence.models.paper import AgentPaperCycleRecord
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            proposal = await persist_portfolio_proposal(session, **args)
+            await _append_event(
+                session,
+                cycle,
+                "researching",
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+            events = await _events(session, cycle.id)
+            assert events[-1].to_status == "decision_recorded"
+            with pytest.raises(DBAPIError):
+                await _append_event(
+                    session,
+                    cycle,
+                    "decision_recorded",
+                    "completed",
+                    "DECISION_COMPLETED",
+                    {"strategy_decision_id": str(proposal.decision_id)},
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_cycle_cannot_use_portfolio_direct_completion_exception(
+    migrated_database_url,
+):
+    from nexus.paper.agent_cycle import _append_event
+    from nexus.paper.agent_decision import AGENT_PAPER_SIZING_POLICY_HASH
+    from nexus.persistence.models.paper import AgentPaperCycleRecord
+    from sqlalchemy import text
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            proposal = await persist_portfolio_proposal(session, **args)
+            await session.execute(text("ALTER TABLE agent_paper_cycles DISABLE TRIGGER USER"))
+            await session.execute(
+                text(
+                    "UPDATE agent_paper_cycles SET candidate_batch_id=NULL, "
+                    "candidate_manifest='[]'::jsonb, candidate_hash=:candidate_hash, "
+                    "sizing_policy_version='agent_paper_sizing_v1', "
+                    "sizing_policy_hash=:sizing_hash WHERE id=:cycle_id"
+                ),
+                {
+                    "candidate_hash": "a" * 64,
+                    "sizing_hash": AGENT_PAPER_SIZING_POLICY_HASH,
+                    "cycle_id": cycle.id,
+                },
+            )
+            await session.execute(text("ALTER TABLE agent_paper_cycles ENABLE TRIGGER USER"))
+            await _append_event(
+                session,
+                cycle,
+                "researching",
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+            with pytest.raises(DBAPIError):
+                await _append_event(
+                    session,
+                    cycle,
+                    "decision_recorded",
+                    "completed",
+                    "NO_ORDER_REQUIRED",
+                    {"strategy_decision_id": str(proposal.decision_id)},
+                )
     finally:
         await engine.dispose()
 

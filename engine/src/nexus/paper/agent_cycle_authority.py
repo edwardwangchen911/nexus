@@ -407,11 +407,12 @@ async def prepare_candidates(
     *,
     authority: CycleAuthority,
     requested_instrument_ids: tuple[UUID, ...],
+    max_instruments: int = 5,
 ) -> tuple[CandidateManifestEntry, ...]:
     """Resolve the exact bounded request; one missing authority rejects every candidate."""
-    if not 1 <= len(requested_instrument_ids) <= 5 or len(set(requested_instrument_ids)) != len(
-        requested_instrument_ids
-    ):
+    if not 1 <= len(requested_instrument_ids) <= max_instruments or len(
+        set(requested_instrument_ids)
+    ) != len(requested_instrument_ids):
         return ()
     rows = (
         await session.execute(
@@ -454,6 +455,7 @@ async def prepare_candidates(
         authority=authority,
         manifest=manifest,
         requested_instrument_ids=requested_instrument_ids,
+        max_instruments=max_instruments,
     ):
         return ()
     return manifest
@@ -654,10 +656,11 @@ async def validate_candidate_manifest(
     authority: CycleAuthority,
     manifest: tuple[CandidateManifestEntry, ...],
     requested_instrument_ids: tuple[UUID, ...] | None = None,
+    max_instruments: int = 5,
 ) -> bool:
     """Read back the exact frozen authorities without selecting newer evidence."""
     if (
-        not 1 <= len(manifest) <= 5
+        not 1 <= len(manifest) <= max_instruments
         or len({row.instrument_id for row in manifest}) != len(manifest)
         or len({row.symbol for row in manifest}) != len(manifest)
     ):

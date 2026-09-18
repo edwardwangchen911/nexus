@@ -691,6 +691,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     universe_id = UUID(int=3)
     instrument_id = UUID(int=4)
     bindings = {"AAPL": instrument_id, **({"MSFT": UUID(int=14)} if two_candidates else {})}
+    inherited_position_id = UUID(int=24)
+    execution_bindings = {**bindings, "GOOGL": inherited_position_id}
     artifact_id = UUID(int=5)
     quote_id = UUID(int=6)
     cycle_id = UUID(int=7)
@@ -704,11 +706,30 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         async def scalar(self, _statement):
             self.calls += 1
             events.append(f"clock-{self.calls}")
-            return initial if self.calls == 1 else frozen
+            if self.calls == 1:
+                return initial
+            if self.calls == 2:
+                return None
+            return frozen
 
         async def get(self, model, _identifier):
             identifier = quote_id if model is cli.LatestQuote else artifact_id
             return SimpleNamespace(id=identifier)
+
+        async def execute(self, _statement):
+            class Rows:
+                def tuples(self):
+                    return tuple(
+                        (
+                            SimpleNamespace(instrument_id=identity, symbol=symbol),
+                            SimpleNamespace(
+                                asset_type="common_stock", exchange="XNAS", currency="USD"
+                            ),
+                        )
+                        for symbol, identity in execution_bindings.items()
+                    )
+
+            return Rows()
 
     authority = CycleAuthority(
         account_id=account_id,
@@ -759,28 +780,35 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     async def scope(*_args, **_kwargs):
         events.append("scope")
         return RiskQueryScope(
-            bindings[_kwargs["symbol"]],
+            execution_bindings[_kwargs["symbol"]],
             universe_id,
             (object(), object(), object()),  # type: ignore[arg-type]
         )
 
     async def risk(**_kwargs):
-        assert {item.symbol: item.instrument_id for item in _kwargs["candidates"]} == bindings
+        assert {
+            item.symbol: item.instrument_id for item in _kwargs["candidates"]
+        } == execution_bindings
         events.append("risk-action-delisting-halt")
         return {
             identity: tuple(
                 RiskSourceProof(kind, False, "a" * 64, initial)
                 for kind in ("corporate_action", "delisting", "suspension")
             )
-            for identity in bindings.values()
+            for identity in execution_bindings.values()
         }
 
     async def level_one(*_args, **_kwargs):
-        assert _kwargs["bindings"] == bindings
+        assert _kwargs["bindings"] == execution_bindings
         assert _kwargs["process_environment"] == {"NEXUS_SCHWAB_APP_KEY": "registered-key"}
         events.append("level-one")
         return SchwabMarketStreamImportResult(
-            "b" * 64, 1, 1, artifact_id, {symbol: quote_id for symbol in bindings}, {}
+            "b" * 64,
+            1,
+            1,
+            artifact_id,
+            {symbol: quote_id for symbol in execution_bindings},
+            {},
         )
 
     async def persist(*_args, **_kwargs):
@@ -824,6 +852,12 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         )
 
     monkeypatch.setattr(cli, "validate_agent_paper_candidate_batch", batch_scope)
+    async def projection(*_args, **_kwargs):
+        return SimpleNamespace(
+            positions=(SimpleNamespace(instrument_id=inherited_position_id),), open_orders=()
+        )
+
+    monkeypatch.setattr("nexus.paper.projection.load_paper_projection", projection)
     monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", root)
     monkeypatch.setattr(
         cli,
@@ -875,13 +909,14 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         "select-calendar",
         "service-calendar",
         "root",
-        *(["scope"] * len(bindings)),
+        "clock-2",
+        *(["scope"] * len(execution_bindings)),
         "risk-action-delisting-halt",
         "level-one",
-        "clock-2",
+        "clock-3",
         "service-calendar",
-        *(["validate-l1"] * len(bindings)),
-        *(["persist-risk"] * len(bindings)),
+        *(["validate-l1"] * len(execution_bindings)),
+        *(["persist-risk"] * len(execution_bindings)),
         "root",
         "cycle-job",
     ]

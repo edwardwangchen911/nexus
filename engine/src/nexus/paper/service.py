@@ -80,6 +80,7 @@ from nexus.risk.evaluate import (
     target_whole_share_quantity,
 )
 from nexus.risk.models import (
+    OrderCandidate,
     PaperDecisionAuthority,
     PaperPortfolioProjection,
     RiskEvaluation,
@@ -1193,8 +1194,18 @@ async def create_paper_order_batch(
                     PaperTargetVersionRecord.account_id == account_id,
                 )
             )
+            current_target_id = await session.scalar(
+                select(PaperTargetVersionRecord.id)
+                .where(PaperTargetVersionRecord.account_id == account_id)
+                .order_by(PaperTargetVersionRecord.version_seq.desc())
+                .limit(1)
+            )
             proposal_target_hash = canonical_portfolio_target_content_hash(proposal.proposal)
-            if target is None or target.target_content_hash != proposal_target_hash:
+            if (
+                target is None
+                or target.id != current_target_id
+                or target.target_content_hash != proposal_target_hash
+            ):
                 raise ValueError("portfolio target mismatch")
             rows = tuple(
                 await session.scalars(
@@ -1305,7 +1316,11 @@ async def create_paper_order_batch(
             cycle = await session.get(AgentPaperCycleRecord, cycle_id)
             if cycle is None:
                 raise ValueError("Schwab Agent cycle is missing")
-            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+            market = await prepare_schwab_realtime_risk_snapshot(
+                session,
+                cycle=cycle,
+                required_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
+            )
             if set(market.required_instrument_ids) != required:
                 raise ValueError("Schwab Agent risk scope is incomplete")
         else:
@@ -1334,6 +1349,26 @@ async def create_paper_order_batch(
     _observe(hooks, "inputs_loaded")
     try:
         candidates = derive_order_candidates(decision, projection, market)
+        if portfolio and target_version_id is not None:
+            from nexus.paper.target_service import load_risk_remainder_coverage
+
+            remainder_coverage = await load_risk_remainder_coverage(
+                session,
+                account_id=account_id,
+                target_version_id=target_version_id,
+            )
+            uncovered: list[OrderCandidate] = []
+            for candidate in candidates:
+                coverage = remainder_coverage.get((candidate.instrument_id, candidate.side))
+                covered_quantity = Decimal(0) if coverage is None else coverage.quantity
+                desired_quantity = candidate.desired_quantity - min(
+                    candidate.desired_quantity, covered_quantity
+                )
+                if desired_quantity > 0:
+                    uncovered.append(
+                        candidate.model_copy(update={"desired_quantity": desired_quantity})
+                    )
+            candidates = tuple(uncovered)
         no_changes = _derive_no_change_evidence(decision, projection, market)
         evaluations = evaluate_order_batch(candidates, projection, market, policy)
     except RiskBatchRejected as error:

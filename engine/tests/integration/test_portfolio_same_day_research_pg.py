@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from helpers.paper_batch import CALENDAR_ID, DECISION_TIME, INSTRUMENTS, seed_paper_batch
-from integration.test_agent_paper_cycle_pg import _seed_two_candidate_authority
+from integration.test_agent_paper_cycle_pg import _ObjectStore, _seed_two_candidate_authority
 from nexus.agents.paper_context import (
     prepare_agent_paper_research_snapshot,
     read_agent_paper_research_context,
@@ -165,6 +165,156 @@ async def test_normal_schwab_snapshot_binds_every_candidate(migrated_database_ur
                     ).authority_id
                     == entry.prior_daily_price_authority_id
                 )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_later_single_candidate_risk_scope_includes_inherited_instruments(
+    migrated_database_url,
+    monkeypatch,
+):
+    from nexus.market.ingestion import ingest_price_page
+    from nexus.persistence.models.data import PriceBarRecord
+    from nexus.persistence.models.market import LatestQuote
+    from nexus.persistence.models.paper import (
+        PAPER_DECISION_SOURCE_POLICY_ID,
+        RiskQueryAuthorityRecord,
+    )
+    from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
+    from nexus.risk.authority import canonical_query_authority_hash
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(
+                session,
+                registered,
+                decision_time=NOW,
+                source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            )
+            inherited_aapl, inherited_msft, later_nvda = (item[0] for item in INSTRUMENTS)
+            source_quote = await session.scalar(
+                select(LatestQuote).where(LatestQuote.instrument_id == inherited_msft)
+            )
+            quote_values = {
+                column.name: getattr(source_quote, column.name)
+                for column in LatestQuote.__table__.columns
+                if column.name != "id"
+            }
+            quote_values.update(instrument_id=later_nvda, content_hash="e" * 64)
+            session.add(LatestQuote(**quote_values))
+            source_bar = await session.scalar(
+                select(PriceBarRecord).where(
+                    PriceBarRecord.instrument_id == inherited_msft,
+                    PriceBarRecord.revision == "second-prior",
+                )
+            )
+            await ingest_price_page(
+                session,
+                _ObjectStore(),
+                ProviderPage(
+                    items=(
+                        PriceBar(
+                            instrument_id=later_nvda,
+                            session=source_bar.session,
+                            open=source_bar.open,
+                            high=source_bar.high,
+                            low=source_bar.low,
+                            close=source_bar.close,
+                            volume=source_bar.volume,
+                            observed_at=source_bar.observed_at,
+                            available_at=source_bar.available_at,
+                            received_at=source_bar.received_at,
+                            revision="later-nvda-prior",
+                            quality_flags=(),
+                        ),
+                    ),
+                    next_cursor=None,
+                    raw_payload=b'{"prior":"later-nvda"}',
+                    source_request_id=None,
+                    as_of=source_bar.available_at,
+                    provenance=MarketDataProvenance(
+                        source="alpaca",
+                        feed="sip",
+                        adjustment="all",
+                        interval="1Day",
+                        mode="delayed",
+                        delivery_mode="delayed",
+                    ),
+                ),
+                commit=False,
+                source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+            )
+            source_proofs = tuple(
+                await session.scalars(
+                    select(RiskQueryAuthorityRecord).where(
+                        RiskQueryAuthorityRecord.required_instrument_ids == [inherited_msft],
+                        RiskQueryAuthorityRecord.source_policy_id
+                        == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    )
+                )
+            )
+            assert len(source_proofs) == 3
+            for source in source_proofs:
+                values = {
+                    column.name: getattr(source, column.name)
+                    for column in RiskQueryAuthorityRecord.__table__.columns
+                    if column.name != "id"
+                }
+                values.update(
+                    required_instrument_ids=[later_nvda],
+                    blocked_instrument_ids=[],
+                    source_watermark_hash="f" * 64,
+                )
+                values["content_hash"] = canonical_query_authority_hash(
+                    **{
+                        key: values[key]
+                        for key in (
+                            "source_policy_id",
+                            "universe_snapshot_id",
+                            "decision_session",
+                            "kind",
+                            "required_instrument_ids",
+                            "blocked_instrument_ids",
+                            "complete",
+                            "source_watermark_hash",
+                            "available_at",
+                        )
+                    }
+                )
+                session.add(RiskQueryAuthorityRecord(**values))
+            await session.flush()
+            execution_manifest = await prepare_candidates(
+                session,
+                authority=authority,
+                requested_instrument_ids=(inherited_aapl, inherited_msft, later_nvda),
+                max_instruments=10,
+            )
+            assert len(execution_manifest) == 3
+            research_manifest = tuple(
+                item for item in execution_manifest if item.instrument_id == later_nvda
+            )
+            market = await prepare_schwab_realtime_risk_snapshot(
+                session,
+                cycle=frozen_cycle(authority, research_manifest),
+                required_instrument_ids=(inherited_aapl, inherited_msft, later_nvda),
+            )
+            assert len(research_manifest) == 1
+            assert market.required_instrument_ids == tuple(
+                sorted((inherited_aapl, inherited_msft, later_nvda), key=lambda value: value.int)
+            )
+            assert len(market.query_proofs) == 9
+            assert all(proof.required_instrument_ids is not None for proof in market.query_proofs)
     finally:
         await engine.dispose()
 

@@ -72,6 +72,7 @@ from nexus.persistence.models.paper import (
     PaperAccountRecord,
     PaperOrderBatchRecord,
     PaperOrderRecord,
+    PaperTargetVersionRecord,
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
@@ -672,7 +673,44 @@ async def _start_cycle(
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     if same_session:
         try:
-            await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+            execution_required = {
+                *(candidate.instrument_id for candidate in manifest),
+                *(position.instrument_id for position in projection.positions),
+                *(order.instrument_id for order in projection.open_orders),
+            }
+            if candidate_batch_id is not None:
+                from nexus.paper.agent_decision_store import load_portfolio_proposal
+
+                current_target = await session.scalar(
+                    select(PaperTargetVersionRecord)
+                    .where(
+                        PaperTargetVersionRecord.account_id == cycle.account_id,
+                        PaperTargetVersionRecord.activated_at <= cycle.decision_time,
+                        PaperTargetVersionRecord.created_at <= cycle.decision_time,
+                    )
+                    .order_by(PaperTargetVersionRecord.version_seq.desc())
+                    .limit(1)
+                )
+                if current_target is not None:
+                    current_proposal = await load_portfolio_proposal(
+                        session,
+                        account_id=cycle.account_id,
+                        decision_id=current_target.strategy_decision_id,
+                    )
+                    if current_proposal is None:
+                        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+                    execution_required.update(
+                        instrument_id
+                        for instrument_id, weight in current_proposal.proposal.weights.items()
+                        if weight > 0
+                    )
+            await prepare_schwab_realtime_risk_snapshot(
+                session,
+                cycle=cycle,
+                required_instrument_ids=tuple(
+                    sorted(execution_required, key=lambda value: value.int)
+                ),
+            )
         except ValueError:
             await _append_event(
                 session,

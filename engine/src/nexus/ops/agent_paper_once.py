@@ -68,12 +68,18 @@ from nexus.persistence.models.agent_versions import (
 )
 from nexus.persistence.models.agents import AgentResearchOutputRecord
 from nexus.persistence.models.data import DataArtifact
-from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQuote
+from nexus.persistence.models.market import (
+    Instrument,
+    InstrumentAlias,
+    LatestQuote,
+    UniverseMember,
+)
 from nexus.persistence.models.paper import (
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
+    PaperTargetVersionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.providers.base import MarketDataProvider
@@ -479,6 +485,7 @@ async def prepare_schwab_decision_authority(
     client: httpx.AsyncClient,
     expected_calendar_authority_id: UUID | None = None,
     process_environment: Mapping[str, str] | None = None,
+    expand_execution_scope: bool = False,
 ) -> CycleAuthority:
     """Freeze one exact shared provider pass for portfolio or registered evaluation."""
     if initial_time is None:
@@ -522,7 +529,85 @@ async def prepare_schwab_decision_authority(
         raise ValueError("CANDIDATE_BATCH_INVALID")
     if not identities or len(identities) > 5:
         raise ValueError("CANDIDATE_BATCH_INVALID")
-    for identity in identities:
+    execution_identities = identities
+    if expand_execution_scope:
+        from nexus.paper.agent_decision_store import load_portfolio_proposal
+        from nexus.paper.projection import load_paper_projection
+
+        projection = await load_paper_projection(session, account_id=account_id, as_of=initial_time)
+        current_target = await session.scalar(
+            select(PaperTargetVersionRecord)
+            .where(
+                PaperTargetVersionRecord.account_id == account_id,
+                PaperTargetVersionRecord.activated_at <= initial_time,
+                PaperTargetVersionRecord.created_at <= initial_time,
+            )
+            .order_by(PaperTargetVersionRecord.version_seq.desc())
+            .limit(1)
+        )
+        target_ids: set[UUID] = set()
+        if current_target is not None:
+            current_proposal = await load_portfolio_proposal(
+                session,
+                account_id=account_id,
+                decision_id=current_target.strategy_decision_id,
+            )
+            if current_proposal is None:
+                raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+            target_ids = {
+                instrument_id
+                for instrument_id, weight in current_proposal.proposal.weights.items()
+                if weight > 0
+            }
+        execution_ids = {
+            *(identity.instrument_id for identity in identities),
+            *(position.instrument_id for position in projection.positions),
+            *(order.instrument_id for order in projection.open_orders),
+            *target_ids,
+        }
+        if not 1 <= len(execution_ids) <= 10:
+            raise ValueError("RISK_INPUT_REQUIRED")
+        if execution_ids != {identity.instrument_id for identity in identities}:
+            rows = tuple(
+                (
+                    await session.execute(
+                        select(InstrumentAlias, Instrument)
+                        .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
+                        .join(
+                            UniverseMember,
+                            UniverseMember.instrument_id == InstrumentAlias.instrument_id,
+                        )
+                        .where(
+                            InstrumentAlias.instrument_id.in_(execution_ids),
+                            InstrumentAlias.alias_type == "ticker",
+                            InstrumentAlias.valid_from <= decision_session,
+                            (InstrumentAlias.valid_to.is_(None))
+                            | (InstrumentAlias.valid_to >= decision_session),
+                            InstrumentAlias.created_at <= initial_time,
+                            Instrument.created_at <= initial_time,
+                            UniverseMember.universe_snapshot_id
+                            == initial_authority.universe_snapshot_id,
+                        )
+                    )
+                ).tuples()
+            )
+            if (
+                len(rows) != len(execution_ids)
+                or {alias.instrument_id for alias, _ in rows} != execution_ids
+                or len({alias.symbol for alias, _ in rows}) != len(rows)
+            ):
+                raise ValueError("RISK_INPUT_REQUIRED")
+            execution_identities = tuple(
+                CandidateInstrumentIdentity(
+                    instrument_id=alias.instrument_id,
+                    symbol=alias.symbol,
+                    asset_type=instrument.asset_type,
+                    exchange=instrument.exchange,
+                    currency=instrument.currency,
+                )
+                for alias, instrument in sorted(rows, key=lambda item: item[0].instrument_id.int)
+            )
+    for identity in execution_identities:
         scope = await inspect_query_authority_scope(
             session,
             decision_session=decision_session,
@@ -541,7 +626,7 @@ async def prepare_schwab_decision_authority(
         proofs = await collect_source_proofs_batch(
             candidates=tuple(
                 RiskCandidate(symbol=item.symbol, instrument_id=item.instrument_id)
-                for item in identities
+                for item in execution_identities
             ),
             decision_session=decision_session,
             key_id=settings.alpaca_key,
@@ -558,7 +643,7 @@ async def prepare_schwab_decision_authority(
             store,
             repo_root=repo_root,
             client=client,
-            bindings={item.symbol: item.instrument_id for item in identities},
+            bindings={item.symbol: item.instrument_id for item in execution_identities},
             process_environment=process_environment,
         )
     except (
@@ -588,9 +673,9 @@ async def prepare_schwab_decision_authority(
     ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     artifact = await session.get(DataArtifact, stream.artifact_id)
-    if set(stream.quote_ids) != {item.symbol for item in identities}:
+    if set(stream.quote_ids) != {item.symbol for item in execution_identities}:
         raise ValueError("SCHWAB_L1_INCOMPLETE")
-    for identity in identities:
+    for identity in execution_identities:
         quote = await session.get(LatestQuote, stream.quote_ids[identity.symbol])
         _validate_trigger_quote(
             quote,
@@ -602,9 +687,9 @@ async def prepare_schwab_decision_authority(
         )
 
     try:
-        if set(proofs) != {item.instrument_id for item in identities}:
+        if set(proofs) != {item.instrument_id for item in execution_identities}:
             raise ValueError("RISK_INPUT_REQUIRED")
-        for identity in identities:
+        for identity in execution_identities:
             await persist_query_authorities(
                 session,
                 universe_snapshot_id=initial_authority.universe_snapshot_id,
@@ -667,6 +752,7 @@ async def trigger_in_session(
         client=client,
         expected_calendar_authority_id=expected_calendar_authority_id,
         process_environment=process_environment,
+        expand_execution_scope=True,
     )
     return await start_schwab_agent_paper_cycle(
         session,

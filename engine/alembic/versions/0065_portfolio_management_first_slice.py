@@ -43,10 +43,31 @@ _OLD_ORIGIN = _NEW_ORIGIN.replace(
 
 
 def _cycle_event_chain_sql(*, portfolio_completion: bool) -> str:
-    targets = (
-        "'risk_evaluated','completed','failed'"
+    cycle_authority_select = (
+        "SELECT account_id,candidate_batch_id,sizing_policy_version "
+        "INTO account_ref,candidate_batch_ref,sizing_policy_ref "
+        "FROM public.agent_paper_cycles WHERE id=NEW.cycle_id;"
         if portfolio_completion
-        else "'risk_evaluated','failed'"
+        else "SELECT account_id INTO account_ref FROM public.agent_paper_cycles "
+        "WHERE id=NEW.cycle_id;"
+    )
+    portfolio_completion_branch = (
+        """
+                    OR (
+                      NEW.to_status='completed'
+                      AND candidate_batch_ref IS NOT NULL
+                      AND sizing_policy_ref='portfolio_allocation_v1'
+                      AND NEW.result_code IN ('NO_ORDER_REQUIRED','TARGET_ACTIVATION_BLOCKED')
+                      AND EXISTS (
+                        SELECT 1 FROM public.strategy_decisions decision
+                        WHERE decision.agent_paper_cycle_id=NEW.cycle_id
+                          AND decision.strategy_version='agent_portfolio_proposal_v1'
+                          AND decision.portfolio_synthesis_output_id IS NOT NULL
+                      )
+                    )
+        """
+        if portfolio_completion
+        else ""
     )
     return f"""
         CREATE OR REPLACE FUNCTION nexus_agent_paper_cycle_event_chain_valid()
@@ -54,11 +75,13 @@ def _cycle_event_chain_sql(*, portfolio_completion: bool) -> str:
         SET search_path TO pg_catalog, public, pg_temp AS $$
         DECLARE
           account_ref uuid;
+          candidate_batch_ref uuid;
+          sizing_policy_ref varchar(50);
           prior_sequence integer;
           prior_status varchar(30);
           transition_valid boolean;
         BEGIN
-          SELECT account_id INTO account_ref FROM public.agent_paper_cycles WHERE id=NEW.cycle_id;
+          {cycle_authority_select}
           PERFORM pg_catalog.pg_advisory_xact_lock(
             pg_catalog.hashtextextended('nexus:agent-paper-cycle:' || account_ref::text, 0)
           );
@@ -75,7 +98,10 @@ def _cycle_event_chain_sql(*, portfolio_completion: bool) -> str:
                 (prior_status='prepared' AND NEW.to_status IN ('researching','unavailable','failed'))
                 OR (prior_status='researching' AND NEW.to_status IN
                     ('decision_recorded','unavailable','failed'))
-                OR (prior_status='decision_recorded' AND NEW.to_status IN ({targets}))
+                OR (prior_status='decision_recorded' AND (
+                    NEW.to_status IN ('risk_evaluated','failed')
+                    {portfolio_completion_branch}
+                ))
                 OR (prior_status='risk_evaluated' AND NEW.to_status IN
                     ('awaiting_market','completed','failed'))
                 OR (prior_status='awaiting_market' AND NEW.to_status IN
