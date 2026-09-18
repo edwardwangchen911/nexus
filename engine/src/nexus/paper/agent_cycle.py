@@ -47,7 +47,10 @@ from nexus.paper.agent_decision import (
     AgentPaperDecisionError,
     build_agent_paper_decision,
 )
-from nexus.paper.agent_decision_store import persist_agent_paper_decision
+from nexus.paper.agent_decision_store import (
+    persist_agent_paper_decision,
+    persist_portfolio_proposal,
+)
 from nexus.paper.candidate_batch import (
     load_agent_paper_candidate_batch,
     validate_agent_paper_candidate_batch,
@@ -920,6 +923,10 @@ async def _resume_batch(
     )
     if decision_id is None:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    if cycle.candidate_batch_id is not None:
+        return _result(cycle.id, events, replayed=True).model_copy(
+            update={"result_code": "TARGET_ACTIVATION_PENDING"}
+        )
     if events[-1].to_status == "decision_recorded":
         try:
             batch = await create_paper_order_batch(
@@ -972,6 +979,8 @@ async def _resume_portfolio_synthesis(
     now: datetime | None,
     daily_limit_usd: Decimal | None,
 ) -> AgentPaperCycleResult:
+    if events[-1].to_status != "researching":
+        return _result(cycle.id, events, replayed=True)
     from nexus.agents.portfolio_synthesis_contracts import (
         PortfolioSynthesisIntentV1,
         canonical_portfolio_synthesis_hash,
@@ -1069,17 +1078,44 @@ async def _resume_portfolio_synthesis(
             )
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_OUTPUT_INVALID")
-        return _result(cycle.id, events, replayed=True).model_copy(
-            update={
-                "result_code": "PORTFOLIO_PROPOSAL_UNAVAILABLE",
-                "portfolio_synthesis_output_id": output.id,
-            }
-        )
     except ValueError:
         await _append_event(
             session, cycle, "researching", "unavailable", "PORTFOLIO_SYNTHESIS_UNAVAILABLE", {}
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    try:
+        if now is None:
+            raise ValueError("PORTFOLIO_PROPOSAL_TIME_REQUIRED")
+        persisted = await persist_portfolio_proposal(
+            session, cycle_id=cycle.id, synthesis_output_id=output.id, now=now
+        )
+    except ValueError as error:
+        code = (
+            "POLICY_UNCONFIRMED"
+            if str(error) == "POLICY_UNCONFIRMED"
+            else "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+        )
+        await _append_event(
+            session,
+            cycle,
+            "researching",
+            "unavailable",
+            code,
+            {"portfolio_synthesis_output_id": str(output.id)},
+        )
+        return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    await _append_event(
+        session,
+        cycle,
+        "researching",
+        "decision_recorded",
+        "TARGET_ACTIVATION_PENDING",
+        {
+            "strategy_decision_id": str(persisted.decision_id),
+            "portfolio_synthesis_output_id": str(output.id),
+        },
+    )
+    return _result(cycle.id, await _events(session, cycle.id), replayed=False)
 
 
 async def _stop_unavailable(
@@ -1195,6 +1231,7 @@ def _result(
         result_code=latest.result_code,
         research_run_ids=_fact_uuids(events, "research_run_ids"),
         strategy_decision_id=_fact_uuid(events, "strategy_decision_id"),
+        portfolio_synthesis_output_id=_fact_uuid(events, "portfolio_synthesis_output_id"),
         batch_id=_fact_uuid(events, "batch_id"),
         order_ids=_fact_uuids(events, "order_ids"),
         replayed=replayed,

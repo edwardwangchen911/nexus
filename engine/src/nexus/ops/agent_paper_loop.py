@@ -174,6 +174,7 @@ class AgentPaperLoopSnapshot:
     next_decision_window_start_at: datetime | None = None
     cycle_id: UUID | None = None
     cycle_status: str | None = None
+    cycle_result_code: str | None = None
     cycle_slot_at: datetime | None = None
     research_job_status: str | None = None
     research_job_id: UUID | str | None = None
@@ -254,6 +255,8 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
         "CANDIDATE_BATCH_INVALID",
         "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
         "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+        "POLICY_UNCONFIRMED",
+        "TARGET_ACTIVATION_PENDING",
     }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
@@ -1481,6 +1484,8 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     """Choose one safe next action without performing I/O or retrying unknown work."""
     if not snapshot.enabled:
         return AgentPaperLoopAction.STOP_DISABLED
+    if snapshot.evaluation_id is None and snapshot.cycle_result_code == "TARGET_ACTIVATION_PENDING":
+        return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
 
     if snapshot.evaluation_id is not None:
         if snapshot.evaluation_slot_at is None:
@@ -2432,6 +2437,8 @@ async def execute_agent_paper_loop_action(
         if resumed is not None and resumed.result_code in {
             "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
             "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+            "POLICY_UNCONFIRMED",
+            "TARGET_ACTIVATION_PENDING",
         }:
             raise ValueError(resumed.result_code)
         return None
@@ -2972,6 +2979,29 @@ async def _inspect_portfolio_batch(
         .order_by(AgentPaperCycleEventRecord.sequence.desc())
         .limit(1)
     )
+    if (
+        event is not None
+        and event.to_status == "decision_recorded"
+        and event.result_code == "TARGET_ACTIVATION_PENDING"
+    ):
+        from nexus.paper.agent_decision_store import load_portfolio_proposal
+
+        decision_id = event.fact_ids.get("strategy_decision_id")
+        if not isinstance(decision_id, str):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        proposal = await load_portfolio_proposal(
+            session, account_id=account_id, decision_id=UUID(decision_id)
+        )
+        if proposal is None or proposal.cycle_id != cycle.id:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        return AgentPaperLoopSnapshot(
+            now=now,
+            cycle_id=cycle.id,
+            cycle_status=event.to_status,
+            cycle_result_code=event.result_code,
+            cycle_slot_at=cycle.decision_slot_at,
+            calendar_authority_id=calendar.calendar_authority_id,
+        )
     if event is None or event.to_status != "researching":
         return None
     job = await read_synthesis_job(session, cycle_id=cycle.id)

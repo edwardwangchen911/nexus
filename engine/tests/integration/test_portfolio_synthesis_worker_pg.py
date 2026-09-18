@@ -465,11 +465,17 @@ async def test_cycle_admits_once_and_resumes_exact_output_without_legacy_decisio
             cycle = await session.get(AgentPaperCycleRecord, kwargs["cycle_id"])
             events = await _events(session, cycle.id)
             for _ in range(2):
-                result = await _resume_research(session, cycle=cycle, authority=None, events=events)
-                assert result.status == "researching"
-                assert result.result_code == "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+                result = await _resume_research(
+                    session,
+                    cycle=cycle,
+                    authority=None,
+                    events=await _events(session, cycle.id),
+                    now=kwargs["now"],
+                )
+                assert result.status == "unavailable"
+                assert result.result_code == "POLICY_UNCONFIRMED"
                 assert result.portfolio_synthesis_output_id == output.id
-            assert len(await _events(session, cycle.id)) == len(events)
+            assert len(await _events(session, cycle.id)) == len(events) + 1
             assert (
                 await session.scalar(
                     select(func.count()).select_from(AgentPortfolioSynthesisRunRecord)
@@ -711,7 +717,7 @@ async def test_product_dispatch_executes_synthesis_and_recovers_committed_output
             )
             assert snapshot.research_job_status == "succeeded"
             assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RESUME
-            with pytest.raises(ValueError, match="^PORTFOLIO_PROPOSAL_UNAVAILABLE$"):
+            with pytest.raises(ValueError, match="^POLICY_UNCONFIRMED$"):
                 await loop.execute_agent_paper_loop_action(
                     settings,
                     account_id=cycle.account_id,
@@ -725,7 +731,7 @@ async def test_product_dispatch_executes_synthesis_and_recovers_committed_output
                 action="resume", cycle_id=cycle.id, idempotency_key="terminal-replay"
             ),
         )
-        assert replay.result_code == "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+        assert replay.result_code == "POLICY_UNCONFIRMED"
         assert replay.portfolio_synthesis_output_id is not None
         assert len(calls) == 1
     finally:
@@ -919,7 +925,7 @@ async def test_host_from_security_jobs_through_synthesis_handoff(
                 snapshot=snapshot,
             )
             if index == 4:
-                with pytest.raises(ValueError, match="^PORTFOLIO_PROPOSAL_UNAVAILABLE$"):
+                with pytest.raises(ValueError, match="^POLICY_UNCONFIRMED$"):
                     await operation
             else:
                 await operation
@@ -931,7 +937,7 @@ async def test_host_from_security_jobs_through_synthesis_handoff(
                     action="resume", cycle_id=cycle.id, idempotency_key="full-host-replay"
                 ),
             )
-            assert replay.result_code == "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+            assert replay.result_code == "POLICY_UNCONFIRMED"
         assert len(calls) == 3
     finally:
         await engine.dispose()

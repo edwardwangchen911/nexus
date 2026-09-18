@@ -293,6 +293,12 @@ def validate_portfolio_synthesis_intent(
     held_targets = {
         item.instrument_id for item in frozen.active_target_weights if item.target_weight > 0
     }
+    if frozen.active_target_version_id is None:
+        # Existing exposure informs action semantics only. Initial allocation
+        # authority is still separately granted by the immutable user approval.
+        held_targets = {
+            item.instrument_id for item in frozen.projection.positions if item.quantity > 0
+        }
     statements = [intent.cash_rationale]
     for choice in intent.choices:
         source = by_instrument[choice.instrument_id]
