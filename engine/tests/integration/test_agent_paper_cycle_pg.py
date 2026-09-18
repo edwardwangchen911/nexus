@@ -358,6 +358,120 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
     assert asyncio.run(heartbeat_count()) == 1
 
 
+def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = DECISION_TIME
+    elapsed = 0.0
+    cycle_id = UUID(int=201)
+    job_id = UUID(int=202)
+    stage = "research_failed"
+    resume_requests: list[tuple[UUID, str]] = []
+    trigger_slots: list[datetime] = []
+    environment = {
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "DATABASE_URL": migrated_database_url,
+        "AGENT_RUNTIME_MODE": "codex_sdk",
+        "ALPACA_API_KEY_ID": "synthetic-test-key",
+        "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
+    }
+
+    def clock() -> datetime:
+        return current
+
+    def monotonic() -> float:
+        return elapsed
+
+    async def sleep(seconds: float) -> None:
+        nonlocal current, elapsed
+        current += timedelta(seconds=seconds)
+        elapsed += seconds
+
+    def load_environment(*_args, **_kwargs) -> dict[str, str]:
+        if stage == "next_slot_triggered":
+            return {**environment, "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "false"}
+        return environment
+
+    async def select_calendar(_settings: EngineSettings) -> UUID:
+        return CALENDAR_ID
+
+    async def inspect_evaluation(*_args, **_kwargs):
+        return None
+
+    async def inspect_cycle(*_args, **_kwargs):
+        common = {
+            "now": current,
+            "calendar_authority_id": CALENDAR_ID,
+            "decision_window_start_at": DECISION_TIME,
+            "decision_window_end_at": DECISION_TIME + timedelta(hours=6),
+            "next_decision_window_start_at": DECISION_TIME + timedelta(days=1),
+            "cycle_id": cycle_id,
+            "cycle_slot_at": DECISION_TIME,
+        }
+        if stage == "research_failed":
+            return agent_paper_loop.AgentPaperLoopSnapshot(
+                **common,
+                cycle_status="researching",
+                research_job_status="failed",
+                research_job_id=job_id,
+            )
+        return agent_paper_loop.AgentPaperLoopSnapshot(
+            **common,
+            cycle_status="completed",
+        )
+
+    async def resume(_settings, request):
+        nonlocal stage
+        resume_requests.append((request.cycle_id, request.idempotency_key))
+        stage = "completed"
+        return None
+
+    async def ready(*_args, **_kwargs) -> str:
+        return "ready"
+
+    async def trigger(_settings, request, **_kwargs):
+        nonlocal stage
+        trigger_slots.append(floor_decision_slot(current))
+        stage = "next_slot_triggered"
+        return request
+
+    monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(
+        agent_paper_loop, "load_agent_paper_service_environment", load_environment
+    )
+    monkeypatch.setattr(
+        agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
+    )
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "inspect_agent_version_evaluation_loop",
+        inspect_evaluation,
+    )
+    monkeypatch.setattr(agent_paper_loop, "inspect_agent_paper_loop", inspect_cycle)
+    monkeypatch.setattr(agent_paper_loop, "resume_once", resume)
+    monkeypatch.setattr(agent_paper_loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(agent_paper_loop, "trigger_once", trigger)
+
+    result = asyncio.run(
+        agent_paper_loop.run_local_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=sleep,
+            clock=clock,
+            monotonic=monotonic,
+        )
+    )
+
+    assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
+    assert resume_requests == [(cycle_id, f"agent-paper-loop-resume:{cycle_id}")]
+    assert trigger_slots == [DECISION_TIME + timedelta(minutes=5)]
+
+
 @pytest.mark.parametrize(
     ("worker_id", "process_version", "seen_offset", "expected"),
     [
