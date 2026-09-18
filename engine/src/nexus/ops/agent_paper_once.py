@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -47,6 +48,12 @@ from nexus.paper.agent_market import (
     PaperMarketWindowResult,
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
+)
+from nexus.paper.candidate_batch import (
+    CandidateBatchResult,
+    CandidateInstrumentIdentity,
+    create_agent_paper_candidate_batch,
+    resolve_agent_paper_candidate_identities,
 )
 from nexus.persistence.models.agents import AgentResearchOutputRecord
 from nexus.persistence.models.data import DataArtifact
@@ -172,6 +179,23 @@ class AgentPaperRunResearchRequest(BaseModel):
     cycle_id: UUID
 
 
+class AgentPaperPrepareCandidatesRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    action: Literal["prepare-candidates"]
+    account_id: UUID
+    universe_snapshot_id: UUID
+    instrument_ids: tuple[UUID, ...]
+    idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
+
+
+class AgentPaperPrepareCandidatesResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    batch: CandidateBatchResult
+    identities: tuple[CandidateInstrumentIdentity, ...]
+
+
 class AgentPaperRunResearchResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -206,6 +230,13 @@ def parser() -> argparse.ArgumentParser:
     resume.add_argument("--idempotency-key", required=True)
     run_research = commands.add_parser("run-research")
     run_research.add_argument("--cycle-id", required=True)
+    prepare_candidates = commands.add_parser("prepare-candidates")
+    prepare_candidates.add_argument("--account-id", required=True)
+    prepare_candidates.add_argument("--universe-snapshot-id", required=True)
+    prepare_candidates.add_argument(
+        "--instrument-id", dest="instrument_ids", action="append", required=True
+    )
+    prepare_candidates.add_argument("--idempotency-key", required=True)
     collect = commands.add_parser("collect-window")
     collect.add_argument("--cycle-id", required=True)
     collect.add_argument("--instrument-id")
@@ -256,6 +287,51 @@ def _validate_local_database(database_url: str | None) -> None:
         or bool(set(url.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         raise ValueError("AGENT_PAPER_DATABASE_NOT_LOCAL")
+
+
+async def prepare_candidates_once(
+    settings: EngineSettings,
+    request: AgentPaperPrepareCandidatesRequest,
+) -> AgentPaperPrepareCandidatesResult:
+    """Resolve local identities and persist one UUID-only candidate scope."""
+    _validate_local_database(settings.database_url)
+    assert settings.database_url is not None
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session, session.begin():
+            created_at = await session.scalar(select(func.clock_timestamp()))
+            if created_at is None:
+                raise ValueError("CANDIDATE_BATCH_INVALID")
+            identities = await resolve_agent_paper_candidate_identities(
+                session,
+                universe_snapshot_id=request.universe_snapshot_id,
+                instrument_ids=request.instrument_ids,
+                created_at=created_at,
+            )
+            print(
+                json.dumps(
+                    {
+                        "candidate_identities": [
+                            identity.model_dump(mode="json") for identity in identities
+                        ]
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=request.account_id,
+                universe_snapshot_id=request.universe_snapshot_id,
+                instrument_ids=request.instrument_ids,
+                idempotency_key=request.idempotency_key,
+                created_at=created_at,
+            )
+            return AgentPaperPrepareCandidatesResult(batch=batch, identities=identities)
+    finally:
+        await engine.dispose()
 
 
 def _validate_trigger_quote(
@@ -780,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
             | AgentPaperResumeRequest
             | AgentPaperRunResearchRequest
             | AgentPaperCollectWindowRequest
+            | AgentPaperPrepareCandidatesRequest
         )
         if action == "run":
             request = AgentPaperRunRequest.model_validate(values)
@@ -789,13 +866,20 @@ def main(argv: list[str] | None = None) -> int:
             request = AgentPaperResumeRequest.model_validate(values)
         elif action == "run-research":
             request = AgentPaperRunResearchRequest.model_validate(values)
+        elif action == "prepare-candidates":
+            request = AgentPaperPrepareCandidatesRequest.model_validate(values)
         else:
             request = AgentPaperCollectWindowRequest.model_validate(values)
         environment = load_local_environment(Path.cwd(), {})
         settings = EngineSettings.model_validate(environment)
         if not settings.agent_paper_cycle_enabled:
             return _emit_error("AGENT_PAPER_CYCLE_DISABLED")
-        result: AgentPaperCycleResult | PaperMarketWindowResult | AgentPaperRunResearchResult
+        result: (
+            AgentPaperCycleResult
+            | PaperMarketWindowResult
+            | AgentPaperRunResearchResult
+            | AgentPaperPrepareCandidatesResult
+        )
         if isinstance(request, AgentPaperRunRequest):
             result = asyncio.run(run_once(settings, request))
         elif isinstance(request, AgentPaperTriggerRequest):
@@ -805,6 +889,8 @@ def main(argv: list[str] | None = None) -> int:
             result = asyncio.run(resume_once(settings, request))
         elif isinstance(request, AgentPaperRunResearchRequest):
             result = asyncio.run(run_research_once(settings, request, repo_root=Path.cwd()))
+        elif isinstance(request, AgentPaperPrepareCandidatesRequest):
+            result = asyncio.run(prepare_candidates_once(settings, request))
         else:
             market_settings = AgentPaperMarketSettings.model_validate(environment)
             result = asyncio.run(
@@ -827,6 +913,8 @@ def main(argv: list[str] | None = None) -> int:
             "SCHWAB_L1_INCOMPLETE",
             "RESEARCH_ADMISSION_UNAVAILABLE",
             "PAPER_MARKET_WINDOW_UNAVAILABLE",
+            "CANDIDATE_BATCH_INVALID",
+            "IDEMPOTENCY_CONFLICT",
         }:
             code = "AGENT_PAPER_RESULT_UNKNOWN"
         return _emit_error(code)

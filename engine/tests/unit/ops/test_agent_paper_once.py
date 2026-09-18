@@ -10,6 +10,7 @@ import pytest
 from nexus.ops import agent_paper_once as cli
 from nexus.ops.agent_paper_once import (
     AgentPaperCollectWindowRequest,
+    AgentPaperPrepareCandidatesRequest,
     AgentPaperResumeRequest,
     AgentPaperRunRequest,
     AgentPaperTriggerRequest,
@@ -22,6 +23,10 @@ from nexus.paper.agent_cycle import AgentPaperCycleError
 from nexus.paper.agent_cycle_authority import CycleAuthority, ServiceCalendarAuthority
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult, AgentPaperTriggerReservation
 from nexus.paper.agent_market import AgentPaperMarketScope
+from nexus.paper.candidate_batch import (
+    CandidateBatchResult,
+    CandidateInstrumentIdentity,
+)
 from nexus.persistence.models.paper import (
     PAPER_EXECUTION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
@@ -41,6 +46,143 @@ def test_request_requires_explicit_utc_time() -> None:
             decision_time=datetime(2026, 8, 26, 21),
             idempotency_key="cycle-1",
         )
+
+
+def test_prepare_candidates_parser_accepts_only_explicit_instrument_ids() -> None:
+    parsed = parser().parse_args(
+        [
+            "prepare-candidates",
+            "--account-id",
+            str(UUID(int=1)),
+            "--universe-snapshot-id",
+            str(UUID(int=2)),
+            "--instrument-id",
+            str(UUID(int=4)),
+            "--instrument-id",
+            str(UUID(int=3)),
+            "--idempotency-key",
+            "scope-1",
+        ]
+    )
+
+    request = AgentPaperPrepareCandidatesRequest.model_validate(vars(parsed))
+    assert request.instrument_ids == (UUID(int=4), UUID(int=3))
+    with pytest.raises(SystemExit):
+        parser().parse_args(
+            [
+                "prepare-candidates",
+                "--account-id",
+                str(UUID(int=1)),
+                "--universe-snapshot-id",
+                str(UUID(int=2)),
+                "--symbol",
+                "AAPL",
+                "--idempotency-key",
+                "scope-1",
+            ]
+        )
+
+
+def test_prepare_candidates_resolves_display_identities_before_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = datetime(2026, 9, 18, 14, tzinfo=UTC)
+    account_id, universe_id, instrument_id, batch_id = (
+        UUID(int=1),
+        UUID(int=2),
+        UUID(int=3),
+        UUID(int=4),
+    )
+    events: list[str] = []
+
+    class Session:
+        async def scalar(self, _statement):
+            return now
+
+        def begin(self):
+            return Transaction()
+
+    class Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class SessionContext:
+        async def __aenter__(self):
+            return Session()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Factory:
+        def __call__(self):
+            return SessionContext()
+
+    class Engine:
+        async def dispose(self):
+            return None
+
+    identity = CandidateInstrumentIdentity(
+        instrument_id=instrument_id,
+        symbol="AAPL",
+        asset_type="common_stock",
+        exchange="XNAS",
+        currency="USD",
+    )
+    batch = CandidateBatchResult(
+        batch_id=batch_id,
+        account_id=account_id,
+        universe_snapshot_id=universe_id,
+        instrument_ids=(instrument_id,),
+        source="explicit_research_scope",
+        batch_hash="a" * 64,
+        created_at=now,
+    )
+
+    async def resolve(*_args, **kwargs):
+        events.append("resolve-identities")
+        assert kwargs == {
+            "universe_snapshot_id": universe_id,
+            "instrument_ids": (instrument_id,),
+            "created_at": now,
+        }
+        return (identity,)
+
+    async def create(*_args, **kwargs):
+        assert json.loads(capsys.readouterr().err) == {
+            "candidate_identities": [identity.model_dump(mode="json")]
+        }
+        events.append("create-batch")
+        assert kwargs["account_id"] == account_id
+        assert kwargs["universe_snapshot_id"] == universe_id
+        assert kwargs["instrument_ids"] == (instrument_id,)
+        assert kwargs["created_at"] == now
+        return batch
+
+    monkeypatch.setattr(cli, "create_async_engine", lambda *_args, **_kwargs: Engine())
+    monkeypatch.setattr(cli, "async_sessionmaker", lambda *_args, **_kwargs: Factory())
+    monkeypatch.setattr(cli, "resolve_agent_paper_candidate_identities", resolve)
+    monkeypatch.setattr(cli, "create_agent_paper_candidate_batch", create)
+
+    result = asyncio.run(
+        cli.prepare_candidates_once(
+            EngineSettings(database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus"),
+            AgentPaperPrepareCandidatesRequest(
+                action="prepare-candidates",
+                account_id=account_id,
+                universe_snapshot_id=universe_id,
+                instrument_ids=(instrument_id,),
+                idempotency_key="scope-1",
+            ),
+        )
+    )
+
+    assert events == ["resolve-identities", "create-batch"]
+    assert result.batch == batch
+    assert result.identities == (identity,)
 
 
 def test_disabled_command_emits_only_fixed_code(
