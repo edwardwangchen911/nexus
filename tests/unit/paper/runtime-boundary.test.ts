@@ -344,9 +344,46 @@ describe("internal-paper Engine response boundary", () => {
     const deferredTarget = ((deferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0];
     Object.assign(deferredTarget, { target_weight: "0", role: "none", rank: null, reason_code: "DEFER" });
     expect((await sanitizeEngineResponse(json({ data: deferred, meta }), undefined, path, "GET")).status).toBe(200);
-    const dependencyDeferred = structuredClone(deferred) as Record<string, unknown>;
-    (((dependencyDeferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0]).reason_code = "DEPENDENCY_NOT_APPLIED";
+    const dependencyDeferred = structuredClone(valid) as Record<string, unknown>;
+    const dependencyBatch = dependencyDeferred.candidate_batch as Record<string, unknown>;
+    dependencyBatch.candidate_instrument_ids = [instrumentId, secondInstrumentId];
+    const dependencyResearch = (dependencyDeferred.security_research as Array<Record<string, unknown>>)[0];
+    dependencyDeferred.security_research = [
+      dependencyResearch,
+      { ...dependencyResearch, instrument_id: secondInstrumentId, research_run_id: requestId, research_output_id: orderId },
+    ];
+    const dependencyChoice = ((dependencyDeferred.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[0];
+    (dependencyDeferred.synthesis as Record<string, unknown>).choices = [
+      dependencyChoice,
+      {
+        ...dependencyChoice,
+        instrument_id: secondInstrumentId,
+        action: "defer",
+        role: "none",
+        rank: null,
+        depends_on_instrument_ids: [instrumentId],
+      },
+    ];
+    const dependencyTarget = ((dependencyDeferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0];
+    (dependencyDeferred.proposal as Record<string, unknown>).targets = [
+      dependencyTarget,
+      {
+        ...dependencyTarget,
+        instrument_id: secondInstrumentId,
+        target_weight: "0",
+        role: "none",
+        rank: null,
+        depends_on_instrument_ids: [instrumentId],
+        reason_code: "DEPENDENCY_NOT_APPLIED",
+      },
+    ];
     expect((await sanitizeEngineResponse(json({ data: dependencyDeferred, meta }), undefined, path, "GET")).status).toBe(200);
+    const dependencyWithoutSource = structuredClone(dependencyDeferred) as Record<string, unknown>;
+    const emptyDependencyChoice = ((dependencyWithoutSource.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[1];
+    const emptyDependencyTarget = ((dependencyWithoutSource.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[1];
+    emptyDependencyChoice.depends_on_instrument_ids = [];
+    emptyDependencyTarget.depends_on_instrument_ids = [];
+    expect((await sanitizeEngineResponse(json({ data: dependencyWithoutSource, meta }), undefined, path, "GET")).status).toBe(500);
 
     for (const reason_code of ["INHERITED_TARGET", "UNKNOWN_REASON"]) {
       const invalidReason = structuredClone(valid) as Record<string, unknown>;

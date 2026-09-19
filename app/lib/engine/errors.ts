@@ -961,7 +961,7 @@ function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Reco
     const choice = choices.find((item) => isPlain(item)
       && sameUuid(item.instrument_id, target.instrument_id));
     if (isPlain(choice)) {
-      return proposalReasonMatchesChoice(target.reason_code, choice.action)
+      return proposalReasonMatchesChoice(target.reason_code, choice)
         && target.role === choice.role
         && target.rank === choice.rank
         && nullableUuidEqual(target.replaces_instrument_id, choice.replaces_instrument_id)
@@ -975,7 +975,7 @@ function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Reco
   });
 }
 
-function proposalReasonMatchesChoice(reason: unknown, action: unknown): boolean {
+function proposalReasonMatchesChoice(reason: unknown, choice: Record<string, unknown>): boolean {
   const reasonsByAction: Record<string, readonly string[]> = {
     defer: ["DEFER", "DEPENDENCY_NOT_APPLIED"],
     exit: ["EXIT"],
@@ -984,6 +984,11 @@ function proposalReasonMatchesChoice(reason: unknown, action: unknown): boolean 
     include: ["INCLUDE", "DEPENDENCY_NOT_APPLIED", "SINGLE_NAME_CAP", "MAX_INCREASES", "CASH_FLOOR", "TURNOVER_LIMIT"],
     increase: ["INCREASE", "DEPENDENCY_NOT_APPLIED", "SINGLE_NAME_CAP", "MAX_INCREASES", "CASH_FLOOR", "TURNOVER_LIMIT"],
   };
+  const action = choice.action;
+  if (reason === "DEPENDENCY_NOT_APPLIED"
+    && choice.replaces_instrument_id === null
+    && Array.isArray(choice.depends_on_instrument_ids)
+    && choice.depends_on_instrument_ids.length === 0) return false;
   return typeof action === "string"
     && typeof reason === "string"
     && (reasonsByAction[action]?.includes(reason) ?? false);
