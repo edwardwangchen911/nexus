@@ -295,12 +295,19 @@ describe("internal-paper Engine response boundary", () => {
     (bounded.proposal as Record<string, unknown>).targets = [
       firstProposalTarget,
       { ...firstProposalTarget, instrument_id: secondInstrumentId, rank: 2 },
+      { ...firstProposalTarget, instrument_id: thirdInstrumentId, rank: 3 },
     ];
     expect((await sanitizeEngineResponse(json({ data: bounded, meta }), undefined, path, "GET")).status).toBe(200);
     const missingChoice = structuredClone(bounded) as Record<string, unknown>;
     (missingChoice.synthesis as Record<string, unknown>).choices =
       ((missingChoice.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>).slice(0, 2);
     expect((await sanitizeEngineResponse(json({ data: missingChoice, meta }), undefined, path, "GET")).status).toBe(500);
+    for (let index = 0; index < 3; index += 1) {
+      const missingTarget = structuredClone(bounded) as Record<string, unknown>;
+      const targets = (missingTarget.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+      targets.splice(index, 1);
+      expect((await sanitizeEngineResponse(json({ data: missingTarget, meta }), undefined, path, "GET")).status).toBe(500);
+    }
 
     for (const mutate of [
       (choice: Record<string, unknown>, target: Record<string, unknown>) => {

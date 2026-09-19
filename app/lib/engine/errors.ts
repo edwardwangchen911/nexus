@@ -1017,7 +1017,9 @@ function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Reco
   if (targets.length !== proposal.targets.length
     || targetIds.some((id) => id === null)
     || new Set(targetIds).size !== targetIds.length) return false;
-  return targets.every((target) => {
+  return choices.every((choice) => isPlain(choice)
+    && targets.some((target) => sameUuid(target.instrument_id, choice.instrument_id)))
+    && targets.every((target) => {
     const choice = choices.find((item) => isPlain(item)
       && sameUuid(item.instrument_id, target.instrument_id));
     if (isPlain(choice)) {
