@@ -13,7 +13,7 @@ import { agentPaperCycle, cancellableOrder, meta } from "../paper/fixtures";
 
 type Cycle = components["schemas"]["AgentPaperCycleResponse"];
 type CyclePage = components["schemas"]["AgentPaperCyclePageResponse"];
-type Detail = components["schemas"]["AgentPaperCycleDetailResponse"];
+type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 
 afterEach(() => {
   vi.restoreAllMocks();

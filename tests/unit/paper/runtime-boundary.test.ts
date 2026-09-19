@@ -6,6 +6,10 @@ const requestId = "0198f7a0-1111-7777-8111-111111111111";
 const portfolioId = "0198f7a0-1111-7777-8111-111111111112";
 const orderId = "0198f7a0-1111-7777-8111-111111111113";
 const instrumentId = "0198f7a0-1111-7777-8111-111111111114";
+const planId = "0198f7a0-1111-7777-8111-111111111115";
+const targetId = "0198f7a0-1111-7777-8111-111111111116";
+const synthesisId = "0198f7a0-1111-7777-8111-111111111117";
+const candidateBatchId = "0198f7a0-1111-7777-8111-111111111118";
 const meta = { request_id: requestId, schema_version: "1", as_of: "2026-08-26T20:00:00Z" };
 const actor = { userId: "allowed-user", requestId };
 const cycleSummary = {
@@ -53,25 +57,20 @@ describe("internal-paper Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json({ data: { ...data, execution_market: { ...data.execution_market, source: "schwab" } }, meta }), undefined, path, "GET")).status).toBe(500);
 
     const detailPath = `/internal/v1/paper/cycles/${portfolioId}`;
-    const detail = {
-      cycle: data,
-      orders: [],
-      candidate_batch: null,
-      security_research: [],
-      synthesis: null,
-      proposal: null,
-      active_target: null,
-      activation_result: null,
-      blocker: null,
-      blocking_plan: null,
-      plan_summary: null,
-    };
+    const detail = { cycle: data, orders: [] };
     expect((await sanitizeEngineResponse(json({ data: detail, meta }), undefined, detailPath, "GET")).status).toBe(200);
     const conflated = structuredClone(detail) as Record<string, unknown>;
     conflated.proposal = { target_version_id: portfolioId };
     expect((await sanitizeEngineResponse(json({ data: conflated, meta }), undefined, detailPath, "GET")).status).toBe(500);
 
-    const capacityBlocked = structuredClone(detail) as Record<string, unknown>;
+    const managementPath = `/internal/v1/paper/management/cycles/${portfolioId}`;
+    const management = managementCycle(data);
+    expect((await sanitizeEngineResponse(json({ data: management, meta }), undefined, managementPath, "GET")).status).toBe(200);
+    const wrongManagementId = structuredClone(management);
+    wrongManagementId.cycle.cycle_id = requestId;
+    expect((await sanitizeEngineResponse(json({ data: wrongManagementId, meta }), undefined, managementPath, "GET")).status).toBe(500);
+
+    const capacityBlocked = structuredClone(management) as Record<string, unknown>;
     capacityBlocked.blocker = {
       code: "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
       source_stage: "provider",
@@ -79,12 +78,12 @@ describe("internal-paper Engine response boundary", () => {
       proposal_rejection_code: null,
       as_of: "2026-08-26T21:00:00Z",
     };
-    expect((await sanitizeEngineResponse(json({ data: capacityBlocked, meta }), undefined, detailPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: capacityBlocked, meta }), undefined, managementPath, "GET")).status).toBe(200);
     const rawBlocked = structuredClone(capacityBlocked) as Record<string, unknown>;
     (rawBlocked.blocker as Record<string, unknown>).code = "RAW_PROVIDER_ERROR";
-    expect((await sanitizeEngineResponse(json({ data: rawBlocked, meta }), undefined, detailPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: rawBlocked, meta }), undefined, managementPath, "GET")).status).toBe(500);
 
-    const proposalBlocked = structuredClone(detail) as Record<string, unknown>;
+    const proposalBlocked = structuredClone(management) as Record<string, unknown>;
     proposalBlocked.blocker = {
       code: "PORTFOLIO_PROPOSAL_UNAVAILABLE",
       source_stage: "proposal",
@@ -92,10 +91,10 @@ describe("internal-paper Engine response boundary", () => {
       proposal_rejection_code: "PORTFOLIO_DEPENDENCY_CONFLICT",
       as_of: "2026-08-26T21:00:00Z",
     };
-    expect((await sanitizeEngineResponse(json({ data: proposalBlocked, meta }), undefined, detailPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: proposalBlocked, meta }), undefined, managementPath, "GET")).status).toBe(200);
     const unknownRejection = structuredClone(proposalBlocked) as Record<string, unknown>;
     (unknownRejection.blocker as Record<string, unknown>).proposal_rejection_code = "UNREVIEWED_REJECTION";
-    expect((await sanitizeEngineResponse(json({ data: unknownRejection, meta }), undefined, detailPath, "GET")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: unknownRejection, meta }), undefined, managementPath, "GET")).status).toBe(500);
 
     const listPath = "/internal/v1/paper/cycles";
     expect((await sanitizeEngineResponse(json({ data: { items: [data], summary: cycleSummary, version_observation: null, version_history: [], version_evaluation: null }, meta }), undefined, listPath, "GET")).status).toBe(200);
@@ -186,6 +185,44 @@ describe("internal-paper Engine response boundary", () => {
       reason_code: "PERSISTED_MARKET_BENCHMARK",
     });
     expect((await sanitizeEngineResponse(json({ data: persistedBenchmark, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(200);
+  });
+
+  it("keeps management, plan, and cancellation facts as distinct strict reads", async () => {
+    const management = managementCycle({
+      cycle_id: portfolioId, status: "completed", result_code: "PAPER_BATCH_EVALUATED",
+      decision_session: "2026-08-26", decision_time: "2026-08-26T21:00:00Z",
+      decision_slot_at: "2026-08-26T21:00:00Z", execution_session: "2026-08-27",
+      execution_locked: true, candidate_count: 0, candidates: [], decision: null,
+      decision_market: null, execution_market: null, order_ids: [],
+    });
+    const summary = {
+      current_target: management.active_target,
+      occupying_plan: management.plan_summary,
+      latest_proposal: management.proposal,
+      read_as_of: "2026-08-26T22:00:00Z",
+    };
+    const summaryPath = "/internal/v1/paper/management/portfolio";
+    expect((await sanitizeEngineResponse(json({ data: summary, meta }), undefined, summaryPath, "GET")).status).toBe(200);
+    const leakedSummary = structuredClone(summary) as Record<string, unknown>;
+    leakedSummary.available_cash = "3500";
+    expect((await sanitizeEngineResponse(json({ data: leakedSummary, meta }), undefined, summaryPath, "GET")).status).toBe(500);
+
+    const plan = paperPlan();
+    const planPath = `/internal/v1/paper/plans/${planId}`;
+    expect((await sanitizeEngineResponse(json({ data: plan, meta }), undefined, planPath, "GET")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { ...plan, batch_id: requestId }, meta }), undefined, planPath, "GET")).status).toBe(500);
+
+    const cancelResult = {
+      status: "UNKNOWN", result_event_seq: null, committed_at: null,
+      order: { order_id: orderId, status: "partially_filled", current_event_seq: 4, filled_quantity: "2", remaining_quantity: "3", as_of: "2026-08-26T21:00:00Z" },
+      reservation: { reservation_id: requestId, reservation_type: "cash", amount: "500", outstanding_amount: "500", released: false, as_of: "2026-08-26T21:00:00Z" },
+      reservation_released: false,
+    };
+    const cancelPath = `/internal/v1/paper/orders/${orderId}/cancel-result`;
+    expect((await sanitizeEngineResponse(json({ data: cancelResult, meta }), undefined, cancelPath, "GET")).status).toBe(200);
+    const wrongOrder = structuredClone(cancelResult);
+    wrongOrder.order.order_id = portfolioId;
+    expect((await sanitizeEngineResponse(json({ data: wrongOrder, meta }), undefined, cancelPath, "GET")).status).toBe(500);
   });
 
   it("uses the bounded paper response budget for a legal projection above the default cap", async () => {
@@ -300,6 +337,117 @@ describe("internal-paper Engine response boundary", () => {
   });
 });
 
+function managementCycle(cycle: Record<string, unknown>) {
+  const targetAllocation = { instrument_id: instrumentId, target_weight: "0.2", exit: false, role: "core", reason_code: "SYNTHESIS_INCLUDE" };
+  const proposalTarget = { ...targetAllocation, rank: 1, replaces_instrument_id: null, depends_on_instrument_ids: [] };
+  const proposal = {
+    strategy_decision_id: requestId,
+    synthesis_output_id: synthesisId,
+    decision_hash: "d".repeat(64),
+    policy_hash: "e".repeat(64),
+    baseline_target_version_id: null,
+    initial_approval_id: "0198f7a0-1111-7777-8111-111111111119",
+    cash_weight: "0.8",
+    targets: [proposalTarget],
+    expires_at: "2026-08-27T21:00:00Z",
+    as_of: "2026-08-26T21:00:03Z",
+  };
+  const planSummary = {
+    batch_id: planId,
+    target_version_id: targetId,
+    strategy_decision_id: requestId,
+    decision_hash: "d".repeat(64),
+    plan_created_at: "2026-08-26T21:00:05Z",
+    reconciliation_as_of: "2026-08-26T21:00:06Z",
+    occupation_state: "occupied",
+  };
+  return {
+    cycle,
+    orders: [],
+    candidate_batch: {
+      candidate_batch_id: candidateBatchId,
+      universe_snapshot_id: "0198f7a0-1111-7777-8111-111111111130",
+      candidate_instrument_ids: [instrumentId],
+      source: "explicit_research_scope",
+      batch_hash: "a".repeat(64),
+      as_of: "2026-08-26T21:00:00Z",
+    },
+    security_research: [{
+      instrument_id: instrumentId,
+      research_run_id: "0198f7a0-1111-7777-8111-111111111131",
+      research_output_id: "0198f7a0-1111-7777-8111-111111111132",
+      status: "completed",
+      content_hash: "b".repeat(64),
+      intent_hash: "c".repeat(64),
+      stance: "buy_candidate",
+      quality_status: "complete",
+      as_of: "2026-08-26T21:00:01Z",
+    }],
+    synthesis: {
+      synthesis_run_id: "0198f7a0-1111-7777-8111-111111111133",
+      synthesis_output_id: synthesisId,
+      candidate_batch_id: candidateBatchId,
+      input_hash: "4".repeat(64),
+      content_hash: "5".repeat(64),
+      binding_hash: "6".repeat(64),
+      status: "completed",
+      choices: [{
+        instrument_id: instrumentId,
+        action: "include",
+        role: "core",
+        rank: 1,
+        replaces_instrument_id: null,
+        depends_on_instrument_ids: [],
+        thesis: "Bounded inclusion thesis.",
+        counter_thesis: "Bounded counter thesis.",
+        invalidation: "Invalidate on evidence expiry.",
+      }],
+      cash_rationale: "Cash remains bounded by policy.",
+      as_of: "2026-08-26T21:00:02Z",
+    },
+    proposal,
+    active_target: {
+      target_version_id: targetId,
+      version_seq: 1,
+      strategy_decision_id: requestId,
+      previous_target_version_id: null,
+      target_content_hash: "7".repeat(64),
+      activation_hash: "8".repeat(64),
+      cash_weight: "0.8",
+      targets: [targetAllocation],
+      as_of: "2026-08-26T21:00:04Z",
+    },
+    activation_result: {
+      result_code: "PLAN_CREATED",
+      strategy_decision_id: requestId,
+      target_version_id: targetId,
+      batch_id: planId,
+      as_of: "2026-08-26T21:00:05Z",
+    },
+    blocker: null,
+    blocking_plan: null,
+    plan_summary: planSummary,
+  };
+}
+
+function paperPlan() {
+  return {
+    batch_id: planId,
+    currency: "USD",
+    association_state: "target_associated",
+    target: { target_version_id: targetId, version_seq: 1, target_content_hash: "7".repeat(64), as_of: "2026-08-26T21:00:04Z" },
+    proposal: { strategy_decision_id: requestId, decision_hash: "d".repeat(64), cash_weight: "0.8", targets: [{ instrument_id: instrumentId, target_weight: "0.2", exit: false }], as_of: "2026-08-26T21:00:03Z" },
+    plan: {
+      plan_created_at: "2026-08-26T21:00:05Z",
+      reconciliation_as_of: "2026-08-26T21:00:06Z",
+      occupation_state: "occupied",
+      risk: [{ order_id: orderId, instrument_id: instrumentId, outcome: "reduced", desired_quantity: "10", approved_quantity: "5", reduced_quantity: "5", rejected_quantity: "0", desired_amount_usd: "2000", approved_amount_usd: "1000", reduced_amount_usd: "1000", rejected_amount_usd: "0" }],
+      items: [{ order_id: orderId, instrument_id: instrumentId, side: "buy", status: "partially_filled", confirmed_fill_quantity: "2", confirmed_fills: [], open_order_coverage_quantity: "3", open_order_coverage_amount_usd: "600", cash_reservation_outstanding: "600", position_reservation_outstanding: null, remaining_target_gap_quantity: "8", remaining_target_gap_amount_usd: "1600", order_as_of: "2026-08-26T21:00:06Z", reservation_as_of: "2026-08-26T21:00:06Z" }],
+    },
+    actual: { data_state: "READY", as_of: "2026-08-26T21:00:06Z", available_cash: "8400", reserved_cash: "600", nav: "10000", positions: [{ instrument_id: instrumentId, quantity: "2", reserved_quantity: "0" }] },
+  };
+}
+
 function json(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
 }
@@ -361,12 +509,6 @@ function portfolio() {
       slippage: "5.000000000000",
       completeness: "FULL" as const,
     }],
-    management_summary: {
-      current_target: null,
-      occupying_plan: null,
-      latest_proposal: null,
-      read_as_of: "2026-08-26T20:00:00Z",
-    },
   };
 }
 

@@ -35,8 +35,8 @@ describe("internal-paper BFF routes", () => {
     await GET(new Request(`https://nexus.test/api/v1/paper/cycles/${cycleId}`));
 
     expect(engineFetch).toHaveBeenCalledWith({
-      template: "/internal/v1/paper/cycles/{cycle_id}",
-      path: `/internal/v1/paper/cycles/${cycleId}`,
+      template: "/internal/v1/paper/management/cycles/{cycle_id}",
+      path: `/internal/v1/paper/management/cycles/${cycleId}`,
     }, { method: "GET", actor });
 
     engineFetch.mockClear();
@@ -91,6 +91,21 @@ describe("internal-paper BFF routes", () => {
 
     engineFetch.mockClear();
     const rejected = await GET(new Request("https://nexus.test/api/v1/paper/portfolio?account_id=secret"));
+    expect(rejected.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
+  it("forwards the management summary as one query-free GET", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/management/portfolio/route");
+    await GET(new Request("https://nexus.test/api/v1/paper/management/portfolio"));
+
+    expect(engineFetch).toHaveBeenCalledWith(
+      "/internal/v1/paper/management/portfolio",
+      { method: "GET", actor },
+    );
+
+    engineFetch.mockClear();
+    const rejected = await GET(new Request("https://nexus.test/api/v1/paper/management/portfolio?account_id=secret"));
     expect(rejected.status).toBe(400);
     expect(engineFetch).not.toHaveBeenCalled();
   });

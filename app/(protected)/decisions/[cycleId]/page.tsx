@@ -11,7 +11,7 @@ import { cycleDecisionPresentation, executionPresentation } from "../../../lib/p
 import { formatDisplayTime } from "../../../lib/display-format";
 import type { components } from "../../../lib/generated/schema";
 
-type Detail = components["schemas"]["AgentPaperCycleDetailResponse"];
+type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 
 export default function DecisionDetailPage(): React.ReactElement {
   const params = useParams<{ cycleId: string }>();
@@ -58,7 +58,7 @@ export function DecisionDetailPanel({ state, detail, onRefresh }: { state: DataS
   </section>;
 }
 
-function isDetailEnvelope(value: unknown): value is components["schemas"]["AgentPaperCycleDetailEnvelope"] {
+function isDetailEnvelope(value: unknown): value is components["schemas"]["AgentPaperManagementCycleEnvelope"] {
   return isPlain(value) && isPlain(value.data) && isDecisionCycle(value.data.cycle)
     && Array.isArray(value.data.orders) && value.data.orders.every(isPaperOrder)
     && isPlain(value.meta) && typeof value.meta.as_of === "string";

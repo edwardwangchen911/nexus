@@ -459,56 +459,6 @@ export const runtimeContractSchemas = {
   "AgentPaperCycleDetailResponse": {
     "additionalProperties": false,
     "properties": {
-      "activation_result": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/AgentPaperActivationResultResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "active_target": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/PaperTargetSummaryResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "blocker": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/AgentPaperCycleBlockerResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "blocking_plan": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/PaperPlanSummaryResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "candidate_batch": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/AgentPaperCandidateBatchResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
       "cycle": {
         "$ref": "#/components/schemas/AgentPaperCycleResponse"
       },
@@ -519,58 +469,11 @@ export const runtimeContractSchemas = {
         "maxItems": 50,
         "title": "Orders",
         "type": "array"
-      },
-      "plan_summary": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/PaperPlanSummaryResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "proposal": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/AgentPaperPortfolioProposalResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "security_research": {
-        "items": {
-          "$ref": "#/components/schemas/AgentPaperSecurityResearchResponse"
-        },
-        "maxItems": 5,
-        "title": "Security Research",
-        "type": "array"
-      },
-      "synthesis": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/AgentPaperSynthesisResponse"
-          },
-          {
-            "type": "null"
-          }
-        ]
       }
     },
     "required": [
       "cycle",
-      "orders",
-      "candidate_batch",
-      "security_research",
-      "synthesis",
-      "proposal",
-      "active_target",
-      "activation_result",
-      "blocker",
-      "blocking_plan",
-      "plan_summary"
+      "orders"
     ],
     "title": "AgentPaperCycleDetailResponse",
     "type": "object"
@@ -843,6 +746,125 @@ export const runtimeContractSchemas = {
       "risk_outcomes"
     ],
     "title": "AgentPaperDecisionResponse",
+    "type": "object"
+  },
+  "AgentPaperManagementCycleResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "activation_result": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperActivationResultResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "active_target": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperTargetSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "blocker": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperCycleBlockerResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "blocking_plan": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperPlanSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "candidate_batch": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperCandidateBatchResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "cycle": {
+        "$ref": "#/components/schemas/AgentPaperCycleResponse"
+      },
+      "orders": {
+        "items": {
+          "$ref": "#/components/schemas/PaperOrderResponse"
+        },
+        "maxItems": 50,
+        "title": "Orders",
+        "type": "array"
+      },
+      "plan_summary": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperPlanSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperPortfolioProposalResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "security_research": {
+        "items": {
+          "$ref": "#/components/schemas/AgentPaperSecurityResearchResponse"
+        },
+        "maxItems": 5,
+        "title": "Security Research",
+        "type": "array"
+      },
+      "synthesis": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/AgentPaperSynthesisResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "cycle",
+      "orders",
+      "candidate_batch",
+      "security_research",
+      "synthesis",
+      "proposal",
+      "active_target",
+      "activation_result",
+      "blocker",
+      "blocking_plan",
+      "plan_summary"
+    ],
+    "title": "AgentPaperManagementCycleResponse",
     "type": "object"
   },
   "AgentPaperPortfolioProposalResponse": {
@@ -6500,6 +6522,154 @@ export const runtimeContractSchemas = {
     "title": "PaperAttributionResponse",
     "type": "object"
   },
+  "PaperCancelOrderFactResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "As Of"
+      },
+      "current_event_seq": {
+        "anyOf": [
+          {
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Current Event Seq"
+      },
+      "filled_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Filled Quantity",
+        "type": "string"
+      },
+      "order_id": {
+        "format": "uuid",
+        "title": "Order Id",
+        "type": "string"
+      },
+      "remaining_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Remaining Quantity",
+        "type": "string"
+      },
+      "status": {
+        "anyOf": [
+          {
+            "enum": [
+              "proposed",
+              "risk_rejected",
+              "risk_approved",
+              "awaiting_approval",
+              "submitted",
+              "partially_filled",
+              "filled",
+              "cancelled",
+              "rejected",
+              "reconciling"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Status"
+      }
+    },
+    "required": [
+      "order_id",
+      "status",
+      "filled_quantity",
+      "remaining_quantity",
+      "as_of"
+    ],
+    "title": "PaperCancelOrderFactResponse",
+    "type": "object"
+  },
+  "PaperCancelReservationFactResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "amount": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Amount",
+        "type": "string"
+      },
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "As Of"
+      },
+      "outstanding_amount": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Outstanding Amount"
+      },
+      "released": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Released"
+      },
+      "reservation_id": {
+        "format": "uuid",
+        "title": "Reservation Id",
+        "type": "string"
+      },
+      "reservation_type": {
+        "enum": [
+          "cash",
+          "position"
+        ],
+        "title": "Reservation Type",
+        "type": "string"
+      }
+    },
+    "required": [
+      "reservation_id",
+      "reservation_type",
+      "amount",
+      "outstanding_amount",
+      "released",
+      "as_of"
+    ],
+    "title": "PaperCancelReservationFactResponse",
+    "type": "object"
+  },
   "PaperCancelResponse": {
     "additionalProperties": false,
     "properties": {
@@ -6544,6 +6714,78 @@ export const runtimeContractSchemas = {
       "replayed"
     ],
     "title": "PaperCancelResponse",
+    "type": "object"
+  },
+  "PaperCancelResultResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "committed_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Committed At"
+      },
+      "order": {
+        "$ref": "#/components/schemas/PaperCancelOrderFactResponse"
+      },
+      "reservation": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperCancelReservationFactResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reservation_released": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reservation Released"
+      },
+      "result_event_seq": {
+        "anyOf": [
+          {
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Result Event Seq"
+      },
+      "status": {
+        "enum": [
+          "NOT_RECORDED",
+          "COMMITTED",
+          "CONFLICT",
+          "UNKNOWN"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "order",
+      "reservation",
+      "reservation_released",
+      "committed_at"
+    ],
+    "title": "PaperCancelResultResponse",
     "type": "object"
   },
   "PaperComparisonResponse": {
@@ -7179,6 +7421,584 @@ export const runtimeContractSchemas = {
     "title": "PaperPerformanceResponse",
     "type": "object"
   },
+  "PaperPlanActualPositionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Quantity",
+        "type": "string"
+      },
+      "reserved_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Reserved Quantity",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "quantity",
+      "reserved_quantity"
+    ],
+    "title": "PaperPlanActualPositionResponse",
+    "type": "object"
+  },
+  "PaperPlanActualResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "As Of"
+      },
+      "available_cash": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Available Cash"
+      },
+      "data_state": {
+        "enum": [
+          "READY",
+          "UNKNOWN"
+        ],
+        "title": "Data State",
+        "type": "string"
+      },
+      "nav": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Nav"
+      },
+      "positions": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/components/schemas/PaperPlanActualPositionResponse"
+            },
+            "maxItems": 500,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Positions"
+      },
+      "reserved_cash": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reserved Cash"
+      }
+    },
+    "required": [
+      "data_state",
+      "as_of",
+      "available_cash",
+      "reserved_cash",
+      "nav",
+      "positions"
+    ],
+    "title": "PaperPlanActualResponse",
+    "type": "object"
+  },
+  "PaperPlanConfirmedFillResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "fill_id": {
+        "format": "uuid",
+        "title": "Fill Id",
+        "type": "string"
+      },
+      "notional_usd": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Notional Usd",
+        "type": "string"
+      },
+      "quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Quantity",
+        "type": "string"
+      }
+    },
+    "required": [
+      "fill_id",
+      "quantity",
+      "notional_usd",
+      "as_of"
+    ],
+    "title": "PaperPlanConfirmedFillResponse",
+    "type": "object"
+  },
+  "PaperPlanFactsResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "items": {
+        "items": {
+          "$ref": "#/components/schemas/PaperPlanItemResponse"
+        },
+        "maxItems": 50,
+        "title": "Items",
+        "type": "array"
+      },
+      "occupation_state": {
+        "enum": [
+          "occupied",
+          "released",
+          "unknown"
+        ],
+        "title": "Occupation State",
+        "type": "string"
+      },
+      "plan_created_at": {
+        "format": "date-time",
+        "title": "Plan Created At",
+        "type": "string"
+      },
+      "reconciliation_as_of": {
+        "format": "date-time",
+        "title": "Reconciliation As Of",
+        "type": "string"
+      },
+      "risk": {
+        "items": {
+          "$ref": "#/components/schemas/PaperPlanRiskResponse"
+        },
+        "maxItems": 50,
+        "title": "Risk",
+        "type": "array"
+      }
+    },
+    "required": [
+      "plan_created_at",
+      "reconciliation_as_of",
+      "occupation_state",
+      "risk",
+      "items"
+    ],
+    "title": "PaperPlanFactsResponse",
+    "type": "object"
+  },
+  "PaperPlanItemResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cash_reservation_outstanding": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cash Reservation Outstanding"
+      },
+      "confirmed_fill_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Confirmed Fill Quantity",
+        "type": "string"
+      },
+      "confirmed_fills": {
+        "items": {
+          "$ref": "#/components/schemas/PaperPlanConfirmedFillResponse"
+        },
+        "maxItems": 128,
+        "title": "Confirmed Fills",
+        "type": "array"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "open_order_coverage_amount_usd": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Open Order Coverage Amount Usd",
+        "type": "string"
+      },
+      "open_order_coverage_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Open Order Coverage Quantity",
+        "type": "string"
+      },
+      "order_as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Order As Of"
+      },
+      "order_id": {
+        "format": "uuid",
+        "title": "Order Id",
+        "type": "string"
+      },
+      "position_reservation_outstanding": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Position Reservation Outstanding"
+      },
+      "remaining_target_gap_amount_usd": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Remaining Target Gap Amount Usd"
+      },
+      "remaining_target_gap_quantity": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Remaining Target Gap Quantity"
+      },
+      "reservation_as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reservation As Of"
+      },
+      "side": {
+        "enum": [
+          "buy",
+          "sell"
+        ],
+        "title": "Side",
+        "type": "string"
+      },
+      "status": {
+        "anyOf": [
+          {
+            "enum": [
+              "proposed",
+              "risk_rejected",
+              "risk_approved",
+              "awaiting_approval",
+              "submitted",
+              "partially_filled",
+              "filled",
+              "cancelled",
+              "rejected",
+              "reconciling"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Status"
+      }
+    },
+    "required": [
+      "order_id",
+      "instrument_id",
+      "side",
+      "status",
+      "confirmed_fill_quantity",
+      "confirmed_fills",
+      "open_order_coverage_quantity",
+      "open_order_coverage_amount_usd",
+      "cash_reservation_outstanding",
+      "position_reservation_outstanding",
+      "remaining_target_gap_quantity",
+      "remaining_target_gap_amount_usd",
+      "order_as_of",
+      "reservation_as_of"
+    ],
+    "title": "PaperPlanItemResponse",
+    "type": "object"
+  },
+  "PaperPlanProposalResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "cash_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cash Weight",
+        "type": "string"
+      },
+      "decision_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Decision Hash",
+        "type": "string"
+      },
+      "strategy_decision_id": {
+        "format": "uuid",
+        "title": "Strategy Decision Id",
+        "type": "string"
+      },
+      "targets": {
+        "items": {
+          "$ref": "#/components/schemas/PaperPlanProposalTargetResponse"
+        },
+        "maxItems": 50,
+        "title": "Targets",
+        "type": "array"
+      }
+    },
+    "required": [
+      "strategy_decision_id",
+      "decision_hash",
+      "cash_weight",
+      "targets",
+      "as_of"
+    ],
+    "title": "PaperPlanProposalResponse",
+    "type": "object"
+  },
+  "PaperPlanProposalTargetResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "exit": {
+        "title": "Exit",
+        "type": "boolean"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "target_weight": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Target Weight",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "target_weight",
+      "exit"
+    ],
+    "title": "PaperPlanProposalTargetResponse",
+    "type": "object"
+  },
+  "PaperPlanResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "actual": {
+        "$ref": "#/components/schemas/PaperPlanActualResponse"
+      },
+      "association_state": {
+        "enum": [
+          "target_associated",
+          "legacy_unassociated"
+        ],
+        "title": "Association State",
+        "type": "string"
+      },
+      "batch_id": {
+        "format": "uuid",
+        "title": "Batch Id",
+        "type": "string"
+      },
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "plan": {
+        "$ref": "#/components/schemas/PaperPlanFactsResponse"
+      },
+      "proposal": {
+        "$ref": "#/components/schemas/PaperPlanProposalResponse"
+      },
+      "target": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperPlanTargetResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "batch_id",
+      "currency",
+      "association_state",
+      "target",
+      "proposal",
+      "plan",
+      "actual"
+    ],
+    "title": "PaperPlanResponse",
+    "type": "object"
+  },
+  "PaperPlanRiskResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "approved_amount_usd": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Approved Amount Usd",
+        "type": "string"
+      },
+      "approved_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Approved Quantity",
+        "type": "string"
+      },
+      "desired_amount_usd": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Desired Amount Usd",
+        "type": "string"
+      },
+      "desired_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Desired Quantity",
+        "type": "string"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "order_id": {
+        "format": "uuid",
+        "title": "Order Id",
+        "type": "string"
+      },
+      "outcome": {
+        "enum": [
+          "approved",
+          "reduced",
+          "rejected"
+        ],
+        "title": "Outcome",
+        "type": "string"
+      },
+      "reduced_amount_usd": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Reduced Amount Usd",
+        "type": "string"
+      },
+      "reduced_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Reduced Quantity",
+        "type": "string"
+      },
+      "rejected_amount_usd": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Rejected Amount Usd",
+        "type": "string"
+      },
+      "rejected_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Rejected Quantity",
+        "type": "string"
+      }
+    },
+    "required": [
+      "order_id",
+      "instrument_id",
+      "outcome",
+      "desired_quantity",
+      "approved_quantity",
+      "reduced_quantity",
+      "rejected_quantity",
+      "desired_amount_usd",
+      "approved_amount_usd",
+      "reduced_amount_usd",
+      "rejected_amount_usd"
+    ],
+    "title": "PaperPlanRiskResponse",
+    "type": "object"
+  },
   "PaperPlanSummaryResponse": {
     "additionalProperties": false,
     "properties": {
@@ -7241,6 +8061,39 @@ export const runtimeContractSchemas = {
     "title": "PaperPlanSummaryResponse",
     "type": "object"
   },
+  "PaperPlanTargetResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "target_content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Target Content Hash",
+        "type": "string"
+      },
+      "target_version_id": {
+        "format": "uuid",
+        "title": "Target Version Id",
+        "type": "string"
+      },
+      "version_seq": {
+        "minimum": 1,
+        "title": "Version Seq",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "target_version_id",
+      "version_seq",
+      "target_content_hash",
+      "as_of"
+    ],
+    "title": "PaperPlanTargetResponse",
+    "type": "object"
+  },
   "PaperPortfolioResponse": {
     "additionalProperties": false,
     "properties": {
@@ -7282,9 +8135,6 @@ export const runtimeContractSchemas = {
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Initial Capital",
         "type": "string"
-      },
-      "management_summary": {
-        "$ref": "#/components/schemas/PaperManagementSummaryResponse"
       },
       "mode": {
         "const": "internal_paper",
@@ -7331,8 +8181,7 @@ export const runtimeContractSchemas = {
       "performance",
       "comparison",
       "positions",
-      "attributions",
-      "management_summary"
+      "attributions"
     ],
     "title": "PaperPortfolioResponse",
     "type": "object"
@@ -15184,11 +16033,19 @@ export const agentPaperCycleRuntimeSchema = runtimeContractSchemas.AgentPaperCyc
 
 export const agentPaperCycleDetailRuntimeSchema = runtimeContractSchemas.AgentPaperCycleDetailResponse;
 
+export const agentPaperManagementCycleRuntimeSchema = runtimeContractSchemas.AgentPaperManagementCycleResponse;
+
 export const agentPaperCyclePageRuntimeSchema = runtimeContractSchemas.AgentPaperCyclePageResponse;
 
 export const paperOrderPageRuntimeSchema = runtimeContractSchemas.PaperOrderPageResponse;
 
 export const paperCancelRuntimeSchema = runtimeContractSchemas.PaperCancelResponse;
+
+export const paperCancelResultRuntimeSchema = runtimeContractSchemas.PaperCancelResultResponse;
+
+export const paperPlanRuntimeSchema = runtimeContractSchemas.PaperPlanResponse;
+
+export const paperManagementSummaryRuntimeSchema = runtimeContractSchemas.PaperManagementSummaryResponse;
 
 export const workbenchRuntimeSchema = runtimeContractSchemas.WorkbenchResponse;
 

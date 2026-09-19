@@ -16,10 +16,14 @@ import {
   optimizationProposalGroupRuntimeSchema,
   overviewRuntimeSchema,
   paperCancelRuntimeSchema,
+  paperCancelResultRuntimeSchema,
+  paperManagementSummaryRuntimeSchema,
   paperOrderPageRuntimeSchema,
+  paperPlanRuntimeSchema,
   paperPortfolioRuntimeSchema,
   agentPaperCycleRuntimeSchema,
   agentPaperCycleDetailRuntimeSchema,
+  agentPaperManagementCycleRuntimeSchema,
   agentPaperCyclePageRuntimeSchema,
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
@@ -308,6 +312,27 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || !cycleOrderIdsMatch(data.cycle.order_ids, data.orders)) return INVALID_DATA;
     return data;
   }
+  const paperManagementCycle = /^\/internal\/v1\/paper\/management\/cycles\/([^/]+)$/.exec(pathname);
+  if (paperManagementCycle && validateUuid(paperManagementCycle[1])) {
+    if (requestMethod?.toUpperCase() !== "GET"
+      || !matchesRuntimeSchema(data, agentPaperManagementCycleRuntimeSchema)
+      || !isPlain(data)
+      || !agentPaperCycleValid(data.cycle)
+      || !isPlain(data.cycle)
+      || !sameUuid(data.cycle.cycle_id, paperManagementCycle[1])
+      || !Array.isArray(data.orders)
+      || data.orders.length > 50
+      || data.orders.some((order) => !paperOrderValid(order))
+      || !cycleOrderIdsMatch(data.cycle.order_ids, data.orders)) return INVALID_DATA;
+    return data;
+  }
+  if (pathname === "/internal/v1/paper/management/portfolio") {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, paperManagementSummaryRuntimeSchema)
+      && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
   if (pathname === "/internal/v1/workbench") {
     if (requestMethod?.toUpperCase() !== "GET"
       || !matchesRuntimeSchema(data, workbenchRuntimeSchema)
@@ -339,6 +364,25 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     return requestMethod?.toUpperCase() === "POST"
       && matchesRuntimeSchema(data, paperCancelRuntimeSchema) && isPlain(data)
       && sameUuid(data.order_id, paperCancel[1])
+      ? data
+      : INVALID_DATA;
+  }
+  const paperCancelResult = /^\/internal\/v1\/paper\/orders\/([^/]+)\/cancel-result$/.exec(pathname);
+  if (paperCancelResult && validateUuid(paperCancelResult[1])) {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, paperCancelResultRuntimeSchema)
+      && isPlain(data)
+      && isPlain(data.order)
+      && sameUuid(data.order.order_id, paperCancelResult[1])
+      ? data
+      : INVALID_DATA;
+  }
+  const paperPlan = /^\/internal\/v1\/paper\/plans\/([^/]+)$/.exec(pathname);
+  if (paperPlan && validateUuid(paperPlan[1])) {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, paperPlanRuntimeSchema)
+      && isPlain(data)
+      && sameUuid(data.batch_id, paperPlan[1])
       ? data
       : INVALID_DATA;
   }

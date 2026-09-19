@@ -230,7 +230,7 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const news = /^\/internal\/v1\/instruments\/([^/]+)\/news$/.exec(path);
   if (news && validateUuid(news[1])) return template === "/internal/v1/instruments/{instrument_id}/news";
   if (template === "/internal/v1/optimization-proposal-drafts") return path === template;
-  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/live-evaluation", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/workbench", "/internal/v1/paper/cycles", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
+  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/live-evaluation", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/workbench", "/internal/v1/paper/cycles", "/internal/v1/paper/cycles/latest", "/internal/v1/paper/management/portfolio", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/broker-simulation", "/internal/v1/broker-simulation/intents", "/internal/v1/optimization-proposals", "/internal/v1/portfolio-scenarios/evaluate", "/internal/v1/portfolio-decision-runs", "/internal/v1/portfolio-decision-runs/latest", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -251,9 +251,21 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   if (paperCancel && validateUuid(paperCancel[1])) {
     return template === "/internal/v1/paper/orders/{order_id}/cancel";
   }
+  const paperCancelResult = /^\/internal\/v1\/paper\/orders\/([^/]+)\/cancel-result$/.exec(path);
+  if (paperCancelResult && validateUuid(paperCancelResult[1])) {
+    return template === "/internal/v1/paper/orders/{order_id}/cancel-result";
+  }
+  const paperPlan = /^\/internal\/v1\/paper\/plans\/([^/]+)$/.exec(path);
+  if (paperPlan && validateUuid(paperPlan[1])) {
+    return template === "/internal/v1/paper/plans/{batch_id}";
+  }
   const paperCycle = /^\/internal\/v1\/paper\/cycles\/([^/]+)$/.exec(path);
   if (paperCycle && validateUuid(paperCycle[1])) {
     return template === "/internal/v1/paper/cycles/{cycle_id}";
+  }
+  const paperManagementCycle = /^\/internal\/v1\/paper\/management\/cycles\/([^/]+)$/.exec(path);
+  if (paperManagementCycle && validateUuid(paperManagementCycle[1])) {
+    return template === "/internal/v1/paper/management/cycles/{cycle_id}";
   }
   const brokerIntent = /^\/internal\/v1\/broker-simulation\/intents\/([^/]+)\/(approve|reject)$/.exec(path);
   if (brokerIntent && validateUuid(brokerIntent[1])) {

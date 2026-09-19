@@ -586,56 +586,6 @@
       "AgentPaperCycleDetailResponse": {
         "additionalProperties": false,
         "properties": {
-          "activation_result": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentPaperActivationResultResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "active_target": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PaperTargetSummaryResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "blocker": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentPaperCycleBlockerResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "blocking_plan": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PaperPlanSummaryResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "candidate_batch": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentPaperCandidateBatchResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "cycle": {
             "$ref": "#/components/schemas/AgentPaperCycleResponse"
           },
@@ -646,58 +596,11 @@
             "maxItems": 50,
             "title": "Orders",
             "type": "array"
-          },
-          "plan_summary": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PaperPlanSummaryResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "proposal": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentPaperPortfolioProposalResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "security_research": {
-            "items": {
-              "$ref": "#/components/schemas/AgentPaperSecurityResearchResponse"
-            },
-            "maxItems": 5,
-            "title": "Security Research",
-            "type": "array"
-          },
-          "synthesis": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentPaperSynthesisResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
           }
         },
         "required": [
           "cycle",
-          "orders",
-          "candidate_batch",
-          "security_research",
-          "synthesis",
-          "proposal",
-          "active_target",
-          "activation_result",
-          "blocker",
-          "blocking_plan",
-          "plan_summary"
+          "orders"
         ],
         "title": "AgentPaperCycleDetailResponse",
         "type": "object"
@@ -1004,6 +907,142 @@
           "risk_outcomes"
         ],
         "title": "AgentPaperDecisionResponse",
+        "type": "object"
+      },
+      "AgentPaperManagementCycleEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentPaperManagementCycleResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "AgentPaperManagementCycleEnvelope",
+        "type": "object"
+      },
+      "AgentPaperManagementCycleResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperActivationResultResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaperTargetSummaryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blocker": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperCycleBlockerResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blocking_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaperPlanSummaryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "candidate_batch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperCandidateBatchResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cycle": {
+            "$ref": "#/components/schemas/AgentPaperCycleResponse"
+          },
+          "orders": {
+            "items": {
+              "$ref": "#/components/schemas/PaperOrderResponse"
+            },
+            "maxItems": 50,
+            "title": "Orders",
+            "type": "array"
+          },
+          "plan_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaperPlanSummaryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperPortfolioProposalResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "security_research": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPaperSecurityResearchResponse"
+            },
+            "maxItems": 5,
+            "title": "Security Research",
+            "type": "array"
+          },
+          "synthesis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperSynthesisResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "cycle",
+          "orders",
+          "candidate_batch",
+          "security_research",
+          "synthesis",
+          "proposal",
+          "active_target",
+          "activation_result",
+          "blocker",
+          "blocking_plan",
+          "plan_summary"
+        ],
+        "title": "AgentPaperManagementCycleResponse",
         "type": "object"
       },
       "AgentPaperPortfolioProposalResponse": {
@@ -7776,6 +7815,23 @@
         "title": "PaperFillResponse",
         "type": "object"
       },
+      "PaperManagementSummaryEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PaperManagementSummaryResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "PaperManagementSummaryEnvelope",
+        "type": "object"
+      },
       "PaperManagementSummaryResponse": {
         "additionalProperties": false,
         "properties": {
@@ -8923,9 +8979,6 @@
             "title": "Initial Capital",
             "type": "string"
           },
-          "management_summary": {
-            "$ref": "#/components/schemas/PaperManagementSummaryResponse"
-          },
           "mode": {
             "const": "internal_paper",
             "title": "Mode",
@@ -8971,8 +9024,7 @@
           "performance",
           "comparison",
           "positions",
-          "attributions",
-          "management_summary"
+          "attributions"
         ],
         "title": "PaperPortfolioResponse",
         "type": "object"
@@ -19833,6 +19885,134 @@
           }
         },
         "summary": "Get Agent Paper Cycle Detail"
+      }
+    },
+    "/internal/v1/paper/management/cycles/{cycle_id}": {
+      "get": {
+        "operationId": "getInternalPaperManagementCycle",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cycle_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Cycle Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPaperManagementCycleEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Agent Paper Management Cycle"
+      }
+    },
+    "/internal/v1/paper/management/portfolio": {
+      "get": {
+        "operationId": "getInternalPaperManagementSummary",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperManagementSummaryEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Paper Management Summary"
       }
     },
     "/internal/v1/paper/orders": {

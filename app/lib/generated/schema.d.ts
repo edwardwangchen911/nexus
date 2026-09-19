@@ -551,6 +551,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/management/cycles/{cycle_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Agent Paper Management Cycle */
+        get: operations["getInternalPaperManagementCycle"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/paper/management/portfolio": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Paper Management Summary */
+        get: operations["getInternalPaperManagementSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/orders": {
         parameters: {
             query?: never;
@@ -1318,19 +1352,9 @@ export interface components {
         };
         /** AgentPaperCycleDetailResponse */
         AgentPaperCycleDetailResponse: {
-            activation_result: components["schemas"]["AgentPaperActivationResultResponse"] | null;
-            active_target: components["schemas"]["PaperTargetSummaryResponse"] | null;
-            blocker: components["schemas"]["AgentPaperCycleBlockerResponse"] | null;
-            blocking_plan: components["schemas"]["PaperPlanSummaryResponse"] | null;
-            candidate_batch: components["schemas"]["AgentPaperCandidateBatchResponse"] | null;
             cycle: components["schemas"]["AgentPaperCycleResponse"];
             /** Orders */
             orders: components["schemas"]["PaperOrderResponse"][];
-            plan_summary: components["schemas"]["PaperPlanSummaryResponse"] | null;
-            proposal: components["schemas"]["AgentPaperPortfolioProposalResponse"] | null;
-            /** Security Research */
-            security_research: components["schemas"]["AgentPaperSecurityResearchResponse"][];
-            synthesis: components["schemas"]["AgentPaperSynthesisResponse"] | null;
         };
         /** AgentPaperCycleEnvelope */
         AgentPaperCycleEnvelope: {
@@ -1446,6 +1470,27 @@ export interface components {
             sizing_policy_version: "agent_paper_sizing_v1";
             /** Target Cash Weight */
             target_cash_weight: string;
+        };
+        /** AgentPaperManagementCycleEnvelope */
+        AgentPaperManagementCycleEnvelope: {
+            data: components["schemas"]["AgentPaperManagementCycleResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** AgentPaperManagementCycleResponse */
+        AgentPaperManagementCycleResponse: {
+            activation_result: components["schemas"]["AgentPaperActivationResultResponse"] | null;
+            active_target: components["schemas"]["PaperTargetSummaryResponse"] | null;
+            blocker: components["schemas"]["AgentPaperCycleBlockerResponse"] | null;
+            blocking_plan: components["schemas"]["PaperPlanSummaryResponse"] | null;
+            candidate_batch: components["schemas"]["AgentPaperCandidateBatchResponse"] | null;
+            cycle: components["schemas"]["AgentPaperCycleResponse"];
+            /** Orders */
+            orders: components["schemas"]["PaperOrderResponse"][];
+            plan_summary: components["schemas"]["PaperPlanSummaryResponse"] | null;
+            proposal: components["schemas"]["AgentPaperPortfolioProposalResponse"] | null;
+            /** Security Research */
+            security_research: components["schemas"]["AgentPaperSecurityResearchResponse"][];
+            synthesis: components["schemas"]["AgentPaperSynthesisResponse"] | null;
         };
         /** AgentPaperPortfolioProposalResponse */
         AgentPaperPortfolioProposalResponse: {
@@ -4042,6 +4087,11 @@ export interface components {
              */
             source_as_of: string;
         };
+        /** PaperManagementSummaryEnvelope */
+        PaperManagementSummaryEnvelope: {
+            data: components["schemas"]["PaperManagementSummaryResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
         /** PaperManagementSummaryResponse */
         PaperManagementSummaryResponse: {
             current_target: components["schemas"]["PaperTargetSummaryResponse"] | null;
@@ -4439,7 +4489,6 @@ export interface components {
             data_state: "EMPTY" | "READY" | "PARTIAL" | "STALE";
             /** Initial Capital */
             initial_capital: string;
-            management_summary: components["schemas"]["PaperManagementSummaryResponse"];
             /**
              * Mode
              * @constant
@@ -9403,6 +9452,120 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentPaperCycleEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPaperManagementCycle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                cycle_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentPaperManagementCycleEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPaperManagementSummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperManagementSummaryEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */
