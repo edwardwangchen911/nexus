@@ -946,7 +946,20 @@ function synthesisChoicesValid(synthesis: Record<string, unknown>, candidateIds:
     : null);
   if (choices.length !== synthesis.choices.length
     || !ids.every((id): id is string => id !== null && candidateIds.includes(id))
-    || new Set(ids).size !== ids.length) return false;
+    || new Set(ids).size !== ids.length
+    || ids.length !== candidateIds.length
+    || !candidateIds.every((id) => ids.includes(id))) return false;
+  const ranks: number[] = [];
+  for (const choice of choices) {
+    const isIncrease = ["include", "increase"].includes(String(choice.action));
+    const hasRank = typeof choice.rank === "number"
+      && Number.isInteger(choice.rank)
+      && choice.rank > 0;
+    if (isIncrease !== hasRank || (isIncrease && choice.role === "none")) return false;
+    if (hasRank) ranks.push(choice.rank as number);
+  }
+  ranks.sort((left, right) => left - right);
+  if (!ranks.every((rank, index) => rank === index + 1)) return false;
   const byId = new Map(choices.map((choice) => [String(choice.instrument_id).toLowerCase(), choice]));
   if (!choices.every((choice) => {
     if (!Array.isArray(choice.depends_on_instrument_ids)) return false;

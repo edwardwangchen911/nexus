@@ -297,6 +297,40 @@ describe("internal-paper Engine response boundary", () => {
       { ...firstProposalTarget, instrument_id: secondInstrumentId, rank: 2 },
     ];
     expect((await sanitizeEngineResponse(json({ data: bounded, meta }), undefined, path, "GET")).status).toBe(200);
+    const missingChoice = structuredClone(bounded) as Record<string, unknown>;
+    (missingChoice.synthesis as Record<string, unknown>).choices =
+      ((missingChoice.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>).slice(0, 2);
+    expect((await sanitizeEngineResponse(json({ data: missingChoice, meta }), undefined, path, "GET")).status).toBe(500);
+
+    for (const mutate of [
+      (choice: Record<string, unknown>, target: Record<string, unknown>) => {
+        choice.rank = null;
+        target.rank = null;
+      },
+      (choice: Record<string, unknown>, target: Record<string, unknown>) => {
+        Object.assign(choice, { action: "maintain", role: "none", rank: 1 });
+        Object.assign(target, { reason_code: "MAINTAIN", role: "none", rank: 1 });
+      },
+      (choice: Record<string, unknown>, target: Record<string, unknown>) => {
+        Object.assign(choice, { action: "increase", role: "none", rank: 1 });
+        Object.assign(target, { reason_code: "INCREASE", role: "none", rank: 1 });
+      },
+    ]) {
+      const invalidRankOrRole = structuredClone(valid) as Record<string, unknown>;
+      mutate(
+        ((invalidRankOrRole.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[0],
+        ((invalidRankOrRole.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0],
+      );
+      expect((await sanitizeEngineResponse(json({ data: invalidRankOrRole, meta }), undefined, path, "GET")).status).toBe(500);
+    }
+    for (const rank of [1, 4]) {
+      const invalidRankSequence = structuredClone(bounded) as Record<string, unknown>;
+      const choices = (invalidRankSequence.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+      const targets = (invalidRankSequence.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+      choices[1].rank = rank;
+      targets[1].rank = rank;
+      expect((await sanitizeEngineResponse(json({ data: invalidRankSequence, meta }), undefined, path, "GET")).status).toBe(500);
+    }
     const forgedTarget = structuredClone(bounded) as Record<string, unknown>;
     (((forgedTarget.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[1]).instrument_id = requestId;
     expect((await sanitizeEngineResponse(json({ data: forgedTarget, meta }), undefined, path, "GET")).status).toBe(500);
