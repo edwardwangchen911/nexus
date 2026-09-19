@@ -30,6 +30,11 @@ from nexus.market.price_bar_authority import (
     SOURCE_POLICY_V2_ID,
 )
 from nexus.paper.errors import PaperExecutionError
+from nexus.paper.execution_canonical import (
+    canonical_cancel_request_hash,
+    canonical_cancel_result_hash,
+    canonical_paper_fact_hash,
+)
 from nexus.paper.fills import (
     EXECUTION_MODEL_V1,
     ExecutionBar,
@@ -102,6 +107,9 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.runtime import OutboxEvent
 from nexus.quality.source_policy import paper_execution_price_authorized
+
+# Compatibility for the existing rank-continuity writer; both names share one canonical function.
+_fact_hash = canonical_paper_fact_hash
 
 _SOURCE_PRIORITY = {"fosun": 0, "alpaca": 1, "fixture": 2}
 
@@ -221,13 +229,6 @@ def paper_advance_request_hash(
     return _digest(
         "paper_advance_request_sha256_v1",
         {"order_id": str(order_id), "evaluated_at": _time(evaluated_at)},
-    )
-
-
-def _fact_hash(kind: str, payload: dict[str, object]) -> str:
-    return _digest(
-        "paper_fact_payload_sha256_v1",
-        {"kind": kind, "payload": payload},
     )
 
 
@@ -369,14 +370,6 @@ def _cancel_result(
     replayed: bool = False,
 ) -> PaperCancelResult:
     unfilled = order.quantity - filled_quantity
-    payload = {
-        "order_id": str(order.id),
-        "account_id": str(order.account_id),
-        "status": "cancelled",
-        "filled_quantity": _decimal(filled_quantity),
-        "unfilled_quantity": _decimal(unfilled),
-        "result_event_seq": result_event_seq,
-    }
     return PaperCancelResult(
         order_id=order.id,
         account_id=order.account_id,
@@ -384,7 +377,13 @@ def _cancel_result(
         filled_quantity=filled_quantity,
         unfilled_quantity=unfilled,
         result_event_seq=result_event_seq,
-        result_hash=_digest("paper_cancel_result_sha256_v1", payload),
+        result_hash=canonical_cancel_result_hash(
+            order_id=order.id,
+            account_id=order.account_id,
+            total_quantity=order.quantity,
+            filled_quantity=filled_quantity,
+            result_event_seq=result_event_seq,
+        ),
         replayed=replayed,
     )
 
@@ -959,7 +958,7 @@ async def _append_order_event(
         actor_kind=actor_kind,
         reason_code=reason_code,
         occurred_at=occurred_at,
-        payload_hash=_fact_hash("paper_order_event", payload),
+        payload_hash=canonical_paper_fact_hash("paper_order_event", payload),
         source_fill_id=source_fill_id,
     )
     session.add(event)
@@ -1321,7 +1320,7 @@ async def _cancel(
         "occurred_at": _time(occurred_at),
         "reason_code": reason_code,
     }
-    release_hash = _fact_hash("paper_reservation_event", release_payload)
+    release_hash = canonical_paper_fact_hash("paper_reservation_event", release_payload)
     if reservation.reservation_type == "cash":
         transaction = make_cash_release_transaction(
             transaction_id=new_uuid7(),
@@ -1813,7 +1812,7 @@ async def advance_internal_paper_order(
         "window_content_hash": calculation.window_content_hash,
         "evaluated_at": _time(evaluated_at),
     }
-    fill_hash = _fact_hash("paper_fill", fill_payload)
+    fill_hash = canonical_paper_fact_hash("paper_fill", fill_payload)
     if order.side == "buy":
         transaction = make_buy_fill_transaction(
             transaction_id=new_uuid7(),
@@ -1936,7 +1935,7 @@ async def advance_internal_paper_order(
             event_type="consumed",
             amount=consumed_amount,
             occurred_at=evaluated_at,
-            payload_hash=_fact_hash("paper_reservation_event", reservation_payload),
+            payload_hash=canonical_paper_fact_hash("paper_reservation_event", reservation_payload),
             source_fill_id=fill_id,
         )
     )
@@ -1977,7 +1976,7 @@ async def advance_internal_paper_order(
             cost_delta=cost_delta,
             source_fill_id=fill_id,
             occurred_at=evaluated_at,
-            payload_hash=_fact_hash("paper_position_adjustment", position_payload),
+            payload_hash=canonical_paper_fact_hash("paper_position_adjustment", position_payload),
         )
     )
     await session.flush()
@@ -2011,7 +2010,7 @@ async def advance_internal_paper_order(
             "occurred_at": _time(evaluated_at),
             "reason_code": "paper_order_filled_release",
         }
-        release_hash = _fact_hash("paper_reservation_event", release_payload)
+        release_hash = canonical_paper_fact_hash("paper_reservation_event", release_payload)
         if reservation.reservation_type == "cash":
             release_transaction = make_cash_release_transaction(
                 transaction_id=new_uuid7(),
@@ -2118,9 +2117,9 @@ async def cancel_internal_paper_order(
         or order.account_id != account.id
     ):
         raise PaperExecutionError("PAPER_EXECUTION_INVALID")
-    request_hash = _digest(
-        "paper_cancel_request_sha256_v1",
-        {"order_id": str(order.id), "expected_event_seq": expected_event_seq},
+    request_hash = canonical_cancel_request_hash(
+        order_id=order.id,
+        expected_event_seq=expected_event_seq,
     )
     existing_request = await _existing_idempotency(
         session,

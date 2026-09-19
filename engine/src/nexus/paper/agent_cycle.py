@@ -1,6 +1,6 @@
 """Resumable, append-only coordination for one internal Agent paper cycle."""
 
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 from typing import cast
@@ -47,10 +47,20 @@ from nexus.paper.agent_decision import (
     AgentPaperDecisionError,
     build_agent_paper_decision,
 )
-from nexus.paper.agent_decision_store import persist_agent_paper_decision
+from nexus.paper.agent_decision_store import (
+    persist_agent_paper_decision,
+    persist_portfolio_proposal,
+)
+from nexus.paper.candidate_batch import (
+    load_agent_paper_candidate_batch,
+    validate_agent_paper_candidate_batch,
+)
 from nexus.paper.errors import PaperBatchError
+from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH, PORTFOLIO_ALLOCATION_V1
+from nexus.paper.portfolio_proposal import KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
+from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
@@ -60,6 +70,9 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     PaperAccountRecord,
+    PaperOrderBatchRecord,
+    PaperOrderRecord,
+    PaperTargetVersionRecord,
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
@@ -98,9 +111,12 @@ _TRIGGER_FAILURE_CODES = frozenset(
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
+        "CANDIDATE_BATCH_REQUIRED",
+        "CANDIDATE_BATCH_INVALID",
     }
 )
 
@@ -111,6 +127,7 @@ async def reserve_schwab_agent_paper_trigger(
     account_id: UUID,
     client_idempotency_key: str,
     now: datetime,
+    candidate_batch_id: UUID | None = None,
 ) -> AgentPaperTriggerReservation:
     """Reserve one database-derived decision slot before provider work begins."""
     if (
@@ -121,12 +138,23 @@ async def reserve_schwab_agent_paper_trigger(
     ):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     local_time = now.astimezone(ZoneInfo("America/New_York"))
-    if not time(7) <= local_time.time().replace(tzinfo=None) < time(16):
+    scheduled_local = datetime.combine(
+        local_time.date(),
+        PORTFOLIO_ALLOCATION_V1.decision_local_time,
+        tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
+    )
+    scheduled_slot = scheduled_local.astimezone(UTC)
+    if floor_decision_slot(now) != scheduled_slot:
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
-        raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
-    decision_slot_at = floor_decision_slot(now)
+        raise AgentPaperCycleError("CANDIDATE_BATCH_INVALID")
+    if candidate_batch_id is None:
+        raise ValueError("CANDIDATE_BATCH_REQUIRED")
+    batch = await load_agent_paper_candidate_batch(session, batch_id=candidate_batch_id)
+    if batch is None or batch.account_id != account_id:
+        raise ValueError("CANDIDATE_BATCH_INVALID")
+    decision_slot_at = scheduled_slot
     request_hash = job_input_hash(
         {
             "schema": "agent-paper-schwab-trigger-v2",
@@ -135,6 +163,8 @@ async def reserve_schwab_agent_paper_trigger(
             "decision_slot_at": decision_slot_at.isoformat(),
             "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
             "client_idempotency_hash": sha256(client_idempotency_key.encode()).hexdigest(),
+            "candidate_batch_id": str(batch.batch_id),
+            "candidate_batch_hash": batch.batch_hash,
         }
     )
     claim, inserted = await claim_or_lock(
@@ -151,8 +181,16 @@ async def reserve_schwab_agent_paper_trigger(
         claim_id=claim.id,
         decision_session=local_time.date(),
         decision_slot_at=decision_slot_at,
+        candidate_batch_id=batch.batch_id,
+        candidate_batch_hash=batch.batch_hash,
     )
     if inserted:
+        await validate_agent_paper_candidate_batch(
+            session,
+            batch_id=batch.batch_id,
+            account_id=account_id,
+            as_of=now,
+        )
         return reservation
     if not claim.response_payload:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
@@ -212,12 +250,15 @@ async def start_schwab_agent_paper_cycle(
     authority: CycleAuthority,
     decision_slot_at: datetime,
     idempotency_key: str,
+    requested_instrument_ids: tuple[UUID, ...],
+    candidate_batch_id: UUID | None = None,
     daily_limit_usd: Decimal = Decimal("3.00"),
     version_evaluation_id: UUID | None = None,
     version_lane: str | None = None,
     version_source_run_id: UUID | None = None,
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
+    execution_scope_max_symbols: int | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
     if (
@@ -228,12 +269,18 @@ async def start_schwab_agent_paper_cycle(
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     explicit_version = version_prompt_id is not None or version_model_id is not None
     if version_evaluation_id is None:
-        if (
-            version_lane is not None
-            or version_source_run_id is not None
-            or explicit_version
-        ):
+        if version_lane is not None or version_source_run_id is not None or explicit_version:
             raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
+        if candidate_batch_id is None:
+            raise ValueError("CANDIDATE_BATCH_REQUIRED")
+        frozen_batch = await load_agent_paper_candidate_batch(session, batch_id=candidate_batch_id)
+        if (
+            frozen_batch is None
+            or frozen_batch.account_id != authority.account_id
+            or frozen_batch.universe_snapshot_id != authority.universe_snapshot_id
+            or frozen_batch.instrument_ids != requested_instrument_ids
+        ):
+            raise ValueError("CANDIDATE_BATCH_INVALID")
     elif (
         version_lane not in {"incumbent", "challenger"}
         or (version_prompt_id is None) != (version_model_id is None)
@@ -257,6 +304,12 @@ async def start_schwab_agent_paper_cycle(
         if (
             cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
             or cycle.execution_price_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+            or cycle.candidate_batch_id != candidate_batch_id
+            or (
+                cycle.candidate_manifest
+                and tuple(UUID(str(row["instrument_id"])) for row in cycle.candidate_manifest)
+                != requested_instrument_ids
+            )
         ):
             raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
         events = await _events(session, cycle.id)
@@ -268,11 +321,14 @@ async def start_schwab_agent_paper_cycle(
         authority=authority,
         decision_slot_at=decision_slot_at,
         daily_limit_usd=daily_limit_usd,
+        requested_instrument_ids=requested_instrument_ids,
+        candidate_batch_id=candidate_batch_id,
         version_evaluation_id=version_evaluation_id,
         version_lane=version_lane,
         version_source_run_id=version_source_run_id,
         version_prompt_id=version_prompt_id,
         version_model_id=version_model_id,
+        execution_scope_max_symbols=execution_scope_max_symbols,
     )
 
 
@@ -281,6 +337,8 @@ async def resume_schwab_agent_paper_cycle(
     *,
     cycle_id: UUID,
     idempotency_key: str,
+    now: datetime | None = None,
+    daily_limit_usd: Decimal | None = None,
 ) -> AgentPaperCycleResult:
     """Resume only from the persisted Job/Run/Output state of a Schwab cycle."""
     if not idempotency_key or len(idempotency_key) > 255:
@@ -310,6 +368,21 @@ async def resume_schwab_agent_paper_cycle(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
         {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
     )
+    if cycle.candidate_batch_id is not None and now is not None:
+        from nexus.agents.portfolio_synthesis_worker import (
+            read_synthesis_job,
+            reconcile_synthesis_orphans,
+        )
+        from nexus.jobs.models import QueueName
+        from nexus.jobs.repository import reclaim_expired_jobs
+
+        synthesis_job = await read_synthesis_job(session, cycle_id=cycle.id)
+        if synthesis_job is not None:
+            exact_job_ids = (synthesis_job.id,)
+            await reclaim_expired_jobs(
+                session, queue=QueueName.GENERAL, now=now, job_ids=exact_job_ids
+            )
+            await reconcile_synthesis_orphans(session, now=now, job_ids=exact_job_ids)
     events = await _events(session, cycle.id)
     if not events:
         raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
@@ -323,8 +396,15 @@ async def resume_schwab_agent_paper_cycle(
     if candidate_manifest_hash(manifest) != cycle.candidate_hash or not valid_manifest:
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
     if events[-1].to_status == "researching":
-        return await _resume_research(session, cycle=cycle, authority=authority, events=events)
-    return await _resume_batch(session, cycle=cycle, events=events)
+        return await _resume_research(
+            session,
+            cycle=cycle,
+            authority=authority,
+            events=events,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+        )
+    return await _resume_batch(session, cycle=cycle, events=events, now=now)
 
 
 async def advance_agent_paper_cycle(
@@ -333,7 +413,9 @@ async def advance_agent_paper_cycle(
     account_id: UUID,
     decision_time: datetime,
     idempotency_key: str,
-    daily_limit_usd: Decimal = Decimal("3.00"),
+    daily_limit_usd: Decimal | None = None,
+    candidate_batch_id: UUID | None = None,
+    now: datetime | None = None,
     version_evaluation_id: UUID | None = None,
     version_lane: str | None = None,
     version_source_run_id: UUID | None = None,
@@ -353,11 +435,7 @@ async def advance_agent_paper_cycle(
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
     explicit_version = version_prompt_id is not None or version_model_id is not None
     if version_evaluation_id is None:
-        if (
-            version_lane is not None
-            or version_source_run_id is not None
-            or explicit_version
-        ):
+        if version_lane is not None or version_source_run_id is not None or explicit_version:
             raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
     elif (
         version_lane not in {"incumbent", "challenger"}
@@ -370,6 +448,13 @@ async def advance_agent_paper_cycle(
         "account_id": str(account_id),
         "decision_time": decision_time.isoformat(),
     }
+    if candidate_batch_id is not None:
+        batch = await load_agent_paper_candidate_batch(session, batch_id=candidate_batch_id)
+        if batch is None or batch.account_id != account_id:
+            raise ValueError("CANDIDATE_BATCH_INVALID")
+        request_payload.update(
+            candidate_batch_id=str(batch.batch_id), candidate_batch_hash=batch.batch_hash
+        )
     if version_evaluation_id is not None:
         request_payload.update(
             {
@@ -412,18 +497,36 @@ async def advance_agent_paper_cycle(
         )
     )
     if cycle is None:
+        if version_evaluation_id is not None:
+            evaluation = await session.get(AgentVersionEvaluationRecord, version_evaluation_id)
+            if evaluation is None:
+                raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
+            requested_ids: tuple[UUID, ...] = (evaluation.instrument_id,)
+        else:
+            batch, _ = await validate_agent_paper_candidate_batch(
+                session,
+                batch_id=candidate_batch_id,
+                account_id=account_id,
+                as_of=decision_time,
+                universe_snapshot_id=authority.universe_snapshot_id,
+            )
+            requested_ids = batch.instrument_ids
         return await _start_cycle(
             session,
             authority=authority,
             decision_slot_at=decision_slot_at,
-            daily_limit_usd=daily_limit_usd,
+            daily_limit_usd=Decimal("3.00") if daily_limit_usd is None else daily_limit_usd,
+            requested_instrument_ids=requested_ids,
+            candidate_batch_id=candidate_batch_id,
             version_evaluation_id=version_evaluation_id,
             version_lane=version_lane,
             version_source_run_id=version_source_run_id,
             version_prompt_id=version_prompt_id,
             version_model_id=version_model_id,
         )
-    if cycle.decision_time != decision_time:
+    if cycle.decision_time != decision_time or (
+        candidate_batch_id is not None and cycle.candidate_batch_id != candidate_batch_id
+    ):
         raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
     allow_legacy = cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID
     manifest = parse_candidate_manifest(cycle.candidate_manifest, allow_legacy=allow_legacy)
@@ -452,7 +555,7 @@ async def advance_agent_paper_cycle(
                 account_id=cycle.account_id,
                 as_of=cycle.decision_time,
             ),
-            daily_limit_usd=daily_limit_usd,
+            daily_limit_usd=Decimal("3.00") if daily_limit_usd is None else daily_limit_usd,
             version_evaluation_id=version_evaluation_id,
             version_lane=version_lane,
             version_source_run_id=version_source_run_id,
@@ -460,8 +563,15 @@ async def advance_agent_paper_cycle(
             version_model_id=version_model_id,
         )
     if events[-1].to_status == "researching":
-        return await _resume_research(session, cycle=cycle, authority=authority, events=events)
-    return await _resume_batch(session, cycle=cycle, events=events)
+        return await _resume_research(
+            session,
+            cycle=cycle,
+            authority=authority,
+            events=events,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+        )
+    return await _resume_batch(session, cycle=cycle, events=events, now=now)
 
 
 async def _start_cycle(
@@ -470,17 +580,52 @@ async def _start_cycle(
     authority: CycleAuthority,
     decision_slot_at: datetime,
     daily_limit_usd: Decimal,
+    requested_instrument_ids: tuple[UUID, ...],
+    candidate_batch_id: UUID | None = None,
     version_evaluation_id: UUID | None = None,
     version_lane: str | None = None,
     version_source_run_id: UUID | None = None,
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
+    execution_scope_max_symbols: int | None = None,
 ) -> AgentPaperCycleResult:
+    if version_evaluation_id is None:
+        batch, _ = await validate_agent_paper_candidate_batch(
+            session,
+            batch_id=candidate_batch_id,
+            account_id=authority.account_id,
+            as_of=authority.decision_time,
+            universe_snapshot_id=authority.universe_snapshot_id,
+        )
+        if batch.instrument_ids != requested_instrument_ids:
+            raise ValueError("CANDIDATE_BATCH_INVALID")
+    else:
+        evaluation = await session.get(AgentVersionEvaluationRecord, version_evaluation_id)
+        if (
+            candidate_batch_id is not None
+            or evaluation is None
+            or requested_instrument_ids != (evaluation.instrument_id,)
+            or authority.account_id
+            != (
+                evaluation.incumbent_account_id
+                if version_lane == "incumbent"
+                else evaluation.challenger_account_id
+            )
+        ):
+            raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time
     )
-    has_open_order = bool(projection.open_orders)
-    manifest = () if has_open_order else await prepare_candidates(session, authority=authority)
+    has_open_order = bool(projection.open_orders) and version_evaluation_id is not None
+    manifest = (
+        ()
+        if has_open_order
+        else await prepare_candidates(
+            session,
+            authority=authority,
+            requested_instrument_ids=requested_instrument_ids,
+        )
+    )
     same_session = authority.execution_session == authority.decision_session
     cycle = AgentPaperCycleRecord(
         id=new_uuid7(),
@@ -504,8 +649,17 @@ async def _start_cycle(
         ),
         candidate_manifest=[row.model_dump(mode="json") for row in manifest],
         candidate_hash=candidate_manifest_hash(manifest),
-        sizing_policy_version=AGENT_PAPER_SIZING_V1.version,
-        sizing_policy_hash=AGENT_PAPER_SIZING_POLICY_HASH,
+        candidate_batch_id=candidate_batch_id,
+        sizing_policy_version=(
+            PORTFOLIO_ALLOCATION_V1.version
+            if candidate_batch_id is not None
+            else AGENT_PAPER_SIZING_V1.version
+        ),
+        sizing_policy_hash=(
+            PORTFOLIO_ALLOCATION_POLICY_HASH
+            if candidate_batch_id is not None
+            else AGENT_PAPER_SIZING_POLICY_HASH
+        ),
         execution_locked=True,
     )
     session.add(cycle)
@@ -529,14 +683,63 @@ async def _start_cycle(
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     if same_session:
         try:
-            await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
-        except ValueError:
+            execution_required = {
+                *(candidate.instrument_id for candidate in manifest),
+                *(position.instrument_id for position in projection.positions),
+                *(order.instrument_id for order in projection.open_orders),
+            }
+            if candidate_batch_id is not None:
+                from nexus.paper.agent_decision_store import load_portfolio_proposal
+
+                current_target = await session.scalar(
+                    select(PaperTargetVersionRecord)
+                    .where(
+                        PaperTargetVersionRecord.account_id == cycle.account_id,
+                        PaperTargetVersionRecord.activated_at <= cycle.decision_time,
+                        PaperTargetVersionRecord.created_at <= cycle.decision_time,
+                    )
+                    .order_by(PaperTargetVersionRecord.version_seq.desc())
+                    .limit(1)
+                )
+                if current_target is not None:
+                    current_proposal = await load_portfolio_proposal(
+                        session,
+                        account_id=cycle.account_id,
+                        decision_id=current_target.strategy_decision_id,
+                    )
+                    if current_proposal is None:
+                        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+                    execution_required.update(
+                        instrument_id
+                        for instrument_id, weight in current_proposal.proposal.weights.items()
+                        if weight > 0
+                    )
+            await prepare_schwab_realtime_risk_snapshot(
+                session,
+                cycle=cycle,
+                required_instrument_ids=tuple(
+                    sorted(execution_required, key=lambda value: value.int)
+                ),
+                max_instruments=(
+                    len(execution_required)
+                    if execution_scope_max_symbols is None
+                    else execution_scope_max_symbols
+                ),
+            )
+        except ValueError as error:
+            code = str(error)
+            if code == "AGENT_PAPER_PROVIDER_CAPACITY_INVALID":
+                raise
             await _append_event(
                 session,
                 cycle,
                 "prepared",
                 "unavailable",
-                "RISK_INPUT_REQUIRED",
+                (
+                    code
+                    if code == "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"
+                    else "RISK_INPUT_REQUIRED"
+                ),
                 {},
             )
             return _result(cycle.id, await _events(session, cycle.id), replayed=False)
@@ -649,6 +852,8 @@ async def _resume_research(
     cycle: AgentPaperCycleRecord,
     authority: CycleAuthority,
     events: tuple[AgentPaperCycleEventRecord, ...],
+    now: datetime | None = None,
+    daily_limit_usd: Decimal | None = None,
 ) -> AgentPaperCycleResult:
     run_ids = _fact_uuids(events, "research_run_ids")
     jobs = tuple(
@@ -669,6 +874,15 @@ async def _resume_research(
         return _result(cycle.id, events, replayed=True)
     if any(job.finished_at is None for job in jobs):
         return await _stop_unavailable(session, cycle, events)
+    if cycle.candidate_batch_id is not None:
+        return await _resume_portfolio_synthesis(
+            session,
+            cycle=cycle,
+            events=events,
+            run_ids=run_ids,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+        )
     output_available_at = max(
         cycle.decision_time,
         *(job.finished_at for job in jobs if job.finished_at is not None),
@@ -720,7 +934,12 @@ async def _resume_research(
             )
         )
         if cycle.decision_price_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID:
-            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+            market = await prepare_schwab_realtime_risk_snapshot(
+                session,
+                cycle=cycle,
+                required_instrument_ids=required,
+                max_instruments=len(required),
+            )
         else:
             market = await prepare_risk_market_snapshot(
                 session,
@@ -755,7 +974,9 @@ async def _resume_research(
             "research_output_ids": [str(action.output_id) for action in actions],
         },
     )
-    return await _resume_batch(session, cycle=cycle, events=await _events(session, cycle.id))
+    return await _resume_batch(
+        session, cycle=cycle, events=await _events(session, cycle.id), now=now
+    )
 
 
 async def _resume_batch(
@@ -763,7 +984,10 @@ async def _resume_batch(
     *,
     cycle: AgentPaperCycleRecord,
     events: tuple[AgentPaperCycleEventRecord, ...],
+    now: datetime | None = None,
 ) -> AgentPaperCycleResult:
+    if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
+        return _result(cycle.id, events, replayed=True)
     decision_id = _fact_uuid(events, "strategy_decision_id") or await session.scalar(
         select(StrategyDecisionRecord.id).where(
             StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
@@ -772,6 +996,79 @@ async def _resume_batch(
     )
     if decision_id is None:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    if cycle.candidate_batch_id is not None:
+        if events[-1].to_status != "decision_recorded" or now is None:
+            return _result(cycle.id, events, replayed=True).model_copy(
+                update={"result_code": "TARGET_ACTIVATION_PENDING"}
+            )
+        from nexus.paper.target_service import (
+            TargetActivationBlockedError,
+            activate_portfolio_target,
+        )
+
+        try:
+            activation = await activate_portfolio_target(
+                session,
+                account_id=cycle.account_id,
+                strategy_decision_id=decision_id,
+                request_time=now,
+                idempotency_key=f"portfolio-target:{cycle.id}",
+            )
+        except TargetActivationBlockedError as error:
+            facts: dict[str, object] = {
+                "strategy_decision_id": str(decision_id),
+                "blocking_plan_id": str(error.blocking_plan_id),
+            }
+            await _append_event(
+                session,
+                cycle,
+                "decision_recorded",
+                "completed",
+                "TARGET_ACTIVATION_BLOCKED",
+                facts,
+            )
+            return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+        except ValueError as error:
+            if str(error) == "PORTFOLIO_PROPOSAL_BASELINE_CONFLICT":
+                raise ValueError("AGENT_PAPER_RESULT_UNKNOWN") from error
+            raise
+        if activation.batch_id is None:
+            await _append_event(
+                session,
+                cycle,
+                "decision_recorded",
+                "completed",
+                "NO_ORDER_REQUIRED",
+                {
+                    "strategy_decision_id": str(decision_id),
+                    "target_version_id": str(activation.target_version_id),
+                },
+            )
+            return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+        stored_batch = await session.get(PaperOrderBatchRecord, activation.batch_id)
+        if stored_batch is None:
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+        order_ids = tuple(
+            await session.scalars(
+                select(PaperOrderRecord.id)
+                .where(PaperOrderRecord.batch_id == stored_batch.id)
+                .order_by(PaperOrderRecord.id)
+            )
+        )
+        await _append_event(
+            session,
+            cycle,
+            "decision_recorded",
+            "risk_evaluated",
+            "PAPER_BATCH_EVALUATED",
+            {
+                "strategy_decision_id": str(decision_id),
+                "target_version_id": str(activation.target_version_id),
+                "batch_id": str(stored_batch.id),
+                "order_ids": [str(value) for value in order_ids],
+            },
+        )
+        events = await _events(session, cycle.id)
     if events[-1].to_status == "decision_recorded":
         try:
             batch = await create_paper_order_batch(
@@ -813,6 +1110,167 @@ async def _resume_batch(
         )
         events = await _events(session, cycle.id)
     return _result(cycle.id, events, replayed=False)
+
+
+async def _resume_portfolio_synthesis(
+    session: AsyncSession,
+    *,
+    cycle: AgentPaperCycleRecord,
+    events: tuple[AgentPaperCycleEventRecord, ...],
+    run_ids: tuple[UUID, ...],
+    now: datetime | None,
+    daily_limit_usd: Decimal | None,
+) -> AgentPaperCycleResult:
+    if events[-1].to_status != "researching":
+        return _result(cycle.id, events, replayed=True)
+    from nexus.agents.portfolio_synthesis_contracts import (
+        PortfolioSynthesisIntentV1,
+        canonical_portfolio_synthesis_hash,
+        validate_portfolio_synthesis_intent,
+    )
+    from nexus.agents.portfolio_synthesis_persistence import _frozen_run, admit_portfolio_synthesis
+    from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
+    from nexus.persistence.models.agents import (
+        AgentPortfolioSynthesisOutputRecord,
+        AgentPortfolioSynthesisRunRecord,
+    )
+    from nexus.persistence.models.paper import PaperTargetVersionRecord
+
+    run = await session.scalar(
+        select(AgentPortfolioSynthesisRunRecord).where(
+            AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
+        )
+    )
+    if run is None and (now is None or daily_limit_usd is None):
+        raise ValueError("PORTFOLIO_SYNTHESIS_ADMISSION_CONTEXT_REQUIRED")
+    try:
+        if run is None:
+            assert now is not None and daily_limit_usd is not None
+            actions = tuple(
+                [
+                    await load_actionable_research_output(
+                        session, run_id=run_id, decision_time=now, allow_safe_no_trade=True
+                    )
+                    for run_id in run_ids
+                ]
+            )
+            projection = await load_paper_projection(
+                session, account_id=cycle.account_id, as_of=cycle.decision_time
+            )
+            target_id = await session.scalar(
+                select(PaperTargetVersionRecord.id)
+                .where(PaperTargetVersionRecord.account_id == cycle.account_id)
+                .order_by(PaperTargetVersionRecord.version_seq.desc())
+                .limit(1)
+            )
+            run = (
+                await admit_portfolio_synthesis(
+                    session,
+                    cycle_id=cycle.id,
+                    research_output_ids=tuple(action.output_id for action in actions),
+                    active_target_version_id=target_id,
+                    projection_hash=projection.projection_hash,
+                    daily_limit_usd=daily_limit_usd,
+                    now=now,
+                )
+            ).run
+        frozen = _frozen_run(run)
+        job = await read_synthesis_job(session, cycle_id=cycle.id)
+        output = await session.scalar(
+            select(AgentPortfolioSynthesisOutputRecord).where(
+                AgentPortfolioSynthesisOutputRecord.run_id == run.id
+            )
+        )
+        if job is None:
+            raise ValueError("PORTFOLIO_SYNTHESIS_JOB_INVALID")
+        if (
+            output is None
+            and job.status in {"queued", "running"}
+            and run.status in {"prepared", "running"}
+        ):
+            return _result(cycle.id, events, replayed=True).model_copy(
+                update={"result_code": "PORTFOLIO_SYNTHESIS_PENDING"}
+            )
+        if (
+            output is None
+            or output.status != "completed"
+            or run.status != "completed"
+            or job.status != "succeeded"
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_UNAVAILABLE")
+        intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
+        validate_portfolio_synthesis_intent(intent, frozen)
+        content_hash = canonical_portfolio_synthesis_hash(
+            {
+                "schema_version": "portfolio_synthesis_terminal_v1",
+                "status": "completed",
+                "intent": intent.model_dump(mode="json"),
+            }
+        )
+        if (
+            output.content_hash != content_hash
+            or output.binding_hash
+            != canonical_portfolio_synthesis_hash(
+                {
+                    "schema_version": "portfolio_synthesis_binding_v1",
+                    "run_id": run.id,
+                    "input_hash": run.input_hash,
+                    "content_hash": content_hash,
+                }
+            )
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_OUTPUT_INVALID")
+    except ValueError:
+        await _append_event(
+            session, cycle, "researching", "unavailable", "PORTFOLIO_SYNTHESIS_UNAVAILABLE", {}
+        )
+        return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    try:
+        if now is None:
+            raise ValueError("PORTFOLIO_PROPOSAL_TIME_REQUIRED")
+        persisted = await persist_portfolio_proposal(
+            session, cycle_id=cycle.id, synthesis_output_id=output.id, now=now
+        )
+    except ValueError as error:
+        if str(error) == "POLICY_UNCONFIRMED":
+            # Missing initial authority is a durable-input wait, not a terminal
+            # research failure. Preserve the completed synthesis for exact resume.
+            return _result(cycle.id, events, replayed=True).model_copy(
+                update={
+                    "result_code": "POLICY_UNCONFIRMED",
+                    "portfolio_synthesis_output_id": output.id,
+                }
+            )
+        code = "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+        facts: dict[str, object] = {"portfolio_synthesis_output_id": str(output.id)}
+        if str(error) in KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS:
+            facts["proposal_rejection_code"] = str(error)
+        await _append_event(
+            session,
+            cycle,
+            "researching",
+            "unavailable",
+            code,
+            facts,
+        )
+        return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    await _append_event(
+        session,
+        cycle,
+        "researching",
+        "decision_recorded",
+        "TARGET_ACTIVATION_PENDING",
+        {
+            "strategy_decision_id": str(persisted.decision_id),
+            "portfolio_synthesis_output_id": str(output.id),
+        },
+    )
+    return await _resume_batch(
+        session,
+        cycle=cycle,
+        events=await _events(session, cycle.id),
+        now=now,
+    )
 
 
 async def _stop_unavailable(
@@ -928,6 +1386,7 @@ def _result(
         result_code=latest.result_code,
         research_run_ids=_fact_uuids(events, "research_run_ids"),
         strategy_decision_id=_fact_uuid(events, "strategy_decision_id"),
+        portfolio_synthesis_output_id=_fact_uuid(events, "portfolio_synthesis_output_id"),
         batch_id=_fact_uuid(events, "batch_id"),
         order_ids=_fact_uuids(events, "order_ids"),
         replayed=replayed,

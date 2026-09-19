@@ -43,10 +43,11 @@ from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.ops.agent_paper_loop import inspect_agent_paper_loop
 from nexus.paper.agent_cycle import (
-    advance_agent_paper_cycle,
+    advance_agent_paper_cycle as _advance_agent_paper_cycle,
+)
+from nexus.paper.agent_cycle import (
     reserve_schwab_agent_paper_trigger,
     resume_schwab_agent_paper_cycle,
-    start_schwab_agent_paper_cycle,
 )
 from nexus.paper.agent_cycle_authority import (
     load_agent_paper_service_calendar_authority,
@@ -59,7 +60,6 @@ from nexus.paper.agent_cycle_models import (
     floor_decision_slot,
 )
 from nexus.paper.agent_market import (
-    PaperMarketError,
     collect_agent_paper_window,
     resolve_agent_paper_market_scope,
 )
@@ -133,11 +133,780 @@ from nexus.strategy.intents import (
     SynthesisClaimReview,
 )
 from nexus.worker import run_agent_worker_once
-from sqlalchemy import func, literal, select, text
+from sqlalchemy import delete, func, literal, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 ENGINE_ROOT = Path(__file__).parents[2]
+
+
+async def _seed_legacy_prepared_cycle(session, *, authority, decision_slot_at):
+    """Historical fixture only: reproduce the pre-batch persisted cycle schema."""
+    from nexus.paper import agent_cycle
+    from nexus.paper.agent_decision import AGENT_PAPER_SIZING_POLICY_HASH, AGENT_PAPER_SIZING_V1
+
+    same_session = authority.execution_session == authority.decision_session
+    manifest = await prepare_candidates(
+        session, authority=authority, requested_instrument_ids=(INSTRUMENTS[0][0],)
+    )
+    assert len(manifest) == 1
+    cycle = AgentPaperCycleRecord(
+        id=uuid4(),
+        account_id=authority.account_id,
+        portfolio_id=authority.portfolio_id,
+        decision_session=authority.decision_session,
+        decision_time=authority.decision_time,
+        decision_slot_at=decision_slot_at,
+        execution_session=authority.execution_session,
+        universe_snapshot_id=authority.universe_snapshot_id,
+        quality_report_id=authority.quality_report_id,
+        decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+        if same_session
+        else PAPER_DECISION_SOURCE_POLICY_ID,
+        execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        if same_session
+        else PAPER_EXECUTION_SOURCE_POLICY_ID,
+        candidate_manifest=[row.model_dump(mode="json") for row in manifest],
+        candidate_hash=candidate_manifest_hash(manifest),
+        candidate_batch_id=None,
+        sizing_policy_version=AGENT_PAPER_SIZING_V1.version,
+        sizing_policy_hash=AGENT_PAPER_SIZING_POLICY_HASH,
+        execution_locked=True,
+    )
+    session.add(cycle)
+    await session.flush()
+    await agent_cycle._append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", {})
+    if same_session:
+        await prepare_schwab_realtime_risk_snapshot(
+            session, cycle=cycle, max_instruments=5
+        )
+    return cycle
+
+
+async def _advance_legacy_cycle_fixture(session, **kwargs):
+    """Seed old facts, then exercise the real public legacy resume path."""
+    from nexus.paper.agent_cycle_authority import load_cycle_authority
+
+    cycle = await session.scalar(
+        select(AgentPaperCycleRecord).where(
+            AgentPaperCycleRecord.account_id == kwargs["account_id"],
+            AgentPaperCycleRecord.decision_slot_at == floor_decision_slot(kwargs["decision_time"]),
+        )
+    )
+    if cycle is None:
+        authority = await load_cycle_authority(
+            session, account_id=kwargs["account_id"], decision_time=kwargs["decision_time"]
+        )
+        cycle = await _seed_legacy_prepared_cycle(
+            session,
+            authority=authority,
+            decision_slot_at=floor_decision_slot(kwargs["decision_time"]),
+        )
+    assert cycle.candidate_batch_id is None
+    return await _advance_agent_paper_cycle(session, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "missing", [False, True], ids=["complete-shared-artifact", "missing-msft-rejects-all"]
+)
+async def test_bounded_batch_capture_requires_quote_for_every_symbol(
+    migrated_database_url, tmp_path, missing, monkeypatch
+):
+    from nexus.ops import schwab_market_stream as stream
+    from nexus.persistence.models.market import InstrumentAlias
+
+    from tests.integration.test_schwab_market_stream_import import (
+        CREDENTIALS,
+        Socket,
+        Store,
+        _frames,
+    )
+
+    assert hasattr(stream, "capture_and_import_schwab_level_one_batch"), "batch capture missing"
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as clock_session:
+        database_now = await clock_session.scalar(select(func.clock_timestamp()))
+    assert isinstance(database_now, datetime)
+    capture_at = database_now - timedelta(seconds=1)
+    at = capture_at - timedelta(seconds=1)
+
+    class CaptureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return capture_at if tz is None else capture_at.astimezone(tz)
+
+    bindings = {"AAPL": UUID(int=101), "MSFT": UUID(int=102)}
+    captures = []
+    sent = []
+
+    class RecordingSocket(Socket):
+        async def send(self, message):
+            sent.extend(json.loads(message)["requests"])
+
+    async def capture(arguments, client, **kwargs):
+        captures.append(tuple(arguments.symbol))
+        frames = _frames(at)
+        if not missing:
+            frames[2]["data"][0]["content"].append(
+                {**frames[2]["data"][0]["content"][0], "key": "MSFT"}
+            )
+        # Synthetic capture uses one database-derived clock; the real importer
+        # still reads PostgreSQL time and enforces completed_at <= imported_at.
+        with monkeypatch.context() as capture_patch:
+            capture_patch.setattr(stream, "datetime", CaptureClock)
+            return await stream.collect_schwab_stream(
+                symbols=tuple(arguments.symbol),
+                directory=arguments.output_dir,
+                streamer_url="wss://streamer-api.schwab.com/ws",
+                credentials=CREDENTIALS,
+                max_frames=3,
+                connector=lambda *a, **kw: RecordingSocket(frames),
+            )
+
+    try:
+        async with sessions.begin() as session:
+            for symbol, iid in bindings.items():
+                session.add(
+                    Instrument(
+                        id=iid,
+                        asset_type="common_stock",
+                        exchange="XNAS",
+                        currency="USD",
+                        tick_size=Decimal("0.01"),
+                        risk_bucket="us_equity",
+                        created_at=at - timedelta(days=1),
+                    )
+                )
+                session.add(
+                    InstrumentAlias(
+                        instrument_id=iid,
+                        symbol=symbol,
+                        alias_type="ticker",
+                        valid_from=date(2020, 1, 1),
+                        created_at=at - timedelta(days=1),
+                    )
+                )
+        store = Store()
+        async with sessions.begin() as session, httpx.AsyncClient() as client:
+            if missing:
+                with pytest.raises(
+                    stream.ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_INCOMPLETE"
+                ):
+                    await stream.capture_and_import_schwab_level_one_batch(
+                        session,
+                        store,
+                        repo_root=tmp_path,
+                        client=client,
+                        bindings=bindings,
+                        max_instruments=5,
+                        capture=capture,
+                    )
+                assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+                assert store.objects == {}
+            else:
+                result = await stream.capture_and_import_schwab_level_one_batch(
+                    session,
+                    store,
+                    repo_root=tmp_path,
+                    client=client,
+                    bindings=bindings,
+                    max_instruments=5,
+                    capture=capture,
+                )
+                assert set(result.quote_ids) == {"AAPL", "MSFT"}
+                assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
+        assert captures == [("AAPL", "MSFT")]
+        assert [
+            (request["command"], request.get("parameters", {}).get("keys")) for request in sent
+        ] == [("LOGIN", None), ("SUBS", "AAPL,MSFT")]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("binding_count", "max_instruments", "error_code"),
+    [
+        (6, 5, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (11, 10, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (31, 30, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (1, 31, "AGENT_PAPER_PROVIDER_CAPACITY_INVALID"),
+    ],
+)
+async def test_schwab_batch_rejects_capacity_before_capture(
+    tmp_path,
+    binding_count,
+    max_instruments,
+    error_code,
+):
+    from nexus.ops import schwab_market_stream as stream
+
+    captures = 0
+
+    async def forbidden_capture(*_args, **_kwargs):
+        nonlocal captures
+        captures += 1
+        raise AssertionError("provider capture must not start")
+
+    bindings = {f"T{index}": UUID(int=index + 1) for index in range(binding_count)}
+    with pytest.raises(stream.ProviderMarketStreamError, match=f"^{error_code}$"):
+        await stream.capture_and_import_schwab_level_one_batch(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            repo_root=tmp_path,
+            client=object(),  # type: ignore[arg-type]
+            bindings=bindings,
+            max_instruments=max_instruments,
+            capture=forbidden_capture,
+        )
+
+    assert captures == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_instruments", [5, 10, 30])
+async def test_schwab_batch_dispatches_once_at_configured_capacity(
+    tmp_path, max_instruments
+):
+    from nexus.ops import schwab_market_stream as stream
+
+    captures = 0
+
+    async def incomplete_capture(*_args, **_kwargs):
+        nonlocal captures
+        captures += 1
+        return {"status": "incomplete"}
+
+    bindings = {f"T{index:02d}": UUID(int=index + 1) for index in range(max_instruments)}
+    with pytest.raises(
+        stream.ProviderMarketStreamError, match="^PROVIDER_MARKET_STREAM_INCOMPLETE$"
+    ):
+        await stream.capture_and_import_schwab_level_one_batch(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            repo_root=tmp_path,
+            client=object(),  # type: ignore[arg-type]
+            bindings=bindings,
+            max_instruments=max_instruments,
+            capture=incomplete_capture,
+        )
+
+    assert captures == 1
+
+
+async def _seed_two_candidate_authority(
+    session,
+    registered,
+    *,
+    decision_time=DECISION_TIME,
+    source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+):
+    from nexus.paper.agent_cycle_authority import CycleAuthority
+    from nexus.persistence.models.data import PriceBarRecord
+
+    same_day = source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
+    decision = registered.decision.model_copy(
+        update={
+            "decision_session": decision_time.date(),
+            "decision_time": decision_time,
+        }
+    )
+    await _seed_cycle_research_authority(
+        session,
+        registered_decision=decision,
+        source_policy_id=source_policy_id,
+        quote_received_at=decision_time,
+        price_available_at=decision_time if same_day else None,
+    )
+    authority = CycleAuthority(
+        account_id=registered.decision.account_id,
+        portfolio_id=registered.decision.portfolio_id,
+        decision_session=decision_time.date(),
+        decision_time=decision_time,
+        execution_session=decision_time.date() + timedelta(days=0 if same_day else 1),
+        calendar_authority_id=CALENDAR_ID,
+        universe_snapshot_id=registered.decision.universe_snapshot_id,
+    )
+    second = INSTRUMENTS[1][0]
+    quote = await session.get(LatestQuote, UUID("63000000-0000-0000-0000-000000000091"))
+    values = {
+        column.name: getattr(quote, column.name)
+        for column in LatestQuote.__table__.columns
+        if column.name != "id"
+    }
+    values.update(instrument_id=second, content_hash="d" * 64)
+    session.add(LatestQuote(**values))
+    prior = await session.scalar(
+        select(PriceBarRecord).where(
+            PriceBarRecord.instrument_id == INSTRUMENTS[0][0],
+            PriceBarRecord.session == decision_time.date() - timedelta(days=1),
+            PriceBarRecord.revision == "agent-prior-all-aapl",
+        )
+    )
+    await ingest_price_page(
+        session,
+        _ObjectStore(),
+        ProviderPage(
+            items=(
+                PriceBar(
+                    instrument_id=second,
+                    session=prior.session,
+                    open=prior.open,
+                    high=prior.high,
+                    low=prior.low,
+                    close=prior.close,
+                    volume=prior.volume,
+                    observed_at=prior.observed_at,
+                    available_at=prior.available_at,
+                    received_at=prior.received_at,
+                    revision="second-prior",
+                    quality_flags=(),
+                ),
+            ),
+            next_cursor=None,
+            raw_payload=b'{"prior":"second"}',
+            source_request_id=None,
+            as_of=prior.available_at,
+            provenance=MarketDataProvenance(
+                source="alpaca",
+                feed="sip",
+                adjustment="all",
+                interval="1Day",
+                mode="delayed",
+                delivery_mode="delayed",
+            ),
+        ),
+        commit=False,
+        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    )
+    for row in tuple(
+        await session.scalars(
+            select(RiskQueryAuthorityRecord).where(
+                RiskQueryAuthorityRecord.required_instrument_ids == [INSTRUMENTS[0][0]],
+                RiskQueryAuthorityRecord.source_policy_id == source_policy_id,
+            )
+        )
+    ):
+        values = {
+            column.name: getattr(row, column.name)
+            for column in RiskQueryAuthorityRecord.__table__.columns
+            if column.name != "id"
+        }
+        values.update(
+            required_instrument_ids=[second],
+            blocked_instrument_ids=[],
+            available_at=row.available_at if same_day else row.available_at + timedelta(seconds=1),
+        )
+        values["content_hash"] = canonical_query_authority_hash(
+            **{
+                key: values[key]
+                for key in (
+                    "source_policy_id",
+                    "universe_snapshot_id",
+                    "decision_session",
+                    "kind",
+                    "required_instrument_ids",
+                    "blocked_instrument_ids",
+                    "complete",
+                    "source_watermark_hash",
+                    "available_at",
+                )
+            }
+        )
+        session.add(RiskQueryAuthorityRecord(**values))
+    await session.flush()
+    return authority
+
+
+@pytest.mark.asyncio
+async def test_manifest_prepares_exact_two_candidates_and_rejects_invalid_sets(
+    migrated_database_url,
+):
+    from nexus.paper.agent_cycle_authority import validate_candidate_manifest
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            ids = (INSTRUMENTS[1][0], INSTRUMENTS[0][0])
+            manifest = await prepare_candidates(
+                session, authority=authority, requested_instrument_ids=ids
+            )
+            assert tuple(row.instrument_id for row in manifest) == tuple(sorted(ids))
+            assert await validate_candidate_manifest(
+                session, authority=authority, manifest=manifest, requested_instrument_ids=ids
+            )
+            for invalid in (
+                (),
+                (ids[0], ids[0]),
+                (*ids, UUID(int=999)),
+                tuple(UUID(int=i) for i in range(6)),
+            ):
+                assert (
+                    await prepare_candidates(
+                        session, authority=authority, requested_instrument_ids=invalid
+                    )
+                    == ()
+                )
+            for bad in (
+                (manifest[0], manifest[0]),
+                (manifest[0], manifest[1].model_copy(update={"symbol": "AAPL"})),
+                (manifest[0],),
+                (manifest[0].model_copy(update={"symbol": "MSFT"}), manifest[1]),
+                (
+                    manifest[0],
+                    manifest[1].model_copy(
+                        update={"risk_query_authority_ids": manifest[0].risk_query_authority_ids}
+                    ),
+                ),
+            ):
+                assert not await validate_candidate_manifest(
+                    session, authority=authority, manifest=bad, requested_instrument_ids=ids
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_risk_authorities_same_timestamp_remain_instrument_scoped_on_replay(
+    migrated_database_url,
+):
+    from nexus.risk.query_authority_producer import RiskSourceProof, persist_query_authorities
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            proofs = tuple(
+                RiskSourceProof(kind, False, "f" * 64, DECISION_TIME)
+                for kind in ("corporate_action", "suspension", "delisting")
+            )
+            persisted = {}
+            for symbol, iid in (("AAPL", INSTRUMENTS[0][0]), ("T2", INSTRUMENTS[1][0])):
+                for _ in range(2):
+                    rows = await persist_query_authorities(
+                        session,
+                        universe_snapshot_id=authority.universe_snapshot_id,
+                        decision_session=authority.decision_session,
+                        symbol=symbol,
+                        proofs=proofs,
+                    )
+                    assert len(rows) == 3
+                    assert all(row.required_instrument_ids == [iid] for row in rows)
+                    ids = tuple(row.id for row in rows)
+                    assert persisted.setdefault(symbol, ids) == ids
+            assert set(persisted["AAPL"]).isdisjoint(persisted["T2"])
+        with pytest.raises(DBAPIError, match="instrument-scoped risk facts prevent downgrade"):
+            await asyncio.to_thread(
+                command.downgrade,
+                Config(str(ENGINE_ROOT / "alembic.ini")),
+                "0064_prompt_release_channel",
+            )
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(RiskQueryAuthorityRecord)
+                    .where(RiskQueryAuthorityRecord.id.in_((*persisted["AAPL"], *persisted["T2"])))
+                )
+                == 6
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gap", ["quote", "research", "risk", "risk_hash"])
+async def test_manifest_never_shrinks_candidate_set_when_one_authority_missing(
+    migrated_database_url, gap
+):
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            table, condition, assignment = {
+                "quote": (
+                    "latest_quotes",
+                    "instrument_id=:iid",
+                    "observed_at=observed_at-interval '5 minutes'",
+                ),
+                "research": (
+                    "data_snapshots",
+                    "provider_object_id=:iid_text",
+                    "available_at=available_at+interval '10 days'",
+                ),
+                "risk": (
+                    "risk_query_authorities",
+                    "required_instrument_ids=ARRAY[:iid]::uuid[] AND kind='suspension'",
+                    "available_at=available_at+interval '10 days'",
+                ),
+                "risk_hash": (
+                    "risk_query_authorities",
+                    "required_instrument_ids=ARRAY[:iid]::uuid[]",
+                    "content_hash=repeat('0',64)",
+                ),
+            }[gap]
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+            await session.execute(
+                text(f"UPDATE {table} SET {assignment} WHERE {condition}"),
+                {"iid": INSTRUMENTS[1][0], "iid_text": str(INSTRUMENTS[1][0])},
+            )
+            await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+            session.expire_all()
+            assert (
+                await prepare_candidates(
+                    session,
+                    authority=authority,
+                    requested_instrument_ids=(INSTRUMENTS[0][0], INSTRUMENTS[1][0]),
+                )
+                == ()
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asset_type", ["ETF", "common_stock", "preferred_stock"])
+async def test_nasdaq_candidate_asset_type_risk_replay_and_exact_manifest(
+    migrated_database_url, asset_type
+):
+    from nexus.paper.agent_cycle_authority import validate_candidate_manifest
+    from nexus.risk.query_authority_producer import RiskSourceProof, persist_query_authorities
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    candidate_id = INSTRUMENTS[1][0]
+    symbol = "QQQ" if asset_type == "ETF" else "MSFT"
+    proofs = tuple(
+        RiskSourceProof(kind, False, "f" * 64, DECISION_TIME)
+        for kind in ("corporate_action", "suspension", "delisting")
+    )
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            # Synthetic test identities model the actual Nasdaq ETF/common-stock contract.
+            # Only the isolated fixture database is changed; source facts stay deterministic.
+            for table, assignment, values in (
+                (
+                    "instruments",
+                    "asset_type=:asset_type, exchange='XNAS'",
+                    {"asset_type": asset_type},
+                ),
+                ("instrument_aliases", "symbol=:symbol", {"symbol": symbol}),
+            ):
+                await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+                try:
+                    key = "id" if table == "instruments" else "instrument_id"
+                    await session.execute(
+                        text(f"UPDATE {table} SET {assignment} WHERE {key}=:iid"),
+                        {"iid": candidate_id, **values},
+                    )
+                finally:
+                    await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+            session.expire_all()
+        frozen_risk_ids = None
+        for _ in range(2):
+            async with sessions.begin() as session:
+                if asset_type == "preferred_stock":
+                    with pytest.raises(ValueError, match="RISK_QUERY_AUTHORITY_SCOPE_INVALID"):
+                        await persist_query_authorities(
+                            session,
+                            universe_snapshot_id=authority.universe_snapshot_id,
+                            decision_session=authority.decision_session,
+                            symbol=symbol,
+                            proofs=proofs,
+                        )
+                    assert (
+                        await prepare_candidates(
+                            session,
+                            authority=authority,
+                            requested_instrument_ids=(INSTRUMENTS[0][0], candidate_id),
+                        )
+                        == ()
+                    )
+                    continue
+                rows = await persist_query_authorities(
+                    session,
+                    universe_snapshot_id=authority.universe_snapshot_id,
+                    decision_session=authority.decision_session,
+                    symbol=symbol,
+                    proofs=proofs,
+                )
+                assert len(rows) == 3
+                assert all(row.required_instrument_ids == [candidate_id] for row in rows)
+                ids = {row.id for row in rows}
+                if frozen_risk_ids is None:
+                    frozen_risk_ids = ids
+                assert ids == frozen_risk_ids
+                requested = (INSTRUMENTS[0][0], candidate_id)
+                manifest = await prepare_candidates(
+                    session, authority=authority, requested_instrument_ids=requested
+                )
+                assert tuple(row.instrument_id for row in manifest) == requested
+                assert manifest[1].symbol == symbol
+                assert set(manifest[1].risk_query_authority_ids) == frozen_risk_ids
+                assert await validate_candidate_manifest(
+                    session,
+                    authority=authority,
+                    manifest=manifest,
+                    requested_instrument_ids=requested,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_batch_persists_two_research_jobs_and_remains_resumable(
+    migrated_database_url, monkeypatch
+):
+    from nexus.paper import agent_cycle
+    from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+    from nexus.paper.projection import load_paper_projection
+    from nexus.paper.service import create_paper_order_batch
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available", lambda: True
+    )
+    try:
+        async with sessions.begin() as session:
+            plan = await create_paper_order_batch(
+                session,
+                account_id=seed.account_id,
+                strategy_decision_id=seed.decision_id,
+                idempotency_key="prior-plan",
+                request_time=seed.request_time,
+            )
+            assert plan.order_ids
+        async with sessions.begin() as session:
+            # A pre-existing plan at the new research cutoff is a real occupied projection.
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            authority = authority.model_copy(update={"decision_time": seed.request_time})
+            projection = await load_paper_projection(
+                session, account_id=seed.account_id, as_of=seed.request_time
+            )
+            assert projection.open_orders
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=seed.account_id,
+                universe_snapshot_id=authority.universe_snapshot_id,
+                instrument_ids=(INSTRUMENTS[1][0], INSTRUMENTS[0][0]),
+                idempotency_key="two-candidates",
+                created_at=seed.request_time,
+            )
+            before_decisions = await session.scalar(
+                select(func.count()).select_from(StrategyDecisionRecord)
+            )
+            before_orders = await session.scalar(select(func.count()).select_from(PaperOrderRecord))
+            result = await agent_cycle._start_cycle(
+                session,
+                authority=authority,
+                decision_slot_at=floor_decision_slot(DECISION_TIME),
+                daily_limit_usd=Decimal("3"),
+                candidate_batch_id=batch.batch_id,
+                requested_instrument_ids=batch.instrument_ids,
+            )
+            assert result.status == "researching"
+            assert len(result.research_run_ids) == 2
+            cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
+            assert cycle.candidate_batch_id == batch.batch_id
+            assert cycle.sizing_policy_version == "portfolio_allocation_v1"
+            assert (
+                tuple(UUID(row["instrument_id"]) for row in cycle.candidate_manifest)
+                == batch.instrument_ids
+            )
+            jobs = tuple(
+                await session.scalars(
+                    select(Job).where(
+                        Job.payload["run_id"]
+                        .as_string()
+                        .in_([str(value) for value in result.research_run_ids])
+                    )
+                )
+            )
+            assert len(jobs) == 2
+            events = await agent_cycle._events(session, cycle.id)
+            first = await agent_cycle._resume_research(
+                session, cycle=cycle, authority=authority, events=events
+            )
+            assert first.status == "researching"
+            # Simulate persisted terminal worker facts, without invoking any model.
+            for job in jobs:
+                job.status = "running"
+                job.started_at = seed.request_time
+                job.attempt_count = 1
+                job.version += 1
+            await session.flush()
+            for job in jobs:
+                job.status = "succeeded"
+                job.finished_at = seed.request_time
+                job.version += 1
+            await session.flush()
+            for _ in range(2):
+                with pytest.raises(
+                    ValueError, match="PORTFOLIO_SYNTHESIS_ADMISSION_CONTEXT_REQUIRED"
+                ):
+                    await agent_cycle._resume_research(
+                        session, cycle=cycle, authority=authority, events=events
+                    )
+            assert len(await agent_cycle._events(session, cycle.id)) == len(events)
+            assert (
+                await session.scalar(select(func.count()).select_from(StrategyDecisionRecord))
+                == before_decisions
+            )
+            assert (
+                await session.scalar(select(func.count()).select_from(PaperOrderRecord))
+                == before_orders
+            )
+    finally:
+        await engine.dispose()
 
 
 async def _wait_for_advisory_wait(
@@ -248,12 +1017,20 @@ def test_service_status_reads_one_heartbeat_without_producers_or_business_writes
     )
 
 
+portfolio_slot = datetime(2026, 8, 26, 14, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
+)
 def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    failure_code: str,
 ) -> None:
-    current = DECISION_TIME
+    current = portfolio_slot
     elapsed = 0.0
     failed_slot: datetime | None = None
     completed = False
@@ -262,6 +1039,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "DATABASE_URL": migrated_database_url,
         "AGENT_RUNTIME_MODE": "codex_sdk",
+        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
         "ALPACA_API_KEY_ID": "synthetic-test-key",
         "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
     }
@@ -274,8 +1052,9 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
 
     async def sleep(seconds: float) -> None:
         nonlocal current, elapsed
-        current += timedelta(seconds=seconds)
-        elapsed += seconds
+        jump = max(seconds, 3600.0)
+        current += timedelta(seconds=jump)
+        elapsed += jump
 
     def load_environment(*_args, **_kwargs) -> dict[str, str]:
         if completed:
@@ -292,11 +1071,12 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
         return agent_paper_loop.AgentPaperLoopSnapshot(
             now=current,
             calendar_authority_id=CALENDAR_ID,
-            decision_window_start_at=DECISION_TIME,
-            decision_window_end_at=DECISION_TIME + timedelta(hours=6),
-            next_decision_window_start_at=DECISION_TIME + timedelta(days=1),
+            decision_window_start_at=current.replace(hour=14, minute=0, second=0),
+            decision_window_end_at=current.replace(hour=20, minute=0, second=0),
+            next_decision_window_start_at=current.replace(hour=14, minute=0, second=0)
+            + timedelta(days=1),
             trigger_attempt_slot_at=failed_slot,
-            trigger_failure_code=("SCHWAB_L1_INCOMPLETE" if failed_slot else None),
+            trigger_failure_code=(failure_code if failed_slot else None),
         )
 
     async def ready(*_args, **_kwargs) -> str:
@@ -308,7 +1088,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
         trigger_slots.append(slot)
         if len(trigger_slots) == 1:
             failed_slot = slot
-            raise ValueError("SCHWAB_L1_INCOMPLETE")
+            raise ValueError(failure_code)
         completed = True
         return request
 
@@ -317,8 +1097,24 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
     ) -> str | None:
         assert account_id == UUID(int=1)
         assert decision_slot_at == failed_slot
-        return "SCHWAB_L1_INCOMPLETE"
+        return failure_code
 
+    async def candidates(*_args, **_kwargs):
+        return (
+            agent_paper_loop.CandidateInstrumentIdentity(
+                instrument_id=UUID(int=20),
+                symbol="AAPL",
+                asset_type="common_stock",
+                exchange="NASDAQ",
+                currency="USD",
+            ),
+        )
+
+    async def evaluation_candidate(*_args, **_kwargs):
+        return (await candidates())[0]
+
+    monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
+    monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
     monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
@@ -348,7 +1144,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
     )
 
     assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
-    assert trigger_slots == [DECISION_TIME, DECISION_TIME + timedelta(minutes=5)]
+    assert trigger_slots == [portfolio_slot, portfolio_slot + timedelta(days=1)]
 
     async def heartbeat_count() -> int:
         engine = create_async_engine(migrated_database_url)
@@ -366,7 +1162,7 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    current = DECISION_TIME
+    current = portfolio_slot
     elapsed = 0.0
     cycle_id = UUID(int=201)
     job_id = UUID(int=202)
@@ -377,6 +1173,7 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "DATABASE_URL": migrated_database_url,
         "AGENT_RUNTIME_MODE": "codex_sdk",
+        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
         "ALPACA_API_KEY_ID": "synthetic-test-key",
         "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
     }
@@ -389,8 +1186,9 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
 
     async def sleep(seconds: float) -> None:
         nonlocal current, elapsed
-        current += timedelta(seconds=seconds)
-        elapsed += seconds
+        jump = max(seconds, 3600.0)
+        current += timedelta(seconds=jump)
+        elapsed += jump
 
     def load_environment(*_args, **_kwargs) -> dict[str, str]:
         if stage == "next_slot_triggered":
@@ -407,11 +1205,12 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
         common = {
             "now": current,
             "calendar_authority_id": CALENDAR_ID,
-            "decision_window_start_at": DECISION_TIME,
-            "decision_window_end_at": DECISION_TIME + timedelta(hours=6),
-            "next_decision_window_start_at": DECISION_TIME + timedelta(days=1),
+            "decision_window_start_at": current.replace(hour=14, minute=0, second=0),
+            "decision_window_end_at": current.replace(hour=20, minute=0, second=0),
+            "next_decision_window_start_at": current.replace(hour=14, minute=0, second=0)
+            + timedelta(days=1),
             "cycle_id": cycle_id,
-            "cycle_slot_at": DECISION_TIME,
+            "cycle_slot_at": portfolio_slot,
         }
         if stage == "research_failed":
             return agent_paper_loop.AgentPaperLoopSnapshot(
@@ -440,6 +1239,22 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
         stage = "next_slot_triggered"
         return request
 
+    async def candidates(*_args, **_kwargs):
+        return (
+            agent_paper_loop.CandidateInstrumentIdentity(
+                instrument_id=UUID(int=20),
+                symbol="AAPL",
+                asset_type="common_stock",
+                exchange="NASDAQ",
+                currency="USD",
+            ),
+        )
+
+    async def evaluation_candidate(*_args, **_kwargs):
+        return (await candidates())[0]
+
+    monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
+    monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
     monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
@@ -470,7 +1285,7 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
 
     assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
     assert resume_requests == [(cycle_id, f"agent-paper-loop-resume:{cycle_id}")]
-    assert trigger_slots == [DECISION_TIME + timedelta(minutes=5)]
+    assert trigger_slots == [portfolio_slot + timedelta(days=1)]
 
 
 def test_accelerated_host_stops_unknown_job_without_replay(
@@ -478,11 +1293,13 @@ def test_accelerated_host_stops_unknown_job_without_replay(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    current = portfolio_slot
     job_id = UUID(int=302)
     environment = {
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "DATABASE_URL": migrated_database_url,
         "AGENT_RUNTIME_MODE": "codex_sdk",
+        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
     }
 
     async def select_calendar(_settings: EngineSettings) -> UUID:
@@ -493,14 +1310,15 @@ def test_accelerated_host_stops_unknown_job_without_replay(
 
     async def inspect_cycle(*_args, **_kwargs):
         return agent_paper_loop.AgentPaperLoopSnapshot(
-            now=DECISION_TIME,
+            now=portfolio_slot,
             calendar_authority_id=CALENDAR_ID,
-            decision_window_start_at=DECISION_TIME,
-            decision_window_end_at=DECISION_TIME + timedelta(hours=6),
-            next_decision_window_start_at=DECISION_TIME + timedelta(days=1),
+            decision_window_start_at=current.replace(hour=14, minute=0, second=0),
+            decision_window_end_at=current.replace(hour=20, minute=0, second=0),
+            next_decision_window_start_at=current.replace(hour=14, minute=0, second=0)
+            + timedelta(days=1),
             cycle_id=UUID(int=301),
             cycle_status="researching",
-            cycle_slot_at=DECISION_TIME,
+            cycle_slot_at=portfolio_slot,
             research_job_status="running",
             research_job_id=job_id,
         )
@@ -508,6 +1326,22 @@ def test_accelerated_host_stops_unknown_job_without_replay(
     async def unexpected(*_args, **_kwargs):
         pytest.fail("unknown Job state must not execute, replay, or create work")
 
+    async def candidates(*_args, **_kwargs):
+        return (
+            agent_paper_loop.CandidateInstrumentIdentity(
+                instrument_id=UUID(int=20),
+                symbol="AAPL",
+                asset_type="common_stock",
+                exchange="NASDAQ",
+                currency="USD",
+            ),
+        )
+
+    async def evaluation_candidate(*_args, **_kwargs):
+        return (await candidates())[0]
+
+    monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
+    monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
     monkeypatch.setattr(
         agent_paper_loop,
@@ -531,7 +1365,7 @@ def test_accelerated_host_stops_unknown_job_without_replay(
             account_id=UUID(int=1),
             repo_root=tmp_path,
             sleep=unexpected,
-            clock=lambda: DECISION_TIME,
+            clock=lambda: portfolio_slot,
             monotonic=lambda: 0.0,
         )
     )
@@ -558,6 +1392,7 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    current = portfolio_slot
     cycle_id = UUID(int=401)
     job_id = UUID(int=402)
     stage = "queued"
@@ -567,6 +1402,7 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "DATABASE_URL": migrated_database_url,
         "AGENT_RUNTIME_MODE": "codex_sdk",
+        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
     }
 
     def load_environment(*_args, **_kwargs) -> dict[str, str]:
@@ -582,14 +1418,15 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
 
     async def inspect_cycle(*_args, **_kwargs):
         return agent_paper_loop.AgentPaperLoopSnapshot(
-            now=DECISION_TIME,
+            now=portfolio_slot,
             calendar_authority_id=CALENDAR_ID,
-            decision_window_start_at=DECISION_TIME,
-            decision_window_end_at=DECISION_TIME + timedelta(hours=6),
-            next_decision_window_start_at=DECISION_TIME + timedelta(days=1),
+            decision_window_start_at=current.replace(hour=14, minute=0, second=0),
+            decision_window_end_at=current.replace(hour=20, minute=0, second=0),
+            next_decision_window_start_at=current.replace(hour=14, minute=0, second=0)
+            + timedelta(days=1),
             cycle_id=cycle_id,
             cycle_status="researching",
-            cycle_slot_at=DECISION_TIME,
+            cycle_slot_at=portfolio_slot,
             research_job_status=stage,
             research_job_id=job_id,
         )
@@ -597,9 +1434,9 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
     async def model_ready() -> None:
         return None
 
-    async def run_worker(_settings, *, job_ids):
+    async def run_worker(_settings, *, job_id):
         nonlocal stage
-        claimed_job_ids.append(job_ids)
+        claimed_job_ids.append((job_id,))
         stage = "succeeded"
         return True
 
@@ -609,6 +1446,22 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
         stage = "completed"
         return None
 
+    async def candidates(*_args, **_kwargs):
+        return (
+            agent_paper_loop.CandidateInstrumentIdentity(
+                instrument_id=UUID(int=20),
+                symbol="AAPL",
+                asset_type="common_stock",
+                exchange="NASDAQ",
+                currency="USD",
+            ),
+        )
+
+    async def evaluation_candidate(*_args, **_kwargs):
+        return (await candidates())[0]
+
+    monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
+    monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
     monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
@@ -626,7 +1479,7 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
         "local_settings",
         lambda *_args, **_kwargs: EngineSettings(database_url=migrated_database_url),
     )
-    monkeypatch.setattr(agent_paper_loop, "run_agent_worker_once", run_worker)
+    monkeypatch.setattr(agent_paper_loop, "run_cycle_job_once", run_worker)
     monkeypatch.setattr(agent_paper_loop, "resume_once", resume)
 
     result = asyncio.run(
@@ -634,7 +1487,7 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
             EngineSettings(database_url=migrated_database_url),
             account_id=UUID(int=1),
             repo_root=tmp_path,
-            clock=lambda: DECISION_TIME,
+            clock=lambda: portfolio_slot,
         )
     )
 
@@ -648,10 +1501,10 @@ def test_accelerated_host_publishes_close_once_then_enters_next_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    current = datetime(2026, 8, 26, 23, 59, 30, tzinfo=UTC)
+    current = datetime(2026, 8, 26, 20, 0, tzinfo=UTC)
     elapsed = 0.0
-    close_at = current - timedelta(hours=1)
-    next_session_start = datetime(2026, 8, 27, 0, 0, tzinfo=UTC)
+    close_at = current
+    next_session_start = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
     cycle_id = UUID(int=501)
     published = False
     next_session_triggered = False
@@ -661,6 +1514,7 @@ def test_accelerated_host_publishes_close_once_then_enters_next_session(
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "DATABASE_URL": migrated_database_url,
         "AGENT_RUNTIME_MODE": "codex_sdk",
+        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
         "ALPACA_API_KEY_ID": "synthetic-test-key",
         "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
     }
@@ -673,8 +1527,9 @@ def test_accelerated_host_publishes_close_once_then_enters_next_session(
 
     async def sleep(seconds: float) -> None:
         nonlocal current, elapsed
-        current += timedelta(seconds=seconds)
-        elapsed += seconds
+        jump = max(seconds, 3600.0)
+        current += timedelta(seconds=jump)
+        elapsed += jump
 
     def load_environment(*_args, **_kwargs) -> dict[str, str]:
         if next_session_triggered:
@@ -696,7 +1551,7 @@ def test_accelerated_host_publishes_close_once_then_enters_next_session(
             next_decision_window_start_at=next_session_start + timedelta(days=1),
             cycle_id=cycle_id,
             cycle_status="completed",
-            cycle_slot_at=DECISION_TIME,
+            cycle_slot_at=portfolio_slot,
             performance_due_at=(None if published else close_at),
         )
 
@@ -715,6 +1570,22 @@ def test_accelerated_host_publishes_close_once_then_enters_next_session(
         next_session_triggered = True
         return request
 
+    async def candidates(*_args, **_kwargs):
+        return (
+            agent_paper_loop.CandidateInstrumentIdentity(
+                instrument_id=UUID(int=20),
+                symbol="AAPL",
+                asset_type="common_stock",
+                exchange="NASDAQ",
+                currency="USD",
+            ),
+        )
+
+    async def evaluation_candidate(*_args, **_kwargs):
+        return (await candidates())[0]
+
+    monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
+    monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
     monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
@@ -761,6 +1632,7 @@ def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         "DATABASE_URL": migrated_database_url,
         "AGENT_RUNTIME_MODE": "codex_sdk",
+        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
         "ALPACA_API_KEY_ID": "synthetic-test-key",
         "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
     }
@@ -775,10 +1647,10 @@ def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
 
     async def inspect_evaluation(*_args, **_kwargs):
         return agent_paper_loop.AgentPaperLoopSnapshot(
-            now=DECISION_TIME,
+            now=portfolio_slot,
             calendar_authority_id=CALENDAR_ID,
             evaluation_id=evaluation_id,
-            evaluation_slot_at=DECISION_TIME,
+            evaluation_slot_at=portfolio_slot,
             cycle_status="evaluation_pending",
         )
 
@@ -788,7 +1660,7 @@ def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
     async def prepare_slot(*_args, **_kwargs) -> AgentVersionSlotResult:
         return AgentVersionSlotResult(
             evaluation_id=evaluation_id,
-            decision_slot_at=DECISION_TIME,
+            decision_slot_at=portfolio_slot,
             phase="train",
             incumbent_cycle_id=incumbent_cycle_id,
             status="incomparable",
@@ -802,6 +1674,22 @@ def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
         close_calls.append((evaluation_id, decision_slot_at, reason_code))
         closed = True
 
+    async def candidates(*_args, **_kwargs):
+        return (
+            agent_paper_loop.CandidateInstrumentIdentity(
+                instrument_id=UUID(int=20),
+                symbol="AAPL",
+                asset_type="common_stock",
+                exchange="NASDAQ",
+                currency="USD",
+            ),
+        )
+
+    async def evaluation_candidate(*_args, **_kwargs):
+        return (await candidates())[0]
+
+    monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
+    monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
     monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
@@ -823,12 +1711,12 @@ def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
             EngineSettings(database_url=migrated_database_url),
             account_id=UUID(int=1),
             repo_root=tmp_path,
-            clock=lambda: DECISION_TIME,
+            clock=lambda: portfolio_slot,
         )
     )
 
     assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
-    assert close_calls == [(evaluation_id, DECISION_TIME, "PAIR_CYCLES_UNAVAILABLE")]
+    assert close_calls == [(evaluation_id, portfolio_slot, "PAIR_CYCLES_UNAVAILABLE")]
 
     async def replacement_fact_counts() -> tuple[int, int]:
         engine = create_async_engine(migrated_database_url)
@@ -1135,13 +2023,20 @@ async def _seed_cycle_research_authority(
         select(ExchangeCalendarSessionRecord.calendar_authority_id).limit(1)
     )
     assert calendar_authority_id is not None
-    session.add(
-        ExchangeCalendarSessionRecord(
-            calendar_authority_id=calendar_authority_id,
-            session=authority_time.date() - timedelta(days=1),
-            decision_at=DECISION_TIME - timedelta(days=1),
+    if (
+        await session.get(
+            ExchangeCalendarSessionRecord,
+            (calendar_authority_id, authority_time.date() - timedelta(days=1)),
         )
-    )
+        is None
+    ):
+        session.add(
+            ExchangeCalendarSessionRecord(
+                calendar_authority_id=calendar_authority_id,
+                session=authority_time.date() - timedelta(days=1),
+                decision_at=(authority_time - timedelta(days=1)).replace(hour=21, minute=0),
+            )
+        )
     session.add_all(
         AgentPromptVersionRecord(
             id=UUID(int=0x63000000000000000000000000000100 + index),
@@ -1416,7 +2311,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
 
         evaluation_id = uuid4()
         async with sessions.begin() as session:
-            started = await advance_agent_paper_cycle(
+            started = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -1546,7 +2441,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
         assert pinned_replay.replayed is True
 
         async with sessions.begin() as session:
-            versioned_replay = await advance_agent_paper_cycle(
+            versioned_replay = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -1657,7 +2552,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
 
         async with sessions.begin() as session:
-            started = await advance_agent_paper_cycle(
+            started = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -1742,7 +2637,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             )
 
         async with sessions.begin() as session:
-            completed = await advance_agent_paper_cycle(
+            completed = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -1929,7 +2824,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
 
 
 @pytest.mark.asyncio
-async def test_agent_version_pair_resumes_outputs_and_starts_next_slot_after_fills(
+async def test_agent_version_pair_resumes_original_outputs_without_duplicate_work(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2591,7 +3486,9 @@ async def test_agent_version_pair_resumes_outputs_and_starts_next_slot_after_fil
                     ),
                 )
             )
-            for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
+            for index, kind in enumerate(
+                ("corporate_action", "suspension", "delisting"), start=1
+            ):
                 watermark = f"{index}" * 64
                 session.add(
                     RiskQueryAuthorityRecord(
@@ -2653,7 +3550,7 @@ async def test_agent_version_pair_resumes_outputs_and_starts_next_slot_after_fil
                 )
                 for account_id in account_ids
             }
-            version_job_count = int(
+            next_slot_job_count = int(
                 await session.scalar(
                     select(func.count())
                     .select_from(Job)
@@ -2696,92 +3593,7 @@ async def test_agent_version_pair_resumes_outputs_and_starts_next_slot_after_fil
             )
         assert next_slot_replay.model_copy(update={"replayed": False}) == next_slot
         assert next_slot_replay.replayed is True
-        assert replay_job_count == version_job_count
-
-        async with sessions.begin() as session:
-            await session.execute(
-                text("ALTER TABLE paper_drawdown_lock_events DISABLE TRIGGER USER")
-            )
-            try:
-                await session.execute(
-                    text(
-                        "UPDATE paper_drawdown_lock_events "
-                        "SET reason_code='PAPER_ACCOUNT_INITIALIZED' "
-                        "WHERE account_id=:account_id AND event_seq=2"
-                    ),
-                    {"account_id": registration.incumbent_account_id},
-                )
-            finally:
-                await session.execute(
-                    text("ALTER TABLE paper_drawdown_lock_events ENABLE TRIGGER USER")
-                )
-        async with sessions.begin() as session:
-            with pytest.raises(
-                ValueError,
-                match="AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID",
-            ):
-                await advance_agent_version_slot(
-                    session,
-                    evaluation_id=registration.evaluation_id,
-                    decision_slot_at=train_slots[1],
-                    daily_limit_usd=Decimal("3"),
-                    now=train_slots[1],
-                )
-
-        async with sessions.begin() as session:
-            await session.execute(
-                text("ALTER TABLE paper_drawdown_lock_events DISABLE TRIGGER USER")
-            )
-            try:
-                await session.execute(
-                    text(
-                        "UPDATE paper_drawdown_lock_events "
-                        "SET reason_code='DRAWDOWN_LIMIT_REACHED' "
-                        "WHERE account_id=:account_id AND event_seq=2"
-                    ),
-                    {"account_id": registration.incumbent_account_id},
-                )
-            finally:
-                await session.execute(
-                    text("ALTER TABLE paper_drawdown_lock_events ENABLE TRIGGER USER")
-                )
-            later_transaction_id = await session.scalar(
-                select(PaperLedgerTransactionRecord.id)
-                .where(
-                    PaperLedgerTransactionRecord.account_id == registration.incumbent_account_id,
-                    PaperLedgerTransactionRecord.transaction_type != "funding",
-                )
-                .order_by(PaperLedgerTransactionRecord.occurred_at)
-                .limit(1)
-            )
-            assert later_transaction_id is not None
-            await session.execute(
-                text("ALTER TABLE paper_ledger_transactions DISABLE TRIGGER USER")
-            )
-            try:
-                await session.execute(
-                    text(
-                        "UPDATE paper_ledger_transactions "
-                        "SET reference_type='initial_funding' WHERE id=:transaction_id"
-                    ),
-                    {"transaction_id": later_transaction_id},
-                )
-            finally:
-                await session.execute(
-                    text("ALTER TABLE paper_ledger_transactions ENABLE TRIGGER USER")
-                )
-        async with sessions.begin() as session:
-            with pytest.raises(
-                ValueError,
-                match="AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID",
-            ):
-                await advance_agent_version_slot(
-                    session,
-                    evaluation_id=registration.evaluation_id,
-                    decision_slot_at=train_slots[1],
-                    daily_limit_usd=Decimal("3"),
-                    now=train_slots[1],
-                )
+        assert replay_job_count == next_slot_job_count
     finally:
         await engine.dispose()
 
@@ -2918,15 +3730,18 @@ async def test_cycle_loader_rejects_authority_switch(
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
         "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
     ],
 )
-async def test_trigger_once_persists_and_replays_calendar_failure(
+async def test_trigger_once_persists_and_replays_safe_terminal_failure(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     failure_code: str,
 ) -> None:
-    seed = await seed_paper_batch(migrated_database_url)
-    fixed_now = datetime(2026, 8, 26, 13, tzinfo=UTC)
+    from engine.tests.integration.test_agent_paper_trigger_reservation_pg import _seed_trigger
+
+    seed = await _seed_trigger(migrated_database_url)
+    fixed_now = datetime(2026, 9, 18, 14, tzinfo=UTC)
     provider_calls = 0
 
     async def reserve_with_fixed_time(
@@ -2935,6 +3750,7 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
         account_id: UUID,
         client_idempotency_key: str,
         now: datetime,
+        candidate_batch_id: UUID,
     ):
         del now
         return await reserve_schwab_agent_paper_trigger(
@@ -2942,6 +3758,7 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
             account_id=account_id,
             client_idempotency_key=client_idempotency_key,
             now=fixed_now,
+            candidate_batch_id=candidate_batch_id,
         )
 
     async def reject_calendar(*_args, **_kwargs):
@@ -2967,6 +3784,7 @@ async def test_trigger_once_persists_and_replays_calendar_failure(
         action="trigger",
         account_id=seed.account_id,
         idempotency_key=failure_code.lower(),
+        candidate_batch_id=seed.batch_id,
     )
 
     with pytest.raises(ValueError, match=failure_code):
@@ -3005,8 +3823,10 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seed = await seed_paper_batch(migrated_database_url)
-    fixed_now = datetime(2026, 8, 26, 13, 5, tzinfo=UTC)
+    from engine.tests.integration.test_agent_paper_trigger_reservation_pg import _seed_trigger
+
+    seed = await _seed_trigger(migrated_database_url)
+    fixed_now = datetime(2026, 9, 18, 14, 4, 59, tzinfo=UTC)
     provider_calls = 0
 
     async def reserve_with_fixed_time(
@@ -3015,6 +3835,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         account_id: UUID,
         client_idempotency_key: str,
         now: datetime,
+        candidate_batch_id: UUID,
     ):
         del now
         return await reserve_schwab_agent_paper_trigger(
@@ -3022,6 +3843,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
             account_id=account_id,
             client_idempotency_key=client_idempotency_key,
             now=fixed_now,
+            candidate_batch_id=candidate_batch_id,
         )
 
     async def reject_provider(*_args, **_kwargs):
@@ -3046,6 +3868,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         action="trigger",
         account_id=seed.account_id,
         idempotency_key="unknown-provider-failure",
+        candidate_batch_id=seed.batch_id,
     )
 
     with pytest.raises(RuntimeError, match="private-provider-failure"):
@@ -3056,9 +3879,14 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_code",
+    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
+)
 async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
     fixed_now = datetime(2026, 8, 26, 20, 0, 30, tzinfo=UTC)
@@ -3076,7 +3904,7 @@ async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
                     schema_version="agent_paper_schwab_trigger_v2",
                     response_payload={
                         "outcome": "failed",
-                        "error_code": "SCHWAB_L1_INCOMPLETE",
+                        "error_code": failure_code,
                     },
                 )
             )
@@ -3094,7 +3922,62 @@ async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
         await engine.dispose()
 
     assert snapshot.trigger_attempt_slot_at == slot
-    assert snapshot.trigger_failure_code == "SCHWAB_L1_INCOMPLETE"
+    assert snapshot.trigger_failure_code == failure_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"outcome": "failed", "error_code": "UNRECOGNIZED"},
+        {"outcome": "failed", "error_code": "AGENT_PAPER_PROVIDER_CAPACITY_INVALID"},
+        {"outcome": "failed"},
+    ],
+)
+async def test_trigger_inspection_rejects_unsealed_or_unknown_attempt(
+    migrated_database_url,
+    payload,
+):
+    engine = create_async_engine(migrated_database_url)
+    account_id = UUID(int=999)
+    slot = datetime(2026, 8, 26, 14, tzinfo=UTC)
+    try:
+        async with async_sessionmaker(engine).begin() as session:
+            session.add(
+                IdempotencyRecord(
+                    actor_id=f"local-agent-paper-schwab:{account_id}",
+                    route="agent-paper-schwab-trigger-v2",
+                    idempotency_key=slot.isoformat(),
+                    request_hash="a" * 64,
+                    schema_version="agent_paper_schwab_trigger_v2",
+                    response_payload=payload,
+                )
+            )
+        with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):
+            await agent_paper_loop._load_persisted_trigger_failure(
+                migrated_database_url,
+                account_id=account_id,
+                decision_slot_at=slot,
+            )
+        assert (
+            await agent_paper_loop._load_persisted_trigger_failure(
+                migrated_database_url,
+                account_id=UUID(int=998),
+                decision_slot_at=slot,
+            )
+            is None
+        )
+        assert (
+            await agent_paper_loop._load_persisted_trigger_failure(
+                migrated_database_url,
+                account_id=account_id,
+                decision_slot_at=slot + timedelta(days=1),
+            )
+            is None
+        )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -3378,6 +4261,7 @@ async def test_current_trends_rejects_short_bound_calendar_before_provider_call(
                     alpaca_secret=object(),
                 ),
                 account_id=UUID(int=1),
+                candidate=SimpleNamespace(instrument_id=instrument_id, symbol="AAPL"),
                 repo_root=tmp_path,
                 now=database_now,
                 expected_calendar_authority_id=authority_id,
@@ -3645,6 +4529,7 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         )
         daily = await agent_paper_loop.prepare_prior_daily_once(
             trigger_settings,
+            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
@@ -3652,16 +4537,24 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         )
         macro = await agent_paper_loop.prepare_macro_once(
             agent_paper_loop.DailyOnceSettings(database_url=migrated_database_url),
+            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
             fred_key=agent_paper_loop.SecretStr("test-key"),
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
             expected_calendar_authority_id=bound_id,
         )
-        trends_attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "trends" / friday.isoformat()
+        trends_attempt = (
+            tmp_path
+            / ".secrets"
+            / "nexus-agent-paper"
+            / "trends"
+            / f"{friday.isoformat()}-{INSTRUMENTS[0][0]}"
+        )
         trends_attempt.mkdir(mode=0o700, parents=True)
         trends = await agent_paper_loop.prepare_current_trends_once(
             trigger_settings,
+            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
@@ -3686,13 +4579,13 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
             observed_trigger_ids.append(received_id)
             return await real_cycle_loader(*args, **kwargs)
 
-        async def collect_proofs(*_args: object, **_kwargs: object) -> tuple[()]:
-            return ()
+        async def collect_proofs(*_args: object, **_kwargs: object):
+            return {INSTRUMENTS[0][0]: ()}
 
         artifact_id = UUID("63000000-0000-0000-0000-000000000101")
 
         async def capture_stream(*_args: object, **_kwargs: object) -> object:
-            return SimpleNamespace(quote_ids={}, artifact_id=artifact_id)
+            return SimpleNamespace(quote_ids={"AAPL": uuid4()}, artifact_id=artifact_id)
 
         async def persist_proofs(*_args: object, **_kwargs: object) -> tuple[()]:
             return ()
@@ -3712,16 +4605,26 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
             "load_quasi_realtime_cycle_authority",
             observed_cycle_loader,
         )
-        monkeypatch.setattr(agent_paper_once, "collect_source_proofs", collect_proofs)
+        monkeypatch.setattr(agent_paper_once, "collect_source_proofs_batch", collect_proofs)
         monkeypatch.setattr(
             agent_paper_once,
-            "capture_and_import_schwab_level_one_once",
+            "capture_and_import_schwab_level_one_batch",
             capture_stream,
         )
         monkeypatch.setattr(agent_paper_once, "persist_query_authorities", persist_proofs)
         monkeypatch.setattr(agent_paper_once, "_validate_trigger_quote", lambda *_a, **_k: None)
         monkeypatch.setattr(agent_paper_once, "start_schwab_agent_paper_cycle", start_cycle)
         async with sessions.begin() as session:
+            from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=seed.account_id,
+                universe_snapshot_id=decision.universe_snapshot_id,
+                instrument_ids=(INSTRUMENTS[0][0],),
+                created_at=monday_at,
+                idempotency_key="calendar-batch",
+            )
             result = await agent_paper_once.trigger_in_session(
                 session,
                 object(),
@@ -3730,11 +4633,14 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
                     action="trigger",
                     account_id=seed.account_id,
                     idempotency_key="bound-calendar-next-session",
+                    candidate_batch_id=batch.batch_id,
                 ),
                 reservation=agent_paper_once.AgentPaperTriggerReservation(
                     claim_id=UUID("63000000-0000-0000-0000-000000000103"),
                     decision_session=monday,
                     decision_slot_at=monday_at.replace(minute=0),
+                    candidate_batch_id=batch.batch_id,
+                    candidate_batch_hash=batch.batch_hash,
                 ),
                 repo_root=tmp_path,
                 client=object(),
@@ -4376,7 +5282,9 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                     await session.execute(
                         text("ALTER TABLE exchange_calendar_sessions ENABLE TRIGGER USER")
                     )
-            manifest = await prepare_candidates(session, authority=authority)
+            manifest = await prepare_candidates(
+                session, authority=authority, requested_instrument_ids=(INSTRUMENTS[0][0],)
+            )
             assert len(manifest) == 1
             assert set(manifest[0].risk_query_authority_ids) == newest_risk_ids
             cycle = AgentPaperCycleRecord(
@@ -4397,7 +5305,9 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 sizing_policy_hash="a" * 64,
                 execution_locked=True,
             )
-            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
+            market = await prepare_schwab_realtime_risk_snapshot(
+                session, cycle=cycle, max_instruments=5
+            )
 
         assert market.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
         assert market.execution_session == market.decision_session
@@ -4419,11 +5329,21 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
         )
         migration_config = Config(str(ENGINE_ROOT / "alembic.ini"))
         async with sessions.begin() as session:
-            first = await start_schwab_agent_paper_cycle(
+            from nexus.paper import agent_cycle
+
+            legacy_cycle = await _seed_legacy_prepared_cycle(
                 session,
                 authority=authority,
                 decision_slot_at=floor_decision_slot(authority.decision_time),
-                idempotency_key="schwab-trigger-1",
+            )
+            first = await agent_cycle._admit_cycle_research(
+                session,
+                cycle=legacy_cycle,
+                authority=authority,
+                projection=await agent_cycle.load_paper_projection(
+                    session, account_id=authority.account_id, as_of=authority.decision_time
+                ),
+                daily_limit_usd=Decimal("5"),
             )
             run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])
             assert run is not None
@@ -4439,6 +5359,22 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
                 )
             finally:
                 await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+            # This test next exercises the older job-isolation migration. Keep the
+            # selected singleton proof set, but remove alternative same-key proof
+            # rows that 0065 correctly refuses to collapse during downgrade.
+            await session.execute(text("ALTER TABLE risk_query_authorities DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    delete(RiskQueryAuthorityRecord).where(
+                        RiskQueryAuthorityRecord.id.not_in(
+                            tuple(manifest[0].risk_query_authority_ids)
+                        )
+                    )
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE risk_query_authorities ENABLE TRIGGER USER")
+                )
 
         await asyncio.to_thread(
             command.downgrade, migration_config, "0060_agent_paper_loop_heartbeat"
@@ -4450,10 +5386,9 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             assert await session.scalar(select(Job.job_type)) == "agent.paper.research"
         await asyncio.to_thread(command.upgrade, migration_config, "head")
         async with sessions.begin() as session:
-            replay = await start_schwab_agent_paper_cycle(
+            replay = await resume_schwab_agent_paper_cycle(
                 session,
-                authority=authority,
-                decision_slot_at=floor_decision_slot(authority.decision_time),
+                cycle_id=first.cycle_id,
                 idempotency_key="schwab-trigger-1",
             )
             job_count = await session.scalar(select(func.count()).select_from(Job))
@@ -4756,12 +5691,12 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
 
         async with sessions() as session:
             scope = await resolve_agent_paper_market_scope(session, cycle_id=first.cycle_id)
-            with pytest.raises(PaperMarketError, match="PAPER_MARKET_CYCLE_REJECTED"):
-                await resolve_agent_paper_market_scope(
-                    session,
-                    cycle_id=first.cycle_id,
-                    instrument_id=scope.instrument_id,
-                )
+            instrument_scope = await resolve_agent_paper_market_scope(
+                session,
+                cycle_id=first.cycle_id,
+                instrument_id=scope.instrument_id,
+            )
+            assert instrument_scope == scope
         assert scope.window_start == datetime(2026, 8, 26, 11, 31, tzinfo=UTC)
         assert scope.window_end == datetime(2026, 8, 26, 11, 36, tzinfo=UTC)
         inspection_calendar_id = UUID("63000000-0000-0000-0000-000000000998")
@@ -5030,7 +5965,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
 
         async with sessions.begin() as session:
-            first = await advance_agent_paper_cycle(
+            first = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -5057,7 +5992,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
                 await session.flush()
             finally:
                 await session.execute(text("ALTER TABLE agent_paper_cycles ENABLE TRIGGER USER"))
-            second = await advance_agent_paper_cycle(
+            second = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -5086,7 +6021,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             )
         async with sessions.begin() as session:
             with pytest.raises(ValueError, match="AGENT_PAPER_IDEMPOTENCY_CONFLICT"):
-                await advance_agent_paper_cycle(
+                await _advance_legacy_cycle_fixture(
                     session,
                     account_id=seed.account_id,
                     decision_time=DECISION_TIME + timedelta(seconds=1),
@@ -5171,7 +6106,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             fake_load_actionable,
         )
         async with sessions.begin() as session:
-            completed = await advance_agent_paper_cycle(
+            completed = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -5193,7 +6128,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert legacy_scope.window_end == window_start + timedelta(minutes=5)
 
         async with sessions.begin() as session:
-            replayed = await advance_agent_paper_cycle(
+            replayed = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -5450,12 +6385,21 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             "load_agent_paper_service_calendar_authority",
             fixed_service_calendar,
         )
+
+        def historical_max(value):  # type: ignore[no-untyped-def]
+            aggregate = func.max(value)
+            return (
+                aggregate.filter(literal(False))
+                if getattr(value, "key", None) == "market_close_at"
+                else aggregate
+            )
+
         monkeypatch.setattr(
             agent_paper_loop,
             "func",
             SimpleNamespace(
                 clock_timestamp=lambda: literal(evaluated_at + timedelta(minutes=5)),
-                max=lambda value: func.max(value).filter(literal(False)),
+                max=historical_max,
             ),
         )
         waiting_for_second_window = await inspect_agent_paper_loop(
@@ -5484,7 +6428,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             "func",
             SimpleNamespace(
                 clock_timestamp=lambda: literal(second_evaluated_at),
-                max=lambda value: func.max(value).filter(literal(False)),
+                max=historical_max,
             ),
         )
         second_advance_snapshot = await inspect_agent_paper_loop(
@@ -5841,7 +6785,7 @@ async def test_agent_version_history_groups_exact_identity_and_keeps_latest_twen
             )
 
         async with sessions.begin() as session:
-            started = await advance_agent_paper_cycle(
+            started = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -6044,7 +6988,7 @@ async def test_mixed_terminal_research_jobs_stop_without_replacement_runs(
             assert registered is not None
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
         async with sessions.begin() as session:
-            first = await advance_agent_paper_cycle(
+            first = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -6068,7 +7012,7 @@ async def test_mixed_terminal_research_jobs_stop_without_replacement_runs(
             finally:
                 await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER USER"))
         async with sessions.begin() as session:
-            stopped = await advance_agent_paper_cycle(
+            stopped = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,
@@ -6115,7 +7059,7 @@ async def test_shutdown_confirmation_reads_back_exact_trigger_slot_from_postgres
                 )
             )
         async with sessions.begin() as session:
-            created = await advance_agent_paper_cycle(
+            created = await _advance_legacy_cycle_fixture(
                 session,
                 account_id=seed.account_id,
                 decision_time=DECISION_TIME,

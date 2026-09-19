@@ -370,45 +370,52 @@ async def seed_paper_batch(
                 )
             )
             proofs: list[AuthorityQueryProof] = []
-            for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
-                authority_id = UUID(int=0x51000000000000000000000000000600 + index)
-                content_hash = canonical_query_authority_hash(
-                    source_policy_id=SOURCE_POLICY_V2_ID,
-                    universe_snapshot_id=UNIVERSE_ID,
-                    decision_session=DECISION_SESSION,
-                    kind=kind,
-                    required_instrument_ids=required_ids,
-                    blocked_instrument_ids=(),
-                    complete=True,
-                    source_watermark_hash=f"{index + 6}" * 64,
-                    available_at=AVAILABLE_AT,
-                )
-                if kind != omit_persisted_query_kind:
-                    session.add(
-                        RiskQueryAuthorityRecord(
-                            id=authority_id,
-                            source_policy_id=SOURCE_POLICY_V2_ID,
-                            universe_snapshot_id=UNIVERSE_ID,
-                            decision_session=DECISION_SESSION,
+            for instrument_index, instrument_id in enumerate(required_ids, start=1):
+                for kind_index, kind in enumerate(
+                    ("corporate_action", "suspension", "delisting"), start=1
+                ):
+                    authority_id = UUID(
+                        int=0x51000000000000000000000000000600 + instrument_index * 16 + kind_index
+                    )
+                    source_watermark_hash = f"{(instrument_index + kind_index + 5) % 10}" * 64
+                    content_hash = canonical_query_authority_hash(
+                        source_policy_id=SOURCE_POLICY_V2_ID,
+                        universe_snapshot_id=UNIVERSE_ID,
+                        decision_session=DECISION_SESSION,
+                        kind=kind,
+                        required_instrument_ids=(instrument_id,),
+                        blocked_instrument_ids=(),
+                        complete=True,
+                        source_watermark_hash=source_watermark_hash,
+                        available_at=AVAILABLE_AT,
+                    )
+                    if kind != omit_persisted_query_kind:
+                        session.add(
+                            RiskQueryAuthorityRecord(
+                                id=authority_id,
+                                source_policy_id=SOURCE_POLICY_V2_ID,
+                                universe_snapshot_id=UNIVERSE_ID,
+                                decision_session=DECISION_SESSION,
+                                kind=kind,
+                                required_instrument_ids=[instrument_id],
+                                blocked_instrument_ids=[],
+                                complete=True,
+                                source_watermark_hash=source_watermark_hash,
+                                available_at=AVAILABLE_AT,
+                                content_hash=content_hash,
+                            )
+                        )
+                    proofs.append(
+                        AuthorityQueryProof(
                             kind=kind,
-                            required_instrument_ids=list(required_ids),
-                            blocked_instrument_ids=[],
+                            authority_id=authority_id,
                             complete=True,
-                            source_watermark_hash=f"{index + 6}" * 64,
+                            blocked=False,
                             available_at=AVAILABLE_AT,
                             content_hash=content_hash,
+                            required_instrument_ids=(instrument_id,),
                         )
                     )
-                proofs.append(
-                    AuthorityQueryProof(
-                        kind=kind,
-                        authority_id=authority_id,
-                        complete=True,
-                        blocked=False,
-                        available_at=AVAILABLE_AT,
-                        content_hash=content_hash,
-                    )
-                )
 
             projection = await load_paper_projection(
                 session,
