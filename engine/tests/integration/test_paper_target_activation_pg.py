@@ -1,6 +1,7 @@
 import asyncio
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,13 +12,20 @@ from nexus.paper.agent_decision_store import (
     persist_portfolio_proposal,
 )
 from nexus.paper.portfolio_proposal import PortfolioBaselineV1
-from nexus.paper.service import PaperBatchError, create_paper_order_batch
+from nexus.paper.service import (
+    PaperBatchError,
+    _create_target_aware_paper_order_batch,
+    create_paper_order_batch,
+)
 from nexus.paper.target_service import activate_portfolio_target
 from nexus.persistence.models.paper import (
     PaperOrderBatchRecord,
+    PaperOrderRecord,
+    PaperReservationRecord,
     PaperTargetVersionRecord,
     StrategyDecisionRecord,
 )
+from nexus.risk.models import OrderCandidate
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 
@@ -55,6 +63,77 @@ async def test_first_activation_appends_one_target_and_no_plan_for_all_cash(
             assert (
                 await session.scalar(select(func.count()).select_from(PaperOrderBatchRecord)) == 0
             )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side", ["buy", "sell"])
+async def test_target_batch_drops_subminimum_remainder_before_writing(
+    migrated_database_url,
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+) -> None:
+    from nexus.paper import target_service
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            proposal = await persist_portfolio_proposal(session, **args)
+            activated = await activate_portfolio_target(
+                session,
+                account_id=proposal.account_id,
+                strategy_decision_id=proposal.decision_id,
+                request_time=args["now"] + timedelta(seconds=1),
+                idempotency_key=f"activate-subminimum-{side}",
+            )
+
+        instrument_id = uuid4()
+        candidate = OrderCandidate(
+            instrument_id=instrument_id,
+            side=side,
+            desired_quantity=Decimal("3"),
+            target_weight=Decimal("0.10"),
+            strategy_priority=1,
+            reference_close=Decimal("40"),
+            asset_type="common_stock",
+            currency="USD",
+            sector_exposures=(),
+        )
+
+        def derive_candidates(*_args, **_kwargs):
+            return (candidate,)
+
+        async def remainder_coverage(*_args, **_kwargs):
+            return {
+                (instrument_id, side): target_service.RiskRemainderCoverage(
+                    quantity=Decimal("1")
+                )
+            }
+
+        async def market_snapshot(*_args, required_instrument_ids, **_kwargs):
+            return SimpleNamespace(
+                required_instrument_ids=required_instrument_ids,
+                query_proofs=(),
+                authority_hash="a" * 64,
+            )
+
+        monkeypatch.setattr("nexus.paper.service.derive_order_candidates", derive_candidates)
+        monkeypatch.setattr("nexus.paper.service.load_risk_market_snapshot", market_snapshot)
+        monkeypatch.setattr(target_service, "load_risk_remainder_coverage", remainder_coverage)
+
+        async with sessions.begin() as session:
+            result = await _create_target_aware_paper_order_batch(
+                session,
+                account_id=proposal.account_id,
+                strategy_decision_id=proposal.decision_id,
+                request_time=args["now"] + timedelta(seconds=2),
+                idempotency_key=f"subminimum-remainder-{side}",
+                target_version_id=activated.target_version_id,
+            )
+            assert result is None
+            for model in (PaperOrderBatchRecord, PaperOrderRecord, PaperReservationRecord):
+                assert await session.scalar(select(func.count()).select_from(model)) == 0
     finally:
         await engine.dispose()
 
