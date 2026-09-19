@@ -354,7 +354,7 @@ describe("internal-paper Engine response boundary", () => {
     ];
     const dependencyChoice = ((dependencyDeferred.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[0];
     (dependencyDeferred.synthesis as Record<string, unknown>).choices = [
-      dependencyChoice,
+      { ...dependencyChoice, action: "reduce", role: "none", rank: null },
       {
         ...dependencyChoice,
         instrument_id: secondInstrumentId,
@@ -366,7 +366,7 @@ describe("internal-paper Engine response boundary", () => {
     ];
     const dependencyTarget = ((dependencyDeferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0];
     (dependencyDeferred.proposal as Record<string, unknown>).targets = [
-      dependencyTarget,
+      { ...dependencyTarget, role: "none", rank: null, reason_code: "ATOMIC_STEP_REQUIRED" },
       {
         ...dependencyTarget,
         instrument_id: secondInstrumentId,
@@ -384,6 +384,40 @@ describe("internal-paper Engine response boundary", () => {
     emptyDependencyChoice.depends_on_instrument_ids = [];
     emptyDependencyTarget.depends_on_instrument_ids = [];
     expect((await sanitizeEngineResponse(json({ data: dependencyWithoutSource, meta }), undefined, path, "GET")).status).toBe(500);
+    const unknownDependency = structuredClone(dependencyDeferred) as Record<string, unknown>;
+    (((unknownDependency.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[1]).depends_on_instrument_ids = [thirdInstrumentId];
+    (((unknownDependency.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[1]).depends_on_instrument_ids = [thirdInstrumentId];
+    expect((await sanitizeEngineResponse(json({ data: unknownDependency, meta }), undefined, path, "GET")).status).toBe(500);
+
+    const invalidReplacement = structuredClone(dependencyDeferred) as Record<string, unknown>;
+    const invalidReplacementChoices = (invalidReplacement.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+    Object.assign(invalidReplacementChoices[0], { action: "maintain", role: "none", rank: null });
+    Object.assign(invalidReplacementChoices[1], {
+      action: "include", role: "core", rank: 1,
+      replaces_instrument_id: instrumentId, depends_on_instrument_ids: [],
+    });
+    const invalidReplacementTargets = (invalidReplacement.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+    Object.assign(invalidReplacementTargets[0], { role: "none", rank: null, reason_code: "MAINTAIN" });
+    Object.assign(invalidReplacementTargets[1], {
+      role: "core", rank: 1, replaces_instrument_id: instrumentId,
+      depends_on_instrument_ids: [], reason_code: "INCLUDE",
+    });
+    expect((await sanitizeEngineResponse(json({ data: invalidReplacement, meta }), undefined, path, "GET")).status).toBe(500);
+
+    const invertedRank = structuredClone(invalidReplacement) as Record<string, unknown>;
+    const invertedChoices = (invertedRank.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+    Object.assign(invertedChoices[0], { action: "include", role: "core", rank: 2 });
+    Object.assign(invertedChoices[1], {
+      action: "include", role: "core", rank: 1,
+      replaces_instrument_id: null, depends_on_instrument_ids: [instrumentId],
+    });
+    const invertedTargets = (invertedRank.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+    Object.assign(invertedTargets[0], { role: "core", rank: 2, reason_code: "INCLUDE" });
+    Object.assign(invertedTargets[1], {
+      role: "core", rank: 1, replaces_instrument_id: null,
+      depends_on_instrument_ids: [instrumentId], reason_code: "DEPENDENCY_NOT_APPLIED",
+    });
+    expect((await sanitizeEngineResponse(json({ data: invertedRank, meta }), undefined, path, "GET")).status).toBe(500);
 
     for (const reason_code of ["INHERITED_TARGET", "UNKNOWN_REASON"]) {
       const invalidReason = structuredClone(valid) as Record<string, unknown>;

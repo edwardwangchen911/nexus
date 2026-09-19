@@ -940,11 +940,35 @@ function managementCycleSemanticsValid(value: Record<string, unknown>): boolean 
 
 function synthesisChoicesValid(synthesis: Record<string, unknown>, candidateIds: string[]): boolean {
   if (!Array.isArray(synthesis.choices)) return false;
-  const ids = synthesis.choices.map((choice) => isPlain(choice) && typeof choice.instrument_id === "string"
+  const choices = synthesis.choices.filter(isPlain);
+  const ids = choices.map((choice) => typeof choice.instrument_id === "string"
     ? choice.instrument_id.toLowerCase()
     : null);
-  return ids.every((id): id is string => id !== null && candidateIds.includes(id))
-    && new Set(ids).size === ids.length;
+  if (choices.length !== synthesis.choices.length
+    || !ids.every((id): id is string => id !== null && candidateIds.includes(id))
+    || new Set(ids).size !== ids.length) return false;
+  const byId = new Map(choices.map((choice) => [String(choice.instrument_id).toLowerCase(), choice]));
+  return choices.every((choice) => {
+    if (!Array.isArray(choice.depends_on_instrument_ids)) return false;
+    const dependencyIds = choice.depends_on_instrument_ids.map((id) => typeof id === "string"
+      ? id.toLowerCase()
+      : null);
+    const replacementId = typeof choice.replaces_instrument_id === "string"
+      ? choice.replaces_instrument_id.toLowerCase()
+      : null;
+    if (dependencyIds.some((id) => id === null || !byId.has(id))) return false;
+    if (replacementId !== null
+      && !["reduce", "exit"].includes(String(byId.get(replacementId)?.action))) return false;
+    return [...dependencyIds, replacementId]
+      .filter((id): id is string => id !== null)
+      .every((id) => {
+        const priorRank = byId.get(id)?.rank;
+        return priorRank === null
+          || (typeof priorRank === "number"
+            && typeof choice.rank === "number"
+            && priorRank < choice.rank);
+      });
+  });
 }
 
 function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Record<string, unknown>): boolean {
