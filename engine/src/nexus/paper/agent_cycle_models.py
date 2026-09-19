@@ -40,7 +40,7 @@ class CandidateManifestEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instrument_id: UUID
-    symbol: Literal["AAPL"]
+    symbol: Annotated[str, StringConstraints(pattern=r"^[A-Z][A-Z0-9.-]{0,14}$")]
     inclusion_reason: str
     research_snapshot_id: UUID
     prior_daily_price_authority_id: UUID
@@ -73,6 +73,7 @@ class AgentPaperCycleResult(BaseModel):
     result_code: str
     research_run_ids: tuple[UUID, ...] = ()
     strategy_decision_id: UUID | None = None
+    portfolio_synthesis_output_id: UUID | None = None
     batch_id: UUID | None = None
     order_ids: tuple[UUID, ...] = ()
     replayed: bool
@@ -84,6 +85,8 @@ class AgentPaperTriggerReservation(BaseModel):
     claim_id: UUID
     decision_session: date
     decision_slot_at: datetime
+    candidate_batch_id: UUID | None = None
+    candidate_batch_hash: str | None = None
     replay: AgentPaperCycleResult | None = None
 
 

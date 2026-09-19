@@ -42,8 +42,10 @@ from nexus.ops.agent_paper_once import (
     AgentPaperTriggerRequest,
     AgentPaperTriggerSettings,
     collect_window_once,
+    load_agent_version_candidate,
     prepare_agent_version_slot_once,
     resume_once,
+    run_cycle_job_once,
     trigger_once,
 )
 from nexus.ops.alpaca_adjusted_authority_import import import_adjusted_authority
@@ -72,9 +74,17 @@ from nexus.paper.agent_version_evaluation import (
     finalize_agent_version_evaluation,
     load_oos_session_closes,
 )
-from nexus.paper.agent_version_runner import resume_agent_version_slot
+from nexus.paper.agent_version_runner import (
+    resume_agent_version_slot,
+)
+from nexus.paper.candidate_batch import (
+    CandidateInstrumentIdentity,
+    validate_agent_paper_candidate_batch,
+)
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
+from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
+from nexus.paper.portfolio_proposal import KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import (
     AGENT_PAPER_LOOP_PROCESS_VERSION,
@@ -103,6 +113,8 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
     PaperExecutionWindowAuthorityRecord,
+    PaperOrderEventRecord,
+    PaperOrderRecord,
     PaperPerformanceSnapshotRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job, JobLease, WorkerHeartbeat
@@ -165,6 +177,7 @@ class AgentPaperLoopSnapshot:
     next_decision_window_start_at: datetime | None = None
     cycle_id: UUID | None = None
     cycle_status: str | None = None
+    cycle_result_code: str | None = None
     cycle_slot_at: datetime | None = None
     trigger_attempt_slot_at: datetime | None = None
     trigger_failure_code: str | None = None
@@ -177,6 +190,7 @@ class AgentPaperLoopSnapshot:
     market_window_id: UUID | None = None
     has_open_order: bool = False
     order_id: UUID | None = None
+    instrument_id: UUID | None = None
     performance_due_at: datetime | None = None
     evaluation_id: UUID | None = None
     evaluation_slot_at: datetime | None = None
@@ -240,14 +254,26 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
         "AGENT_PAPER_LOOP_ALREADY_RUNNING",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
         "CODEX_CHATGPT_LOGIN_REQUIRED",
+        "CANDIDATE_BATCH_REQUIRED",
+        "CANDIDATE_BATCH_INVALID",
+        "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
+        "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+        "POLICY_UNCONFIRMED",
+        "TARGET_ACTIVATION_PENDING",
     }
 )
 _SLOT_TERMINAL_TRIGGER_FAILURE_CODES = frozenset(
-    {"SCHWAB_L1_FRESHNESS_UNPROVEN", "SCHWAB_L1_INCOMPLETE"}
+    {
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        "SCHWAB_L1_FRESHNESS_UNPROVEN",
+        "SCHWAB_L1_INCOMPLETE",
+    }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
 _PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
@@ -539,6 +565,7 @@ def agent_paper_service_startup_preflight(
         "external_requests": 0,
         "blocking_codes": sorted(blocking_codes),
         "optional_codes": [],
+        **_normal_cycle_config_readiness(environment),
     }
 
 
@@ -622,6 +649,7 @@ def agent_paper_service_preflight(
         "external_requests": 0,
         "blocking_codes": sorted(blocking_codes),
         "optional_codes": optional_codes,
+        **_normal_cycle_config_readiness(environment),
     }
 
 
@@ -746,6 +774,7 @@ async def _inspect_prior_daily_scope(
     account_id: UUID,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> PriorDailyScope:
     require_utc(now)
     if not settings.database_url:
@@ -783,11 +812,13 @@ async def _inspect_prior_daily_scope(
             scope = await inspect_query_authority_scope(
                 session,
                 decision_session=authority.decision_session,
-                symbol="AAPL",
+                symbol=candidate.symbol,
                 as_of=database_now,
                 universe_snapshot_id=authority.universe_snapshot_id,
                 source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
             )
+            if scope.instrument_id != candidate.instrument_id:
+                raise ValueError("CANDIDATE_BATCH_INVALID")
             prior_session = await session.scalar(
                 select(ExchangeCalendarSessionRecord.session)
                 .where(
@@ -845,6 +876,7 @@ async def prepare_prior_daily_once(
     repo_root: Path,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Create at most one exact prior-session daily authority before a cycle."""
     scope = await _inspect_prior_daily_scope(
@@ -852,12 +884,15 @@ async def prepare_prior_daily_once(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if scope.authority_ready:
         return "ready"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "daily"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output_dir = parent / scope.prior_session.isoformat()
+    if candidate.symbol == "AAPL" and (parent / scope.prior_session.isoformat()).exists():
+        return "unavailable"
+    output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
         output_dir.mkdir(mode=0o700)
     except FileExistsError:
@@ -872,7 +907,7 @@ async def prepare_prior_daily_once(
         )
         collected = await collect_prices(
             request,
-            symbol="AAPL",
+            symbol=candidate.symbol,
             calendar=calendar,
             resolved_at=now,
             key_id=settings.alpaca_key,
@@ -898,6 +933,7 @@ async def prepare_prior_daily_once(
         account_id=account_id,
         now=datetime.now(UTC),
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if (
         not verified.authority_ready
@@ -914,6 +950,7 @@ async def _inspect_macro_scope(
     account_id: UUID,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> MacroScope:
     require_utc(now)
     prior = await _inspect_prior_daily_scope(
@@ -921,6 +958,7 @@ async def _inspect_macro_scope(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -1009,6 +1047,7 @@ async def prepare_macro_once(
     repo_root: Path,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Best-effort daily macro preparation; unavailable macro does not block a cycle."""
     scope = await _inspect_macro_scope(
@@ -1016,6 +1055,7 @@ async def prepare_macro_once(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if scope.ready_series == _PAPER_MACRO_SERIES:
         if scope.snapshot_ready:
@@ -1031,6 +1071,7 @@ async def prepare_macro_once(
             account_id=account_id,
             now=datetime.now(UTC),
             expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
         )
         if (
             verified.instrument_id != scope.instrument_id
@@ -1085,6 +1126,7 @@ async def prepare_macro_once(
         account_id=account_id,
         now=datetime.now(UTC),
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if (
         verified.instrument_id != scope.instrument_id
@@ -1102,6 +1144,7 @@ async def _inspect_current_trends_scope(
     account_id: UUID,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> CurrentTrendsScope:
     require_utc(now)
     prior = await _inspect_prior_daily_scope(
@@ -1109,6 +1152,7 @@ async def _inspect_current_trends_scope(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -1231,6 +1275,7 @@ async def prepare_current_trends_once(
     repo_root: Path,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Create at most one current-trends evidence record for the prior session."""
     scope = await _inspect_current_trends_scope(
@@ -1238,6 +1283,7 @@ async def prepare_current_trends_once(
         account_id=account_id,
         now=now,
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if scope.snapshot_ready:
         return "ready"
@@ -1252,6 +1298,7 @@ async def prepare_current_trends_once(
             account_id=account_id,
             now=datetime.now(UTC),
             expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
         )
         if (
             not verified.evidence_ready
@@ -1263,7 +1310,9 @@ async def prepare_current_trends_once(
         return "prepared"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output_dir = parent / scope.prior_session.isoformat()
+    if candidate.symbol == "AAPL" and (parent / scope.prior_session.isoformat()).exists():
+        return "unavailable"
+    output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
         output_dir.mkdir(mode=0o700)
     except FileExistsError:
@@ -1280,7 +1329,7 @@ async def prepare_current_trends_once(
         return "unavailable"
     collected = await collect_prices(
         request,
-        symbol="AAPL",
+        symbol=candidate.symbol,
         calendar=calendar,
         resolved_at=now,
         key_id=settings.alpaca_key,
@@ -1310,6 +1359,7 @@ async def prepare_current_trends_once(
         account_id=account_id,
         now=datetime.now(UTC),
         expected_calendar_authority_id=expected_calendar_authority_id,
+        candidate=candidate,
     )
     if (
         not verified.evidence_ready
@@ -1324,27 +1374,83 @@ async def prepare_current_trends_once(
 def resolve_cycle_research_job(
     *, events: Sequence[object], jobs: Sequence[object]
 ) -> tuple[UUID, str] | None:
-    """Resolve exactly one Job whose persisted run ID belongs to the cycle."""
+    """Select one next Job only after accounting for the complete frozen run set."""
     run_ids: list[str] = []
     for event in events:
         fact_ids = getattr(event, "fact_ids", None)
         raw = fact_ids.get("research_run_ids") if isinstance(fact_ids, dict) else None
         if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
             run_ids.extend(raw)
-    if len(run_ids) != 1 or len(jobs) != 1:
+    if not 1 <= len(run_ids) <= 5 or len(set(run_ids)) != len(run_ids) or len(jobs) != len(run_ids):
         return None
-    job = jobs[0]
-    payload = getattr(job, "payload", None)
-    job_id = getattr(job, "id", None)
-    status = getattr(job, "status", None)
-    if (
-        not isinstance(payload, dict)
-        or payload.get("run_id") != run_ids[0]
-        or not isinstance(job_id, UUID)
-        or not isinstance(status, str)
-    ):
+    matched: dict[str, tuple[UUID, str]] = {}
+    for job in jobs:
+        payload = getattr(job, "payload", None)
+        job_id, status = getattr(job, "id", None), getattr(job, "status", None)
+        run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        if (
+            run_id not in run_ids
+            or run_id in matched
+            or not isinstance(job_id, UUID)
+            or not isinstance(status, str)
+        ):
+            return None
+        matched[run_id] = (job_id, status)
+    if set(matched) != set(run_ids):
         return None
-    return job_id, status
+    ordered = [matched[run_id] for run_id in run_ids]
+    # Unknown/running work blocks dispatch; never advance past a still-running job.
+    for job in ordered:
+        if job[1] not in _TERMINAL_JOB_STATUSES and job[1] != "queued":
+            return job
+    for job in ordered:
+        if job[1] in _TERMINAL_JOB_STATUSES and job[1] != "succeeded":
+            return job
+    return next((job for job in ordered if job[1] == "queued"), ordered[0])
+
+
+def _portfolio_slot(window_start: datetime) -> datetime:
+    zone = ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone)
+    return datetime.combine(
+        window_start.astimezone(zone).date(),
+        PORTFOLIO_ALLOCATION_V1.decision_local_time,
+        tzinfo=zone,
+    ).astimezone(UTC)
+
+
+def select_active_order_identity(
+    rows: Sequence[tuple[UUID, UUID, str]],
+    *,
+    additional_market_windows_allowed: bool,
+) -> tuple[UUID, UUID] | None:
+    """Select one durable open order, finishing partial work before new work."""
+    if len(rows) > 50 or len({row[0] for row in rows}) != len(rows):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    settled_or_executable = {
+        "submitted", "partially_filled", "filled", "cancelled", "rejected", "risk_rejected"
+    }
+    if any(status not in settled_or_executable for _order_id, _instrument_id, status in rows):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    partial = sorted(
+        (
+            (order_id, instrument_id)
+            for order_id, instrument_id, status in rows
+            if status == "partially_filled"
+        ),
+        key=lambda row: row[0],
+    )
+    submitted = sorted(
+        (
+            (order_id, instrument_id)
+            for order_id, instrument_id, status in rows
+            if status == "submitted"
+        ),
+        key=lambda row: row[0],
+    )
+    priority = (
+        (partial, submitted) if additional_market_windows_allowed else (submitted, partial)
+    )
+    return next((rows[0] for rows in priority if rows), None)
 
 
 def snapshot_from_cycle_view(
@@ -1359,6 +1465,9 @@ def snapshot_from_cycle_view(
     trigger_attempt_slot_at: datetime | None = None,
     trigger_failure_code: str | None = None,
     additional_market_windows_allowed: bool = False,
+    active_order_id: UUID | None = None,
+    active_instrument_id: UUID | None = None,
+    active_order_status: str | None = None,
 ) -> AgentPaperLoopSnapshot:
     """Map the bounded read projection into the scheduler's fail-closed contract."""
     cycle_id = getattr(view, "cycle_id", None)
@@ -1371,12 +1480,28 @@ def snapshot_from_cycle_view(
         or not isinstance(cycle_slot_at, datetime)
         or not isinstance(order_ids, tuple)
         or any(not isinstance(value, UUID) for value in order_ids)
-        or len(order_ids) > 1
+        or len(order_ids) > 50
+        or (active_order_id is not None and active_order_id not in order_ids)
+        or (active_instrument_id is not None and active_order_id is None)
+        or (active_order_status is not None and active_order_id is None)
+        or active_order_status not in {None, "submitted", "partially_filled"}
     ):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-    order_id = order_ids[0] if order_ids else None
+    order_id = active_order_id
+    if order_id is None and len(order_ids) == 1:
+        order_id = order_ids[0]
+    action_cycle_status = (
+        "awaiting_market"
+        if active_order_status == "submitted"
+        else "partially_filled"
+        if active_order_status == "partially_filled"
+        else cycle_status
+    )
+    if action_cycle_status in {"awaiting_market", "partially_filled"} and order_id is None:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    instrument_id = active_instrument_id
     has_open_order = (
-        cycle_status in {"awaiting_market", "partially_filled"} and order_id is not None
+        action_cycle_status in {"awaiting_market", "partially_filled"} and order_id is not None
     )
     market_window_ready = has_open_order and market_window is not None
     market_window_start_at = None
@@ -1385,32 +1510,43 @@ def snapshot_from_cycle_view(
     if (
         has_open_order
         and not market_window_ready
-        and not (cycle_status == "partially_filled" and not additional_market_windows_allowed)
+        and not (
+            action_cycle_status == "partially_filled"
+            and not additional_market_windows_allowed
+        )
     ):
         scope_cycle_id = getattr(market_scope, "cycle_id", None)
+        scope_instrument_id = getattr(market_scope, "instrument_id", None)
         market_window_start_at = getattr(market_scope, "window_start", None)
         market_window_end_at = getattr(market_scope, "window_end", None)
         if (
             scope_cycle_id != cycle_id
+            or not isinstance(scope_instrument_id, UUID)
+            or (instrument_id is not None and scope_instrument_id != instrument_id)
             or not isinstance(market_window_start_at, datetime)
             or not isinstance(market_window_end_at, datetime)
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        instrument_id = scope_instrument_id
         market_window_end_at += _MARKET_PUBLICATION_LAG
     elif market_window_ready:
         market_window_id = getattr(market_window, "id", None)
         market_cycle_id = getattr(market_window, "cycle_id", None)
         market_order_id = getattr(market_window, "order_id", None)
+        market_instrument_id = getattr(market_window, "instrument_id", None)
         market_window_start_at = getattr(market_window, "window_start_at", None)
         market_window_end_at = getattr(market_window, "window_end_at", None)
         if (
             not isinstance(market_window_id, UUID)
             or market_cycle_id != cycle_id
             or market_order_id != order_id
+            or not isinstance(market_instrument_id, UUID)
+            or (instrument_id is not None and market_instrument_id != instrument_id)
             or not isinstance(market_window_start_at, datetime)
             or not isinstance(market_window_end_at, datetime)
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        instrument_id = market_instrument_id
     return AgentPaperLoopSnapshot(
         now=now,
         calendar_authority_id=calendar.calendar_authority_id,
@@ -1418,7 +1554,7 @@ def snapshot_from_cycle_view(
         decision_window_end_at=calendar.market_close_at,
         next_decision_window_start_at=calendar.next_decision_window_start_at,
         cycle_id=cycle_id,
-        cycle_status=cycle_status,
+        cycle_status=action_cycle_status,
         cycle_slot_at=cycle_slot_at,
         trigger_attempt_slot_at=trigger_attempt_slot_at,
         trigger_failure_code=trigger_failure_code,
@@ -1430,6 +1566,7 @@ def snapshot_from_cycle_view(
         market_window_id=market_window_id,
         has_open_order=has_open_order,
         order_id=order_id,
+        instrument_id=instrument_id,
         performance_due_at=performance_due_at,
         additional_market_windows_allowed=additional_market_windows_allowed,
     )
@@ -1439,6 +1576,14 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     """Choose one safe next action without performing I/O or retrying unknown work."""
     if not snapshot.enabled:
         return AgentPaperLoopAction.STOP_DISABLED
+    if snapshot.evaluation_id is None and snapshot.cycle_result_code == "POLICY_UNCONFIRMED":
+        if snapshot.cycle_id is None or snapshot.cycle_status not in {"researching", "unavailable"}:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        if snapshot.performance_due_at is not None:
+            return AgentPaperLoopAction.PUBLISH_PERFORMANCE
+        return AgentPaperLoopAction.WAIT_FOR_SLOT
+    if snapshot.evaluation_id is None and snapshot.cycle_result_code == "TARGET_ACTIVATION_PENDING":
+        return AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE
 
     if snapshot.evaluation_id is not None:
         if snapshot.evaluation_slot_at is None:
@@ -1500,7 +1645,7 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.cycle_status == "researching":
         if snapshot.research_job_status == "queued":
             return AgentPaperLoopAction.RUN_RESEARCH_JOB
-        if snapshot.research_job_status in _TERMINAL_JOB_STATUSES:
+        if snapshot.research_job_status in _TERMINAL_JOB_STATUSES | {"running_expired"}:
             return AgentPaperLoopAction.RESUME
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
@@ -1539,9 +1684,12 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     if snapshot.performance_due_at is not None:
         return AgentPaperLoopAction.PUBLISH_PERFORMANCE
 
-    if snapshot.now < snapshot.decision_window_start_at:
+    decision_slot = _portfolio_slot(snapshot.decision_window_start_at)
+    if snapshot.now < decision_slot:
         return AgentPaperLoopAction.WAIT_FOR_SESSION
     if snapshot.now >= snapshot.decision_window_end_at:
+        return AgentPaperLoopAction.WAIT_FOR_SESSION
+    if snapshot.now >= decision_slot + timedelta(minutes=5):
         return AgentPaperLoopAction.WAIT_FOR_SESSION
 
     current_slot = floor_decision_slot(snapshot.now)
@@ -1726,10 +1874,17 @@ async def run_foreground_loop(
         if action == AgentPaperLoopAction.WAIT_FOR_SESSION:
             assert snapshot.decision_window_start_at is not None
             assert snapshot.next_decision_window_start_at is not None
-            if snapshot.now < snapshot.decision_window_start_at:
-                wait_until = snapshot.decision_window_start_at
+            if snapshot.now < _portfolio_slot(snapshot.decision_window_start_at):
+                wait_until = _portfolio_slot(snapshot.decision_window_start_at)
             else:
-                wait_until = snapshot.next_decision_window_start_at
+                wait_until = _portfolio_slot(snapshot.next_decision_window_start_at)
+            # Reinspect at today's frozen close so performance/summary publication
+            # is not postponed to the next decision (possibly after a weekend).
+            if (
+                snapshot.decision_window_end_at is not None
+                and snapshot.now < snapshot.decision_window_end_at < wait_until
+            ):
+                wait_until = snapshot.decision_window_end_at
             deadline = monotonic() + (wait_until - snapshot.now).total_seconds()
             while (remaining := deadline - monotonic()) > 0:
                 duration = min(remaining, interval_seconds)
@@ -2096,6 +2251,66 @@ async def run_local_agent_paper_loop(
                 event_loop.remove_signal_handler(installed_signal)
 
 
+def _candidate_batch_setting(environment: Mapping[str, str]) -> UUID:
+    raw = environment.get("NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID", "").strip()
+    if not raw:
+        raise ValueError("CANDIDATE_BATCH_REQUIRED")
+    try:
+        return UUID(raw)
+    except ValueError:
+        raise ValueError("CANDIDATE_BATCH_INVALID") from None
+
+
+def _normal_cycle_config_readiness(environment: Mapping[str, str]) -> dict[str, object]:
+    """Host readiness does not authorize starting a new ordinary cycle."""
+    try:
+        _candidate_batch_setting(environment)
+    except ValueError as error:
+        return {
+            "normal_cycle_status": "blocked",
+            "normal_cycle_blocking_codes": [str(error)],
+        }
+    return {
+        "normal_cycle_status": "requires_batch_validation",
+        "normal_cycle_blocking_codes": [],
+    }
+
+
+async def _load_loop_candidates(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    batch_id: UUID,
+    expected_calendar_authority_id: UUID,
+) -> tuple[CandidateInstrumentIdentity, ...]:
+    if not settings.database_url:
+        raise ValueError("AGENT_PAPER_DATABASE_UNCONFIGURED")
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(now, datetime):
+                raise ValueError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            batch, identities = await validate_agent_paper_candidate_batch(
+                session,
+                batch_id=batch_id,
+                account_id=account_id,
+                as_of=now,
+            )
+            authority = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=account_id,
+                now=now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+            )
+            if batch.universe_snapshot_id != authority.universe_snapshot_id:
+                raise ValueError("CANDIDATE_BATCH_INVALID")
+            return identities
+    finally:
+        await engine.dispose()
+
+
 async def _close_unrecoverable_evaluation_once(
     *,
     database_url: str | None,
@@ -2157,6 +2372,12 @@ async def execute_agent_paper_loop_action(
         except Exception as error:
             _annotate_agent_paper_failure(error, phase="configuration")
             raise
+        candidate = await load_agent_version_candidate(
+            trigger_settings,
+            evaluation_id=snapshot.evaluation_id,
+            expected_calendar_authority_id=snapshot.calendar_authority_id,
+            now=snapshot.now,
+        )
         try:
             prior_daily = await prepare_prior_daily_once(
                 trigger_settings,
@@ -2164,6 +2385,7 @@ async def execute_agent_paper_loop_action(
                 repo_root=repo_root,
                 now=snapshot.now,
                 expected_calendar_authority_id=snapshot.calendar_authority_id,
+                candidate=candidate,
             )
         except Exception as error:
             _annotate_agent_paper_failure(error, phase="prior_daily")
@@ -2188,6 +2410,7 @@ async def execute_agent_paper_loop_action(
                 repo_root=repo_root,
                 now=snapshot.now,
                 expected_calendar_authority_id=snapshot.calendar_authority_id,
+                candidate=candidate,
             )
         except Exception as error:
             _annotate_agent_paper_failure(error, phase="macro")
@@ -2203,6 +2426,7 @@ async def execute_agent_paper_loop_action(
                 repo_root=repo_root,
                 now=snapshot.now,
                 expected_calendar_authority_id=snapshot.calendar_authority_id,
+                candidate=candidate,
             )
         except Exception as error:
             _annotate_agent_paper_failure(error, phase="current_trends")
@@ -2329,44 +2553,57 @@ async def execute_agent_paper_loop_action(
         macro_settings = (
             _FileDailySettings if env_file is not None else DailyOnceSettings
         ).model_validate(environment)
-        prior_daily = await prepare_prior_daily_once(
+        batch_id = _candidate_batch_setting(environment)
+        candidates = await _load_loop_candidates(
             trigger_settings,
             account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
+            batch_id=batch_id,
             expected_calendar_authority_id=expected_calendar_authority_id,
         )
-        if prior_daily == "prepared":
-            return None
-        if prior_daily == "unavailable":
-            return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
-        if prior_daily != "ready":
-            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        macro = await prepare_macro_once(
-            macro_settings,
-            fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
-            account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
-            expected_calendar_authority_id=expected_calendar_authority_id,
-        )
-        if macro == "prepared":
-            return None
-        if macro not in {"ready", "unavailable"}:
-            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        current_trends = await prepare_current_trends_once(
-            trigger_settings,
-            account_id=account_id,
-            repo_root=repo_root,
-            now=snapshot.now,
-            expected_calendar_authority_id=expected_calendar_authority_id,
-        )
-        if current_trends == "prepared":
-            return None
-        if current_trends == "unavailable":
-            return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
-        if current_trends != "ready":
-            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            prior_daily = await prepare_prior_daily_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            )
+            if prior_daily == "prepared":
+                return None
+            if prior_daily == "unavailable":
+                return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+            if prior_daily != "ready":
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            macro = await prepare_macro_once(
+                macro_settings,
+                fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            )
+            if macro == "prepared":
+                return None
+            if macro not in {"ready", "unavailable"}:
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            current_trends = await prepare_current_trends_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            )
+            if current_trends == "prepared":
+                return None
+            if current_trends == "unavailable":
+                return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+            if current_trends != "ready":
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         decision_slot_at = floor_decision_slot(snapshot.now)
         try:
             await trigger_once(
@@ -2374,7 +2611,10 @@ async def execute_agent_paper_loop_action(
                 AgentPaperTriggerRequest(
                     action="trigger",
                     account_id=account_id,
-                    idempotency_key=f"agent-paper-loop:{decision_slot_at.isoformat()}",
+                    candidate_batch_id=batch_id,
+                    idempotency_key=(
+                        f"agent-paper-loop:{floor_decision_slot(snapshot.now).isoformat()}"
+                    ),
                 ),
                 repo_root=repo_root,
                 expected_calendar_authority_id=expected_calendar_authority_id,
@@ -2409,10 +2649,7 @@ async def execute_agent_paper_loop_action(
             if env_file is not None
             else local_settings(repo_root, backend="codex_sdk")
         )
-        worked = await run_agent_worker_once(
-            research_settings,
-            job_ids=(snapshot.research_job_id,),
-        )
+        worked = await run_cycle_job_once(research_settings, job_id=snapshot.research_job_id)
         if not worked:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return None
@@ -2442,7 +2679,7 @@ async def execute_agent_paper_loop_action(
     if snapshot.cycle_id is None:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     if action == AgentPaperLoopAction.RESUME:
-        await resume_once(
+        resumed = await resume_once(
             settings,
             AgentPaperResumeRequest(
                 action="resume",
@@ -2450,8 +2687,23 @@ async def execute_agent_paper_loop_action(
                 idempotency_key=f"agent-paper-loop-resume:{snapshot.cycle_id}",
             ),
         )
+        if (
+            resumed is not None
+            and resumed.status == "researching"
+            and resumed.result_code == "POLICY_UNCONFIRMED"
+        ):
+            return None
+        if resumed is not None and resumed.result_code in {
+            "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
+            "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+            "POLICY_UNCONFIRMED",
+            "TARGET_ACTIVATION_PENDING",
+        }:
+            raise ValueError(resumed.result_code)
         return None
     if action == AgentPaperLoopAction.COLLECT_WINDOW:
+        if snapshot.instrument_id is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         environment = (
             load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
             if env_file is not None
@@ -2463,7 +2715,11 @@ async def execute_agent_paper_loop_action(
             (
                 _FileMarketSettings if env_file is not None else AgentPaperMarketSettings
             ).model_validate(environment),
-            AgentPaperCollectWindowRequest(action="collect-window", cycle_id=snapshot.cycle_id),
+            AgentPaperCollectWindowRequest(
+                action="collect-window",
+                cycle_id=snapshot.cycle_id,
+                instrument_id=snapshot.instrument_id,
+            ),
             repo_root=repo_root,
             **({"process_environment": environment} if env_file is not None else {}),
         )
@@ -2776,6 +3032,9 @@ async def inspect_agent_version_evaluation_loop(
                 if len(view.order_ids) != 1:
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                 order_id = view.order_ids[0]
+                order = await session.get(PaperOrderRecord, order_id)
+                if order is None or order.account_id != cycle.account_id:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                 allows_more_windows = (
                     cycle.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
                 )
@@ -2822,6 +3081,7 @@ async def inspect_agent_version_evaluation_loop(
                         market_window_id=window.id,
                         has_open_order=True,
                         order_id=order_id,
+                        instrument_id=order.instrument_id,
                         action_account_id=cycle.account_id,
                         additional_market_windows_allowed=allows_more_windows,
                     )
@@ -2835,11 +3095,13 @@ async def inspect_agent_version_evaluation_loop(
                         cycle_status="partially_filled",
                         has_open_order=True,
                         order_id=order_id,
+                        instrument_id=order.instrument_id,
                         action_account_id=cycle.account_id,
                     )
                 market_scope = await resolve_agent_paper_market_scope(
                     session,
                     cycle_id=cycle.id,
+                    instrument_id=order.instrument_id,
                 )
                 if market_scope.cycle_id != cycle.id:
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -2852,6 +3114,7 @@ async def inspect_agent_version_evaluation_loop(
                     cycle_status="partially_filled",
                     has_open_order=True,
                     order_id=order_id,
+                    instrument_id=order.instrument_id,
                     market_window_start_at=market_scope.window_start,
                     market_window_end_at=market_scope.window_end + _MARKET_PUBLICATION_LAG,
                     action_account_id=cycle.account_id,
@@ -2863,10 +3126,14 @@ async def inspect_agent_version_evaluation_loop(
                 if len(view.order_ids) != 1:
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                 order_id = view.order_ids[0]
+                order = await session.get(PaperOrderRecord, order_id)
+                if order is None or order.account_id != cycle.account_id:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
                 if view.execution_market.status != "qualified":
                     market_scope = await resolve_agent_paper_market_scope(
                         session,
                         cycle_id=cycle.id,
+                        instrument_id=order.instrument_id,
                     )
                     if market_scope.cycle_id != cycle.id:
                         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -2879,6 +3146,7 @@ async def inspect_agent_version_evaluation_loop(
                         cycle_status="awaiting_market",
                         has_open_order=True,
                         order_id=order_id,
+                        instrument_id=order.instrument_id,
                         market_window_start_at=market_scope.window_start,
                         market_window_end_at=market_scope.window_end + _MARKET_PUBLICATION_LAG,
                         action_account_id=cycle.account_id,
@@ -2925,6 +3193,7 @@ async def inspect_agent_version_evaluation_loop(
                     market_window_id=window.id,
                     has_open_order=True,
                     order_id=order_id,
+                    instrument_id=order.instrument_id,
                     action_account_id=cycle.account_id,
                 )
             if statuses <= {
@@ -2940,6 +3209,373 @@ async def inspect_agent_version_evaluation_loop(
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     finally:
         await engine.dispose()
+
+
+async def _read_portfolio_security_job(session: AsyncSession, cycle: AgentPaperCycleRecord) -> Job:
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper.agent_cycle_models import candidate_manifest_hash, parse_candidate_manifest
+    from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
+    from nexus.persistence.models.agents import AgentResearchRunRecord
+
+    assert cycle.candidate_batch_id is not None
+    batch, _ = await validate_agent_paper_candidate_batch(
+        session,
+        batch_id=cycle.candidate_batch_id,
+        account_id=cycle.account_id,
+        as_of=cycle.decision_time,
+        universe_snapshot_id=cycle.universe_snapshot_id,
+    )
+    manifest = parse_candidate_manifest(cycle.candidate_manifest, allow_legacy=False)
+    events = tuple(
+        await session.scalars(
+            select(AgentPaperCycleEventRecord).where(
+                AgentPaperCycleEventRecord.cycle_id == cycle.id,
+                AgentPaperCycleEventRecord.result_code == "RESEARCH_JOBS_PREPARED",
+            )
+        )
+    )
+    if (
+        len(events) != 1
+        or not cycle.execution_locked
+        or tuple(item.instrument_id for item in manifest) != batch.instrument_ids
+        or candidate_manifest_hash(manifest) != cycle.candidate_hash
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    raw_ids = events[0].fact_ids.get("research_run_ids")
+    if not isinstance(raw_ids, list) or len(raw_ids) != len(batch.instrument_ids):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    run_ids = tuple(UUID(str(value)) for value in raw_ids)
+    runs = tuple(
+        await session.scalars(
+            select(AgentResearchRunRecord)
+            .where(AgentResearchRunRecord.id.in_(run_ids))
+            .order_by(AgentResearchRunRecord.instrument_id)
+        )
+    )
+    jobs = tuple(
+        await session.scalars(
+            select(Job).where(
+                Job.job_type == JobType.AGENT_PAPER_RESEARCH.value,
+                Job.payload["run_id"].as_string().in_(tuple(str(value) for value in run_ids)),
+            )
+        )
+    )
+    if (
+        tuple(run.id for run in runs) != run_ids
+        or tuple(run.instrument_id for run in runs) != batch.instrument_ids
+        or len(jobs) != len(run_ids)
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    by_run = {str(run.id): run for run in runs}
+    for job in jobs:
+        run = by_run.get(str(job.payload.get("run_id")))
+        if run is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        durable_hash = job_input_hash(
+            {
+                "instrument_id": str(run.instrument_id),
+                "data_snapshot_id": str(run.data_snapshot_id),
+                "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "request_hash": run.input_hash,
+                "schema_hash": run.schema_hash,
+                "model_hash": run.model_hash,
+                "prompt_hash": run.prompt_hash,
+                "evidence_hash": run.evidence_hash,
+                "tool_hash": run.tool_hash,
+                "pricing_version": run.pricing_version,
+            }
+        )
+        if (
+            run.actor_id != "local-agent-paper-cycle"
+            or run.idempotency_key != f"agent-paper:{cycle.id}:{run.instrument_id}"
+            or run.decision_time != cycle.decision_time
+            or job.payload != {"run_id": str(run.id)}
+            or job.queue != QueueName.GENERAL.value
+            or job.schema_version != "agent_research_job_v1"
+            or job.scope_kind != "instrument"
+            or job.scope_id != str(run.instrument_id)
+            or job.effective_at != cycle.decision_time
+            or job.input_hash != durable_hash
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    resolved = resolve_cycle_research_job(events=events, jobs=jobs)
+    if resolved is None:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    return next(job for job in jobs if job.id == resolved[0])
+
+
+async def _inspect_portfolio_batch(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    now: datetime,
+    calendar: ServiceCalendarAuthority,
+    performance_due_at: datetime | None,
+) -> AgentPaperLoopSnapshot | None:
+    """Read internal scheduling authority, not the legacy single-security display DTO."""
+    from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+    from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
+    from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
+
+    cycle = await session.scalar(
+        select(AgentPaperCycleRecord)
+        .where(
+            AgentPaperCycleRecord.account_id == account_id,
+            AgentPaperCycleRecord.decision_time <= now,
+            AgentPaperCycleRecord.created_at <= now,
+        )
+        .order_by(AgentPaperCycleRecord.decision_slot_at.desc(), AgentPaperCycleRecord.id.desc())
+        .limit(1)
+    )
+    if cycle is None or cycle.candidate_batch_id is None:
+        return None
+    event = await session.scalar(
+        select(AgentPaperCycleEventRecord)
+        .where(AgentPaperCycleEventRecord.cycle_id == cycle.id)
+        .order_by(AgentPaperCycleEventRecord.sequence.desc())
+        .limit(1)
+    )
+    activation_pending = (
+        event is not None
+        and event.to_status == "decision_recorded"
+        and event.result_code == "TARGET_ACTIVATION_PENDING"
+    )
+    legacy_policy_block = (
+        event is not None
+        and event.to_status == "unavailable"
+        and event.result_code == "POLICY_UNCONFIRMED"
+    )
+    proposal_unavailable = (
+        event is not None
+        and event.to_status == "unavailable"
+        and event.result_code == "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+    )
+    if event is None or (
+        event.to_status != "researching"
+        and not legacy_policy_block
+        and not activation_pending
+        and not proposal_unavailable
+    ):
+        return None
+    job = await read_synthesis_job(session, cycle_id=cycle.id)
+    if job is None:
+        if legacy_policy_block or activation_pending or proposal_unavailable:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        job = await _read_portfolio_security_job(session, cycle)
+        return AgentPaperLoopSnapshot(
+            now=now,
+            calendar_authority_id=calendar.calendar_authority_id,
+            decision_window_start_at=calendar.decision_window_start_at,
+            decision_window_end_at=calendar.market_close_at,
+            next_decision_window_start_at=calendar.next_decision_window_start_at,
+            cycle_id=cycle.id,
+            cycle_status=event.to_status,
+            cycle_slot_at=cycle.decision_slot_at,
+            research_job_id=job.id,
+            research_job_status=job.status,
+            performance_due_at=performance_due_at,
+        )
+    run = await session.get(AgentPortfolioSynthesisRunRecord, UUID(str(job.payload["run_id"])))
+    assert run is not None
+    try:
+        frozen = _frozen_run(run)
+    except ValueError as error:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
+    if (
+        frozen.account_id != account_id
+        or frozen.portfolio_id != cycle.portfolio_id
+        or frozen.cycle_id != cycle.id
+        or frozen.candidate_batch_id != cycle.candidate_batch_id
+        or frozen.decision_time != cycle.decision_time
+        or not cycle.execution_locked
+        or set(job.payload) != {"run_id"}
+        or job.input_hash != run.input_hash
+        or job.scope_kind != "portfolio"
+        or job.scope_id != str(frozen.portfolio_id)
+        or job.effective_at != frozen.decision_time
+        or job.queue != QueueName.GENERAL.value
+        or job.schema_version != "portfolio_synthesis_job_v1"
+        or job.retry_policy != "never"
+        or job.max_attempts != 1
+        or job.manual_retry_count != 0
+    ):
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    policy_block = False
+    if run.status == "completed" and job.status == "succeeded":
+        from nexus.agents.portfolio_synthesis_contracts import (
+            PortfolioSynthesisIntentV1,
+            canonical_portfolio_synthesis_hash,
+            validate_portfolio_synthesis_intent,
+        )
+        from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH
+        from nexus.paper.target_service import load_initial_approval_projection
+        from nexus.persistence.models.agents import AgentPortfolioSynthesisOutputRecord
+        from nexus.persistence.models.paper import (
+            PaperInitialTargetApprovalRecord,
+            PaperTargetVersionRecord,
+            StrategyDecisionRecord,
+        )
+
+        output = await session.scalar(
+            select(AgentPortfolioSynthesisOutputRecord).where(
+                AgentPortfolioSynthesisOutputRecord.run_id == run.id,
+            )
+        )
+        proposal = await session.scalar(
+            select(StrategyDecisionRecord).where(
+                StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+            )
+        )
+        if (
+            output is None
+            or output.status != "completed"
+            or output.created_at > now
+            or cycle.sizing_policy_version != "portfolio_allocation_v1"
+            or cycle.sizing_policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+            or frozen.policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        try:
+            intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
+            validate_portfolio_synthesis_intent(intent, frozen)
+        except ValueError as error:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
+        content_hash = canonical_portfolio_synthesis_hash(
+            {
+                "schema_version": "portfolio_synthesis_terminal_v1",
+                "status": "completed",
+                "intent": intent.model_dump(mode="json"),
+            }
+        )
+        if (
+            output.content_hash != content_hash
+            or output.binding_hash
+            != canonical_portfolio_synthesis_hash(
+                {
+                    "schema_version": "portfolio_synthesis_binding_v1",
+                    "run_id": run.id,
+                    "input_hash": run.input_hash,
+                    "content_hash": content_hash,
+                }
+            )
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if proposal is not None and (
+            proposal.account_id != cycle.account_id
+            or proposal.portfolio_id != cycle.portfolio_id
+            or proposal.strategy_version != "agent_portfolio_proposal_v1"
+            or proposal.portfolio_synthesis_output_id != output.id
+            or proposal.authority_hash != run.input_hash
+            or proposal.strategy_parameters_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
+            or proposal.portfolio_projection_hash != frozen.projection_hash
+            or proposal.decision_time != cycle.decision_time
+            or proposal.created_at > now
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        # Only identity and frozen authority are inspected here. Allocation and
+        # current admissibility belong to the coordinator's persisted outcome.
+        if frozen.active_target_version_id is None:
+            approval = await session.scalar(
+                select(PaperInitialTargetApprovalRecord).where(
+                    PaperInitialTargetApprovalRecord.account_id == account_id,
+                )
+            )
+            policy_block = approval is None
+            if approval is not None:
+                try:
+                    await load_initial_approval_projection(
+                        session,
+                        approval=approval,
+                        portfolio_id=cycle.portfolio_id,
+                        decision_time=cycle.decision_time,
+                        now=now,
+                    )
+                except ValueError as error:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
+        else:
+            target = await session.get(PaperTargetVersionRecord, frozen.active_target_version_id)
+            target_decision = (
+                None
+                if target is None
+                else await session.get(StrategyDecisionRecord, target.strategy_decision_id)
+            )
+            if (
+                target is None
+                or target_decision is None
+                or target.account_id != cycle.account_id
+                or target.portfolio_id != cycle.portfolio_id
+                or target.target_content_hash != frozen.active_target_content_hash
+                or target.activated_at > cycle.decision_time
+                or target_decision.account_id != cycle.account_id
+                or target_decision.portfolio_id != cycle.portfolio_id
+                or target_decision.strategy_version != "agent_portfolio_proposal_v1"
+            ):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if activation_pending:
+            if (
+                policy_block
+                or proposal is None
+                or event.fact_ids
+                != {
+                    "strategy_decision_id": str(proposal.id),
+                    "portfolio_synthesis_output_id": str(output.id),
+                }
+            ):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if legacy_policy_block:
+            if proposal is not None or event.fact_ids != {
+                "portfolio_synthesis_output_id": str(output.id)
+            }:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            policy_block = True
+        if proposal_unavailable:
+            expected_facts = {"portfolio_synthesis_output_id": str(output.id)}
+            rejection = event.fact_ids.get("proposal_rejection_code")
+            if rejection is not None:
+                if (
+                    not isinstance(rejection, str)
+                    or rejection not in KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
+                ):
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                expected_facts["proposal_rejection_code"] = rejection
+            if proposal is not None or event.fact_ids != expected_facts:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            policy_block = False
+        if policy_block and proposal is not None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    elif legacy_policy_block or activation_pending or proposal_unavailable:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    status = job.status
+    lease = None
+    if status == "running":
+        lease = await session.scalar(select(JobLease).where(JobLease.job_id == job.id))
+        if lease is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        if lease.expires_at <= now:
+            status = "running_expired"
+    return AgentPaperLoopSnapshot(
+        now=now,
+        calendar_authority_id=calendar.calendar_authority_id,
+        decision_window_start_at=calendar.decision_window_start_at,
+        decision_window_end_at=calendar.market_close_at,
+        next_decision_window_start_at=calendar.next_decision_window_start_at,
+        cycle_id=cycle.id,
+        cycle_status=event.to_status,
+        cycle_result_code=(
+            "POLICY_UNCONFIRMED"
+            if policy_block
+            else "TARGET_ACTIVATION_PENDING"
+            if activation_pending
+            else "PORTFOLIO_PROPOSAL_UNAVAILABLE"
+            if proposal_unavailable
+            else None
+        ),
+        cycle_slot_at=cycle.decision_slot_at,
+        research_job_id=job.id,
+        research_job_status=status,
+        research_job_lease_expires_at=None if lease is None else lease.expires_at,
+        performance_due_at=performance_due_at,
+    )
 
 
 async def _read_persisted_trigger_failure(
@@ -2962,7 +3598,9 @@ async def _read_persisted_trigger_failure(
     error_code = payload.get("error_code") if payload.get("outcome") == "failed" else None
     if isinstance(error_code, str) and error_code in _SLOT_TERMINAL_TRIGGER_FAILURE_CODES:
         return error_code
-    return None
+    if payload.get("outcome") == "completed":
+        return None
+    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
 
 
 async def _load_persisted_trigger_failure(
@@ -3060,6 +3698,15 @@ async def inspect_agent_paper_loop(
                 )
                 if existing_performance is None:
                     performance_due_at = latest_completed_close
+            synthesis = await _inspect_portfolio_batch(
+                session,
+                account_id=account_id,
+                now=now,
+                calendar=calendar,
+                performance_due_at=performance_due_at,
+            )
+            if synthesis is not None:
+                return synthesis
             view = await service.latest_agent_cycle()
             if view is None:
                 return AgentPaperLoopSnapshot(
@@ -3110,7 +3757,72 @@ async def inspect_agent_paper_loop(
             research_job = resolve_cycle_research_job(events=events, jobs=jobs)
             market_scope = None
             market_window = None
-            if view.status in {"awaiting_market", "partially_filled"} and len(view.order_ids) == 1:
+            active_order_id = None
+            active_instrument_id = None
+            active_order_status = None
+            additional_market_windows_allowed = (
+                cycle_record.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+            )
+            if view.status in {"awaiting_market", "partially_filled"}:
+                latest_order_events = (
+                    select(
+                        PaperOrderEventRecord.order_id,
+                        func.max(PaperOrderEventRecord.event_seq).label("event_seq"),
+                    )
+                    .where(
+                        PaperOrderEventRecord.order_id.in_(view.order_ids),
+                        PaperOrderEventRecord.occurred_at <= now,
+                        PaperOrderEventRecord.created_at <= now,
+                    )
+                    .group_by(PaperOrderEventRecord.order_id)
+                    .subquery()
+                )
+                order_rows = tuple(
+                    (
+                        order_id,
+                        instrument_id,
+                        status,
+                    )
+                    for order_id, instrument_id, status in (
+                        await session.execute(
+                            select(
+                                PaperOrderRecord.id,
+                                PaperOrderRecord.instrument_id,
+                                PaperOrderEventRecord.to_status,
+                            )
+                            .join(
+                                latest_order_events,
+                                latest_order_events.c.order_id == PaperOrderRecord.id,
+                            )
+                            .join(
+                                PaperOrderEventRecord,
+                                and_(
+                                    PaperOrderEventRecord.order_id
+                                    == latest_order_events.c.order_id,
+                                    PaperOrderEventRecord.event_seq
+                                    == latest_order_events.c.event_seq,
+                                ),
+                            )
+                            .where(PaperOrderRecord.id.in_(view.order_ids))
+                            .order_by(PaperOrderRecord.id)
+                            .limit(51)
+                        )
+                    ).all()
+                )
+                if len(order_rows) != len(view.order_ids):
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                selected_order = select_active_order_identity(
+                    order_rows,
+                    additional_market_windows_allowed=additional_market_windows_allowed,
+                )
+                if selected_order is None:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                active_order_id, active_instrument_id = selected_order
+                active_order_status = next(
+                    status
+                    for order_id, _instrument_id, status in order_rows
+                    if order_id == active_order_id
+                )
                 unused_windows = tuple(
                     await session.scalars(
                         select(AgentPaperMarketWindowRecord)
@@ -3129,7 +3841,7 @@ async def inspect_agent_paper_loop(
                         )
                         .where(
                             AgentPaperMarketWindowRecord.cycle_id == view.cycle_id,
-                            AgentPaperMarketWindowRecord.order_id == view.order_ids[0],
+                            AgentPaperMarketWindowRecord.order_id == active_order_id,
                             AgentPaperMarketWindowRecord.purpose == "paper_fill",
                             PaperExecutionWindowAuthorityRecord.id.is_(None),
                         )
@@ -3142,11 +3854,13 @@ async def inspect_agent_paper_loop(
                 if unused_windows:
                     market_window = unused_windows[0]
                 elif (
-                    view.status == "awaiting_market"
+                    active_order_status == "submitted"
                     or cycle_record.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
                 ):
                     market_scope = await resolve_agent_paper_market_scope(
-                        session, cycle_id=view.cycle_id
+                        session,
+                        cycle_id=view.cycle_id,
+                        instrument_id=active_instrument_id,
                     )
             return snapshot_from_cycle_view(
                 now=now,
@@ -3158,9 +3872,10 @@ async def inspect_agent_paper_loop(
                 performance_due_at=performance_due_at,
                 trigger_attempt_slot_at=trigger_attempt_slot_at,
                 trigger_failure_code=trigger_failure_code,
-                additional_market_windows_allowed=(
-                    cycle_record.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
-                ),
+                additional_market_windows_allowed=additional_market_windows_allowed,
+                active_order_id=active_order_id,
+                active_instrument_id=active_instrument_id,
+                active_order_status=active_order_status,
             )
     finally:
         await engine.dispose()

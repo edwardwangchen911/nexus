@@ -20,7 +20,7 @@ from nexus.market.ingestion import (
     prepare_price_page,
 )
 from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
-from nexus.persistence.models.agents import AgentResearchOutputRecord
+from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import DataArtifact
 from nexus.persistence.models.paper import (
@@ -225,7 +225,11 @@ async def collect_agent_paper_window(
         if cycle is None:
             raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
         if cycle.execution_price_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
-            scope = await resolve_agent_paper_market_scope(session, cycle_id=cycle_id)
+            scope = await resolve_agent_paper_market_scope(
+                session,
+                cycle_id=cycle_id,
+                instrument_id=instrument_id,
+            )
             if instrument_id not in {None, scope.instrument_id} or window_start not in {
                 None,
                 scope.window_start,
@@ -496,9 +500,12 @@ async def resolve_agent_paper_market_scope(
     except (TypeError, ValueError):
         raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED") from None
     if cycle.execution_price_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
-        if instrument_id is not None or len(candidate_ids) != 1:
-            raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
-        instrument_id = candidate_ids[0]
+        if instrument_id is None:
+            if len(candidate_ids) != 1:
+                raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
+            instrument_id = candidate_ids[0]
+        elif instrument_id not in candidate_ids:
+            raise PaperMarketError("PAPER_MARKET_INSTRUMENT_REJECTED")
     elif instrument_id is None:
         if len(candidate_ids) != 1:
             raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
@@ -535,6 +542,10 @@ async def resolve_agent_paper_market_scope(
             await session.execute(
                 select(AgentResearchOutputRecord, Job, ExchangeCalendarSessionRecord)
                 .join(
+                    AgentResearchRunRecord,
+                    AgentResearchRunRecord.id == AgentResearchOutputRecord.run_id,
+                )
+                .join(
                     StrategyDecisionAgentOutputRecord,
                     StrategyDecisionAgentOutputRecord.agent_research_output_id
                     == AgentResearchOutputRecord.id,
@@ -564,6 +575,7 @@ async def resolve_agent_paper_market_scope(
                     == cycle.execution_price_policy_id,
                     AgentResearchOutputRecord.status == "completed",
                     AgentResearchOutputRecord.role.is_(None),
+                    AgentResearchRunRecord.instrument_id == instrument_id,
                     Job.job_type.in_(
                         (JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)
                     ),

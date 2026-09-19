@@ -7,6 +7,7 @@ from nexus.risk.authority import (
     RiskAuthorityInput,
     build_risk_market_snapshot,
     canonical_query_authority_hash,
+    require_schwab_execution_scope_capacity,
 )
 from nexus.risk.canonical import canonical_risk_market_authority_hash
 from nexus.risk.models import AuthorityQueryProof, RiskPrice, RiskSectorExposure
@@ -15,6 +16,33 @@ from nexus.strategy.forward import ForwardStrategyDecision, ForwardStrategyTarge
 NOW = datetime(2026, 8, 21, 20, tzinfo=UTC)
 FIRST_ID = UUID(int=10)
 SECOND_ID = UUID(int=11)
+
+
+@pytest.mark.parametrize(
+    ("required_count", "max_instruments", "error"),
+    [
+        (10, 10, None),
+        (11, 10, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (30, 30, None),
+        (31, 30, "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"),
+        (1, 31, "AGENT_PAPER_PROVIDER_CAPACITY_INVALID"),
+    ],
+)
+def test_schwab_execution_scope_uses_explicit_provider_capacity(
+    required_count: int, max_instruments: int, error: str | None
+) -> None:
+    required = {UUID(int=index + 1) for index in range(required_count)}
+
+    if error is None:
+        require_schwab_execution_scope_capacity(
+            required, max_instruments=max_instruments
+        )
+        return
+
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        require_schwab_execution_scope_capacity(
+            required, max_instruments=max_instruments
+        )
 
 
 def _decision() -> ForwardStrategyDecision:
@@ -131,6 +159,74 @@ def test_authority_builds_exact_stable_snapshot_and_hash() -> None:
 
     assert snapshot.authority_hash == canonical_risk_market_authority_hash(snapshot)
     assert reversed_snapshot.authority_hash == snapshot.authority_hash
+
+
+def _bound_proofs():
+    return tuple(
+        AuthorityQueryProof(
+            **{
+                **_proof(kind, index).model_dump(),
+                "authority_id": UUID(int=instrument.int * 100 + index),
+                "required_instrument_ids": (instrument,),
+            }
+        )
+        for instrument in (FIRST_ID, SECOND_ID)
+        for index, kind in enumerate(("corporate_action", "delisting", "suspension"), 1)
+    )
+
+
+def test_bound_proofs_cover_every_candidate_and_have_stable_hash():
+    proofs = _bound_proofs()
+    snapshot = _build(query_proofs=proofs)
+    reversed_snapshot = _build(query_proofs=tuple(reversed(proofs)))
+    assert snapshot == reversed_snapshot
+    assert snapshot.query_proofs == proofs
+    swapped = tuple(
+        proof.model_copy(
+            update={
+                "required_instrument_ids": (
+                    SECOND_ID if proof.required_instrument_ids == (FIRST_ID,) else FIRST_ID,
+                ),
+            }
+        )
+        for proof in proofs
+    )
+    assert _build(query_proofs=swapped).authority_hash != snapshot.authority_hash
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "foreign", "mixed", "multi"])
+def test_bound_proofs_reject_inexact_cross_candidate_coverage(mutation):
+    proofs = list(_bound_proofs())
+    if mutation == "missing":
+        proofs.pop()
+    elif mutation == "duplicate":
+        proofs[-1] = proofs[0]
+    elif mutation == "foreign":
+        proofs[-1] = proofs[-1].model_copy(update={"required_instrument_ids": (UUID(int=99),)})
+    elif mutation == "mixed":
+        proofs[-1] = _proof("suspension", 3)
+    else:
+        proofs[-1] = proofs[-1].model_copy(
+            update={"required_instrument_ids": (FIRST_ID, SECOND_ID)}
+        )
+    with pytest.raises(ValueError):
+        _build(query_proofs=proofs)
+
+
+def test_legacy_proof_serialization_and_hash_are_unchanged():
+    proof = _proof("corporate_action", 1)
+    assert set(proof.model_dump()) == {
+        "kind",
+        "authority_id",
+        "complete",
+        "blocked",
+        "available_at",
+        "content_hash",
+    }
+    assert (
+        _build().authority_hash
+        == "7282987e5cde558d03b104b1eae6bdb55a646d468a0e71a0bd76b9391c06467f"
+    )
 
 
 def test_risk_snapshot_value_allows_same_session_authority() -> None:
