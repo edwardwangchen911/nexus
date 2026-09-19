@@ -102,7 +102,7 @@ async function installFixtures(page: Page, methods: string[]): Promise<void> {
   });
   await page.route(`**/api/v1/paper/management/cycles/${agentPaperCycle.cycle_id}`, async (route) => {
     methods.push(route.request().method());
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { cycle: agentPaperCycle, orders: [cancellableOrder] }, meta: meta() }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { cycle: agentPaperCycle, orders: [cancellableOrder], active_target: managementDetail.active_target, plan_summary: { ...managementDetail.blocking_plan, target_version_id: null } }, meta: meta() }) });
   });
 }
 

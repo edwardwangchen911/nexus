@@ -58,6 +58,16 @@ const summary: CyclePage["summary"] = {
 };
 
 describe("decision records", () => {
+  it.each([false, true])("keeps a legacy unassociated order batch in the ledger (account target: %s)", (hasCurrentTarget) => {
+    const legacy = detail(agentPaperCycle);
+    legacy.active_target = hasCurrentTarget ? managementDetail.active_target : null;
+    legacy.plan_summary = { ...managementDetail.blocking_plan!, target_version_id: null };
+    render(<DecisionDetailPanel state="ready" detail={legacy} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("region", { name: "市场与研究证据" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "订单结论" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "执行结果" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "本轮组合取舍" })).not.toBeInTheDocument();
+  });
   it("keeps a legacy cycle's research and execution ledger when the account has a current target", () => {
     const legacy = detail(agentPaperCycle);
     legacy.active_target = managementDetail.active_target;
