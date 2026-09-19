@@ -858,10 +858,13 @@ async def _locked_portfolio_decision_budget(
 
 
 async def _shared_daily_budget_used(session: AsyncSession, *, business_date: date) -> Decimal:
+    from nexus.persistence.models.agents import AgentPortfolioSynthesisBudgetReservationRecord
+
     totals: list[Decimal] = []
     for model in (
         AgentDailyBudgetReservationRecord,
         PortfolioDecisionBudgetReservationRecord,
+        AgentPortfolioSynthesisBudgetReservationRecord,
     ):
         used = await session.scalar(
             select(

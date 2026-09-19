@@ -247,10 +247,7 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
     outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
     assert [p["stage"] for p in submitted] == ["research", "critique", "synthesis"]
     assert [len(p["previous_claims"]) for p in submitted] == [0, 5, 7]
-    assert {
-        p["role"]: (p["vote"], p["text"])
-        for p in submitted[2]["previous_claims"][-2:]
-    } == {
+    assert {p["role"]: (p["vote"], p["text"]) for p in submitted[2]["previous_claims"][-2:]} == {
         "bear": ("abstain", "成交容量未知，不能判断退出速度。"),
         "evidence_audit": ("abstain", "估值时间缺失，尚不能验证可比性。"),
     }
@@ -1056,9 +1053,28 @@ async def test_sdk_invocation_failure_retains_only_safe_phase(monkeypatch, phase
         await codex_sdk.invoke_codex({})
     assert caught.value.phase == phase
     assert caught.value.kind == "unexpected_exception"
+    assert caught.value.provider_call_started is (phase in {"turn_run", "client_close"})
     assert "private-exception-canary" not in str(caught.value)
     if phase != "client_init":
         client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_temp_directory_cleanup_after_turn_retains_dispatch_fact(monkeypatch):
+    _, thread, _, _ = _sdk(monkeypatch)
+    original = codex_sdk.TemporaryDirectory
+
+    class BrokenCleanup(original):
+        def __exit__(self, *args):
+            super().__exit__(*args)
+            raise OSError("private-cleanup-canary")
+
+    monkeypatch.setattr(codex_sdk, "TemporaryDirectory", BrokenCleanup)
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await codex_sdk.invoke_codex_portfolio({})
+    thread.run.assert_awaited_once()
+    assert caught.value.provider_call_started is True
+    assert "private-cleanup-canary" not in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -1691,10 +1707,9 @@ async def test_timeout_closes_sdk_without_retry(monkeypatch):
 async def test_research_sdk_keeps_a_tail_latency_margin_without_changing_portfolio(monkeypatch):
     observed: list[int] = []
 
-    async def invoke(
-        payload, *, output_model, max_wire_bytes, timeout_seconds
-    ):
+    async def invoke(payload, *, output_model, max_wire_bytes, timeout_seconds, invocation_state):
         del payload, output_model, max_wire_bytes
+        assert invocation_state.provider_call_started is False
         observed.append(timeout_seconds)
         return "{}", UsageSnapshot()
 
