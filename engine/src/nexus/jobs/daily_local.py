@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, any_, func, select
+from sqlalchemy import and_, any_, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.manifest import AuditManifestObjectStore, publish_audit_chain_manifest
@@ -37,6 +37,7 @@ from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.optimization import OptimizationProposalGroupRecord
 from nexus.persistence.models.paper import (
     PaperAccountRecord,
+    PaperLedgerTransactionRecord,
     PaperOrderEventRecord,
     PaperOrderRecord,
     StrategyDecisionRecord,
@@ -199,7 +200,14 @@ async def _performance_target_ids(
             await session.scalars(
                 select(PaperAccountRecord.id)
                 .where(
-                    PaperAccountRecord.capability == "simulation_write_internal"
+                    PaperAccountRecord.capability == "simulation_write_internal",
+                    exists(
+                        select(PaperLedgerTransactionRecord.id).where(
+                            PaperLedgerTransactionRecord.account_id == PaperAccountRecord.id,
+                            PaperLedgerTransactionRecord.transaction_type == "funding",
+                            PaperLedgerTransactionRecord.reference_type == "initial_funding",
+                        )
+                    ),
                 )
                 .order_by(PaperAccountRecord.id)
             )
