@@ -959,10 +959,10 @@ function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Reco
     || new Set(targetIds).size !== targetIds.length) return false;
   return targets.every((target) => {
     const choice = choices.find((item) => isPlain(item)
-      && item.action !== "defer"
       && sameUuid(item.instrument_id, target.instrument_id));
     if (isPlain(choice)) {
-      return target.role === choice.role
+      return proposalReasonMatchesChoice(target.reason_code, choice.action)
+        && target.role === choice.role
         && target.rank === choice.rank
         && nullableUuidEqual(target.replaces_instrument_id, choice.replaces_instrument_id)
         && uuidArraysEqual(target.depends_on_instrument_ids, choice.depends_on_instrument_ids);
@@ -973,6 +973,20 @@ function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Reco
       && Array.isArray(target.depends_on_instrument_ids)
       && target.depends_on_instrument_ids.length === 0;
   });
+}
+
+function proposalReasonMatchesChoice(reason: unknown, action: unknown): boolean {
+  const reasonsByAction: Record<string, readonly string[]> = {
+    defer: ["DEFER"],
+    exit: ["EXIT"],
+    reduce: ["REDUCE", "DEPENDENCY_NOT_APPLIED", "ATOMIC_STEP_REQUIRED"],
+    maintain: ["MAINTAIN", "DEPENDENCY_NOT_APPLIED"],
+    include: ["INCLUDE", "DEPENDENCY_NOT_APPLIED", "SINGLE_NAME_CAP", "MAX_INCREASES", "CASH_FLOOR", "TURNOVER_LIMIT"],
+    increase: ["INCREASE", "DEPENDENCY_NOT_APPLIED", "SINGLE_NAME_CAP", "MAX_INCREASES", "CASH_FLOOR", "TURNOVER_LIMIT"],
+  };
+  return typeof action === "string"
+    && typeof reason === "string"
+    && (reasonsByAction[action]?.includes(reason) ?? false);
 }
 
 function paperManagementSummarySemanticsValid(value: Record<string, unknown>): boolean {

@@ -337,6 +337,19 @@ describe("internal-paper Engine response boundary", () => {
       );
       expect((await sanitizeEngineResponse(json({ data: invalidInherited, meta }), undefined, path, "GET")).status).toBe(500);
     }
+
+    const deferred = structuredClone(valid) as Record<string, unknown>;
+    const deferredChoice = ((deferred.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[0];
+    Object.assign(deferredChoice, { action: "defer", role: "none", rank: null });
+    const deferredTarget = ((deferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0];
+    Object.assign(deferredTarget, { target_weight: "0", role: "none", rank: null, reason_code: "DEFER" });
+    expect((await sanitizeEngineResponse(json({ data: deferred, meta }), undefined, path, "GET")).status).toBe(200);
+
+    for (const reason_code of ["INHERITED_TARGET", "UNKNOWN_REASON"]) {
+      const invalidReason = structuredClone(valid) as Record<string, unknown>;
+      (((invalidReason.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0]).reason_code = reason_code;
+      expect((await sanitizeEngineResponse(json({ data: invalidReason, meta }), undefined, path, "GET")).status).toBe(500);
+    }
   });
 
   it("keeps management, plan, and cancellation facts as distinct strict reads", async () => {
@@ -538,7 +551,7 @@ describe("internal-paper Engine response boundary", () => {
 });
 
 function managementCycle(cycle: Record<string, unknown>) {
-  const targetAllocation = { instrument_id: instrumentId, target_weight: "0.2", exit: false, role: "core", reason_code: "SYNTHESIS_INCLUDE" };
+  const targetAllocation = { instrument_id: instrumentId, target_weight: "0.2", exit: false, role: "core", reason_code: "INCLUDE" };
   const proposalTarget = { ...targetAllocation, rank: 1, replaces_instrument_id: null, depends_on_instrument_ids: [] };
   const proposal = {
     strategy_decision_id: requestId,
