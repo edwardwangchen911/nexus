@@ -977,7 +977,7 @@ function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Reco
 
 function proposalReasonMatchesChoice(reason: unknown, action: unknown): boolean {
   const reasonsByAction: Record<string, readonly string[]> = {
-    defer: ["DEFER"],
+    defer: ["DEFER", "DEPENDENCY_NOT_APPLIED"],
     exit: ["EXIT"],
     reduce: ["REDUCE", "DEPENDENCY_NOT_APPLIED", "ATOMIC_STEP_REQUIRED"],
     maintain: ["MAINTAIN", "DEPENDENCY_NOT_APPLIED"],

@@ -344,6 +344,9 @@ describe("internal-paper Engine response boundary", () => {
     const deferredTarget = ((deferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0];
     Object.assign(deferredTarget, { target_weight: "0", role: "none", rank: null, reason_code: "DEFER" });
     expect((await sanitizeEngineResponse(json({ data: deferred, meta }), undefined, path, "GET")).status).toBe(200);
+    const dependencyDeferred = structuredClone(deferred) as Record<string, unknown>;
+    (((dependencyDeferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0]).reason_code = "DEPENDENCY_NOT_APPLIED";
+    expect((await sanitizeEngineResponse(json({ data: dependencyDeferred, meta }), undefined, path, "GET")).status).toBe(200);
 
     for (const reason_code of ["INHERITED_TARGET", "UNKNOWN_REASON"]) {
       const invalidReason = structuredClone(valid) as Record<string, unknown>;
