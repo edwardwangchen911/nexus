@@ -8,7 +8,8 @@
 
 - 主线已收口 Agent Paper 订单跨执行窗口的宿主幂等与恢复：新路径以
   `order_id + market_window_id` 识别一次推进，在 `paper_once` 的同一事务中绑定
-  精确窗口、执行请求和结果；同窗口的宿主时钟变化或重启只读回原结果，
+  精确窗口、执行请求和结果，并在读取旧 fixed-key 前取得与执行服务相同的
+  账户事务锁；同窗口的宿主时钟变化或重启只读回原结果，
   不重复成交、账本或执行 authority。旧 fixed-key 只在原请求 hash、成交、
   执行 authority 与当前/前置窗口唯一匹配时恢复；无法证明的旧无成交结果
   保持未知。Alpaca 允许 partial 后通过真实 `inspect → planner` 进入下一窗口；

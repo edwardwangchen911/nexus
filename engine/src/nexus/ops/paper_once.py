@@ -361,6 +361,14 @@ async def _advance_agent_market_window(
 ) -> dict[str, object]:
     assert request.agent_cycle_id is not None
     assert request.agent_market_window_id is not None
+    # Serialize legacy resolution and the v2 admission with the execution
+    # service's account scope. An older fixed-key transaction must commit or
+    # roll back before this path is allowed to conclude that no legacy result
+    # exists.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1818))"),
+        {"scope": f"internal-paper:{request.account_id}"},
+    )
     window = await session.scalar(
         select(AgentPaperMarketWindowRecord)
         .where(

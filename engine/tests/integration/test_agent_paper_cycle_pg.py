@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import nexus.ops.agent_paper_loop as agent_paper_loop
 import nexus.ops.agent_paper_once as agent_paper_once
+import nexus.ops.paper_once as paper_once
 import nexus.paper.agent_cycle_authority as agent_cycle_authority
 import nexus.paper.agent_version_evaluation as agent_version_evaluation
 import nexus.paper.agent_version_runner as agent_version_runner
@@ -5220,6 +5221,23 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             action_account_id=seed.account_id,
         )
         async with sessions.begin() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1818))"),
+                {"scope": f"internal-paper:{seed.account_id}"},
+            )
+            concurrent_v2 = asyncio.create_task(
+                agent_paper_loop.execute_agent_paper_loop_action(
+                    EngineSettings(database_url=migrated_database_url),
+                    account_id=seed.account_id,
+                    repo_root=ENGINE_ROOT.parent,
+                    action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                    snapshot=replace(
+                        first_advance_snapshot,
+                        now=evaluated_at + timedelta(seconds=30),
+                    ),
+                )
+            )
+            await asyncio.sleep(0)
             legacy_first_fill = await advance_internal_paper_order(
                 session,
                 order_id=completed.order_ids[0],
@@ -5227,6 +5245,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
                 idempotency_key=f"agent-paper-loop-advance:{completed.order_ids[0]}",
             )
         assert legacy_first_fill.action == "partially_filled"
+        assert await concurrent_v2 is None
         async with sessions() as session:
             before_replay_counts = (
                 await session.scalar(select(func.count(PaperFillRecord.id))),
@@ -5359,6 +5378,44 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             agent_paper_loop.choose_loop_action(second_advance_snapshot)
             == agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER
         )
+        async with sessions() as session:
+            before_rollback_counts = (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
+        real_advance = paper_once.advance_internal_paper_order
+
+        async def lose_before_commit(*args, **kwargs):
+            await real_advance(*args, **kwargs)
+            raise RuntimeError("injected-before-commit")
+
+        monkeypatch.setattr(paper_once, "advance_internal_paper_order", lose_before_commit)
+        with pytest.raises(paper_once.PaperOnceError, match="PAPER_ONCE_RESULT_UNKNOWN"):
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=second_advance_snapshot,
+            )
+        monkeypatch.setattr(paper_once, "advance_internal_paper_order", real_advance)
+        async with sessions() as session:
+            assert before_rollback_counts == (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
         assert (
             await agent_paper_loop.execute_agent_paper_loop_action(
                 EngineSettings(database_url=migrated_database_url),
