@@ -506,6 +506,28 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
         ({"cycle_status": "decision_recorded"}, A.RESUME),
         ({"cycle_status": "risk_evaluated"}, A.RESUME),
         ({"cycle_status": "partially_filled"}, A.STOP_RESULT_UNKNOWN),
+        (
+            {"cycle_status": "partially_filled", "has_open_order": True},
+            A.STOP_ORDER_UNAVAILABLE,
+        ),
+        (
+            {
+                "cycle_status": "partially_filled",
+                "has_open_order": True,
+                "additional_market_windows_allowed": True,
+                "market_window_end_at": NOW,
+            },
+            A.COLLECT_WINDOW,
+        ),
+        (
+            {
+                "cycle_status": "partially_filled",
+                "has_open_order": True,
+                "additional_market_windows_allowed": True,
+                "market_window_ready": True,
+            },
+            A.ADVANCE_ORDER,
+        ),
         ({"cycle_status": "awaiting_market", "has_open_order": True}, A.STOP_RESULT_UNKNOWN),
         (
             {
@@ -648,6 +670,38 @@ def test_policy_is_slot_based_restart_safe_and_fail_closed(
                 "cycle_status": "completed",
             },
             A.RESUME_EVALUATION,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "partially_filled",
+                "has_open_order": True,
+            },
+            A.STOP_ORDER_UNAVAILABLE,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "partially_filled",
+                "has_open_order": True,
+                "additional_market_windows_allowed": True,
+                "market_window_end_at": SLOT,
+            },
+            A.COLLECT_WINDOW,
+        ),
+        (
+            {
+                "evaluation_id": UUID(int=101),
+                "evaluation_slot_at": SLOT,
+                "cycle_status": "partially_filled",
+                "has_open_order": True,
+                "additional_market_windows_allowed": True,
+                "market_window_ready": True,
+                "action_account_id": UUID(int=103),
+            },
+            A.ADVANCE_ORDER,
         ),
         (
             {
@@ -4421,6 +4475,9 @@ def test_order_executor_surfaces_only_known_no_trade_stop(
     expected: loop.AgentPaperLoopAction | None,
 ) -> None:
     async def advance(_settings, request):
+        assert request.agent_cycle_id == UUID(int=2)
+        assert request.agent_market_window_id == UUID(int=4)
+        assert request.idempotency_key.endswith(f":{UUID(int=4)}")
         return {
             "status": "submitted",
             "action": paper_action,
@@ -4438,6 +4495,7 @@ def test_order_executor_surfaces_only_known_no_trade_stop(
                 cycle_id=UUID(int=2),
                 cycle_status="awaiting_market",
                 market_window_ready=True,
+                market_window_id=UUID(int=4),
                 has_open_order=True,
                 order_id=UUID(int=3),
             ),
@@ -4485,6 +4543,21 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
     )
     assert result.order_id == order_id
     assert result.market_window_start_at == window_end - timedelta(minutes=5)
+    schwab_partial = loop.snapshot_from_cycle_view(
+        now=NOW,
+        view=SimpleNamespace(
+            cycle_id=cycle_id,
+            status="partially_filled",
+            decision_slot_at=SLOT,
+            order_ids=(order_id,),
+        ),
+        research_job=None,
+        market_scope=None,
+        calendar=calendar,
+        additional_market_windows_allowed=False,
+    )
+    assert schwab_partial.market_window_start_at is None
+    assert loop.choose_loop_action(schwab_partial) == A.STOP_ORDER_UNAVAILABLE
     assert result.market_window_end_at == window_end + timedelta(seconds=60)
     assert result.has_open_order is True
     with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):

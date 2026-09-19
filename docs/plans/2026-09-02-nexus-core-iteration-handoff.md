@@ -6,6 +6,16 @@
 
 ## 2026-09-19 主线与组合分支集成交接
 
+- 主线已收口 Agent Paper 订单跨执行窗口的宿主幂等与恢复：新路径以
+  `order_id + market_window_id` 识别一次推进，在 `paper_once` 的同一事务中绑定
+  精确窗口、执行请求和结果；同窗口的宿主时钟变化或重启只读回原结果，
+  不重复成交、账本或执行 authority。旧 fixed-key 只在原请求 hash、成交、
+  执行 authority 与当前/前置窗口唯一匹配时恢复；无法证明的旧无成交结果
+  保持未知。Alpaca 允许 partial 后通过真实 `inspect → planner` 进入下一窗口；
+  Schwab 仍严格保持单窗口，partial 后在采集前确定性停止。评价通道的确认
+  使用实际 `action_account_id`；`cancelled/terminal/no_data/no_capacity` 也按原请求
+  精确区分和读回。聚焦验证为 211 个循环单测、67 个 PostgreSQL 用例、
+  Ruff 和 Mypy 通过；未放宽 `execution_locked=true`，未变更 Schwab 多窗口政策。
 - 主线 `2a7120d6` 已修复评价账户在首槽真实成交后无法进入下一槽的问题：初始化
   完整性只核对唯一原始注资、两条初始分录和初始锁事件，同时允许后续合法交易与
   回撤事件。本次增补恢复了 `transaction_type='funding'` 与初始锁事件

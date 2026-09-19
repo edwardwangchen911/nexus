@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from dotenv import dotenv_values
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -97,6 +97,7 @@ from nexus.persistence.models.data import (
 )
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
+    PAPER_EXECUTION_SOURCE_POLICY_ID,
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
@@ -183,6 +184,7 @@ class AgentPaperLoopSnapshot:
     evaluation_id: UUID | None = None
     evaluation_slot_at: datetime | None = None
     action_account_id: UUID | None = None
+    additional_market_windows_allowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -1359,14 +1361,13 @@ def snapshot_from_cycle_view(
     performance_due_at: datetime | None = None,
     trigger_attempt_slot_at: datetime | None = None,
     trigger_failure_code: str | None = None,
+    additional_market_windows_allowed: bool = False,
 ) -> AgentPaperLoopSnapshot:
     """Map the bounded read projection into the scheduler's fail-closed contract."""
     cycle_id = getattr(view, "cycle_id", None)
     cycle_status = getattr(view, "status", None)
     cycle_slot_at = getattr(view, "decision_slot_at", None)
     order_ids = getattr(view, "order_ids", ())
-    execution_market = getattr(view, "execution_market", None)
-    market_status = getattr(execution_market, "status", None)
     if (
         not isinstance(cycle_id, UUID)
         or not isinstance(cycle_status, str)
@@ -1377,12 +1378,18 @@ def snapshot_from_cycle_view(
     ):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     order_id = order_ids[0] if order_ids else None
-    has_open_order = cycle_status == "awaiting_market" and order_id is not None
-    market_window_ready = has_open_order and market_status == "qualified"
+    has_open_order = (
+        cycle_status in {"awaiting_market", "partially_filled"} and order_id is not None
+    )
+    market_window_ready = has_open_order and market_window is not None
     market_window_start_at = None
     market_window_end_at = None
     market_window_id = None
-    if has_open_order and not market_window_ready:
+    if (
+        has_open_order
+        and not market_window_ready
+        and not (cycle_status == "partially_filled" and not additional_market_windows_allowed)
+    ):
         scope_cycle_id = getattr(market_scope, "cycle_id", None)
         market_window_start_at = getattr(market_scope, "window_start", None)
         market_window_end_at = getattr(market_scope, "window_end", None)
@@ -1393,7 +1400,7 @@ def snapshot_from_cycle_view(
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         market_window_end_at += _MARKET_PUBLICATION_LAG
-    elif has_open_order:
+    elif market_window_ready:
         market_window_id = getattr(market_window, "id", None)
         market_cycle_id = getattr(market_window, "cycle_id", None)
         market_order_id = getattr(market_window, "order_id", None)
@@ -1427,6 +1434,7 @@ def snapshot_from_cycle_view(
         has_open_order=has_open_order,
         order_id=order_id,
         performance_due_at=performance_due_at,
+        additional_market_windows_allowed=additional_market_windows_allowed,
     )
 
 
@@ -1468,6 +1476,16 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
             "risk_evaluated",
         }:
             return AgentPaperLoopAction.RESUME_EVALUATION
+        if snapshot.cycle_status == "partially_filled" and snapshot.has_open_order:
+            if not snapshot.additional_market_windows_allowed:
+                return AgentPaperLoopAction.STOP_ORDER_UNAVAILABLE
+            if snapshot.market_window_ready:
+                return AgentPaperLoopAction.ADVANCE_ORDER
+            if snapshot.market_window_end_at is None:
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+            if snapshot.now < snapshot.market_window_end_at:
+                return AgentPaperLoopAction.WAIT_FOR_MARKET
+            return AgentPaperLoopAction.COLLECT_WINDOW
         if (
             snapshot.cycle_status == "awaiting_market"
             and snapshot.has_open_order
@@ -1490,13 +1508,20 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
     if (
-        snapshot.cycle_status == "awaiting_market"
+        snapshot.cycle_status == "partially_filled"
+        and snapshot.has_open_order
+        and not snapshot.additional_market_windows_allowed
+    ):
+        return AgentPaperLoopAction.STOP_ORDER_UNAVAILABLE
+
+    if (
+        snapshot.cycle_status in {"awaiting_market", "partially_filled"}
         and snapshot.has_open_order
         and snapshot.market_window_ready
     ):
         return AgentPaperLoopAction.ADVANCE_ORDER
 
-    if snapshot.cycle_status == "awaiting_market" and snapshot.has_open_order:
+    if snapshot.cycle_status in {"awaiting_market", "partially_filled"} and snapshot.has_open_order:
         if snapshot.market_window_end_at is None:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         if snapshot.now < snapshot.market_window_end_at:
@@ -1918,6 +1943,73 @@ async def confirm_agent_paper_shutdown(
                         or before_snapshot.market_window_id is None
                     ):
                         return False
+                    advance_account_id = before_snapshot.action_account_id or account_id
+                    advance_key = (
+                        "agent-paper-loop-advance-v2:"
+                        f"{before_snapshot.order_id}:{before_snapshot.market_window_id}"
+                    )
+                    coordinator = await session.scalar(
+                        select(IdempotencyRecord).where(
+                            IdempotencyRecord.actor_id == f"paper-account:{advance_account_id}",
+                            IdempotencyRecord.route == "agent-paper-order-window-advance",
+                            IdempotencyRecord.idempotency_key == advance_key,
+                        )
+                    )
+                    if coordinator is not None:
+                        payload = coordinator.response_payload
+                        raw_paper_request_id = payload.get("paper_request_id")
+                        if (
+                            coordinator.schema_version == "agent_paper_window_advance_v1"
+                            and payload.get("state") == "completed"
+                            and payload.get("cycle_id") == str(before_snapshot.cycle_id)
+                            and payload.get("market_window_id")
+                            == str(before_snapshot.market_window_id)
+                            and payload.get("order_id") == str(before_snapshot.order_id)
+                            and isinstance(raw_paper_request_id, str)
+                            and isinstance(payload.get("paper_request_hash"), str)
+                            and isinstance(payload.get("paper_result_hash"), str)
+                            and isinstance(payload.get("status"), str)
+                        ):
+                            try:
+                                paper_request_id = UUID(raw_paper_request_id)
+                            except ValueError:
+                                paper_request_id = None
+                            paper_request = (
+                                None
+                                if paper_request_id is None
+                                else await session.get(
+                                    PaperRequestIdempotencyRecord,
+                                    paper_request_id,
+                                )
+                            )
+                            coordinator_action = payload.get("action")
+                            if (
+                                paper_request is not None
+                                and paper_request.account_id == advance_account_id
+                                and paper_request.order_id == before_snapshot.order_id
+                                and paper_request.idempotency_key == advance_key
+                                and paper_request.request_hash == payload["paper_request_hash"]
+                                and paper_request.result_hash == payload["paper_result_hash"]
+                            ):
+                                if coordinator_action in {"no_data", "no_capacity"}:
+                                    return (
+                                        action_result == AgentPaperLoopAction.STOP_ORDER_UNAVAILABLE
+                                        and paper_request.result_event_seq is None
+                                    )
+                                if coordinator_action in {"cancelled", "terminal"}:
+                                    terminal_status = await session.scalar(
+                                        select(PaperOrderEventRecord.to_status).where(
+                                            PaperOrderEventRecord.account_id == advance_account_id,
+                                            PaperOrderEventRecord.order_id
+                                            == before_snapshot.order_id,
+                                            PaperOrderEventRecord.event_seq
+                                            == paper_request.result_event_seq,
+                                        )
+                                    )
+                                    return (
+                                        action_result is None
+                                        and terminal_status == payload["status"]
+                                    )
                     persisted = await session.scalar(
                         select(PaperRequestIdempotencyRecord.id)
                         .join(
@@ -1945,18 +2037,21 @@ async def confirm_agent_paper_shutdown(
                             AgentPaperMarketWindowRecord.id == before_snapshot.market_window_id,
                         )
                         .where(
-                            PaperRequestIdempotencyRecord.account_id == account_id,
+                            PaperRequestIdempotencyRecord.account_id == advance_account_id,
                             PaperRequestIdempotencyRecord.order_id == before_snapshot.order_id,
                             PaperRequestIdempotencyRecord.operation == "advance",
-                            PaperRequestIdempotencyRecord.idempotency_key
-                            == f"agent-paper-loop-advance:{before_snapshot.order_id}",
+                            or_(
+                                PaperRequestIdempotencyRecord.idempotency_key
+                                == f"agent-paper-loop-advance:{before_snapshot.order_id}",
+                                PaperRequestIdempotencyRecord.idempotency_key == advance_key,
+                            ),
                             PaperOrderEventRecord.to_status.in_(("partially_filled", "filled")),
                             AgentPaperMarketWindowRecord.cycle_id == before_snapshot.cycle_id,
                             AgentPaperMarketWindowRecord.order_id == before_snapshot.order_id,
                             AgentPaperMarketWindowRecord.purpose == "paper_fill",
                             PaperExecutionWindowAuthorityRecord.order_id
                             == before_snapshot.order_id,
-                            PaperExecutionWindowAuthorityRecord.account_id == account_id,
+                            PaperExecutionWindowAuthorityRecord.account_id == advance_account_id,
                             PaperExecutionWindowAuthorityRecord.window_start_at
                             == AgentPaperMarketWindowRecord.window_start_at,
                             PaperExecutionWindowAuthorityRecord.window_end_at
@@ -2481,6 +2576,8 @@ async def execute_agent_paper_loop_action(
         )
         return None
     if action == AgentPaperLoopAction.ADVANCE_ORDER and snapshot.order_id is not None:
+        if snapshot.cycle_id is None or snapshot.market_window_id is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         result = await run_paper_once(
             settings,
             PaperAdvanceRequest(
@@ -2488,7 +2585,11 @@ async def execute_agent_paper_loop_action(
                 account_id=snapshot.action_account_id or account_id,
                 order_id=snapshot.order_id,
                 evaluated_at=snapshot.now,
-                idempotency_key=f"agent-paper-loop-advance:{snapshot.order_id}",
+                idempotency_key=(
+                    f"agent-paper-loop-advance-v2:{snapshot.order_id}:{snapshot.market_window_id}"
+                ),
+                agent_cycle_id=snapshot.cycle_id,
+                agent_market_window_id=snapshot.market_window_id,
             ),
         )
         if result.get("action") in {"no_data", "no_capacity"}:
@@ -2781,6 +2882,68 @@ async def inspect_agent_version_evaluation_loop(
                     continue
                 if len(view.order_ids) != 1:
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                order_id = view.order_ids[0]
+                allows_more_windows = (
+                    cycle.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+                )
+                unused_windows = tuple(
+                    await session.scalars(
+                        select(AgentPaperMarketWindowRecord)
+                        .outerjoin(
+                            PaperExecutionWindowAuthorityRecord,
+                            and_(
+                                PaperExecutionWindowAuthorityRecord.order_id
+                                == AgentPaperMarketWindowRecord.order_id,
+                                PaperExecutionWindowAuthorityRecord.window_start_at
+                                == AgentPaperMarketWindowRecord.window_start_at,
+                                PaperExecutionWindowAuthorityRecord.window_end_at
+                                == AgentPaperMarketWindowRecord.window_end_at,
+                                PaperExecutionWindowAuthorityRecord.source_authority_id
+                                == AgentPaperMarketWindowRecord.source_authority_id,
+                            ),
+                        )
+                        .where(
+                            AgentPaperMarketWindowRecord.cycle_id == cycle.id,
+                            AgentPaperMarketWindowRecord.order_id == order_id,
+                            AgentPaperMarketWindowRecord.purpose == "paper_fill",
+                            PaperExecutionWindowAuthorityRecord.id.is_(None),
+                        )
+                        .order_by(AgentPaperMarketWindowRecord.window_start_at)
+                        .limit(2)
+                    )
+                )
+                if len(unused_windows) > 1:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                if unused_windows:
+                    window = unused_windows[0]
+                    return AgentPaperLoopSnapshot(
+                        now=now,
+                        calendar_authority_id=evaluation.calendar_authority_id,
+                        evaluation_id=evaluation.id,
+                        evaluation_slot_at=slot,
+                        cycle_id=cycle.id,
+                        cycle_status="partially_filled",
+                        market_window_ready=True,
+                        market_window_start_at=window.window_start_at,
+                        market_window_end_at=window.window_end_at,
+                        market_window_id=window.id,
+                        has_open_order=True,
+                        order_id=order_id,
+                        action_account_id=cycle.account_id,
+                        additional_market_windows_allowed=allows_more_windows,
+                    )
+                if not allows_more_windows:
+                    return AgentPaperLoopSnapshot(
+                        now=now,
+                        calendar_authority_id=evaluation.calendar_authority_id,
+                        evaluation_id=evaluation.id,
+                        evaluation_slot_at=slot,
+                        cycle_id=cycle.id,
+                        cycle_status="partially_filled",
+                        has_open_order=True,
+                        order_id=order_id,
+                        action_account_id=cycle.account_id,
+                    )
                 market_scope = await resolve_agent_paper_market_scope(
                     session,
                     cycle_id=cycle.id,
@@ -2793,12 +2956,13 @@ async def inspect_agent_version_evaluation_loop(
                     evaluation_id=evaluation.id,
                     evaluation_slot_at=slot,
                     cycle_id=cycle.id,
-                    cycle_status="awaiting_market",
+                    cycle_status="partially_filled",
                     has_open_order=True,
-                    order_id=view.order_ids[0],
+                    order_id=order_id,
                     market_window_start_at=market_scope.window_start,
                     market_window_end_at=market_scope.window_end + _MARKET_PUBLICATION_LAG,
                     action_account_id=cycle.account_id,
+                    additional_market_windows_allowed=True,
                 )
             for cycle, view in views:
                 if view.status != "awaiting_market":
@@ -3016,6 +3180,10 @@ async def inspect_agent_paper_loop(
                     trigger_failure_code=trigger_failure_code,
                 )
 
+            cycle_record = await session.get(AgentPaperCycleRecord, view.cycle_id)
+            if cycle_record is None or cycle_record.account_id != account_id:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+
             events: tuple[object, ...] = ()
             jobs: tuple[object, ...] = ()
             if view.status == "researching":
@@ -3049,19 +3217,7 @@ async def inspect_agent_paper_loop(
             research_job = resolve_cycle_research_job(events=events, jobs=jobs)
             market_scope = None
             market_window = None
-            if (
-                view.status == "awaiting_market"
-                and len(view.order_ids) == 1
-                and view.execution_market.status != "qualified"
-            ):
-                market_scope = await resolve_agent_paper_market_scope(
-                    session, cycle_id=view.cycle_id
-                )
-            elif (
-                view.status == "awaiting_market"
-                and len(view.order_ids) == 1
-                and view.execution_market.status == "qualified"
-            ):
+            if view.status in {"awaiting_market", "partially_filled"} and len(view.order_ids) == 1:
                 unused_windows = tuple(
                     await session.scalars(
                         select(AgentPaperMarketWindowRecord)
@@ -3088,9 +3244,17 @@ async def inspect_agent_paper_loop(
                         .limit(2)
                     )
                 )
-                if len(unused_windows) != 1:
+                if len(unused_windows) > 1:
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-                market_window = unused_windows[0]
+                if unused_windows:
+                    market_window = unused_windows[0]
+                elif (
+                    view.status == "awaiting_market"
+                    or cycle_record.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+                ):
+                    market_scope = await resolve_agent_paper_market_scope(
+                        session, cycle_id=view.cycle_id
+                    )
             return snapshot_from_cycle_view(
                 now=now,
                 view=view,
@@ -3101,6 +3265,9 @@ async def inspect_agent_paper_loop(
                 performance_due_at=performance_due_at,
                 trigger_attempt_slot_at=trigger_attempt_slot_at,
                 trigger_failure_code=trigger_failure_code,
+                additional_market_windows_allowed=(
+                    cycle_record.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
+                ),
             )
     finally:
         await engine.dispose()
