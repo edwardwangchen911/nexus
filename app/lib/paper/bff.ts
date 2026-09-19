@@ -63,6 +63,13 @@ export function paperCycleId(request: Request): string {
   return value;
 }
 
+export function paperManagementCycleId(request: Request): string {
+  const match = /^\/api\/v1\/paper\/management\/cycles\/([^/]+)$/.exec(new URL(request.url).pathname);
+  const value = match?.[1];
+  if (!value || !validateUuid(value)) throw invalid("The Agent paper management cycle is invalid.");
+  return value;
+}
+
 export function paperPlanId(request: Request): string {
   const match = /^\/api\/v1\/paper\/plans\/([^/]+)$/.exec(new URL(request.url).pathname);
   const value = match?.[1];

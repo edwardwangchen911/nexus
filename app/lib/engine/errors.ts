@@ -323,7 +323,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       || !Array.isArray(data.orders)
       || data.orders.length > 50
       || data.orders.some((order) => !paperOrderValid(order))
-      || !cycleOrderIdsMatch(data.cycle.order_ids, data.orders)) return INVALID_DATA;
+      || !cycleOrderIdsMatch(data.cycle.order_ids, data.orders)
+      || !managementCycleSemanticsValid(data)) return INVALID_DATA;
     return data;
   }
   if (pathname === "/internal/v1/paper/management/portfolio") {
@@ -374,6 +375,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       && isPlain(data)
       && isPlain(data.order)
       && sameUuid(data.order.order_id, paperCancelResult[1])
+      && paperCancelResultSemanticsValid(data)
       ? data
       : INVALID_DATA;
   }
@@ -383,6 +385,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       && matchesRuntimeSchema(data, paperPlanRuntimeSchema)
       && isPlain(data)
       && sameUuid(data.batch_id, paperPlan[1])
+      && paperPlanSemanticsValid(data)
       ? data
       : INVALID_DATA;
   }
@@ -841,6 +844,198 @@ function cycleOrderIdsMatch(orderIds: unknown, orders: unknown[]): boolean {
     && new Set(expected).size === expected.length
     && new Set(actual).size === actual.length
     && expected.every((value) => actual.includes(value));
+}
+
+function managementCycleSemanticsValid(value: Record<string, unknown>): boolean {
+  const research = value.security_research;
+  if (!Array.isArray(research)) return false;
+  const candidate = plainOrNull(value.candidate_batch);
+  const synthesis = plainOrNull(value.synthesis);
+  const proposal = plainOrNull(value.proposal);
+  const target = plainOrNull(value.active_target);
+  const activation = plainOrNull(value.activation_result);
+  const blocker = plainOrNull(value.blocker);
+  const blockingPlan = plainOrNull(value.blocking_plan);
+  const plan = plainOrNull(value.plan_summary);
+  if (candidate === undefined || synthesis === undefined || proposal === undefined
+    || target === undefined || activation === undefined || blocker === undefined
+    || blockingPlan === undefined || plan === undefined) return false;
+
+  if (blocker?.code === "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED") {
+    return blocker.source_stage === "provider" && blocker.category === "provider_capacity"
+      && blocker.proposal_rejection_code === null
+      && candidate === null && research.length === 0 && synthesis === null && proposal === null
+      && activation === null && blockingPlan === null && plan === null;
+  }
+  if (candidate === null) {
+    return research.length === 0 && synthesis === null && proposal === null && activation === null
+      && blocker === null && blockingPlan === null && plan === null;
+  }
+  const candidateIds = uuidArray(candidate.candidate_instrument_ids);
+  const researchIds = research.map((item) => isPlain(item) && typeof item.instrument_id === "string"
+    ? item.instrument_id.toLowerCase()
+    : null);
+  if (candidateIds === null || researchIds.some((item) => item === null)
+    || new Set(researchIds).size !== researchIds.length
+    || researchIds.some((item) => !candidateIds.includes(item as string))
+    || research.some((item) => !isPlain(item) || !orderedTimes(candidate.as_of, item.as_of))) return false;
+  if (synthesis === null) {
+    return proposal === null && activation === null && blocker === null && blockingPlan === null && plan === null;
+  }
+  if (!sameUuid(synthesis.candidate_batch_id, candidate.candidate_batch_id)
+    || researchIds.length !== candidateIds.length
+    || !candidateIds.every((id) => researchIds.includes(id))
+    || research.some((item) => !orderedTimes((item as Record<string, unknown>).as_of, synthesis.as_of))
+    || !synthesisChoicesValid(synthesis, candidateIds)) return false;
+
+  if (blocker?.code === "POLICY_UNCONFIRMED") {
+    return synthesis.status === "completed" && proposal === null && target === null
+      && activation === null && blockingPlan === null && plan === null
+      && blocker.source_stage === "policy" && blocker.category === "policy_unconfirmed"
+      && orderedTimes(synthesis.as_of, blocker.as_of);
+  }
+  if (blocker?.code === "PORTFOLIO_PROPOSAL_UNAVAILABLE") {
+    return proposal === null && target === null && activation === null && blockingPlan === null && plan === null
+      && blocker.source_stage === "proposal" && blocker.category === "proposal_rejected"
+      && ["EXIT_TURNOVER_CONFLICT", "REDUCTION_TURNOVER_CONFLICT", "PORTFOLIO_DEPENDENCY_CONFLICT"].includes(String(blocker.proposal_rejection_code))
+      && orderedTimes(synthesis.as_of, blocker.as_of);
+  }
+  if (proposal === null) {
+    return activation === null && blocker === null && blockingPlan === null && plan === null;
+  }
+  if (synthesis.status !== "completed"
+    || !sameUuid(proposal.synthesis_output_id, synthesis.synthesis_output_id)
+    || !orderedTimes(synthesis.as_of, proposal.as_of)
+    || !proposalChoicesValid(proposal, synthesis)) return false;
+  if (activation === null) {
+    return blocker === null && blockingPlan === null && plan === null;
+  }
+  if (!sameUuid(activation.strategy_decision_id, proposal.strategy_decision_id)
+    || !orderedTimes(proposal.as_of, activation.as_of)) return false;
+  if (activation.result_code === "TARGET_ACTIVATION_BLOCKED") {
+    return activation.target_version_id === null && activation.batch_id === null
+      && blocker?.code === "TARGET_ACTIVATION_BLOCKED" && blocker.source_stage === "activation"
+      && blocker.category === "resource_occupied" && plan === null
+      && orderedTimes(activation.as_of, blocker.as_of)
+      && (blockingPlan === null || planSummaryCoherent(blockingPlan));
+  }
+  if (blocker !== null || blockingPlan !== null || target === null
+    || !sameUuid(target.strategy_decision_id, proposal.strategy_decision_id)
+    || !sameUuid(activation.target_version_id, target.target_version_id)
+    || !orderedTimes(proposal.as_of, target.as_of, activation.as_of)) return false;
+  if (activation.result_code === "NO_ORDER_REQUIRED") {
+    return activation.batch_id === null && plan === null;
+  }
+  return activation.result_code === "PLAN_CREATED" && plan !== null
+    && sameUuid(activation.batch_id, plan.batch_id)
+    && sameUuid(plan.target_version_id, target.target_version_id)
+    && sameUuid(plan.strategy_decision_id, proposal.strategy_decision_id)
+    && plan.decision_hash === proposal.decision_hash
+    && planSummaryCoherent(plan)
+    && orderedTimes(activation.as_of, plan.plan_created_at, plan.reconciliation_as_of);
+}
+
+function synthesisChoicesValid(synthesis: Record<string, unknown>, candidateIds: string[]): boolean {
+  if (!Array.isArray(synthesis.choices)) return false;
+  const ids = synthesis.choices.map((choice) => isPlain(choice) && typeof choice.instrument_id === "string"
+    ? choice.instrument_id.toLowerCase()
+    : null);
+  return ids.every((id): id is string => id !== null && candidateIds.includes(id))
+    && new Set(ids).size === ids.length;
+}
+
+function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Record<string, unknown>): boolean {
+  if (!Array.isArray(proposal.targets) || !Array.isArray(synthesis.choices)) return false;
+  const targets = proposal.targets.filter(isPlain);
+  if (targets.length !== proposal.targets.length) return false;
+  return synthesis.choices.every((rawChoice) => {
+    if (!isPlain(rawChoice) || rawChoice.action === "defer") return isPlain(rawChoice);
+    const target = targets.find((item) => sameUuid(item.instrument_id, rawChoice.instrument_id));
+    return target !== undefined
+      && target.role === rawChoice.role
+      && target.rank === rawChoice.rank
+      && nullableUuidEqual(target.replaces_instrument_id, rawChoice.replaces_instrument_id)
+      && uuidArraysEqual(target.depends_on_instrument_ids, rawChoice.depends_on_instrument_ids);
+  });
+}
+
+function planSummaryCoherent(plan: Record<string, unknown>): boolean {
+  return orderedTimes(plan.plan_created_at, plan.reconciliation_as_of);
+}
+
+function paperPlanSemanticsValid(value: Record<string, unknown>): boolean {
+  const target = plainOrNull(value.target);
+  const proposal = plainOrNull(value.proposal);
+  const plan = plainOrNull(value.plan);
+  const actual = plainOrNull(value.actual);
+  if (target === undefined || proposal === null || proposal === undefined
+    || plan === null || plan === undefined || actual === null || actual === undefined) return false;
+  if ((value.association_state === "target_associated") !== (target !== null)) return false;
+  if (!orderedTimes(proposal.as_of, target?.as_of, plan.plan_created_at, plan.reconciliation_as_of)) return false;
+  if (!Array.isArray(plan.risk) || !Array.isArray(plan.items)) return false;
+  const riskByOrder = new Map<string, Record<string, unknown>>();
+  for (const row of plan.risk) {
+    if (!isPlain(row) || typeof row.order_id !== "string" || riskByOrder.has(row.order_id.toLowerCase())) return false;
+    riskByOrder.set(row.order_id.toLowerCase(), row);
+  }
+  if (riskByOrder.size !== plan.items.length) return false;
+  for (const rawItem of plan.items) {
+    if (!isPlain(rawItem) || typeof rawItem.order_id !== "string") return false;
+    const risk = riskByOrder.get(rawItem.order_id.toLowerCase());
+    if (risk === undefined || !sameUuid(risk.instrument_id, rawItem.instrument_id)
+      || !Array.isArray(rawItem.confirmed_fills)
+      || rawItem.confirmed_fills.some((fill) => !isPlain(fill) || !orderedTimes(fill.as_of, rawItem.order_as_of))
+      || !orderedTimes(rawItem.order_as_of, plan.reconciliation_as_of)
+      || !orderedTimes(rawItem.reservation_as_of, plan.reconciliation_as_of)) return false;
+  }
+  if (actual.data_state === "UNKNOWN") {
+    return actual.as_of === null && actual.available_cash === null && actual.reserved_cash === null
+      && actual.nav === null && actual.positions === null;
+  }
+  return actual.data_state === "READY" && Array.isArray(actual.positions)
+    && orderedTimes(plan.plan_created_at, actual.as_of)
+    && actual.as_of === plan.reconciliation_as_of;
+}
+
+function paperCancelResultSemanticsValid(value: Record<string, unknown>): boolean {
+  const order = plainOrNull(value.order);
+  const reservation = plainOrNull(value.reservation);
+  if (order === null || order === undefined || reservation === undefined) return false;
+  if (value.reservation_released !== (reservation === null ? null : reservation.released)) return false;
+  if (value.status !== "COMMITTED") {
+    return value.result_event_seq === null && value.committed_at === null;
+  }
+  return order.status === "cancelled"
+    && value.result_event_seq === order.current_event_seq
+    && value.committed_at === order.as_of
+    && (reservation === null || reservation.released === true)
+    && orderedTimes(reservation?.as_of, value.committed_at);
+}
+
+function plainOrNull(value: unknown): Record<string, unknown> | null | undefined {
+  return value === null ? null : isPlain(value) ? value : undefined;
+}
+
+function orderedTimes(...values: unknown[]): boolean {
+  const times = values.filter((value) => value !== null && value !== undefined).map(contextMicroseconds);
+  return times.every((value): value is bigint => value !== null)
+    && times.every((value, index) => index === 0 || value >= (times[index - 1] as bigint));
+}
+
+function uuidArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && validateUuid(item))) return null;
+  const normalized = value.map((item) => String(item).toLowerCase());
+  return new Set(normalized).size === normalized.length ? normalized : null;
+}
+
+function uuidArraysEqual(left: unknown, right: unknown): boolean {
+  const leftIds = uuidArray(left); const rightIds = uuidArray(right);
+  return leftIds !== null && rightIds !== null && leftIds.length === rightIds.length
+    && leftIds.every((id, index) => id === rightIds[index]);
+}
+
+function nullableUuidEqual(left: unknown, right: unknown): boolean {
+  return left === null && right === null || typeof left === "string" && typeof right === "string" && sameUuid(left, right);
 }
 
 function agentPaperSessionSummaryValid(value: unknown, cycles: unknown[]): boolean {

@@ -30,13 +30,13 @@ describe("internal-paper BFF routes", () => {
     expect(rejected.status).toBe(400);
   });
 
-  it("forwards one validated cycle detail without query parameters", async () => {
+  it("keeps the legacy cycle detail route on the legacy Engine contract", async () => {
     const { GET } = await import("../../../app/api/v1/paper/cycles/[cycleId]/route");
     await GET(new Request(`https://nexus.test/api/v1/paper/cycles/${cycleId}`));
 
     expect(engineFetch).toHaveBeenCalledWith({
-      template: "/internal/v1/paper/management/cycles/{cycle_id}",
-      path: `/internal/v1/paper/management/cycles/${cycleId}`,
+      template: "/internal/v1/paper/cycles/{cycle_id}",
+      path: `/internal/v1/paper/cycles/${cycleId}`,
     }, { method: "GET", actor });
 
     engineFetch.mockClear();
@@ -45,6 +45,23 @@ describe("internal-paper BFF routes", () => {
     expect(engineFetch).not.toHaveBeenCalled();
 
     const queried = await GET(new Request(`https://nexus.test/api/v1/paper/cycles/${cycleId}?account_id=secret`));
+    expect(queried.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
+  it("forwards the additive management cycle route without query parameters", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/management/cycles/[cycleId]/route");
+    await GET(new Request(`https://nexus.test/api/v1/paper/management/cycles/${cycleId}`));
+
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/paper/management/cycles/{cycle_id}",
+      path: `/internal/v1/paper/management/cycles/${cycleId}`,
+    }, { method: "GET", actor });
+
+    engineFetch.mockClear();
+    const malformed = await GET(new Request("https://nexus.test/api/v1/paper/management/cycles/not-a-uuid"));
+    expect(malformed.status).toBe(400);
+    const queried = await GET(new Request(`https://nexus.test/api/v1/paper/management/cycles/${cycleId}?account_id=secret`));
     expect(queried.status).toBe(400);
     expect(engineFetch).not.toHaveBeenCalled();
   });

@@ -23,7 +23,7 @@ export default function DecisionDetailPage(): React.ReactElement {
     if (!cycleId) { detailRef.current = null; setDetail(null); setState("empty"); return; }
     if (!detailRef.current) setState("loading");
     try {
-      const response = await fetch(`/api/v1/paper/cycles/${encodeURIComponent(cycleId)}`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+      const response = await fetch(`/api/v1/paper/management/cycles/${encodeURIComponent(cycleId)}`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
       if (response.status === 401 || response.status === 403) { detailRef.current = null; setDetail(null); setState("forbidden"); return; }
       if (response.status === 404) { detailRef.current = null; setDetail(null); setState("empty"); return; }
       if (!response.ok) { setState(detailRef.current ? "stale" : response.status === 409 || response.status === 422 ? "partial" : "error"); return; }

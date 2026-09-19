@@ -143,7 +143,7 @@ describe("decision records", () => {
     await waitFor(() => expect(screen.getByRole("region", { name: "决策详情页面" })).toHaveAttribute("data-state", "ready"));
     expect(calls).toEqual([
       { path: "/api/v1/paper/cycles?limit=20", method: "GET" },
-      { path: `/api/v1/paper/cycles/${agentPaperCycle.cycle_id}`, method: "GET" },
+      { path: `/api/v1/paper/management/cycles/${agentPaperCycle.cycle_id}`, method: "GET" },
     ]);
   });
 
