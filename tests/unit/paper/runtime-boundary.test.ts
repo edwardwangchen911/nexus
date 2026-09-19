@@ -10,6 +10,8 @@ const planId = "0198f7a0-1111-7777-8111-111111111115";
 const targetId = "0198f7a0-1111-7777-8111-111111111116";
 const synthesisId = "0198f7a0-1111-7777-8111-111111111117";
 const candidateBatchId = "0198f7a0-1111-7777-8111-111111111118";
+const secondInstrumentId = "0198f7a0-1111-7777-8111-111111111140";
+const thirdInstrumentId = "0198f7a0-1111-7777-8111-111111111141";
 const meta = { request_id: requestId, schema_version: "1", as_of: "2026-08-26T20:00:00Z" };
 const actor = { userId: "allowed-user", requestId };
 const cycleSummary = {
@@ -103,6 +105,8 @@ describe("internal-paper Engine response boundary", () => {
       proposal_rejection_code: "PORTFOLIO_DEPENDENCY_CONFLICT",
       as_of: "2026-08-26T21:00:03Z",
     };
+    expect((await sanitizeEngineResponse(json({ data: proposalBlocked, meta }), undefined, managementPath, "GET")).status).toBe(200);
+    proposalBlocked.active_target = management.active_target;
     expect((await sanitizeEngineResponse(json({ data: proposalBlocked, meta }), undefined, managementPath, "GET")).status).toBe(200);
     const unknownRejection = structuredClone(proposalBlocked) as Record<string, unknown>;
     (unknownRejection.blocker as Record<string, unknown>).proposal_rejection_code = "UNREVIEWED_REJECTION";
@@ -220,7 +224,6 @@ describe("internal-paper Engine response boundary", () => {
         targets[0].depends_on_instrument_ids = [requestId];
       },
       (value) => { (value.activation_result as Record<string, unknown>).strategy_decision_id = orderId; },
-      (value) => { (value.active_target as Record<string, unknown>).target_version_id = orderId; },
       (value) => { (value.plan_summary as Record<string, unknown>).decision_hash = "f".repeat(64); },
       (value) => { (value.plan_summary as Record<string, unknown>).plan_created_at = "2026-08-26T21:00:07Z"; },
       (value) => {
@@ -241,12 +244,19 @@ describe("internal-paper Engine response boundary", () => {
     policyUnconfirmed.plan_summary = null;
     policyUnconfirmed.blocker = { code: "POLICY_UNCONFIRMED", source_stage: "policy", category: "policy_unconfirmed", proposal_rejection_code: null, as_of: "2026-08-26T21:00:03Z" };
     expect((await sanitizeEngineResponse(json({ data: policyUnconfirmed, meta }), undefined, path, "GET")).status).toBe(200);
+    policyUnconfirmed.active_target = valid.active_target;
+    expect((await sanitizeEngineResponse(json({ data: policyUnconfirmed, meta }), undefined, path, "GET")).status).toBe(200);
 
     const legacy = structuredClone(valid) as Record<string, unknown>;
     legacy.candidate_batch = null; legacy.security_research = []; legacy.synthesis = null;
     legacy.proposal = null; legacy.active_target = null; legacy.activation_result = null;
     legacy.blocker = null; legacy.blocking_plan = null; legacy.plan_summary = null;
     expect((await sanitizeEngineResponse(json({ data: legacy, meta }), undefined, path, "GET")).status).toBe(200);
+
+    const historicalTarget = structuredClone(valid) as Record<string, unknown>;
+    (historicalTarget.active_target as Record<string, unknown>).target_version_id = requestId;
+    (historicalTarget.active_target as Record<string, unknown>).strategy_decision_id = orderId;
+    expect((await sanitizeEngineResponse(json({ data: historicalTarget, meta }), undefined, path, "GET")).status).toBe(200);
 
     const noOrder = structuredClone(valid) as Record<string, unknown>;
     noOrder.activation_result = { ...(noOrder.activation_result as Record<string, unknown>), result_code: "NO_ORDER_REQUIRED", batch_id: null };
@@ -265,6 +275,31 @@ describe("internal-paper Engine response boundary", () => {
     occupied.blocking_plan = occupied.plan_summary;
     occupied.plan_summary = null;
     expect((await sanitizeEngineResponse(json({ data: occupied, meta }), undefined, path, "GET")).status).toBe(200);
+
+    const bounded = structuredClone(valid) as Record<string, unknown>;
+    const boundedBatch = bounded.candidate_batch as Record<string, unknown>;
+    boundedBatch.candidate_instrument_ids = [instrumentId, secondInstrumentId, thirdInstrumentId];
+    const firstResearch = (bounded.security_research as Array<Record<string, unknown>>)[0];
+    bounded.security_research = [
+      firstResearch,
+      { ...firstResearch, instrument_id: secondInstrumentId, research_run_id: requestId, research_output_id: orderId },
+      { ...firstResearch, instrument_id: thirdInstrumentId, research_run_id: targetId, research_output_id: planId },
+    ];
+    const firstChoice = ((bounded.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[0];
+    (bounded.synthesis as Record<string, unknown>).choices = [
+      firstChoice,
+      { ...firstChoice, instrument_id: secondInstrumentId, rank: 2 },
+      { ...firstChoice, instrument_id: thirdInstrumentId, rank: 3 },
+    ];
+    const firstProposalTarget = ((bounded.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0];
+    (bounded.proposal as Record<string, unknown>).targets = [
+      firstProposalTarget,
+      { ...firstProposalTarget, instrument_id: secondInstrumentId, rank: 2 },
+    ];
+    expect((await sanitizeEngineResponse(json({ data: bounded, meta }), undefined, path, "GET")).status).toBe(200);
+    const forgedTarget = structuredClone(bounded) as Record<string, unknown>;
+    (((forgedTarget.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[1]).instrument_id = requestId;
+    expect((await sanitizeEngineResponse(json({ data: forgedTarget, meta }), undefined, path, "GET")).status).toBe(500);
   });
 
   it("keeps management, plan, and cancellation facts as distinct strict reads", async () => {
@@ -286,6 +321,19 @@ describe("internal-paper Engine response boundary", () => {
     const leakedSummary = structuredClone(summary) as Record<string, unknown>;
     leakedSummary.available_cash = "3500";
     expect((await sanitizeEngineResponse(json({ data: leakedSummary, meta }), undefined, summaryPath, "GET")).status).toBe(500);
+    const laterProposal = structuredClone(summary);
+    laterProposal.latest_proposal.strategy_decision_id = orderId;
+    laterProposal.latest_proposal.decision_hash = "f".repeat(64);
+    expect((await sanitizeEngineResponse(json({ data: laterProposal, meta }), undefined, summaryPath, "GET")).status).toBe(200);
+    for (const drift of [
+      { ...structuredClone(summary), current_target: { ...summary.current_target, as_of: "2026-08-26T22:00:01Z" } },
+      { ...structuredClone(summary), occupying_plan: { ...summary.occupying_plan, occupation_state: "released" } },
+      { ...structuredClone(summary), occupying_plan: { ...summary.occupying_plan, reconciliation_as_of: "2026-08-26T22:00:01Z" } },
+      { ...structuredClone(summary), latest_proposal: { ...summary.latest_proposal, as_of: "2026-08-26T22:00:01Z" } },
+      { ...structuredClone(summary), occupying_plan: { ...summary.occupying_plan, target_version_id: orderId } },
+    ]) {
+      expect((await sanitizeEngineResponse(json({ data: drift, meta }), undefined, summaryPath, "GET")).status).toBe(500);
+    }
 
     const plan = paperPlan();
     const planPath = `/internal/v1/paper/plans/${planId}`;
@@ -301,6 +349,11 @@ describe("internal-paper Engine response boundary", () => {
       { ...structuredClone(plan), actual: { ...plan.actual, as_of: "2026-08-26T21:00:07Z" } },
       { ...structuredClone(plan), plan: { ...plan.plan, items: [{ ...plan.plan.items[0], order_id: requestId }] } },
     ]) {
+      expect((await sanitizeEngineResponse(json({ data: drift, meta }), undefined, planPath, "GET")).status).toBe(500);
+    }
+    for (const field of ["available_cash", "reserved_cash", "nav", "positions"] as const) {
+      const drift = structuredClone(plan);
+      drift.actual[field] = null as never;
       expect((await sanitizeEngineResponse(json({ data: drift, meta }), undefined, planPath, "GET")).status).toBe(500);
     }
 

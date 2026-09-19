@@ -331,6 +331,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     return requestMethod?.toUpperCase() === "GET"
       && matchesRuntimeSchema(data, paperManagementSummaryRuntimeSchema)
       && isPlain(data)
+      && paperManagementSummarySemanticsValid(data)
       ? data
       : INVALID_DATA;
   }
@@ -889,13 +890,13 @@ function managementCycleSemanticsValid(value: Record<string, unknown>): boolean 
     || !synthesisChoicesValid(synthesis, candidateIds)) return false;
 
   if (blocker?.code === "POLICY_UNCONFIRMED") {
-    return synthesis.status === "completed" && proposal === null && target === null
+    return synthesis.status === "completed" && proposal === null
       && activation === null && blockingPlan === null && plan === null
       && blocker.source_stage === "policy" && blocker.category === "policy_unconfirmed"
       && orderedTimes(synthesis.as_of, blocker.as_of);
   }
   if (blocker?.code === "PORTFOLIO_PROPOSAL_UNAVAILABLE") {
-    return proposal === null && target === null && activation === null && blockingPlan === null && plan === null
+    return proposal === null && activation === null && blockingPlan === null && plan === null
       && blocker.source_stage === "proposal" && blocker.category === "proposal_rejected"
       && ["EXIT_TURNOVER_CONFLICT", "REDUCTION_TURNOVER_CONFLICT", "PORTFOLIO_DEPENDENCY_CONFLICT"].includes(String(blocker.proposal_rejection_code))
       && orderedTimes(synthesis.as_of, blocker.as_of);
@@ -919,16 +920,18 @@ function managementCycleSemanticsValid(value: Record<string, unknown>): boolean 
       && orderedTimes(activation.as_of, blocker.as_of)
       && (blockingPlan === null || planSummaryCoherent(blockingPlan));
   }
-  if (blocker !== null || blockingPlan !== null || target === null
-    || !sameUuid(target.strategy_decision_id, proposal.strategy_decision_id)
-    || !sameUuid(activation.target_version_id, target.target_version_id)
-    || !orderedTimes(proposal.as_of, target.as_of, activation.as_of)) return false;
+  if (blocker !== null || blockingPlan !== null
+    || !orderedTimes(proposal.as_of, activation.as_of)) return false;
   if (activation.result_code === "NO_ORDER_REQUIRED") {
-    return activation.batch_id === null && plan === null;
+    return typeof activation.target_version_id === "string"
+      && validateUuid(activation.target_version_id)
+      && activation.batch_id === null && plan === null;
   }
   return activation.result_code === "PLAN_CREATED" && plan !== null
+    && typeof activation.target_version_id === "string"
+    && validateUuid(activation.target_version_id)
     && sameUuid(activation.batch_id, plan.batch_id)
-    && sameUuid(plan.target_version_id, target.target_version_id)
+    && sameUuid(plan.target_version_id, activation.target_version_id)
     && sameUuid(plan.strategy_decision_id, proposal.strategy_decision_id)
     && plan.decision_hash === proposal.decision_hash
     && planSummaryCoherent(plan)
@@ -947,16 +950,37 @@ function synthesisChoicesValid(synthesis: Record<string, unknown>, candidateIds:
 function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Record<string, unknown>): boolean {
   if (!Array.isArray(proposal.targets) || !Array.isArray(synthesis.choices)) return false;
   const targets = proposal.targets.filter(isPlain);
-  if (targets.length !== proposal.targets.length) return false;
-  return synthesis.choices.every((rawChoice) => {
-    if (!isPlain(rawChoice) || rawChoice.action === "defer") return isPlain(rawChoice);
-    const target = targets.find((item) => sameUuid(item.instrument_id, rawChoice.instrument_id));
-    return target !== undefined
-      && target.role === rawChoice.role
-      && target.rank === rawChoice.rank
-      && nullableUuidEqual(target.replaces_instrument_id, rawChoice.replaces_instrument_id)
-      && uuidArraysEqual(target.depends_on_instrument_ids, rawChoice.depends_on_instrument_ids);
+  const choices = synthesis.choices;
+  const targetIds = targets.map((target) => typeof target.instrument_id === "string"
+    ? target.instrument_id.toLowerCase()
+    : null);
+  if (targets.length !== proposal.targets.length
+    || targetIds.some((id) => id === null)
+    || new Set(targetIds).size !== targetIds.length) return false;
+  return targets.every((target) => {
+    const choice = choices.find((item) => isPlain(item)
+      && item.action !== "defer"
+      && sameUuid(item.instrument_id, target.instrument_id));
+    return isPlain(choice)
+      && target.role === choice.role
+      && target.rank === choice.rank
+      && nullableUuidEqual(target.replaces_instrument_id, choice.replaces_instrument_id)
+      && uuidArraysEqual(target.depends_on_instrument_ids, choice.depends_on_instrument_ids);
   });
+}
+
+function paperManagementSummarySemanticsValid(value: Record<string, unknown>): boolean {
+  const target = plainOrNull(value.current_target);
+  const plan = plainOrNull(value.occupying_plan);
+  const proposal = plainOrNull(value.latest_proposal);
+  if (target === undefined || plan === undefined || proposal === undefined
+    || !orderedTimes(target?.as_of, value.read_as_of)
+    || !orderedTimes(plan?.plan_created_at, plan?.reconciliation_as_of, value.read_as_of)
+    || !orderedTimes(proposal?.as_of, value.read_as_of)) return false;
+  if (plan !== null
+    && !["occupied", "unknown"].includes(String(plan.occupation_state))) return false;
+  return plan === null || target === null || plan.target_version_id === null
+    || sameUuid(plan.target_version_id, target.target_version_id);
 }
 
 function planSummaryCoherent(plan: Record<string, unknown>): boolean {
@@ -992,7 +1016,11 @@ function paperPlanSemanticsValid(value: Record<string, unknown>): boolean {
     return actual.as_of === null && actual.available_cash === null && actual.reserved_cash === null
       && actual.nav === null && actual.positions === null;
   }
-  return actual.data_state === "READY" && Array.isArray(actual.positions)
+  return actual.data_state === "READY"
+    && actual.available_cash !== null
+    && actual.reserved_cash !== null
+    && actual.nav !== null
+    && Array.isArray(actual.positions)
     && orderedTimes(plan.plan_created_at, actual.as_of)
     && actual.as_of === plan.reconciliation_as_of;
 }
