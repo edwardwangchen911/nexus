@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import nexus.ops.agent_paper_loop as agent_paper_loop
 import nexus.ops.agent_paper_once as agent_paper_once
+import nexus.ops.paper_once as paper_once
 import nexus.paper.agent_cycle_authority as agent_cycle_authority
 import nexus.paper.agent_version_evaluation as agent_version_evaluation
 import nexus.paper.agent_version_runner as agent_version_runner
@@ -73,6 +74,7 @@ from nexus.paper.agent_version_runner import (
     advance_agent_version_slot,
     resume_agent_version_slot,
 )
+from nexus.paper.errors import PaperExecutionError
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
@@ -105,9 +107,12 @@ from nexus.persistence.models.paper import (
     PaperFillRecord,
     PaperLedgerEntryRecord,
     PaperLedgerTransactionRecord,
+    PaperOrderEventRecord,
     PaperOrderRecord,
     PaperPositionAdjustmentEventRecord,
+    PaperRequestIdempotencyRecord,
     PaperReservationEventRecord,
+    PaperReservationRecord,
     RiskNoChangeEvaluationRecord,
     RiskQueryAuthorityRecord,
     StrategyDecisionRecord,
@@ -5828,12 +5833,43 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             )
         assert filled.action == "filled"
         assert fill_replay == filled
+        async with sessions() as session:
+            legacy_counts = (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+            )
+        assert (
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=advance_snapshot,
+            )
+            is None
+        )
+        async with sessions() as session:
+            assert legacy_counts == (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+            )
         assert await agent_paper_loop.confirm_agent_paper_shutdown(
             EngineSettings(database_url=migrated_database_url),
             account_id=seed.account_id,
             expected_calendar_authority_id=inspection_calendar_id,
             action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
             before_snapshot=advance_snapshot,
+            action_result=None,
+        )
+        assert await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=UUID(int=404),
+            expected_calendar_authority_id=inspection_calendar_id,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=replace(
+                advance_snapshot,
+                action_account_id=seed.account_id,
+            ),
             action_result=None,
         )
         assert not await agent_paper_loop.confirm_agent_paper_shutdown(
@@ -6102,6 +6138,108 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             assert replayed == completed.model_copy(update={"replayed": True})
 
         evaluated_at = window_start + timedelta(minutes=25, seconds=2)
+        second_window_start = window_start + timedelta(minutes=5)
+        second_evaluated_at = evaluated_at + timedelta(minutes=5)
+        early_second_market = await collect_agent_paper_window(
+            sessions,
+            cycle_id=completed.cycle_id,
+            instrument_id=INSTRUMENTS[0][0],
+            window_start=second_window_start,
+            provider=_IexProvider(),
+            object_store=_ObjectStore(),
+            evaluated_at=second_evaluated_at,
+        )
+
+        async def execution_fact_counts() -> tuple[int, ...]:
+            async with sessions() as session:
+                return (
+                    int(
+                        await session.scalar(
+                            select(func.count(PaperOrderEventRecord.event_seq)).where(
+                                PaperOrderEventRecord.order_id == completed.order_ids[0]
+                            )
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count(PaperReservationEventRecord.event_seq))
+                            .join(
+                                PaperReservationRecord,
+                                PaperReservationRecord.id
+                                == PaperReservationEventRecord.reservation_id,
+                            )
+                            .where(PaperReservationRecord.order_id == completed.order_ids[0])
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count(PaperRequestIdempotencyRecord.id)).where(
+                                PaperRequestIdempotencyRecord.order_id == completed.order_ids[0]
+                            )
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count(PaperFillRecord.id)).where(
+                                PaperFillRecord.order_id == completed.order_ids[0]
+                            )
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count(PaperExecutionWindowAuthorityRecord.id)).where(
+                                PaperExecutionWindowAuthorityRecord.order_id
+                                == completed.order_ids[0]
+                            )
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count(IdempotencyRecord.id)).where(
+                                IdempotencyRecord.route == "agent-paper-order-window-advance"
+                            )
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count(PaperLedgerTransactionRecord.id)).where(
+                                PaperLedgerTransactionRecord.order_id == completed.order_ids[0]
+                            )
+                        )
+                        or 0
+                    ),
+                )
+
+        before_wrong_window = await execution_fact_counts()
+        wrong_second_snapshot = agent_paper_loop.AgentPaperLoopSnapshot(
+            now=second_evaluated_at,
+            cycle_id=completed.cycle_id,
+            cycle_status="awaiting_market",
+            market_window_ready=True,
+            market_window_start_at=early_second_market.window_start,
+            market_window_end_at=early_second_market.window_end,
+            market_window_id=early_second_market.authority_id,
+            has_open_order=True,
+            order_id=completed.order_ids[0],
+            action_account_id=seed.account_id,
+        )
+        for wrong_time in (second_evaluated_at, market_close):
+            with pytest.raises(paper_once.PaperOnceError, match="PAPER_EXECUTION_INVALID"):
+                await agent_paper_loop.execute_agent_paper_loop_action(
+                    EngineSettings(database_url=migrated_database_url),
+                    account_id=seed.account_id,
+                    repo_root=ENGINE_ROOT.parent,
+                    action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                    snapshot=replace(wrong_second_snapshot, now=wrong_time),
+                )
+            assert await execution_fact_counts() == before_wrong_window
+
         market = await collect_agent_paper_window(
             sessions,
             cycle_id=completed.cycle_id,
@@ -6112,15 +6250,95 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             evaluated_at=evaluated_at,
         )
         assert market.purpose == "paper_fill"
+        first_advance_snapshot = agent_paper_loop.AgentPaperLoopSnapshot(
+            now=evaluated_at,
+            cycle_id=completed.cycle_id,
+            cycle_status="awaiting_market",
+            market_window_ready=True,
+            market_window_start_at=market.window_start,
+            market_window_end_at=market.window_end,
+            market_window_id=market.authority_id,
+            has_open_order=True,
+            order_id=completed.order_ids[0],
+            action_account_id=seed.account_id,
+        )
         async with sessions.begin() as session:
-            advanced = await advance_internal_paper_order(
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1818))"),
+                {"scope": f"internal-paper:{seed.account_id}"},
+            )
+            concurrent_v2 = asyncio.create_task(
+                agent_paper_loop.execute_agent_paper_loop_action(
+                    EngineSettings(database_url=migrated_database_url),
+                    account_id=seed.account_id,
+                    repo_root=ENGINE_ROOT.parent,
+                    action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                    snapshot=replace(
+                        first_advance_snapshot,
+                        now=evaluated_at + timedelta(seconds=30),
+                    ),
+                )
+            )
+            blocked_on_legacy = False
+            async with sessions() as observer:
+                for _ in range(100):
+                    blocked_on_legacy = bool(
+                        await observer.scalar(
+                            text(
+                                "SELECT EXISTS ("
+                                "SELECT 1 FROM pg_locks "
+                                "WHERE locktype='advisory' AND NOT granted"
+                                ")"
+                            )
+                        )
+                    )
+                    if blocked_on_legacy:
+                        break
+                    await asyncio.sleep(0)
+            assert blocked_on_legacy
+            legacy_first_fill = await advance_internal_paper_order(
                 session,
                 order_id=completed.order_ids[0],
                 evaluated_at=evaluated_at,
-                idempotency_key="agent-paper-first-fill",
+                idempotency_key=f"agent-paper-loop-advance:{completed.order_ids[0]}",
             )
-        assert advanced.action == "partially_filled"
+        assert legacy_first_fill.action == "partially_filled"
+        assert await concurrent_v2 is None
         async with sessions() as session:
+            before_replay_counts = (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
+        assert (
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=replace(
+                    first_advance_snapshot,
+                    now=evaluated_at + timedelta(seconds=30),
+                ),
+            )
+            is None
+        )
+        async with sessions() as session:
+            after_replay_counts = (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
             historical_service = PaperReadService(session, evaluated_at - timedelta(seconds=1))
             historical = await historical_service.latest_agent_cycle()
             historical_page = await historical_service.agent_cycles(
@@ -6128,6 +6346,9 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
                 limit=1,
             )
             projected = await PaperReadService(session, evaluated_at).latest_agent_cycle()
+        assert before_replay_counts == after_replay_counts
+        assert before_replay_counts[:2] == (1, 1)
+        assert before_replay_counts[3] == 0
         assert historical is not None
         assert historical.status == "awaiting_market"
         assert historical_page.version_observation is not None
@@ -6138,7 +6359,6 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert projected is not None
         assert projected.status == "partially_filled"
         assert projected.result_code == "PAPER_ORDERS_PARTIALLY_FILLED"
-        second_window_start = window_start + timedelta(minutes=5)
         async with sessions() as session:
             second_scope = await resolve_agent_paper_market_scope(
                 session,
@@ -6146,8 +6366,47 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             )
         assert second_scope.window_start == second_window_start
         assert second_scope.window_end == second_window_start + timedelta(minutes=5)
-        second_evaluated_at = evaluated_at + timedelta(minutes=5)
-        await collect_agent_paper_window(
+
+        async def fixed_service_calendar(
+            _session: AsyncSession,
+            *,
+            now: datetime,
+            expected_calendar_authority_id: UUID,
+        ) -> SimpleNamespace:
+            assert expected_calendar_authority_id == CALENDAR_ID
+            return SimpleNamespace(
+                calendar_authority_id=CALENDAR_ID,
+                decision_window_start_at=now - timedelta(hours=1),
+                market_close_at=market_close,
+                next_decision_window_start_at=market_close + timedelta(hours=15),
+            )
+
+        monkeypatch.setattr(
+            agent_paper_loop,
+            "load_agent_paper_service_calendar_authority",
+            fixed_service_calendar,
+        )
+        monkeypatch.setattr(
+            agent_paper_loop,
+            "func",
+            SimpleNamespace(
+                clock_timestamp=lambda: literal(evaluated_at + timedelta(minutes=5)),
+                max=lambda value: func.max(value).filter(literal(False)),
+            ),
+        )
+        waiting_for_second_window = await inspect_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+        )
+        assert waiting_for_second_window.cycle_status == "partially_filled"
+        assert waiting_for_second_window.market_window_ready is True
+        assert waiting_for_second_window.market_window_start_at == second_window_start
+        assert (
+            agent_paper_loop.choose_loop_action(waiting_for_second_window)
+            == agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER
+        )
+        second_market = await collect_agent_paper_window(
             sessions,
             cycle_id=completed.cycle_id,
             instrument_id=INSTRUMENTS[0][0],
@@ -6156,15 +6415,111 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             object_store=_ObjectStore(),
             evaluated_at=second_evaluated_at,
         )
-        async with sessions.begin() as session:
-            final_fill = await advance_internal_paper_order(
-                session,
-                order_id=completed.order_ids[0],
-                evaluated_at=second_evaluated_at,
-                idempotency_key="agent-paper-final-fill",
-            )
-        assert final_fill.action == "filled"
+        monkeypatch.setattr(
+            agent_paper_loop,
+            "func",
+            SimpleNamespace(
+                clock_timestamp=lambda: literal(second_evaluated_at),
+                max=lambda value: func.max(value).filter(literal(False)),
+            ),
+        )
+        second_advance_snapshot = await inspect_agent_paper_loop(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+        )
+        assert second_advance_snapshot.market_window_id == second_market.authority_id
+        assert second_market.replayed is True
+        assert second_advance_snapshot.market_window_ready is True
+        assert (
+            agent_paper_loop.choose_loop_action(second_advance_snapshot)
+            == agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER
+        )
         async with sessions() as session:
+            before_rollback_counts = (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
+        real_advance = paper_once.advance_internal_paper_order
+
+        async def lose_before_commit(*args, **kwargs):
+            await real_advance(*args, **kwargs)
+            raise RuntimeError("injected-before-commit")
+
+        monkeypatch.setattr(paper_once, "advance_internal_paper_order", lose_before_commit)
+        with pytest.raises(paper_once.PaperOnceError, match="PAPER_ONCE_RESULT_UNKNOWN"):
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=second_advance_snapshot,
+            )
+        monkeypatch.setattr(paper_once, "advance_internal_paper_order", real_advance)
+        async with sessions() as session:
+            assert before_rollback_counts == (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
+        assert (
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=second_advance_snapshot,
+            )
+            is None
+        )
+        async with sessions() as session:
+            second_window_counts = (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
+        assert (
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=replace(
+                    second_advance_snapshot,
+                    now=second_evaluated_at + timedelta(seconds=30),
+                ),
+            )
+            is None
+        )
+        async with sessions() as session:
+            assert second_window_counts == (
+                await session.scalar(select(func.count(PaperFillRecord.id))),
+                await session.scalar(select(func.count(PaperExecutionWindowAuthorityRecord.id))),
+                await session.scalar(select(func.count(PaperLedgerTransactionRecord.id))),
+                await session.scalar(
+                    select(func.count(IdempotencyRecord.id)).where(
+                        IdempotencyRecord.route == "agent-paper-order-window-advance"
+                    )
+                ),
+            )
+            assert second_window_counts[:2] == (2, 2)
+            assert second_window_counts[3] == 1
             read_service = PaperReadService(session, second_evaluated_at)
             projected = await read_service.latest_agent_cycle()
             cycle_page = await read_service.agent_cycles(
@@ -6193,6 +6548,206 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         assert cycle_page.version_observation.reason_codes == (
             "VERSION_PERFORMANCE_ATTRIBUTION_UNAVAILABLE",
             "VERSION_CHALLENGER_UNAVAILABLE",
+        )
+
+        third_window_start = second_window_start + timedelta(minutes=5)
+        third_evaluated_at = second_evaluated_at + timedelta(minutes=5)
+        before_late_legacy = await execution_fact_counts()
+        async with sessions.begin() as session:
+            exact_legacy_replay = await advance_internal_paper_order(
+                session,
+                order_id=completed.order_ids[0],
+                evaluated_at=evaluated_at,
+                idempotency_key=f"agent-paper-loop-advance:{completed.order_ids[0]}",
+            )
+        assert exact_legacy_replay.action == "partially_filled"
+        assert await execution_fact_counts() == before_late_legacy
+
+        with pytest.raises(PaperExecutionError, match="PAPER_EXECUTION_INVALID"):
+            async with sessions.begin() as session:
+                await advance_internal_paper_order(
+                    session,
+                    order_id=completed.order_ids[0],
+                    evaluated_at=third_evaluated_at,
+                    idempotency_key="late-windowless-direct-advance",
+                )
+        assert await execution_fact_counts() == before_late_legacy
+        with pytest.raises(paper_once.PaperOnceError, match="PAPER_EXECUTION_INVALID"):
+            await paper_once.run_once(
+                EngineSettings(database_url=migrated_database_url),
+                paper_once.PaperAdvanceRequest(
+                    action="advance",
+                    account_id=seed.account_id,
+                    order_id=completed.order_ids[0],
+                    evaluated_at=third_evaluated_at,
+                    idempotency_key="late-windowless-paper-once-advance",
+                ),
+            )
+        assert await execution_fact_counts() == before_late_legacy
+
+        third_market = await collect_agent_paper_window(
+            sessions,
+            cycle_id=completed.cycle_id,
+            instrument_id=INSTRUMENTS[0][0],
+            window_start=third_window_start,
+            provider=_IexProvider(),
+            object_store=_ObjectStore(),
+            evaluated_at=third_evaluated_at,
+        )
+        terminal_filled_snapshot = replace(
+            second_advance_snapshot,
+            now=third_evaluated_at,
+            cycle_status="completed",
+            market_window_start_at=third_market.window_start,
+            market_window_end_at=third_market.window_end,
+            market_window_id=third_market.authority_id,
+            has_open_order=False,
+        )
+        before_terminal = await execution_fact_counts()
+        assert (
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=terminal_filled_snapshot,
+            )
+            is None
+        )
+        after_terminal = await execution_fact_counts()
+        assert after_terminal[:2] == before_terminal[:2]
+        assert after_terminal[3:5] == before_terminal[3:5]
+        assert after_terminal[6] == before_terminal[6]
+        assert after_terminal[2] == before_terminal[2] + 1
+        assert after_terminal[5] == before_terminal[5] + 1
+        assert (
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=replace(
+                    terminal_filled_snapshot,
+                    now=third_evaluated_at + timedelta(seconds=30),
+                ),
+            )
+            is None
+        )
+        assert await execution_fact_counts() == after_terminal
+        assert await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=terminal_filled_snapshot,
+            action_result=None,
+        )
+
+        assert await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=second_advance_snapshot,
+            action_result=None,
+        )
+        assert not await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=replace(second_advance_snapshot, action_account_id=uuid4()),
+            action_result=None,
+        )
+
+        coordinator_key = (
+            f"agent-paper-loop-advance-v2:{completed.order_ids[0]}:"
+            f"{second_market.authority_id}"
+        )
+        async with sessions.begin() as session:
+            coordinator = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.route == "agent-paper-order-window-advance",
+                    IdempotencyRecord.idempotency_key == coordinator_key,
+                )
+            )
+            assert coordinator is not None
+            original_request = await session.get(
+                PaperRequestIdempotencyRecord,
+                UUID(coordinator.response_payload["paper_request_id"]),
+            )
+            assert original_request is not None
+            duplicate_request = PaperRequestIdempotencyRecord(
+                account_id=original_request.account_id,
+                order_id=original_request.order_id,
+                operation=original_request.operation,
+                idempotency_key="duplicate-agent-window-result-proof",
+                request_hash=original_request.request_hash,
+                result_event_seq=original_request.result_event_seq,
+                result_hash=original_request.result_hash,
+            )
+            session.add(duplicate_request)
+            await session.flush()
+            duplicate_request_id = duplicate_request.id
+        with pytest.raises(paper_once.PaperOnceError, match="PAPER_ONCE_RESULT_UNKNOWN"):
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=second_advance_snapshot,
+            )
+        assert not await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=second_advance_snapshot,
+            action_result=None,
+        )
+
+        async with sessions.begin() as session:
+            duplicate_request = await session.get(
+                PaperRequestIdempotencyRecord,
+                duplicate_request_id,
+            )
+            assert duplicate_request is not None
+            await session.execute(
+                text("ALTER TABLE paper_request_idempotency DISABLE TRIGGER USER")
+            )
+            try:
+                await session.delete(duplicate_request)
+                await session.flush()
+            finally:
+                await session.execute(
+                    text("ALTER TABLE paper_request_idempotency ENABLE TRIGGER USER")
+                )
+            await session.execute(
+                text(
+                    "UPDATE idempotency_records "
+                    "SET response_payload = jsonb_set("
+                    "response_payload, '{result,result_hash}', "
+                    "to_jsonb(CAST(:bad_hash AS text))"
+                    ") WHERE route = 'agent-paper-order-window-advance' "
+                    "AND idempotency_key = :idempotency_key"
+                ),
+                {"bad_hash": "0" * 64, "idempotency_key": coordinator_key},
+            )
+        with pytest.raises(paper_once.PaperOnceError, match="PAPER_ONCE_RESULT_UNKNOWN"):
+            await agent_paper_loop.execute_agent_paper_loop_action(
+                EngineSettings(database_url=migrated_database_url),
+                account_id=seed.account_id,
+                repo_root=ENGINE_ROOT.parent,
+                action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+                snapshot=second_advance_snapshot,
+            )
+        assert not await agent_paper_loop.confirm_agent_paper_shutdown(
+            EngineSettings(database_url=migrated_database_url),
+            account_id=seed.account_id,
+            expected_calendar_authority_id=CALENDAR_ID,
+            action=agent_paper_loop.AgentPaperLoopAction.ADVANCE_ORDER,
+            before_snapshot=second_advance_snapshot,
+            action_result=None,
         )
     finally:
         await engine.dispose()

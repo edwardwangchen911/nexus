@@ -8,6 +8,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import httpx
+import nexus.jobs.daily_local as daily_local
 import nexus.ops.agent_paper_once as agent_paper_once
 import nexus.paper.agent_version_evaluation as agent_version_evaluation
 import nexus.paper.agent_version_runner as agent_version_runner
@@ -496,6 +497,45 @@ async def test_registration_creates_equal_cash_accounts_and_no_external_facts(
             )
             assert authority_replay.evaluation_id == registration.evaluation_id
             assert authority_replay.replayed is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_daily_performance_targets_wait_for_evaluation_ledger_initialization(
+    migrated_database_url: str,
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="test-agent-version-evaluation",
+                idempotency_key="register-performance-target-v1",
+                now=NOW,
+            )
+            evaluation_accounts = {
+                registration.incumbent_account_id,
+                registration.challenger_account_id,
+            }
+
+            before = set(await daily_local._performance_target_ids(session))
+            assert evaluation_accounts.isdisjoint(before)
+
+            evaluation = await session.get(
+                AgentVersionEvaluationRecord,
+                registration.evaluation_id,
+            )
+            assert evaluation is not None
+            assert await agent_version_runner._ensure_equal_internal_accounts(
+                session,
+                evaluation=evaluation,
+            )
+
+            after = set(await daily_local._performance_target_ids(session))
+            assert evaluation_accounts <= after
     finally:
         await engine.dispose()
 

@@ -107,6 +107,22 @@ def test_agent_paper_research_is_owned_only_by_explicit_worker() -> None:
     assert explicit.resolve(JobType.AGENT_PAPER_RESEARCH.value) is not None
 
 
+def test_codex_research_worker_reserves_time_for_three_bounded_sdk_turns() -> None:
+    registry = _agent_registry(
+        EngineSettings(agent_runtime_mode="codex_sdk"),
+        responses_client=None,
+        tools=None,
+        include_agent_paper=True,
+    )
+
+    standard = registry.resolve(JobType.AGENT_RESEARCH.value)
+    paper = registry.resolve(JobType.AGENT_PAPER_RESEARCH.value)
+
+    assert standard is not None and standard.timeout_seconds == 135
+    assert paper is not None and paper.timeout_seconds == 135
+    assert standard.max_attempts == paper.max_attempts == 1
+
+
 @pytest.mark.asyncio
 async def test_unscoped_agent_run_once_cannot_claim_agent_paper_research(
     monkeypatch: pytest.MonkeyPatch,

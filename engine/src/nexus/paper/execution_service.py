@@ -211,7 +211,21 @@ def _digest(schema: str, payload: Mapping[str, object]) -> str:
     ).hexdigest()
 
 
-def _request_hash(*, order_id: UUID, evaluated_at: datetime) -> str:
+def paper_advance_request_hash(
+    *,
+    order_id: UUID,
+    evaluated_at: datetime,
+    expected_agent_market_window_id: UUID | None = None,
+) -> str:
+    if expected_agent_market_window_id is not None:
+        return _digest(
+            "paper_advance_request_sha256_v2",
+            {
+                "order_id": str(order_id),
+                "evaluated_at": _time(evaluated_at),
+                "expected_agent_market_window_id": str(expected_agent_market_window_id),
+            },
+        )
     return _digest(
         "paper_advance_request_sha256_v1",
         {"order_id": str(order_id), "evaluated_at": _time(evaluated_at)},
@@ -259,6 +273,93 @@ def _result(
         fill_id=fill_id,
         result_hash=_digest("paper_advance_result_sha256_v1", payload),
     )
+
+
+def canonical_paper_advance_result(
+    *,
+    order_id: UUID,
+    account_id: UUID,
+    action: Literal[
+        "not_due",
+        "no_data",
+        "no_capacity",
+        "partially_filled",
+        "filled",
+        "cancelled",
+        "terminal",
+    ],
+    status: InternalOrderStatus,
+    filled_quantity: Decimal,
+    total_quantity: Decimal,
+    result_event_seq: int | None,
+    fill_id: UUID | None,
+) -> PaperAdvanceResult:
+    """Build the canonical persisted result for exact read-only verification."""
+    return _result(
+        order_id=order_id,
+        account_id=account_id,
+        action=action,
+        status=status,
+        filled_quantity=filled_quantity,
+        total_quantity=total_quantity,
+        result_event_seq=result_event_seq,
+        fill_id=fill_id,
+    )
+
+
+async def _validate_expected_agent_market_window(
+    session: AsyncSession,
+    *,
+    order: PaperOrderRecord,
+    source_policy_id: UUID,
+    calendar: ExecutionCalendarSession,
+    model: ExecutionModel,
+    evaluated_at: datetime,
+    expected_agent_market_window_id: UUID,
+) -> None:
+    window = await session.get(
+        AgentPaperMarketWindowRecord,
+        expected_agent_market_window_id,
+    )
+    if (
+        window is None
+        or window.order_id != order.id
+        or window.instrument_id != order.instrument_id
+        or window.purpose != "paper_fill"
+        or window.evaluated_at > evaluated_at
+        or window.data_available_at > evaluated_at
+    ):
+        raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+    prior_window = await session.scalar(
+        select(PaperExecutionWindowAuthorityRecord)
+        .where(PaperExecutionWindowAuthorityRecord.order_id == order.id)
+        .order_by(PaperExecutionWindowAuthorityRecord.window_seq.desc())
+        .limit(1)
+    )
+    if source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
+        if prior_window is not None or window.source != "schwab":
+            raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+        return
+    if source_policy_id != PAPER_EXECUTION_SOURCE_POLICY_ID or window.source != "alpaca":
+        raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+    window_seq = 1 if prior_window is None else prior_window.window_seq + 1
+    expected_start = calendar.market_open_at + timedelta(
+        minutes=(window_seq - 1) * model.window_minutes
+    )
+    if (
+        window.window_start_at != expected_start
+        or window.window_end_at != expected_start + timedelta(minutes=model.window_minutes)
+        or (
+            prior_window is not None
+            and (
+                window.window_start_at != prior_window.window_end_at
+                or window.source != prior_window.source
+                or window.feed != prior_window.feed
+                or window.delivery_mode != prior_window.delivery_mode
+            )
+        )
+    ):
+        raise PaperExecutionError("PAPER_EXECUTION_INVALID")
 
 
 def _cancel_result(
@@ -579,6 +680,7 @@ async def _qualified_window(
     window_seq: int,
     evaluated_at: datetime,
     prior_window: PaperExecutionWindowAuthorityRecord | None,
+    expected_agent_market_window_id: UUID | None,
 ) -> tuple[QualifiedExecutionWindow, PriceBarSetAuthority] | None:
     agent_paper = source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
     schwab_agent_paper = source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
@@ -592,12 +694,19 @@ async def _qualified_window(
         PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     }:
         return None
+    if expected_agent_market_window_id is not None and not (agent_paper or schwab_agent_paper):
+        raise PaperExecutionError("PAPER_EXECUTION_INVALID")
     schwab_binding: AgentPaperMarketWindowRecord | None = None
     if schwab_agent_paper:
         if prior_window is not None or window_seq != 1:
             return None
         schwab_binding = await session.scalar(
             select(AgentPaperMarketWindowRecord).where(
+                *(
+                    (AgentPaperMarketWindowRecord.id == expected_agent_market_window_id,)
+                    if expected_agent_market_window_id is not None
+                    else ()
+                ),
                 AgentPaperMarketWindowRecord.order_id == order.id,
                 AgentPaperMarketWindowRecord.instrument_id == order.instrument_id,
                 AgentPaperMarketWindowRecord.purpose == "paper_fill",
@@ -644,10 +753,12 @@ async def _qualified_window(
             AgentPaperMarketWindowRecord.window_end_at == window_end,
             AgentPaperMarketWindowRecord.evaluated_at <= evaluated_at,
             AgentPaperMarketWindowRecord.price_series_manifest_id == PriceSeriesManifest.id,
-            PriceSeriesManifest.source == (
-                "schwab" if schwab_agent_paper else "alpaca"
-            ),
+            PriceSeriesManifest.source == ("schwab" if schwab_agent_paper else "alpaca"),
         )
+        if expected_agent_market_window_id is not None:
+            statement = statement.where(
+                AgentPaperMarketWindowRecord.id == expected_agent_market_window_id
+            )
     else:
         statement = statement.where(PriceSeriesManifest.source.in_(("alpaca", "fixture")))
     if prior_window is not None:
@@ -755,9 +866,7 @@ async def _qualified_window(
             market_open_at=schwab_binding.window_start_at,
             market_close_at=calendar.market_close_at,
         )
-        qualification_model = model.model_copy(
-            update={"first_evaluation_offset_minutes": 0}
-        )
+        qualification_model = model.model_copy(update={"first_evaluation_offset_minutes": 0})
     try:
         window = qualify_execution_window(
             model=qualification_model,
@@ -1034,12 +1143,8 @@ async def _terminal_notification_snapshot(
         status = "cancelled"
     snapshot = build_terminal_execution_snapshot(
         order=order,
-        requested_quantity=(
-            order.quantity if evaluation is None else evaluation.desired_quantity
-        ),
-        approved_quantity=(
-            order.quantity if evaluation is None else evaluation.approved_quantity
-        ),
+        requested_quantity=(order.quantity if evaluation is None else evaluation.desired_quantity),
+        approved_quantity=(order.quantity if evaluation is None else evaluation.approved_quantity),
         fills=tuple(
             PaperNotificationFill(
                 quantity=fill.quantity,
@@ -1272,6 +1377,7 @@ async def advance_internal_paper_order(
     evaluated_at: datetime,
     idempotency_key: str,
     hooks: PaperExecutionHooks | None = None,
+    expected_agent_market_window_id: UUID | None = None,
 ) -> PaperAdvanceResult:
     """Advance one submitted internal-paper order using frozen database facts."""
     evaluated_at = _utc(evaluated_at, field="evaluated_at")
@@ -1350,7 +1456,11 @@ async def advance_internal_paper_order(
         raise PaperExecutionError("PAPER_EXECUTION_AUTHORITY_INCOMPLETE")
 
     execution_source_policy_id = decision.execution_source_policy_id or decision.source_policy_id
-    request_hash = _request_hash(order_id=order.id, evaluated_at=evaluated_at)
+    request_hash = paper_advance_request_hash(
+        order_id=order.id,
+        evaluated_at=evaluated_at,
+        expected_agent_market_window_id=expected_agent_market_window_id,
+    )
     existing_request = await _existing_idempotency(
         session,
         account_id=account.id,
@@ -1365,6 +1475,31 @@ async def advance_internal_paper_order(
             record=existing_request,
             calendar=calendar,
             execution_source_policy_id=execution_source_policy_id,
+        )
+    if expected_agent_market_window_id is None:
+        v2_window_request = await session.scalar(
+            select(PaperRequestIdempotencyRecord.id)
+            .where(
+                PaperRequestIdempotencyRecord.account_id == account.id,
+                PaperRequestIdempotencyRecord.order_id == order.id,
+                PaperRequestIdempotencyRecord.operation == "advance",
+                PaperRequestIdempotencyRecord.idempotency_key.startswith(
+                    f"agent-paper-loop-advance-v2:{order.id}:"
+                ),
+            )
+            .limit(1)
+        )
+        if v2_window_request is not None:
+            raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+    if expected_agent_market_window_id is not None:
+        await _validate_expected_agent_market_window(
+            session,
+            order=order,
+            source_policy_id=execution_source_policy_id,
+            calendar=calendar,
+            model=model,
+            evaluated_at=evaluated_at,
+            expected_agent_market_window_id=expected_agent_market_window_id,
         )
     if events and evaluated_at < events[-1].occurred_at:
         raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
@@ -1534,6 +1669,7 @@ async def advance_internal_paper_order(
             window_seq=window_seq,
             evaluated_at=evaluated_at,
             prior_window=prior_window,
+            expected_agent_market_window_id=expected_agent_market_window_id,
         )
         if price_authority_available
         else None

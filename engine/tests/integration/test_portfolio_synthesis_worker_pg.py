@@ -975,7 +975,7 @@ async def test_host_from_security_jobs_through_synthesis_handoff(
         )
         assert snapshot.cycle_id == cycle.id
         assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RESUME
-        with pytest.raises(ValueError, match="^TARGET_ACTIVATION_PENDING$"):
+        assert (
             await loop.execute_agent_paper_loop_action(
                 settings,
                 account_id=cycle.account_id,
@@ -983,11 +983,15 @@ async def test_host_from_security_jobs_through_synthesis_handoff(
                 action=loop.AgentPaperLoopAction.RESUME,
                 snapshot=snapshot,
             )
+            is None
+        )
         async with sessions() as session:
             events = await _events(session, cycle.id)
-            assert len(events) == prior_events + 1
-            assert events[-1].to_status == "decision_recorded"
-            assert events[-1].result_code == "TARGET_ACTIVATION_PENDING"
+            assert len(events) == prior_events + 2
+            assert events[-2].to_status == "decision_recorded"
+            assert events[-2].result_code == "TARGET_ACTIVATION_PENDING"
+            assert events[-1].to_status == "completed"
+            assert events[-1].result_code == "NO_ORDER_REQUIRED"
             assert set(await session.scalars(select(Job.id))) == original_jobs
             assert set(await session.scalars(select(AgentPaperCycleRecord.id))) == original_cycles
         assert len(calls) == 3

@@ -4,6 +4,56 @@
 > `docs/plans/2026-09-12-nexus-simulation-evolution-roadmap.md`。该文档优先于本文下方
 > 历史 Shadow 阶段和本轮未提交的过程性核查记录；后续开发应从其“下一份技术方案的唯一范围”开始。
 
+## 2026-09-19 主线与组合分支集成交接
+
+- 主线已收口 Agent Paper 订单跨执行窗口的宿主幂等与恢复：新路径以
+  `order_id + market_window_id` 识别一次推进，在 `paper_once` 的同一事务中绑定
+  精确窗口、执行请求和结果，并在读取旧 fixed-key 前取得与执行服务相同的
+  账户事务锁；同窗口的宿主时钟变化或重启只读回原结果，
+  不重复成交、账本或执行 authority。旧 fixed-key 只在原请求 hash、成交、
+  执行 authority 与当前/前置窗口唯一匹配时恢复；无法证明的旧无成交结果
+  保持未知。后续窗口即使已经提前落库，在前置窗口尚未消费时也会于任何执行或
+  取消写入前被拒绝；运行恢复与停机确认共用同一份完整结果、原请求 hash、精确
+  窗口及唯一请求证据，协调记录损坏或结果归属有歧义时不回退宽松查询。订单一旦
+  已提交 v2 窗口请求，迟到的无窗口新请求即使在共同账户锁上等待到 v2 提交之后，
+  也会在任何执行写入前被拒绝；原 legacy 同 key/同 hash 结果仍可精确读回。Alpaca
+  允许 partial 后通过真实 `inspect → planner` 进入下一窗口；
+  Schwab 仍严格保持单窗口，partial 后在采集前确定性停止。评价通道的确认
+  使用实际 `action_account_id`；`cancelled/terminal/no_data/no_capacity` 也按原请求
+  精确区分和读回。聚焦验证为 254 个相关单测、75 个 PostgreSQL 用例、
+  Ruff 和 Mypy 通过；未放宽 `execution_locked=true`，未变更 Schwab 多窗口政策。
+- 主线 `2a7120d6` 已修复评价账户在首槽真实成交后无法进入下一槽的问题：初始化
+  完整性只核对唯一原始注资、两条初始分录和初始锁事件，同时允许后续合法交易与
+  回撤事件。本次增补恢复了 `transaction_type='funding'` 与初始锁事件
+  `event_seq=1` 的显式断言；真实 PostgreSQL 回归还覆盖重复进入不重复注资/Job、
+  损坏原始 hash、后续事实复用初始化语义及初始事件序号篡改均 fail-closed。
+  两个相关 PostgreSQL 模块共 70 项通过，Ruff、Mypy 通过。完整 Engine 回归另有
+  9 项既有失败，已分类为 Agent execution fixture、历史 migration-head 断言及
+  current ETF identity；不能据此写成全仓全绿。
+- 共享 Agent Paper 运行逻辑由主线任务统一负责，冻结同步点为 `main@2fc4aca7`；
+  组合管理第一切片仍由任务 `01a09987-af26-7692-95ec-a9e9483a13d2` 负责，
+  实现分支为 `edward/portfolio-management-first-slice-implementation@f4fc10d5`，
+  共同基线为 `576eba79`。组合代码未验收，不整体合回主线。
+- 组合分支扩大 `agent_paper_loop.py`、`agent_paper_once.py`、`agent_version_runner.py`
+  或对应测试前，先语义适配主线 `54e4ecd9`、`83cdf303`、`2560ecdc`、
+  `e5fdd25b`、`05c7e0b9`、`ec29c1a6`、`a332fbba`、`2fc4aca7`；不整文件覆盖
+  组合分支已有的收盘唤醒、synthesis exactly-once/orphan 恢复与结果未知处理。
+- 必须保留的主线语义：版本评价共用一次冻结市场事实并用持久化准备声明防重；
+  宿主不因单个 terminal cycle 退出；同槽 `failed/unavailable` 不直接停宿主；
+  仅在精确同槽的 Schwab 终态失败已持久化时等待下一槽，未知或字段不成对仍 fail-closed；
+  评价快照在 pending、researching、completed 及成交阶段始终携带冻结 calendar authority。
+- 加速演练覆盖：跨槽继续、研究失败后原 Job 恢复、未知运行 Job 停止且不重放、
+  宿主重启只领取原 Job、收盘仅发布一次并跨到下一交易日、双版本不完整 pair 关闭且不创建替代事实。
+  `main@2fc4aca7` 已通过 203 个循环单测、38 个 PostgreSQL 生命周期集成测试、Ruff 和 Mypy。
+- 组合分支已完成本次语义适配，当前为 `fd596169`：`8b226f9f` 同步主线宿主生命周期，
+  `1c985d41` 保留跨重启的策略批准等待，`fd596169` 分离策略等待、收盘发布和分配。
+  实现方验证为 199 个 PostgreSQL 测试和 471 个单测/边界测试通过；独立复核为
+  8 个 PostgreSQL 测试和 254 个单测通过，Ruff、Mypy 及 diff 均干净。分支仍未合回主线；
+  下一个组合切片只处理批准时点绑定与替换/依赖强制两个已知 proposal 问题。
+- 主线 `01a0b599-a36e-7f1d-a332-7b264b1ac2be` 已按 `PAIR_LANE_TERMINAL_FAILURE` 安全终结，
+  后续真实 4+20 评价为 `01a0b5a9-38ef-7131-8ff4-56ae3b09e32d`。
+  本交接不授权 push、部署、迁移或交易。
+
 ## 当前迭代方向：Agent 模拟交易与策略进化（2026-09-13）
 
 本节优先于下方历史阶段的“人工接受候选后开发手动 Shadow”路线。状态为产品迭代计划，

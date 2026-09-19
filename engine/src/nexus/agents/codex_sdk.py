@@ -49,7 +49,7 @@ MODEL_ID = "gpt-5.6-terra"
 _PROVIDER = "nexus_openai"
 MAX_INPUT_TOKENS = 64000
 MAX_OUTPUT_TOKENS = 8192
-TIMEOUT_SECONDS = 35
+TIMEOUT_SECONDS = 40
 CLIENT_CLOSE_TIMEOUT_SECONDS = 5
 BASE_INSTRUCTIONS = (
     "You are a bounded NEXUS research analyst. Analyze only supplied frozen "
