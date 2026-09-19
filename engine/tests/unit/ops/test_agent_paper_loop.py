@@ -18,6 +18,7 @@ from nexus.ops import agent_paper_loop as loop
 from nexus.paper.agent_market import AgentPaperMarketScope
 from nexus.persistence.models.paper import PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
 from nexus.providers.http import HttpPolicyError
+from sqlalchemy.exc import SQLAlchemyError
 
 NOW = datetime(2026, 9, 14, 14, 5, tzinfo=UTC)
 SLOT = datetime(2026, 9, 14, 14, 5, tzinfo=UTC)
@@ -209,8 +210,18 @@ def test_foreground_loop_waits_for_session_without_product_side_effects() -> Non
     assert len(heartbeats) == 4
 
 
-def test_foreground_loop_logs_safe_heartbeat_failure_stage(
+@pytest.mark.parametrize(
+    ("failure", "expected_kind"),
+    (
+        (TimeoutError("private-timeout-canary"), "timeout"),
+        (SQLAlchemyError("private-database-canary"), "database"),
+        (RuntimeError("private-unexpected-canary"), "unexpected_exception"),
+    ),
+)
+def test_foreground_loop_logs_safe_heartbeat_failure_kind(
     capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+    expected_kind: str,
 ) -> None:
     async def inspect() -> loop.AgentPaperLoopSnapshot:
         raise AssertionError("inspection must not run after the initial heartbeat fails")
@@ -219,7 +230,7 @@ def test_foreground_loop_logs_safe_heartbeat_failure_stage(
         raise AssertionError("execution must not run after the initial heartbeat fails")
 
     async def heartbeat(_seen_at: datetime) -> None:
-        raise RuntimeError("private-heartbeat-canary")
+        raise failure
 
     result = asyncio.run(
         loop.run_foreground_loop(
@@ -237,10 +248,11 @@ def test_foreground_loop_logs_safe_heartbeat_failure_stage(
     assert json.loads(captured.err) == {
         "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
         "event": "agent_paper_loop_failure",
+        "failure_kind": expected_kind,
         "failure_stage": "heartbeat",
         "occurred_at": NOW.isoformat(),
     }
-    assert "private-heartbeat-canary" not in captured.err
+    assert "private-" not in captured.err
 
 
 def test_foreground_loop_logs_safe_inspection_failure_stage(
@@ -1343,9 +1355,7 @@ def test_local_runner_forwards_deterministic_runtime_clock(
 
     result = asyncio.run(
         loop.run_local_agent_paper_loop(
-            loop.EngineSettings(
-                database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"
-            ),
+            loop.EngineSettings(database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"),
             account_id=UUID(int=1),
             repo_root=tmp_path,
             sleep=controlled_sleep,
@@ -3243,9 +3253,7 @@ def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
     async def fail_known(*_args, **_kwargs):
         raise ValueError("SCHWAB_L1_INCOMPLETE")
 
-    async def persisted_failure(
-        database_url, *, account_id, decision_slot_at
-    ):
+    async def persisted_failure(database_url, *, account_id, decision_slot_at):
         assert database_url == loop.EngineSettings().database_url
         assert account_id == UUID(int=1)
         assert decision_slot_at == SLOT

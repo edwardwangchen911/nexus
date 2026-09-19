@@ -25,6 +25,7 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.agents.codex_sdk import sdk_status
@@ -1440,10 +1441,7 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
         if snapshot.cycle_status == "evaluation_waiting":
             return AgentPaperLoopAction.WAIT_FOR_EVALUATION
         if snapshot.cycle_status == "evaluation_performance_due":
-            if (
-                snapshot.performance_due_at is None
-                or snapshot.action_account_id is None
-            ):
+            if snapshot.performance_due_at is None or snapshot.action_account_id is None:
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
             return AgentPaperLoopAction.PUBLISH_EVALUATION_PERFORMANCE
         if snapshot.cycle_status == "evaluation_complete":
@@ -1574,6 +1572,14 @@ def _emit_agent_paper_unknown_failure(
         }
         if action is not None:
             payload["failure_action"] = action.value
+        if stage == "heartbeat" and error is not None:
+            payload["failure_kind"] = (
+                "timeout"
+                if isinstance(error, TimeoutError)
+                else "database"
+                if isinstance(error, SQLAlchemyError)
+                else "unexpected_exception"
+            )
         phase = getattr(error, "_nexus_agent_paper_failure_phase", None)
         if phase in _SAFE_EVALUATION_FAILURE_PHASES:
             payload["failure_phase"] = phase
@@ -1620,16 +1626,16 @@ async def run_foreground_loop(
         async with asyncio.timeout(interval_seconds):
             await heartbeat(clock())
 
-    def stop_unknown(stage: str) -> AgentPaperLoopAction:
-        _emit_agent_paper_unknown_failure(stage, clock())
+    def stop_unknown(stage: str, *, error: Exception | None = None) -> AgentPaperLoopAction:
+        _emit_agent_paper_unknown_failure(stage, clock(), error=error)
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
     if shutdown_requested():
         return AgentPaperLoopAction.STOP_REQUESTED
     try:
         await persist_heartbeat()
-    except Exception:
-        return stop_unknown("heartbeat")
+    except Exception as error:
+        return stop_unknown("heartbeat", error=error)
     while True:
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
@@ -1662,8 +1668,8 @@ async def run_foreground_loop(
                     return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
-                except Exception:
-                    return stop_unknown("heartbeat")
+                except Exception as error:
+                    return stop_unknown("heartbeat", error=error)
                 remaining -= duration
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_EVALUATION:
@@ -1676,8 +1682,8 @@ async def run_foreground_loop(
                     return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
-                except Exception:
-                    return stop_unknown("heartbeat")
+                except Exception as error:
+                    return stop_unknown("heartbeat", error=error)
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_EVALUATION_JOB:
             assert snapshot.research_job_lease_expires_at is not None
@@ -1692,8 +1698,8 @@ async def run_foreground_loop(
                     return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
-                except Exception:
-                    return stop_unknown("heartbeat")
+                except Exception as error:
+                    return stop_unknown("heartbeat", error=error)
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_SESSION:
             assert snapshot.decision_window_start_at is not None
@@ -1710,8 +1716,8 @@ async def run_foreground_loop(
                     return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
-                except Exception:
-                    return stop_unknown("heartbeat")
+                except Exception as error:
+                    return stop_unknown("heartbeat", error=error)
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_MARKET:
             assert snapshot.market_window_end_at is not None
@@ -1723,15 +1729,15 @@ async def run_foreground_loop(
                     return AgentPaperLoopAction.STOP_REQUESTED
                 try:
                     await persist_heartbeat()
-                except Exception:
-                    return stop_unknown("heartbeat")
+                except Exception as error:
+                    return stop_unknown("heartbeat", error=error)
                 remaining -= duration
             continue
         action_task: asyncio.Future[AgentPaperLoopAction | None] = asyncio.ensure_future(
             execute(action, snapshot)
         )
         heartbeat_task: asyncio.Future[AgentPaperLoopAction | None] | None = None
-        heartbeat_failed = False
+        heartbeat_error: Exception | None = None
         action_error: Exception | None = None
         try:
             await asyncio.sleep(0)
@@ -1750,8 +1756,8 @@ async def run_foreground_loop(
                 heartbeat_task = None
                 try:
                     await persist_heartbeat()
-                except Exception:
-                    heartbeat_failed = True
+                except Exception as error:
+                    heartbeat_error = error
                     break
                 next_heartbeat_at += interval_seconds
             try:
@@ -1769,20 +1775,18 @@ async def run_foreground_loop(
                 confirmed = await confirm_shutdown(action, snapshot, stop)
             except Exception:
                 confirmed = False
-            if action_error is not None or heartbeat_failed or not confirmed:
+            if action_error is not None or heartbeat_error is not None or not confirmed:
                 return AgentPaperLoopAction.STOP_UNCONFIRMED
             return AgentPaperLoopAction.STOP_REQUESTED
         if action_error is not None:
-            _emit_agent_paper_unknown_failure(
-                "execute", clock(), action=action, error=action_error
-            )
+            _emit_agent_paper_unknown_failure("execute", clock(), action=action, error=action_error)
             raise action_error
-        if heartbeat_failed:
-            return stop_unknown("heartbeat")
+        if heartbeat_error is not None:
+            return stop_unknown("heartbeat", error=heartbeat_error)
         try:
             await persist_heartbeat()
-        except Exception:
-            return stop_unknown("heartbeat")
+        except Exception as error:
+            return stop_unknown("heartbeat", error=error)
         if stop is not None:
             if stop == AgentPaperLoopAction.STOP_RESULT_UNKNOWN:
                 return stop_unknown("execute")
@@ -1883,8 +1887,7 @@ async def confirm_agent_paper_shutdown(
                         return False
                     persisted = await session.scalar(
                         select(PaperPerformanceSnapshotRecord.id).where(
-                            PaperPerformanceSnapshotRecord.account_id
-                            == performance_account_id,
+                            PaperPerformanceSnapshotRecord.account_id == performance_account_id,
                             PaperPerformanceSnapshotRecord.as_of
                             == before_snapshot.performance_due_at,
                         )
