@@ -1,12 +1,16 @@
 import asyncio
+import json
 from datetime import timedelta
 from uuid import uuid4
 
 import pytest
 from helpers.paper_batch import seed_paper_batch
+from integration.test_portfolio_same_day_research_pg import seed_normal_path
+from nexus.ops import agent_paper_once
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.target_service import approve_initial_target_projection
 from nexus.persistence.models.paper import (
+    AgentPaperCandidateBatchRecord,
     PaperFillRecord,
     PaperInitialTargetApprovalRecord,
     PaperLedgerTransactionRecord,
@@ -36,6 +40,103 @@ async def setup_approval(url):
         idempotency_key="approval-1",
     )
     return engine, sessions, args
+
+
+def test_normal_cli_parses_dispatches_and_persists_initial_portfolio_chain(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seeded_engine, _, authority, manifest = asyncio.run(
+        seed_normal_path(migrated_database_url, monkeypatch)
+    )
+    monkeypatch.setattr(
+        agent_paper_once,
+        "load_local_environment",
+        lambda *_args, **_kwargs: {
+            "DATABASE_URL": migrated_database_url,
+            "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        },
+    )
+
+    as_of = authority.decision_time.isoformat()
+    assert agent_paper_once.main(
+        [
+            "inspect-projection",
+            "--account-id",
+            str(authority.account_id),
+            "--as-of",
+            as_of,
+        ]
+    ) == 0
+    projection = json.loads(capsys.readouterr().out)
+
+    approval_args = [
+        "approve-initial-target",
+        "--account-id",
+        str(authority.account_id),
+        "--projection-as-of",
+        as_of,
+        "--projection-hash",
+        projection["projection_hash"],
+        "--approved-by",
+        "local-user",
+        "--approved-at",
+        (authority.decision_time + timedelta(seconds=1)).isoformat(),
+        "--idempotency-key",
+        "cli-initial-target",
+    ]
+    assert agent_paper_once.main(approval_args) == 0
+    approval = json.loads(capsys.readouterr().out)
+    assert agent_paper_once.main(approval_args) == 0
+    assert json.loads(capsys.readouterr().out) == approval
+
+    candidate_args = [
+        "prepare-candidates",
+        "--account-id",
+        str(authority.account_id),
+        "--universe-snapshot-id",
+        str(authority.universe_snapshot_id),
+        "--instrument-id",
+        str(manifest[0].instrument_id),
+        "--instrument-id",
+        str(manifest[1].instrument_id),
+        "--idempotency-key",
+        "cli-candidate-batch",
+    ]
+    assert agent_paper_once.main(candidate_args) == 0
+    candidates = json.loads(capsys.readouterr().out)
+    assert agent_paper_once.main(candidate_args) == 0
+    assert json.loads(capsys.readouterr().out) == candidates
+
+    async def persisted_counts() -> tuple[int, int]:
+        engine = create_async_engine(migrated_database_url)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sessions() as session:
+                return (
+                    int(
+                        await session.scalar(
+                            select(func.count()).select_from(
+                                PaperInitialTargetApprovalRecord
+                            )
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count()).select_from(
+                                AgentPaperCandidateBatchRecord
+                            )
+                        )
+                        or 0
+                    ),
+                )
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(persisted_counts()) == (1, 1)
+    asyncio.run(seeded_engine.dispose())
 
 
 @pytest.mark.asyncio
