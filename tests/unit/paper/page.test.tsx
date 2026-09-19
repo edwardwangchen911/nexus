@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { managementPlan, managementSummary, cancelRead } from "./management-fixtures";
 import { CancelResultCheck } from "../../../app/components/paper/cancel-result-check";
+import { AdjustmentPlan, AdjustmentPlanLoader } from "../../../app/components/paper/adjustment-plan";
 
 import PaperPage, { PaperPanel } from "../../../app/(protected)/paper/page";
 import { AgentPaperCycle, AgentPaperSessionSummary, AgentPaperVersionHistory } from "../../../app/components/agent-paper-cycle";
@@ -32,6 +33,36 @@ function evaluationSlots(paired = 0): Array<Record<string, unknown>> {
 }
 
 describe("internal paper page", () => {
+  it("keeps current target details reachable without inventing an occupying plan", async () => {
+    const fetcher = vi.fn(async () => Response.json({ data: { ...managementSummary, occupying_plan: null }, meta: meta() }));
+    vi.stubGlobal("fetch", fetcher);
+    render(<AdjustmentPlanLoader />);
+    const target = await screen.findByRole("region", { name: "当前目标详情" });
+    expect(target).toHaveTextContent("目标 V7");
+    expect(target).toHaveTextContent("20%");
+    expect(target).toHaveTextContent("80%");
+    expect(target).toHaveTextContent("当前无资源占用计划");
+    expect(within(target).getByRole("link", { name: "查看独立实际账户事实" })).toHaveAttribute("href", "#paper-actual-facts");
+    expect(screen.queryByRole("region", { name: "当前调整计划" })).not.toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("sorts interleaved multi-order fills by fact time with unambiguous order identity", () => {
+    const value = structuredClone(managementPlan);
+    const first = value.plan.items[0];
+    first.confirmed_fills = [{ ...first.confirmed_fills[0], fill_id: "late", as_of: "2026-09-18T14:00:00Z" }];
+    value.plan.items.push({ ...structuredClone(first), order_id: filledOrder.order_id, confirmed_fills: [{ ...first.confirmed_fills[0], fill_id: "early", as_of: "2026-09-18T12:00:00Z" }, { ...first.confirmed_fills[0], fill_id: "middle", as_of: "2026-09-18T13:00:00Z" }] });
+    render(<AdjustmentPlan plan={value} />);
+    const rows = screen.getAllByRole("heading", { name: "已确认成交" }).map((heading) => heading.closest("li")!);
+    expect(rows.map((row) => row.querySelector("time")?.dateTime)).toEqual(["2026-09-18T12:00:00Z", "2026-09-18T13:00:00Z", "2026-09-18T14:00:00Z"]);
+    expect(within(rows[0]).getByTitle(filledOrder.order_id)).toHaveTextContent("订单");
+    expect(within(rows[2]).getByTitle(cancellableOrder.order_id)).toHaveTextContent("订单");
+  });
+  it("places original-operation checks before the timeline in DOM reading order", () => {
+    render(<AdjustmentPlan plan={managementPlan} />);
+    const check = screen.getByRole("heading", { name: "核对原操作结果" });
+    const timeline = screen.getByRole("heading", { name: "执行时间线" });
+    expect(check.compareDocumentPosition(timeline) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
   it("isolates a late original-operation read after changing the selected order", async () => {
     let resolveFirst!: (value: Response) => void;
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { resolveFirst = resolve; })));

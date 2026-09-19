@@ -58,6 +58,20 @@ const summary: CyclePage["summary"] = {
 };
 
 describe("decision records", () => {
+  it("keeps a legacy cycle's research and execution ledger when the account has a current target", () => {
+    const legacy = detail(agentPaperCycle);
+    legacy.active_target = managementDetail.active_target;
+    render(<DecisionDetailPanel state="ready" detail={legacy} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("region", { name: "市场与研究证据" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "订单结论" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "执行结果" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "本轮组合取舍" })).not.toBeInTheDocument();
+  });
+  it("uses the producer's blocked activation shape and links only the blocking plan", () => {
+    expect(managementDetail.activation_result?.target_version_id).toBeNull();
+    expect(managementDetail.activation_result?.batch_id).toBeNull();
+    expect(managementDetail.blocking_plan?.batch_id).toBe(managementId(10));
+  });
   it("does not call a resource-blocked proposal completed in the list", () => {
     render(<DecisionsPanel state="ready" page={{ items: [managementDetail.cycle], summary, version_observation: null, version_history: [], version_evaluation: null }} onRefresh={vi.fn()} />);
     expect(screen.getByRole("list", { name: "决策记录" })).toHaveTextContent("提案未生效");

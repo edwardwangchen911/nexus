@@ -320,9 +320,11 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         {versionEvaluation ? <AgentVersionEvaluation evaluation={versionEvaluation} /> : null}
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
+        <section id="paper-actual-facts" className="page-stack" aria-label="独立实际账户事实">
         <PerformanceFacts portfolio={portfolio} />
         {portfolio.comparison ? <PaperComparison comparison={portfolio.comparison} /> : null}
         <Positions portfolio={portfolio} />
+        </section>
         <Attributions portfolio={portfolio} />
         <section className="paper-orders" aria-labelledby="paper-orders-title">
           <header className="paper-orders__heading"><div><p className="eyebrow">已保存的订单记录</p><h2 id="paper-orders-title">订单与模拟成交</h2><p>订单状态与可取消性以已保存的最新记录为准。</p></div><label className="paper-orders__filter">订单状态筛选<select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as "" | OrderStatus)} disabled={loadingMore}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label></header>

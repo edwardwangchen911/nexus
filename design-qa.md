@@ -2,7 +2,7 @@
 
 final result: blocked
 
-The selected direction is implemented and the four-file functional e2e suite passes (30/30); full unit verification passes (1090 passed, 1 skipped). Exact source-state visual acceptance remains blocked. The current Task 11 read contract cannot reproduce all the reference facts. No demonstration values, inferred actual weights, target amounts, cash totals, or invented cancellation attempt keys were added to make the screenshots look equivalent.
+The selected direction is implemented and the four-file functional e2e suite passes after independent review corrections (31/31); focused unit verification passes (123 tests). Exact source-state visual acceptance remains blocked. The current Task 11 read contract cannot reproduce all the reference facts. No demonstration values, inferred actual weights, target amounts, cash totals, or invented cancellation attempt keys were added to make the screenshots look equivalent.
 
 ## Comparison targets and evidence
 
@@ -17,12 +17,14 @@ Browser-rendered implementation (relative to project root):
 | --- | --- | --- | --- |
 | Decisions detail, blocked proposal/current V7 | 1280 × 910 | `docs/design/qa/task-12/task12-decisions-1280.png` | `docs/design/qa/task-12/task12-decisions-focused-1280.png`, 963 × 941 |
 | Same decision, mobile | 390 × 844 | `docs/design/qa/task-12/task12-decisions-390.png` | `docs/design/qa/task-12/task12-decisions-focused-390.png`, 358 × 1512 |
-| Paper, occupied partially filled plan | 1280 × 1066 | `docs/design/qa/task-12/task12-paper-1280.png` | `docs/design/qa/task-12/task12-paper-focused-1280.png`, 963 × 1365 |
-| Same plan, mobile | 390 × 844 | `docs/design/qa/task-12/task12-paper-390.png` | `docs/design/qa/task-12/task12-paper-focused-390.png`, 358 × 2281 |
+| Paper, occupied partially filled plan | 1280 × 1066 | `docs/design/qa/task-12/task12-paper-1280.png` | `docs/design/qa/task-12/task12-paper-focused-1280.png`, 963 × 1384 |
+| Same plan, mobile | 390 × 844 | `docs/design/qa/task-12/task12-paper-390.png` | `docs/design/qa/task-12/task12-paper-focused-390.png`, 358 × 2305 |
 
 Chromium, existing Playwright webServer, isolated worktree port 4297, dark theme, authenticated fixture routes. Browser deviceScaleFactor is 1; full screenshot pixel dimensions equal CSS viewport. Sources were viewed at their native pixel dimensions with no density resampling. Mobile has no matching source viewport; it is a responsive adaptation check, not a pixel-match claim. Focused screenshots exclude the unchanged app shell and include the full newly implemented section.
 
-Final capture run: 30/30 e2e tests passed in 55.1s. Full and focused source/implementation evidence was reopened after capture correction; fractional CSS bounding boxes are rounded to the recorded clip pixel dimensions by Chromium. Final lint, typecheck and build passed; vinext retains its existing static route-classification notice.
+Latest post-review capture run: 31/31 e2e tests passed in 44.1s. Sources and updated implementation evidence were reopened together for comparison; fractional CSS bounding boxes are rounded to the recorded clip pixel dimensions by Chromium. The earlier 30/30 capture run is superseded by this review run.
+
+Post-review full unit: 1095 passed, 1 skipped (83 passed /1 skipped files). Fresh lint, typecheck and build all passed. These results do not resolve the source-state/shell fidelity blockers below.
 
 Source and implementation images were opened together in the same tool comparison input for each desktop full-view comparison and for focused content inspection. This was a combined image-input comparison, not a generated side-by-side composite. The focused desktop and mobile screenshots were also opened with the relevant source. Source files are local attachments; implementation evidence is committed in the repository.
 
@@ -47,6 +49,7 @@ Source and implementation images were opened together in the same tool compariso
 2. Mobile tests found a short disclosure tap target and the added unavailable portfolio-summary height. Increased only the disclosure hit area; after confirming the unavailable portfolio state, conditioned that optional summary on actual management facts and removed temporary density adjustments. Re-ran failed viewport tests with unchanged assertions.
 3. Captured the final decisions and paper views at source desktop sizes and 390px mobile, plus focused sections. Reopened source plus implementation in shared comparison inputs. Required fidelity surfaces above were checked. Source-state and global-shell mismatches remain explicitly blocked; neither build success nor test success closes them.
 4. [P2, resolved] Full UUID primary labels made the banner and unknown instruments visually dense. TDD introduced short-label/title assertions (2 expected RED failures), then shortened display text without changing identity values or links; 118 focused unit tests and 30 four-file e2e tests passed. Recaptured desktop/mobile views show `提案 …0008`, `标的 …0009`, `调整计划 …0010`; complete identifiers remain accessible in title/evidence. Focused capture was also corrected from element auto-scroll to a full-page clip, avoiding sticky navigation obscuring the top of the captured component. No layout CSS was changed for capture.
+5. Independent review follow-up: corrected blocked-activation fixtures to null target/batch IDs, retaining the original plan only in `blocking_plan`; rendered decisions remains visually unchanged. Added original-order labels to chronologically sorted fill facts (paper timeline slightly taller). Moved result-check section before timeline in DOM, using desktop grid placement rather than mobile CSS order; the mobile capture and DOM/geometry assertions now agree. Existing typography, colors, icons and responsive cards remain unchanged. The no-occupying-plan state now shows current target configuration and links to independent actual-account facts; its end-to-end navigation is covered, but there is no equivalent source-state mock, so it is not claimed as a visual match. Legacy cycles retain their evidence ledger despite an account-level current target. Five expected unit RED failures and one expected e2e RED preceded the fixes; 123 focused unit and 31 e2e tests pass afterward.
 
 Earlier e2e failures were investigated before rerun: one navigation `ERR_NETWORK_IO_SUSPENDED`, two 30-second timeouts spanning 15.5 minutes. macOS power logs confirmed long Idle Sleep intervals during that run. The original run had no trace configured; exact portfolio timeout step remains unavailable. Each original failure passed independently with trace enabled, all three passed sequentially, and the four-file concurrent run passed while a command-scoped `caffeinate -i` prevented sleep. No retry, timeout extension, assertion relaxation, or system power-setting change was made.
 

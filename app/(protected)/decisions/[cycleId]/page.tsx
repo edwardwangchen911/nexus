@@ -46,7 +46,7 @@ export function DecisionDetailPanel({ state, detail, onRefresh }: { state: DataS
   const execution = detail ? executionPresentation(detail.cycle, detail.orders) : null;
   const primary = decision?.candidates[0] ?? null;
   const resultUnknown = execution?.key === "result_unknown" || execution?.key === "unknown";
-  const management = detail && Boolean(detail.candidate_batch || detail.proposal || detail.active_target || detail.blocker || detail.synthesis);
+  const management = detail && Boolean(detail.candidate_batch || detail.proposal || detail.blocker || detail.synthesis || detail.activation_result || detail.plan_summary || detail.blocking_plan);
   return <section className="decision-detail-page" data-state={state} aria-label="决策详情页面">
     {/* vinext client routes use native anchors here; next/link currently duplicates React at runtime. */}
     {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}

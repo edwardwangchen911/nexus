@@ -2,6 +2,19 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { managementSummary, managementPlan } from "../unit/paper/management-fixtures";
 
+test("current target without an occupying plan links to independent actual account facts", async ({ page }) => {
+  await installPaperFixtures(page);
+  await page.route("**/api/v1/paper/management/portfolio", (route) => route.fulfill({ json: { data: { ...managementSummary, occupying_plan: null }, meta: meta() } }));
+  await page.goto("/paper");
+  const target = page.getByRole("region", { name: "当前目标详情" });
+  await expect(target).toContainText("当前无资源占用计划");
+  await expect(target.getByRole("table")).toContainText("80%");
+  await target.getByRole("link", { name: "查看独立实际账户事实" }).click();
+  await expect(page).toHaveURL(/#paper-actual-facts$/);
+  await expect(page.getByRole("region", { name: "独立实际账户事实" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "当前调整计划" })).toHaveCount(0);
+});
+
 for (const viewport of [{ width: 1280, height: 1066 }, { width: 390, height: 844 }]) {
   test(`portfolio plan has separate resource facts at ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
@@ -14,6 +27,12 @@ for (const viewport of [{ width: 1280, height: 1066 }, { width: 390, height: 844
     await expect(plan.getByRole("heading", { name: "调整计划 …0010" })).toBeVisible();
     await expect(plan).toContainText("USD 3,500.00");
     await expect(plan.getByRole("button", { name: "核对原操作结果" })).toBeDisabled();
+    expect(await plan.evaluate((element) => {
+      const check = element.querySelector(".pm-cancel")!;
+      const timeline = element.querySelector(".pm-timeline")!;
+      return Boolean(check.compareDocumentPosition(timeline) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+    if (viewport.width < 768) expect((await plan.locator(".pm-cancel").boundingBox())!.y).toBeLessThan((await plan.locator(".pm-timeline").boundingBox())!.y);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: `test-results/task12-paper-${viewport.width}.png` });
     await page.evaluate(() => window.scrollTo(0, 0));
