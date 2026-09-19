@@ -841,6 +841,329 @@ async def test_cycle_persists_exact_blocking_plan_from_activation_result(
 
 
 @pytest.mark.asyncio
+async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    import json
+    from copy import deepcopy
+    from uuid import UUID
+
+    import httpx
+    from helpers.paper_api import app, headers
+    from integration.test_agent_paper_cycle_pg import _safe_no_trade_intent
+    from integration.test_paper_cancel_result_read_pg import _seed_target_associated_plan
+    from integration.test_portfolio_synthesis_persistence_pg import synthesis_intent
+    from nexus.agents.paper_context import prepare_agent_paper_research_snapshot
+    from nexus.agents.portfolio_synthesis_persistence import admit_portfolio_synthesis
+    from nexus.agents.portfolio_synthesis_worker import (
+        read_synthesis_job,
+        run_synthesis_job_once,
+    )
+    from nexus.agents.responses_budget import UsageSnapshot
+    from nexus.domain.evidence import EvidenceRef
+    from nexus.jobs.daily_research import admit_agent_paper_research
+    from nexus.paper.agent_cycle import (
+        _append_event,
+        _events,
+        _resume_portfolio_synthesis,
+    )
+    from nexus.paper.agent_cycle_models import parse_candidate_manifest
+    from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+    from nexus.paper.execution_service import cancel_internal_paper_order
+    from nexus.paper.projection import load_paper_projection
+    from nexus.persistence.models.agents import (
+        AgentResearchOutputEvidenceRecord,
+        AgentResearchOutputRecord,
+        AgentResearchRunRecord,
+    )
+    from nexus.persistence.models.paper import (
+        AgentPaperCycleRecord,
+        PaperOrderEventRecord,
+        PaperOrderRecord,
+    )
+    from nexus.persistence.models.research import ResearchEvidenceRef
+    from nexus.persistence.models.runtime import Job
+    from sqlalchemy import text
+
+    engine, sessions, args, first_proposal, first_activation = (
+        await _seed_target_associated_plan(migrated_database_url, monkeypatch)
+    )
+    assert first_activation.batch_id is not None
+
+    def values(record):
+        return {
+            column.name: deepcopy(getattr(record, column.name))
+            for column in record.__table__.columns
+            if column.name != "id"
+        }
+
+    try:
+        async with sessions.begin() as session:
+            first_cycle = await session.get(AgentPaperCycleRecord, first_proposal.cycle_id)
+            assert first_cycle is not None
+            manifest = parse_candidate_manifest(first_cycle.candidate_manifest, allow_legacy=False)
+            new_time = args["now"] + timedelta(minutes=3)
+            projection = await load_paper_projection(
+                session,
+                account_id=first_proposal.account_id,
+                as_of=new_time,
+            )
+            assert projection.open_orders
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=first_proposal.account_id,
+                universe_snapshot_id=first_cycle.universe_snapshot_id,
+                instrument_ids=tuple(candidate.instrument_id for candidate in manifest),
+                idempotency_key="occupied-follow-up-candidates",
+                created_at=new_time,
+            )
+            second_cycle = AgentPaperCycleRecord(
+                id=uuid4(),
+                **(
+                    values(first_cycle)
+                    | {
+                        "decision_time": new_time,
+                        "decision_slot_at": first_cycle.decision_slot_at + timedelta(minutes=5),
+                        "candidate_batch_id": batch.batch_id,
+                        "created_at": new_time,
+                    }
+                ),
+            )
+            session.add(second_cycle)
+            await session.flush()
+            await _append_event(session, second_cycle, None, "prepared", "CYCLE_PREPARED", {})
+
+            run_ids = []
+            output_ids = []
+            for index, candidate in enumerate(manifest):
+                snapshot = await prepare_agent_paper_research_snapshot(
+                    session,
+                    cycle_id=second_cycle.id,
+                    decision_time=new_time,
+                    candidate=candidate,
+                    projection=projection,
+                )
+                admission = await admit_agent_paper_research(
+                    session,
+                    cycle_id=second_cycle.id,
+                    instrument_id=candidate.instrument_id,
+                    research_snapshot_id=snapshot.id,
+                    research_as_of=new_time,
+                    daily_limit_usd=Decimal("1"),
+                    now=new_time,
+                )
+                run = await session.get(AgentResearchRunRecord, admission.run_id)
+                assert run is not None
+                bound_records = [
+                    await session.get(ResearchEvidenceRef, UUID(frozen["id"]))
+                    for frozen in run.evidence_manifest
+                ]
+                assert all(bound is not None for bound in bound_records)
+                intent = _safe_no_trade_intent(
+                    run=run,
+                    evidence=bound_records[0],
+                    valid_until=new_time + timedelta(days=1),
+                ).model_copy(
+                    update={
+                        "display_symbol": "AAPL" if index == 0 else "T2",
+                        "evidence_refs": tuple(
+                            EvidenceRef(
+                                source=bound.source,
+                                object_id=bound.provider_object_id,
+                                available_at=bound.available_at,
+                                location=bound.location,
+                                content_hash=bound.content_hash,
+                            )
+                            for bound in bound_records
+                        ),
+                    }
+                )
+                document = intent.model_dump(mode="json")
+                payload = {"quality_status": intent.quality_status}
+                content = {
+                    "status": "completed",
+                    "role": None,
+                    "payload": payload,
+                    "intent": document,
+                }
+                output = AgentResearchOutputRecord(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=1,
+                    status="completed",
+                    role=None,
+                    prompt_hash=None,
+                    payload=payload,
+                    intent=document,
+                    content_hash=hashlib.sha256(
+                        json.dumps(
+                            content,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            default=str,
+                        ).encode()
+                    ).hexdigest(),
+                    created_at=new_time + timedelta(minutes=1),
+                )
+                session.add(output)
+                await session.flush()
+                for bound in bound_records:
+                    session.add(
+                        AgentResearchOutputEvidenceRecord(
+                            output_id=output.id,
+                            evidence_ref_id=bound.id,
+                            source=bound.source,
+                            provider_object_id=bound.provider_object_id,
+                            revision=bound.revision,
+                            available_at=bound.available_at,
+                            location=bound.location,
+                            content_hash=bound.content_hash,
+                        )
+                    )
+                await session.execute(
+                    text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
+                )
+                await session.execute(
+                    text("UPDATE agent_research_runs SET status='completed' WHERE id=:id"),
+                    {"id": run.id},
+                )
+                await session.execute(
+                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
+                )
+                job = await session.scalar(
+                    select(Job).where(Job.payload["run_id"].as_string() == str(run.id))
+                )
+                assert job is not None
+                job.status = "running"
+                job.started_at = new_time
+                job.attempt_count = 1
+                job.version += 1
+                await session.flush()
+                job.status = "succeeded"
+                job.finished_at = new_time + timedelta(minutes=1)
+                job.version += 1
+                run_ids.append(run.id)
+                output_ids.append(output.id)
+            await _append_event(
+                session,
+                second_cycle,
+                "prepared",
+                "researching",
+                "RESEARCH_JOBS_PREPARED",
+                {"research_run_ids": [str(value) for value in run_ids]},
+            )
+            admitted = await admit_portfolio_synthesis(
+                session,
+                cycle_id=second_cycle.id,
+                research_output_ids=tuple(output_ids),
+                active_target_version_id=first_activation.target_version_id,
+                projection_hash=projection.projection_hash,
+                daily_limit_usd=Decimal("1"),
+                now=new_time + timedelta(minutes=2),
+            )
+            raw = synthesis_intent(admitted.run).model_dump_json()
+            synthesis_job = await read_synthesis_job(session, cycle_id=second_cycle.id)
+            assert synthesis_job is not None
+
+        class Transport:
+            def supports(self, model):
+                return True
+
+            async def invoke(self, payload):
+                return raw, UsageSnapshot(input_tokens=10, output_tokens=20, provider_calls=1)
+
+        synthesis_at = new_time + timedelta(minutes=2, seconds=1)
+        assert await run_synthesis_job_once(
+            sessions,
+            transport=Transport(),
+            worker_id="occupied-follow-up",
+            job_ids=(synthesis_job.id,),
+            clock=lambda: synthesis_at,
+        )
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, second_cycle.id)
+            result = await _resume_portfolio_synthesis(
+                session,
+                cycle=cycle,
+                events=await _events(session, cycle.id),
+                run_ids=tuple(run_ids),
+                now=synthesis_at + timedelta(seconds=1),
+                daily_limit_usd=None,
+            )
+            terminal = (await _events(session, cycle.id))[-1]
+            assert result.result_code == "TARGET_ACTIVATION_BLOCKED"
+            assert terminal.fact_ids["blocking_plan_id"] == str(first_activation.batch_id)
+
+        path = f"/internal/v1/paper/management/cycles/{second_cycle.id}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=synthesis_at + timedelta(minutes=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            blocked = await client.get(path, headers=headers("GET", path))
+        assert blocked.status_code == 200, blocked.text
+        blocked_data = blocked.json()["data"]
+        assert blocked_data["blocking_plan"]["batch_id"] == str(first_activation.batch_id)
+        assert blocked_data["active_target"]["target_version_id"] == str(
+            first_activation.target_version_id
+        )
+        assert blocked_data["proposal"]["strategy_decision_id"] != str(
+            first_proposal.decision_id
+        )
+        assert blocked_data["activation_result"]["result_code"] == "TARGET_ACTIVATION_BLOCKED"
+        assert blocked_data["plan_summary"] is None
+
+        async with sessions() as session:
+            assert (
+                await session.scalar(select(func.count()).select_from(PaperTargetVersionRecord))
+                == 1
+            )
+            assert (
+                await session.scalar(select(func.count()).select_from(PaperOrderBatchRecord)) == 1
+            )
+
+        async with sessions.begin() as session:
+            orders = tuple(
+                await session.scalars(
+                    select(PaperOrderRecord)
+                    .where(PaperOrderRecord.batch_id == first_activation.batch_id)
+                    .order_by(PaperOrderRecord.id)
+                )
+            )
+            assert orders
+            for index, order in enumerate(orders):
+                event_seq = await session.scalar(
+                    select(func.max(PaperOrderEventRecord.event_seq)).where(
+                        PaperOrderEventRecord.order_id == order.id
+                    )
+                )
+                await cancel_internal_paper_order(
+                    session,
+                    order_id=order.id,
+                    expected_event_seq=int(event_seq),
+                    requested_at=synthesis_at + timedelta(minutes=2, seconds=index),
+                    idempotency_key=f"release-old-plan-{index}",
+                )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=synthesis_at + timedelta(minutes=3))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            released = await client.get(path, headers=headers("GET", path))
+        assert released.status_code == 200, released.text
+        released_plan = released.json()["data"]["blocking_plan"]
+        assert released_plan["batch_id"] == str(first_activation.batch_id)
+        assert released_plan["occupation_state"] == "released"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_stale_baseline_never_becomes_a_planless_resource_blocker(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
