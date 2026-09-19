@@ -948,17 +948,21 @@ function synthesisChoicesValid(synthesis: Record<string, unknown>, candidateIds:
     || !ids.every((id): id is string => id !== null && candidateIds.includes(id))
     || new Set(ids).size !== ids.length) return false;
   const byId = new Map(choices.map((choice) => [String(choice.instrument_id).toLowerCase(), choice]));
-  return choices.every((choice) => {
+  if (!choices.every((choice) => {
     if (!Array.isArray(choice.depends_on_instrument_ids)) return false;
+    const choiceId = String(choice.instrument_id).toLowerCase();
     const dependencyIds = choice.depends_on_instrument_ids.map((id) => typeof id === "string"
       ? id.toLowerCase()
       : null);
     const replacementId = typeof choice.replaces_instrument_id === "string"
       ? choice.replaces_instrument_id.toLowerCase()
       : null;
-    if (dependencyIds.some((id) => id === null || !byId.has(id))) return false;
+    if (dependencyIds.some((id) => id === null || id === choiceId || !byId.has(id))
+      || new Set(dependencyIds).size !== dependencyIds.length
+      || replacementId === choiceId) return false;
     if (replacementId !== null
-      && !["reduce", "exit"].includes(String(byId.get(replacementId)?.action))) return false;
+      && (!["include", "increase"].includes(String(choice.action))
+        || !["reduce", "exit"].includes(String(byId.get(replacementId)?.action)))) return false;
     return [...dependencyIds, replacementId]
       .filter((id): id is string => id !== null)
       .every((id) => {
@@ -968,7 +972,26 @@ function synthesisChoicesValid(synthesis: Record<string, unknown>, candidateIds:
             && typeof choice.rank === "number"
             && priorRank < choice.rank);
       });
-  });
+  })) return false;
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (visiting.has(id)) return false;
+    if (visited.has(id)) return true;
+    visiting.add(id);
+    const choice = byId.get(id);
+    const references = choice === undefined
+      ? []
+      : [
+        ...(choice.depends_on_instrument_ids as string[]),
+        ...(typeof choice.replaces_instrument_id === "string" ? [choice.replaces_instrument_id] : []),
+      ].map((value) => value.toLowerCase());
+    if (!references.every(visit)) return false;
+    visiting.delete(id);
+    visited.add(id);
+    return true;
+  };
+  return [...byId.keys()].every(visit);
 }
 
 function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Record<string, unknown>): boolean {

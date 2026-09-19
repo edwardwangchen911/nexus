@@ -349,7 +349,7 @@ describe("internal-paper Engine response boundary", () => {
     dependencyBatch.candidate_instrument_ids = [instrumentId, secondInstrumentId];
     const dependencyResearch = (dependencyDeferred.security_research as Array<Record<string, unknown>>)[0];
     dependencyDeferred.security_research = [
-      dependencyResearch,
+      { ...dependencyResearch, stance: "reduce_candidate" },
       { ...dependencyResearch, instrument_id: secondInstrumentId, research_run_id: requestId, research_output_id: orderId },
     ];
     const dependencyChoice = ((dependencyDeferred.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[0];
@@ -365,8 +365,9 @@ describe("internal-paper Engine response boundary", () => {
       },
     ];
     const dependencyTarget = ((dependencyDeferred.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[0];
+    (dependencyDeferred.proposal as Record<string, unknown>).cash_weight = "0.98";
     (dependencyDeferred.proposal as Record<string, unknown>).targets = [
-      { ...dependencyTarget, role: "none", rank: null, reason_code: "ATOMIC_STEP_REQUIRED" },
+      { ...dependencyTarget, target_weight: "0.02", role: "none", rank: null, reason_code: "ATOMIC_STEP_REQUIRED" },
       {
         ...dependencyTarget,
         instrument_id: secondInstrumentId,
@@ -377,6 +378,9 @@ describe("internal-paper Engine response boundary", () => {
         reason_code: "DEPENDENCY_NOT_APPLIED",
       },
     ];
+    const dependencyActiveTarget = dependencyDeferred.active_target as Record<string, unknown>;
+    dependencyActiveTarget.cash_weight = "0.98";
+    (dependencyActiveTarget.targets as Array<Record<string, unknown>>)[0].target_weight = "0.02";
     expect((await sanitizeEngineResponse(json({ data: dependencyDeferred, meta }), undefined, path, "GET")).status).toBe(200);
     const dependencyWithoutSource = structuredClone(dependencyDeferred) as Record<string, unknown>;
     const emptyDependencyChoice = ((dependencyWithoutSource.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>)[1];
@@ -418,6 +422,38 @@ describe("internal-paper Engine response boundary", () => {
       depends_on_instrument_ids: [instrumentId], reason_code: "DEPENDENCY_NOT_APPLIED",
     });
     expect((await sanitizeEngineResponse(json({ data: invertedRank, meta }), undefined, path, "GET")).status).toBe(500);
+
+    for (const mutate of [
+      (value: Record<string, unknown>) => {
+        const choices = (value.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+        const targets = (value.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+        choices[1].depends_on_instrument_ids = [secondInstrumentId];
+        targets[1].depends_on_instrument_ids = [secondInstrumentId];
+      },
+      (value: Record<string, unknown>) => {
+        const choices = (value.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+        const targets = (value.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+        choices[1].depends_on_instrument_ids = [instrumentId, instrumentId];
+        targets[1].depends_on_instrument_ids = [instrumentId, instrumentId];
+      },
+      (value: Record<string, unknown>) => {
+        const choices = (value.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+        const targets = (value.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+        choices[0].depends_on_instrument_ids = [secondInstrumentId];
+        targets[0].depends_on_instrument_ids = [secondInstrumentId];
+        targets[0].reason_code = "DEPENDENCY_NOT_APPLIED";
+      },
+      (value: Record<string, unknown>) => {
+        const choices = (value.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+        const targets = (value.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>;
+        choices[1].replaces_instrument_id = instrumentId;
+        targets[1].replaces_instrument_id = instrumentId;
+      },
+    ]) {
+      const invalidStructure = structuredClone(dependencyDeferred) as Record<string, unknown>;
+      mutate(invalidStructure);
+      expect((await sanitizeEngineResponse(json({ data: invalidStructure, meta }), undefined, path, "GET")).status).toBe(500);
+    }
 
     for (const reason_code of ["INHERITED_TARGET", "UNKNOWN_REASON"]) {
       const invalidReason = structuredClone(valid) as Record<string, unknown>;
