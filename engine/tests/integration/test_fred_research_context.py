@@ -1,11 +1,12 @@
 """Normal FRED import augments exact research, never its historical or standalone base."""
 
 import json
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import exchange_calendars
 import pytest
 from helpers.research_snapshots import INSTRUMENT, seed_filing
 from nexus.agents import snapshots as snapshot_module
@@ -261,15 +262,20 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
                 created_at=fixed_now - timedelta(days=1),
             )
         )
-        for offset in range(-3, 4):
-            session_date = local_date + timedelta(days=offset)
+        official_calendar = exchange_calendars.get_calendar("XNYS")
+        for label in official_calendar.sessions_in_range(
+            local_date - timedelta(days=7),
+            local_date + timedelta(days=7),
+        ):
+            session_date = label.date()
+            market_close_at = official_calendar.session_close(label).to_pydatetime()
             session.add(
                 ExchangeCalendarSessionRecord(
                     calendar_authority_id=calendar_authority_id,
                     session=session_date,
-                    market_open_at=datetime.combine(session_date, time(13, 30), tzinfo=UTC),
-                    market_close_at=datetime.combine(session_date, time(20), tzinfo=UTC),
-                    decision_at=datetime.combine(session_date, time(20, 1), tzinfo=UTC),
+                    market_open_at=official_calendar.session_open(label).to_pydatetime(),
+                    market_close_at=market_close_at,
+                    decision_at=market_close_at + timedelta(minutes=1),
                     created_at=fixed_now - timedelta(days=1),
                 )
             )

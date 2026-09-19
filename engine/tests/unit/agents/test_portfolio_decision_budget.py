@@ -17,7 +17,7 @@ _RUN_ID = UUID("018f0000-0000-7000-8000-000000000001")
 
 
 class _BudgetSession:
-    def __init__(self, usage: tuple[Decimal, Decimal]) -> None:
+    def __init__(self, usage: tuple[Decimal, ...]) -> None:
         self._usage = iter(usage)
         self.queries: list[str] = []
         self.added: list[object] = []
@@ -38,7 +38,7 @@ class _BudgetSession:
 
 @pytest.mark.asyncio
 async def test_instrument_budget_counts_open_portfolio_decision_reservations() -> None:
-    session = _BudgetSession((Decimal("1.00"), Decimal("0.75")))
+    session = _BudgetSession((Decimal("1.00"), Decimal("0.75"), Decimal("0")))
 
     with pytest.raises(BudgetExhausted, match="daily research budget exhausted"):
         await reserve_daily_budget(
@@ -53,12 +53,16 @@ async def test_instrument_budget_counts_open_portfolio_decision_reservations() -
 
     assert any("agent_daily_budget_reservations" in query for query in session.queries)
     assert any("portfolio_decision_budget_reservations" in query for query in session.queries)
+    assert any(
+        "agent_portfolio_synthesis_budget_reservations" in query
+        for query in session.queries
+    )
     assert session.added == []
 
 
 @pytest.mark.asyncio
 async def test_portfolio_decision_budget_uses_the_shared_daily_total() -> None:
-    session = _BudgetSession((Decimal("1.00"), Decimal("0.75")))
+    session = _BudgetSession((Decimal("1.00"), Decimal("0.75"), Decimal("0")))
 
     reservation = await reserve_portfolio_decision_budget(
         session,  # type: ignore[arg-type]
