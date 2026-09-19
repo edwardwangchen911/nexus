@@ -81,10 +81,12 @@ challenger orchestrator ID 只作为整套 bundle 的锚，缺角色或混入 ac
 8. 只有某个登记槽的两条持久化事实都确实缺失，且冻结 authority 仍完全匹配时，才允许推进该
    精确槽；不得换槽、换幂等键、改冻结版本或补造 challenger。
 
-存在 open 评价时，统一 Agent Paper 宿主服务会固定评价的日历 authority，进入评价
-专用等待态并持续写心跳；等待期间不触发普通 Agent 周期。到达登记槽后，服务仅按
-持久化状态执行 `advance`、精确 Job 领取、`resume`、订单窗口与终结；进程重启仍从
-原 cycle/Job/Output 恢复。若登记槽超过 60 秒仍完全没有 cycle，则追加
+存在 open 评价时，统一 Agent Paper 宿主服务会固定评价的日历 authority，并持续写心跳。
+评价仅在等待下一评价时点（登记槽或待发布绩效时点）时不独占宿主，普通组合仍按其唯一
+10:00 窗口检查和推进；普通流程进入纯等待时，会以更早的评价时点作为下一统一检查点。到达评价时点后，
+评价在下一个动作边界恢复优先，并仅按持久化状态执行 `advance`、精确 Job 领取、`resume`、
+订单窗口与终结；已开始的普通动作不被取消、并发或重放。进程重启仍从原 cycle/Job/Output
+恢复。若登记槽超过 60 秒仍完全没有 cycle，则追加
 `UNKNOWN / REGISTERED_SLOT_MISSED`，不回放该槽；若已有任一 cycle，则拒绝这种关闭并保留
 原现场恢复。
 宿主启动只校验静态配置与本地 PostgreSQL 可达性；Codex 登录状态仅在领取精确研究 Job

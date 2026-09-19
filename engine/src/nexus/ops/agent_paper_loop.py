@@ -1708,6 +1708,34 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
     return AgentPaperLoopAction.TRIGGER
 
 
+def _normal_wait_until(
+    snapshot: AgentPaperLoopSnapshot,
+    action: AgentPaperLoopAction,
+) -> datetime | None:
+    """Return the next normal-flow wakeup without changing its scheduling policy."""
+    if action == AgentPaperLoopAction.WAIT_FOR_SLOT:
+        return floor_decision_slot(snapshot.now) + timedelta(minutes=5)
+    if action == AgentPaperLoopAction.WAIT_FOR_MARKET:
+        return snapshot.market_window_end_at
+    if action != AgentPaperLoopAction.WAIT_FOR_SESSION:
+        return None
+    if (
+        snapshot.decision_window_start_at is None
+        or snapshot.next_decision_window_start_at is None
+    ):
+        return None
+    if snapshot.now < _portfolio_slot(snapshot.decision_window_start_at):
+        wait_until = _portfolio_slot(snapshot.decision_window_start_at)
+    else:
+        wait_until = _portfolio_slot(snapshot.next_decision_window_start_at)
+    if (
+        snapshot.decision_window_end_at is not None
+        and snapshot.now < snapshot.decision_window_end_at < wait_until
+    ):
+        return snapshot.decision_window_end_at
+    return wait_until
+
+
 _SAFE_EVALUATION_FAILURE_PHASES = frozenset(
     {"configuration", "prior_daily", "macro", "current_trends", "prepare_pair"}
 )
@@ -2187,13 +2215,28 @@ async def run_local_agent_paper_loop(
                     current,
                     expected_calendar_authority_id=calendar_authority_id,
                 )
-                if evaluation is not None:
+                if evaluation is not None and evaluation.cycle_status != "evaluation_waiting":
                     return evaluation
-                return await inspect_agent_paper_loop(
+                evaluation_wait_at = (
+                    None if evaluation is None else evaluation.evaluation_slot_at
+                )
+                if evaluation is not None and evaluation_wait_at is None:
+                    return evaluation
+                normal = await inspect_agent_paper_loop(
                     current,
                     account_id=account_id,
                     expected_calendar_authority_id=calendar_authority_id,
                 )
+                if evaluation is None:
+                    return normal
+                assert evaluation_wait_at is not None
+                normal_wait_until = _normal_wait_until(normal, choose_loop_action(normal))
+                if (
+                    normal_wait_until is not None
+                    and evaluation_wait_at <= normal_wait_until
+                ):
+                    return evaluation
+                return normal
 
             async def execute(
                 action: AgentPaperLoopAction, snapshot: AgentPaperLoopSnapshot

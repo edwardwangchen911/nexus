@@ -2374,6 +2374,271 @@ def test_explicit_loop_reinspection_and_action_keep_registered_config(monkeypatc
     assert seen == ["inspect", "execute"]
 
 
+def test_waiting_evaluation_does_not_hide_normal_cycle_inspection(monkeypatch, tmp_path):
+    env_file = explicit_service_config(tmp_path)
+    normal = snapshot()
+    evaluation = loop.AgentPaperLoopSnapshot(
+        now=normal.now,
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        evaluation_id=UUID(int=40),
+        evaluation_slot_at=normal.now + timedelta(minutes=5),
+        cycle_status="evaluation_waiting",
+    )
+    inspected = []
+
+    @contextmanager
+    def isolated_lock():
+        yield
+
+    async def initial(_settings):
+        return CALENDAR_AUTHORITY_ID
+
+    async def inspect_normal(_settings, **_kwargs):
+        inspected.append("normal")
+        return normal
+
+    async def inspect_evaluation(_settings, **_kwargs):
+        inspected.append("evaluation")
+        return evaluation
+
+    async def run_loop(*, inspect, **_kwargs):
+        selected = await inspect()
+        assert selected is normal
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", initial)
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect_normal)
+    monkeypatch.setattr(loop, "inspect_agent_version_evaluation_loop", inspect_evaluation)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url=enabled_environment()["DATABASE_URL"]),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+        )
+    )
+
+    assert result == A.STOP_REQUESTED
+    assert inspected == ["evaluation", "normal"]
+
+
+@pytest.mark.parametrize(
+    "evaluation_status",
+    ["evaluation_pending", "researching", "evaluation_performance_due", "evaluation_complete"],
+)
+def test_due_evaluation_keeps_priority_over_normal_cycle(
+    monkeypatch, tmp_path, evaluation_status
+):
+    env_file = explicit_service_config(tmp_path)
+    evaluation = loop.AgentPaperLoopSnapshot(
+        now=NOW,
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        evaluation_id=UUID(int=40),
+        evaluation_slot_at=NOW,
+        cycle_status=evaluation_status,
+    )
+
+    @contextmanager
+    def isolated_lock():
+        yield
+
+    async def initial(_settings):
+        return CALENDAR_AUTHORITY_ID
+
+    async def inspect_evaluation(_settings, **_kwargs):
+        return evaluation
+
+    async def inspect_normal(*_args, **_kwargs):
+        raise AssertionError("a due evaluation keeps the existing priority")
+
+    async def run_loop(*, inspect, **_kwargs):
+        selected = await inspect()
+        assert selected is evaluation
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", initial)
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect_normal)
+    monkeypatch.setattr(loop, "inspect_agent_version_evaluation_loop", inspect_evaluation)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url=enabled_environment()["DATABASE_URL"]),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+        )
+    )
+
+    assert result == A.STOP_REQUESTED
+
+
+@pytest.mark.parametrize(
+    "normal_wait",
+    [A.WAIT_FOR_SLOT, A.WAIT_FOR_SESSION, A.WAIT_FOR_MARKET],
+)
+def test_waiting_evaluation_is_reinspected_before_normal_wait_deadline(
+    monkeypatch, tmp_path, normal_wait
+):
+    env_file = explicit_service_config(tmp_path)
+    started_at = NOW + timedelta(minutes=6)
+    current = [started_at]
+    evaluation_slot = started_at + timedelta(seconds=30)
+    normal_deadline = started_at + timedelta(minutes=5)
+    actions = []
+    sleeps = []
+
+    @contextmanager
+    def isolated_lock():
+        yield
+
+    async def initial(_settings):
+        return CALENDAR_AUTHORITY_ID
+
+    async def inspect_evaluation(_settings, **_kwargs):
+        return loop.AgentPaperLoopSnapshot(
+            now=current[0],
+            calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            evaluation_id=UUID(int=40),
+            evaluation_slot_at=evaluation_slot,
+            cycle_status=(
+                "evaluation_waiting" if current[0] < evaluation_slot else "evaluation_pending"
+            ),
+        )
+
+    async def inspect_normal(_settings, **_kwargs):
+        if normal_wait == A.WAIT_FOR_SLOT:
+            return snapshot(
+                now=current[0],
+                cycle_id=UUID(int=41),
+                cycle_status="completed",
+                cycle_slot_at=loop.floor_decision_slot(current[0]),
+            )
+        if normal_wait == A.WAIT_FOR_MARKET:
+            return snapshot(
+                now=current[0],
+                cycle_id=UUID(int=41),
+                cycle_status="awaiting_market",
+                has_open_order=True,
+                order_id=UUID(int=42),
+                market_window_end_at=normal_deadline,
+            )
+        return snapshot(
+            now=current[0],
+            decision_window_start_at=NOW,
+            decision_window_end_at=NOW + timedelta(hours=6),
+            next_decision_window_start_at=NOW + timedelta(days=1),
+        )
+
+    async def execute(_settings, *, action, **_kwargs):
+        actions.append(action)
+        assert action == A.ADVANCE_EVALUATION
+        return A.STOP_REQUESTED
+
+    async def heartbeat(*_args, **_kwargs):
+        return None
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        current[0] += timedelta(seconds=seconds)
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", initial)
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect_normal)
+    monkeypatch.setattr(loop, "inspect_agent_version_evaluation_loop", inspect_evaluation)
+    monkeypatch.setattr(loop, "execute_agent_paper_loop_action", execute)
+    monkeypatch.setattr(loop, "heartbeat_agent_paper_loop", heartbeat)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url=enabled_environment()["DATABASE_URL"]),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+            sleep=sleep,
+            clock=lambda: current[0],
+            monotonic=lambda: (current[0] - started_at).total_seconds(),
+        )
+    )
+
+    assert result == A.STOP_REQUESTED
+    assert actions == [A.ADVANCE_EVALUATION]
+    assert sum(sleeps) == pytest.approx(30)
+    assert current[0] < normal_deadline
+
+
+def test_running_normal_action_finishes_before_due_evaluation_is_selected(
+    monkeypatch, tmp_path
+):
+    env_file = explicit_service_config(tmp_path)
+    current = [NOW]
+    evaluation_slot = NOW + timedelta(seconds=5)
+    actions = []
+
+    @contextmanager
+    def isolated_lock():
+        yield
+
+    async def initial(_settings):
+        return CALENDAR_AUTHORITY_ID
+
+    async def inspect_evaluation(_settings, **_kwargs):
+        return loop.AgentPaperLoopSnapshot(
+            now=current[0],
+            calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            evaluation_id=UUID(int=40),
+            evaluation_slot_at=evaluation_slot,
+            cycle_status=(
+                "evaluation_waiting" if current[0] < evaluation_slot else "evaluation_pending"
+            ),
+        )
+
+    async def inspect_normal(_settings, **_kwargs):
+        return snapshot(
+            now=current[0],
+            cycle_id=UUID(int=41),
+            cycle_status="researching",
+            research_job_id=UUID(int=42),
+            research_job_status="succeeded",
+        )
+
+    async def execute(_settings, *, action, **_kwargs):
+        actions.append(action)
+        if action == A.RESUME:
+            current[0] += timedelta(seconds=6)
+            return None
+        assert action == A.ADVANCE_EVALUATION
+        return A.STOP_REQUESTED
+
+    async def heartbeat(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", initial)
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect_normal)
+    monkeypatch.setattr(loop, "inspect_agent_version_evaluation_loop", inspect_evaluation)
+    monkeypatch.setattr(loop, "execute_agent_paper_loop_action", execute)
+    monkeypatch.setattr(loop, "heartbeat_agent_paper_loop", heartbeat)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url=enabled_environment()["DATABASE_URL"]),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=env_file,
+            clock=lambda: current[0],
+            monotonic=lambda: (current[0] - NOW).total_seconds(),
+        )
+    )
+
+    assert result == A.STOP_REQUESTED
+    assert actions == [A.RESUME, A.ADVANCE_EVALUATION]
+
+
 @pytest.mark.parametrize("action", [A.TRIGGER, A.COLLECT_WINDOW, A.RUN_RESEARCH_JOB])
 def test_explicit_action_uses_registered_config_through_product_boundary(
     monkeypatch,
