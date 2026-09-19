@@ -63,6 +63,27 @@ export function paperCycleId(request: Request): string {
   return value;
 }
 
+export function paperManagementCycleId(request: Request): string {
+  const match = /^\/api\/v1\/paper\/management\/cycles\/([^/]+)$/.exec(new URL(request.url).pathname);
+  const value = match?.[1];
+  if (!value || !validateUuid(value)) throw invalid("The Agent paper management cycle is invalid.");
+  return value;
+}
+
+export function paperPlanId(request: Request): string {
+  const match = /^\/api\/v1\/paper\/plans\/([^/]+)$/.exec(new URL(request.url).pathname);
+  const value = match?.[1];
+  if (!value || !validateUuid(value)) throw invalid("The paper plan is invalid.");
+  return value;
+}
+
+export function paperCancelResultOrderId(request: Request): string {
+  const match = /^\/api\/v1\/paper\/orders\/([^/]+)\/cancel-result$/.exec(new URL(request.url).pathname);
+  const value = match?.[1];
+  if (!value || !validateUuid(value)) throw invalid("The paper order is invalid.");
+  return value;
+}
+
 export async function readPaperCancel(request: Request): Promise<Uint8Array> {
   if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
     throw invalid("The paper cancellation request is invalid.");

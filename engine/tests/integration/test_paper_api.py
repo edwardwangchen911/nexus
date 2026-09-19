@@ -90,6 +90,514 @@ async def test_latest_agent_paper_cycle_is_404_without_a_cycle(
 
 
 @pytest.mark.asyncio
+async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identities(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from integration.test_paper_cancel_result_read_pg import _seed_target_associated_plan
+    from nexus.paper.agent_cycle import _append_event, _events, _resume_batch
+
+    engine, sessions, args, proposal, activated = await _seed_target_associated_plan(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        now = args["now"] + timedelta(seconds=2)
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            await _append_event(
+                session,
+                cycle,
+                (await _events(session, cycle.id))[-1].to_status,
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {
+                    "strategy_decision_id": str(proposal.decision_id),
+                    "portfolio_synthesis_output_id": str(proposal.proposal.synthesis_output_id),
+                },
+            )
+            await _resume_batch(
+                session,
+                cycle=cycle,
+                events=await _events(session, cycle.id),
+                now=now,
+            )
+        legacy_detail_path = f"/internal/v1/paper/cycles/{args['cycle_id']}"
+        detail_path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        legacy_portfolio_path = "/internal/v1/paper/portfolio"
+        portfolio_path = "/internal/v1/paper/management/portfolio"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=now)),
+            base_url="http://testserver",
+        ) as client:
+            legacy_detail = await client.get(
+                legacy_detail_path, headers=headers("GET", legacy_detail_path)
+            )
+            detail = await client.get(detail_path, headers=headers("GET", detail_path))
+            legacy_portfolio = await client.get(
+                legacy_portfolio_path, headers=headers("GET", legacy_portfolio_path)
+            )
+            portfolio = await client.get(portfolio_path, headers=headers("GET", portfolio_path))
+
+        assert set(legacy_detail.json()["data"]) == {"cycle", "orders"}
+        assert "management_summary" not in legacy_portfolio.json()["data"]
+        assert detail.status_code == 200, detail.text
+        assert portfolio.status_code == 200, portfolio.text
+        facts = detail.json()["data"]
+        assert facts["candidate_batch"]["candidate_batch_id"] is not None
+        assert len(facts["security_research"]) == 2
+        assert facts["synthesis"]["synthesis_output_id"] == str(
+            proposal.proposal.synthesis_output_id
+        )
+        assert facts["synthesis"]["content_hash"] == proposal.proposal.synthesis_output_hash
+        assert facts["proposal"]["strategy_decision_id"] == str(proposal.decision_id)
+        assert facts["proposal"]["decision_hash"] == proposal.proposal.decision_hash
+        assert facts["active_target"]["target_version_id"] == str(activated.target_version_id)
+        assert facts["activation_result"]["batch_id"] == str(activated.batch_id)
+        assert facts["blocking_plan"] is None
+        assert facts["plan_summary"]["batch_id"] == str(activated.batch_id)
+        assert facts["proposal"]["as_of"] != facts["active_target"]["as_of"]
+        assert facts["active_target"]["as_of"]
+        assert facts["plan_summary"]["plan_created_at"]
+        assert facts["plan_summary"]["reconciliation_as_of"]
+        assert facts["proposal"] != facts["active_target"] != facts["plan_summary"]
+
+        summary = portfolio.json()["data"]
+        assert summary["current_target"]["target_version_id"] == str(activated.target_version_id)
+        assert summary["occupying_plan"]["batch_id"] == str(activated.batch_id)
+        assert summary["latest_proposal"]["strategy_decision_id"] == str(proposal.decision_id)
+        assert summary["read_as_of"] == now.isoformat().replace("+00:00", "Z")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("table", "identity"),
+    (
+        ("strategy_decisions", "decision"),
+        ("paper_target_versions", "target"),
+        ("paper_order_batches", "batch"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_management_cycle_rejects_activation_with_missing_authority_row(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    table: str,
+    identity: str,
+) -> None:
+    from integration.test_paper_cancel_result_read_pg import _seed_target_associated_plan
+    from nexus.paper.agent_cycle import _append_event, _events, _resume_batch
+
+    engine, sessions, args, proposal, activated = await _seed_target_associated_plan(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        read_at = args["now"] + timedelta(seconds=3)
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            await _append_event(
+                session,
+                cycle,
+                (await _events(session, cycle.id))[-1].to_status,
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {
+                    "strategy_decision_id": str(proposal.decision_id),
+                    "portfolio_synthesis_output_id": str(
+                        proposal.proposal.synthesis_output_id
+                    ),
+                },
+            )
+            await _resume_batch(
+                session,
+                cycle=cycle,
+                events=await _events(session, cycle.id),
+                now=args["now"] + timedelta(seconds=2),
+            )
+        row_id = {
+            "decision": proposal.decision_id,
+            "target": activated.target_version_id,
+            "batch": activated.batch_id,
+        }[identity]
+        assert row_id is not None
+        async with sessions.begin() as session:
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text(f"UPDATE {table} SET created_at=:future WHERE id=:row_id"),
+                    {"future": read_at + timedelta(days=1), "row_id": row_id},
+                )
+            finally:
+                await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=read_at)),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "DATA_PARTIAL"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_management_summary_ignores_more_than_fifty_unoccupied_historical_batches(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from integration.test_paper_cancel_result_read_pg import _seed_target_associated_plan
+
+    engine, sessions, args, _, activated = await _seed_target_associated_plan(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        async with sessions.begin() as session:
+            await session.execute(
+                text(
+                    "ALTER TABLE paper_order_batches "
+                    "DROP CONSTRAINT uq_paper_order_batches_account_decision, "
+                    "DROP CONSTRAINT uq_paper_order_batches_idempotency"
+                )
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO paper_order_batches ("
+                    "id, account_id, strategy_decision_id, target_version_id, risk_policy_id, "
+                    "idempotency_record_id, request_hash, projection_hash, risk_input_hash, "
+                    "result_hash, batch_hash, evaluated_at, created_at"
+                    ") SELECT gen_random_uuid(), account_id, strategy_decision_id, "
+                    "target_version_id, risk_policy_id, idempotency_record_id, "
+                    "repeat(md5('request-' || series), 2), "
+                    "repeat(md5('projection-' || series), 2), "
+                    "repeat(md5('risk-' || series), 2), "
+                    "repeat(md5('result-' || series), 2), "
+                    "repeat(md5('batch-' || series), 2), "
+                    "evaluated_at + make_interval(secs => series), "
+                    "created_at + make_interval(secs => series) "
+                    "FROM paper_order_batches CROSS JOIN generate_series(1, 51) AS series "
+                    "WHERE id = :batch_id"
+                ),
+                {"batch_id": activated.batch_id},
+            )
+
+        path = "/internal/v1/paper/management/portfolio"
+        read_at = args["now"] + timedelta(minutes=2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=read_at)),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["occupying_plan"]["batch_id"] == str(
+            activated.batch_id
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_policy_unconfirmed_exposes_synthesis_without_invented_proposal_weights(
+    migrated_database_url: str,
+) -> None:
+    from integration.test_portfolio_proposal_pg import proposal_source
+
+    engine, _, args = await proposal_source(migrated_database_url, approve=False)
+    try:
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200
+        facts = response.json()["data"]
+        assert facts["synthesis"] is not None
+        assert facts["proposal"] is None
+        assert facts["active_target"] is None
+        assert facts["activation_result"] is None
+        assert facts["blocker"]["code"] == "POLICY_UNCONFIRMED"
+        assert "weight" not in json.dumps(facts["blocker"]).lower()
+        summary_path = "/internal/v1/paper/management/portfolio"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            summary = await client.get(
+                summary_path, headers=headers("GET", summary_path)
+            )
+        assert summary.status_code == 200, summary.text
+        assert summary.json()["data"]["occupying_plan"] is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_management_summary_rejects_two_persisted_occupying_batch_identities(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.paper.service import create_paper_order_batch
+
+    seed = await seed_paper_batch(migrated_database_url)
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        await create_paper_order_batch(
+            session,
+            account_id=seed.account_id,
+            strategy_decision_id=seed.decision_id,
+            idempotency_key="management-two-occupying-batches",
+            request_time=seed.request_time,
+        )
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE paper_order_batches "
+                "DROP CONSTRAINT uq_paper_order_batches_account_decision, "
+                "DROP CONSTRAINT uq_paper_order_batches_idempotency"
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE risk_evaluations "
+                "DROP CONSTRAINT fk_risk_evaluations_order"
+            )
+        )
+        second_batch_id = await session.scalar(
+            text(
+                "INSERT INTO paper_order_batches ("
+                "id, account_id, strategy_decision_id, target_version_id, risk_policy_id, "
+                "idempotency_record_id, request_hash, projection_hash, risk_input_hash, "
+                "result_hash, batch_hash, evaluated_at, created_at"
+                ") SELECT gen_random_uuid(), account_id, strategy_decision_id, "
+                "target_version_id, risk_policy_id, idempotency_record_id, "
+                "repeat(md5('second-request'), 2), repeat(md5('second-projection'), 2), "
+                "repeat(md5('second-risk'), 2), repeat(md5('second-result'), 2), "
+                "repeat(md5('second-batch'), 2), evaluated_at, created_at "
+                "FROM paper_order_batches WHERE account_id = :account_id "
+                "RETURNING id"
+            ),
+            {"account_id": seed.account_id},
+        )
+        assert second_batch_id is not None
+        await session.execute(text("ALTER TABLE paper_orders DISABLE TRIGGER USER"))
+        await session.execute(
+            text(
+                "UPDATE paper_orders SET batch_id = :second_batch_id "
+                "WHERE id = (SELECT id FROM paper_orders "
+                "WHERE account_id = :account_id ORDER BY id LIMIT 1)"
+            ),
+            {"account_id": seed.account_id, "second_batch_id": second_batch_id},
+        )
+        await session.execute(text("ALTER TABLE paper_orders ENABLE TRIGGER USER"))
+
+    path = "/internal/v1/paper/management/portfolio"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(migrated_database_url, now=seed.request_time)
+        ),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
+
+
+@pytest.mark.asyncio
+async def test_proposal_rejection_exposes_only_allowlisted_structured_blocker(
+    migrated_database_url: str,
+) -> None:
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_cycle import _append_event, _events
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            event_at = cycle.decision_time
+            events = await _events(session, cycle.id)
+            await _append_event(
+                session,
+                cycle,
+                events[-1].to_status,
+                "unavailable",
+                "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+                {
+                    "portfolio_synthesis_output_id": str(args["synthesis_output_id"]),
+                    "proposal_rejection_code": "PORTFOLIO_DEPENDENCY_CONFLICT",
+                },
+            )
+
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200, response.text
+        facts = response.json()["data"]
+        assert facts["proposal"] is None
+        assert facts["activation_result"] is None
+        assert facts["blocker"] == {
+            "code": "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+            "source_stage": "proposal",
+            "category": "proposal_rejected",
+            "proposal_rejection_code": "PORTFOLIO_DEPENDENCY_CONFLICT",
+            "as_of": event_at.isoformat().replace("+00:00", "Z"),
+        }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "proposal_rejection_code",
+    (None, "UNKNOWN_REJECTION", ["PORTFOLIO_DEPENDENCY_CONFLICT"]),
+)
+@pytest.mark.asyncio
+async def test_proposal_rejection_requires_one_allowlisted_scalar_code(
+    migrated_database_url: str,
+    proposal_rejection_code: object,
+) -> None:
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_cycle import _append_event, _events
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        facts: dict[str, object] = {
+            "portfolio_synthesis_output_id": str(args["synthesis_output_id"]),
+        }
+        if proposal_rejection_code is not None:
+            facts["proposal_rejection_code"] = proposal_rejection_code
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            events = await _events(session, cycle.id)
+            await _append_event(
+                session,
+                cycle,
+                events[-1].to_status,
+                "unavailable",
+                "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+                facts,
+            )
+
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "DATA_PARTIAL"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_management_cycle_rejects_terminal_synthesis_without_output(
+    migrated_database_url: str,
+) -> None:
+    from integration.test_paper_cancel_result_read_pg import (
+        _corrupt_target_proposal_authority,
+    )
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_decision_store import persist_portfolio_proposal
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            proposal = await persist_portfolio_proposal(session, **args)
+        async with sessions.begin() as session:
+            await _corrupt_target_proposal_authority(
+                session,
+                decision_id=proposal.decision_id,
+                corruption="missing_output",
+            )
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "DATA_PARTIAL"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_historical_activation_blocker_without_plan_id_stays_unknown(
+    migrated_database_url: str,
+) -> None:
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_cycle import _append_event, _events
+    from nexus.paper.agent_decision_store import persist_portfolio_proposal
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            proposal = await persist_portfolio_proposal(session, **args)
+            events = await _events(session, cycle.id)
+            await _append_event(
+                session,
+                cycle,
+                events[-1].to_status,
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+            await _append_event(
+                session,
+                cycle,
+                "decision_recorded",
+                "completed",
+                "TARGET_ACTIVATION_BLOCKED",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["blocking_plan"] is None
+        assert response.json()["data"]["blocker"]["code"] == "TARGET_ACTIVATION_BLOCKED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_workbench_endpoint_is_authenticated_read_only_and_rejects_queries(
     migrated_database_url: str,
 ) -> None:
@@ -106,7 +614,7 @@ async def test_workbench_endpoint_is_authenticated_read_only_and_rejects_queries
             headers=headers("GET", invalid_path),
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert response.json()["data"]["mode"] == "internal_paper"
     assert response.json()["data"]["execution_locked"] is True
     assert response.json()["data"]["loop"]["status"] == "unknown"
@@ -237,9 +745,7 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
         )
         invalid_low_path = "/internal/v1/paper/cycles?limit=0"
         invalid_high_path = "/internal/v1/paper/cycles?limit=21"
-        invalid_low = await client.get(
-            invalid_low_path, headers=headers("GET", invalid_low_path)
-        )
+        invalid_low = await client.get(invalid_low_path, headers=headers("GET", invalid_low_path))
         invalid_high = await client.get(
             invalid_high_path, headers=headers("GET", invalid_high_path)
         )
@@ -290,7 +796,7 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
 
 
 @pytest.mark.asyncio
-async def test_failed_agent_cycle_becomes_eligible_again_in_the_next_slot(
+async def test_legacy_failed_cycle_does_not_restore_removed_intraday_slots(
     migrated_database_url: str,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
@@ -352,14 +858,14 @@ async def test_failed_agent_cycle_becomes_eligible_again_in_the_next_slot(
         (
             decision_time + timedelta(minutes=1),
             "stopped",
-            decision_time + timedelta(minutes=5),
-            "NEXT_SLOT",
+            None,
+            "CALENDAR_UNAVAILABLE",
         ),
         (
             decision_time + timedelta(minutes=6),
-            "ready",
-            decision_time + timedelta(minutes=5),
-            "CURRENT_SLOT",
+            "stopped",
+            None,
+            "CALENDAR_UNAVAILABLE",
         ),
         (
             datetime(2026, 8, 27, 20, 1, tzinfo=UTC),
@@ -387,8 +893,26 @@ async def test_failed_agent_cycle_becomes_eligible_again_in_the_next_slot(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_code", "expected_blocker"),
+    [
+        ("RISK_INPUT_REQUIRED", None),
+        (
+            "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+            {
+                "code": "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+                "source_stage": "provider",
+                "category": "provider_capacity",
+                "proposal_rejection_code": None,
+                "as_of": DECISION_TIME.isoformat().replace("+00:00", "Z"),
+            },
+        ),
+    ],
+)
 async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_result(
     migrated_database_url: str,
+    result_code: str,
+    expected_blocker: dict[str, object] | None,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
     cycle_id = UUID("72000000-0000-0000-0000-000000000009")
@@ -417,7 +941,7 @@ async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_resu
         await session.flush()
         events = (
             (1, None, "prepared", "CYCLE_PREPARED"),
-            (2, "prepared", "unavailable", "RISK_INPUT_REQUIRED"),
+            (2, "prepared", "unavailable", result_code),
         )
         for sequence, from_status, to_status, result_code in events:
             session.add(
@@ -442,21 +966,32 @@ async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_resu
             )
 
     path = "/internal/v1/paper/cycles/latest"
+    detail_path = f"/internal/v1/paper/cycles/{cycle_id}"
+    management_path = f"/internal/v1/paper/management/cycles/{cycle_id}"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)),
         base_url="http://testserver",
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
+        detail = await client.get(detail_path, headers=headers("GET", detail_path))
+        management = await client.get(
+            management_path,
+            headers=headers("GET", management_path),
+        )
 
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["cycle_id"] == str(cycle_id)
     assert data["status"] == "unavailable"
-    assert data["result_code"] == "RISK_INPUT_REQUIRED"
+    assert data["result_code"] == result_code
     assert data["candidate_count"] == 0
     assert data["candidates"] == []
     assert data["decision_market"] is None
     assert data["execution_locked"] is True
+    assert detail.status_code == 200, detail.text
+    assert "blocker" not in detail.json()["data"]
+    assert management.status_code == 200, management.text
+    assert management.json()["data"]["blocker"] == expected_blocker
 
 
 @pytest.mark.asyncio
@@ -746,7 +1281,7 @@ async def test_paper_portfolio_returns_redacted_authoritative_performance(
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["mode"] == "internal_paper"
     assert data["currency"] == "USD"

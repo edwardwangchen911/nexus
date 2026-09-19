@@ -58,6 +58,164 @@ class PaperAttributionResponse(_StrictSchema):
     completeness: Literal["FULL", "PARTIAL"]
 
 
+class PaperTargetAllocationResponse(_StrictSchema):
+    instrument_id: UUID
+    target_weight: DecimalString
+    exit: bool
+    role: Literal["core", "tactical", "none"] | None
+    reason_code: str = Field(min_length=1, max_length=100)
+
+
+class PaperTargetSummaryResponse(_StrictSchema):
+    target_version_id: UUID
+    version_seq: int = Field(ge=1)
+    strategy_decision_id: UUID
+    previous_target_version_id: UUID | None
+    target_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    activation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cash_weight: DecimalString
+    targets: tuple[PaperTargetAllocationResponse, ...] = Field(max_length=50)
+    as_of: AwareDatetime
+
+
+class PaperPlanSummaryResponse(_StrictSchema):
+    batch_id: UUID
+    target_version_id: UUID | None
+    strategy_decision_id: UUID
+    decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_created_at: AwareDatetime
+    reconciliation_as_of: AwareDatetime
+    occupation_state: Literal["occupied", "released", "unknown"]
+
+
+class AgentPaperCandidateBatchResponse(_StrictSchema):
+    candidate_batch_id: UUID
+    universe_snapshot_id: UUID
+    candidate_instrument_ids: tuple[UUID, ...] = Field(min_length=1, max_length=5)
+    source: Literal["explicit_research_scope"]
+    batch_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    as_of: AwareDatetime
+
+
+class AgentPaperSecurityResearchResponse(_StrictSchema):
+    instrument_id: UUID
+    research_run_id: UUID
+    research_output_id: UUID
+    status: Literal["completed"]
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    intent_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stance: Literal["buy_candidate", "reduce_candidate", "hold", "watch"]
+    quality_status: Literal["complete", "partial"]
+    as_of: AwareDatetime
+
+
+class AgentPaperSynthesisChoiceResponse(_StrictSchema):
+    instrument_id: UUID
+    action: Literal["include", "increase", "reduce", "exit", "maintain", "defer"]
+    role: Literal["core", "tactical", "none"]
+    rank: int | None = Field(default=None, ge=1, le=5)
+    replaces_instrument_id: UUID | None
+    depends_on_instrument_ids: tuple[UUID, ...] = Field(max_length=4)
+    thesis: str = Field(min_length=1, max_length=2000)
+    counter_thesis: str = Field(min_length=1, max_length=2000)
+    invalidation: str = Field(min_length=1, max_length=2000)
+
+
+class AgentPaperSynthesisResponse(_StrictSchema):
+    synthesis_run_id: UUID
+    synthesis_output_id: UUID
+    candidate_batch_id: UUID
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    binding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["completed", "abstained", "failed"]
+    choices: tuple[AgentPaperSynthesisChoiceResponse, ...] = Field(max_length=5)
+    cash_rationale: str | None = Field(default=None, min_length=1, max_length=2000)
+    as_of: AwareDatetime
+
+
+class AgentPaperProposalTargetResponse(_StrictSchema):
+    instrument_id: UUID
+    target_weight: DecimalString
+    exit: bool
+    role: Literal["core", "tactical", "none"]
+    reason_code: str = Field(min_length=1, max_length=100)
+    rank: int | None = Field(default=None, ge=1, le=5)
+    replaces_instrument_id: UUID | None
+    depends_on_instrument_ids: tuple[UUID, ...] = Field(max_length=4)
+
+
+class AgentPaperPortfolioProposalResponse(_StrictSchema):
+    strategy_decision_id: UUID
+    synthesis_output_id: UUID
+    decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    policy_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_target_version_id: UUID | None
+    initial_approval_id: UUID | None
+    cash_weight: DecimalString
+    targets: tuple[AgentPaperProposalTargetResponse, ...] = Field(max_length=50)
+    expires_at: AwareDatetime
+    as_of: AwareDatetime
+
+
+class AgentPaperActivationResultResponse(_StrictSchema):
+    result_code: Literal["TARGET_ACTIVATION_BLOCKED", "PLAN_CREATED", "NO_ORDER_REQUIRED"]
+    strategy_decision_id: UUID | None
+    target_version_id: UUID | None
+    batch_id: UUID | None
+    as_of: AwareDatetime
+
+
+class AgentPaperCycleBlockerResponse(_StrictSchema):
+    code: Literal[
+        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        "POLICY_UNCONFIRMED",
+        "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+        "TARGET_ACTIVATION_BLOCKED",
+    ]
+    source_stage: Literal["provider", "policy", "proposal", "activation"]
+    category: Literal[
+        "provider_capacity",
+        "policy_unconfirmed",
+        "proposal_rejected",
+        "resource_occupied",
+    ]
+    proposal_rejection_code: (
+        Literal[
+            "EXIT_TURNOVER_CONFLICT",
+            "REDUCTION_TURNOVER_CONFLICT",
+            "PORTFOLIO_DEPENDENCY_CONFLICT",
+        ]
+        | None
+    )
+    as_of: AwareDatetime
+
+    @model_validator(mode="after")
+    def _code_matches_stage_and_category(self) -> AgentPaperCycleBlockerResponse:
+        expected = {
+            "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED": (
+                "provider",
+                "provider_capacity",
+                False,
+            ),
+            "POLICY_UNCONFIRMED": ("policy", "policy_unconfirmed", False),
+            "PORTFOLIO_PROPOSAL_UNAVAILABLE": ("proposal", "proposal_rejected", True),
+            "TARGET_ACTIVATION_BLOCKED": ("activation", "resource_occupied", False),
+        }[self.code]
+        if (self.source_stage, self.category) != expected[:2]:
+            raise ValueError("blocker code does not match its source stage and category")
+        if (self.proposal_rejection_code is not None) != expected[2]:
+            raise ValueError("proposal rejection code does not match blocker category")
+        return self
+
+
+class PaperManagementSummaryResponse(_StrictSchema):
+    current_target: PaperTargetSummaryResponse | None
+    occupying_plan: PaperPlanSummaryResponse | None
+    latest_proposal: AgentPaperPortfolioProposalResponse | None
+    read_as_of: AwareDatetime
+
+
 class PaperComparisonRowResponse(_StrictSchema):
     key: Literal["agent", "hold_current", "baseline_v1", "market_benchmark"]
     data_state: Literal["READY", "PARTIAL", "STALE", "UNAVAILABLE"]
@@ -197,7 +355,10 @@ class AgentPaperCandidateResponse(_StrictSchema):
 
 class AgentPaperDecisionResponse(_StrictSchema):
     decision_id: UUID
-    sizing_policy_version: Literal["agent_paper_sizing_v1"]
+    sizing_policy_version: Literal[
+        "agent_paper_sizing_v1",
+        "portfolio_allocation_v1",
+    ]
     target_cash_weight: DecimalString
     risk_outcomes: tuple[Literal["approved", "reduced", "rejected", "no_change"], ...] = Field(
         max_length=50
@@ -271,8 +432,32 @@ class AgentPaperCycleDetailResponse(_StrictSchema):
     orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
 
 
+class AgentPaperManagementCycleResponse(_StrictSchema):
+    cycle: AgentPaperCycleResponse
+    orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
+    candidate_batch: AgentPaperCandidateBatchResponse | None
+    security_research: tuple[AgentPaperSecurityResearchResponse, ...] = Field(max_length=5)
+    synthesis: AgentPaperSynthesisResponse | None
+    proposal: AgentPaperPortfolioProposalResponse | None
+    active_target: PaperTargetSummaryResponse | None
+    activation_result: AgentPaperActivationResultResponse | None
+    blocker: AgentPaperCycleBlockerResponse | None
+    blocking_plan: PaperPlanSummaryResponse | None
+    plan_summary: PaperPlanSummaryResponse | None
+
+
 class AgentPaperCycleDetailEnvelope(_StrictSchema):
     data: AgentPaperCycleDetailResponse
+    meta: SuccessMetaResponse
+
+
+class AgentPaperManagementCycleEnvelope(_StrictSchema):
+    data: AgentPaperManagementCycleResponse
+    meta: SuccessMetaResponse
+
+
+class PaperManagementSummaryEnvelope(_StrictSchema):
+    data: PaperManagementSummaryResponse
     meta: SuccessMetaResponse
 
 
@@ -565,4 +750,162 @@ class PaperCancelResponse(_StrictSchema):
 
 class PaperCancelEnvelope(_StrictSchema):
     data: PaperCancelResponse
+    meta: SuccessMetaResponse
+
+
+class PaperCancelOrderFactResponse(_StrictSchema):
+    order_id: UUID
+    status: InternalOrderStatus | None
+    current_event_seq: int | None = Field(default=None, ge=1)
+    filled_quantity: DecimalString
+    remaining_quantity: DecimalString
+    as_of: AwareDatetime | None
+
+
+class PaperCancelReservationFactResponse(_StrictSchema):
+    reservation_id: UUID
+    reservation_type: Literal["cash", "position"]
+    amount: DecimalString
+    outstanding_amount: DecimalString | None
+    released: bool | None
+    as_of: AwareDatetime | None
+
+
+class PaperCancelResultResponse(_StrictSchema):
+    status: Literal["NOT_RECORDED", "COMMITTED", "CONFLICT", "UNKNOWN"]
+    order: PaperCancelOrderFactResponse
+    reservation: PaperCancelReservationFactResponse | None
+    reservation_released: bool | None
+    result_event_seq: int | None = Field(default=None, ge=1)
+    committed_at: AwareDatetime | None
+
+    @model_validator(mode="after")
+    def _committed_fact_pair_is_coherent(self) -> PaperCancelResultResponse:
+        has_committed_facts = self.result_event_seq is not None and self.committed_at is not None
+        if (self.status == "COMMITTED") != has_committed_facts:
+            raise ValueError("committed cancellation requires its result event and time")
+        expected_release = None if self.reservation is None else self.reservation.released
+        if self.reservation_released != expected_release:
+            raise ValueError("cancellation reservation summary must match its fact")
+        return self
+
+
+class PaperCancelResultEnvelope(_StrictSchema):
+    data: PaperCancelResultResponse
+    meta: SuccessMetaResponse
+
+
+class PaperPlanTargetResponse(_StrictSchema):
+    target_version_id: UUID
+    version_seq: int = Field(ge=1)
+    target_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    as_of: AwareDatetime
+
+
+class PaperPlanProposalTargetResponse(_StrictSchema):
+    instrument_id: UUID
+    target_weight: DecimalString
+    exit: bool
+
+
+class PaperPlanProposalResponse(_StrictSchema):
+    strategy_decision_id: UUID
+    decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cash_weight: DecimalString
+    targets: tuple[PaperPlanProposalTargetResponse, ...] = Field(max_length=50)
+    as_of: AwareDatetime
+
+
+class PaperPlanRiskResponse(_StrictSchema):
+    order_id: UUID
+    instrument_id: UUID
+    outcome: Literal["approved", "reduced", "rejected"]
+    desired_quantity: DecimalString
+    approved_quantity: DecimalString
+    reduced_quantity: DecimalString
+    rejected_quantity: DecimalString
+    desired_amount_usd: DecimalString
+    approved_amount_usd: DecimalString
+    reduced_amount_usd: DecimalString
+    rejected_amount_usd: DecimalString
+
+
+class PaperPlanConfirmedFillResponse(_StrictSchema):
+    fill_id: UUID
+    quantity: DecimalString
+    notional_usd: DecimalString
+    as_of: AwareDatetime
+
+
+class PaperPlanItemResponse(_StrictSchema):
+    order_id: UUID
+    instrument_id: UUID
+    side: Literal["buy", "sell"]
+    status: InternalOrderStatus | None
+    confirmed_fill_quantity: DecimalString
+    confirmed_fills: tuple[PaperPlanConfirmedFillResponse, ...] = Field(max_length=128)
+    open_order_coverage_quantity: DecimalString
+    open_order_coverage_amount_usd: DecimalString
+    cash_reservation_outstanding: DecimalString | None
+    position_reservation_outstanding: DecimalString | None
+    remaining_target_gap_quantity: DecimalString | None
+    remaining_target_gap_amount_usd: DecimalString | None
+    order_as_of: AwareDatetime | None
+    reservation_as_of: AwareDatetime | None
+
+
+class PaperPlanFactsResponse(_StrictSchema):
+    plan_created_at: AwareDatetime
+    reconciliation_as_of: AwareDatetime
+    occupation_state: Literal["occupied", "released", "unknown"]
+    risk: tuple[PaperPlanRiskResponse, ...] = Field(max_length=50)
+    items: tuple[PaperPlanItemResponse, ...] = Field(max_length=50)
+
+
+class PaperPlanActualPositionResponse(_StrictSchema):
+    instrument_id: UUID
+    quantity: DecimalString
+    reserved_quantity: DecimalString
+
+
+class PaperPlanActualResponse(_StrictSchema):
+    data_state: Literal["READY", "UNKNOWN"]
+    as_of: AwareDatetime | None
+    available_cash: DecimalString | None
+    reserved_cash: DecimalString | None
+    nav: DecimalString | None
+    positions: tuple[PaperPlanActualPositionResponse, ...] | None = Field(max_length=500)
+
+    @model_validator(mode="after")
+    def _facts_match_state(self) -> PaperPlanActualResponse:
+        facts = (self.available_cash, self.reserved_cash, self.nav, self.positions)
+        if self.data_state == "READY" and any(value is None for value in facts):
+            raise ValueError("ready actual projection requires every fact")
+        if self.data_state == "UNKNOWN" and any(value is not None for value in facts):
+            raise ValueError("unknown actual projection cannot fabricate facts")
+        if self.data_state == "READY" and self.as_of is None:
+            raise ValueError("ready actual projection requires its projection cutoff")
+        if self.data_state == "UNKNOWN" and self.as_of is not None:
+            raise ValueError("unknown actual projection has no authoritative cutoff")
+        return self
+
+
+class PaperPlanResponse(_StrictSchema):
+    batch_id: UUID
+    currency: Literal["USD"]
+    association_state: Literal["target_associated", "legacy_unassociated"]
+    target: PaperPlanTargetResponse | None
+    proposal: PaperPlanProposalResponse
+    plan: PaperPlanFactsResponse
+    actual: PaperPlanActualResponse
+
+    @model_validator(mode="after")
+    def _target_association_is_coherent(self) -> PaperPlanResponse:
+        if (self.association_state == "target_associated") != (self.target is not None):
+            raise ValueError("target association must match the exact target object")
+        return self
+
+
+class PaperPlanEnvelope(_StrictSchema):
+    data: PaperPlanResponse
     meta: SuccessMetaResponse
