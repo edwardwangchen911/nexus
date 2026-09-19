@@ -58,7 +58,7 @@ class TargetActivationResult(BaseModel):
 class TargetActivationBlockedError(ValueError):
     """Activation stopped by the exact persisted plan occupying the account."""
 
-    def __init__(self, *, blocking_plan_id: UUID | None) -> None:
+    def __init__(self, *, blocking_plan_id: UUID) -> None:
         super().__init__("INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN")
         self.blocking_plan_id = blocking_plan_id
 
@@ -185,12 +185,9 @@ async def require_activation_projection_unoccupied(
         )
     )
     batch_ids = {batch_id for _, batch_id in rows}
-    blocking_plan_id = (
-        next(iter(batch_ids))
-        if len(rows) == len(order_ids) and len(batch_ids) == 1
-        else None
-    )
-    raise TargetActivationBlockedError(blocking_plan_id=blocking_plan_id)
+    if len(rows) != len(order_ids) or len(batch_ids) != 1:
+        raise ValueError("INITIAL_PROJECTION_OCCUPANCY_AUTHORITY_CONFLICT")
+    raise TargetActivationBlockedError(blocking_plan_id=next(iter(batch_ids)))
 
 
 def initial_approval_result(

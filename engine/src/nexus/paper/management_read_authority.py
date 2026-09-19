@@ -103,6 +103,8 @@ async def load_synthesis_read_authority(
         )
     )
     if output is None:
+        if run.status in {"completed", "abstained", "failed"} or run.completed_at is not None:
+            raise ValueError("PORTFOLIO_SYNTHESIS_TERMINAL_OUTPUT_MISSING")
         return None
     intent = (
         None

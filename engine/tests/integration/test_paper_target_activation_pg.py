@@ -482,7 +482,10 @@ async def test_occupied_projection_blocks_activation_without_deleting_proposal(
 
         monkeypatch.setattr(target_service, "load_paper_projection", load_occupied)
         async with sessions.begin() as session:
-            with pytest.raises(ValueError, match="^INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN$"):
+            with pytest.raises(
+                ValueError,
+                match="^INITIAL_PROJECTION_OCCUPANCY_AUTHORITY_CONFLICT$",
+            ):
                 await activate_portfolio_target(
                     session,
                     account_id=proposal.account_id,
@@ -733,10 +736,11 @@ async def test_blocked_candidate_cycle_never_activates_same_proposal_after_relea
         _events,
         _resume_batch,
     )
-    from nexus.paper.projection import load_paper_projection
+    from nexus.paper.target_service import TargetActivationBlockedError
     from nexus.persistence.models.paper import AgentPaperCycleRecord
 
     engine, sessions, args = await proposal_source(migrated_database_url)
+    blocking_plan_id = uuid4()
     try:
         async with sessions.begin() as session:
             cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
@@ -749,20 +753,14 @@ async def test_blocked_candidate_cycle_never_activates_same_proposal_after_relea
                 "TARGET_ACTIVATION_PENDING",
                 {"strategy_decision_id": str(proposal.decision_id)},
             )
-            base = await load_paper_projection(
-                session, account_id=cycle.account_id, as_of=args["now"]
-            )
-        occupied = base.model_copy(
-            update={
-                "available_cash": base.available_cash - Decimal(1),
-                "reserved_cash": Decimal(1),
-            }
+        async def block_with_exact_plan(*args, **kwargs):
+            raise TargetActivationBlockedError(blocking_plan_id=blocking_plan_id)
+
+        monkeypatch.setattr(
+            target_service,
+            "require_activation_projection_unoccupied",
+            block_with_exact_plan,
         )
-
-        async def load_occupied(*args, **kwargs):
-            return occupied
-
-        monkeypatch.setattr(target_service, "load_paper_projection", load_occupied)
         async with sessions.begin() as session:
             cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
             blocked = await _resume_batch(
@@ -773,7 +771,8 @@ async def test_blocked_candidate_cycle_never_activates_same_proposal_after_relea
             )
             assert blocked.status == "completed"
             assert blocked.result_code == "TARGET_ACTIVATION_BLOCKED"
-        monkeypatch.setattr(target_service, "load_paper_projection", load_paper_projection)
+            terminal = (await _events(session, cycle.id))[-1]
+            assert terminal.fact_ids["blocking_plan_id"] == str(blocking_plan_id)
         async with sessions.begin() as session:
             cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
             replay = await _resume_batch(

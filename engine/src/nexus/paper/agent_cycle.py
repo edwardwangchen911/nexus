@@ -1014,10 +1014,7 @@ async def _resume_batch(
             ):
                 raise
             facts: dict[str, object] = {"strategy_decision_id": str(decision_id)}
-            if (
-                isinstance(error, TargetActivationBlockedError)
-                and error.blocking_plan_id is not None
-            ):
+            if isinstance(error, TargetActivationBlockedError):
                 facts["blocking_plan_id"] = str(error.blocking_plan_id)
             await _append_event(
                 session,

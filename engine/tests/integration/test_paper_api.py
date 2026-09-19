@@ -298,6 +298,87 @@ async def test_proposal_rejection_requires_one_allowlisted_scalar_code(
 
 
 @pytest.mark.asyncio
+async def test_management_cycle_rejects_terminal_synthesis_without_output(
+    migrated_database_url: str,
+) -> None:
+    from integration.test_paper_cancel_result_read_pg import (
+        _corrupt_target_proposal_authority,
+    )
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_decision_store import persist_portfolio_proposal
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            proposal = await persist_portfolio_proposal(session, **args)
+            await _corrupt_target_proposal_authority(
+                session,
+                decision_id=proposal.decision_id,
+                corruption="missing_output",
+            )
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "DATA_PARTIAL"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_historical_activation_blocker_without_plan_id_stays_unknown(
+    migrated_database_url: str,
+) -> None:
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_cycle import _append_event, _events
+    from nexus.paper.agent_decision_store import persist_portfolio_proposal
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            proposal = await persist_portfolio_proposal(session, **args)
+            events = await _events(session, cycle.id)
+            await _append_event(
+                session,
+                cycle,
+                events[-1].to_status,
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+            await _append_event(
+                session,
+                cycle,
+                "decision_recorded",
+                "completed",
+                "TARGET_ACTIVATION_BLOCKED",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["blocking_plan"] is None
+        assert response.json()["data"]["blocker"]["code"] == "TARGET_ACTIVATION_BLOCKED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_workbench_endpoint_is_authenticated_read_only_and_rejects_queries(
     migrated_database_url: str,
 ) -> None:

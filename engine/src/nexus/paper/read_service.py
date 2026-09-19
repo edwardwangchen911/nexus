@@ -752,6 +752,17 @@ class PaperReadService:
         target_id = _optional_uuid(facts.get("target_version_id"))
         batch_id = _optional_uuid(facts.get("batch_id"))
         if event.result_code == "TARGET_ACTIVATION_BLOCKED":
+            if (
+                batch is not None
+                or target is not None
+                or batch_id is not None
+                or target_id is not None
+            ):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent paper activation identity is incomplete.",
+                    status_code=409,
+                )
             return AgentPaperActivationResultResponse(
                 result_code="TARGET_ACTIVATION_BLOCKED",
                 strategy_decision_id=decision_id,
@@ -773,14 +784,23 @@ class PaperReadService:
                 "The Agent paper activation identity is incomplete.",
                 status_code=409,
             )
-        if batch_id is not None and (batch is None or batch_id != batch.id):
+        plan_created = event.result_code == "PAPER_BATCH_EVALUATED"
+        no_order_required = event.result_code == "NO_ORDER_REQUIRED"
+        if (
+            plan_created != (batch is not None)
+            or no_order_required != (batch is None)
+            or batch is not None
+            and batch_id != batch.id
+            or batch is None
+            and batch_id is not None
+        ):
             raise NexusError(
                 ErrorCode.DATA_PARTIAL,
                 "The Agent paper activation identity is incomplete.",
                 status_code=409,
             )
         return AgentPaperActivationResultResponse(
-            result_code="PLAN_CREATED" if batch is not None else "NO_ORDER_REQUIRED",
+            result_code="PLAN_CREATED" if plan_created else "NO_ORDER_REQUIRED",
             strategy_decision_id=decision.id,
             target_version_id=target.target_version_id,
             batch_id=None if batch is None else batch.id,
