@@ -477,8 +477,12 @@ async def test_occupied_projection_blocks_activation_without_deleting_proposal(
             }
         occupied = base.model_copy(update=update)
 
-        async def load_occupied(*args, **kwargs):
-            return occupied
+        activation_time = args["now"] + timedelta(seconds=1)
+
+        async def load_occupied(*call_args, **call_kwargs):
+            if call_kwargs.get("as_of") == activation_time:
+                return occupied
+            return await load_paper_projection(*call_args, **call_kwargs)
 
         monkeypatch.setattr(target_service, "load_paper_projection", load_occupied)
         async with sessions.begin() as session:
@@ -490,7 +494,7 @@ async def test_occupied_projection_blocks_activation_without_deleting_proposal(
                     session,
                     account_id=proposal.account_id,
                     strategy_decision_id=proposal.decision_id,
-                    request_time=args["now"] + timedelta(seconds=1),
+                    request_time=activation_time,
                     idempotency_key=f"occupied-{occupation}",
                 )
         async with sessions.begin() as session:
