@@ -128,6 +128,20 @@ def test_portfolio_minimum_notional_applies_to_buys_and_sells(
     assert meets_portfolio_minimum_notional(candidate) is expected
 
 
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_risk_remainder_cannot_leave_a_subminimum_portfolio_order(side: str) -> None:
+    candidate = _candidate(side=side, quantity="3").model_copy(
+        update={"reference_close": Decimal("40")}
+    )
+    assert meets_portfolio_minimum_notional(candidate)
+
+    remaining = _subtract_portfolio_risk_remainders(
+        (candidate,), {(candidate.instrument_id, side): Decimal("1")}
+    )
+
+    assert tuple(filter(meets_portfolio_minimum_notional, remaining)) == ()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "scenario",

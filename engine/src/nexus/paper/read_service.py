@@ -952,19 +952,30 @@ class PaperReadService:
             )
         )
         items = tuple([await self._agent_cycle(cycle) for cycle in cycles])
+        historical = decision_session is not None
+        summary_items = (
+            items
+            if historical
+            else tuple(
+                item
+                for cycle, item in zip(cycles, items, strict=True)
+                if cycle.candidate_batch_id is not None
+            )
+        )
         cycle_count, completed_count = await self._agent_session_counts(
             account_id=account.id,
             decision_session=resolved_session,
+            portfolio_only=not historical,
         )
         return AgentPaperCyclePageResponse(
             items=items,
             summary=await self._agent_session_summary(
                 account_id=account.id,
                 decision_session=resolved_session,
-                cycles=items,
+                cycles=summary_items,
                 cycle_count=cycle_count,
                 completed_count=completed_count,
-                historical=decision_session is not None,
+                historical=historical,
             ),
             version_observation=version_history[0] if version_history else None,
             version_history=version_history,
@@ -1512,6 +1523,7 @@ class PaperReadService:
         *,
         account_id: UUID,
         decision_session: date,
+        portfolio_only: bool = False,
     ) -> tuple[int, int]:
         session_cycle_ids = select(AgentPaperCycleRecord.id).where(
             AgentPaperCycleRecord.account_id == account_id,
@@ -1519,6 +1531,10 @@ class PaperReadService:
             AgentPaperCycleRecord.decision_time <= self._request_time,
             AgentPaperCycleRecord.created_at <= self._request_time,
         )
+        if portfolio_only:
+            session_cycle_ids = session_cycle_ids.where(
+                AgentPaperCycleRecord.candidate_batch_id.is_not(None)
+            )
         latest_cycle_events = (
             select(
                 AgentPaperCycleEventRecord.cycle_id,
@@ -1611,6 +1627,11 @@ class PaperReadService:
                     AgentPaperCycleRecord.decision_session == decision_session,
                     AgentPaperCycleRecord.decision_time <= self._request_time,
                     AgentPaperCycleRecord.created_at <= self._request_time,
+                    *(
+                        (AgentPaperCycleRecord.candidate_batch_id.is_not(None),)
+                        if portfolio_only
+                        else ()
+                    ),
                 )
                 .group_by(
                     AgentPaperCycleRecord.id,

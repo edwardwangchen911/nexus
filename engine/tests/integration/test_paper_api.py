@@ -800,7 +800,7 @@ async def test_legacy_failed_cycle_does_not_restore_removed_intraday_slots(
     migrated_database_url: str,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
-    decision_time = datetime(2026, 8, 27, 18, tzinfo=UTC)
+    decision_time = datetime(2026, 8, 27, 13, tzinfo=UTC)
     cycle_id = UUID("72000000-0000-0000-0000-000000000103")
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
@@ -856,13 +856,13 @@ async def test_legacy_failed_cycle_does_not_restore_removed_intraday_slots(
     path = "/internal/v1/paper/cycles?limit=20"
     cases = (
         (
-            decision_time + timedelta(minutes=1),
-            "stopped",
-            None,
-            "CALENDAR_UNAVAILABLE",
+            datetime(2026, 8, 27, 14, 1, tzinfo=UTC),
+            "ready",
+            datetime(2026, 8, 27, 14, tzinfo=UTC),
+            "CURRENT_SLOT",
         ),
         (
-            decision_time + timedelta(minutes=6),
+            datetime(2026, 8, 27, 14, 6, tzinfo=UTC),
             "stopped",
             None,
             "CALENDAR_UNAVAILABLE",

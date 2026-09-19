@@ -204,8 +204,8 @@ Engine `/internal/v1/paper/cycles/latest`、同源 BFF `/api/v1/paper/cycles/lat
 同 head 本地栈的浏览器只读验收入口：
 
 ```bash
-NEXUS_REAL_AGENT_PAPER_ACCEPTANCE=1 npm run test:e2e -- \
-  tests/e2e/agent-paper-cycle-real.spec.ts
+NEXUS_REAL_PORTFOLIO_MANAGEMENT_ACCEPTANCE=1 npm run test:e2e -- \
+  tests/e2e/portfolio-management-real.spec.ts
 ```
 
 ### 单次组合周期固定验收顺序

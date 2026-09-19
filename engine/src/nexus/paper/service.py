@@ -1589,6 +1589,7 @@ async def _create_paper_order_batch_impl(
                 candidates,
                 {key: value.quantity for key, value in remainder_coverage.items()},
             )
+            candidates = tuple(filter(meets_portfolio_minimum_notional, candidates))
         if portfolio and not candidates:
             await session.delete(idempotency)
             await session.flush()
