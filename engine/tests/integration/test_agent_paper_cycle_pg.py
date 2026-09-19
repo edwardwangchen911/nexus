@@ -98,6 +98,7 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
+    PaperDrawdownLockEventRecord,
     PaperExecutionWindowAuthorityRecord,
     PaperExecutionWindowMemberRecord,
     PaperFillRecord,
@@ -314,9 +315,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
         return "SCHWAB_L1_INCOMPLETE"
 
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
-    monkeypatch.setattr(
-        agent_paper_loop, "load_agent_paper_service_environment", load_environment
-    )
+    monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
         agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
     )
@@ -330,9 +329,7 @@ def test_accelerated_host_continues_from_confirmed_failure_into_next_slot(
     monkeypatch.setattr(agent_paper_loop, "prepare_macro_once", ready)
     monkeypatch.setattr(agent_paper_loop, "prepare_current_trends_once", ready)
     monkeypatch.setattr(agent_paper_loop, "trigger_once", trigger)
-    monkeypatch.setattr(
-        agent_paper_loop, "_load_persisted_trigger_failure", persisted_failure
-    )
+    monkeypatch.setattr(agent_paper_loop, "_load_persisted_trigger_failure", persisted_failure)
 
     result = asyncio.run(
         agent_paper_loop.run_local_agent_paper_loop(
@@ -439,9 +436,7 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
         return request
 
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
-    monkeypatch.setattr(
-        agent_paper_loop, "load_agent_paper_service_environment", load_environment
-    )
+    monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
         agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
     )
@@ -610,9 +605,7 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
         return None
 
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
-    monkeypatch.setattr(
-        agent_paper_loop, "load_agent_paper_service_environment", load_environment
-    )
+    monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
         agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
     )
@@ -718,9 +711,7 @@ def test_accelerated_host_publishes_close_once_then_enters_next_session(
         return request
 
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
-    monkeypatch.setattr(
-        agent_paper_loop, "load_agent_paper_service_environment", load_environment
-    )
+    monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
         agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
     )
@@ -800,18 +791,14 @@ def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
             replayed=False,
         )
 
-    async def close(
-        *, database_url, evaluation_id, decision_slot_at, reason_code
-    ) -> None:
+    async def close(*, database_url, evaluation_id, decision_slot_at, reason_code) -> None:
         nonlocal closed
         assert database_url == migrated_database_url
         close_calls.append((evaluation_id, decision_slot_at, reason_code))
         closed = True
 
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
-    monkeypatch.setattr(
-        agent_paper_loop, "load_agent_paper_service_environment", load_environment
-    )
+    monkeypatch.setattr(agent_paper_loop, "load_agent_paper_service_environment", load_environment)
     monkeypatch.setattr(
         agent_paper_loop, "_select_initial_service_calendar_authority_id", select_calendar
     )
@@ -836,9 +823,7 @@ def test_accelerated_evaluation_closes_incomplete_pair_without_replacement(
     )
 
     assert result is agent_paper_loop.AgentPaperLoopAction.STOP_DISABLED
-    assert close_calls == [
-        (evaluation_id, DECISION_TIME, "PAIR_CYCLES_UNAVAILABLE")
-    ]
+    assert close_calls == [(evaluation_id, DECISION_TIME, "PAIR_CYCLES_UNAVAILABLE")]
 
     async def replacement_fact_counts() -> tuple[int, int]:
         engine = create_async_engine(migrated_database_url)
@@ -1939,7 +1924,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
 
 
 @pytest.mark.asyncio
-async def test_agent_version_pair_resumes_original_outputs_without_duplicate_work(
+async def test_agent_version_pair_resumes_outputs_and_starts_next_slot_after_fills(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1975,8 +1960,10 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
     train_slots = slots(train_dates)
     oos_slots = slots(oos_dates)
 
+    database_time = train_slots[0]
+
     async def historical_database_now(_session: AsyncSession) -> datetime:
-        return train_slots[0]
+        return database_time
 
     monkeypatch.setattr(agent_version_runner, "_database_now", historical_database_now)
     try:
@@ -2523,6 +2510,273 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
             )
         assert replay.model_copy(update={"replayed": False}) == paired
         assert replay.replayed is True
+
+        database_time = train_slots[1]
+        async with sessions.begin() as session:
+            account_ids = (
+                registration.incumbent_account_id,
+                registration.challenger_account_id,
+            )
+            session.add_all(
+                PaperDrawdownLockEventRecord(
+                    id=uuid4(),
+                    account_id=account_id,
+                    event_seq=2,
+                    from_state="unlocked",
+                    to_state="locked",
+                    drawdown_ratio=Decimal("0.08"),
+                    user_acknowledged=False,
+                    reason_code="DRAWDOWN_LIMIT_REACHED",
+                    occurred_at=train_slots[1] - timedelta(seconds=1),
+                    payload_hash=sha256(f"later-drawdown:{account_id}".encode()).hexdigest(),
+                    created_at=train_slots[1] - timedelta(seconds=1),
+                )
+                for account_id in account_ids
+            )
+            next_artifact_id = UUID("63000000-0000-0000-0000-0000000000a0")
+            next_revision = "a" * 64
+            next_quote_hash = canonical_quote_observation(
+                instrument_id=INSTRUMENTS[0][0],
+                source="schwab",
+                feed="l1",
+                delivery_mode="real_time",
+                event_kind="quote",
+                bid=Decimal("100.90"),
+                ask=Decimal("101.10"),
+                last=None,
+                observed_at=train_slots[1] - timedelta(seconds=10),
+                available_at=train_slots[1],
+                received_at=train_slots[1],
+                revision=next_revision,
+            )
+            session.add_all(
+                (
+                    DataArtifact(
+                        id=next_artifact_id,
+                        uri=f"memory://raw/market/schwab/stream/{next_revision}.json",
+                        sha256=next_revision,
+                        byte_size=100,
+                        mime_type="application/json",
+                        schema_version="schwab_level_one_stream_v1",
+                        source="schwab",
+                        observed_at=train_slots[1] - timedelta(seconds=10),
+                        available_at=train_slots[1],
+                        received_at=train_slots[1],
+                        created_at=train_slots[1],
+                    ),
+                    LatestQuote(
+                        id=UUID("63000000-0000-0000-0000-0000000000a1"),
+                        instrument_id=INSTRUMENTS[0][0],
+                        source="schwab",
+                        feed="l1",
+                        delivery_mode="real_time",
+                        bid=Decimal("100.90"),
+                        ask=Decimal("101.10"),
+                        last=None,
+                        observed_at=train_slots[1] - timedelta(seconds=10),
+                        available_at=train_slots[1],
+                        received_at=train_slots[1],
+                        revision=next_revision,
+                        quality_flags=[],
+                        event_kind="quote",
+                        content_hash=sha256(next_quote_hash).hexdigest(),
+                        evidence_status="verified",
+                        data_artifact_id=next_artifact_id,
+                        created_at=train_slots[1],
+                    ),
+                )
+            )
+            for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
+                watermark = f"{index}" * 64
+                session.add(
+                    RiskQueryAuthorityRecord(
+                        id=UUID(int=0x63000000000000000000000000000A10 + index),
+                        source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                        universe_snapshot_id=registered.decision.universe_snapshot_id,
+                        decision_session=train_slots[1].date(),
+                        kind=kind,
+                        required_instrument_ids=[INSTRUMENTS[0][0]],
+                        blocked_instrument_ids=[],
+                        complete=True,
+                        source_watermark_hash=watermark,
+                        available_at=train_slots[1],
+                        content_hash=canonical_query_authority_hash(
+                            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                            universe_snapshot_id=registered.decision.universe_snapshot_id,
+                            decision_session=train_slots[1].date(),
+                            kind=kind,
+                            required_instrument_ids=[INSTRUMENTS[0][0]],
+                            blocked_instrument_ids=[],
+                            complete=True,
+                            source_watermark_hash=watermark,
+                            available_at=train_slots[1],
+                        ),
+                        created_at=train_slots[1],
+                    )
+                )
+            await session.flush()
+            next_slot = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[1],
+                daily_limit_usd=Decimal("3"),
+                now=train_slots[1],
+            )
+            initial_funding_counts = {
+                account_id: int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperLedgerTransactionRecord)
+                        .where(
+                            PaperLedgerTransactionRecord.account_id == account_id,
+                            PaperLedgerTransactionRecord.transaction_type == "funding",
+                            PaperLedgerTransactionRecord.reference_type == "initial_funding",
+                        )
+                    )
+                    or 0
+                )
+                for account_id in account_ids
+            }
+            transaction_counts = {
+                account_id: int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperLedgerTransactionRecord)
+                        .where(PaperLedgerTransactionRecord.account_id == account_id)
+                    )
+                    or 0
+                )
+                for account_id in account_ids
+            }
+            version_job_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.payload["version_evaluation_id"].as_string()
+                        == str(registration.evaluation_id)
+                    )
+                )
+                or 0
+            )
+
+        assert next_slot.status == "running", next_slot.reason_code
+        assert next_slot.reason_code == "PAIR_JOBS_PREPARED"
+        assert next_slot.decision_slot_at == train_slots[1]
+        assert next_slot.replayed is False
+        assert initial_funding_counts == {
+            registration.incumbent_account_id: 1,
+            registration.challenger_account_id: 1,
+        }
+        assert all(count > 1 for count in transaction_counts.values())
+
+        async with sessions.begin() as session:
+            next_slot_replay = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[1],
+                daily_limit_usd=Decimal("3"),
+                now=train_slots[1],
+            )
+            replay_job_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.payload["version_evaluation_id"].as_string()
+                        == str(registration.evaluation_id)
+                    )
+                )
+                or 0
+            )
+        assert next_slot_replay.model_copy(update={"replayed": False}) == next_slot
+        assert next_slot_replay.replayed is True
+        assert replay_job_count == version_job_count
+
+        async with sessions.begin() as session:
+            await session.execute(
+                text("ALTER TABLE paper_drawdown_lock_events DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE paper_drawdown_lock_events "
+                        "SET reason_code='PAPER_ACCOUNT_INITIALIZED' "
+                        "WHERE account_id=:account_id AND event_seq=2"
+                    ),
+                    {"account_id": registration.incumbent_account_id},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE paper_drawdown_lock_events ENABLE TRIGGER USER")
+                )
+        async with sessions.begin() as session:
+            with pytest.raises(
+                ValueError,
+                match="AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID",
+            ):
+                await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=train_slots[1],
+                    daily_limit_usd=Decimal("3"),
+                    now=train_slots[1],
+                )
+
+        async with sessions.begin() as session:
+            await session.execute(
+                text("ALTER TABLE paper_drawdown_lock_events DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE paper_drawdown_lock_events "
+                        "SET reason_code='DRAWDOWN_LIMIT_REACHED' "
+                        "WHERE account_id=:account_id AND event_seq=2"
+                    ),
+                    {"account_id": registration.incumbent_account_id},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE paper_drawdown_lock_events ENABLE TRIGGER USER")
+                )
+            later_transaction_id = await session.scalar(
+                select(PaperLedgerTransactionRecord.id)
+                .where(
+                    PaperLedgerTransactionRecord.account_id == registration.incumbent_account_id,
+                    PaperLedgerTransactionRecord.transaction_type != "funding",
+                )
+                .order_by(PaperLedgerTransactionRecord.occurred_at)
+                .limit(1)
+            )
+            assert later_transaction_id is not None
+            await session.execute(
+                text("ALTER TABLE paper_ledger_transactions DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE paper_ledger_transactions "
+                        "SET reference_type='initial_funding' WHERE id=:transaction_id"
+                    ),
+                    {"transaction_id": later_transaction_id},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE paper_ledger_transactions ENABLE TRIGGER USER")
+                )
+        async with sessions.begin() as session:
+            with pytest.raises(
+                ValueError,
+                match="AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID",
+            ):
+                await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=train_slots[1],
+                    daily_limit_usd=Decimal("3"),
+                    now=train_slots[1],
+                )
     finally:
         await engine.dispose()
 

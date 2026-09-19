@@ -501,9 +501,7 @@ async def _database_now(session: AsyncSession) -> datetime:
     return value
 
 
-def _phase(
-    evaluation: AgentVersionEvaluationRecord, slot: datetime
-) -> Literal["train", "oos"]:
+def _phase(evaluation: AgentVersionEvaluationRecord, slot: datetime) -> Literal["train", "oos"]:
     if slot in evaluation.train_slots:
         return "train"
     if slot in evaluation.oos_slots:
@@ -539,7 +537,7 @@ async def _pair(
                 AgentVersionCyclePairRecord.evaluation_id == evaluation_id,
                 AgentVersionCyclePairRecord.decision_slot_at == slot,
             )
-        )
+        ),
     )
 
 
@@ -669,9 +667,7 @@ async def _previous_slot_is_paired(
         return False
     if index == 0:
         return True
-    return (
-        await _pair(session, evaluation.id, slots[index - 1])
-    ) is not None
+    return (await _pair(session, evaluation.id, slots[index - 1])) is not None
 
 
 def _pair_hash(
@@ -715,8 +711,7 @@ async def _slot_authorities(
     decision_session = decision_slot_at.astimezone(_NEW_YORK).date()
     calendar = await session.scalar(
         select(ExchangeCalendarSessionRecord).where(
-            ExchangeCalendarSessionRecord.calendar_authority_id
-            == evaluation.calendar_authority_id,
+            ExchangeCalendarSessionRecord.calendar_authority_id == evaluation.calendar_authority_id,
             ExchangeCalendarSessionRecord.session == decision_session,
             ExchangeCalendarSessionRecord.market_open_at <= decision_slot_at,
             ExchangeCalendarSessionRecord.market_close_at >= decision_slot_at,
@@ -748,6 +743,7 @@ async def _slot_authorities(
     account_by_id = {row.id: row for row in accounts}
     if calendar is None or universe is None or len(account_by_id) != 2:
         return None
+
     def authority(account_id: UUID) -> CycleAuthority:
         return CycleAuthority(
             account_id=account_id,
@@ -826,8 +822,7 @@ async def _validate_prepared_pair(
         or challenger_run.model_hash != evaluation.challenger_model_hash
         or challenger_run.prompt_version_id != evaluation.challenger_prompt_version_id
         or challenger_run.model_config_id != evaluation.challenger_model_config_id
-        or _non_context_evidence(incumbent_run)
-        != _non_context_evidence(challenger_run)
+        or _non_context_evidence(incumbent_run) != _non_context_evidence(challenger_run)
     ):
         raise _PairPreparationUnavailable
 
@@ -849,6 +844,11 @@ async def _ensure_equal_internal_accounts(
     evaluation: AgentVersionEvaluationRecord,
 ) -> bool:
     account_ids = (evaluation.incumbent_account_id, evaluation.challenger_account_id)
+    accounts = tuple(
+        await session.scalars(
+            select(PaperAccountRecord).where(PaperAccountRecord.id.in_(account_ids))
+        )
+    )
     ledger_accounts = tuple(
         await session.scalars(
             select(PaperLedgerAccountRecord).where(
@@ -884,7 +884,9 @@ async def _ensure_equal_internal_accounts(
     )
     if ledger_accounts or transactions or entries or events:
         _validate_existing_initialization(
+            evaluation=evaluation,
             account_ids=account_ids,
+            accounts=accounts,
             ledger_accounts=ledger_accounts,
             transactions=transactions,
             entries=entries,
@@ -1002,41 +1004,127 @@ async def _initialize_account(
             user_acknowledged=False,
             reason_code="PAPER_ACCOUNT_INITIALIZED",
             occurred_at=evaluation.created_at,
-            payload_hash=_hash(
-                f"agent_version_initial_drawdown_v1|{evaluation.id}|{account_id}"
-            ),
+            payload_hash=_hash(f"agent_version_initial_drawdown_v1|{evaluation.id}|{account_id}"),
         )
     )
 
 
 def _validate_existing_initialization(
     *,
+    evaluation: AgentVersionEvaluationRecord,
     account_ids: tuple[UUID, UUID],
+    accounts: tuple[PaperAccountRecord, ...],
     ledger_accounts: tuple[PaperLedgerAccountRecord, ...],
     transactions: tuple[PaperLedgerTransactionRecord, ...],
     entries: tuple[PaperLedgerEntryRecord, ...],
     events: tuple[PaperDrawdownLockEventRecord, ...],
 ) -> None:
+    account_by_id = {row.id: row for row in accounts}
+    if set(account_by_id) != set(account_ids):
+        raise ValueError("AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID")
     for account_id in account_ids:
-        catalog = {
-            row.code: row.normal_side
-            for row in ledger_accounts
-            if row.paper_account_id == account_id
+        ledger_by_code = {
+            row.code: row for row in ledger_accounts if row.paper_account_id == account_id
         }
-        funding = tuple(row for row in transactions if row.account_id == account_id)
-        account_entries = tuple(row for row in entries if row.account_id == account_id)
-        account_events = tuple(row for row in events if row.account_id == account_id)
+        catalog = {code: row.normal_side for code, row in ledger_by_code.items()}
+        capital = account_by_id[account_id].initial_capital
+        reference_hash = _hash(
+            f"agent_version_initial_funding_v1|{evaluation.id}|{account_id}|{capital}"
+        )
+        event_payload_hash = _hash(
+            f"agent_version_initial_drawdown_v1|{evaluation.id}|{account_id}"
+        )
+        funding = tuple(
+            row
+            for row in transactions
+            if row.account_id == account_id
+            and (row.transaction_type == "funding" or row.reference_type == "initial_funding")
+        )
+        initial_event = tuple(
+            row
+            for row in events
+            if row.account_id == account_id
+            and (
+                row.event_seq == 1
+                or row.reason_code == "PAPER_ACCOUNT_INITIALIZED"
+                or row.payload_hash == event_payload_hash
+            )
+        )
         if (
             catalog != _LEDGER_CATALOG
             or len(funding) != 1
-            or funding[0].transaction_type != "funding"
             or funding[0].reference_type != "initial_funding"
-            or len(account_entries) != 2
-            or len(account_events) != 1
-            or account_events[0].event_seq != 1
-            or account_events[0].from_state is not None
-            or account_events[0].to_state != "unlocked"
+            or funding[0].order_id is not None
+            or funding[0].reference_hash != reference_hash
+            or funding[0].occurred_at != evaluation.created_at
+            or len(initial_event) != 1
+            or initial_event[0].from_state is not None
+            or initial_event[0].to_state != "unlocked"
+            or initial_event[0].drawdown_ratio != 0
+            or initial_event[0].user_acknowledged
+            or initial_event[0].reason_code != "PAPER_ACCOUNT_INITIALIZED"
+            or initial_event[0].occurred_at != evaluation.created_at
+            or initial_event[0].payload_hash != event_payload_hash
         ):
+            raise ValueError("AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID")
+        funding_entries = tuple(
+            sorted(
+                (row for row in entries if row.transaction_id == funding[0].id),
+                key=lambda row: row.entry_seq,
+            )
+        )
+        if len(funding_entries) != 2:
+            raise ValueError("AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID")
+        expected_entries = (
+            (
+                1,
+                "asset.cash.available.usd",
+                ledger_by_code["asset.cash.available.usd"].id,
+                capital,
+                Decimal(0),
+            ),
+            (
+                2,
+                "equity.contributed_capital.usd",
+                ledger_by_code["equity.contributed_capital.usd"].id,
+                Decimal(0),
+                capital,
+            ),
+        )
+        actual_entries = tuple(
+            (
+                row.entry_seq,
+                row.account_code,
+                row.ledger_account_id,
+                row.debit_amount,
+                row.credit_amount,
+            )
+            for row in funding_entries
+            if row.account_id == account_id and row.currency == "USD"
+        )
+        if actual_entries != expected_entries:
+            raise ValueError("AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID")
+        draft = LedgerTransaction(
+            transaction_id=funding[0].id,
+            account_id=account_id,
+            transaction_type="funding",
+            reference_type="initial_funding",
+            reference_hash=reference_hash,
+            occurred_at=evaluation.created_at,
+            entries=tuple(
+                LedgerEntry(
+                    entry_id=row.id,
+                    entry_seq=row.entry_seq,
+                    account_code=row.account_code,
+                    currency="USD",
+                    debit_amount=row.debit_amount,
+                    credit_amount=row.credit_amount,
+                )
+                for row in funding_entries
+            ),
+            transaction_hash="0" * 64,
+        )
+        if funding[0].transaction_hash != canonical_paper_ledger_transaction_hash(draft):
             raise ValueError("AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID")
 
 

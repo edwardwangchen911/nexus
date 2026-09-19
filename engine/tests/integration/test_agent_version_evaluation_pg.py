@@ -1115,7 +1115,7 @@ async def test_known_shared_market_preparation_failure_closes_with_exact_reason(
 
 
 @pytest.mark.asyncio
-async def test_first_slot_initializes_equal_internal_accounts_without_work_replay(
+async def test_first_slot_initialization_replays_without_work_and_rejects_corruption(
     migrated_database_url: str,
 ) -> None:
     factory, engine = await _factory(migrated_database_url)
@@ -1252,6 +1252,40 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
         assert resumed.reason_code == "PAIR_CYCLES_UNAVAILABLE"
         assert resumed.replayed is True
         assert incumbent_source.source_run_id == INCUMBENT_RUN_ID
+
+        async with factory.begin() as session:
+            await session.execute(
+                text("ALTER TABLE paper_ledger_transactions DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE paper_ledger_transactions SET reference_hash=:corrupt_hash "
+                        "WHERE account_id=:account_id AND transaction_type='funding' "
+                        "AND reference_type='initial_funding'"
+                    ),
+                    {
+                        "account_id": registration.incumbent_account_id,
+                        "corrupt_hash": "f" * 64,
+                    },
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE paper_ledger_transactions ENABLE TRIGGER USER")
+                )
+
+        async with factory.begin() as session:
+            with pytest.raises(
+                ValueError,
+                match="AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID",
+            ):
+                await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=slot,
+                    daily_limit_usd=Decimal("3"),
+                    now=slot,
+                )
     finally:
         await engine.dispose()
 
@@ -1374,9 +1408,7 @@ async def test_slot_preparation_replays_persisted_result_without_provider_call(
                 idempotency_key="register-preparation-replay-v1",
                 now=NOW,
             )
-            incumbent = await session.get(
-                PaperAccountRecord, registration.incumbent_account_id
-            )
+            incumbent = await session.get(PaperAccountRecord, registration.incumbent_account_id)
             assert incumbent is not None
 
         async def prepare(*_args, **_kwargs) -> CycleAuthority:
