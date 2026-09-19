@@ -104,6 +104,7 @@ async def seed_paper_batch(
     include_no_change: bool = False,
     execution_market_close_at: datetime | None = None,
     expired_ticker_instrument_id: UUID | None = None,
+    additional_instruments: tuple[tuple[UUID, Decimal, Decimal, str], ...] = (),
 ) -> PaperBatchSeed:
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -202,9 +203,9 @@ async def seed_paper_batch(
 
             price_inputs: list[RiskPrice] = []
             sector_inputs: list[RiskSectorExposure] = []
-            instruments = (
-                INSTRUMENTS + (NO_CHANGE_INSTRUMENT,) if include_no_change else INSTRUMENTS
-            )
+            instruments = INSTRUMENTS + additional_instruments
+            if include_no_change:
+                instruments += (NO_CHANGE_INSTRUMENT,)
             for index, (instrument_id, close, _, sector) in enumerate(instruments, start=1):
                 artifact_id = UUID(int=0x51000000000000000000000000000100 + index)
                 manifest_id = UUID(int=0x51000000000000000000000000000200 + index)

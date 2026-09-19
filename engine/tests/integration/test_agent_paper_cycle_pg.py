@@ -402,6 +402,8 @@ async def _seed_two_candidate_authority(
     *,
     decision_time=DECISION_TIME,
     source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    authority_instruments=INSTRUMENTS,
+    candidate_instruments=INSTRUMENTS[:2],
 ):
     from nexus.paper.agent_cycle_authority import CycleAuthority
     from nexus.persistence.models.data import PriceBarRecord
@@ -419,6 +421,7 @@ async def _seed_two_candidate_authority(
         source_policy_id=source_policy_id,
         quote_received_at=decision_time,
         price_available_at=decision_time if same_day else None,
+        instruments=authority_instruments,
     )
     authority = CycleAuthority(
         account_id=registered.decision.account_id,
@@ -429,15 +432,7 @@ async def _seed_two_candidate_authority(
         calendar_authority_id=CALENDAR_ID,
         universe_snapshot_id=registered.decision.universe_snapshot_id,
     )
-    second = INSTRUMENTS[1][0]
     quote = await session.get(LatestQuote, UUID("63000000-0000-0000-0000-000000000091"))
-    values = {
-        column.name: getattr(quote, column.name)
-        for column in LatestQuote.__table__.columns
-        if column.name != "id"
-    }
-    values.update(instrument_id=second, content_hash="d" * 64)
-    session.add(LatestQuote(**values))
     prior = await session.scalar(
         select(PriceBarRecord).where(
             PriceBarRecord.instrument_id == INSTRUMENTS[0][0],
@@ -445,77 +440,91 @@ async def _seed_two_candidate_authority(
             PriceBarRecord.revision == "agent-prior-all-aapl",
         )
     )
-    await ingest_price_page(
-        session,
-        _ObjectStore(),
-        ProviderPage(
-            items=(
-                PriceBar(
-                    instrument_id=second,
-                    session=prior.session,
-                    open=prior.open,
-                    high=prior.high,
-                    low=prior.low,
-                    close=prior.close,
-                    volume=prior.volume,
-                    observed_at=prior.observed_at,
-                    available_at=prior.available_at,
-                    received_at=prior.received_at,
-                    revision="second-prior",
-                    quality_flags=(),
-                ),
-            ),
-            next_cursor=None,
-            raw_payload=b'{"prior":"second"}',
-            source_request_id=None,
-            as_of=prior.available_at,
-            provenance=MarketDataProvenance(
-                source="alpaca",
-                feed="sip",
-                adjustment="all",
-                interval="1Day",
-                mode="delayed",
-                delivery_mode="delayed",
-            ),
-        ),
-        commit=False,
-        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
-    )
-    for row in tuple(
+    risk_templates = tuple(
         await session.scalars(
             select(RiskQueryAuthorityRecord).where(
                 RiskQueryAuthorityRecord.required_instrument_ids == [INSTRUMENTS[0][0]],
                 RiskQueryAuthorityRecord.source_policy_id == source_policy_id,
             )
         )
-    ):
-        values = {
-            column.name: getattr(row, column.name)
-            for column in RiskQueryAuthorityRecord.__table__.columns
+    )
+    for candidate_index, (instrument_id, *_rest) in enumerate(candidate_instruments[1:], start=2):
+        quote_values = {
+            column.name: getattr(quote, column.name)
+            for column in LatestQuote.__table__.columns
             if column.name != "id"
         }
-        values.update(
-            required_instrument_ids=[second],
-            blocked_instrument_ids=[],
-            available_at=row.available_at if same_day else row.available_at + timedelta(seconds=1),
+        quote_values.update(
+            instrument_id=instrument_id,
+            content_hash=sha256(f"candidate-quote-{candidate_index}".encode()).hexdigest(),
         )
-        values["content_hash"] = canonical_query_authority_hash(
-            **{
-                key: values[key]
-                for key in (
-                    "source_policy_id",
-                    "universe_snapshot_id",
-                    "decision_session",
-                    "kind",
-                    "required_instrument_ids",
-                    "blocked_instrument_ids",
-                    "complete",
-                    "source_watermark_hash",
-                    "available_at",
-                )
+        session.add(LatestQuote(**quote_values))
+        await ingest_price_page(
+            session,
+            _ObjectStore(),
+            ProviderPage(
+                items=(
+                    PriceBar(
+                        instrument_id=instrument_id,
+                        session=prior.session,
+                        open=prior.open,
+                        high=prior.high,
+                        low=prior.low,
+                        close=prior.close,
+                        volume=prior.volume,
+                        observed_at=prior.observed_at,
+                        available_at=prior.available_at,
+                        received_at=prior.received_at,
+                        revision=f"candidate-{candidate_index}-prior",
+                        quality_flags=(),
+                    ),
+                ),
+                next_cursor=None,
+                raw_payload=f'{{"prior":"candidate-{candidate_index}"}}'.encode(),
+                source_request_id=None,
+                as_of=prior.available_at,
+                provenance=MarketDataProvenance(
+                    source="alpaca",
+                    feed="sip",
+                    adjustment="all",
+                    interval="1Day",
+                    mode="delayed",
+                    delivery_mode="delayed",
+                ),
+            ),
+            commit=False,
+            source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+        )
+        for row in risk_templates:
+            values = {
+                column.name: getattr(row, column.name)
+                for column in RiskQueryAuthorityRecord.__table__.columns
+                if column.name != "id"
             }
-        )
-        session.add(RiskQueryAuthorityRecord(**values))
+            values.update(
+                required_instrument_ids=[instrument_id],
+                blocked_instrument_ids=[],
+                available_at=(
+                    row.available_at if same_day else row.available_at + timedelta(seconds=1)
+                ),
+            )
+            values["content_hash"] = canonical_query_authority_hash(
+                **{
+                    key: values[key]
+                    for key in (
+                        "source_policy_id",
+                        "universe_snapshot_id",
+                        "decision_session",
+                        "kind",
+                        "required_instrument_ids",
+                        "blocked_instrument_ids",
+                        "complete",
+                        "source_watermark_hash",
+                        "available_at",
+                    )
+                }
+            )
+            session.add(RiskQueryAuthorityRecord(**values))
     await session.flush()
     return authority
 
@@ -1865,10 +1874,11 @@ async def _seed_adjusted_authority(
     *,
     source_policy_id: UUID = PAPER_DECISION_SOURCE_POLICY_ID,
     available_at: datetime | None = None,
+    instruments=INSTRUMENTS,
 ) -> None:
     available_at = available_at or decision.decision_time - timedelta(minutes=30)
     store = _ObjectStore()
-    for index, (instrument_id, close, _, _) in enumerate(INSTRUMENTS, start=1):
+    for index, (instrument_id, close, _, _) in enumerate(instruments, start=1):
         for adjustment in ("raw", "all"):
             page = ProviderPage(
                 items=(
@@ -1986,6 +1996,7 @@ async def _seed_cycle_research_authority(
     price_available_at: datetime | None = None,
     base_payload: dict[str, object] | None = None,
     prompt_bundle_version: str | None = None,
+    instruments=INSTRUMENTS,
 ) -> None:
     authority_time = price_available_at or DECISION_TIME
     await session.execute(text("ALTER TABLE instrument_aliases DISABLE TRIGGER USER"))
@@ -2064,7 +2075,7 @@ async def _seed_cycle_research_authority(
     )
     await session.execute(text("ALTER TABLE instrument_aliases DISABLE TRIGGER USER"))
     try:
-        for index, (instrument_id, _, _, _) in enumerate(INSTRUMENTS, start=1):
+        for index, (instrument_id, _, _, _) in enumerate(instruments, start=1):
             await session.execute(
                 text(
                     "UPDATE instrument_aliases SET symbol=:symbol "
@@ -2077,15 +2088,16 @@ async def _seed_cycle_research_authority(
             )
     finally:
         await session.execute(text("ALTER TABLE instrument_aliases ENABLE TRIGGER USER"))
-    for index, (instrument_id, _, _, _) in enumerate(INSTRUMENTS, start=1):
+    for index, (instrument_id, _, _, _) in enumerate(instruments, start=1):
+        evidence_hash = str((index + 6) % 10) * 64
         evidence = ResearchEvidenceRef(
             id=UUID(int=0x63000000000000000000000000000200 + index),
             source="sec",
             provider_object_id=f"agent-paper:{instrument_id}",
             revision="v1",
             available_at=authority_time - timedelta(hours=2),
-            location=f"memory://sha256/{f'{index + 6}' * 64}",
-            content_hash=f"{index + 6}" * 64,
+            location=f"memory://sha256/{evidence_hash}",
+            content_hash=evidence_hash,
             byte_length=10,
         )
         snapshot = DataSnapshot(
@@ -2143,6 +2155,7 @@ async def _seed_cycle_research_authority(
         registered_decision,
         source_policy_id=source_policy_id,
         available_at=price_available_at,
+        instruments=instruments,
     )
     artifact = DataArtifact(
         id=UUID("63000000-0000-0000-0000-000000000090"),

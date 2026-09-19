@@ -50,9 +50,16 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
-async def seed_synthesis(url, *, normal_path=None, complete_research=True):
+async def seed_synthesis(
+    url,
+    *,
+    normal_path=None,
+    complete_research=True,
+    candidate_instruments=INSTRUMENTS[:2],
+):
     if normal_path is None:
-        seed = await seed_paper_batch(url)
+        additional = tuple(item for item in candidate_instruments if item not in INSTRUMENTS)
+        seed = await seed_paper_batch(url, additional_instruments=additional)
         engine = create_async_engine(url)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
     else:
@@ -65,7 +72,12 @@ async def seed_synthesis(url, *, normal_path=None, complete_research=True):
                 strategy_version="baseline_v1",
                 decision_session=DECISION_TIME.date(),
             )
-            authority = await _seed_two_candidate_authority(session, registered)
+            authority = await _seed_two_candidate_authority(
+                session,
+                registered,
+                authority_instruments=INSTRUMENTS + additional,
+                candidate_instruments=candidate_instruments,
+            )
         decision_time = authority.decision_time
         # A synthetic one-hour remaining session makes expiry deterministic, without wall time.
         await session.execute(text("ALTER TABLE exchange_calendar_sessions DISABLE TRIGGER USER"))
@@ -85,7 +97,7 @@ async def seed_synthesis(url, *, normal_path=None, complete_research=True):
             session,
             account_id=authority.account_id,
             universe_snapshot_id=authority.universe_snapshot_id,
-            instrument_ids=(INSTRUMENTS[0][0], INSTRUMENTS[1][0]),
+            instrument_ids=tuple(item[0] for item in candidate_instruments),
             idempotency_key="synthesis-candidates",
             created_at=decision_time,
         )
@@ -97,7 +109,7 @@ async def seed_synthesis(url, *, normal_path=None, complete_research=True):
             candidate_batch_id=batch.batch_id,
             requested_instrument_ids=batch.instrument_ids,
         )
-        assert len(started.research_run_ids) == 2
+        assert len(started.research_run_ids) == len(candidate_instruments)
         outputs = []
         for index, run_id in enumerate(started.research_run_ids):
             if not complete_research:
@@ -107,7 +119,9 @@ async def seed_synthesis(url, *, normal_path=None, complete_research=True):
             intent = _safe_no_trade_intent(
                 run=run, evidence=evidence, valid_until=decision_time + timedelta(days=1)
             )
-            intent = intent.model_copy(update={"display_symbol": "AAPL" if index == 0 else "T2"})
+            intent = intent.model_copy(
+                update={"display_symbol": "AAPL" if index == 0 else f"T{index + 1}"}
+            )
             bound_records = [
                 await session.get(ResearchEvidenceRef, UUID(frozen["id"]))
                 for frozen in run.evidence_manifest
@@ -238,6 +252,101 @@ def synthesis_intent(run):
             "cash_rationale": choices[0]["thesis"],
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_five_candidate_cycle_reaches_no_trade_and_replays_exactly_once(
+    migrated_database_url,
+):
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_cycle import _events, _resume_research
+    from nexus.persistence.models.paper import (
+        AgentPaperCycleRecord,
+        PaperOrderRecord,
+        StrategyDecisionRecord,
+    )
+
+    extra = (
+        (
+            UUID("51000000-0000-0000-0000-000000000014"),
+            Decimal("80"),
+            Decimal("0"),
+            "consumer_staples",
+        ),
+        (
+            UUID("51000000-0000-0000-0000-000000000015"),
+            Decimal("120"),
+            Decimal("0"),
+            "communication_services",
+        ),
+    )
+    candidates = INSTRUMENTS + extra
+    seeded = await seed_synthesis(
+        migrated_database_url,
+        candidate_instruments=candidates,
+    )
+    engine, sessions, args = await proposal_source(
+        migrated_database_url,
+        seeded=seeded,
+    )
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            assert len(cycle.candidate_manifest) == 5
+            assert all(
+                len(row["risk_query_authority_ids"]) == 3 for row in cycle.candidate_manifest
+            )
+            assert (
+                await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 5
+            )
+            assert (
+                await session.scalar(select(func.count()).select_from(AgentResearchOutputRecord))
+                == 5
+            )
+            synthesis = await session.scalar(
+                select(AgentPortfolioSynthesisRunRecord).where(
+                    AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
+                )
+            )
+            frozen = PortfolioSynthesisInputV1.model_validate(synthesis.frozen_input)
+            assert frozen.candidate_instrument_ids == tuple(item[0] for item in candidates)
+            first = await _resume_research(
+                session,
+                cycle=cycle,
+                authority=None,
+                events=await _events(session, cycle.id),
+                now=args["now"],
+            )
+            assert first.status == "completed"
+            assert first.result_code == "NO_ORDER_REQUIRED"
+            counts = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(StrategyDecisionRecord)
+                    .where(StrategyDecisionRecord.agent_paper_cycle_id == cycle.id)
+                ),
+                await session.scalar(select(func.count()).select_from(PaperOrderRecord)),
+            )
+            replay = await _resume_research(
+                session,
+                cycle=cycle,
+                authority=None,
+                events=await _events(session, cycle.id),
+                now=args["now"],
+            )
+            assert replay == first.model_copy(update={"replayed": True})
+            assert counts == (1, 0)
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(StrategyDecisionRecord)
+                    .where(StrategyDecisionRecord.agent_paper_cycle_id == cycle.id)
+                ),
+                await session.scalar(select(func.count()).select_from(PaperOrderRecord)),
+            ) == counts
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
