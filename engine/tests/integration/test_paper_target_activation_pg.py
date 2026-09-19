@@ -789,3 +789,53 @@ async def test_blocked_candidate_cycle_never_activates_same_proposal_after_relea
             )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cycle_persists_exact_blocking_plan_from_activation_result(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.paper.agent_cycle import _append_event, _events, _resume_batch
+    from nexus.paper.target_service import TargetActivationBlockedError
+    from nexus.persistence.models.paper import AgentPaperCycleRecord
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    blocking_plan_id = uuid4()
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            proposal = await persist_portfolio_proposal(session, **args)
+            await _append_event(
+                session,
+                cycle,
+                "researching",
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+
+        async def block_activation(*args, **kwargs):
+            raise TargetActivationBlockedError(blocking_plan_id=blocking_plan_id)
+
+        monkeypatch.setattr(
+            "nexus.paper.target_service.activate_portfolio_target",
+            block_activation,
+        )
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            result = await _resume_batch(
+                session,
+                cycle=cycle,
+                events=await _events(session, cycle.id),
+                now=args["now"],
+            )
+            event = (await _events(session, cycle.id))[-1]
+
+        assert result.result_code == "TARGET_ACTIVATION_BLOCKED"
+        assert event.fact_ids["blocking_plan_id"] == str(blocking_plan_id)
+        assert event.fact_ids["strategy_decision_id"] == str(proposal.decision_id)
+    finally:
+        await engine.dispose()

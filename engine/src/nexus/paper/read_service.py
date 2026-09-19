@@ -359,7 +359,7 @@ class PaperReadService:
             )
         )
         plan_summary = None if batch is None else await self._plan_summary(batch.id)
-        blocking_plan = await self._occupying_plan_summary(cycle.account_id)
+        blocking_plan = await self._blocking_plan_summary(activation_event)
         return AgentPaperManagementCycleResponse(
             cycle=cycle_response,
             orders=await self._orders_for_cycle(cycle_id),
@@ -662,26 +662,80 @@ class PaperReadService:
         )
 
     async def _occupying_plan_summary(self, account_id: UUID) -> PaperPlanSummaryResponse | None:
-        batch_ids = tuple(
-            await self._session.scalars(
-                select(PaperOrderBatchRecord.id)
-                .where(
-                    PaperOrderBatchRecord.account_id == account_id,
-                    PaperOrderBatchRecord.target_version_id.is_not(None),
-                    PaperOrderBatchRecord.created_at <= self._request_time,
+        try:
+            projection = await load_paper_projection(
+                self._session,
+                account_id=account_id,
+                as_of=self._request_time,
+            )
+        except ValueError as error:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The occupying paper plan projection is incomplete.",
+                status_code=409,
+            ) from error
+        occupied = bool(
+            projection.open_orders
+            or projection.reserved_cash != 0
+            or any(position.reserved_quantity != 0 for position in projection.positions)
+        )
+        if not occupied:
+            return None
+        order_ids = tuple(order.order_id for order in projection.open_orders)
+        batch_ids = (
+            ()
+            if not order_ids
+            else tuple(
+                await self._session.scalars(
+                    select(PaperOrderRecord.batch_id)
+                    .where(
+                        PaperOrderRecord.account_id == account_id,
+                        PaperOrderRecord.id.in_(order_ids),
+                    )
+                    .distinct()
                 )
-                .order_by(
-                    PaperOrderBatchRecord.evaluated_at.desc(), PaperOrderBatchRecord.id.desc()
-                )
-                .limit(51)
             )
         )
-        _require_bounded("paper_management_plans", batch_ids, 50)
-        for batch_id in batch_ids:
-            summary = await self._plan_summary(batch_id)
-            if summary is not None and summary.occupation_state in {"occupied", "unknown"}:
-                return summary
-        return None
+        if len(batch_ids) != 1:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The occupying paper plan identity is incomplete.",
+                status_code=409,
+            )
+        summary = await self._plan_summary(batch_ids[0])
+        if summary is None or summary.occupation_state not in {"occupied", "unknown"}:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The occupying paper plan authority is incomplete.",
+                status_code=409,
+            )
+        return summary
+
+    async def _blocking_plan_summary(
+        self,
+        event: AgentPaperCycleEventRecord | None,
+    ) -> PaperPlanSummaryResponse | None:
+        if event is None or event.result_code != "TARGET_ACTIVATION_BLOCKED":
+            return None
+        facts = event.fact_ids if isinstance(event.fact_ids, dict) else {}
+        raw_plan_id = facts.get("blocking_plan_id")
+        if raw_plan_id is None:
+            return None
+        plan_id = _optional_uuid(raw_plan_id)
+        if plan_id is None:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The blocking paper plan identity is incomplete.",
+                status_code=409,
+            )
+        summary = await self._plan_summary(plan_id)
+        if summary is None:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The blocking paper plan authority is incomplete.",
+                status_code=409,
+            )
+        return summary
 
     def _activation_result(
         self,

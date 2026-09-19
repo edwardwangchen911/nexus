@@ -829,6 +829,40 @@ async def test_plan_preserves_target_and_proposal_identity_without_merging_actua
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_activation_occupation_binds_the_exact_persisted_plan(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.paper.projection import load_paper_projection
+    from nexus.paper.target_service import (
+        TargetActivationBlockedError,
+        require_activation_projection_unoccupied,
+    )
+
+    engine, sessions, args, proposal, activated = await _seed_target_associated_plan(
+        migrated_database_url,
+        monkeypatch,
+    )
+    try:
+        as_of = args["now"] + timedelta(minutes=1)
+        async with sessions() as session:
+            projection = await load_paper_projection(
+                session,
+                account_id=proposal.account_id,
+                as_of=as_of,
+            )
+            with pytest.raises(TargetActivationBlockedError) as caught:
+                await require_activation_projection_unoccupied(
+                    session,
+                    account_id=proposal.account_id,
+                    projection=projection,
+                )
+        assert caught.value.blocking_plan_id == activated.batch_id
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize(
     "corruption",
     ("decision_hash", "proposal", "binding", "missing_run", "missing_output"),

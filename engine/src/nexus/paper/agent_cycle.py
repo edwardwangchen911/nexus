@@ -995,7 +995,10 @@ async def _resume_batch(
             return _result(cycle.id, events, replayed=True).model_copy(
                 update={"result_code": "TARGET_ACTIVATION_PENDING"}
             )
-        from nexus.paper.target_service import activate_portfolio_target
+        from nexus.paper.target_service import (
+            TargetActivationBlockedError,
+            activate_portfolio_target,
+        )
 
         try:
             activation = await activate_portfolio_target(
@@ -1006,18 +1009,23 @@ async def _resume_batch(
                 idempotency_key=f"portfolio-target:{cycle.id}",
             )
         except ValueError as error:
-            if str(error) not in {
-                "INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN",
-                "PORTFOLIO_PROPOSAL_BASELINE_CONFLICT",
-            }:
+            if not isinstance(error, TargetActivationBlockedError) and str(error) != (
+                "PORTFOLIO_PROPOSAL_BASELINE_CONFLICT"
+            ):
                 raise
+            facts: dict[str, object] = {"strategy_decision_id": str(decision_id)}
+            if (
+                isinstance(error, TargetActivationBlockedError)
+                and error.blocking_plan_id is not None
+            ):
+                facts["blocking_plan_id"] = str(error.blocking_plan_id)
             await _append_event(
                 session,
                 cycle,
                 "decision_recorded",
                 "completed",
                 "TARGET_ACTIVATION_BLOCKED",
-                {"strategy_decision_id": str(decision_id)},
+                facts,
             )
             return _result(cycle.id, await _events(session, cycle.id), replayed=False)
         if activation.batch_id is None:

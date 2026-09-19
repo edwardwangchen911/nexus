@@ -55,6 +55,14 @@ class TargetActivationResult(BaseModel):
     activated_at: datetime
 
 
+class TargetActivationBlockedError(ValueError):
+    """Activation stopped by the exact persisted plan occupying the account."""
+
+    def __init__(self, *, blocking_plan_id: UUID | None) -> None:
+        super().__init__("INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN")
+        self.blocking_plan_id = blocking_plan_id
+
+
 class RiskRemainderCoverage(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -144,6 +152,45 @@ def require_unoccupied_projection(projection: PaperPortfolioProjection) -> None:
         raise ValueError("INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN")
     if canonical_paper_projection_hash(projection) != projection.projection_hash:
         raise ValueError("INITIAL_PROJECTION_HASH_INVALID")
+
+
+async def require_activation_projection_unoccupied(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    projection: PaperPortfolioProjection,
+) -> None:
+    """Fail activation with an exact occupying plan when the projection proves one."""
+    occupied = bool(
+        projection.open_orders
+        or projection.reserved_cash != 0
+        or any(position.reserved_quantity != 0 for position in projection.positions)
+    )
+    if not occupied:
+        require_unoccupied_projection(projection)
+        return
+    order_ids = tuple(order.order_id for order in projection.open_orders)
+    rows = (
+        ()
+        if not order_ids
+        else tuple(
+            (
+                await session.execute(
+                    select(PaperOrderRecord.id, PaperOrderRecord.batch_id).where(
+                        PaperOrderRecord.account_id == account_id,
+                        PaperOrderRecord.id.in_(order_ids),
+                    )
+                )
+            ).all()
+        )
+    )
+    batch_ids = {batch_id for _, batch_id in rows}
+    blocking_plan_id = (
+        next(iter(batch_ids))
+        if len(rows) == len(order_ids) and len(batch_ids) == 1
+        else None
+    )
+    raise TargetActivationBlockedError(blocking_plan_id=blocking_plan_id)
 
 
 def initial_approval_result(
@@ -466,7 +513,11 @@ async def activate_portfolio_target(
             raise ValueError("POLICY_UNCONFIRMED")
 
     projection = await load_paper_projection(session, account_id=account_id, as_of=request_time)
-    require_unoccupied_projection(projection)
+    await require_activation_projection_unoccupied(
+        session,
+        account_id=account_id,
+        projection=projection,
+    )
     content_hash = canonical_portfolio_target_content_hash(proposal)
     created = current is None or current.target_content_hash != content_hash
     if created:

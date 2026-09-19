@@ -154,7 +154,7 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
         assert facts["proposal"]["decision_hash"] == proposal.proposal.decision_hash
         assert facts["active_target"]["target_version_id"] == str(activated.target_version_id)
         assert facts["activation_result"]["batch_id"] == str(activated.batch_id)
-        assert facts["blocking_plan"]["batch_id"] == str(activated.batch_id)
+        assert facts["blocking_plan"] is None
         assert facts["plan_summary"]["batch_id"] == str(activated.batch_id)
         assert facts["proposal"]["as_of"] != facts["active_target"]["as_of"]
         assert facts["active_target"]["as_of"]
