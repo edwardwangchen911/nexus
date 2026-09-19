@@ -20,7 +20,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ENGINE_ROOT = Path(__file__).parents[2]
-MIGRATION_HEAD = "0065_portfolio_management"
+MIGRATION_HEAD = "0064_prompt_release_channel"
 EVALUATION_HEAD = "0062_agent_version_evaluation"
 PAIR_CONTEXT_HEAD = "0063_agent_version_pair_context"
 PREVIOUS_HEAD = "0061_agent_paper_job_isolation"
@@ -33,7 +33,7 @@ def test_current_head_retains_agent_version_authority_lineage() -> None:
     assert scripts.get_heads() == [MIGRATION_HEAD]
     revision = scripts.get_revision(MIGRATION_HEAD)
     pair_revision = scripts.get_revision(PAIR_CONTEXT_HEAD)
-    assert revision is not None and revision.down_revision == "0064_prompt_release_channel"
+    assert revision is not None and revision.down_revision == PAIR_CONTEXT_HEAD
     assert pair_revision is not None and pair_revision.down_revision == EVALUATION_HEAD
     assert {
         AgentVersionEvaluationRecord.__tablename__,

@@ -1115,7 +1115,7 @@ async def test_known_shared_market_preparation_failure_closes_with_exact_reason(
 
 
 @pytest.mark.asyncio
-async def test_first_slot_initializes_equal_internal_accounts_without_work_replay(
+async def test_first_slot_initialization_replays_without_work_and_rejects_corruption(
     migrated_database_url: str,
 ) -> None:
     factory, engine = await _factory(migrated_database_url)
@@ -1256,8 +1256,7 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
         async with factory.begin() as session:
             original_reference_hash = await session.scalar(
                 select(PaperLedgerTransactionRecord.reference_hash).where(
-                    PaperLedgerTransactionRecord.account_id
-                    == registration.incumbent_account_id,
+                    PaperLedgerTransactionRecord.account_id == registration.incumbent_account_id,
                     PaperLedgerTransactionRecord.transaction_type == "funding",
                     PaperLedgerTransactionRecord.reference_type == "initial_funding",
                 )
@@ -1347,12 +1346,9 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hosted_without_batch", [False, True])
 async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    hosted_without_batch,
 ) -> None:
     factory, engine = await _factory(migrated_database_url)
     slot = _slots(TRAIN_DATES)[0]
@@ -1401,88 +1397,14 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
                 now=NOW,
             )
 
-        if hosted_without_batch:
-            from nexus.ops import agent_paper_loop as loop
-
-            output = tmp_path / ".secrets" / "nexus-agent-paper"
-            output.mkdir(parents=True, mode=0o700)
-            environment = {
-                "DATABASE_URL": migrated_database_url,
-                "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
-                "ALPACA_API_KEY_ID": "key",
-                "ALPACA_API_SECRET_KEY": "secret",
-                "AGENT_RUNTIME_MODE": "codex_sdk",
-                "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
-                "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(registration.incumbent_account_id),
-            }
-            readiness = loop.agent_paper_service_startup_preflight(environment, repo_root=tmp_path)
-            assert readiness["status"] == "ready"
-            assert readiness["normal_cycle_status"] == "blocked"
-            assert readiness["normal_cycle_blocking_codes"] == ["CANDIDATE_BATCH_REQUIRED"]
-            observed = []
-
-            async def observe_advance(*args, **kwargs):
-                value = await advance_agent_version_slot(*args, **kwargs)
-                observed.append(value)
-                return value
-
-            async def ready(*args, candidate, **kwargs):
-                assert candidate.instrument_id == INSTRUMENT_ID
-                return "ready"
-
-            async def shared_authority(session, *args, identities, **kwargs):
-                assert tuple(item.instrument_id for item in identities) == (INSTRUMENT_ID,)
-                account = await session.get(PaperAccountRecord, registration.incumbent_account_id)
-                return CycleAuthority(
-                    account_id=registration.incumbent_account_id,
-                    portfolio_id=account.portfolio_id,
-                    decision_session=slot.date(),
-                    decision_time=prepared_at,
-                    execution_session=slot.date(),
-                    calendar_authority_id=CALENDAR_ID,
-                    universe_snapshot_id=UUID("72000000-0000-0000-0000-000000000805"),
-                )
-
-            monkeypatch.setattr(
-                loop, "load_agent_paper_service_environment", lambda *args, **kwargs: environment
+        async with factory.begin() as session:
+            result = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=slot,
+                daily_limit_usd=Decimal("3"),
+                now=prepared_at,
             )
-            for name in (
-                "prepare_prior_daily_once",
-                "prepare_macro_once",
-                "prepare_current_trends_once",
-            ):
-                monkeypatch.setattr(loop, name, ready)
-            monkeypatch.setattr(
-                agent_paper_once, "prepare_schwab_decision_authority", shared_authority
-            )
-            monkeypatch.setattr(
-                agent_paper_once, "S3ProviderEvidenceStore", lambda *args, **kwargs: object()
-            )
-            monkeypatch.setattr(agent_paper_once, "advance_agent_version_slot", observe_advance)
-            await loop.execute_agent_paper_loop_action(
-                EngineSettings(database_url=migrated_database_url),
-                account_id=registration.incumbent_account_id,
-                repo_root=tmp_path,
-                action=loop.AgentPaperLoopAction.ADVANCE_EVALUATION,
-                snapshot=loop.AgentPaperLoopSnapshot(
-                    now=slot,
-                    calendar_authority_id=CALENDAR_ID,
-                    evaluation_id=registration.evaluation_id,
-                    evaluation_slot_at=slot,
-                    cycle_status="evaluation_pending",
-                ),
-            )
-            assert len(observed) == 1
-            result = observed[0]
-        else:
-            async with factory.begin() as session:
-                result = await advance_agent_version_slot(
-                    session,
-                    evaluation_id=registration.evaluation_id,
-                    decision_slot_at=slot,
-                    daily_limit_usd=Decimal("3"),
-                    now=prepared_at,
-                )
 
         assert result.status == "running"
         assert result.reason_code == "PAIR_JOBS_PREPARED"
@@ -1492,8 +1414,6 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
         assert result.challenger_run_id == challenger_run_id
         assert result.replayed is False
         assert [call["version_lane"] for call in calls] == ["incumbent", "challenger"]
-        assert all(call["requested_instrument_ids"] == (INSTRUMENT_ID,) for call in calls)
-        assert all(call.get("candidate_batch_id") is None for call in calls)
         assert calls[0]["version_source_run_id"] == INCUMBENT_RUN_ID
         assert calls[0].get("version_prompt_id") is None
         assert calls[1].get("version_source_run_id") is None

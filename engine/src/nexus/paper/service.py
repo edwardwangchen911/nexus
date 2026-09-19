@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
@@ -21,7 +21,6 @@ from nexus.domain.ids import new_uuid7
 from nexus.paper.agent_decision import AgentPaperDecision
 from nexus.paper.agent_decision_store import (
     load_paper_decision,
-    load_portfolio_proposal,
     require_agent_decision_bindings,
     require_agent_source_policies,
 )
@@ -32,7 +31,6 @@ from nexus.paper.notification import (
     build_risk_rejected_snapshot,
     notification_snapshot_payload,
 )
-from nexus.paper.portfolio_proposal import canonical_portfolio_target_content_hash
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.paper import (
     PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
@@ -47,7 +45,6 @@ from nexus.persistence.models.paper import (
     PaperOrderRecord,
     PaperReservationEventRecord,
     PaperReservationRecord,
-    PaperTargetVersionRecord,
     RiskEvaluationPriceInputRecord,
     RiskEvaluationQueryProofRecord,
     RiskEvaluationRecord,
@@ -56,7 +53,6 @@ from nexus.persistence.models.paper import (
     RiskNoChangeEvaluationRecord,
     RiskPolicyRecord,
     StrategyDecisionRecord,
-    StrategyDecisionTargetRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, OutboxEvent
 from nexus.quality.source_policy import (
@@ -80,7 +76,6 @@ from nexus.risk.evaluate import (
     target_whole_share_quantity,
 )
 from nexus.risk.models import (
-    OrderCandidate,
     PaperDecisionAuthority,
     PaperPortfolioProjection,
     RiskEvaluation,
@@ -88,7 +83,6 @@ from nexus.risk.models import (
     RiskRuleEvidence,
 )
 from nexus.risk.policy import RiskPolicy, select_active_policy
-from nexus.strategy.forward import ForwardStrategyTarget
 
 _ROUTE = "paper.order_batch.create"
 _ACTOR = "system:task18"
@@ -129,109 +123,12 @@ class PaperOrderBatchResult(BaseModel):
     order_ids: tuple[UUID, ...]
     evaluations: tuple[RiskEvaluation, ...]
 
-    @field_validator("evaluations", mode="before")
-    @classmethod
-    def _stored_evaluations_are_exact(cls, value: object) -> object:
-        if not isinstance(value, tuple | list):
-            return value
-        decimal_fields = (
-            "desired_quantity",
-            "approved_quantity",
-            "target_weight",
-            "reference_close",
-            "worst_price",
-            "reserve_amount",
-            "projected_available_cash",
-            "projected_cash_ratio",
-            "projected_name_ratio",
-        )
-
-        def stored_decimal(item: object) -> object:
-            if not isinstance(item, str):
-                return item
-            try:
-                decimal = Decimal(item)
-            except (InvalidOperation, ValueError) as error:
-                raise ValueError("stored batch decimal is invalid") from error
-            if decimal == 0 and item.startswith("-"):
-                raise ValueError("stored batch decimal cannot be negative zero")
-            return decimal
-
-        evaluations: list[object] = []
-        for raw in value:
-            if isinstance(raw, RiskEvaluation) or not isinstance(raw, Mapping):
-                evaluations.append(raw)
-                continue
-            evaluation = dict(raw)
-            for field in decimal_fields:
-                if field in evaluation:
-                    evaluation[field] = stored_decimal(evaluation[field])
-            ratios = evaluation.get("projected_sector_ratios")
-            if isinstance(ratios, tuple | list):
-                evaluation["projected_sector_ratios"] = tuple(
-                    (sector, stored_decimal(ratio)) for sector, ratio in ratios
-                )
-            rules = evaluation.get("rules")
-            if isinstance(rules, tuple | list):
-                converted_rules = []
-                for raw_rule in rules:
-                    if not isinstance(raw_rule, Mapping):
-                        converted_rules.append(raw_rule)
-                        continue
-                    rule = dict(raw_rule)
-                    for field in ("limit", "observed", "remaining"):
-                        if field in rule:
-                            rule[field] = stored_decimal(rule[field])
-                    converted_rules.append(rule)
-                evaluation["rules"] = tuple(converted_rules)
-            evaluations.append(evaluation)
-        return tuple(evaluations)
-
     @field_validator("evaluated_at")
     @classmethod
     def _time_is_utc(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
             raise ValueError("evaluated_at must use UTC")
         return value
-
-
-class _PortfolioDecisionAuthority(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    cycle_id: UUID
-    account_id: UUID
-    portfolio_id: UUID
-    decision_session: date
-    decision_time: datetime
-    execution_session: date
-    source_policy_id: UUID
-    execution_source_policy_id: UUID
-    calendar_authority_id: UUID
-    universe_snapshot_id: UUID
-    quality_report_id: UUID | None
-    portfolio_projection_hash: str
-    authority_hash: str
-    decision_hash: str
-    cash_weight: Decimal
-    targets: tuple[ForwardStrategyTarget, ...]
-
-
-def _subtract_portfolio_risk_remainders(
-    candidates: Sequence[OrderCandidate],
-    remainder_quantities: Mapping[tuple[UUID, str], Decimal],
-) -> tuple[OrderCandidate, ...]:
-    """Subtract only fixed same-side unapproved quantities from current deltas."""
-    uncovered: list[OrderCandidate] = []
-    for candidate in candidates:
-        covered_quantity = remainder_quantities.get(
-            (candidate.instrument_id, candidate.side), Decimal(0)
-        )
-        desired_quantity = candidate.desired_quantity - min(
-            candidate.desired_quantity, covered_quantity
-        )
-        if desired_quantity > 0:
-            uncovered.append(candidate.model_copy(update={"desired_quantity": desired_quantity}))
-    return tuple(uncovered)
 
 
 def _observe(hooks: PaperBatchHooks | None, phase: str) -> None:
@@ -250,7 +147,6 @@ def canonical_paper_batch_request_hash(
     account_id: UUID,
     strategy_decision_id: UUID,
     request_time: datetime,
-    target_version_id: UUID | None = None,
 ) -> str:
     payload = {
         "schema": "paper_order_batch_request_sha256_v1",
@@ -258,8 +154,6 @@ def canonical_paper_batch_request_hash(
         "strategy_decision_id": str(strategy_decision_id).lower(),
         "request_time": _utc(request_time),
     }
-    if target_version_id is not None:
-        payload["target_version_id"] = str(target_version_id).lower()
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -398,7 +292,9 @@ async def _lock_account_graph(
     )
     _observe(hooks, "account_locked")
     account = await session.scalar(
-        select(PaperAccountRecord).where(PaperAccountRecord.id == account_id).with_for_update()
+        select(PaperAccountRecord)
+        .where(PaperAccountRecord.id == account_id)
+        .with_for_update()
     )
     if account is None or account.capability != "simulation_write_internal":
         raise PaperBatchError("PAPER_ACCOUNT_INVALID")
@@ -520,7 +416,7 @@ async def _load_policy(session: AsyncSession) -> tuple[UUID, RiskPolicy]:
     return matching[0], policy
 
 
-async def load_paper_order_batch_result(
+async def _existing_batch_result(
     session: AsyncSession,
     *,
     account_id: UUID,
@@ -534,54 +430,8 @@ async def load_paper_order_batch_result(
     )
     if batch is None:
         return None
-    idempotency = await session.get(IdempotencyRecord, batch.idempotency_record_id)
     decision = await session.get(StrategyDecisionRecord, strategy_decision_id)
-    if (
-        decision is None
-        or batch.account_id != account_id
-        or batch.strategy_decision_id != strategy_decision_id
-        or idempotency is None
-        or idempotency.actor_id != f"internal-paper:{account_id}"
-        or idempotency.route != _ROUTE
-        or idempotency.schema_version != "paper_order_batch_result_v1"
-        or idempotency.request_hash != batch.request_hash
-        or batch.request_hash
-        != canonical_paper_batch_request_hash(
-            account_id=account_id,
-            strategy_decision_id=strategy_decision_id,
-            request_time=batch.evaluated_at,
-            target_version_id=batch.target_version_id,
-        )
-    ):
-        raise PaperBatchError("PAPER_BATCH_CONFLICT")
-    try:
-        stored_result = PaperOrderBatchResult.model_validate(idempotency.response_payload)
-        if idempotency.response_payload != stored_result.model_dump(mode="json"):
-            raise ValueError("stored batch result is not canonical")
-        if decision.strategy_version == "agent_portfolio_proposal_v1":
-            proposal = await load_portfolio_proposal(
-                session,
-                account_id=account_id,
-                decision_id=strategy_decision_id,
-            )
-            if proposal is None:
-                raise ValueError("portfolio proposal is missing")
-            current_decision_hash = proposal.proposal.decision_hash
-        else:
-            persisted = await load_paper_decision(
-                session,
-                account_id=account_id,
-                decision_id=strategy_decision_id,
-            )
-            if persisted is None:
-                raise ValueError("paper decision is missing")
-            current_decision_hash = persisted.decision.decision_hash
-    except ValueError as error:
-        raise PaperBatchError("PAPER_BATCH_CONFLICT") from error
-    if (
-        decision.decision_hash != current_decision_hash
-        or stored_result.decision_hash != current_decision_hash
-    ):
+    if decision is None:
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
     orders = tuple(
         (
@@ -596,22 +446,10 @@ async def load_paper_order_batch_result(
         ).all()
     )
     evaluations: list[RiskEvaluation] = []
-    risk_rows = tuple(
-        (
-            await session.scalars(
-                select(RiskEvaluationRecord)
-                .where(RiskEvaluationRecord.batch_id == batch.id)
-                .order_by(RiskEvaluationRecord.order_id)
-            )
-        ).all()
-    )
-    if {row.order_id for row in risk_rows} != {order.id for order in orders} or len(
-        risk_rows
-    ) != len(orders):
-        raise PaperBatchError("PAPER_BATCH_CONFLICT")
-    risk_by_order = {row.order_id: row for row in risk_rows}
     for order in orders:
-        evaluation = risk_by_order.get(order.id)
+        evaluation = await session.scalar(
+            select(RiskEvaluationRecord).where(RiskEvaluationRecord.order_id == order.id)
+        )
         if evaluation is None:
             raise PaperBatchError("PAPER_BATCH_CONFLICT")
         rules = tuple(
@@ -654,31 +492,7 @@ async def load_paper_order_batch_result(
             ),
             result_hash=evaluation.result_hash,
         )
-        if (
-            evaluation.account_id != account_id
-            or evaluation.risk_policy_id != batch.risk_policy_id
-            or evaluation.input_hash != batch.risk_input_hash
-            or order.account_id != account_id
-            or order.batch_id != batch.id
-            or order.strategy_decision_id != strategy_decision_id
-            or order.instrument_id != domain.instrument_id
-            or order.side != domain.side
-            or order.risk_outcome != domain.outcome
-            or order.quantity
-            != (
-                domain.desired_quantity
-                if domain.outcome == "rejected"
-                else domain.approved_quantity
-            )
-            or order.target_weight != domain.target_weight
-            or order.reference_close != domain.reference_close
-            or order.worst_price != domain.worst_price
-            or any(
-                row.rule_seq != index or row.account_id != account_id
-                for index, row in enumerate(rules, start=1)
-            )
-            or canonical_risk_evaluation_result_hash((domain,)) != domain.result_hash
-        ):
+        if canonical_risk_evaluation_result_hash((domain,)) != domain.result_hash:
             raise PaperBatchError("PAPER_BATCH_CONFLICT")
         evaluations.append(domain)
     ordered = tuple(
@@ -696,7 +510,7 @@ async def load_paper_order_batch_result(
     if (
         canonical_paper_order_batch_hash(
             account_id=account_id,
-            decision_hash=current_decision_hash,
+            decision_hash=decision.decision_hash,
             risk_input_hash=batch.risk_input_hash,
             evaluations=ordered,
         )
@@ -738,11 +552,11 @@ async def load_paper_order_batch_result(
             raise PaperBatchError("PAPER_BATCH_CONFLICT")
     order_by_instrument = {order.instrument_id: order for order in orders}
     order_ids = tuple(order_by_instrument[item.instrument_id].id for item in ordered)
-    result = PaperOrderBatchResult(
+    return PaperOrderBatchResult(
         batch_id=batch.id,
         account_id=batch.account_id,
         strategy_decision_id=batch.strategy_decision_id,
-        decision_hash=current_decision_hash,
+        decision_hash=decision.decision_hash,
         projection_hash=batch.projection_hash,
         request_hash=batch.request_hash,
         risk_input_hash=batch.risk_input_hash,
@@ -752,9 +566,6 @@ async def load_paper_order_batch_result(
         order_ids=order_ids,
         evaluations=ordered,
     )
-    if stored_result != result:
-        raise PaperBatchError("PAPER_BATCH_CONFLICT")
-    return result
 
 
 def _event_record(
@@ -870,7 +681,6 @@ async def _persist_new_batch(
     *,
     account_id: UUID,
     strategy_decision_id: UUID,
-    target_version_id: UUID | None,
     decision_hash: str,
     policy_id: UUID,
     idempotency_record: IdempotencyRecord,
@@ -894,7 +704,6 @@ async def _persist_new_batch(
         id=batch_id,
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
-        target_version_id=target_version_id,
         risk_policy_id=policy_id,
         idempotency_record_id=idempotency_record.id,
         request_hash=request_hash,
@@ -949,7 +758,9 @@ async def _persist_new_batch(
             batch_id=batch_id,
             account_id=account_id,
             strategy_decision_id=strategy_decision_id,
-            client_order_id=(f"paper-v1-{decision_hash[:12]}-{evaluation.instrument_id.hex}"),
+            client_order_id=(
+                f"paper-v1-{decision_hash[:12]}-{evaluation.instrument_id.hex}"
+            ),
             instrument_id=evaluation.instrument_id,
             side=evaluation.side,
             quantity=quantity,
@@ -994,7 +805,8 @@ async def _persist_new_batch(
                 projected_cash_ratio=evaluation.projected_cash_ratio,
                 projected_name_ratio=evaluation.projected_name_ratio,
                 projected_sector_ratios={
-                    sector: _decimal(ratio) for sector, ratio in evaluation.projected_sector_ratios
+                    sector: _decimal(ratio)
+                    for sector, ratio in evaluation.projected_sector_ratios
                 },
                 input_hash=risk_input_hash,
                 result_hash=evaluation.result_hash,
@@ -1047,20 +859,6 @@ async def _persist_new_batch(
             )
             for exposure in market.sector_exposures
         )
-        bound_proofs = tuple(
-            proof
-            for proof in market.query_proofs
-            if proof.required_instrument_ids is None
-            or proof.required_instrument_ids == (evaluation.instrument_id,)
-        )
-        if any(proof.required_instrument_ids is not None for proof in market.query_proofs):
-            if len(bound_proofs) != 3 or any(
-                proof.required_instrument_ids != (evaluation.instrument_id,)
-                for proof in bound_proofs
-            ):
-                raise PaperBatchError("RISK_AUTHORITY_INCOMPLETE")
-        elif len(market.required_instrument_ids) != 1:
-            raise PaperBatchError("RISK_AUTHORITY_INCOMPLETE")
         session.add_all(
             RiskEvaluationQueryProofRecord(
                 id=new_uuid7(),
@@ -1073,7 +871,7 @@ async def _persist_new_batch(
                 available_at=proof.available_at,
                 content_hash=proof.content_hash,
             )
-            for proof in bound_proofs
+            for proof in market.query_proofs
         )
     await session.flush()
     _observe(hooks, "risk_persisted")
@@ -1128,7 +926,9 @@ async def _persist_new_batch(
             )
             await session.flush()
         amount = (
-            evaluation.reserve_amount if evaluation.side == "buy" else evaluation.approved_quantity
+            evaluation.reserve_amount
+            if evaluation.side == "buy"
+            else evaluation.approved_quantity
         )
         session.add(
             PaperReservationRecord(
@@ -1283,89 +1083,27 @@ async def create_paper_order_batch(
     strategy_decision_id: UUID,
     idempotency_key: str,
     request_time: datetime,
-    target_version_id: UUID | None = None,
     hooks: PaperBatchHooks | None = None,
 ) -> PaperOrderBatchResult:
-    """Create a legacy batch; portfolio batches require the activation coordinator."""
-    if target_version_id is not None:
-        raise PaperBatchError("PORTFOLIO_ACTIVATION_REQUIRED")
-    result = await _create_paper_order_batch_impl(
-        session,
-        account_id=account_id,
-        strategy_decision_id=strategy_decision_id,
-        idempotency_key=idempotency_key,
-        request_time=request_time,
-        target_version_id=None,
-        portfolio_activation=False,
-        hooks=hooks,
-    )
-    assert result is not None
-    return result
-
-
-async def _create_target_aware_paper_order_batch(
-    session: AsyncSession,
-    *,
-    account_id: UUID,
-    strategy_decision_id: UUID,
-    idempotency_key: str,
-    request_time: datetime,
-    target_version_id: UUID,
-    hooks: PaperBatchHooks | None = None,
-) -> PaperOrderBatchResult | None:
-    """Private activation-only target batch entrypoint; caller owns the transaction."""
-    return await _create_paper_order_batch_impl(
-        session,
-        account_id=account_id,
-        strategy_decision_id=strategy_decision_id,
-        idempotency_key=idempotency_key,
-        request_time=request_time,
-        target_version_id=target_version_id,
-        portfolio_activation=True,
-        hooks=hooks,
-    )
-
-
-async def _create_paper_order_batch_impl(
-    session: AsyncSession,
-    *,
-    account_id: UUID,
-    strategy_decision_id: UUID,
-    idempotency_key: str,
-    request_time: datetime,
-    target_version_id: UUID | None,
-    portfolio_activation: bool,
-    hooks: PaperBatchHooks | None,
-) -> PaperOrderBatchResult | None:
-    """Shared deterministic batch implementation behind the two permission boundaries."""
+    """Create or replay one deterministic internal-paper order batch atomically."""
     if not idempotency_key or len(idempotency_key) > 255:
         raise PaperBatchError("IDEMPOTENCY_CONFLICT")
     request_hash = canonical_paper_batch_request_hash(
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
         request_time=request_time,
-        target_version_id=target_version_id,
     )
     account, ledger_accounts = await _lock_account_graph(
         session,
         account_id=account_id,
         hooks=hooks,
     )
-    existing = await load_paper_order_batch_result(
+    existing = await _existing_batch_result(
         session,
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
     )
     if existing is not None:
-        existing_target = await session.scalar(
-            select(PaperOrderBatchRecord.target_version_id).where(
-                PaperOrderBatchRecord.id == existing.batch_id
-            )
-        )
-        if existing_target is not None and not portfolio_activation:
-            raise PaperBatchError("PORTFOLIO_ACTIVATION_REQUIRED")
-        if existing_target != target_version_id:
-            raise PaperBatchError("PAPER_BATCH_CONFLICT")
         idempotency, idempotency_is_new = await _claim_idempotency(
             session,
             account_id=account_id,
@@ -1391,99 +1129,23 @@ async def _create_paper_order_batch_impl(
     )
     if newer_decision_id is not None:
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
-    portfolio = decision_record.strategy_version == "agent_portfolio_proposal_v1"
-    if portfolio and not portfolio_activation:
-        raise PaperBatchError("PORTFOLIO_ACTIVATION_REQUIRED")
-    decision: PaperDecisionAuthority
     try:
-        if portfolio:
-            if target_version_id is None:
-                raise ValueError("portfolio batch requires target")
-            proposal = await load_portfolio_proposal(
-                session, account_id=account_id, decision_id=strategy_decision_id
-            )
-            if proposal is None:
-                raise ValueError("portfolio proposal missing")
-            target = await session.scalar(
-                select(PaperTargetVersionRecord).where(
-                    PaperTargetVersionRecord.id == target_version_id,
-                    PaperTargetVersionRecord.account_id == account_id,
-                )
-            )
-            current_target_id = await session.scalar(
-                select(PaperTargetVersionRecord.id)
-                .where(PaperTargetVersionRecord.account_id == account_id)
-                .order_by(PaperTargetVersionRecord.version_seq.desc())
-                .limit(1)
-            )
-            proposal_target_hash = canonical_portfolio_target_content_hash(proposal.proposal)
-            if (
-                target is None
-                or target.id != current_target_id
-                or target.target_content_hash != proposal_target_hash
-            ):
-                raise ValueError("portfolio target mismatch")
-            rows = tuple(
-                await session.scalars(
-                    select(StrategyDecisionTargetRecord)
-                    .where(
-                        StrategyDecisionTargetRecord.strategy_decision_id == strategy_decision_id
-                    )
-                    .order_by(StrategyDecisionTargetRecord.instrument_id)
-                )
-            )
-            if (
-                decision_record.execution_source_policy_id is None
-                or decision_record.agent_paper_cycle_id is None
-            ):
-                raise ValueError("portfolio execution authority missing")
-            decision = _PortfolioDecisionAuthority(
-                cycle_id=decision_record.agent_paper_cycle_id,
-                account_id=decision_record.account_id,
-                portfolio_id=decision_record.portfolio_id,
-                decision_session=decision_record.decision_session,
-                decision_time=decision_record.decision_time,
-                execution_session=decision_record.execution_session,
-                source_policy_id=decision_record.source_policy_id,
-                execution_source_policy_id=decision_record.execution_source_policy_id,
-                calendar_authority_id=decision_record.calendar_authority_id,
-                universe_snapshot_id=decision_record.universe_snapshot_id,
-                quality_report_id=decision_record.quality_report_id,
-                portfolio_projection_hash=decision_record.portfolio_projection_hash,
-                authority_hash=decision_record.authority_hash,
-                decision_hash=decision_record.decision_hash,
-                cash_weight=decision_record.cash_weight,
-                targets=tuple(
-                    ForwardStrategyTarget(
-                        instrument_id=row.instrument_id,
-                        target_weight=row.target_weight,
-                        exit=row.exit,
-                        strategy_priority=row.strategy_priority,
-                        reason=row.reason,
-                    )
-                    for row in rows
-                ),
-            )
-        else:
-            if target_version_id is not None:
-                raise ValueError("legacy batch cannot bind target")
-            persisted = await load_paper_decision(
-                session,
-                account_id=account_id,
-                decision_id=strategy_decision_id,
-            )
-            if persisted is None or persisted.decision_id != strategy_decision_id:
-                raise ValueError("paper decision missing")
-            decision = cast(PaperDecisionAuthority, persisted.decision)
+        persisted = await load_paper_decision(
+            session,
+            account_id=account_id,
+            decision_id=strategy_decision_id,
+        )
     except ValueError as error:
         raise PaperBatchError("STRATEGY_DECISION_INVALID") from error
+    if persisted is None or persisted.decision_id != strategy_decision_id:
+        raise PaperBatchError("STRATEGY_DECISION_INVALID")
+    decision = persisted.decision
     if request_time < decision.decision_time or account.portfolio_id != decision.portfolio_id:
         raise PaperBatchError("STRATEGY_DECISION_INVALID")
     try:
-        if isinstance(decision, AgentPaperDecision) or portfolio:
-            await require_agent_source_policies(session, decision)  # type: ignore[arg-type]
-            if isinstance(decision, AgentPaperDecision):
-                await require_agent_decision_bindings(session, decision)
+        if isinstance(decision, AgentPaperDecision):
+            await require_agent_source_policies(session, decision)
+            await require_agent_decision_bindings(session, decision)
         else:
             if decision.source_policy_id != SOURCE_POLICY_V2_ID:
                 raise ValueError("registered source policy is invalid")
@@ -1511,7 +1173,7 @@ async def _create_paper_order_batch_impl(
         projection = await load_paper_projection(
             session,
             account_id=account_id,
-            as_of=request_time if portfolio else decision.decision_time,
+            as_of=decision.decision_time,
         )
     except ValueError as error:
         raise PaperBatchError("PAPER_PROJECTION_INVALID") from error
@@ -1522,22 +1184,14 @@ async def _create_paper_order_batch_impl(
     }
     try:
         if (
-            isinstance(decision, AgentPaperDecision) or portfolio
-        ) and decision.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
-            cycle_id = (
-                decision.cycle_id
-                if isinstance(decision, AgentPaperDecision | _PortfolioDecisionAuthority)
-                else None
-            )
-            cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+            isinstance(decision, AgentPaperDecision)
+            and decision.execution_source_policy_id
+            == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        ):
+            cycle = await session.get(AgentPaperCycleRecord, decision.cycle_id)
             if cycle is None:
                 raise ValueError("Schwab Agent cycle is missing")
-            market = await prepare_schwab_realtime_risk_snapshot(
-                session,
-                cycle=cycle,
-                required_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
-                max_instruments=len(required),
-            )
+            market = await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle)
             if set(market.required_instrument_ids) != required:
                 raise ValueError("Schwab Agent risk scope is incomplete")
         else:
@@ -1546,42 +1200,12 @@ async def _create_paper_order_batch_impl(
                 decision=decision,
                 required_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
             )
-        if (
-            portfolio
-            and len(market.required_instrument_ids) > 1
-            and any(proof.required_instrument_ids is None for proof in market.query_proofs)
-        ):
-            raise ValueError("portfolio risk proofs are ambiguously unbound")
     except ValueError as error:
         raise PaperBatchError("RISK_AUTHORITY_INCOMPLETE") from error
-    if portfolio:
-        assert isinstance(decision, _PortfolioDecisionAuthority)
-        decision = decision.model_copy(
-            update={
-                "portfolio_projection_hash": projection.projection_hash,
-                "authority_hash": market.authority_hash,
-            }
-        )
     policy_id, policy = await _load_policy(session)
     _observe(hooks, "inputs_loaded")
     try:
         candidates = derive_order_candidates(decision, projection, market)
-        if portfolio and target_version_id is not None:
-            from nexus.paper.target_service import load_risk_remainder_coverage
-
-            remainder_coverage = await load_risk_remainder_coverage(
-                session,
-                account_id=account_id,
-                target_version_id=target_version_id,
-            )
-            candidates = _subtract_portfolio_risk_remainders(
-                candidates,
-                {key: value.quantity for key, value in remainder_coverage.items()},
-            )
-            if not candidates:
-                await session.delete(idempotency)
-                await session.flush()
-                return None
         no_changes = _derive_no_change_evidence(decision, projection, market)
         evaluations = evaluate_order_batch(candidates, projection, market, policy)
     except RiskBatchRejected as error:
@@ -1605,7 +1229,6 @@ async def _create_paper_order_batch_impl(
         session,
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
-        target_version_id=target_version_id,
         decision_hash=decision.decision_hash,
         policy_id=policy_id,
         idempotency_record=idempotency,

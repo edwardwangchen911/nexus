@@ -1,4 +1,4 @@
-"""Collect bounded Nasdaq instrument risk proofs without model or trading effects."""
+"""Collect the bounded AAPL/Nasdaq risk proofs without model or trading effects."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import json
 import sys
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -33,12 +32,8 @@ from nexus.persistence.models.paper import (
 )
 from nexus.providers.corporate_actions.alpaca_http import CorporateActionsRequest
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
-from nexus.providers.news import validate_symbol
 from nexus.research.alpaca_actions_archive import load_action_collection
-from nexus.risk.authority import (
-    canonical_query_authority_hash,
-    require_schwab_execution_scope_capacity,
-)
+from nexus.risk.authority import canonical_query_authority_hash
 from nexus.risk.query_authority_producer import (
     RiskSourceProof,
     inspect_query_authority_scope,
@@ -50,103 +45,6 @@ from nexus.settings import EngineSettings
 
 _NASDAQ_ORIGIN = AllowedOrigin(scheme="https", host="www.nasdaqtrader.com")
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
-
-
-@dataclass(frozen=True)
-class RiskCandidate:
-    symbol: str
-    instrument_id: UUID
-
-    def __post_init__(self) -> None:
-        validate_symbol(self.symbol)
-        if not isinstance(self.instrument_id, UUID):
-            raise ValueError("AGENT_RISK_CANDIDATE_INVALID")
-
-
-@dataclass(frozen=True)
-class _SharedNasdaqSources:
-    listing: bytes
-    listing_received: datetime
-    halt: bytes
-    halt_received: datetime
-
-
-async def collect_source_proofs_batch(
-    *,
-    candidates: tuple[RiskCandidate, ...],
-    max_instruments: int = 5,
-    decision_session: date,
-    key_id: SecretStr,
-    secret: SecretStr,
-    output_dir: Path,
-    cutoff_at: datetime | None,
-) -> dict[UUID, tuple[RiskSourceProof, ...]]:
-    """Collect shared Nasdaq bytes once and bounded actions for each exact candidate."""
-    require_schwab_execution_scope_capacity(
-        tuple(candidate.instrument_id for candidate in candidates),
-        max_instruments=max_instruments,
-    )
-    if (
-        len({c.instrument_id for c in candidates}) != len(candidates)
-        or len({c.symbol for c in candidates}) != len(candidates)
-    ):
-        raise ValueError("AGENT_RISK_CANDIDATE_INVALID")
-    try:
-        output_dir.mkdir(mode=0o700)
-    except OSError as error:
-        raise ValueError("AGENT_RISK_NEW_OUTPUT_REQUIRED") from error
-    try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as http:
-            client = FixedOriginHttpClient(
-                provider_name="nasdaq_trader",
-                origin=_NASDAQ_ORIGIN,
-                policy=HttpRequestPolicy(max_attempts=1, max_response_bytes=8 * 1024 * 1024),
-                client=http,
-            )
-            listing = await client.get_bytes(("dynamic", "SymDir", "nasdaqlisted.txt"), (), ())
-            listing_received = datetime.now(UTC)
-            write_private(output_dir / "nasdaqlisted.txt", listing)
-            write_private(
-                output_dir / "nasdaqlisted.receipt.json",
-                _receipt(
-                    source="nasdaq_trader",
-                    path="/dynamic/SymDir/nasdaqlisted.txt",
-                    raw=listing,
-                    received_at=listing_received,
-                ),
-            )
-            halt = await client.get_bytes(("rss.aspx",), (("feed", "tradehalts"),), ())
-            halt_received = datetime.now(UTC)
-            write_private(output_dir / "tradehalts.xml", halt)
-            write_private(
-                output_dir / "tradehalts.receipt.json",
-                _receipt(
-                    source="nasdaq_trader",
-                    path="/rss.aspx?feed=tradehalts",
-                    raw=halt,
-                    received_at=halt_received,
-                ),
-            )
-        if cutoff_at is not None and max(listing_received, halt_received) > cutoff_at:
-            raise ValueError("AGENT_RISK_COLLECTION_WINDOW_INVALID")
-        shared = _SharedNasdaqSources(listing, listing_received, halt, halt_received)
-        result = {}
-        for candidate in sorted(candidates, key=lambda c: c.instrument_id.int):
-            result[candidate.instrument_id] = await collect_source_proofs(
-                symbol=candidate.symbol,
-                instrument_id=candidate.instrument_id,
-                decision_session=decision_session,
-                key_id=key_id,
-                secret=secret,
-                output_dir=output_dir / str(candidate.instrument_id),
-                cutoff_at=cutoff_at,
-                _shared_sources=shared,
-            )
-        return result
-    except (Exception, KeyboardInterrupt) as error:
-        if isinstance(error, ValueError) and str(error) == "AGENT_RISK_COLLECTION_WINDOW_INVALID":
-            raise
-        raise ValueError("AGENT_RISK_SOURCE_COLLECTION_FAILED") from error
 
 
 class AgentRiskSettings(EngineSettings):
@@ -195,7 +93,6 @@ async def collect_source_proofs(
     secret: SecretStr,
     output_dir: Path,
     cutoff_at: datetime | None,
-    _shared_sources: _SharedNasdaqSources | None = None,
 ) -> tuple[RiskSourceProof, ...]:
     """Archive exact provider bytes and reject receipts after an explicit cutoff."""
     try:
@@ -228,8 +125,6 @@ async def collect_source_proofs(
             symbol=symbol,
             now=datetime.now(UTC),
         )
-        if cutoff_at is not None and action_archive.document.available_at > cutoff_at:
-            raise ValueError("AGENT_RISK_COLLECTION_WINDOW_INVALID")
         proofs.append(
             RiskSourceProof(
                 "corporate_action",
@@ -246,16 +141,8 @@ async def collect_source_proofs(
                 policy=HttpRequestPolicy(max_attempts=1, max_response_bytes=8 * 1024 * 1024),
                 client=http,
             )
-            listing_raw = (
-                _shared_sources.listing
-                if _shared_sources is not None
-                else await client.get_bytes(("dynamic", "SymDir", "nasdaqlisted.txt"), (), ())
-            )
-            listing_received = (
-                _shared_sources.listing_received
-                if _shared_sources is not None
-                else datetime.now(UTC)
-            )
+            listing_raw = await client.get_bytes(("dynamic", "SymDir", "nasdaqlisted.txt"), (), ())
+            listing_received = datetime.now(UTC)
             write_private(output_dir / "nasdaqlisted.txt", listing_raw)
             write_private(
                 output_dir / "nasdaqlisted.receipt.json",
@@ -281,14 +168,8 @@ async def collect_source_proofs(
                 )
             )
 
-            halt_raw = (
-                _shared_sources.halt
-                if _shared_sources is not None
-                else await client.get_bytes(("rss.aspx",), (("feed", "tradehalts"),), ())
-            )
-            halt_received = (
-                _shared_sources.halt_received if _shared_sources is not None else datetime.now(UTC)
-            )
+            halt_raw = await client.get_bytes(("rss.aspx",), (("feed", "tradehalts"),), ())
+            halt_received = datetime.now(UTC)
             write_private(output_dir / "tradehalts.xml", halt_raw)
             write_private(
                 output_dir / "tradehalts.receipt.json",

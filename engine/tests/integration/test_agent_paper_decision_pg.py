@@ -112,17 +112,11 @@ class _ObjectStore:
         return f"memory://{key}"
 
 
-async def _seed_adjusted_authority(
-    session: AsyncSession,
-    decision,
-    *,
-    legacy_aggregate_proofs: bool = False,
-    seed_prices: bool = True,
-) -> None:
+async def _seed_adjusted_authority(session: AsyncSession, decision) -> None:
     available_at = decision.decision_time - timedelta(minutes=30)
     store = _ObjectStore()
     for index, (instrument_id, close, _, _) in enumerate(INSTRUMENTS, start=1):
-        for adjustment in (("raw", "all") if seed_prices else ()):
+        for adjustment in ("raw", "all"):
             page = ProviderPage(
                 items=(
                     PriceBar(
@@ -162,45 +156,33 @@ async def _seed_adjusted_authority(
             )
             assert result.price_authority is not None
     required = tuple(item[0] for item in INSTRUMENTS)
-    proof_scopes = (required,) if legacy_aggregate_proofs else tuple((item,) for item in required)
-    sequence = 0
-    for required_scope in proof_scopes:
-        for kind in ("corporate_action", "suspension", "delisting"):
-            sequence += 1
-            source_watermark_hash = f"{sequence + 6:x}"[-1] * 64
-            content_hash = canonical_query_authority_hash(
+    for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
+        content_hash = canonical_query_authority_hash(
+            source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+            universe_snapshot_id=decision.universe_snapshot_id,
+            decision_session=decision.decision_session,
+            kind=kind,
+            required_instrument_ids=required,
+            blocked_instrument_ids=(),
+            complete=True,
+            source_watermark_hash=f"{index + 6}" * 64,
+            available_at=available_at,
+        )
+        session.add(
+            RiskQueryAuthorityRecord(
+                id=UUID(int=0x62000000000000000000000000000400 + index),
                 source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
                 universe_snapshot_id=decision.universe_snapshot_id,
                 decision_session=decision.decision_session,
                 kind=kind,
-                required_instrument_ids=required_scope,
-                blocked_instrument_ids=(),
+                required_instrument_ids=list(required),
+                blocked_instrument_ids=[],
                 complete=True,
-                source_watermark_hash=source_watermark_hash,
+                source_watermark_hash=f"{index + 6}" * 64,
                 available_at=available_at,
+                content_hash=content_hash,
             )
-            session.add(
-                RiskQueryAuthorityRecord(
-                    id=UUID(
-                        int=(
-                            0x62000000000000000000000000000500
-                            if legacy_aggregate_proofs
-                            else 0x62000000000000000000000000000400
-                        )
-                        + sequence
-                    ),
-                    source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
-                    universe_snapshot_id=decision.universe_snapshot_id,
-                    decision_session=decision.decision_session,
-                    kind=kind,
-                    required_instrument_ids=list(required_scope),
-                    blocked_instrument_ids=[],
-                    complete=True,
-                    source_watermark_hash=source_watermark_hash,
-                    available_at=available_at,
-                    content_hash=content_hash,
-                )
-            )
+        )
     await session.flush()
 
 
@@ -226,34 +208,7 @@ async def test_agent_decision_round_trip_keeps_registered_forward_lookup_isolate
                 account_id=seed.account_id,
                 as_of=seed.decision_time,
             )
-            await _seed_adjusted_authority(
-                session,
-                registered.decision,
-                legacy_aggregate_proofs=True,
-            )
-            historical_market = await prepare_risk_market_snapshot(
-                session,
-                authority=RiskAuthorityInput(
-                    decision_session=registered.decision.decision_session,
-                    execution_session=registered.decision.execution_session,
-                    decision_time=registered.decision.decision_time,
-                    source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
-                    calendar_authority_id=registered.decision.calendar_authority_id,
-                    universe_snapshot_id=registered.decision.universe_snapshot_id,
-                    quality_report_id=None,
-                ),
-                required_instrument_ids=tuple(item[0] for item in INSTRUMENTS),
-            )
-            assert len(historical_market.query_proofs) == 3
-            assert all(
-                proof.required_instrument_ids is None
-                for proof in historical_market.query_proofs
-            )
-            await _seed_adjusted_authority(
-                session,
-                registered.decision,
-                seed_prices=False,
-            )
+            await _seed_adjusted_authority(session, registered.decision)
             paper_market = await prepare_risk_market_snapshot(
                 session,
                 authority=RiskAuthorityInput(

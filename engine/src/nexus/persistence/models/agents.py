@@ -5,7 +5,6 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
-    ARRAY,
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
@@ -17,9 +16,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.schema import conv
 
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
@@ -37,7 +34,7 @@ class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
         CheckConstraint(
             "release_channel IN ('active','challenger')",
-            name=conv("ck_agent_prompt_versions_agent_prompt_versions_release__c242"),
+            name="release_channel_allowed",
         ),
     )
 
@@ -260,118 +257,6 @@ class AgentResearchOutputEvidenceRecord(ImmutableCreatedAt, Base):
     available_at: Mapped[datetime] = mapped_column(UTCDateTime())
     location: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64))
-
-
-class AgentPortfolioSynthesisRunRecord(ImmutableCreatedAt, Base):
-    """Frozen portfolio authority with a guarded, single-call execution lifecycle."""
-
-    __tablename__ = "agent_portfolio_synthesis_runs"
-    __table_args__ = (
-        UniqueConstraint("cycle_id", name="uq_portfolio_synthesis_runs_cycle"),
-        UniqueConstraint("idempotency_key", name="uq_portfolio_synthesis_runs_idempotency"),
-        CheckConstraint(
-            "status IN ('prepared','running','completed','abstained','failed')",
-            name="status_allowed",
-        ),
-        CheckConstraint("jsonb_typeof(frozen_input) = 'object'", name="frozen_input_object"),
-        CheckConstraint(
-            "cardinality(research_output_ids) BETWEEN 1 AND 5 "
-            "AND array_ndims(research_output_ids) = 1 "
-            "AND array_position(research_output_ids, NULL) IS NULL",
-            name="outputs_bounded",
-        ),
-        CheckConstraint(
-            "projection_hash ~ '^[0-9a-f]{64}$' AND prompt_hash ~ '^[0-9a-f]{64}$' "
-            "AND model_hash ~ '^[0-9a-f]{64}$' AND input_hash ~ '^[0-9a-f]{64}$'",
-            name="hashes_canonical",
-        ),
-        CheckConstraint(
-            "btrim(idempotency_key) <> '' AND btrim(pricing_version) <> ''",
-            name="identity_nonempty",
-        ),
-        CheckConstraint("input_tokens IS NULL OR input_tokens >= 0", name="input_nonnegative"),
-        CheckConstraint("output_tokens IS NULL OR output_tokens >= 0", name="output_nonnegative"),
-        CheckConstraint(
-            "settled_cost_usd IS NULL OR settled_cost_usd >= 0", name="cost_nonnegative"
-        ),
-        CheckConstraint(
-            "completed_at IS NULL OR completed_at >= decision_time", name="times_ordered"
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    cycle_id: Mapped[UUID] = mapped_column(ForeignKey("agent_paper_cycles.id"))
-    candidate_batch_id: Mapped[UUID] = mapped_column(ForeignKey("agent_paper_candidate_batches.id"))
-    research_output_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PostgreSQLUUID(as_uuid=True)))
-    active_target_version_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("paper_target_versions.id")
-    )
-    projection_hash: Mapped[str] = mapped_column(String(64))
-    prompt_version_id: Mapped[UUID] = mapped_column(ForeignKey("agent_prompt_versions.id"))
-    model_config_id: Mapped[UUID] = mapped_column(ForeignKey("agent_model_configs.id"))
-    prompt_hash: Mapped[str] = mapped_column(String(64))
-    model_hash: Mapped[str] = mapped_column(String(64))
-    input_hash: Mapped[str] = mapped_column(String(64))
-    frozen_input: Mapped[dict[str, object]] = mapped_column(JSONB)
-    idempotency_key: Mapped[str] = mapped_column(String(255))
-    status: Mapped[str] = mapped_column(String(16), default="prepared", server_default="prepared")
-    pricing_version: Mapped[str] = mapped_column(String(100))
-    input_tokens: Mapped[int | None] = mapped_column(Integer)
-    output_tokens: Mapped[int | None] = mapped_column(Integer)
-    settled_cost_usd: Mapped[Decimal | None]
-    decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
-    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
-
-
-class AgentPortfolioSynthesisOutputRecord(ImmutableCreatedAt, Base):
-    __tablename__ = "agent_portfolio_synthesis_outputs"
-    __table_args__ = (
-        UniqueConstraint("run_id", name="uq_portfolio_synthesis_outputs_run"),
-        CheckConstraint("status IN ('completed','abstained','failed')", name="status_allowed"),
-        CheckConstraint(
-            "content_hash ~ '^[0-9a-f]{64}$' AND binding_hash ~ '^[0-9a-f]{64}$'",
-            name="hashes_canonical",
-        ),
-        CheckConstraint(
-            "(status = 'completed' AND intent IS NOT NULL AND jsonb_typeof(intent) = 'object') "
-            "OR (status IN ('abstained','failed') AND intent IS NULL)",
-            name="intent_bound",
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_portfolio_synthesis_runs.id"))
-    status: Mapped[str] = mapped_column(String(16))
-    intent: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
-    content_hash: Mapped[str] = mapped_column(String(64))
-    binding_hash: Mapped[str] = mapped_column(String(64))
-
-
-class AgentPortfolioSynthesisBudgetReservationRecord(ImmutableCreatedAt, Base):
-    __tablename__ = "agent_portfolio_synthesis_budget_reservations"
-    __table_args__ = (
-        UniqueConstraint("run_id", name="uq_portfolio_synthesis_budget_run"),
-        CheckConstraint("reserved_usd >= 0", name=conv("ck_synthesis_budget_reserved_nonnegative")),
-        CheckConstraint(
-            "settled_usd IS NULL OR settled_usd BETWEEN 0 AND reserved_usd",
-            name=conv("ck_synthesis_budget_settled_bounded"),
-        ),
-        CheckConstraint("state IN ('reserved','settled','released')", name="state_allowed"),
-        CheckConstraint(
-            "(state = 'reserved' AND settled_usd IS NULL) OR "
-            "(state = 'settled' AND settled_usd IS NOT NULL) OR "
-            "(state = 'released' AND settled_usd IS NOT NULL AND settled_usd = 0)",
-            name=conv("ck_synthesis_budget_settlement_bound"),
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    business_date: Mapped[date]
-    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_portfolio_synthesis_runs.id"))
-    pricing_version: Mapped[str] = mapped_column(String(100))
-    reserved_usd: Mapped[Decimal]
-    settled_usd: Mapped[Decimal | None]
-    state: Mapped[str] = mapped_column(String(16), default="reserved", server_default="reserved")
 
 
 class AgentDailyBudgetReservationRecord(ImmutableCreatedAt, Base):

@@ -7,7 +7,6 @@ import WorkspacePage, {
   type WorkbenchPayload,
 } from "../../../app/(protected)/workspace/page";
 import { agentPaperCycle, cancellableOrder, meta, paperPortfolio } from "../paper/fixtures";
-import { managementSummary } from "../paper/management-fixtures";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -73,15 +72,6 @@ const states: Array<[WorkbenchPageState, string]> = [
 ];
 
 describe("decision-first trading workbench", () => {
-  it("keeps target and plan in a compact read-only summary", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(String(input).includes("management/portfolio") ? { data: managementSummary, meta: meta() } : readyPayload())));
-    render(<WorkspacePage />);
-    const summary = await screen.findByRole("region", { name: "内部模拟目标与计划摘要" });
-    await waitFor(() => expect(summary).toHaveTextContent("目标 V7"));
-    expect(within(summary).getByRole("link", { name: "查看调整计划" })).toHaveAttribute("href", `/paper?plan=${managementSummary.occupying_plan!.batch_id}`);
-    expect(within(summary).queryByRole("table")).not.toBeInTheDocument();
-    expect(within(summary).queryByRole("button")).not.toBeInTheDocument();
-  });
   it.each(states)("renders the %s state honestly", (state, label) => {
     const hasFacts = ["ready", "partial", "stale"].includes(state);
     render(<WorkbenchPanel state={state} payload={hasFacts ? readyPayload() : null} refreshing={false} onRefresh={vi.fn()} />);
@@ -167,10 +157,9 @@ describe("decision-first trading workbench", () => {
   });
 
   it("clears facts after a forbidden response", async () => {
-    const workbenchRead = vi.fn()
+    const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json(readyPayload()))
       .mockResolvedValueOnce(Response.json({ error: { code: "FORBIDDEN" } }, { status: 403 }));
-    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input) === "/api/v1/workbench" ? workbenchRead() : Promise.resolve(new Response(null, { status: 404 })));
     vi.stubGlobal("fetch", fetchMock);
     render(<WorkspacePage />);
     expect(await screen.findByText("AAPL")).toBeVisible();

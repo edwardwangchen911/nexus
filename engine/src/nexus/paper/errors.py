@@ -8,7 +8,6 @@ PaperBatchErrorCode = Literal[
     "PAPER_PROJECTION_INVALID",
     "PAPER_BATCH_CONFLICT",
     "IDEMPOTENCY_CONFLICT",
-    "PORTFOLIO_ACTIVATION_REQUIRED",
 ]
 
 _SAFE_MESSAGES: dict[PaperBatchErrorCode, str] = {
@@ -19,9 +18,6 @@ _SAFE_MESSAGES: dict[PaperBatchErrorCode, str] = {
     "PAPER_PROJECTION_INVALID": "The internal paper projection is invalid.",
     "PAPER_BATCH_CONFLICT": "The paper order batch conflicts with existing facts.",
     "IDEMPOTENCY_CONFLICT": "The idempotency key was used for another request.",
-    "PORTFOLIO_ACTIVATION_REQUIRED": (
-        "Portfolio order batches must be created by target activation."
-    ),
 }
 
 

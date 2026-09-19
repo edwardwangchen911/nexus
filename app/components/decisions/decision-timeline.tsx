@@ -5,7 +5,7 @@ import { formatDisplayTime } from "../../lib/display-format";
 import { cycleDecisionPresentation, executionPresentation, riskPresentation } from "../../lib/product-status";
 import type { components } from "../../lib/generated/schema";
 
-type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
+type Detail = components["schemas"]["AgentPaperCycleDetailResponse"];
 type Order = components["schemas"]["PaperOrderResponse"];
 
 const stages = ["运行窗口", "市场与研究证据", "Agent 决策", "确定性仓位计算", "确定性风控", "订单结论", "执行结果", "后续表现"] as const;

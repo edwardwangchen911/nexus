@@ -3,17 +3,6 @@ import { expect, test, type Page } from "@playwright/test";
 import type { components } from "../../app/lib/generated/schema";
 import { agentPaperCycle, meta, paperPortfolio } from "../unit/paper/fixtures";
 import { assertReleaseAccessibility } from "./helpers/accessibility";
-import { managementSummary } from "../unit/paper/management-fixtures";
-
-test("workbench portfolio management is only a summary", async ({ page }) => {
-  await installFixtures(page, readyWorkbench(), []);
-  await page.route("**/api/v1/paper/management/portfolio", (route) => route.fulfill({ json: { data: managementSummary, meta: meta() } }));
-  await page.goto("/workspace");
-  const summary = page.getByRole("region", { name: "内部模拟目标与计划摘要" });
-  await expect(summary).toContainText("目标 V7");
-  await expect(summary.getByRole("table")).toHaveCount(0);
-  await expect(summary.getByRole("link", { name: "查看调整计划" })).toBeVisible();
-});
 
 type WorkbenchPayload = components["schemas"]["WorkbenchEnvelope"];
 

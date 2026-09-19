@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID
@@ -301,15 +301,7 @@ def build_risk_market_snapshot(
                 ),
             )
         ),
-        query_proofs=tuple(
-            sorted(
-                query_proofs,
-                key=lambda item: (
-                    tuple(value.int for value in item.required_instrument_ids or ()),
-                    item.kind,
-                ),
-            )
-        ),
+        query_proofs=tuple(sorted(query_proofs, key=lambda item: item.kind)),
         authority_hash="0" * 64,
     )
     return draft.model_copy(update={"authority_hash": canonical_risk_market_authority_hash(draft)})
@@ -612,66 +604,32 @@ async def _load_query_proofs(
         )
     records = tuple((await session.scalars(query)).all())
     if authority_ids is None:
-        singleton_latest: dict[tuple[UUID, str], RiskQueryAuthorityRecord] = {}
-        aggregate_latest: dict[str, RiskQueryAuthorityRecord] = {}
+        latest: dict[str, RiskQueryAuthorityRecord] = {}
         for record in records:
-            if (
-                len(record.required_instrument_ids) == 1
-                and record.required_instrument_ids[0] in required
-            ):
-                singleton_latest.setdefault(
-                    (record.required_instrument_ids[0], record.kind), record
-                )
-            if set(record.required_instrument_ids) == required and len(
-                record.required_instrument_ids
-            ) == len(required):
-                aggregate_latest.setdefault(record.kind, record)
-        if len(required) > 1:
-            singleton_records = tuple(
-                singleton_latest[(instrument_id, kind)]
-                for instrument_id in sorted(required, key=lambda value: value.int)
-                for kind in sorted(_QUERY_KINDS)
-                if (instrument_id, kind) in singleton_latest
-            )
-            records = (
-                singleton_records
-                if len(singleton_records) == 3 * len(required)
-                else tuple(
-                    aggregate_latest[kind]
-                    for kind in sorted(_QUERY_KINDS)
-                    if kind in aggregate_latest
-                )
-            )
-        else:
-            instrument_id = next(iter(required))
-            selected: list[RiskQueryAuthorityRecord] = []
-            for kind in sorted(_QUERY_KINDS):
-                selected_record = singleton_latest.get(
-                    (instrument_id, kind), aggregate_latest.get(kind)
-                )
-                if selected_record is not None:
-                    selected.append(selected_record)
-            records = tuple(selected)
-    bound = authority_ids is None and len(required) > 1 and len(records) == 3 * len(required)
+            latest.setdefault(record.kind, record)
+        records = tuple(latest[kind] for kind in sorted(latest))
     if (
         {record.kind for record in records} != _QUERY_KINDS
-        or len(records) != (3 * len(required) if bound else 3)
-        or (authority_ids is not None and {record.id for record in records} != set(authority_ids))
+        or len(records) != 3
+        or (
+            authority_ids is not None
+            and {record.id for record in records} != set(authority_ids)
+        )
     ):
         raise ValueError("risk query proofs are incomplete")
     proofs: list[AuthorityQueryProof] = []
     for record in records:
-        record_required = {record.required_instrument_ids[0]} if bound else required
         if (
-            set(record.required_instrument_ids) != record_required
-            or len(record.required_instrument_ids) != len(record_required)
-            or not set(record.blocked_instrument_ids) <= record_required
+            set(record.required_instrument_ids) != required
+            or len(record.required_instrument_ids) != len(required)
+            or not set(record.blocked_instrument_ids) <= required
             or not record.complete
             or record.available_at > decision.decision_time
             or (
                 decision.source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
                 and record.kind == "suspension"
-                and decision.decision_time - record.available_at > timedelta(minutes=2)
+                and decision.decision_time - record.available_at
+                > timedelta(minutes=2)
             )
             or canonical_query_authority_hash(
                 source_policy_id=record.source_policy_id,
@@ -698,18 +656,9 @@ async def _load_query_proofs(
                 blocked=bool(record.blocked_instrument_ids),
                 available_at=record.available_at,
                 content_hash=record.content_hash,
-                required_instrument_ids=(record.required_instrument_ids[0],) if bound else None,
             )
         )
-    return tuple(
-        sorted(
-            proofs,
-            key=lambda item: (
-                tuple(value.int for value in item.required_instrument_ids or ()),
-                item.kind,
-            ),
-        )
-    )
+    return tuple(sorted(proofs, key=lambda item: item.kind))
 
 
 async def _load_frozen_prior_daily_price(
@@ -721,7 +670,8 @@ async def _load_frozen_prior_daily_price(
     previous_session = await session.scalar(
         select(ExchangeCalendarSessionRecord.session)
         .where(
-            ExchangeCalendarSessionRecord.calendar_authority_id == authority.calendar_authority_id,
+            ExchangeCalendarSessionRecord.calendar_authority_id
+            == authority.calendar_authority_id,
             ExchangeCalendarSessionRecord.session < authority.decision_session,
         )
         .order_by(ExchangeCalendarSessionRecord.session.desc())
@@ -803,11 +753,7 @@ async def _load_frozen_prior_daily_price(
 
 
 async def prepare_schwab_realtime_risk_snapshot(
-    session: AsyncSession,
-    *,
-    cycle: AgentPaperCycleRecord,
-    required_instrument_ids: Sequence[UUID] | None = None,
-    max_instruments: int,
+    session: AsyncSession, *, cycle: AgentPaperCycleRecord
 ) -> RiskMarketSnapshot:
     """Build the same-session risk snapshot only from one cycle's frozen IDs."""
     if (
@@ -818,13 +764,9 @@ async def prepare_schwab_realtime_risk_snapshot(
     ):
         raise ValueError("risk Schwab cycle authority is invalid")
     manifest = tuple(CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest)
-    research_required = {candidate.instrument_id for candidate in manifest}
-    if (
-        not 1 <= len(manifest) <= 5
-        or len(research_required) != len(manifest)
-        or candidate_manifest_hash(manifest) != cycle.candidate_hash
-    ):
+    if len(manifest) != 1 or candidate_manifest_hash(manifest) != cycle.candidate_hash:
         raise ValueError("risk Schwab candidate authority is invalid")
+    candidate = manifest[0]
     calendar = await session.scalar(
         select(ExchangeCalendarAuthorityRecord)
         .join(
@@ -858,77 +800,27 @@ async def prepare_schwab_realtime_risk_snapshot(
         universe_snapshot_id=cycle.universe_snapshot_id,
         quality_report_id=cycle.quality_report_id,
     )
-    required = (
-        research_required if required_instrument_ids is None else set(required_instrument_ids)
-    )
-    require_schwab_execution_scope_capacity(required, max_instruments=max_instruments)
-    if (
-        not research_required <= required
-        or len(required) != len(tuple(required_instrument_ids or required))
-    ):
-        raise ValueError("risk Schwab execution scope is invalid")
-    execution_manifest = manifest
-    if required != research_required:
-        from nexus.paper.agent_cycle_authority import CycleAuthority, prepare_candidates
-
-        execution_manifest = await prepare_candidates(
-            session,
-            authority=CycleAuthority(
-                account_id=cycle.account_id,
-                portfolio_id=cycle.portfolio_id,
-                decision_session=cycle.decision_session,
-                decision_time=cycle.decision_time,
-                execution_session=cycle.execution_session,
-                calendar_authority_id=calendar.id,
-                universe_snapshot_id=cycle.universe_snapshot_id,
-                quality_report_id=cycle.quality_report_id,
-            ),
-            requested_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
-            max_instruments=max_instruments,
-        )
-        if {item.instrument_id for item in execution_manifest} != required:
-            raise ValueError("risk Schwab execution scope is incomplete")
+    required = {candidate.instrument_id}
     whitelist = await _validate_root_authorities(session, authority, required)
-    prices: list[RiskPrice] = []
-    proofs: list[AuthorityQueryProof] = []
-    for candidate in sorted(execution_manifest, key=lambda item: item.instrument_id.int):
-        prices.append(
+    return build_risk_market_snapshot(
+        decision=authority,
+        required_instrument_ids=(candidate.instrument_id,),
+        whitelisted_instrument_ids=whitelist,
+        prices=(
             await _load_frozen_prior_daily_price(
                 session,
                 authority=authority,
                 candidate=candidate,
-            )
-        )
-        candidate_proofs = await _load_query_proofs(
+            ),
+        ),
+        sector_exposures=await _load_sectors(session, authority, required),
+        query_proofs=await _load_query_proofs(
             session,
             authority,
-            {candidate.instrument_id},
+            required,
             candidate.risk_query_authority_ids,
-        )
-        proofs.extend(
-            proof.model_copy(update={"required_instrument_ids": (candidate.instrument_id,)})
-            if len(execution_manifest) > 1
-            else proof
-            for proof in candidate_proofs
-        )
-    return build_risk_market_snapshot(
-        decision=authority,
-        required_instrument_ids=tuple(sorted(required, key=lambda value: value.int)),
-        whitelisted_instrument_ids=whitelist,
-        prices=prices,
-        sector_exposures=await _load_sectors(session, authority, required),
-        query_proofs=proofs,
+        ),
     )
-
-
-def require_schwab_execution_scope_capacity(
-    required_instrument_ids: Collection[UUID], *, max_instruments: int
-) -> None:
-    """Fail closed when a frozen execution scope exceeds provider capacity."""
-    if not 1 <= max_instruments <= 30:
-        raise ValueError("AGENT_PAPER_PROVIDER_CAPACITY_INVALID")
-    if not 1 <= len(required_instrument_ids) <= max_instruments:
-        raise ValueError("AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED")
 
 
 async def load_risk_market_snapshot(

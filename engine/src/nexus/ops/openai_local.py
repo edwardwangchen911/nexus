@@ -300,19 +300,6 @@ async def prepare_database(
         (prompt.role, "local-openai-v1", prompt.content, prompt.content_hash)
         for prompt in load_prompt_assets().values()
     ]
-    from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
-
-    management_prompt = (
-        Path(__file__).resolve().parents[1] / f"agents/prompts/{SYNTHESIS_PROMPT_VERSION}.md"
-    ).read_text()
-    prompts.append(
-        (
-            "portfolio_decision",
-            SYNTHESIS_PROMPT_VERSION,
-            management_prompt,
-            hashlib.sha256(management_prompt.encode()).hexdigest(),
-        )
-    )
     portfolio_decision_prompt_path = (
         Path(__file__).resolve().parents[1] / "agents/prompts/portfolio-decision-v1.md"
     )
@@ -378,8 +365,12 @@ async def prepare_database(
                         max_input_tokens=int(configured["max_input_tokens"]),
                         max_output_tokens=int(configured["max_output_tokens"]),
                         max_tool_calls=int(configured["max_tool_calls"]),
-                        input_usd_per_million=Decimal(str(configured["input_usd_per_million"])),
-                        output_usd_per_million=Decimal(str(configured["output_usd_per_million"])),
+                        input_usd_per_million=Decimal(
+                            str(configured["input_usd_per_million"])
+                        ),
+                        output_usd_per_million=Decimal(
+                            str(configured["output_usd_per_million"])
+                        ),
                         pricing_available_at=datetime.fromisoformat(
                             str(configured["pricing_available_at"])
                         ),

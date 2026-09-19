@@ -17,7 +17,6 @@ from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops import agent_paper_loop as loop
 from nexus.ops.daily_once import DailyOnceSettings
 from nexus.ops.openai_local import prepare_database
-from nexus.paper.candidate_batch import CandidateInstrumentIdentity
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -267,9 +266,15 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
                 ExchangeCalendarSessionRecord(
                     calendar_authority_id=calendar_authority_id,
                     session=session_date,
-                    market_open_at=datetime.combine(session_date, time(13, 30), tzinfo=UTC),
-                    market_close_at=datetime.combine(session_date, time(20), tzinfo=UTC),
-                    decision_at=datetime.combine(session_date, time(20, 1), tzinfo=UTC),
+                    market_open_at=datetime.combine(
+                        session_date, time(13, 30), tzinfo=UTC
+                    ),
+                    market_close_at=datetime.combine(
+                        session_date, time(20), tzinfo=UTC
+                    ),
+                    decision_at=datetime.combine(
+                        session_date, time(20, 1), tzinfo=UTC
+                    ),
                     created_at=fixed_now - timedelta(days=1),
                 )
             )
@@ -326,7 +331,7 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
         )
 
     async def inspect_prior(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate
+        _settings, *, account_id, now, expected_calendar_authority_id
     ):
         assert expected_calendar_authority_id == calendar_authority_id
         return loop.PriorDailyScope(
@@ -345,13 +350,6 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
 
     result = await loop.prepare_macro_once(
         settings,
-        candidate=CandidateInstrumentIdentity(
-            instrument_id=INSTRUMENT,
-            symbol="AAPL",
-            asset_type="common_stock",
-            exchange="XNYS",
-            currency="USD",
-        ),
         fred_key=SecretStr("unused-test-key"),
         account_id=UUID(int=1),
         repo_root=tmp_path,
@@ -363,13 +361,6 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
     assert not (tmp_path / ".secrets").exists()
     scope = await loop._inspect_macro_scope(
         settings,
-        candidate=CandidateInstrumentIdentity(
-            instrument_id=INSTRUMENT,
-            symbol="AAPL",
-            asset_type="common_stock",
-            exchange="XNYS",
-            currency="USD",
-        ),
         account_id=UUID(int=1),
         now=decision_now,
         expected_calendar_authority_id=calendar_authority_id,

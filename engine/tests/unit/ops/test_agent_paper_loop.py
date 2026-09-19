@@ -20,320 +20,17 @@ from nexus.persistence.models.paper import PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_
 from nexus.providers.http import HttpPolicyError
 from sqlalchemy.exc import SQLAlchemyError
 
-NOW = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
-SLOT = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
-PREVIOUS_SLOT = datetime(2026, 9, 14, 13, 55, tzinfo=UTC)
+NOW = datetime(2026, 9, 14, 14, 5, tzinfo=UTC)
+SLOT = datetime(2026, 9, 14, 14, 5, tzinfo=UTC)
+PREVIOUS_SLOT = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
 AFTER_CLOSE = datetime(2026, 9, 14, 20, 1, tzinfo=UTC)
 LAST_SLOT = datetime(2026, 9, 14, 19, 55, tzinfo=UTC)
 A = loop.AgentPaperLoopAction
 CALENDAR_AUTHORITY_ID = UUID(int=9)
-TEST_CANDIDATE = loop.CandidateInstrumentIdentity(
-    instrument_id=UUID(int=20),
-    symbol="AAPL",
-    asset_type="common_stock",
-    exchange="XNAS",
-    currency="USD",
-)
-
-
-@pytest.fixture(autouse=True)
-def isolated_loop_candidates(monkeypatch):
-    async def candidates(*args, **kwargs):
-        return (TEST_CANDIDATE,)
-
-    monkeypatch.setattr(loop, "_load_loop_candidates", candidates)
-
-    async def evaluation_candidate(*args, **kwargs):
-        return TEST_CANDIDATE
-
-    monkeypatch.setattr(loop, "load_agent_version_candidate", evaluation_candidate)
-
-
-@pytest.mark.parametrize(
-    "slot", [datetime(2026, 7, 6, 14, tzinfo=UTC), datetime(2026, 12, 1, 15, tzinfo=UTC)]
-)
-def test_normal_loop_only_triggers_ten_new_york_slot(slot: datetime) -> None:
-    state = loop.AgentPaperLoopSnapshot(
-        now=slot,
-        calendar_authority_id=CALENDAR_AUTHORITY_ID,
-        decision_window_start_at=slot - timedelta(hours=3),
-        decision_window_end_at=slot + timedelta(hours=6),
-        next_decision_window_start_at=slot + timedelta(hours=21),
-    )
-    assert loop.choose_loop_action(state) == A.TRIGGER
-    assert (
-        loop.choose_loop_action(replace(state, now=slot - timedelta(seconds=1)))
-        == A.WAIT_FOR_SESSION
-    )
-    assert (
-        loop.choose_loop_action(replace(state, now=slot + timedelta(minutes=5)))
-        == A.WAIT_FOR_SESSION
-    )
-    assert (
-        loop.choose_loop_action(replace(state, cycle_slot_at=slot, cycle_status="completed"))
-        == A.WAIT_FOR_SLOT
-    )
-
-
-def test_multi_candidate_jobs_select_next_pending_without_early_completion() -> None:
-    first, second = UUID(int=101), UUID(int=102)
-    event = SimpleNamespace(fact_ids={"research_run_ids": [str(first), str(second)]})
-    jobs = [
-        SimpleNamespace(id=UUID(int=202), payload={"run_id": str(second)}, status="queued"),
-        SimpleNamespace(id=UUID(int=201), payload={"run_id": str(first)}, status="succeeded"),
-    ]
-    assert loop.resolve_cycle_research_job(events=(event,), jobs=jobs) == (UUID(int=202), "queued")
-    jobs[1].status = "running"
-    assert loop.resolve_cycle_research_job(events=(event,), jobs=jobs) == (UUID(int=201), "running")
-    assert loop.resolve_cycle_research_job(events=(event,), jobs=jobs[:1]) is None
-
-
-@pytest.mark.parametrize("failure", [False, True])
-def test_multi_candidate_executor_prepares_exact_scope_before_trigger(monkeypatch, failure) -> None:
-    second = TEST_CANDIDATE.model_copy(update={"instrument_id": UUID(int=21), "symbol": "MSFT"})
-    calls = []
-
-    async def load(*_args, **kwargs):
-        assert kwargs["batch_id"] == UUID(int=30)
-        calls.append("batch")
-        return (TEST_CANDIDATE, second)
-
-    async def daily(*_args, candidate, **kwargs):
-        calls.append(f"daily:{candidate.symbol}")
-        return "unavailable" if failure and candidate == second else "ready"
-
-    async def macro(*_args, candidate, **kwargs):
-        calls.append(f"macro:{candidate.symbol}")
-        return "ready"
-
-    async def trends(*_args, candidate, **kwargs):
-        calls.append(f"trends:{candidate.symbol}")
-        return "ready"
-
-    async def trigger(_settings, request, **kwargs):
-        assert request.candidate_batch_id == UUID(int=30)
-        calls.append("trigger")
-
-    monkeypatch.setattr(
-        loop,
-        "load_agent_paper_service_environment",
-        lambda *a, **k: {
-            **enabled_environment(),
-            "ALPACA_API_KEY_ID": "key",
-            "ALPACA_API_SECRET_KEY": "secret",
-        },
-    )
-    monkeypatch.setattr(loop, "_load_loop_candidates", load)
-    monkeypatch.setattr(loop, "prepare_prior_daily_once", daily)
-    monkeypatch.setattr(loop, "prepare_macro_once", macro)
-    monkeypatch.setattr(loop, "prepare_current_trends_once", trends)
-    monkeypatch.setattr(loop, "trigger_once", trigger)
-    result = asyncio.run(
-        loop.execute_agent_paper_loop_action(
-            loop.EngineSettings(),
-            account_id=UUID(int=1),
-            repo_root=Path("/unused"),
-            action=A.TRIGGER,
-            snapshot=snapshot(),
-        )
-    )
-    if failure:
-        assert result == A.STOP_PREREQUISITE_UNAVAILABLE
-        assert calls == ["batch", "daily:AAPL", "daily:MSFT"]
-    else:
-        assert result is None
-        assert calls == [
-            "batch",
-            "daily:AAPL",
-            "daily:MSFT",
-            "macro:AAPL",
-            "macro:MSFT",
-            "trends:AAPL",
-            "trends:MSFT",
-            "trigger",
-        ]
-
-
-def test_missing_protected_batch_stops_before_any_preparation(monkeypatch) -> None:
-    monkeypatch.setattr(
-        loop,
-        "load_agent_paper_service_environment",
-        lambda *a, **k: {
-            "ALPACA_API_KEY_ID": "key",
-            "ALPACA_API_SECRET_KEY": "secret",
-        },
-    )
-
-    async def forbidden(*_args, **_kwargs):
-        raise AssertionError("no source preparation without a batch")
-
-    monkeypatch.setattr(loop, "_load_loop_candidates", forbidden)
-    monkeypatch.setattr(loop, "prepare_prior_daily_once", forbidden)
-    with pytest.raises(ValueError, match="CANDIDATE_BATCH_REQUIRED"):
-        asyncio.run(
-            loop.execute_agent_paper_loop_action(
-                loop.EngineSettings(),
-                account_id=UUID(int=1),
-                repo_root=Path("/unused"),
-                action=A.TRIGGER,
-                snapshot=snapshot(),
-            )
-        )
 
 
 async def noop_heartbeat(_seen_at: datetime) -> None:
     return None
-
-
-@pytest.mark.parametrize("close_hour", [20, 17], ids=["friday-close", "friday-half-day"])
-def test_daily_wait_wakes_at_frozen_close_before_monday_without_busy_loop(close_hour):
-    start = datetime(2026, 9, 18, 14, 5, tzinfo=UTC)
-    close = start.replace(hour=close_hour, minute=0)
-    elapsed = 0.0
-    inspected = []
-    published = []
-    sleeps = []
-
-    async def inspect():
-        now = start + timedelta(seconds=elapsed)
-        inspected.append(now)
-        assert len(inspected) <= 3, "no repeated inspection between calendar wakeups"
-        return loop.AgentPaperLoopSnapshot(
-            now=now,
-            enabled=not published,
-            calendar_authority_id=CALENDAR_AUTHORITY_ID,
-            decision_window_start_at=start.replace(hour=11, minute=0),
-            decision_window_end_at=close,
-            next_decision_window_start_at=datetime(2026, 9, 21, 11, tzinfo=UTC),
-            performance_due_at=close if now >= close else None,
-        )
-
-    async def execute(action, state):
-        assert action == A.PUBLISH_PERFORMANCE
-        assert state.now == close, (
-            "performance and its existing summary publication must not wait until Monday"
-        )
-        published.append(state.performance_due_at)
-
-    async def sleep(seconds):
-        nonlocal elapsed
-        assert 0 < seconds <= 15
-        assert start + timedelta(seconds=elapsed + seconds) <= close
-        sleeps.append(seconds)
-        elapsed += seconds
-
-    result = asyncio.run(
-        loop.run_foreground_loop(
-            inspect=inspect,
-            execute=execute,
-            sleep=sleep,
-            heartbeat=noop_heartbeat,
-            monotonic=lambda: elapsed,
-            clock=lambda: start + timedelta(seconds=elapsed),
-        )
-    )
-    assert result == A.STOP_DISABLED
-    assert published == [close]
-    assert inspected == [start, close, close]
-    assert sum(sleeps) == (close - start).total_seconds()
-
-
-@pytest.mark.parametrize("kind", ["daily", "trends"])
-@pytest.mark.parametrize("ready", [False, True])
-def test_aapl_legacy_attempt_fences_provider_but_reuses_qualified_facts(
-    monkeypatch, tmp_path, kind, ready
-):
-    prior = date(2026, 9, 11)
-    legacy = tmp_path / ".secrets" / "nexus-agent-paper" / kind / prior.isoformat()
-    legacy.mkdir(parents=True)
-
-    async def inspect(*_args, **_kwargs):
-        return SimpleNamespace(
-            instrument_id=TEST_CANDIDATE.instrument_id,
-            prior_session=prior,
-            start_session=prior - timedelta(days=366),
-            authority_ready=ready,
-            evidence_ready=ready,
-            snapshot_ready=ready,
-        )
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("legacy AAPL attempt must not repeat provider work")
-
-    monkeypatch.setattr(
-        loop,
-        "_inspect_prior_daily_scope" if kind == "daily" else "_inspect_current_trends_scope",
-        inspect,
-    )
-    monkeypatch.setattr(loop, "collection_window", forbidden)
-    monkeypatch.setattr(loop, "collect_prices", forbidden)
-    prepare = loop.prepare_prior_daily_once if kind == "daily" else loop.prepare_current_trends_once
-    result = asyncio.run(
-        prepare(
-            SimpleNamespace(),
-            candidate=TEST_CANDIDATE,
-            account_id=UUID(int=1),
-            repo_root=tmp_path,
-            now=NOW,
-            expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
-        )
-    )
-    assert result == ("ready" if ready else "unavailable")
-    assert not (legacy.parent / f"{prior}-{TEST_CANDIDATE.instrument_id}").exists()
-
-
-def test_host_startup_without_batch_can_inspect_legacy_and_evaluation(monkeypatch, tmp_path):
-    output = tmp_path / ".secrets" / "nexus-agent-paper"
-    output.mkdir(parents=True, mode=0o700)
-    environment = service_ready_environment()
-    environment.pop("NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID")
-    result = loop.agent_paper_service_startup_preflight(environment, repo_root=tmp_path)
-    assert result["status"] == "ready"
-    assert result["blocking_codes"] == []
-    assert result["normal_cycle_status"] == "blocked"
-    assert result["normal_cycle_blocking_codes"] == ["CANDIDATE_BATCH_REQUIRED"]
-
-
-@pytest.mark.parametrize("kind", ["daily", "trends"])
-def test_other_candidate_does_not_inherit_aapl_legacy_attempt(monkeypatch, tmp_path, kind):
-    prior = date(2026, 9, 11)
-    legacy = tmp_path / ".secrets" / "nexus-agent-paper" / kind / prior.isoformat()
-    legacy.mkdir(parents=True)
-    candidate = TEST_CANDIDATE.model_copy(update={"symbol": "MSFT", "instrument_id": UUID(int=21)})
-
-    async def inspect(*_args, **_kwargs):
-        return SimpleNamespace(
-            instrument_id=candidate.instrument_id,
-            prior_session=prior,
-            start_session=prior - timedelta(days=366),
-            authority_ready=False,
-            evidence_ready=False,
-            snapshot_ready=False,
-        )
-
-    def window(instrument_id, *_args, **_kwargs):
-        assert instrument_id == candidate.instrument_id
-        raise RuntimeError("reached-explicit-candidate-preparation")
-
-    monkeypatch.setattr(
-        loop,
-        "_inspect_prior_daily_scope" if kind == "daily" else "_inspect_current_trends_scope",
-        inspect,
-    )
-    monkeypatch.setattr(loop, "collection_window", window)
-    prepare = loop.prepare_prior_daily_once if kind == "daily" else loop.prepare_current_trends_once
-    with pytest.raises(RuntimeError, match="reached-explicit-candidate-preparation"):
-        asyncio.run(
-            prepare(
-                SimpleNamespace(),
-                candidate=candidate,
-                account_id=UUID(int=1),
-                repo_root=tmp_path,
-                now=NOW,
-                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
-            )
-        )
-    assert (legacy.parent / f"{prior}-{candidate.instrument_id}").exists()
 
 
 def test_agent_paper_lock_is_shared_across_spawned_worktrees(tmp_path: Path) -> None:
@@ -418,7 +115,7 @@ def snapshot(**changes: object) -> loop.AgentPaperLoopSnapshot:
             A.WAIT_FOR_SESSION,
         ),
         (
-            datetime(2026, 11, 27, 15, 0, tzinfo=UTC),
+            datetime(2026, 11, 27, 17, 59, tzinfo=UTC),
             datetime(2026, 11, 27, 12, tzinfo=UTC),
             datetime(2026, 11, 27, 18, tzinfo=UTC),
             datetime(2026, 11, 30, 12, tzinfo=UTC),
@@ -466,7 +163,7 @@ def test_policy_uses_bound_calendar_windows_across_sessions(
 
 
 def test_foreground_loop_waits_for_session_without_product_side_effects() -> None:
-    start = datetime(2026, 7, 6, 14, tzinfo=UTC)
+    start = datetime(2026, 7, 6, 11, tzinfo=UTC)
     states = iter(
         (
             loop.AgentPaperLoopSnapshot(
@@ -631,12 +328,57 @@ def test_foreground_loop_logs_safe_execution_failure_stage(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert json.loads(captured.err)["failure_stage"] == "execute"
+    assert json.loads(captured.err) == {
+        "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+        "event": "agent_paper_loop_failure",
+        "failure_action": "trigger",
+        "failure_stage": "execute",
+        "occurred_at": NOW.isoformat(),
+    }
     assert "private-execution-canary" not in captured.err
 
 
+def test_foreground_loop_logs_safe_execution_phase(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def inspect() -> loop.AgentPaperLoopSnapshot:
+        return snapshot(
+            evaluation_id=UUID(int=8),
+            evaluation_slot_at=NOW,
+            cycle_status="evaluation_pending",
+        )
+
+    async def execute(*_args) -> None:
+        error = RuntimeError("private-evaluation-canary")
+        loop._annotate_agent_paper_failure(error, phase="prepare_pair")
+        raise error
+
+    with pytest.raises(RuntimeError, match="private-evaluation-canary"):
+        asyncio.run(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=noop_heartbeat,
+                clock=lambda: NOW,
+            )
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+        "event": "agent_paper_loop_failure",
+        "failure_action": "advance_evaluation",
+        "failure_phase": "prepare_pair",
+        "failure_stage": "execute",
+        "occurred_at": NOW.isoformat(),
+    }
+    assert "private-evaluation-canary" not in captured.err
+
+
 def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() -> None:
-    start = datetime(2026, 7, 6, 14, tzinfo=UTC)
+    start = datetime(2026, 7, 6, 11, tzinfo=UTC)
     states = iter(
         (
             loop.AgentPaperLoopSnapshot(
@@ -702,7 +444,7 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
                 "cycle_status": "completed",
                 "cycle_slot_at": PREVIOUS_SLOT,
             },
-            A.WAIT_FOR_SESSION,
+            A.WAIT_FOR_SLOT,
         ),
         ({"cycle_status": "completed", "cycle_slot_at": PREVIOUS_SLOT}, A.TRIGGER),
         (
@@ -717,11 +459,26 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
         ({"cycle_status": "failed", "cycle_slot_at": SLOT}, A.WAIT_FOR_SLOT),
         (
             {
+                "trigger_attempt_slot_at": SLOT,
+                "trigger_failure_code": "SCHWAB_L1_INCOMPLETE",
+            },
+            A.WAIT_FOR_SLOT,
+        ),
+        (
+            {
+                "now": NOW + timedelta(minutes=5),
+                "trigger_attempt_slot_at": SLOT,
+                "trigger_failure_code": "SCHWAB_L1_INCOMPLETE",
+            },
+            A.TRIGGER,
+        ),
+        (
+            {
                 "now": NOW + timedelta(minutes=5),
                 "cycle_status": "unavailable",
                 "cycle_slot_at": SLOT,
             },
-            A.WAIT_FOR_SESSION,
+            A.TRIGGER,
         ),
         (
             {
@@ -729,7 +486,7 @@ def test_foreground_loop_session_wait_uses_elapsed_time_after_slow_heartbeats() 
                 "cycle_status": "failed",
                 "cycle_slot_at": SLOT,
             },
-            A.WAIT_FOR_SESSION,
+            A.TRIGGER,
         ),
         (
             {
@@ -1511,7 +1268,7 @@ def test_shutdown_confirmation_reads_once_and_matches_exact_persisted_action(
 ) -> None:
     inspections: list[tuple[UUID, UUID]] = []
 
-    async def inspect(_settings, *, account_id, expected_calendar_authority_id, candidate=None):
+    async def inspect(_settings, *, account_id, expected_calendar_authority_id):
         inspections.append((account_id, expected_calendar_authority_id))
         return after
 
@@ -1618,6 +1375,50 @@ def test_local_runner_holds_lock_and_coalesces_signals_before_calendar_selection
         ("remove", signal.SIGTERM),
         "lock-exit",
     ]
+
+
+def test_local_runner_forwards_deterministic_runtime_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def isolated_lock():
+        yield
+
+    async def select_calendar(_settings) -> UUID:
+        return CALENDAR_AUTHORITY_ID
+
+    async def controlled_sleep(_seconds: float) -> None:
+        return None
+
+    def clock() -> datetime:
+        return NOW
+
+    def monotonic() -> float:
+        return 42.0
+
+    async def run_loop(**kwargs) -> loop.AgentPaperLoopAction:
+        assert kwargs["sleep"] is controlled_sleep
+        assert kwargs["clock"] is clock
+        assert kwargs["monotonic"] is monotonic
+        return A.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_calendar)
+    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+
+    result = asyncio.run(
+        loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=controlled_sleep,
+            clock=clock,
+            monotonic=monotonic,
+        )
+    )
+
+    assert result is A.STOP_REQUESTED
 
 
 def test_local_runner_lock_contention_stops_before_calendar_selection(
@@ -2178,7 +1979,6 @@ def test_foreground_loop_stops_after_action_when_followup_heartbeat_fails() -> N
 def enabled_environment() -> dict[str, str]:
     return {
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
-        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
         "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
         "AGENT_RUNTIME_MODE": "codex_sdk",
     }
@@ -2187,7 +1987,6 @@ def enabled_environment() -> dict[str, str]:
 def service_ready_environment() -> dict[str, str]:
     return {
         "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
-        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(UUID(int=30)),
         "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(UUID(int=1)),
         "NEXUS_ENV": "development",
         "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
@@ -2399,7 +2198,7 @@ def test_explicit_action_uses_registered_config_through_product_boundary(
 
     monkeypatch.setattr(loop, "prepare_prior_daily_once", producer)
     monkeypatch.setattr(loop, "collect_window_once", producer)
-    monkeypatch.setattr(loop, "run_cycle_job_once", producer)
+    monkeypatch.setattr(loop, "run_agent_worker_once", producer)
     result = asyncio.run(
         loop.execute_agent_paper_loop_action(
             loop.EngineSettings(),
@@ -2447,6 +2246,134 @@ def test_explicit_trigger_forwards_registered_schwab_config_after_prerequisites(
         )
     )
     assert result is None and seen == [UUID(int=1)]
+
+
+def test_evaluation_advance_freezes_shared_market_facts_before_creating_lanes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+    evaluation_id = UUID(int=101)
+    seen: list[tuple[UUID, datetime]] = []
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def prepare_slot(
+        settings,
+        *,
+        evaluation_id,
+        decision_slot_at,
+        repo_root,
+        expected_calendar_authority_id,
+        process_environment,
+    ):
+        assert settings.alpaca_key.get_secret_value() == "alpaca-key"
+        assert repo_root == tmp_path
+        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
+        assert process_environment["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
+        seen.append((evaluation_id, decision_slot_at))
+        return SimpleNamespace(status="running")
+
+    def unexpected_database(*_args, **_kwargs):
+        pytest.fail("evaluation advance must freeze shared market facts first")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", prepare_slot, raising=False)
+    monkeypatch.setattr(loop, "create_async_engine", unexpected_database)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.ADVANCE_EVALUATION,
+            snapshot=snapshot(
+                evaluation_id=evaluation_id,
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_pending",
+            ),
+            env_file=env_file,
+        )
+    )
+
+    assert result is None
+    assert seen == [(evaluation_id, SLOT)]
+
+
+def test_evaluation_advance_annotates_prepare_pair_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("private-pair-canary")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", fail)
+
+    with pytest.raises(RuntimeError, match="private-pair-canary") as caught:
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                action=A.ADVANCE_EVALUATION,
+                snapshot=snapshot(
+                    evaluation_id=UUID(int=101),
+                    evaluation_slot_at=SLOT,
+                    cycle_status="evaluation_pending",
+                ),
+                env_file=env_file,
+            )
+        )
+
+    assert getattr(caught.value, "_nexus_agent_paper_failure_phase") == "prepare_pair"
+
+
+def test_evaluation_closes_exactly_when_prior_daily_preparation_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = explicit_service_config(tmp_path)
+    evaluation_id = UUID(int=101)
+    closed: list[str] = []
+
+    async def unavailable(*_args, **_kwargs):
+        return "unavailable"
+
+    async def close(*_args, reason_code, **_kwargs):
+        closed.append(reason_code)
+
+    async def unexpected(*_args, **_kwargs):
+        pytest.fail("unavailable prior daily authority must not call realtime providers")
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", unavailable)
+    monkeypatch.setattr(loop, "_close_unrecoverable_evaluation_once", close, raising=False)
+    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", unexpected)
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=A.ADVANCE_EVALUATION,
+            snapshot=snapshot(
+                evaluation_id=evaluation_id,
+                evaluation_slot_at=SLOT,
+                cycle_status="evaluation_pending",
+            ),
+            env_file=env_file,
+        )
+    )
+
+    assert result is None
+    assert closed == ["PAIR_PRIOR_DAILY_UNAVAILABLE"]
 
 
 def test_preflight_cannot_fill_missing_schwab_config_from_default_file(monkeypatch, tmp_path):
@@ -2501,7 +2428,7 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         service_loads.append(process_environment)
         return environment
 
-    async def inspect(_settings, *, account_id, expected_calendar_authority_id, candidate=None):
+    async def inspect(_settings, *, account_id, expected_calendar_authority_id):
         assert account_id == UUID(int=1)
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return snapshot()
@@ -2566,8 +2493,6 @@ def test_service_preflight_aggregates_safe_blockers_without_external_requests(
             "SCHWAB_OAUTH_TOKEN_STORE_INVALID",
         ],
         "optional_codes": ["AGENT_PAPER_FRED_OPTIONAL_UNCONFIGURED"],
-        "normal_cycle_status": "blocked",
-        "normal_cycle_blocking_codes": ["CANDIDATE_BATCH_REQUIRED"],
     }
 
 
@@ -2595,8 +2520,6 @@ def test_service_preflight_accepts_complete_local_configuration(
         "external_requests": 0,
         "blocking_codes": [],
         "optional_codes": [],
-        "normal_cycle_status": "requires_batch_validation",
-        "normal_cycle_blocking_codes": [],
     }
 
 
@@ -2630,8 +2553,6 @@ def test_service_startup_preflight_defers_dynamic_model_and_market_readiness(
         "external_requests": 0,
         "blocking_codes": [],
         "optional_codes": [],
-        "normal_cycle_status": "requires_batch_validation",
-        "normal_cycle_blocking_codes": [],
     }
 
 
@@ -2719,8 +2640,6 @@ def test_service_preflight_treats_expired_access_token_as_refreshable_warning(
         "external_requests": 0,
         "blocking_codes": [],
         "optional_codes": ["SCHWAB_OAUTH_ACCESS_TOKEN_REFRESH_REQUIRED"],
-        "normal_cycle_status": "requires_batch_validation",
-        "normal_cycle_blocking_codes": [],
     }
 
 
@@ -3080,8 +2999,6 @@ def test_loop_command_exposes_only_safe_stop_reasons(
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_OUTSIDE_WINDOW",
-        "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
-        "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
         "RISK_INPUT_REQUIRED",
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
@@ -3197,12 +3114,12 @@ def test_executor_claims_only_persisted_job(
     job_id = UUID(int=11)
     received: list[tuple[UUID, ...] | None] = []
 
-    async def run_worker(_settings, *, job_id):
-        received.append((job_id,))
+    async def run_worker(_settings, *, job_ids=None):
+        received.append(job_ids)
         return True
 
     monkeypatch.setattr(loop, "local_settings", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(loop, "run_cycle_job_once", run_worker)
+    monkeypatch.setattr(loop, "run_agent_worker_once", run_worker)
     asyncio.run(
         loop.execute_agent_paper_loop_action(
             loop.EngineSettings(),
@@ -3234,9 +3151,7 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     }
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
-    async def prepare(
-        settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def prepare(settings, *, account_id, repo_root, now, expected_calendar_authority_id):
         assert repo_root == loop.Path("/repo")
         assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
@@ -3253,7 +3168,6 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
         repo_root,
         now,
         expected_calendar_authority_id,
-        candidate=None,
     ):
         assert repo_root == loop.Path("/repo")
         assert expected_calendar_authority_id == calendar_authority_id
@@ -3265,7 +3179,7 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(loop, "prepare_macro_once", prepare_macro, raising=False)
 
     async def prepare_trends(
-        settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
+        settings, *, account_id, repo_root, now, expected_calendar_authority_id
     ):
         assert repo_root == loop.Path("/repo")
         assert expected_calendar_authority_id == calendar_authority_id
@@ -3275,9 +3189,7 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(loop, "prepare_current_trends_once", prepare_trends, raising=False)
 
-    async def trigger(
-        settings, request, *, repo_root, expected_calendar_authority_id, candidate=None
-    ):
+    async def trigger(settings, request, *, repo_root, expected_calendar_authority_id):
         assert expected_calendar_authority_id == calendar_authority_id
         received_settings.append(settings)
         requests.append(request)
@@ -3317,9 +3229,7 @@ def test_executor_reinspects_after_preparing_missing_prior_daily(
     }
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
-    async def prepare(
-        _settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def prepare(_settings, *, account_id, repo_root, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "prepared"
 
@@ -3355,9 +3265,7 @@ def test_executor_stops_before_cycle_when_prior_daily_is_unavailable(
         },
     )
 
-    async def prepare(
-        _settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def prepare(_settings, *, account_id, repo_root, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "unavailable"
 
@@ -3378,6 +3286,55 @@ def test_executor_stops_before_cycle_when_prior_daily_is_unavailable(
     )
 
     assert result == "stop_prerequisite_unavailable"
+
+
+def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        loop,
+        "load_local_environment",
+        lambda *_args: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+
+    async def ready(*_args, **_kwargs):
+        return "ready"
+
+    async def fail_known(*_args, **_kwargs):
+        raise ValueError("SCHWAB_L1_INCOMPLETE")
+
+    async def persisted_failure(database_url, *, account_id, decision_slot_at):
+        assert database_url == loop.EngineSettings().database_url
+        assert account_id == UUID(int=1)
+        assert decision_slot_at == SLOT
+        return "SCHWAB_L1_INCOMPLETE"
+
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
+    monkeypatch.setattr(loop, "prepare_macro_once", ready)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
+    monkeypatch.setattr(loop, "trigger_once", fail_known)
+    monkeypatch.setattr(
+        loop,
+        "_load_persisted_trigger_failure",
+        persisted_failure,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=loop.Path("/repo"),
+            action=loop.AgentPaperLoopAction.TRIGGER,
+            snapshot=snapshot(),
+        )
+    )
+
+    assert result is None
 
 
 @pytest.mark.parametrize(
@@ -3403,13 +3360,13 @@ def test_executor_does_not_trigger_until_current_trends_are_ready(
     )
 
     async def prepare_daily(
-        _settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
 
     async def prepare_trends(
-        _settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return trend_status
@@ -3422,7 +3379,6 @@ def test_executor_does_not_trigger_until_current_trends_are_ready(
         repo_root,
         now,
         expected_calendar_authority_id,
-        candidate=None,
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
@@ -3463,7 +3419,7 @@ def test_executor_continues_when_daily_macro_refresh_is_unavailable(
     events: list[str] = []
 
     async def prepare_daily(
-        _settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("daily")
@@ -3477,22 +3433,19 @@ def test_executor_continues_when_daily_macro_refresh_is_unavailable(
         repo_root,
         now,
         expected_calendar_authority_id,
-        candidate=None,
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("macro")
         return "unavailable"
 
     async def prepare_trends(
-        _settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("trends")
         return "ready"
 
-    async def trigger(
-        _settings, _request, *, repo_root, expected_calendar_authority_id, candidate=None
-    ):
+    async def trigger(_settings, _request, *, repo_root, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         events.append("trigger")
 
@@ -3529,7 +3482,7 @@ def test_executor_reinspects_after_binding_macro_evidence(
     )
 
     async def prepare_daily(
-        _settings, *, account_id, repo_root, now, expected_calendar_authority_id, candidate=None
+        _settings, *, account_id, repo_root, now, expected_calendar_authority_id
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "ready"
@@ -3542,7 +3495,6 @@ def test_executor_reinspects_after_binding_macro_evidence(
         repo_root,
         now,
         expected_calendar_authority_id,
-        candidate=None,
     ):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return "prepared"
@@ -3589,9 +3541,7 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
@@ -3617,7 +3567,6 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
     result = asyncio.run(
         loop.prepare_prior_daily_once(
             settings,
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -3635,9 +3584,7 @@ def test_prior_daily_preparation_collects_imports_and_reads_back_once(
 def test_prior_daily_preparation_reuses_existing_authority_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
@@ -3655,7 +3602,6 @@ def test_prior_daily_preparation_reuses_existing_authority_without_provider_call
     result = asyncio.run(
         loop.prepare_prior_daily_once(
             SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -3671,18 +3617,10 @@ def test_prior_daily_preparation_does_not_repeat_an_existing_attempt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
     prior_session = date(2026, 9, 11)
-    attempt = (
-        tmp_path
-        / ".secrets"
-        / "nexus-agent-paper"
-        / "daily"
-        / f"{prior_session.isoformat()}-{UUID(int=20)}"
-    )
+    attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "daily" / prior_session.isoformat()
     attempt.mkdir(mode=0o700, parents=True)
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
@@ -3700,7 +3638,6 @@ def test_prior_daily_preparation_does_not_repeat_an_existing_attempt(
     result = asyncio.run(
         loop.prepare_prior_daily_once(
             SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -3716,9 +3653,7 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return loop.PriorDailyScope(
             instrument_id=UUID(int=20),
@@ -3740,7 +3675,6 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
     result = asyncio.run(
         loop.prepare_prior_daily_once(
             SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -3754,9 +3688,7 @@ def test_prior_daily_preparation_stops_after_known_collection_failure(
 def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         assert account_id == UUID(int=1)
         return SimpleNamespace(
@@ -3776,7 +3708,6 @@ def test_macro_preparation_reuses_complete_visible_vintage_without_provider_call
     result = asyncio.run(
         loop.prepare_macro_once(
             SimpleNamespace(),
-            candidate=TEST_CANDIDATE,
             fred_key=object(),
             account_id=UUID(int=1),
             repo_root=tmp_path,
@@ -3828,9 +3759,7 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
     )
     snapshots: list[UUID] = []
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return next(scopes)
 
@@ -3848,7 +3777,6 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
     result = asyncio.run(
         loop.prepare_macro_once(
             SimpleNamespace(),
-            candidate=TEST_CANDIDATE,
             fred_key=object(),
             account_id=UUID(int=1),
             repo_root=tmp_path,
@@ -3865,9 +3793,7 @@ def test_macro_preparation_binds_complete_evidence_without_provider_call(
 def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -3884,7 +3810,6 @@ def test_macro_preparation_rejects_missing_archive_config_before_provider_call(
     result = asyncio.run(
         loop.prepare_macro_once(
             loop.DailyOnceSettings(database_url="postgresql+asyncpg://test:test@127.0.0.1/test"),
-            candidate=TEST_CANDIDATE,
             fred_key=loop.SecretStr("test-key"),
             account_id=UUID(int=1),
             repo_root=tmp_path,
@@ -3947,9 +3872,7 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
     imported: list[str] = []
     snapshots: list[UUID] = []
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         assert account_id == UUID(int=1)
         return next(scopes)
@@ -3980,7 +3903,6 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
     result = asyncio.run(
         loop.prepare_macro_once(
             SimpleNamespace(),
-            candidate=TEST_CANDIDATE,
             fred_key=object(),
             account_id=UUID(int=1),
             repo_root=tmp_path,
@@ -4028,9 +3950,7 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
     )
     attempts: list[str] = []
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return next(scopes)
 
@@ -4046,7 +3966,6 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
         result = asyncio.run(
             loop.prepare_macro_once(
                 SimpleNamespace(),
-                candidate=TEST_CANDIDATE,
                 fred_key=object(),
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
@@ -4062,9 +3981,7 @@ def test_macro_preparation_attempts_provider_only_once_per_trading_day(
 def test_macro_preparation_degrades_only_known_provider_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -4082,7 +3999,6 @@ def test_macro_preparation_degrades_only_known_provider_failure(
     result = asyncio.run(
         loop.prepare_macro_once(
             SimpleNamespace(),
-            candidate=TEST_CANDIDATE,
             fred_key=object(),
             account_id=UUID(int=1),
             repo_root=tmp_path,
@@ -4097,9 +4013,7 @@ def test_macro_preparation_degrades_only_known_provider_failure(
 def test_macro_preparation_propagates_unknown_provider_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -4118,7 +4032,6 @@ def test_macro_preparation_propagates_unknown_provider_failure(
         asyncio.run(
             loop.prepare_macro_once(
                 SimpleNamespace(),
-                candidate=TEST_CANDIDATE,
                 fred_key=object(),
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
@@ -4140,9 +4053,7 @@ def test_macro_preparation_fails_closed_on_import_or_readback_mismatch(
     tmp_path: loop.Path,
     imported: dict[str, object],
 ) -> None:
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -4166,7 +4077,6 @@ def test_macro_preparation_fails_closed_on_import_or_readback_mismatch(
         asyncio.run(
             loop.prepare_macro_once(
                 SimpleNamespace(),
-                candidate=TEST_CANDIDATE,
                 fred_key=object(),
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
@@ -4204,9 +4114,7 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
@@ -4241,7 +4149,6 @@ def test_current_trends_preparation_collects_imports_and_reads_back_once(
     result = asyncio.run(
         prepare(
             settings,
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -4275,9 +4182,7 @@ def test_current_trends_preparation_reuses_current_evidence_without_provider_cal
     prepare = getattr(loop, "prepare_current_trends_once", None)
     assert prepare is not None, "the loop must prepare current trends before triggering research"
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -4297,7 +4202,6 @@ def test_current_trends_preparation_reuses_current_evidence_without_provider_cal
     result = asyncio.run(
         prepare(
             SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -4334,9 +4238,7 @@ def test_current_trends_preparation_builds_missing_snapshot_without_provider_cal
     )
     calls: list[tuple[object, ...]] = []
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         calls.append(("inspect", account_id, now))
         return next(scopes)
@@ -4355,7 +4257,6 @@ def test_current_trends_preparation_builds_missing_snapshot_without_provider_cal
     result = asyncio.run(
         loop.prepare_current_trends_once(
             SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -4374,18 +4275,10 @@ def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
     prepare = getattr(loop, "prepare_current_trends_once", None)
     assert prepare is not None, "the loop must prepare current trends before triggering research"
     prior_session = date(2026, 9, 11)
-    attempt = (
-        tmp_path
-        / ".secrets"
-        / "nexus-agent-paper"
-        / "trends"
-        / f"{prior_session.isoformat()}-{UUID(int=20)}"
-    )
+    attempt = tmp_path / ".secrets" / "nexus-agent-paper" / "trends" / prior_session.isoformat()
     attempt.mkdir(mode=0o700, parents=True)
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -4405,7 +4298,6 @@ def test_current_trends_preparation_does_not_repeat_an_existing_attempt(
     result = asyncio.run(
         prepare(
             SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -4421,9 +4313,7 @@ def test_current_trends_preparation_stops_after_known_collection_failure(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -4447,7 +4337,6 @@ def test_current_trends_preparation_stops_after_known_collection_failure(
     result = asyncio.run(
         loop.prepare_current_trends_once(
             SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-            candidate=TEST_CANDIDATE,
             account_id=UUID(int=1),
             repo_root=tmp_path,
             now=NOW,
@@ -4466,9 +4355,7 @@ def test_current_trends_preparation_preserves_unknown_external_outcomes(
 ) -> None:
     prior_session = date(2026, 9, 11)
 
-    async def inspect(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
-    ):
+    async def inspect(_settings, *, account_id, now, expected_calendar_authority_id):
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return SimpleNamespace(
             instrument_id=UUID(int=20),
@@ -4497,7 +4384,6 @@ def test_current_trends_preparation_preserves_unknown_external_outcomes(
         asyncio.run(
             loop.prepare_current_trends_once(
                 SimpleNamespace(alpaca_key=object(), alpaca_secret=object()),
-                candidate=TEST_CANDIDATE,
                 account_id=UUID(int=1),
                 repo_root=tmp_path,
                 now=NOW,
@@ -4682,376 +4568,3 @@ def test_cycle_view_accepts_real_cycle_bound_scope_and_delays_collection() -> No
             market_scope=market_scope.model_copy(update={"cycle_id": UUID(int=5)}),
             calendar=calendar,
         )
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"trigger_attempt_slot_at": SLOT},
-        {"trigger_failure_code": "SCHWAB_L1_INCOMPLETE"},
-        {"trigger_attempt_slot_at": SLOT, "trigger_failure_code": "UNRECOGNIZED"},
-    ],
-)
-def test_trigger_failure_snapshot_requires_complete_known_identity(changes):
-    assert loop.choose_loop_action(snapshot(**changes)) == A.STOP_RESULT_UNKNOWN
-
-
-def test_capacity_exceeded_is_terminal_for_current_slot_and_allows_future_slot() -> None:
-    current = snapshot(
-        trigger_attempt_slot_at=SLOT,
-        trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
-    )
-    future = snapshot(
-        now=NOW + timedelta(days=1),
-        trigger_attempt_slot_at=SLOT,
-        trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
-    )
-
-    assert loop.choose_loop_action(current) == A.WAIT_FOR_SLOT
-    assert loop.choose_loop_action(future) == A.TRIGGER
-
-
-def test_capacity_invalid_is_not_a_persisted_terminal_slot() -> None:
-    assert (
-        loop.choose_loop_action(
-            snapshot(
-                trigger_attempt_slot_at=SLOT,
-                trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
-            )
-        )
-        == A.STOP_RESULT_UNKNOWN
-    )
-
-
-@pytest.mark.parametrize("at", [NOW, NOW + timedelta(days=1)])
-def test_policy_unconfirmed_keeps_host_waiting_across_slots(at):
-    state = snapshot(
-        now=at,
-        cycle_id=UUID(int=101),
-        cycle_status="unavailable",
-        cycle_result_code="POLICY_UNCONFIRMED",
-        cycle_slot_at=SLOT,
-    )
-    assert loop.choose_loop_action(state) == A.WAIT_FOR_SLOT
-
-
-@pytest.mark.parametrize("status", ["researching", "unavailable"])
-@pytest.mark.parametrize("close_hour", [20, 17], ids=["normal-close", "half-day"])
-def test_policy_wait_publishes_close_once_then_keeps_waiting(status, close_hour):
-    close = NOW.replace(hour=close_hour)
-    state = snapshot(
-        now=close,
-        cycle_id=UUID(int=101),
-        cycle_status=status,
-        cycle_result_code="POLICY_UNCONFIRMED",
-        cycle_slot_at=SLOT,
-        performance_due_at=close,
-    )
-    assert loop.choose_loop_action(state) == A.PUBLISH_PERFORMANCE
-    for at in (close, close + timedelta(seconds=1), NOW + timedelta(days=1)):
-        assert (
-            loop.choose_loop_action(replace(state, now=at, performance_due_at=None))
-            == A.WAIT_FOR_SLOT
-        )
-
-
-@pytest.mark.parametrize("persisted", [None, "SCHWAB_L1_FRESHNESS_UNPROVEN"])
-def test_trigger_failure_without_matching_persistence_stops_unknown(monkeypatch, persisted):
-    monkeypatch.setattr(
-        loop,
-        "load_local_environment",
-        lambda *_: {
-            **enabled_environment(),
-            "ALPACA_API_KEY_ID": "key",
-            "ALPACA_API_SECRET_KEY": "secret",
-        },
-    )
-
-    async def ready(*args, **kwargs):
-        return "ready"
-
-    async def failure(*args, **kwargs):
-        raise ValueError("SCHWAB_L1_INCOMPLETE")
-
-    async def read(*args, **kwargs):
-        return persisted
-
-    for name in ("prepare_prior_daily_once", "prepare_macro_once", "prepare_current_trends_once"):
-        monkeypatch.setattr(loop, name, ready)
-    monkeypatch.setattr(loop, "trigger_once", failure)
-    monkeypatch.setattr(loop, "_load_persisted_trigger_failure", read)
-    with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):
-        asyncio.run(
-            loop.execute_agent_paper_loop_action(
-                loop.EngineSettings(),
-                account_id=UUID(int=1),
-                repo_root=Path("/repo"),
-                action=A.TRIGGER,
-                snapshot=snapshot(),
-            )
-        )
-
-
-def test_foreground_loop_logs_safe_execution_phase(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    async def inspect() -> loop.AgentPaperLoopSnapshot:
-        return snapshot(
-            evaluation_id=UUID(int=8),
-            evaluation_slot_at=NOW,
-            cycle_status="evaluation_pending",
-        )
-
-    async def execute(*_args) -> None:
-        error = RuntimeError("private-evaluation-canary")
-        loop._annotate_agent_paper_failure(error, phase="prepare_pair")
-        raise error
-
-    with pytest.raises(RuntimeError, match="private-evaluation-canary"):
-        asyncio.run(
-            loop.run_foreground_loop(
-                inspect=inspect,
-                execute=execute,
-                sleep=asyncio.sleep,
-                heartbeat=noop_heartbeat,
-                clock=lambda: NOW,
-            )
-        )
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert json.loads(captured.err) == {
-        "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
-        "event": "agent_paper_loop_failure",
-        "failure_action": "advance_evaluation",
-        "failure_phase": "prepare_pair",
-        "failure_stage": "execute",
-        "occurred_at": NOW.isoformat(),
-    }
-    assert "private-evaluation-canary" not in captured.err
-
-
-def test_local_runner_forwards_deterministic_runtime_clock(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    @contextmanager
-    def isolated_lock():
-        yield
-
-    async def select_calendar(_settings) -> UUID:
-        return CALENDAR_AUTHORITY_ID
-
-    async def controlled_sleep(_seconds: float) -> None:
-        return None
-
-    def clock() -> datetime:
-        return NOW
-
-    def monotonic() -> float:
-        return 42.0
-
-    async def run_loop(**kwargs) -> loop.AgentPaperLoopAction:
-        assert kwargs["sleep"] is controlled_sleep
-        assert kwargs["clock"] is clock
-        assert kwargs["monotonic"] is monotonic
-        return A.STOP_REQUESTED
-
-    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: isolated_lock())
-    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_calendar)
-    monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
-
-    result = asyncio.run(
-        loop.run_local_agent_paper_loop(
-            loop.EngineSettings(database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"),
-            account_id=UUID(int=1),
-            repo_root=tmp_path,
-            sleep=controlled_sleep,
-            clock=clock,
-            monotonic=monotonic,
-        )
-    )
-
-    assert result is A.STOP_REQUESTED
-
-
-def test_evaluation_advance_freezes_shared_market_facts_before_creating_lanes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    env_file = explicit_service_config(tmp_path)
-    evaluation_id = UUID(int=101)
-    seen: list[tuple[UUID, datetime]] = []
-
-    async def ready(*_args, **_kwargs):
-        return "ready"
-
-    async def prepare_slot(
-        settings,
-        *,
-        evaluation_id,
-        decision_slot_at,
-        repo_root,
-        expected_calendar_authority_id,
-        process_environment,
-    ):
-        assert settings.alpaca_key.get_secret_value() == "alpaca-key"
-        assert repo_root == tmp_path
-        assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
-        assert process_environment["NEXUS_SCHWAB_APP_KEY"] == "schwab-key"
-        seen.append((evaluation_id, decision_slot_at))
-        return SimpleNamespace(status="running")
-
-    def unexpected_database(*_args, **_kwargs):
-        pytest.fail("evaluation advance must freeze shared market facts first")
-
-    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
-    monkeypatch.setattr(loop, "prepare_macro_once", ready)
-    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
-    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", prepare_slot, raising=False)
-    monkeypatch.setattr(loop, "create_async_engine", unexpected_database)
-
-    result = asyncio.run(
-        loop.execute_agent_paper_loop_action(
-            loop.EngineSettings(),
-            account_id=UUID(int=1),
-            repo_root=tmp_path,
-            action=A.ADVANCE_EVALUATION,
-            snapshot=snapshot(
-                evaluation_id=evaluation_id,
-                evaluation_slot_at=SLOT,
-                cycle_status="evaluation_pending",
-            ),
-            env_file=env_file,
-        )
-    )
-
-    assert result is None
-    assert seen == [(evaluation_id, SLOT)]
-
-
-def test_evaluation_advance_annotates_prepare_pair_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    env_file = explicit_service_config(tmp_path)
-
-    async def ready(*_args, **_kwargs):
-        return "ready"
-
-    async def fail(*_args, **_kwargs):
-        raise RuntimeError("private-pair-canary")
-
-    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
-    monkeypatch.setattr(loop, "prepare_macro_once", ready)
-    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
-    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", fail)
-
-    with pytest.raises(RuntimeError, match="private-pair-canary") as caught:
-        asyncio.run(
-            loop.execute_agent_paper_loop_action(
-                loop.EngineSettings(),
-                account_id=UUID(int=1),
-                repo_root=tmp_path,
-                action=A.ADVANCE_EVALUATION,
-                snapshot=snapshot(
-                    evaluation_id=UUID(int=101),
-                    evaluation_slot_at=SLOT,
-                    cycle_status="evaluation_pending",
-                ),
-                env_file=env_file,
-            )
-        )
-
-    assert getattr(caught.value, "_nexus_agent_paper_failure_phase") == "prepare_pair"
-
-
-def test_evaluation_closes_exactly_when_prior_daily_preparation_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    env_file = explicit_service_config(tmp_path)
-    evaluation_id = UUID(int=101)
-    closed: list[str] = []
-
-    async def unavailable(*_args, **_kwargs):
-        return "unavailable"
-
-    async def close(*_args, reason_code, **_kwargs):
-        closed.append(reason_code)
-
-    async def unexpected(*_args, **_kwargs):
-        pytest.fail("unavailable prior daily authority must not call realtime providers")
-
-    monkeypatch.setattr(loop, "prepare_prior_daily_once", unavailable)
-    monkeypatch.setattr(loop, "_close_unrecoverable_evaluation_once", close, raising=False)
-    monkeypatch.setattr(loop, "prepare_agent_version_slot_once", unexpected)
-
-    result = asyncio.run(
-        loop.execute_agent_paper_loop_action(
-            loop.EngineSettings(),
-            account_id=UUID(int=1),
-            repo_root=tmp_path,
-            action=A.ADVANCE_EVALUATION,
-            snapshot=snapshot(
-                evaluation_id=evaluation_id,
-                evaluation_slot_at=SLOT,
-                cycle_status="evaluation_pending",
-            ),
-            env_file=env_file,
-        )
-    )
-
-    assert result is None
-    assert closed == ["PAIR_PRIOR_DAILY_UNAVAILABLE"]
-
-
-@pytest.mark.parametrize(
-    "failure_code",
-    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
-)
-def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    failure_code: str,
-) -> None:
-    monkeypatch.setattr(
-        loop,
-        "load_local_environment",
-        lambda *_args: {
-            **enabled_environment(),
-            "ALPACA_API_KEY_ID": "key",
-            "ALPACA_API_SECRET_KEY": "secret",
-        },
-    )
-
-    async def ready(*_args, **_kwargs):
-        return "ready"
-
-    async def fail_known(*_args, **_kwargs):
-        raise ValueError(failure_code)
-
-    async def persisted_failure(database_url, *, account_id, decision_slot_at):
-        assert database_url == loop.EngineSettings().database_url
-        assert account_id == UUID(int=1)
-        assert decision_slot_at == SLOT
-        return failure_code
-
-    monkeypatch.setattr(loop, "prepare_prior_daily_once", ready)
-    monkeypatch.setattr(loop, "prepare_macro_once", ready)
-    monkeypatch.setattr(loop, "prepare_current_trends_once", ready)
-    monkeypatch.setattr(loop, "trigger_once", fail_known)
-    monkeypatch.setattr(
-        loop,
-        "_load_persisted_trigger_failure",
-        persisted_failure,
-        raising=False,
-    )
-
-    result = asyncio.run(
-        loop.execute_agent_paper_loop_action(
-            loop.EngineSettings(),
-            account_id=UUID(int=1),
-            repo_root=loop.Path("/repo"),
-            action=loop.AgentPaperLoopAction.TRIGGER,
-            snapshot=snapshot(),
-        )
-    )
-
-    assert result is None

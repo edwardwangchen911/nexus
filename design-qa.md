@@ -1,70 +1,51 @@
-# Task 12 — selected-source implementation QA
+# 交易工作台 Design QA
 
-final result: blocked
+Result: passed
 
-The selected direction is implemented and the four-file functional e2e suite passes after independent review corrections (31/31); focused unit verification passes (123 tests). Exact source-state visual acceptance remains blocked. The current Task 11 read contract cannot reproduce all the reference facts. No demonstration values, inferred actual weights, target amounts, cash totals, or invented cancellation attempt keys were added to make the screenshots look equivalent.
+## Source truth and captures
 
-## Comparison targets and evidence
+- Selected visual source: `/Users/wangchen/.codex/generated_images/01a0a3e3-543b-7ab3-8b2a-98754ae30bff/exec-62ff1c41-f607-4cd2-a9a7-11b66423b28a.png`
+- Desktop implementation: `test-results/workbench-desktop.png`
+- Mobile implementation: `test-results/workbench-mobile.png`
+- Full comparison input: `test-results/workbench-comparison.png`
+- Browser verification URL: `http://127.0.0.1:4174/workspace`
 
-Source visual truth:
+## Verification context
 
-- Decisions: `/tmp/codex-remote-attachments/01a09987-af26-7692-95ec-a9e9483a13d2/2A87A2C6-CB40-4EEE-BE53-53B05FFB80F4/1-照片-1.jpg` — 1280 × 910 pixels.
-- Paper: `/tmp/codex-remote-attachments/01a09987-af26-7692-95ec-a9e9483a13d2/2A87A2C6-CB40-4EEE-BE53-53B05FFB80F4/2-照片-2.jpg` — 1280 × 1066 pixels.
+- Desktop viewport: 1440 × 1000 CSS px; full-page capture: 1440 × 1456 px.
+- Mobile viewport: 390 × 844 CSS px; full-page capture: 390 × 2274 px.
+- Reference image: 1487 × 1058 px.
+- Density: 1× CSS pixel capture. Reduced motion was enabled for deterministic browser verification.
+- State: internal paper, execution locked, loop online, one persisted AAPL hold decision, no active order, one risk attention item, ready account summary.
+- Focused-region capture was not required: the latest-decision and attention regions are fully visible together in the desktop viewport and the full-page comparison covers all five required surfaces.
 
-Browser-rendered implementation (relative to project root):
+## Comparison findings
 
-| Route/state | Viewport, CSS px | Full viewport screenshot | Focused content screenshot, pixels |
-| --- | --- | --- | --- |
-| Decisions detail, blocked proposal/current V7 | 1280 × 910 | `docs/design/qa/task-12/task12-decisions-1280.png` | `docs/design/qa/task-12/task12-decisions-focused-1280.png`, 963 × 941 |
-| Same decision, mobile | 390 × 844 | `docs/design/qa/task-12/task12-decisions-390.png` | `docs/design/qa/task-12/task12-decisions-focused-390.png`, 358 × 1512 |
-| Paper, occupied partially filled plan | 1280 × 1066 | `docs/design/qa/task-12/task12-paper-1280.png` | `docs/design/qa/task-12/task12-paper-focused-1280.png`, 963 × 1384 |
-| Same plan, mobile | 390 × 844 | `docs/design/qa/task-12/task12-paper-390.png` | `docs/design/qa/task-12/task12-paper-focused-390.png`, 358 × 2305 |
+- Product hierarchy matches the source: persistent mode/lock strip, dominant latest decision, narrow attention rail, orders, then account facts.
+- The implementation preserves the repository shell and its global data-source boundary. This adds vertical space above the source composition but keeps the decision completely visible in the initial desktop viewport.
+- The source contains generated natural-language rationale and a system log. The current API does not provide either fact, so the implementation uses saved product-state explanations and omits an invented log.
+- Color, border weight, compact typography, numeric alignment, status accents, and wide-to-narrow primary grid follow the selected direction while reusing repository tokens.
+- Mobile collapses in semantic order with no core horizontal scrolling. Decision, attention, orders, and account facts remain legible at 390 px.
 
-Chromium, existing Playwright webServer, isolated worktree port 4297, dark theme, authenticated fixture routes. Browser deviceScaleFactor is 1; full screenshot pixel dimensions equal CSS viewport. Sources were viewed at their native pixel dimensions with no density resampling. Mobile has no matching source viewport; it is a responsive adaptation check, not a pixel-match claim. Focused screenshots exclude the unchanged app shell and include the full newly implemented section.
+## Required surfaces
 
-Latest post-review capture run: 31/31 e2e tests passed in 44.1s. Sources and updated implementation evidence were reopened together for comparison; fractional CSS bounding boxes are rounded to the recorded clip pixel dimensions by Chromium. The earlier 30/30 capture run is superseded by this review run.
+1. Running mode: internal simulation, live execution lock, loop state, heartbeat and session are visible.
+2. Latest decision: decision status, all candidates, deterministic risk, execution result, timestamp and detail link are visible.
+3. Attention: distinct safe state, raw reason code and safe navigation are visible.
+4. Active orders: valid no-order state and recent-cycle link are visible; populated orders are covered by unit tests.
+5. Account summary: currency, net asset value, cash, market value, P&L and fact time are visible.
 
-Post-review full unit: 1095 passed, 1 skipped (83 passed /1 skipped files). Fresh lint, typecheck and build all passed. These results do not resolve the source-state/shell fidelity blockers below.
+## Interaction and safety checks
 
-Source and implementation images were opened together in the same tool comparison input for each desktop full-view comparison and for focused content inspection. This was a combined image-input comparison, not a generated side-by-side composite. The focused desktop and mobile screenshots were also opened with the relevant source. Source files are local attachments; implementation evidence is committed in the repository.
-
-## Findings
-
-- [P1, blocked] Source state cannot be faithfully reproduced from the current read contract. The reference includes more symbols, actual allocation/target amount facts, and a discoverable original pending cancellation attempt. Our fixture contains two target instruments, exposes projected plan money/quantity/cash facts only, and a refreshed page cannot discover an old idempotency key. Evidence: focused decisions table and paper original-operation panel. Impact: exact content/state comparison is not valid. Required next action: provide the same persisted source-state fixture and an authorized read contract for the missing facts; this task explicitly does not expand the backend. Until then show unavailable or disabled, not substitute source demonstration values.
-- [P2, blocked] Full-view density differs because the current app retains its existing global safety/status shell, while the source uses a much thinner header. The first fold still contains the blocking conclusion and Agent judgment, but less of the deterministic table is visible. Evidence: both 1280 full captures versus their sources; focused captures separate this shell difference from local panel layout. Changing the global shell is outside this slice. Required next action: agree a source capture incorporating the actual shell or separately authorize shell changes; do not compress page content blindly.
-- [P2, resolved] Mobile disclosure target was initially too short. `.pm-disclosure summary` now has a 44px minimum height. Post-fix focused decisions screenshots and mobile keyboard/target-size test confirm the control is usable.
-- [P2, resolved] An unavailable management summary increased the existing real-portfolio mobile page beyond its height budget. Portfolio now renders this optional internal-simulation summary only when a management fact was read; no compacting/negative-margin CSS workaround remains. The exact 375px and 390px regressions pass. This is an information-state correction, not a source fidelity claim.
-
-## Required fidelity surfaces
-
-- Fonts/typography: retained existing Geist/PingFang and numeric monospace tokens; no font dependency added. Clear heading/body/meta hierarchy. Primary proposal/plan labels and unmapped instruments now use explicit object prefixes plus short IDs; full UUIDs remain in title attributes and evidence content for traceability. Full evidence strings wrap without horizontal clipping. Font family/optical metrics in a raster source cannot be proven exactly; no exact-match claim.
-- Spacing/layout rhythm: warning first, Agent judgment before deterministic comparison, timeline and original-operation panel before historical evaluation. Desktop two-column plan region collapses to mobile cards; check panel moves before the timeline. Focused evidence shows no horizontal crop or overlapping controls. Existing sidebar/header remain unchanged; the first-fold density difference remains blocked as above.
-- Colors/tokens: existing navy surfaces, subdued borders, action blue, amber uncertainty and mint confirmation retained. Text communicates status independently of color. No new gradients/decorative artwork; existing shell styling remains outside this slice.
-- Image quality/assets/icons: references are primarily text/data UI, no photographic assets required. Existing NEXUS identity and lucide icon family reused. No fake avatars, rasterized UI, custom SVG illustrations, or replacement decorative art. Captures are browser-rendered PNGs at density 1.
-- Copy/content: target/proposal/plan/order/fill/reservation are distinct. Agent choices are not presented as numeric configuration authority. Missing facts remain unavailable; inherited targets explicitly do not renew research validity. Original-result check explicitly says it never resends an action. Demo source values are not product facts.
+- Refresh was exercised in desktop and mobile browser tests; every `/api/v1/workbench` request used GET.
+- Failed refresh retains the last valid facts and marks them stale. Forbidden responses clear prior facts.
+- Offline, unknown-result, empty, partial, stale, error and forbidden states have explicit coverage.
+- No run, stop, approve, submit or transaction-retry control appears on this page.
+- Desktop and mobile accessibility checks passed, including 44 px targets, no serious/critical Axe findings and no page-level horizontal overflow.
+- In-app browser console: no warnings or errors.
 
 ## Iteration history
 
-1. Implemented selected hierarchy against typed fixture facts. Full-view comparison identified legacy hero/safety-shell density and source-state differences. Removed the redundant local legacy hero treatment on management decisions, retaining the required global navigation/safety shell; preserved unavailable states instead of adding fake facts.
-2. Mobile tests found a short disclosure tap target and the added unavailable portfolio-summary height. Increased only the disclosure hit area; after confirming the unavailable portfolio state, conditioned that optional summary on actual management facts and removed temporary density adjustments. Re-ran failed viewport tests with unchanged assertions.
-3. Captured the final decisions and paper views at source desktop sizes and 390px mobile, plus focused sections. Reopened source plus implementation in shared comparison inputs. Required fidelity surfaces above were checked. Source-state and global-shell mismatches remain explicitly blocked; neither build success nor test success closes them.
-4. [P2, resolved] Full UUID primary labels made the banner and unknown instruments visually dense. TDD introduced short-label/title assertions (2 expected RED failures), then shortened display text without changing identity values or links; 118 focused unit tests and 30 four-file e2e tests passed. Recaptured desktop/mobile views show `提案 …0008`, `标的 …0009`, `调整计划 …0010`; complete identifiers remain accessible in title/evidence. Focused capture was also corrected from element auto-scroll to a full-page clip, avoiding sticky navigation obscuring the top of the captured component. No layout CSS was changed for capture.
-5. Independent review follow-up: corrected blocked-activation fixtures to null target/batch IDs, retaining the original plan only in `blocking_plan`; rendered decisions remains visually unchanged. Added original-order labels to chronologically sorted fill facts (paper timeline slightly taller). Moved result-check section before timeline in DOM, using desktop grid placement rather than mobile CSS order; the mobile capture and DOM/geometry assertions now agree. Existing typography, colors, icons and responsive cards remain unchanged. The no-occupying-plan state now shows current target configuration and links to independent actual-account facts; its end-to-end navigation is covered, but there is no equivalent source-state mock, so it is not claimed as a visual match. Legacy cycles retain their evidence ledger despite an account-level current target. Five expected unit RED failures and one expected e2e RED preceded the fixes; 123 focused unit and 31 e2e tests pass afterward.
-
-Earlier e2e failures were investigated before rerun: one navigation `ERR_NETWORK_IO_SUSPENDED`, two 30-second timeouts spanning 15.5 minutes. macOS power logs confirmed long Idle Sleep intervals during that run. The original run had no trace configured; exact portfolio timeout step remains unavailable. Each original failure passed independently with trace enabled, all three passed sequentially, and the four-file concurrent run passed while a command-scoped `caffeinate -i` prevented sleep. No retry, timeout extension, assertion relaxation, or system power-setting change was made.
-
-## Interactions and residual gaps
-
-Verified by focused unit/e2e coverage: semantic target comparison, exact plan link, keyboard disclosure, mobile no-overflow and tap targets, unknown/error/permission states, exact-key GET cancellation checks, duplicate-click guard, repeated read after completion, close/reopen of an unknown cancel without a second POST, and unchanged real-account separation. Existing axe/no-console-error checks run in the selected e2e suite; this is not a claim that every fixture state has an individual console audit. vinext test-server renderer warnings are recorded in test logs and do not establish a product failure.
-
-No real account facts, broker requests, model requests, or shared application server were used. Screenshots use normal application rendering with isolated fixture API responses, not database integration or live business acceptance. Browser zoom/text-rescaling beyond tested viewport sizes and exact source-state equivalence remain unverified.
-
-## Implementation checklist / follow-up
-
-- [x] Selected hierarchy, existing tokens/navigation, desktop and mobile evidence.
-- [x] Read-only projections; original-attempt GET check stays separate from explicit cancel mutation.
-- [x] Correct mobile disclosure hit target and unavailable portfolio summary.
-- [ ] Supply a matching source-state fixture/read contract before claiming source fidelity acceptance.
-- [ ] Resolve full-view shell/reference density as a separate authorized decision.
-
-P3 polish: once a matching fixture is available, re-evaluate identifier wrapping and local panel spacing against that fixture; do not abbreviate away traceability merely to match demonstration copy.
+1. Initial implementation used the repository's existing shell, status tokens and generated workbench contract.
+2. Browser comparison confirmed the decision-first hierarchy. Mobile and desktop assertions were tightened to validate column ordering and read-only refresh behavior.
+3. Final in-app browser capture confirmed the ready state and zero console warnings/errors; no further visual correction was required.

@@ -106,10 +106,6 @@ class AuthorityQueryProof(FrozenRiskModel):
     blocked: bool
     available_at: datetime
     content_hash: Hash64
-    # Absent on legacy batch-wide proofs; omit None to preserve their serialized facts.
-    required_instrument_ids: tuple[UUID, ...] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
 
     @field_validator("available_at")
     @classmethod
@@ -163,28 +159,9 @@ class RiskMarketSnapshot(FrozenRiskModel):
             )
             if total != Decimal(1):
                 raise ValueError("sector exposures must sum to one")
-        if any(proof.required_instrument_ids is not None for proof in self.query_proofs):
-            if any(
-                proof.required_instrument_ids is None or len(proof.required_instrument_ids) != 1
-                for proof in self.query_proofs
-            ):
-                raise ValueError("bound query proofs require one explicit instrument each")
-            pairs = [
-                (proof.required_instrument_ids[0], proof.kind)
-                for proof in self.query_proofs
-                if proof.required_instrument_ids
-            ]
-            expected = {(instrument, kind) for instrument in required for kind in _QUERY_KINDS}
-            if (
-                len(pairs) != len(expected)
-                or set(pairs) != expected
-                or len({proof.authority_id for proof in self.query_proofs}) != len(pairs)
-            ):
-                raise ValueError("bound query proofs must exactly cover instruments and kinds")
-        else:
-            proof_kinds = [proof.kind for proof in self.query_proofs]
-            if len(proof_kinds) != len(set(proof_kinds)) or set(proof_kinds) != _QUERY_KINDS:
-                raise ValueError("query proofs must exactly cover required kinds")
+        proof_kinds = [proof.kind for proof in self.query_proofs]
+        if len(proof_kinds) != len(set(proof_kinds)) or set(proof_kinds) != _QUERY_KINDS:
+            raise ValueError("query proofs must exactly cover required kinds")
         if any(not proof.complete for proof in self.query_proofs):
             raise ValueError("query proofs must be complete")
         late_price = any(price.available_at > self.decision_time for price in self.prices)

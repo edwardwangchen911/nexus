@@ -91,28 +91,6 @@ _PORTFOLIO_ONCE_WORKER_ID = f"portfolio-decision-once-{new_uuid7()}"
 _PORTFOLIO_ONCE_STARTED_AT = datetime.now(UTC)
 
 
-async def run_portfolio_synthesis_worker_once(
-    settings: EngineSettings,
-    *,
-    job_ids: tuple[UUID, ...] = (),
-) -> bool:
-    """Explicit one-shot synthesis using frozen Codex authority and no retry."""
-    from nexus.agents.portfolio_synthesis_worker import (
-        CodexSynthesisTransport,
-        run_synthesis_job_once,
-    )
-
-    if _require_worker_runtime(settings) is not AgentRuntimeMode.CODEX_SDK:
-        raise ValueError("PORTFOLIO_SYNTHESIS_TRANSPORT_UNSUPPORTED")
-    return await run_synthesis_job_once(
-        session_factory(settings),
-        transport=CodexSynthesisTransport(),
-        worker_id=f"portfolio-synthesis-{new_uuid7()}",
-        clock=lambda: datetime.now(UTC),
-        job_ids=job_ids,
-    )
-
-
 class _AgentResearchJobPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -178,8 +156,12 @@ def _openai_portfolio_responses_client(
             max_output_tokens=int(OPENAI_LOCAL_CONFIG["max_output_tokens"]),
             max_tool_calls=1,
             absolute_timeout_seconds=PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
-            input_usd_per_million=Decimal(str(OPENAI_LOCAL_CONFIG["input_usd_per_million"])),
-            output_usd_per_million=Decimal(str(OPENAI_LOCAL_CONFIG["output_usd_per_million"])),
+            input_usd_per_million=Decimal(
+                str(OPENAI_LOCAL_CONFIG["input_usd_per_million"])
+            ),
+            output_usd_per_million=Decimal(
+                str(OPENAI_LOCAL_CONFIG["output_usd_per_million"])
+            ),
         ),
     )
 

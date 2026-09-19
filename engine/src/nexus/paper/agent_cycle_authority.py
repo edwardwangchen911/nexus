@@ -39,7 +39,6 @@ from nexus.persistence.models.paper import (
     PaperAccountRecord,
     RiskQueryAuthorityRecord,
 )
-from nexus.risk.authority import canonical_query_authority_hash
 
 
 class CycleAuthority(BaseModel):
@@ -403,73 +402,40 @@ async def load_recorded_schwab_cycle_authority(
 
 
 async def prepare_candidates(
-    session: AsyncSession,
-    *,
-    authority: CycleAuthority,
-    requested_instrument_ids: tuple[UUID, ...],
-    max_instruments: int = 5,
+    session: AsyncSession, *, authority: CycleAuthority
 ) -> tuple[CandidateManifestEntry, ...]:
-    """Resolve the exact bounded request; one missing authority rejects every candidate."""
-    if not 1 <= len(requested_instrument_ids) <= max_instruments or len(
-        set(requested_instrument_ids)
-    ) != len(requested_instrument_ids):
-        return ()
-    rows = (
-        await session.execute(
-            select(InstrumentAlias, UniverseMember, Instrument)
+    decision_source_policy_id = _decision_source_policy_id(authority)
+    aliases = tuple(
+        await session.scalars(
+            select(InstrumentAlias)
             .join(
                 UniverseMember,
                 UniverseMember.instrument_id == InstrumentAlias.instrument_id,
             )
-            .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
             .where(
                 UniverseMember.universe_snapshot_id == authority.universe_snapshot_id,
                 UniverseMember.created_at <= authority.decision_time,
-                InstrumentAlias.instrument_id.in_(requested_instrument_ids),
+                InstrumentAlias.symbol == "AAPL",
                 InstrumentAlias.alias_type == "ticker",
                 InstrumentAlias.valid_from <= authority.decision_session,
                 (InstrumentAlias.valid_to.is_(None))
                 | (InstrumentAlias.valid_to >= authority.decision_session),
                 InstrumentAlias.created_at <= authority.decision_time,
             )
-            .limit(max_instruments + 1)
+            .limit(2)
         )
-    ).all()
-    if (
-        len(rows) != len(requested_instrument_ids)
-        or {alias.instrument_id for alias, _, _ in rows} != set(requested_instrument_ids)
-        or len({alias.symbol for alias, _, _ in rows}) != len(rows)
-    ):
+    )
+    if len(aliases) != 1:
         return ()
-    prepared: list[CandidateManifestEntry] = []
-    for alias, member, instrument in sorted(rows, key=lambda row: row[0].instrument_id.int):
-        candidate = await _prepare_candidate(
-            session, authority=authority, alias=alias, member=member, instrument=instrument
+    alias = aliases[0]
+    instrument = await session.get(Instrument, alias.instrument_id)
+    member = await session.scalar(
+        select(UniverseMember).where(
+            UniverseMember.universe_snapshot_id == authority.universe_snapshot_id,
+            UniverseMember.instrument_id == alias.instrument_id,
+            UniverseMember.created_at <= authority.decision_time,
         )
-        if not candidate:
-            return ()
-        prepared.extend(candidate)
-    manifest = tuple(prepared)
-    if not await validate_candidate_manifest(
-        session,
-        authority=authority,
-        manifest=manifest,
-        requested_instrument_ids=requested_instrument_ids,
-        max_instruments=max_instruments,
-    ):
-        return ()
-    return manifest
-
-
-async def _prepare_candidate(
-    session: AsyncSession,
-    *,
-    authority: CycleAuthority,
-    alias: InstrumentAlias,
-    member: UniverseMember,
-    instrument: Instrument,
-) -> tuple[CandidateManifestEntry, ...]:
-    decision_source_policy_id = _decision_source_policy_id(authority)
+    )
     snapshot = await select_authoritative_snapshot(
         session, instrument_id=alias.instrument_id, as_of=authority.decision_time
     )
@@ -541,7 +507,6 @@ async def _prepare_candidate(
                 RiskQueryAuthorityRecord.source_policy_id == decision_source_policy_id,
                 RiskQueryAuthorityRecord.universe_snapshot_id == authority.universe_snapshot_id,
                 RiskQueryAuthorityRecord.decision_session == authority.decision_session,
-                RiskQueryAuthorityRecord.required_instrument_ids == [alias.instrument_id],
                 RiskQueryAuthorityRecord.kind.in_(("corporate_action", "suspension", "delisting")),
                 RiskQueryAuthorityRecord.complete.is_(True),
                 RiskQueryAuthorityRecord.available_at <= authority.decision_time,
@@ -637,7 +602,7 @@ async def _prepare_candidate(
     return (
         CandidateManifestEntry(
             instrument_id=alias.instrument_id,
-            symbol=alias.symbol,
+            symbol="AAPL",
             inclusion_reason=member.inclusion_reason,
             research_snapshot_id=snapshot.id,
             prior_daily_price_authority_id=prior_daily.id,
@@ -655,41 +620,19 @@ async def validate_candidate_manifest(
     *,
     authority: CycleAuthority,
     manifest: tuple[CandidateManifestEntry, ...],
-    requested_instrument_ids: tuple[UUID, ...] | None = None,
-    max_instruments: int = 5,
 ) -> bool:
     """Read back the exact frozen authorities without selecting newer evidence."""
-    if (
-        not 1 <= len(manifest) <= max_instruments
-        or len({row.instrument_id for row in manifest}) != len(manifest)
-        or len({row.symbol for row in manifest}) != len(manifest)
-    ):
+    if len(manifest) != 1:
         return False
-    if requested_instrument_ids is not None and (
-        len(requested_instrument_ids) != len(manifest)
-        or set(requested_instrument_ids) != {row.instrument_id for row in manifest}
-    ):
-        return False
-    for candidate in manifest:
-        if not await _validate_candidate(session, authority=authority, candidate=candidate):
-            return False
-    return True
-
-
-async def _validate_candidate(
-    session: AsyncSession,
-    *,
-    authority: CycleAuthority,
-    candidate: CandidateManifestEntry,
-) -> bool:
     decision_source_policy_id = _decision_source_policy_id(authority)
+    candidate = manifest[0]
     instrument = await session.get(Instrument, candidate.instrument_id)
     alias_count = await session.scalar(
         select(func.count())
         .select_from(InstrumentAlias)
         .where(
             InstrumentAlias.instrument_id == candidate.instrument_id,
-            InstrumentAlias.symbol == candidate.symbol,
+            InstrumentAlias.symbol == "AAPL",
             InstrumentAlias.alias_type == "ticker",
             InstrumentAlias.valid_from <= authority.decision_session,
             (InstrumentAlias.valid_to.is_(None))
@@ -776,8 +719,6 @@ async def _validate_candidate(
         or quote.observed_at > artifact.received_at
         or artifact.received_at - quote.observed_at > timedelta(seconds=60)
         or artifact.received_at > authority.decision_time
-        or authority.decision_time - artifact.received_at > timedelta(seconds=60)
-        or (candidate.decision_trade_id is not None and trade is None)
         or len(risk_rows) != 3
         or {row.id for row in risk_rows} != set(candidate.risk_query_authority_ids)
         or {row.kind for row in risk_rows} != {"corporate_action", "suspension", "delisting"}
@@ -788,20 +729,8 @@ async def _validate_candidate(
             or not row.complete
             or row.available_at > authority.decision_time
             or row.created_at > authority.decision_time
-            or row.required_instrument_ids != [candidate.instrument_id]
+            or candidate.instrument_id not in row.required_instrument_ids
             or candidate.instrument_id in row.blocked_instrument_ids
-            or row.content_hash
-            != canonical_query_authority_hash(
-                source_policy_id=row.source_policy_id,
-                universe_snapshot_id=row.universe_snapshot_id,
-                decision_session=row.decision_session,
-                kind=row.kind,
-                required_instrument_ids=row.required_instrument_ids,
-                blocked_instrument_ids=row.blocked_instrument_ids,
-                complete=row.complete,
-                source_watermark_hash=row.source_watermark_hash,
-                available_at=row.available_at,
-            )
             or (
                 decision_source_policy_id == PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
                 and row.kind == "suspension"

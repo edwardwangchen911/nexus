@@ -12,7 +12,6 @@ it("loads a diagnostic through the real portfolio page without starting a provid
   const report = { ...diagnosticReport("RESEARCH_REQUIRED"), portfolio_snapshot_id: snapshotId, snapshot_as_of: snapshot.as_of! };
   const read = vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
-    if (path === "/api/v1/paper/management/portfolio") return new Response(null, { status: 404 });
     if (path.startsWith("/api/v1/portfolios?")) return Response.json({ data: { items: [portfolio], next_cursor: null } });
     if (path.endsWith("/snapshots/latest")) return Response.json({ data: snapshot });
     if (path.endsWith("/diagnostics/latest")) return Response.json({ data: report });
@@ -23,7 +22,7 @@ it("loads a diagnostic through the real portfolio page without starting a provid
   expect(await screen.findByRole("region", { name: "当前快照诊断" })).toBeVisible();
   expect(screen.getByRole("button", { name: "生成调整情景" })).toBeEnabled();
   expect(screen.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toBeVisible();
-  expect(read).toHaveBeenCalledTimes(4);
+  expect(read).toHaveBeenCalledTimes(3);
   const calls = read.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
   expect(calls.every((call) => (call[1]?.method ?? "GET") === "GET")).toBe(true);
 });

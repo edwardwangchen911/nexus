@@ -67,101 +67,9 @@ class PaperAccountRecord(ImmutableCreatedAt, Base):
     capability: Mapped[str] = mapped_column(String(50))
 
 
-class AgentPaperCandidateBatchRecord(ImmutableCreatedAt, Base):
-    __tablename__ = "agent_paper_candidate_batches"
-    __table_args__ = (
-        UniqueConstraint("batch_hash", name="uq_agent_paper_candidate_batches_hash"),
-        UniqueConstraint("id", "account_id", "universe_snapshot_id", name="uq_candidate_batches_scope"),
-        ForeignKeyConstraint(["account_id"], ["paper_accounts.id"]),
-        ForeignKeyConstraint(["universe_snapshot_id"], ["universe_snapshots.id"]),
-        CheckConstraint("source = 'explicit_research_scope'", name="source_fixed"),
-        CheckConstraint("batch_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),
-        CheckConstraint(
-            "array_ndims(candidate_instrument_ids) = 1 "
-            "AND cardinality(candidate_instrument_ids) BETWEEN 1 AND 5 "
-            "AND array_position(candidate_instrument_ids, NULL) IS NULL",
-            name="candidates_bounded",
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    account_id: Mapped[UUID]
-    universe_snapshot_id: Mapped[UUID]
-    candidate_instrument_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PostgreSQLUUID(as_uuid=True)))
-    source: Mapped[str] = mapped_column(String(40))
-    batch_hash: Mapped[str] = mapped_column(String(64))
-
-
-class PaperInitialTargetApprovalRecord(ImmutableCreatedAt, Base):
-    __tablename__ = "paper_initial_target_approvals"
-    __table_args__ = (
-        UniqueConstraint("account_id", name="uq_paper_initial_target_approvals_account"),
-        ForeignKeyConstraint(
-            ["account_id", "portfolio_id"], ["paper_accounts.id", "paper_accounts.portfolio_id"],
-            name="fk_paper_initial_target_approvals_account",
-        ),
-        CheckConstraint("projection_hash ~ '^[0-9a-f]{64}$' AND allocation_policy_hash ~ '^[0-9a-f]{64}$' AND approval_hash ~ '^[0-9a-f]{64}$'", name="hashes_canonical"),
-        CheckConstraint("btrim(approved_by) <> ''", name="approver_nonempty"),
-        CheckConstraint("approved_at >= projection_as_of", name="times_ordered"),
-        CheckConstraint("allocation_policy_version = 'portfolio_allocation_v1' AND allocation_policy_hash = 'd7b719f47edbf3cb7ebb40dbe555a51f717ca581162a72d05c23391b8b083dd7'", name="policy_fixed"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    account_id: Mapped[UUID]
-    portfolio_id: Mapped[UUID]
-    projection_as_of: Mapped[datetime] = mapped_column(UTCDateTime())
-    projection_hash: Mapped[str] = mapped_column(String(64))
-    allocation_policy_version: Mapped[str] = mapped_column(String(50))
-    allocation_policy_hash: Mapped[str] = mapped_column(String(64))
-    approved_by: Mapped[str] = mapped_column(String(100))
-    approved_at: Mapped[datetime] = mapped_column(UTCDateTime())
-    approval_hash: Mapped[str] = mapped_column(String(64))
-
-
-class PaperTargetVersionRecord(ImmutableCreatedAt, Base):
-    __tablename__ = "paper_target_versions"
-    __table_args__ = (
-        UniqueConstraint("account_id", "version_seq", name="uq_paper_target_versions_account_seq"),
-        UniqueConstraint("strategy_decision_id", name="uq_paper_target_versions_decision"),
-        UniqueConstraint("previous_target_version_id", name="uq_paper_target_versions_previous"),
-        UniqueConstraint("id", "account_id", name="uq_paper_target_versions_id_account"),
-        ForeignKeyConstraint(
-            ["account_id", "portfolio_id"], ["paper_accounts.id", "paper_accounts.portfolio_id"],
-            name="fk_paper_target_versions_account",
-        ),
-        ForeignKeyConstraint(
-            ["strategy_decision_id", "account_id"], ["strategy_decisions.id", "strategy_decisions.account_id"],
-            name="fk_paper_target_versions_decision",
-        ),
-        ForeignKeyConstraint(
-            ["previous_target_version_id", "account_id"], ["paper_target_versions.id", "paper_target_versions.account_id"],
-            name="fk_paper_target_versions_previous",
-        ),
-        CheckConstraint("version_seq >= 1", name="sequence_positive"),
-        CheckConstraint("previous_target_version_id IS NULL OR previous_target_version_id <> id", name="previous_not_self"),
-        CheckConstraint("target_content_hash ~ '^[0-9a-f]{64}$' AND activation_hash ~ '^[0-9a-f]{64}$'", name="hashes_canonical"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    account_id: Mapped[UUID]
-    portfolio_id: Mapped[UUID]
-    version_seq: Mapped[int] = mapped_column(BigInteger)
-    strategy_decision_id: Mapped[UUID]
-    previous_target_version_id: Mapped[UUID | None]
-    target_content_hash: Mapped[str] = mapped_column(String(64))
-    activated_at: Mapped[datetime] = mapped_column(UTCDateTime())
-    activation_hash: Mapped[str] = mapped_column(String(64))
-
-
 class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
     __tablename__ = "agent_paper_cycles"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["candidate_batch_id", "account_id", "universe_snapshot_id"],
-            ["agent_paper_candidate_batches.id", "agent_paper_candidate_batches.account_id",
-             "agent_paper_candidate_batches.universe_snapshot_id"],
-            name="fk_agent_paper_cycles_candidate_batch",
-        ),
         UniqueConstraint(
             "account_id",
             "decision_slot_at",
@@ -212,9 +120,7 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
             name="hashes_canonical",
         ),
         CheckConstraint(
-            "(candidate_batch_id IS NULL AND sizing_policy_version = 'agent_paper_sizing_v1') "
-            "OR (candidate_batch_id IS NOT NULL AND sizing_policy_version = 'portfolio_allocation_v1' "
-            "AND sizing_policy_hash = 'd7b719f47edbf3cb7ebb40dbe555a51f717ca581162a72d05c23391b8b083dd7')",
+            "sizing_policy_version = 'agent_paper_sizing_v1'",
             name="sizing_policy_fixed",
         ),
         CheckConstraint("execution_locked", name="execution_locked"),
@@ -230,7 +136,6 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
     execution_session: Mapped[date] = mapped_column(Date)
     universe_snapshot_id: Mapped[UUID]
     quality_report_id: Mapped[UUID | None]
-    candidate_batch_id: Mapped[UUID | None]
     decision_price_policy_id: Mapped[UUID]
     execution_price_policy_id: Mapped[UUID]
     candidate_manifest: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
@@ -415,11 +320,6 @@ Index(
 class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     __tablename__ = "strategy_decisions"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["portfolio_synthesis_output_id"], ["agent_portfolio_synthesis_outputs.id"],
-            name="fk_strategy_decisions_portfolio_synthesis",
-            use_alter=True,
-        ),
         Index(
             "uq_strategy_decisions_registered_account_session",
             "account_id",
@@ -494,11 +394,7 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             "AND execution_session > decision_session) OR "
             "(decision_origin = 'agent_research' "
             "AND strategy_id = 'agent_research' "
-            "AND ((strategy_version = 'agent_paper_decision_v1' "
-            "AND portfolio_synthesis_output_id IS NULL) OR "
-            "(strategy_version = 'agent_portfolio_proposal_v1' "
-            "AND portfolio_synthesis_output_id IS NOT NULL "
-            "AND strategy_parameters_hash = 'd7b719f47edbf3cb7ebb40dbe555a51f717ca581162a72d05c23391b8b083dd7')) "
+            "AND strategy_version = 'agent_paper_decision_v1' "
             "AND num_nonnulls(strategy_definition_id, registry_event_id, champion_generation) = 0 "
             "AND quality_report_id IS NULL "
             "AND reason = 'AGENT_RESEARCH' "
@@ -542,7 +438,6 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
         String(30), default="registered_strategy", server_default="registered_strategy"
     )
     agent_paper_cycle_id: Mapped[UUID | None]
-    portfolio_synthesis_output_id: Mapped[UUID | None]
     decision_session: Mapped[date] = mapped_column(Date)
     decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
     execution_session: Mapped[date] = mapped_column(Date)
@@ -667,11 +562,6 @@ class PaperDrawdownLockEventRecord(ImmutableCreatedAt, Base):
 class PaperOrderBatchRecord(ImmutableCreatedAt, Base):
     __tablename__ = "paper_order_batches"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["target_version_id", "account_id"],
-            ["paper_target_versions.id", "paper_target_versions.account_id"],
-            name="fk_paper_order_batches_target_version",
-        ),
         UniqueConstraint(
             "account_id",
             "strategy_decision_id",
@@ -719,7 +609,6 @@ class PaperOrderBatchRecord(ImmutableCreatedAt, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     account_id: Mapped[UUID]
     strategy_decision_id: Mapped[UUID]
-    target_version_id: Mapped[UUID | None]
     risk_policy_id: Mapped[UUID]
     idempotency_record_id: Mapped[UUID]
     request_hash: Mapped[str] = mapped_column(String(64))
@@ -1103,7 +992,6 @@ class RiskQueryAuthorityRecord(ImmutableCreatedAt, Base):
             "decision_session",
             "kind",
             "available_at",
-            "required_instrument_ids",
             name="uq_risk_query_authorities_scope_available",
         ),
         UniqueConstraint(

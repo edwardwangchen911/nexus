@@ -4,12 +4,11 @@ import json
 import os
 import subprocess
 from copy import deepcopy
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -21,12 +20,7 @@ from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.api.research_inputs import read_research_inputs
 from nexus.ops import agent_paper_loop
 from nexus.ops.openai_local import prepare_database
-from nexus.paper.candidate_batch import CandidateInstrumentIdentity
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
-from nexus.persistence.models.backtest import (
-    ExchangeCalendarAuthorityRecord,
-    ExchangeCalendarSessionRecord,
-)
 from nexus.persistence.models.data import DataSnapshot
 from nexus.research.current_price_trends import SOURCE
 from nexus.research.current_price_trends_storage import persist_current_price_trends
@@ -197,53 +191,7 @@ async def test_agent_paper_preparation_binds_existing_trend_without_recollecting
         prior_session = documents[evidence.id].last_observed_on
         assert prior_session is not None
 
-    candidate = CandidateInstrumentIdentity(
-        instrument_id=INSTRUMENT,
-        symbol="AAPL",
-        asset_type="common_stock",
-        exchange="XNYS",
-        currency="USD",
-    )
-    calendar_id = UUID(int=711)
-    calendar_now = datetime.now(UTC)
-    today = calendar_now.astimezone(ZoneInfo("America/New_York")).date()
-    start = prior_session - timedelta(days=366)
-    async with factory.begin() as session:
-        session.add(
-            ExchangeCalendarAuthorityRecord(
-                id=calendar_id,
-                exchange="XNYS",
-                version="current-trend-bound-test",
-                source="fixture",
-                range_start=start,
-                range_end=today + timedelta(days=2),
-                query_parameters={},
-                completeness_status="complete",
-                content_hash="c" * 64,
-                published_at=calendar_now - timedelta(days=1),
-                created_at=calendar_now - timedelta(days=1),
-            )
-        )
-        await session.flush()
-        for day in sorted(
-            {start, prior_session, today, today + timedelta(days=1), today + timedelta(days=2)}
-        ):
-            session.add(
-                ExchangeCalendarSessionRecord(
-                    calendar_authority_id=calendar_id,
-                    session=day,
-                    decision_at=datetime.combine(day, time(20, 1), tzinfo=UTC),
-                    market_open_at=datetime.combine(day, time(13, 30), tzinfo=UTC),
-                    market_close_at=datetime.combine(day, time(20), tzinfo=UTC),
-                    created_at=calendar_now - timedelta(days=1),
-                )
-            )
-
-    async def inspect_prior(
-        _settings, *, account_id, now, expected_calendar_authority_id, candidate
-    ):
-        assert expected_calendar_authority_id == calendar_id
-        assert candidate.instrument_id == INSTRUMENT
+    async def inspect_prior(_settings, *, account_id, now):
         return agent_paper_loop.PriorDailyScope(
             instrument_id=INSTRUMENT,
             prior_session=prior_session,
@@ -259,8 +207,6 @@ async def test_agent_paper_preparation_binds_existing_trend_without_recollecting
 
     first = await agent_paper_loop.prepare_current_trends_once(
         settings,
-        candidate=candidate,
-        expected_calendar_authority_id=calendar_id,
         account_id=UUID(int=1),
         repo_root=tmp_path,
         now=datetime.now(UTC),
@@ -290,8 +236,6 @@ async def test_agent_paper_preparation_binds_existing_trend_without_recollecting
 
     second = await agent_paper_loop.prepare_current_trends_once(
         settings,
-        candidate=candidate,
-        expected_calendar_authority_id=calendar_id,
         account_id=UUID(int=1),
         repo_root=tmp_path,
         now=datetime.now(UTC),

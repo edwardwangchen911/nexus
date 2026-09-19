@@ -10,7 +10,6 @@ import json
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -97,7 +96,6 @@ class CodexInvocationError(ValueError):
         *,
         usage: UsageSnapshot | None = None,
         phase: InvocationPhase = "response_check",
-        provider_call_started: bool | None = None,
     ) -> None:
         kinds: dict[str, InvocationKind] = {
             "CODEX_INPUT_TOO_LARGE": "input_too_large",
@@ -117,12 +115,6 @@ class CodexInvocationError(ValueError):
         )
         super().__init__(self.reason)
         self.usage = usage
-        self.provider_call_started = provider_call_started
-
-
-@dataclass
-class _InvocationState:
-    provider_call_started: bool = False
 
 
 class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
@@ -152,27 +144,15 @@ async def _close_sdk_client(client: AsyncCodex) -> None:
 
 
 @contextmanager
-def _invocation_boundary(
-    phase: InvocationPhase, *, state: _InvocationState | None = None
-) -> Iterator[None]:
+def _invocation_boundary(phase: InvocationPhase) -> Iterator[None]:
     try:
         yield
-    except CodexInvocationError as error:
-        if state is not None:
-            error.provider_call_started = state.provider_call_started
+    except CodexInvocationError:
         raise
     except TimeoutError:
-        raise _CodexInvocationTimeout(
-            "CODEX_TIMEOUT",
-            phase=phase,
-            provider_call_started=None if state is None else state.provider_call_started,
-        ) from None
+        raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
     except Exception:
-        raise CodexInvocationError(
-            "CODEX_UNEXPECTED_EXCEPTION",
-            phase=phase,
-            provider_call_started=None if state is None else state.provider_call_started,
-        ) from None
+        raise CodexInvocationError("CODEX_UNEXPECTED_EXCEPTION", phase=phase) from None
 
 
 class _Claim(BaseModel):
@@ -327,11 +307,9 @@ async def invoke_codex(
     output_model: type[BaseModel] = _Batch,
     max_wire_bytes: int = 55808,
 ) -> tuple[str, UsageSnapshot]:
-    state = _InvocationState()
-    with _invocation_boundary("preflight", state=state):
+    with _invocation_boundary("preflight"):
         return await _invoke_codex(
             payload,
-            invocation_state=state,
             output_model=output_model,
             max_wire_bytes=max_wire_bytes,
             timeout_seconds=TIMEOUT_SECONDS,
@@ -345,11 +323,9 @@ async def invoke_codex_portfolio(
     max_wire_bytes: int = 55808,
 ) -> tuple[str, UsageSnapshot]:
     """Run one portfolio turn without changing the default research deadline."""
-    state = _InvocationState()
-    with _invocation_boundary("preflight", state=state):
+    with _invocation_boundary("preflight"):
         return await _invoke_codex(
             payload,
-            invocation_state=state,
             output_model=output_model,
             max_wire_bytes=max_wire_bytes,
             timeout_seconds=PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS,
@@ -362,7 +338,6 @@ async def _invoke_codex(
     output_model: type[BaseModel],
     max_wire_bytes: int,
     timeout_seconds: int,
-    invocation_state: _InvocationState,
 ) -> tuple[str, UsageSnapshot]:
     wire = codex_request_wire(payload)
     if type(max_wire_bytes) is not int or max_wire_bytes not in {55808, 64000}:
@@ -410,9 +385,6 @@ async def _invoke_codex(
                     )
                 phase = "turn_run"
                 with _invocation_boundary(phase):
-                    # Mark before entering thread.run; any later cleanup/stream
-                    # failure must retain uncertainty even without reported usage.
-                    invocation_state.provider_call_started = True
                     run_task = asyncio.create_task(
                         thread.run(
                             wire,

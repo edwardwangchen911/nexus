@@ -163,7 +163,6 @@ async def advance_agent_version_slot(
         async with session.begin_nested():
             incumbent = await start_schwab_agent_paper_cycle(
                 session,
-                requested_instrument_ids=(evaluation.instrument_id,),
                 authority=authorities[0],
                 decision_slot_at=decision_slot_at,
                 idempotency_key=(
@@ -176,7 +175,6 @@ async def advance_agent_version_slot(
             )
             challenger = await start_schwab_agent_paper_cycle(
                 session,
-                requested_instrument_ids=(evaluation.instrument_id,),
                 authority=authorities[1],
                 decision_slot_at=decision_slot_at,
                 idempotency_key=(
@@ -503,9 +501,7 @@ async def _database_now(session: AsyncSession) -> datetime:
     return value
 
 
-def _phase(
-    evaluation: AgentVersionEvaluationRecord, slot: datetime
-) -> Literal["train", "oos"]:
+def _phase(evaluation: AgentVersionEvaluationRecord, slot: datetime) -> Literal["train", "oos"]:
     if slot in evaluation.train_slots:
         return "train"
     if slot in evaluation.oos_slots:
@@ -541,7 +537,7 @@ async def _pair(
                 AgentVersionCyclePairRecord.evaluation_id == evaluation_id,
                 AgentVersionCyclePairRecord.decision_slot_at == slot,
             )
-        )
+        ),
     )
 
 
@@ -671,9 +667,7 @@ async def _previous_slot_is_paired(
         return False
     if index == 0:
         return True
-    return (
-        await _pair(session, evaluation.id, slots[index - 1])
-    ) is not None
+    return (await _pair(session, evaluation.id, slots[index - 1])) is not None
 
 
 def _pair_hash(
@@ -717,8 +711,7 @@ async def _slot_authorities(
     decision_session = decision_slot_at.astimezone(_NEW_YORK).date()
     calendar = await session.scalar(
         select(ExchangeCalendarSessionRecord).where(
-            ExchangeCalendarSessionRecord.calendar_authority_id
-            == evaluation.calendar_authority_id,
+            ExchangeCalendarSessionRecord.calendar_authority_id == evaluation.calendar_authority_id,
             ExchangeCalendarSessionRecord.session == decision_session,
             ExchangeCalendarSessionRecord.market_open_at <= decision_slot_at,
             ExchangeCalendarSessionRecord.market_close_at >= decision_slot_at,
@@ -750,6 +743,7 @@ async def _slot_authorities(
     account_by_id = {row.id: row for row in accounts}
     if calendar is None or universe is None or len(account_by_id) != 2:
         return None
+
     def authority(account_id: UUID) -> CycleAuthority:
         return CycleAuthority(
             account_id=account_id,
@@ -828,8 +822,7 @@ async def _validate_prepared_pair(
         or challenger_run.model_hash != evaluation.challenger_model_hash
         or challenger_run.prompt_version_id != evaluation.challenger_prompt_version_id
         or challenger_run.model_config_id != evaluation.challenger_model_config_id
-        or _non_context_evidence(incumbent_run)
-        != _non_context_evidence(challenger_run)
+        or _non_context_evidence(incumbent_run) != _non_context_evidence(challenger_run)
     ):
         raise _PairPreparationUnavailable
 
@@ -1011,9 +1004,7 @@ async def _initialize_account(
             user_acknowledged=False,
             reason_code="PAPER_ACCOUNT_INITIALIZED",
             occurred_at=evaluation.created_at,
-            payload_hash=_hash(
-                f"agent_version_initial_drawdown_v1|{evaluation.id}|{account_id}"
-            ),
+            payload_hash=_hash(f"agent_version_initial_drawdown_v1|{evaluation.id}|{account_id}"),
         )
     )
 
@@ -1047,10 +1038,7 @@ def _validate_existing_initialization(
             row
             for row in transactions
             if row.account_id == account_id
-            and (
-                row.transaction_type == "funding"
-                or row.reference_type == "initial_funding"
-            )
+            and (row.transaction_type == "funding" or row.reference_type == "initial_funding")
         )
         initial_event = tuple(
             row
@@ -1138,9 +1126,7 @@ def _validate_existing_initialization(
             ),
             transaction_hash="0" * 64,
         )
-        if funding[0].transaction_hash != canonical_paper_ledger_transaction_hash(
-            draft
-        ):
+        if funding[0].transaction_hash != canonical_paper_ledger_transaction_hash(draft):
             raise ValueError("AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID")
 
 
