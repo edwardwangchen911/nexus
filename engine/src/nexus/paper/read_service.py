@@ -772,6 +772,12 @@ class PaperReadService:
                 batch_id=None,
                 as_of=event.occurred_at,
             )
+        if strict_identity and (decision is None or target is None):
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The Agent paper activation identity is incomplete.",
+                status_code=409,
+            )
         if decision is None or target is None:
             return None
         if (strict_identity and decision_id != decision.id) or (

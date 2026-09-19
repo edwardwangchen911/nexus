@@ -171,6 +171,80 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
         await engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("table", "identity"),
+    (
+        ("strategy_decisions", "decision"),
+        ("paper_target_versions", "target"),
+        ("paper_order_batches", "batch"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_management_cycle_rejects_activation_with_missing_authority_row(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    table: str,
+    identity: str,
+) -> None:
+    from integration.test_paper_cancel_result_read_pg import _seed_target_associated_plan
+    from nexus.paper.agent_cycle import _append_event, _events, _resume_batch
+
+    engine, sessions, args, proposal, activated = await _seed_target_associated_plan(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        read_at = args["now"] + timedelta(seconds=3)
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            await _append_event(
+                session,
+                cycle,
+                (await _events(session, cycle.id))[-1].to_status,
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {
+                    "strategy_decision_id": str(proposal.decision_id),
+                    "portfolio_synthesis_output_id": str(
+                        proposal.proposal.synthesis_output_id
+                    ),
+                },
+            )
+            await _resume_batch(
+                session,
+                cycle=cycle,
+                events=await _events(session, cycle.id),
+                now=args["now"] + timedelta(seconds=2),
+            )
+        row_id = {
+            "decision": proposal.decision_id,
+            "target": activated.target_version_id,
+            "batch": activated.batch_id,
+        }[identity]
+        assert row_id is not None
+        async with sessions.begin() as session:
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text(f"UPDATE {table} SET created_at=:future WHERE id=:row_id"),
+                    {"future": read_at + timedelta(days=1), "row_id": row_id},
+                )
+            finally:
+                await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=read_at)),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "DATA_PARTIAL"
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_management_summary_ignores_more_than_fifty_unoccupied_historical_batches(
     migrated_database_url: str,

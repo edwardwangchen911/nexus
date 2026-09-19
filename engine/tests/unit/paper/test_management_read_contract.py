@@ -168,3 +168,42 @@ def test_candidate_batch_activation_requires_every_exact_event_identity() -> Non
             batch=None,
             strict_identity=True,
         )
+
+
+@pytest.mark.parametrize("missing", ("decision", "target", "batch"))
+def test_candidate_batch_activation_rejects_missing_authority_rows(missing: str) -> None:
+    now = datetime(2026, 9, 19, tzinfo=UTC)
+    decision_id = uuid4()
+    target_id = uuid4()
+    batch_id = uuid4()
+    service = PaperReadService(cast(AsyncSession, None), now)
+    event = SimpleNamespace(
+        result_code="PAPER_BATCH_EVALUATED",
+        fact_ids={
+            "strategy_decision_id": str(decision_id),
+            "target_version_id": str(target_id),
+            "batch_id": str(batch_id),
+        },
+        occurred_at=now,
+    )
+
+    with pytest.raises(NexusError) as caught:
+        service._activation_result(
+            event=cast(Any, event),
+            decision=(
+                None
+                if missing == "decision"
+                else cast(Any, SimpleNamespace(id=decision_id))
+            ),
+            target=(
+                None
+                if missing == "target"
+                else cast(Any, SimpleNamespace(target_version_id=target_id))
+            ),
+            batch=(
+                None if missing == "batch" else cast(Any, SimpleNamespace(id=batch_id))
+            ),
+            strict_identity=True,
+        )
+
+    assert caught.value.code.value == "DATA_PARTIAL"
