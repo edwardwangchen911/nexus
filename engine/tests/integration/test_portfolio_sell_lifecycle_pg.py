@@ -289,6 +289,18 @@ async def test_persisted_proposal_creates_and_conserves_real_sell_lifecycle(
             )
             cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
             assert cycle is not None
+            initial_available_cash = await session.scalar(
+                select(
+                    func.sum(
+                        PaperLedgerEntryRecord.debit_amount
+                        - PaperLedgerEntryRecord.credit_amount
+                    )
+                ).where(
+                    PaperLedgerEntryRecord.account_id == proposal.account_id,
+                    PaperLedgerEntryRecord.account_code == "asset.cash.available.usd",
+                )
+            )
+            assert initial_available_cash is not None
 
         async with sessions() as session:
             scope = await resolve_agent_paper_market_scope(
@@ -393,10 +405,13 @@ async def test_persisted_proposal_creates_and_conserves_real_sell_lifecycle(
             )
 
         sold_quantity = sum((fill.quantity for fill in fills), start=Decimal(0))
+        net_proceeds = sum(
+            (fill.notional - fill.fee for fill in fills), start=Decimal(0)
+        )
         assert sold_quantity == advanced.filled_quantity
         assert position_quantity == initial_quantity - sold_quantity
         assert reserved_cash in (None, 0)
-        assert available_cash is not None and available_cash > Decimal("10000")
+        assert available_cash == initial_available_cash + net_proceeds
         assert imbalances == []
         assert sum(
             (

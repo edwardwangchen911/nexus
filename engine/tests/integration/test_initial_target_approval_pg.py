@@ -1,16 +1,20 @@
 import asyncio
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from helpers.paper_batch import seed_paper_batch
+from helpers.paper_batch import CALENDAR_ID, seed_paper_batch
 from integration.test_portfolio_same_day_research_pg import seed_normal_path
 from nexus.ops import agent_paper_once
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.target_service import approve_initial_target_projection
+from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.paper import (
     AgentPaperCandidateBatchRecord,
+    AgentPaperCycleRecord,
     PaperFillRecord,
     PaperInitialTargetApprovalRecord,
     PaperLedgerTransactionRecord,
@@ -19,7 +23,8 @@ from nexus.persistence.models.paper import (
     PaperReservationRecord,
     PaperTargetVersionRecord,
 )
-from sqlalchemy import func, select
+from nexus.persistence.models.runtime import Job
+from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -54,6 +59,8 @@ def test_normal_cli_parses_dispatches_and_persists_initial_portfolio_chain(
         agent_paper_once,
         "load_local_environment",
         lambda *_args, **_kwargs: {
+            "ALPACA_API_KEY_ID": "synthetic-test-key",
+            "ALPACA_API_SECRET_KEY": "synthetic-test-secret",
             "DATABASE_URL": migrated_database_url,
             "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
         },
@@ -104,12 +111,70 @@ def test_normal_cli_parses_dispatches_and_persists_initial_portfolio_chain(
         "--idempotency-key",
         "cli-candidate-batch",
     ]
+    monkeypatch.setattr(
+        agent_paper_once,
+        "func",
+        SimpleNamespace(clock_timestamp=lambda: literal(authority.decision_time)),
+    )
     assert agent_paper_once.main(candidate_args) == 0
     candidates = json.loads(capsys.readouterr().out)
     assert agent_paper_once.main(candidate_args) == 0
     assert json.loads(capsys.readouterr().out) == candidates
 
-    async def persisted_counts() -> tuple[int, int]:
+    async def add_next_calendar_session() -> None:
+        calendar_engine = create_async_engine(migrated_database_url)
+        sessions = async_sessionmaker(calendar_engine, expire_on_commit=False)
+        next_day = authority.decision_time + timedelta(days=1)
+        try:
+            async with sessions.begin() as session:
+                session.add(
+                    ExchangeCalendarSessionRecord(
+                        calendar_authority_id=CALENDAR_ID,
+                        session=next_day.date(),
+                        market_open_at=next_day.replace(hour=13, minute=30),
+                        market_close_at=next_day.replace(hour=20, minute=0),
+                        decision_at=next_day.replace(hour=21, minute=0),
+                        created_at=authority.decision_time,
+                    )
+                )
+        finally:
+            await calendar_engine.dispose()
+
+    asyncio.run(add_next_calendar_session())
+
+    async def use_seeded_authority(*_args, **_kwargs):
+        return authority
+
+    monkeypatch.setattr(agent_paper_once, "_validate_trigger_dependencies", lambda *_args: None)
+    monkeypatch.setattr(
+        agent_paper_once,
+        "S3ProviderEvidenceStore",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        agent_paper_once,
+        "prepare_schwab_decision_authority",
+        use_seeded_authority,
+    )
+    trigger_args = [
+        "trigger",
+        "--account-id",
+        str(authority.account_id),
+        "--idempotency-key",
+        "cli-portfolio-cycle",
+        "--candidate-batch-id",
+        candidates["batch"]["batch_id"],
+    ]
+    assert agent_paper_once.main(trigger_args) == 0
+    cycle = json.loads(capsys.readouterr().out)
+    assert cycle["status"] == "researching"
+    assert len(cycle["research_run_ids"]) == 2
+    assert agent_paper_once.main(trigger_args) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["cycle_id"] == cycle["cycle_id"]
+    assert replay["replayed"] is True
+
+    async def persisted_counts() -> tuple[int, int, int, int, int]:
         engine = create_async_engine(migrated_database_url)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         try:
@@ -131,11 +196,27 @@ def test_normal_cli_parses_dispatches_and_persists_initial_portfolio_chain(
                         )
                         or 0
                     ),
+                    int(
+                        await session.scalar(
+                            select(func.count()).select_from(AgentPaperCycleRecord)
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(
+                            select(func.count()).select_from(AgentResearchRunRecord)
+                        )
+                        or 0
+                    ),
+                    int(
+                        await session.scalar(select(func.count()).select_from(Job))
+                        or 0
+                    ),
                 )
         finally:
             await engine.dispose()
 
-    assert asyncio.run(persisted_counts()) == (1, 1)
+    assert asyncio.run(persisted_counts()) == (1, 1, 1, 2, 2)
     asyncio.run(seeded_engine.dispose())
 
 
