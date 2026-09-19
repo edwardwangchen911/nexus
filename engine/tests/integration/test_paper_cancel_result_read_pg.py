@@ -861,12 +861,19 @@ async def test_target_plan_maps_proposal_authority_corruption_to_pure_read_409(
         ) as client:
             first = await client.get(path, headers=headers("GET", path))
             repeated = await client.get(path, headers=headers("GET", path))
+            orders_path = "/internal/v1/paper/orders?limit=50"
+            orders = await client.get(
+                orders_path,
+                headers=headers("GET", orders_path),
+            )
         async with sessions() as session:
             after = await _database_fingerprint(session)
 
         assert first.status_code == repeated.status_code == 409
         assert first.json()["error"]["code"] == "DATA_PARTIAL"
         assert repeated.json()["error"]["code"] == "DATA_PARTIAL"
+        assert orders.status_code == 409
+        assert orders.json()["error"]["code"] == "DATA_PARTIAL"
         assert before == after
     finally:
         await engine.dispose()

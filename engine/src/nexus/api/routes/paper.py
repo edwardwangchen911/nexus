@@ -16,10 +16,12 @@ from nexus.api.schemas.paper import (
     AgentPaperCycleDetailEnvelope,
     AgentPaperCycleEnvelope,
     AgentPaperCyclePageEnvelope,
+    AgentPaperManagementCycleEnvelope,
     PaperCancelEnvelope,
     PaperCancelRequest,
     PaperCancelResponse,
     PaperCancelResultEnvelope,
+    PaperManagementSummaryEnvelope,
     PaperOrderPageEnvelope,
     PaperPlanEnvelope,
     PaperPortfolioEnvelope,
@@ -147,6 +149,62 @@ async def get_agent_paper_cycle_detail(
         )
     return AgentPaperCycleDetailEnvelope(
         data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/management/cycles/{cycle_id}",
+    operation_id="getInternalPaperManagementCycle",
+    response_model=AgentPaperManagementCycleEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_agent_paper_management_cycle(
+    cycle_id: UUID,
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> AgentPaperManagementCycleEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR,
+            "The Agent paper management cycle query is invalid.",
+            status_code=422,
+        )
+    data = await PaperReadService(session, now).management_cycle_detail(cycle_id)
+    if data is None:
+        raise NexusError(
+            ErrorCode.NOT_FOUND,
+            "The Agent paper management cycle was not found.",
+            status_code=404,
+        )
+    return AgentPaperManagementCycleEnvelope(
+        data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/management/portfolio",
+    operation_id="getInternalPaperManagementSummary",
+    response_model=PaperManagementSummaryEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_paper_management_summary(
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> PaperManagementSummaryEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR,
+            "The paper management summary query is invalid.",
+            status_code=422,
+        )
+    return PaperManagementSummaryEnvelope(
+        data=await PaperReadService(session, now).management_summary(),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
 

@@ -279,7 +279,6 @@ class PaperPortfolioResponse(_StrictSchema):
     comparison: PaperComparisonResponse | None
     positions: tuple[PaperPositionResponse, ...] = Field(max_length=500)
     attributions: tuple[PaperAttributionResponse, ...] = Field(max_length=500)
-    management_summary: PaperManagementSummaryResponse
 
 
 class PaperPortfolioEnvelope(_StrictSchema):
@@ -428,6 +427,11 @@ class AgentPaperCycleEnvelope(_StrictSchema):
 class AgentPaperCycleDetailResponse(_StrictSchema):
     cycle: AgentPaperCycleResponse
     orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
+
+
+class AgentPaperManagementCycleResponse(_StrictSchema):
+    cycle: AgentPaperCycleResponse
+    orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
     candidate_batch: AgentPaperCandidateBatchResponse | None
     security_research: tuple[AgentPaperSecurityResearchResponse, ...] = Field(max_length=5)
     synthesis: AgentPaperSynthesisResponse | None
@@ -441,6 +445,16 @@ class AgentPaperCycleDetailResponse(_StrictSchema):
 
 class AgentPaperCycleDetailEnvelope(_StrictSchema):
     data: AgentPaperCycleDetailResponse
+    meta: SuccessMetaResponse
+
+
+class AgentPaperManagementCycleEnvelope(_StrictSchema):
+    data: AgentPaperManagementCycleResponse
+    meta: SuccessMetaResponse
+
+
+class PaperManagementSummaryEnvelope(_StrictSchema):
+    data: PaperManagementSummaryResponse
     meta: SuccessMetaResponse
 
 

@@ -122,15 +122,25 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
                 events=await _events(session, cycle.id),
                 now=now,
             )
-        detail_path = f"/internal/v1/paper/cycles/{args['cycle_id']}"
-        portfolio_path = "/internal/v1/paper/portfolio"
+        legacy_detail_path = f"/internal/v1/paper/cycles/{args['cycle_id']}"
+        detail_path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        legacy_portfolio_path = "/internal/v1/paper/portfolio"
+        portfolio_path = "/internal/v1/paper/management/portfolio"
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app(migrated_database_url, now=now)),
             base_url="http://testserver",
         ) as client:
+            legacy_detail = await client.get(
+                legacy_detail_path, headers=headers("GET", legacy_detail_path)
+            )
             detail = await client.get(detail_path, headers=headers("GET", detail_path))
+            legacy_portfolio = await client.get(
+                legacy_portfolio_path, headers=headers("GET", legacy_portfolio_path)
+            )
             portfolio = await client.get(portfolio_path, headers=headers("GET", portfolio_path))
 
+        assert set(legacy_detail.json()["data"]) == {"cycle", "orders"}
+        assert "management_summary" not in legacy_portfolio.json()["data"]
         assert detail.status_code == 200, detail.text
         assert portfolio.status_code == 200, portfolio.text
         facts = detail.json()["data"]
@@ -152,7 +162,7 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
         assert facts["plan_summary"]["reconciliation_as_of"]
         assert facts["proposal"] != facts["active_target"] != facts["plan_summary"]
 
-        summary = portfolio.json()["data"]["management_summary"]
+        summary = portfolio.json()["data"]
         assert summary["current_target"]["target_version_id"] == str(activated.target_version_id)
         assert summary["occupying_plan"]["batch_id"] == str(activated.batch_id)
         assert summary["latest_proposal"]["strategy_decision_id"] == str(proposal.decision_id)
@@ -169,7 +179,7 @@ async def test_policy_unconfirmed_exposes_synthesis_without_invented_proposal_we
 
     engine, _, args = await proposal_source(migrated_database_url, approve=False)
     try:
-        path = f"/internal/v1/paper/cycles/{args['cycle_id']}"
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(
                 app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
@@ -216,7 +226,7 @@ async def test_proposal_rejection_exposes_only_allowlisted_structured_blocker(
                 },
             )
 
-        path = f"/internal/v1/paper/cycles/{args['cycle_id']}"
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(
                 app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
@@ -236,6 +246,53 @@ async def test_proposal_rejection_exposes_only_allowlisted_structured_blocker(
             "proposal_rejection_code": "PORTFOLIO_DEPENDENCY_CONFLICT",
             "as_of": event_at.isoformat().replace("+00:00", "Z"),
         }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "proposal_rejection_code",
+    (None, "UNKNOWN_REJECTION", ["PORTFOLIO_DEPENDENCY_CONFLICT"]),
+)
+@pytest.mark.asyncio
+async def test_proposal_rejection_requires_one_allowlisted_scalar_code(
+    migrated_database_url: str,
+    proposal_rejection_code: object,
+) -> None:
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.agent_cycle import _append_event, _events
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        facts: dict[str, object] = {
+            "portfolio_synthesis_output_id": str(args["synthesis_output_id"]),
+        }
+        if proposal_rejection_code is not None:
+            facts["proposal_rejection_code"] = proposal_rejection_code
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            events = await _events(session, cycle.id)
+            await _append_event(
+                session,
+                cycle,
+                events[-1].to_status,
+                "unavailable",
+                "PORTFOLIO_PROPOSAL_UNAVAILABLE",
+                facts,
+            )
+
+        path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "DATA_PARTIAL"
     finally:
         await engine.dispose()
 

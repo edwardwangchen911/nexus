@@ -269,7 +269,9 @@ def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() 
     paths = document["paths"]
 
     assert set(paths["/internal/v1/paper/portfolio"]) == {"get"}
+    assert set(paths["/internal/v1/paper/management/portfolio"]) == {"get"}
     assert set(paths["/internal/v1/paper/cycles/latest"]) == {"get"}
+    assert set(paths["/internal/v1/paper/management/cycles/{cycle_id}"]) == {"get"}
     assert set(paths["/internal/v1/paper/orders"]) == {"get"}
     assert set(paths["/internal/v1/paper/orders/{order_id}/cancel"]) == {"post"}
     assert set(paths["/internal/v1/paper/orders/{order_id}/cancel-result"]) == {"get"}
@@ -294,3 +296,32 @@ def test_paper_openapi_exposes_reads_and_cancel_but_no_fill_or_order_creation() 
     }
     assert result_headers["Idempotency-Key"]["required"] is True
     assert not any(parameter["in"] == "query" for parameter in cancel_result["parameters"])
+
+    schemas = document["components"]["schemas"]
+    assert set(schemas["PaperPortfolioResponse"]["properties"]) == {
+        "portfolio_id",
+        "name",
+        "mode",
+        "currency",
+        "initial_capital",
+        "data_state",
+        "performance",
+        "comparison",
+        "positions",
+        "attributions",
+    }
+    assert set(schemas["AgentPaperCycleDetailResponse"]["properties"]) == {
+        "cycle",
+        "orders",
+    }
+    assert {
+        "candidate_batch",
+        "security_research",
+        "synthesis",
+        "proposal",
+        "active_target",
+        "activation_result",
+        "blocker",
+        "blocking_plan",
+        "plan_summary",
+    } <= set(schemas["AgentPaperManagementCycleResponse"]["properties"])
