@@ -73,6 +73,7 @@ from nexus.paper.agent_version_runner import (
     advance_agent_version_slot,
     resume_agent_version_slot,
 )
+from nexus.paper.errors import PaperExecutionError
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.read_service import PaperReadService
@@ -5269,6 +5270,14 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
                         )
                         or 0
                     ),
+                    int(
+                        await session.scalar(
+                            select(func.count(PaperLedgerTransactionRecord.id)).where(
+                                PaperLedgerTransactionRecord.order_id == completed.order_ids[0]
+                            )
+                        )
+                        or 0
+                    ),
                 )
 
         before_wrong_window = await execution_fact_counts()
@@ -5607,6 +5616,39 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
 
         third_window_start = second_window_start + timedelta(minutes=5)
         third_evaluated_at = second_evaluated_at + timedelta(minutes=5)
+        before_late_legacy = await execution_fact_counts()
+        async with sessions.begin() as session:
+            exact_legacy_replay = await advance_internal_paper_order(
+                session,
+                order_id=completed.order_ids[0],
+                evaluated_at=evaluated_at,
+                idempotency_key=f"agent-paper-loop-advance:{completed.order_ids[0]}",
+            )
+        assert exact_legacy_replay.action == "partially_filled"
+        assert await execution_fact_counts() == before_late_legacy
+
+        with pytest.raises(PaperExecutionError, match="PAPER_EXECUTION_INVALID"):
+            async with sessions.begin() as session:
+                await advance_internal_paper_order(
+                    session,
+                    order_id=completed.order_ids[0],
+                    evaluated_at=third_evaluated_at,
+                    idempotency_key="late-windowless-direct-advance",
+                )
+        assert await execution_fact_counts() == before_late_legacy
+        with pytest.raises(paper_once.PaperOnceError, match="PAPER_EXECUTION_INVALID"):
+            await paper_once.run_once(
+                EngineSettings(database_url=migrated_database_url),
+                paper_once.PaperAdvanceRequest(
+                    action="advance",
+                    account_id=seed.account_id,
+                    order_id=completed.order_ids[0],
+                    evaluated_at=third_evaluated_at,
+                    idempotency_key="late-windowless-paper-once-advance",
+                ),
+            )
+        assert await execution_fact_counts() == before_late_legacy
+
         third_market = await collect_agent_paper_window(
             sessions,
             cycle_id=completed.cycle_id,
@@ -5639,6 +5681,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         after_terminal = await execution_fact_counts()
         assert after_terminal[:2] == before_terminal[:2]
         assert after_terminal[3:5] == before_terminal[3:5]
+        assert after_terminal[6] == before_terminal[6]
         assert after_terminal[2] == before_terminal[2] + 1
         assert after_terminal[5] == before_terminal[5] + 1
         assert (

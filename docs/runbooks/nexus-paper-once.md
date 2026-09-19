@@ -189,6 +189,7 @@ python -m nexus.ops.paper_once advance
 ```
 
 这些操作分别在单一数据库事务内执行，均拒绝未来时间。`advance` 只评估指定时刻，不等待下一个窗口、不循环推进。`no_data`、`no_capacity`、`not_due` 不代表成交；`partially_filled` 只代表部分成交。
+对已由 Agent Paper 宿主持久化 v2 窗口请求的订单，该通用无窗口命令只允许原 key、原时间的精确历史读回；任何新推进都拒绝。这类订单必须交由 Agent Paper 宿主按原 cycle/window 恢复，不得换 key 或用手工 CLI 消费下一窗。
 
 当前不可变价格政策尚未授权新建单所需的复权价格或模拟成交用途。命令保留这些检查：新建单可能返回 `STRATEGY_DECISION_INVALID`，无合格成交窗口不会产生 fill，已有订单在截止时间可能按原规则撤销并释放预留。不得为试运行修改政策开关或重标历史事实。历史合成 PostgreSQL 测试不代表当前真实数据已取得用途授权。
 

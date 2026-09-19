@@ -146,7 +146,10 @@ authority：停止并保留 cycle/order 原状，不重试、不补造 bar、不
 ## 6. Advance：只推进已有内部模拟订单
 
 `resume` 不执行订单。只有上一步已持久化与该订单精确绑定的五根连续分钟线时，才复用现有内部
-模拟入口推进；`EVALUATED_AT` 使用已到达窗口的实际核对时间，不伪造未来时间。
+模拟入口推进；`EVALUATED_AT` 使用已到达窗口的实际核对时间，不伪造未来时间。下述命令只用于尚未进入
+受管 v2 窗口协议的历史订单及其原 key 结果核对；某订单一旦已产生 v2 窗口请求，
+禁止再用该无窗口命令推进，新请求会在任何成交、撤单或幂等写入前被拒绝。
+受管循环必须由正常 Agent Paper 宿主使用持久化的 cycle/window 恢复。
 
 ```bash
 uv run --project engine python -m nexus.ops.paper_once advance \

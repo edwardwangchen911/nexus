@@ -1477,6 +1477,21 @@ async def advance_internal_paper_order(
             calendar=calendar,
             execution_source_policy_id=execution_source_policy_id,
         )
+    if expected_agent_market_window_id is None:
+        v2_window_request = await session.scalar(
+            select(PaperRequestIdempotencyRecord.id)
+            .where(
+                PaperRequestIdempotencyRecord.account_id == account.id,
+                PaperRequestIdempotencyRecord.order_id == order.id,
+                PaperRequestIdempotencyRecord.operation == "advance",
+                PaperRequestIdempotencyRecord.idempotency_key.startswith(
+                    f"agent-paper-loop-advance-v2:{order.id}:"
+                ),
+            )
+            .limit(1)
+        )
+        if v2_window_request is not None:
+            raise PaperExecutionError("PAPER_EXECUTION_INVALID")
     if expected_agent_market_window_id is not None:
         await _validate_expected_agent_market_window(
             session,
