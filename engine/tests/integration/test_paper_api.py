@@ -967,12 +967,17 @@ async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_resu
 
     path = "/internal/v1/paper/cycles/latest"
     detail_path = f"/internal/v1/paper/cycles/{cycle_id}"
+    management_path = f"/internal/v1/paper/management/cycles/{cycle_id}"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)),
         base_url="http://testserver",
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
         detail = await client.get(detail_path, headers=headers("GET", detail_path))
+        management = await client.get(
+            management_path,
+            headers=headers("GET", management_path),
+        )
 
     assert response.status_code == 200
     data = response.json()["data"]
@@ -984,7 +989,9 @@ async def test_latest_schwab_agent_cycle_preserves_terminal_empty_candidate_resu
     assert data["decision_market"] is None
     assert data["execution_locked"] is True
     assert detail.status_code == 200, detail.text
-    assert detail.json()["data"]["blocker"] == expected_blocker
+    assert "blocker" not in detail.json()["data"]
+    assert management.status_code == 200, management.text
+    assert management.json()["data"]["blocker"] == expected_blocker
 
 
 @pytest.mark.asyncio
