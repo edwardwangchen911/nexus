@@ -10,6 +10,7 @@ import DecisionsPage, { DecisionsPanel } from "../../../app/(protected)/decision
 import type { DataStateKind } from "../../../app/components/data-state";
 import type { components } from "../../../app/lib/generated/schema";
 import { agentPaperCycle, cancellableOrder, meta } from "../paper/fixtures";
+import { managementDetail, managementId } from "../paper/management-fixtures";
 
 type Cycle = components["schemas"]["AgentPaperCycleResponse"];
 type CyclePage = components["schemas"]["AgentPaperCyclePageResponse"];
@@ -57,6 +58,39 @@ const summary: CyclePage["summary"] = {
 };
 
 describe("decision records", () => {
+  it("does not call a resource-blocked proposal completed in the list", () => {
+    render(<DecisionsPanel state="ready" page={{ items: [managementDetail.cycle], summary, version_observation: null, version_history: [], version_evaluation: null }} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("list", { name: "决策记录" })).toHaveTextContent("提案未生效");
+  });
+  it("labels the producer's inherited-target reason without renewing research", () => {
+    const value = structuredClone(managementDetail);
+    value.proposal!.targets[0].reason_code = "INHERITED_TARGET";
+    render(<DecisionDetailPanel state="ready" detail={value} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("table", { name: "确定性目标对照" })).toHaveTextContent("不更新研究有效期");
+  });
+  it("separates blocked proposal, Agent judgment and deterministic target authority", () => {
+    render(<DecisionDetailPanel state="ready" detail={managementDetail} onRefresh={vi.fn()} />);
+    const conclusion = screen.getByRole("note", { name: "目标生效结论" });
+    expect(conclusion).toHaveTextContent("未生效");
+    expect(conclusion).toHaveTextContent("目标 V7 继续生效");
+    expect(conclusion).toHaveTextContent("提案 …0008");
+    expect(within(conclusion).getByTitle(managementId(8))).toHaveTextContent("…0008");
+    expect(screen.getByRole("table", { name: "确定性目标对照" })).toHaveTextContent("标的 …0009");
+    expect(screen.getAllByTitle(managementId(9)).length).toBeGreaterThan(0);
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings.indexOf("本轮组合取舍")).toBeLessThan(headings.indexOf("当前目标与提案对照"));
+    expect(screen.getByRole("table", { name: "确定性目标对照" })).toHaveTextContent("不更新研究有效期");
+    expect(screen.getByRole("link", { name: "查看调整计划" })).toHaveAttribute("href", `/paper?plan=${managementId(10)}`);
+    expect(screen.queryByRole("button", { name: /批准|立即生效/ })).not.toBeInTheDocument();
+  });
+  it.each(["initial", "unchanged", "policy"])("keeps %s target authority explicit", (variant) => {
+    const value = structuredClone(managementDetail); value.blocker = null; value.blocking_plan = null;
+    if (variant === "initial") { value.active_target = null; value.activation_result = null; }
+    if (variant === "unchanged") value.activation_result = { ...value.activation_result!, result_code: "NO_ORDER_REQUIRED" };
+    if (variant === "policy") { value.proposal = null; value.activation_result = null; value.blocker = { category: "policy_unconfirmed", code: "POLICY_UNCONFIRMED", source_stage: "policy", proposal_rejection_code: null, as_of: meta().as_of }; }
+    render(<DecisionDetailPanel state="ready" detail={value} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("note", { name: "目标生效结论" })).toHaveTextContent(variant === "initial" ? "尚未建立目标" : variant === "policy" ? "政策未确认" : "目标 V7 继续生效");
+  });
   it("renders one semantic row per cycle and keeps distinct product outcomes", () => {
     render(<DecisionsPanel state="ready" page={{ items: cycles(), summary, version_observation: null, version_history: [], version_evaluation: null }} onRefresh={vi.fn()} />);
 

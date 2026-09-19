@@ -9,6 +9,7 @@ import PortfolioPage, {
 import { PortfolioSummary, PortfolioValuationSummary } from "../../../app/components/portfolio-summary";
 import type { DataStateKind } from "../../../app/components/data-state";
 import { portfolio, portfolioId, responseMeta, snapshot } from "./fixtures";
+import { managementSummary } from "../paper/management-fixtures";
 
 const stateLabels: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
@@ -23,6 +24,20 @@ afterEach(() => {
 });
 
 describe("portfolio vertical slice", () => {
+  it("keeps internal target summary separate from real-account facts", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("management/portfolio")) return Response.json({ data: managementSummary, meta: responseMeta });
+      if (path.includes("snapshots/latest")) return Response.json({ data: snapshot, meta: responseMeta });
+      if (path.includes("/portfolios?")) return Response.json({ data: { items: [portfolio], next_cursor: null }, meta: responseMeta });
+      return new Response(null, { status: 404 });
+    }));
+    render(<PortfolioPage />);
+    const summary = await screen.findByRole("region", { name: "内部模拟目标与计划摘要" });
+    expect(summary).toHaveTextContent("目标 V7");
+    expect(summary).toHaveTextContent("独立于真实账户");
+    expect(within(summary).queryByRole("table")).not.toBeInTheDocument();
+  });
   it("connects a partial frozen Agent report without calling a model or promoting readiness", () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);

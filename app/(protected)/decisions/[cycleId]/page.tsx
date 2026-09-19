@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
 import { isDecisionCycle } from "../../../components/decisions/decision-list";
 import { DecisionTimeline, isPaperOrder } from "../../../components/decisions/decision-timeline";
+import { PortfolioDecisionDetail } from "../../../components/decisions/portfolio-decision-detail";
 import { cycleDecisionPresentation, executionPresentation } from "../../../lib/product-status";
 import { formatDisplayTime } from "../../../lib/display-format";
 import type { components } from "../../../lib/generated/schema";
@@ -45,16 +46,17 @@ export function DecisionDetailPanel({ state, detail, onRefresh }: { state: DataS
   const execution = detail ? executionPresentation(detail.cycle, detail.orders) : null;
   const primary = decision?.candidates[0] ?? null;
   const resultUnknown = execution?.key === "result_unknown" || execution?.key === "unknown";
+  const management = detail && Boolean(detail.candidate_batch || detail.proposal || detail.active_target || detail.blocker || detail.synthesis);
   return <section className="decision-detail-page" data-state={state} aria-label="决策详情页面">
     {/* vinext client routes use native anchors here; next/link currently duplicates React at runtime. */}
     {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
     <a className="decision-detail-page__back" href="/decisions"><ArrowLeft aria-hidden="true" size={16} />返回决策记录</a>
     <header className="decision-detail-hero">
-      <div><p className="eyebrow">DECISION EVIDENCE LEDGER</p><h1>{primary ? `${primary.label} · ${primary.symbol}` : decision?.summary.label ?? "决策详情"}</h1><p>{primary?.detail ?? decision?.summary.detail ?? "读取已保存的周期事实。"}</p></div>
+      <div><p className="eyebrow">DECISION EVIDENCE LEDGER</p><h1>{management ? "组合决策详情" : primary ? `${primary.label} · ${primary.symbol}` : decision?.summary.label ?? "决策详情"}</h1><p>{management ? "核对本轮组合取舍、确定性配置与目标生效依据。" : primary?.detail ?? decision?.summary.detail ?? "读取已保存的周期事实。"}</p></div>
       <div className="page-actions"><span className="mode-badge">内部模拟</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新记录</button></div>
       {detail ? <dl><div><dt>决策时间</dt><dd className="numeric-data">{formatDisplayTime(detail.cycle.decision_time)}</dd></div><div><dt>周期 ID</dt><dd className="numeric-data">{detail.cycle.cycle_id}</dd></div><div><dt>执行结论</dt><dd>{resultUnknown ? "结果未知" : execution?.label}</dd></div></dl> : null}
     </header>
-    {hasFacts ? <DecisionTimeline detail={detail} /> : <DataState state={state} title={title} detail="详情只读取该周期及其精确关联订单，不从其他周期补填。" announce={false} />}
+    {hasFacts ? management ? <PortfolioDecisionDetail detail={detail} /> : <DecisionTimeline detail={detail} /> : <DataState state={state} title={title} detail="详情只读取该周期及其精确关联订单，不从其他周期补填。" announce={false} />}
   </section>;
 }
 

@@ -1,5 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { managementPlan, managementSummary, cancelRead } from "./management-fixtures";
+import { CancelResultCheck } from "../../../app/components/paper/cancel-result-check";
 
 import PaperPage, { PaperPanel } from "../../../app/(protected)/paper/page";
 import { AgentPaperCycle, AgentPaperSessionSummary, AgentPaperVersionHistory } from "../../../app/components/agent-paper-cycle";
@@ -30,6 +32,34 @@ function evaluationSlots(paired = 0): Array<Record<string, unknown>> {
 }
 
 describe("internal paper page", () => {
+  it("isolates a late original-operation read after changing the selected order", async () => {
+    let resolveFirst!: (value: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { resolveFirst = resolve; })));
+    const attempt = { orderId: cancellableOrder.order_id, key: "original-attempt", requestedAt: meta().as_of };
+    const view = render(<CancelResultCheck attempt={attempt} />);
+    fireEvent.click(screen.getByRole("button", { name: "核对原操作结果" }));
+    view.rerender(<CancelResultCheck attempt={{ ...attempt, orderId: filledOrder.order_id, key: "other-original-attempt" }} />);
+    await act(async () => { resolveFirst(Response.json({ data: { ...cancelRead, status: "COMMITTED" }, meta: meta() })); });
+    expect(screen.queryByText("原取消已确认")).not.toBeInTheDocument();
+    expect(screen.getByText(filledOrder.order_id)).toBeVisible();
+  });
+  it("reads an exact plan and independently displays risk, fills, coverage, gap and cash", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/paper/management/portfolio") return Response.json({ data: managementSummary, meta: meta() });
+      if (url.includes("/paper/plans/")) return Response.json({ data: managementPlan, meta: meta() });
+      if (url === "/api/v1/paper/portfolio") return Response.json({ data: paperPortfolio, meta: meta() });
+      if (url.includes("/paper/orders?")) return Response.json({ data: { items: [cancellableOrder], next_cursor: null }, meta: meta() });
+      return new Response(null, { status: 404 });
+    }));
+    render(<PaperPage />);
+    const plan = await screen.findByRole("region", { name: "当前调整计划" });
+    expect(plan).toHaveTextContent(managementPlan.batch_id);
+    expect(within(plan).getByRole("heading", { name: "调整计划 …0010" })).toHaveTextContent("…0010");
+    expect(within(plan).getByTitle(managementPlan.batch_id)).toHaveTextContent("…0010");
+    for (const label of ["风控缩减", "已确认成交", "未结订单覆盖", "剩余目标差额", "资源仍占用", "可用现金", "预留现金", "USD 3,500.00"]) expect(plan).toHaveTextContent(label);
+    expect(within(plan).getByRole("button", { name: "核对原操作结果" })).toBeDisabled();
+  });
   it("renders a read-only paired Agent version evaluation with all write paths closed", () => {
     render(<AgentVersionEvaluation evaluation={{
       evaluation_id: "71000000-0000-0000-0000-000000000099",
@@ -510,16 +540,23 @@ describe("internal paper page", () => {
 
   it("keeps an unknown cancellation locked to one idempotency key for recovery", async () => {
     const keys: Array<string | null> = [];
+    const operations: Array<[string, string]> = [];
     let cancels = 0;
+    let reads = 0;
     vi.spyOn(crypto, "randomUUID").mockReturnValue("0198f7a0-1111-7777-8111-111111111131");
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      operations.push([url, init?.method ?? "GET"]);
       if (url === "/api/v1/paper/portfolio") return Response.json({ data: paperPortfolio, meta: meta() });
       if (url === "/api/v1/paper/orders?limit=20") return Response.json({ data: { items: [cancellableOrder], next_cursor: null }, meta: meta() });
       if (url.endsWith("/cancel")) {
         cancels += 1; keys.push(new Headers(init?.headers).get("idempotency-key"));
-        if (cancels === 1) throw new TypeError("network result unknown");
-        return Response.json({ data: { order_id: cancellableOrder.order_id, status: "cancelled", filled_quantity: "2", remaining_quantity: "3", result_event_seq: 5, replayed: true }, meta: meta() });
+        throw new TypeError("network result unknown");
+      }
+      if (url.endsWith("/cancel-result")) {
+        reads += 1; keys.push(new Headers(init?.headers).get("idempotency-key"));
+        expect(init?.method ?? "GET").toBe("GET");
+        return Response.json({ data: cancelRead, meta: meta() });
       }
       throw new Error(`unexpected request: ${url}`);
     }));
@@ -528,11 +565,17 @@ describe("internal paper page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "取消 AAPL 模拟订单" }));
     fireEvent.click(screen.getByRole("button", { name: "确认取消模拟订单" }));
     expect((await screen.findAllByText(/取消结果未知/)).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "继续确认原操作结果" }));
-    await act(async () => { await Promise.resolve(); });
-
-    expect(cancels).toBe(2);
+    fireEvent.click(screen.getByRole("button", { name: "核对原操作结果" }));
+    expect(await screen.findByText("服务端未记录原取消结果")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "核对原操作结果" }));
+    await waitFor(() => expect(reads).toBe(2));
+    expect(cancels).toBe(1);
+    expect(operations.filter(([, method]) => method !== "GET")).toEqual([[`/api/v1/paper/orders/${cancellableOrder.order_id}/cancel`, "POST"]]);
     expect(new Set(keys).size).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "返回订单" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消 AAPL 模拟订单" }));
+    expect(screen.queryByRole("button", { name: "确认取消模拟订单" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "核对原操作结果" })).toBeEnabled();
   });
 
   it("dismisses the confirmation with Escape and returns focus to the order", async () => {

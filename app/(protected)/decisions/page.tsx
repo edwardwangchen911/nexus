@@ -36,7 +36,7 @@ export function DecisionsPanel({ state, page, onRefresh }: { state: DataStateKin
   const title = ({ loading: "正在读取决策记录", empty: "暂无决策记录", ready: "决策记录已就绪", partial: "决策记录不完整", stale: "显示上次决策记录", error: "决策记录加载失败", forbidden: "无权读取决策记录" } as const)[state];
   return <section className="decisions-page" data-state={state} aria-label="决策记录页面">
     <header className="page-heading decisions-page__heading"><div><p className="eyebrow">DECISION RECORDS</p><h1>决策记录</h1><p>按周期查看 Agent 判断、确定性风控与内部模拟结果；筛选不会重放周期。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新记录</button></div></header>
-    <p className="decisions-boundary" role="note">仅显示本次加载的最多 20 条当前会话记录 · 实盘锁定 · 页面只读</p>
+    <p className="decisions-boundary" role="note">仅显示本次加载的最多 20 条当前会话记录 · 实盘锁定 · 页面只读。组合提案、当前生效目标与计划归属请进入对应决策详情核对。</p>
     {hasFacts ? <DecisionList cycles={page.items} /> : <DataState state={state} title={title} detail="页面只读取已保存周期，不会运行 Agent 或创建订单。" announce={false} />}
   </section>;
 }

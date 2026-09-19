@@ -3,6 +3,35 @@ import { expect, test, type Page } from "@playwright/test";
 import type { components } from "../../app/lib/generated/schema";
 import { agentPaperCycle, cancellableOrder, meta, paperPortfolio } from "../unit/paper/fixtures";
 import { assertReleaseAccessibility } from "./helpers/accessibility";
+import { managementDetail } from "../unit/paper/management-fixtures";
+
+for (const viewport of [{ width: 1280, height: 910 }, { width: 390, height: 844 }]) {
+  test(`portfolio proposal authority fits ${viewport.width} and disclosures work by keyboard`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await installFixtures(page, []);
+    await page.route(`**/api/v1/paper/management/cycles/${agentPaperCycle.cycle_id}`, (route) => route.fulfill({ json: { data: managementDetail, meta: meta() } }));
+    await page.goto(`/decisions/${agentPaperCycle.cycle_id}`);
+    const conclusion = page.getByRole("note", { name: "目标生效结论" });
+    await expect(conclusion).toContainText("目标 V7 继续生效");
+    await expect(conclusion).toContainText("提案 …0008");
+    await expect(page.getByRole("table", { name: "确定性目标对照" })).toContainText("标的 …0009");
+    const table = page.getByRole("table", { name: "确定性目标对照" });
+    expect((await conclusion.boundingBox())!.y).toBeLessThan((await table.boundingBox())!.y);
+    await expect(table).toContainText("不更新研究有效期");
+    const disclosure = page.getByText("查看政策版本与证据依据", { exact: true });
+    await disclosure.focus(); await page.keyboard.press("Enter");
+    await expect(page.getByText("提案有效期", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await assertReleaseAccessibility(page);
+    await disclosure.click();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: `test-results/task12-decisions-${viewport.width}.png` });
+    const focused = await page.locator(".portfolio-decision").boundingBox();
+    expect(focused).not.toBeNull();
+    await page.screenshot({ path: `test-results/task12-decisions-focused-${viewport.width}.png`, fullPage: true, clip: focused! });
+  });
+}
 
 type WorkbenchPayload = components["schemas"]["WorkbenchEnvelope"];
 
@@ -53,6 +82,7 @@ test("decision records filter the loaded page and the detail ledger fits mobile"
 });
 
 async function installFixtures(page: Page, methods: string[]): Promise<void> {
+  await page.route("**/api/v1/paper/management/portfolio", (route) => route.fulfill({ json: { data: { current_target: null, latest_proposal: null, occupying_plan: null, read_as_of: meta().as_of }, meta: meta() } }));
   await page.route("**/api/v1/integrations", async (route) => route.fulfill({
     status: 200, contentType: "application/json", body: JSON.stringify({
       data: [{ provider: "fosun", mode: "fixture", quality: "PASS", as_of: meta().as_of, capability_expires_at: null, contract_hash: null, next_action: "只读研究模式。", version: 1 }],

@@ -3,6 +3,16 @@ import { expect, test, type Page } from "@playwright/test";
 import type { PortfolioSnapshot } from "../../app/(protected)/portfolio/page";
 import { diagnosticReport } from "../unit/optimize/fixtures";
 import { assertReleaseAccessibility, releaseViewports } from "./helpers/accessibility";
+import { managementSummary } from "../unit/paper/management-fixtures";
+
+test("portfolio separates internal target summary from real holdings", async ({ page }) => {
+  await installPortfolioFixtures(page);
+  await page.route("**/api/v1/paper/management/portfolio", (route) => route.fulfill({ json: { data: managementSummary, meta: { request_id: requestId, as_of: managementSummary.read_as_of, schema_version: "1" } } }));
+  await page.goto("/portfolio");
+  const summary = page.getByRole("region", { name: "内部模拟目标与计划摘要" });
+  await expect(summary).toContainText("独立于真实账户");
+  await expect(summary.getByRole("table")).toHaveCount(0);
+});
 
 const requestId = "0198f7a0-1111-7777-8111-111111111111";
 const portfolioId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e701";

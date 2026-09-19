@@ -12,6 +12,7 @@ import { PortfolioDiagnostic } from "../../components/portfolio-diagnostic";
 import type { PortfolioDiagnosticReport } from "../../components/portfolio-diagnostic";
 import { PortfolioScenario } from "../../components/portfolio-scenario";
 import { PortfolioSummary, PortfolioValuationSummary } from "../../components/portfolio-summary";
+import { ManagementSummaryCard } from "../../components/paper/management-summary";
 import type { components } from "../../lib/generated/schema";
 
 export type PortfolioItem = components["schemas"]["PortfolioListItemResponse"];
@@ -172,6 +173,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
       <div role="status" aria-label="组合操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
       </div>
+      {state !== "forbidden" ? <ManagementSummaryCard hideUnavailable /> : null}
       {!selected ? <DataState state={state} title="组合快照" detail={stateDetail(state)} announce={false} /> : (
         <div className="portfolio-workspace" data-single={portfolios.length === 1}>
           <nav className="portfolio-rail" aria-label="组合选择"><p className="portfolio-rail__label">组合账户</p><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {coverageLabel(item.coverage_scope)}</span><span>{item.original_currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
