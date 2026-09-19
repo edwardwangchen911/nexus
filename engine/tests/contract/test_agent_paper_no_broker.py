@@ -17,8 +17,21 @@ def _imports(path: Path) -> set[str]:
 
 def test_agent_paper_modules_do_not_import_broker_order_code() -> None:
     imports = set().union(
-        *(_imports(PAPER_ROOT / name) for name in ("agent_cycle.py", "agent_market.py"))
+        *(
+            _imports(PAPER_ROOT / name)
+            for name in (
+                "agent_cycle.py",
+                "agent_market.py",
+                "candidate_batch.py",
+                "target_service.py",
+            )
+        )
     )
+    for name in (
+        "portfolio_synthesis_worker.py",
+        "portfolio_synthesis_persistence.py",
+    ):
+        imports.update(_imports(PAPER_ROOT.parent / "agents" / name))
 
     assert not {
         name

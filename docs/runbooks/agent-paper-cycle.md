@@ -1,14 +1,16 @@
 # Agent 内部模拟周期
 
-本手册用于单一私人用户在 Mac 本地手工运行一个 Agent 模拟周期。当前最小真实路径固定为
-`AAPL + Schwab Level One 决策报价 + Schwab price history 五分钟执行窗口`。它只产生内部模拟
+本手册说明组合周期在创建后的研究、恢复和模拟成交步骤。正常组合入口由
+[组合管理第一切片](portfolio-management-first-slice.md) 负责：候选是显式冻结的 1–5 个标的，
+每个 XNYS 交易日只允许纽约时间 10:00 的一个组合周期。历史 AAPL 五分钟周期只保留给隔离的
+Agent-version evaluation，不能通过正常组合入口继续创建。周期只产生内部模拟
 订单、成交和账本事实，不访问 Schwab 订单接口，不连接券商交易域，不解除
 `execution_locked=true`，也不等于券商模拟盘或实盘。
 
 页面和只读 API 只读取已持久化事实；刷新 `/workspace`、`/decisions` 或 `/paper` 不会触发行情、
 模型或周期推进。功能开关
-默认关闭，失败不自动重试。每个五分钟决策槽最多一个周期；每个周期只允许一个研究 Job 和至多
-一次模型执行。同一交易日可以在前一周期及其订单都进入诚实终态后运行下一槽，不按“每天一次”限制。
+默认关闭，失败不自动重试。正常组合每个候选各有一个绑定研究 Job，每个 Job 至多执行一次；
+1–5 个结果全部进入同一 synthesis。不得在 10:05 或当天其他五分钟槽创建第二个正常组合周期。
 
 ## 1. Preflight：先查状态，不先发请求
 
@@ -33,14 +35,14 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 → Engine API/BFF/page
 ```
 
-发现当前五分钟槽已有周期时停止新建，恢复该槽已有 `CYCLE_ID`；同日较早周期不阻止下一槽。
+发现当天已有正常组合周期时停止新建，恢复已有 `CYCLE_ID`；错过 10:00 窗口不补跑。
 发现 queued/running Job 时先读取其状态；断流、观察超时、worker 退出或终端输出丢失都不是换 key
 重放的许可。存在非终态订单时先对账，不删除事实、不重建周期。`unavailable` 是保留的诚实终态，
 不恢复、不删除；到下一合法槽后可以新建周期。
 
 运行前还必须满足：
 
-- 唯一候选是已发布 `us_liquid/us_liquid_v1` 中的 AAPL，且有当前研究快照、前一完整交易日
+- 1–5 个候选都来自同一个已发布 `us_liquid/us_liquid_v1` 批次，且各自有当前研究快照、前一完整交易日
   Alpaca SIP delayed `all` 日线、审核行业 authority、完整 XNYS 日历和三类风险查询证据；
 - 宏观工具只读取当前时点可见的 `DFF`、`DGS2`、`DGS10`、`CPIAUCSL`、`UNRATE`
   和 `VIXCLS` 严格 FRED vintage；宏观证据不是价格、风控或下单权威；
@@ -48,10 +50,9 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 - `infra/.env.local` 保持受保护且未进入 Git；动态 Schwab OAuth token 只能位于主仓库
   `.secrets/nexus-schwab-local/tokens.json`，目录和文件权限分别为 `0700`、`0600`；
 - `NEXUS_AGENT_PAPER_CYCLE_ENABLED=true` 仅在本轮手工窗口内启用。模板及默认值仍为 false；
-- 当前纽约时间处于合法 XNYS 交易日的 `[07:00, 16:00)`。07:00–09:30 盘前可运行；不必等
-  09:30 正式开盘。当前 MVP 不接受 07:00 前隔夜行情，也不接受 16:00 后盘后行情。
+- 当前纽约时间处于合法 XNYS 交易日的 `10:00–10:04:59` 正常组合窗口。
 
-### 07:00 前盘前行情边界
+### 10:00 前行情边界
 
 2026-09-15 约 05:45 ET 的一次 20 秒有界实测中，Schwab `LEVELONE_EQUITIES` 为 AAPL 和 NVDA
 返回了 `delayed=false` 的双边报价与最近成交；这说明 07:00 前可以做只读行情观察。该归档没有
@@ -59,8 +60,8 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 `SCHWAB_PRICE_HISTORY_RESPONSE_INVALID`，未满足现有精确 5×1 分钟执行窗口合同，且按无重试规则
 停止。
 
-因此不要把“WebSocket 有盘前报价”推导为“完整订单闭环已可运行”。当前循环仍从 07:00 ET
-开始：决策报价继续使用 Level One，订单成交权威继续使用通过合同校验的 Schwab pricehistory
+因此不要把“WebSocket 有盘前报价”推导为“完整订单闭环已可运行”。当前组合循环只在 10:00 ET
+单次窗口开始：决策报价继续使用 Level One，订单成交权威继续使用通过合同校验的 Schwab pricehistory
 分钟线。不要临时改用 WebSocket 成交事件拼 K 线，不新增 04:00–07:00 决策专用状态机；若未来
 要提前正式窗口，应先用正常产品入口取得一次合格的精确五分钟 pricehistory 证据，再单独评审。
 
@@ -79,14 +80,16 @@ uv run --project engine nexus-openai-local setup \
 
 ## 2. Trigger：冻结一次决策证据
 
-`trigger` 不接受 symbol 或 decision time。数据库按当前时间归入五分钟决策槽，并认领同账户、同槽
-的唯一周期；缺少现成
-风险查询证明时，按既有只读 Alpaca 入口补齐一次，然后对 AAPL 做一次有界 Schwab Level One
-采集。Schwab 路径固定一次 LOGIN、一次订阅、最多 15 秒/100 帧/8 MiB，不重连、不重试。
+`trigger` 不接受 symbol 或 decision time。数据库固定认领当日纽约时间 10:00 的唯一正常组合周期；
+缺少现成风险查询证明时，按既有只读 Alpaca 入口补齐一次，然后对批次中的每个候选做一次有界 Schwab Level One
+采集。Schwab 路径固定一次 LOGIN、一次订阅、最多 15 秒/100 帧/8 MiB，不重连、不重试。先按
+[组合管理第一切片](portfolio-management-first-slice.md) 创建并核对候选批次；`trigger` 必须显式
+绑定该批次，不能从 symbol 或环境默认值推断。
 
 ```bash
 uv run --project engine nexus-engine-agent-paper-once trigger \
   --account-id "$PAPER_ACCOUNT_ID" \
+  --candidate-batch-id "$CANDIDATE_BATCH_ID" \
   --idempotency-key "$TRIGGER_KEY"
 ```
 
@@ -98,17 +101,18 @@ uv run --project engine nexus-engine-agent-paper-once trigger \
 `SCHWAB_L1_FRESHNESS_UNPROVEN`、`SCHWAB_L1_INCOMPLETE`、候选或证据绑定冲突。不得换数据源、
 放宽时间/质量门槛或借用 Shadow 路径。
 
-## 3. Run research once：只消费该周期的一个 Job
+## 3. Run research：逐个消费该周期已持久化的 Job
 
 使用 `trigger` 返回的 `CYCLE_ID`。入口从该周期的持久化事件解析唯一 Run，只允许领取与之绑定的
-queued `agent.paper.research` Job：
+queued `agent.paper.research` Job。每次命令最多领取一个；只有前一 Job 已有明确持久终态时，才为同一
+`CYCLE_ID` 再次运行以领取下一个候选 Job，直到 1–5 个候选都终结：
 
 ```bash
 uv run --project engine nexus-engine-agent-paper-once run-research \
   --cycle-id "$CYCLE_ID"
 ```
 
-该命令最多处理一个 Job 后立即退出，不扫描普通研究 Job，不执行 `resume`，也不创建下一决策槽周期。
+该命令最多处理一个 Job 后立即退出，不扫描普通研究 Job，不执行 `resume`，也不创建新周期。
 如果 Job 已在运行、已终态、绑定冲突、已有 Output 或调用结果不明，命令返回
 `AGENT_PAPER_RESULT_UNKNOWN`；先查原 Cycle/Job/Run/Output，不再次运行 worker。只有持久化 Output 终态明确后才继续。
 
@@ -122,6 +126,10 @@ uv run --project engine nexus-engine-agent-paper-once resume \
 
 `resume` 不调用模型、不采集行情，只读取已持久化 Job/Run/Output，并生成确定性 sizing、硬风控、
 批次和内部模拟订单。用同一个 `RESUME_KEY` 处理结果不明；不要轮询或换 key。合法结果包括：
+
+- 首次 `resume` 在候选研究全部终态后登记唯一的 `agent.paper.portfolio_synthesis` Job，并返回
+  `PORTFOLIO_SYNTHESIS_PENDING`。此时再次执行一次上节的 `run-research --cycle-id "$CYCLE_ID"`
+  只领取该 synthesis Job；确认其 Output 已持久化后，再用原 `RESUME_KEY` 执行 `resume`。
 
 - `NO_ORDER_REQUIRED`：maintain/none 是真实不交易结论，没有订单；
 - `PAPER_ORDERS_AWAITING_MARKET`：已有风控通过订单，等待五分钟窗口；
@@ -200,35 +208,34 @@ NEXUS_REAL_AGENT_PAPER_ACCEPTANCE=1 npm run test:e2e -- \
   tests/e2e/agent-paper-cycle-real.spec.ts
 ```
 
-### 同日两槽固定验收顺序
+### 单次组合周期固定验收顺序
 
-两个槽使用受保护的本地变量 `NEXUS_ACCEPTANCE_PAPER_ACCOUNT_ID`、
-`NEXUS_ACCEPTANCE_SLOT_A_KEY` 和 `NEXUS_ACCEPTANCE_SLOT_B_KEY`；值不得写入命令历史、聊天、Git
-或验收文档。每一个动作前都先按本节开头的事实链顺序读取持久状态，固定流程为：
+周期使用受保护的本地变量 `NEXUS_ACCEPTANCE_PAPER_ACCOUNT_ID` 和各步骤幂等键；值不得写入命令历史、
+聊天、Git 或验收文档。每一个动作前都先按本节开头的事实链顺序读取持久状态，固定流程为：
 
 ```text
 read current cycle/job/order state
-→ trigger slot A
+→ trigger 10:00 portfolio cycle
 → run existing one-shot worker（仅当该 Job 为 queued）
-→ resume
+→ resume to admit synthesis
+→ run synthesis worker（仅当该 Job 为 queued）
+→ resume with the original key
 → collect-window（仅当存在订单）并 advance
 → resume and read DB/API/BFF/page
-→ slot A 的 cycle 与订单均终态后等待 slot B
-→ trigger slot B
-→ run/resume/collect/advance as required
-→ read both cycles and disable the feature flag
+→ cycle 与订单均终态后关闭本次手工窗口
+→ read the cycle and disable the feature flag
 ```
 
-槽 B 必须获得不同的 `cycle_id`、Job/Run/Output 和 decision，并从槽 A 终态后的最新模拟现金、持仓、
-当日换手、预算及未结订单事实重新投影。两槽都允许合规 no-trade；但都必须实际形成 Agent 决策并
-经过确定性硬风控。同槽使用原幂等键回读不得增加 Job、订单、成交或账本。连接或命令结果未知时只
+同一交易日不会创建第二个组合决策周期。该周期允许合规 no-trade；但必须形成组合决策并经过确定性
+硬风控。使用原幂等键回读不得增加 Job、订单、成交或账本。连接或命令结果未知时只
 查原 `run → job → outputs` 和业务事实，不换 key、不重放。原始模型全文、token 和个人账户事实不
 进入 Git 或验收记录。
 
 ## 8. 连续服务与前台诊断
 
-手工双槽验收完成后，可在一个纽约交易时段内按五分钟槽连续推进。该入口没有逐日
-次数上限，但仍受现有美元日预算约束；每槽最多一个 cycle，每个 cycle 最多一个真实 Agent Job。
+手工单次组合周期验收完成后，宿主服务仅在下一交易日 10:00 ET 再创建新周期。执行分钟窗口只推进
+当前周期已有订单，不代表新的决策槽；每个交易日最多一个组合 cycle，包含 1–5 个候选研究 Job 和
+一个 synthesis Job。
 正常启停统一使用本地后端入口；它先完成基础 Compose 步骤，仅在受保护配置明确启用时启动宿主机
 Agent Paper，停止时则先确认 Agent Paper 已安全退出，再停止 Compose：
 
@@ -266,11 +273,14 @@ FRED 宏观准备复用现有固定 origin 采集和严格导入合同，按 XNY
 决策；导入、数据库或回读结果不明则立即 fail closed。不删除失败尝试目录来重试，不切换
 数据源，不用当天后来发布的 vintage 回填已有决策。
 
-当前槽出现 `unavailable` 或 `failed` 时，保留该终态事实，不在同槽重复 Provider 或模型调用。
-托管进程继续保持心跳并等待同日下一合法五分钟槽；到达新槽后再从持久化状态和前置数据检查开始。未知结果仍立即 fail closed 并退出。
-若周期创建前的 Schwab Level One 采集以已知错误终止，循环必须先回读同槽已封存的 trigger 失败事实；回读一致后只等待下一槽，不再执行同槽行情请求。失败事实缺失或不一致时仍视为结果未知并退出。
-日线、宏观或趋势补齐已有失败尝试时不会删目录或换 key 重放 Provider。16:00 ET 后若没有活动订单则正常退出，
-已有订单可完成其已冻结窗口后再退出。运行中将
+普通组合槽出现 `unavailable` 或 `failed` 时，保留该终态事实，同槽不重复 Provider 或模型调用；
+宿主保持心跳，先在已冻结收盘时点核对绩效，再等待下一个合法的纽约 10:00 组合决策槽。
+已注册版本评价继续按其冻结槽位运行，不受普通组合候选批次配置缺失影响。
+周期建立前的 Schwab 已知终态失败必须回读同账户、槽位、route 和 schema 的持久化失败声明；
+仅回读一致的 `SCHWAB_L1_FRESHNESS_UNPROVEN` / `SCHWAB_L1_INCOMPLETE` 可等待后续槽。
+未知结果仍停止，不能凭异常文本重放；综合决策未知、政策未确认和目标待生效保留各自安全边界。
+日线、宏观或趋势补齐已有失败尝试时不会删目录或换 key 重放 Provider。已有订单继续使用其冻结窗口。
+运行中将
 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false` 或按 `Ctrl-C` 都会停止；历史事实不删除。
 
 内部托管适配器在 Mac 宿主机使用 Codex SDK 登录，不复制凭据、不注入 OpenAI API key，也没有

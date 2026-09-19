@@ -11,11 +11,16 @@ from pydantic import ValidationError
 ENGINE_ROOT = Path(__file__).parents[2]
 CHAIN_FILES = (
     ENGINE_ROOT / "src/nexus/ops/agent_paper_once.py",
+    ENGINE_ROOT / "src/nexus/ops/agent_paper_loop.py",
     ENGINE_ROOT / "src/nexus/ops/schwab_market_stream.py",
     ENGINE_ROOT / "src/nexus/paper/agent_cycle.py",
     ENGINE_ROOT / "src/nexus/paper/agent_market.py",
     ENGINE_ROOT / "src/nexus/paper/execution_service.py",
     ENGINE_ROOT / "src/nexus/paper/read_service.py",
+    ENGINE_ROOT / "src/nexus/paper/candidate_batch.py",
+    ENGINE_ROOT / "src/nexus/paper/target_service.py",
+    ENGINE_ROOT / "src/nexus/agents/portfolio_synthesis_worker.py",
+    ENGINE_ROOT / "src/nexus/agents/portfolio_synthesis_persistence.py",
     ENGINE_ROOT / "src/nexus/providers/market/schwab_price_history.py",
 )
 FORBIDDEN_IMPORT_PREFIXES = (

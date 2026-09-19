@@ -1,0 +1,91 @@
+# 组合管理第一切片
+
+本手册只用于 Mac 本地的内部模拟组合管理。它不会访问券商下单接口，不启用券商模拟盘或实盘，
+并始终保持 `execution_locked=true`。页面和只读接口只读取已持久化事实，不触发模型、行情采集或
+订单推进。
+
+## 1. 查看并确认首次组合基线
+
+先从本地受保护配置取得内部模拟账户 ID，并选择一个已经完成绩效发布、无活动订单或未知占用的
+UTC 时点：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-once inspect-projection \
+  --account-id "$PAPER_ACCOUNT_ID" \
+  --as-of "$PROJECTION_AS_OF"
+```
+
+把输出中的 `as_of`、`projection_hash`、现金、持仓和未结订单完整展示给用户。只有用户明确批准
+这一份精确投影后，才运行以下一次性写入；政策确认、页面浏览或此前对其他快照的同意都不能代替
+本次批准：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-once approve-initial-target \
+  --account-id "$PAPER_ACCOUNT_ID" \
+  --projection-as-of "$PROJECTION_AS_OF" \
+  --projection-hash "$PROJECTION_HASH" \
+  --approved-by local-user \
+  --approved-at "$APPROVED_AT" \
+  --idempotency-key "$INITIAL_APPROVAL_KEY"
+```
+
+结果不明时先读取持久化的 approval 与幂等记录，只能使用原 key 核对。不要更换 key 重复批准。
+
+## 2. 创建唯一候选批次
+
+先从已批准 Universe 中确定 1–5 个互不重复的 instrument UUID，再运行：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-once prepare-candidates \
+  --account-id "$PAPER_ACCOUNT_ID" \
+  --universe-snapshot-id "$UNIVERSE_SNAPSHOT_ID" \
+  --instrument-id "$INSTRUMENT_ID_1" \
+  --instrument-id "$INSTRUMENT_ID_2" \
+  --idempotency-key "$CANDIDATE_BATCH_KEY"
+```
+
+核对输出的候选身份、Universe、`batch_id` 和 `batch_hash`。将该 `batch_id` 写入受保护且 Git 忽略的
+`infra/.env.local`：
+
+```text
+NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID=<confirmed batch_id>
+```
+
+模板保持空值；不得把账户 ID、候选批次或凭据提交到 Git。
+
+## 3. 运行一个有界周期
+
+先查 cycle → Job → Output → order 的持久状态。正常组合只允许在 XNYS 交易日纽约时间
+10:00–10:04:59 启动一次；当天已有组合周期、错过该窗口或结果不明时都不得换 key 补跑。
+合法窗口内没有周期时，使用同一个显式批次启动一次：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-once trigger \
+  --account-id "$PAPER_ACCOUNT_ID" \
+  --candidate-batch-id "$CANDIDATE_BATCH_ID" \
+  --idempotency-key "$TRIGGER_KEY"
+```
+
+随后严格复用 [Agent 内部模拟周期](agent-paper-cycle.md) 中的 `run-research`、`resume`、
+`collect-window` 和受管宿主推进流程。失败或输出不明时先读持久状态，不换 key、不自动重试、
+不放宽证据、时间窗或风控。
+
+## 4. 只读核对同一事实链
+
+Web 已在本机运行后，使用同一个 `CYCLE_ID`、`PLAN_ID` 和原取消尝试键读取：
+
+```bash
+curl -fsS "http://127.0.0.1:3000/api/v1/paper/management/cycles/$CYCLE_ID"
+curl -fsS "http://127.0.0.1:3000/api/v1/paper/management/portfolio"
+curl -fsS "http://127.0.0.1:3000/api/v1/paper/plans/$PLAN_ID"
+curl -fsS \
+  -H "Idempotency-Key: $CANCEL_IDEMPOTENCY_KEY" \
+  "http://127.0.0.1:3000/api/v1/paper/orders/$ORDER_ID/cancel-result"
+```
+
+逐项核对 proposal、target、plan、order、fill、reservation、借贷平衡账本、最新绩效和页面身份一致；
+重复 GET 不得新增业务事实。`cycle.execution_locked` 必须为 `true`。取消的客户端尝试键只有在服务端
+持久化 `COMMITTED` 后才能称为已确认取消请求；超时或未知不得释放占用。
+
+最后依次查看 `/workspace`、`/decisions/$CYCLE_ID`、`/portfolio` 和 `/paper`。外部券商模拟写入和
+实盘交易在本切片中不可用，不能因内部模拟成交、页面可见或绩效发布而启用。

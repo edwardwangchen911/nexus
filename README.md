@@ -173,6 +173,7 @@ Compose 显示 `Up` 或 `/health/live` 返回 200 只证明进程存活。实际
 - [回测单次运行](docs/runbooks/nexus-baseline-backtest-once.md)
 - [内部模拟单次运行](docs/runbooks/nexus-paper-once.md)
 - [Agent 内部模拟周期](docs/runbooks/agent-paper-cycle.md)
+- [组合管理第一切片](docs/runbooks/portfolio-management-first-slice.md)
 - [券商模拟激活](docs/runbooks/broker-simulation-activation.md)
 
 ### 通知
