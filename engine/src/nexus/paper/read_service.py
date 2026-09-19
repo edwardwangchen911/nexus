@@ -953,15 +953,27 @@ class PaperReadService:
         )
         items = tuple([await self._agent_cycle(cycle) for cycle in cycles])
         historical = decision_session is not None
-        summary_items = (
-            items
-            if historical
-            else tuple(
-                item
-                for cycle, item in zip(cycles, items, strict=True)
-                if cycle.candidate_batch_id is not None
+        if historical:
+            summary_items = items
+        else:
+            summary_cycle = await self._session.scalar(
+                select(AgentPaperCycleRecord)
+                .where(
+                    AgentPaperCycleRecord.account_id == account.id,
+                    AgentPaperCycleRecord.decision_session == resolved_session,
+                    AgentPaperCycleRecord.candidate_batch_id.is_not(None),
+                    AgentPaperCycleRecord.decision_time <= self._request_time,
+                    AgentPaperCycleRecord.created_at <= self._request_time,
+                )
+                .order_by(
+                    AgentPaperCycleRecord.decision_slot_at.desc(),
+                    AgentPaperCycleRecord.id.desc(),
+                )
+                .limit(1)
             )
-        )
+            summary_items = (
+                () if summary_cycle is None else (await self._agent_cycle(summary_cycle),)
+            )
         cycle_count, completed_count = await self._agent_session_counts(
             account_id=account.id,
             decision_session=resolved_session,
@@ -1685,6 +1697,11 @@ class PaperReadService:
                 AgentPaperCycleRecord.account_id == account_id,
                 AgentPaperCycleRecord.decision_time <= self._request_time,
                 AgentPaperCycleRecord.created_at <= self._request_time,
+                *(
+                    (AgentPaperCycleRecord.candidate_batch_id.is_not(None),)
+                    if not historical
+                    else ()
+                ),
             )
             .order_by(
                 AgentPaperCycleEventRecord.occurred_at.desc(),

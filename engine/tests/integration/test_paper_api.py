@@ -122,12 +122,63 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
                 events=await _events(session, cycle.id),
                 now=now,
             )
+            legacy_id = UUID("ffffffff-ffff-7fff-bfff-ffffffffffff")
+            legacy_time = now + timedelta(minutes=5)
+            session.add(
+                AgentPaperCycleRecord(
+                    id=legacy_id,
+                    account_id=cycle.account_id,
+                    portfolio_id=cycle.portfolio_id,
+                    decision_session=cycle.decision_session,
+                    decision_time=legacy_time,
+                    decision_slot_at=floor_decision_slot(legacy_time),
+                    execution_session=cycle.execution_session,
+                    universe_snapshot_id=cycle.universe_snapshot_id,
+                    quality_report_id=None,
+                    decision_price_policy_id=cycle.decision_price_policy_id,
+                    execution_price_policy_id=cycle.execution_price_policy_id,
+                    candidate_manifest=[],
+                    candidate_hash=candidate_manifest_hash(()),
+                    sizing_policy_version="agent_paper_sizing_v1",
+                    sizing_policy_hash="9" * 64,
+                    execution_locked=True,
+                    created_at=legacy_time,
+                )
+            )
+            await session.flush()
+            for sequence, from_status, to_status, result_code in (
+                (1, None, "prepared", "CYCLE_PREPARED"),
+                (2, "prepared", "unavailable", "RISK_INPUT_REQUIRED"),
+            ):
+                session.add(
+                    AgentPaperCycleEventRecord(
+                        cycle_id=legacy_id,
+                        sequence=sequence,
+                        from_status=from_status,
+                        to_status=to_status,
+                        result_code=result_code,
+                        fact_ids={},
+                        occurred_at=legacy_time,
+                        event_hash=canonical_cycle_event_hash(
+                            cycle_id=legacy_id,
+                            sequence=sequence,
+                            from_status=from_status,
+                            to_status=to_status,
+                            result_code=result_code,
+                            fact_ids={},
+                            occurred_at=legacy_time,
+                        ),
+                        created_at=legacy_time,
+                    )
+                )
         legacy_detail_path = f"/internal/v1/paper/cycles/{args['cycle_id']}"
         detail_path = f"/internal/v1/paper/management/cycles/{args['cycle_id']}"
         legacy_portfolio_path = "/internal/v1/paper/portfolio"
         portfolio_path = "/internal/v1/paper/management/portfolio"
+        cycles_path = "/internal/v1/paper/cycles?limit=1"
+        read_now = now + timedelta(minutes=6)
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app(migrated_database_url, now=now)),
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=read_now)),
             base_url="http://testserver",
         ) as client:
             legacy_detail = await client.get(
@@ -138,6 +189,7 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
                 legacy_portfolio_path, headers=headers("GET", legacy_portfolio_path)
             )
             portfolio = await client.get(portfolio_path, headers=headers("GET", portfolio_path))
+            cycles_page = await client.get(cycles_path, headers=headers("GET", cycles_path))
 
         assert set(legacy_detail.json()["data"]) == {"cycle", "orders"}
         assert "management_summary" not in legacy_portfolio.json()["data"]
@@ -166,7 +218,11 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
         assert summary["current_target"]["target_version_id"] == str(activated.target_version_id)
         assert summary["occupying_plan"]["batch_id"] == str(activated.batch_id)
         assert summary["latest_proposal"]["strategy_decision_id"] == str(proposal.decision_id)
-        assert summary["read_as_of"] == now.isoformat().replace("+00:00", "Z")
+        assert summary["read_as_of"] == read_now.isoformat().replace("+00:00", "Z")
+        cycle_page = cycles_page.json()["data"]
+        assert cycle_page["items"][0]["cycle_id"] == str(legacy_id)
+        assert cycle_page["summary"]["cycle_count"] == 1
+        assert cycle_page["summary"]["latest_result_code"] == facts["cycle"]["result_code"]
     finally:
         await engine.dispose()
 
@@ -796,7 +852,7 @@ async def test_agent_cycle_list_returns_same_day_cycles_newest_first(
 
 
 @pytest.mark.asyncio
-async def test_legacy_failed_cycle_does_not_restore_removed_intraday_slots(
+async def test_legacy_failed_cycle_does_not_occupy_portfolio_schedule_summary(
     migrated_database_url: str,
 ) -> None:
     seed = await seed_paper_batch(migrated_database_url)
@@ -890,6 +946,84 @@ async def test_legacy_failed_cycle_does_not_restore_removed_intraday_slots(
             else expected_next_at.isoformat().replace("+00:00", "Z")
         )
         assert summary["next_eligible_reason"] == expected_reason
+        assert summary["last_completed_decision_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_completion_is_excluded_from_current_portfolio_summary(
+    migrated_database_url: str,
+) -> None:
+    from nexus.paper.read_service import PaperReadService
+
+    seed = await seed_paper_batch(migrated_database_url)
+    decision_time = datetime(2026, 8, 27, 13, tzinfo=UTC)
+    cycle_id = UUID("72000000-0000-0000-0000-000000000104")
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        session.add(
+            AgentPaperCycleRecord(
+                id=cycle_id,
+                account_id=seed.account_id,
+                portfolio_id=seed.portfolio_id,
+                decision_session=EXECUTION_SESSION,
+                decision_time=decision_time,
+                decision_slot_at=floor_decision_slot(decision_time),
+                execution_session=EXECUTION_SESSION,
+                universe_snapshot_id=UNIVERSE_ID,
+                quality_report_id=None,
+                decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                candidate_manifest=[],
+                candidate_hash=candidate_manifest_hash(()),
+                sizing_policy_version="agent_paper_sizing_v1",
+                sizing_policy_hash="9" * 64,
+                execution_locked=True,
+                created_at=decision_time,
+            )
+        )
+        await session.flush()
+        events = (
+            (1, None, "prepared", "CYCLE_PREPARED"),
+            (2, "prepared", "researching", "RESEARCH_JOBS_PREPARED"),
+            (3, "researching", "decision_recorded", "AGENT_DECISION_RECORDED"),
+            (4, "decision_recorded", "risk_evaluated", "PAPER_BATCH_EVALUATED"),
+            (5, "risk_evaluated", "completed", "NO_ORDER_REQUIRED"),
+        )
+        for sequence, from_status, to_status, result_code in events:
+            session.add(
+                AgentPaperCycleEventRecord(
+                    cycle_id=cycle_id,
+                    sequence=sequence,
+                    from_status=from_status,
+                    to_status=to_status,
+                    result_code=result_code,
+                    fact_ids={},
+                    occurred_at=decision_time,
+                    event_hash=canonical_cycle_event_hash(
+                        cycle_id=cycle_id,
+                        sequence=sequence,
+                        from_status=from_status,
+                        to_status=to_status,
+                        result_code=result_code,
+                        fact_ids={},
+                        occurred_at=decision_time,
+                    ),
+                    created_at=decision_time,
+                )
+            )
+
+    async with factory() as session:
+        summary = await PaperReadService(
+            session, datetime(2026, 8, 27, 14, 1, tzinfo=UTC)
+        )._agent_session_summary(
+            account_id=seed.account_id,
+            decision_session=EXECUTION_SESSION,
+            cycles=(),
+            historical=False,
+        )
+
+    assert summary.status == "ready"
+    assert summary.last_completed_decision_at is None
 
 
 @pytest.mark.asyncio
