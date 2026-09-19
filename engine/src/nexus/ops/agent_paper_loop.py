@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from dotenv import dotenv_values
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -56,7 +56,7 @@ from nexus.ops.fred_local import import_collection as import_fred_collection
 from nexus.ops.fred_local import validate_local_import
 from nexus.ops.local_stack import LocalStackConfigurationError, _validate_local_env
 from nexus.ops.openai_local import local_settings
-from nexus.ops.paper_once import PaperAdvanceRequest
+from nexus.ops.paper_once import PaperAdvanceRequest, read_agent_window_advance_result
 from nexus.ops.paper_once import run_once as run_paper_once
 from nexus.paper.agent_cycle_authority import (
     ServiceCalendarAuthority,
@@ -103,10 +103,7 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
     PaperExecutionWindowAuthorityRecord,
-    PaperFillRecord,
-    PaperOrderEventRecord,
     PaperPerformanceSnapshotRecord,
-    PaperRequestIdempotencyRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job, JobLease, WorkerHeartbeat
 from nexus.providers.http import HttpPolicyError
@@ -1944,122 +1941,18 @@ async def confirm_agent_paper_shutdown(
                     ):
                         return False
                     advance_account_id = before_snapshot.action_account_id or account_id
-                    advance_key = (
-                        "agent-paper-loop-advance-v2:"
-                        f"{before_snapshot.order_id}:{before_snapshot.market_window_id}"
+                    advance_result = await read_agent_window_advance_result(
+                        session,
+                        account_id=advance_account_id,
+                        cycle_id=before_snapshot.cycle_id,
+                        order_id=before_snapshot.order_id,
+                        market_window_id=before_snapshot.market_window_id,
                     )
-                    coordinator = await session.scalar(
-                        select(IdempotencyRecord).where(
-                            IdempotencyRecord.actor_id == f"paper-account:{advance_account_id}",
-                            IdempotencyRecord.route == "agent-paper-order-window-advance",
-                            IdempotencyRecord.idempotency_key == advance_key,
-                        )
-                    )
-                    if coordinator is not None:
-                        payload = coordinator.response_payload
-                        raw_paper_request_id = payload.get("paper_request_id")
-                        if (
-                            coordinator.schema_version == "agent_paper_window_advance_v1"
-                            and payload.get("state") == "completed"
-                            and payload.get("cycle_id") == str(before_snapshot.cycle_id)
-                            and payload.get("market_window_id")
-                            == str(before_snapshot.market_window_id)
-                            and payload.get("order_id") == str(before_snapshot.order_id)
-                            and isinstance(raw_paper_request_id, str)
-                            and isinstance(payload.get("paper_request_hash"), str)
-                            and isinstance(payload.get("paper_result_hash"), str)
-                            and isinstance(payload.get("status"), str)
-                        ):
-                            try:
-                                paper_request_id = UUID(raw_paper_request_id)
-                            except ValueError:
-                                paper_request_id = None
-                            paper_request = (
-                                None
-                                if paper_request_id is None
-                                else await session.get(
-                                    PaperRequestIdempotencyRecord,
-                                    paper_request_id,
-                                )
-                            )
-                            coordinator_action = payload.get("action")
-                            if (
-                                paper_request is not None
-                                and paper_request.account_id == advance_account_id
-                                and paper_request.order_id == before_snapshot.order_id
-                                and paper_request.idempotency_key == advance_key
-                                and paper_request.request_hash == payload["paper_request_hash"]
-                                and paper_request.result_hash == payload["paper_result_hash"]
-                            ):
-                                if coordinator_action in {"no_data", "no_capacity"}:
-                                    return (
-                                        action_result == AgentPaperLoopAction.STOP_ORDER_UNAVAILABLE
-                                        and paper_request.result_event_seq is None
-                                    )
-                                if coordinator_action in {"cancelled", "terminal"}:
-                                    terminal_status = await session.scalar(
-                                        select(PaperOrderEventRecord.to_status).where(
-                                            PaperOrderEventRecord.account_id == advance_account_id,
-                                            PaperOrderEventRecord.order_id
-                                            == before_snapshot.order_id,
-                                            PaperOrderEventRecord.event_seq
-                                            == paper_request.result_event_seq,
-                                        )
-                                    )
-                                    return (
-                                        action_result is None
-                                        and terminal_status == payload["status"]
-                                    )
-                    persisted = await session.scalar(
-                        select(PaperRequestIdempotencyRecord.id)
-                        .join(
-                            PaperOrderEventRecord,
-                            and_(
-                                PaperOrderEventRecord.order_id
-                                == PaperRequestIdempotencyRecord.order_id,
-                                PaperOrderEventRecord.account_id
-                                == PaperRequestIdempotencyRecord.account_id,
-                                PaperOrderEventRecord.event_seq
-                                == PaperRequestIdempotencyRecord.result_event_seq,
-                            ),
-                        )
-                        .join(
-                            PaperFillRecord,
-                            PaperFillRecord.id == PaperOrderEventRecord.source_fill_id,
-                        )
-                        .join(
-                            PaperExecutionWindowAuthorityRecord,
-                            PaperExecutionWindowAuthorityRecord.id
-                            == PaperFillRecord.execution_window_authority_id,
-                        )
-                        .join(
-                            AgentPaperMarketWindowRecord,
-                            AgentPaperMarketWindowRecord.id == before_snapshot.market_window_id,
-                        )
-                        .where(
-                            PaperRequestIdempotencyRecord.account_id == advance_account_id,
-                            PaperRequestIdempotencyRecord.order_id == before_snapshot.order_id,
-                            PaperRequestIdempotencyRecord.operation == "advance",
-                            or_(
-                                PaperRequestIdempotencyRecord.idempotency_key
-                                == f"agent-paper-loop-advance:{before_snapshot.order_id}",
-                                PaperRequestIdempotencyRecord.idempotency_key == advance_key,
-                            ),
-                            PaperOrderEventRecord.to_status.in_(("partially_filled", "filled")),
-                            AgentPaperMarketWindowRecord.cycle_id == before_snapshot.cycle_id,
-                            AgentPaperMarketWindowRecord.order_id == before_snapshot.order_id,
-                            AgentPaperMarketWindowRecord.purpose == "paper_fill",
-                            PaperExecutionWindowAuthorityRecord.order_id
-                            == before_snapshot.order_id,
-                            PaperExecutionWindowAuthorityRecord.account_id == advance_account_id,
-                            PaperExecutionWindowAuthorityRecord.window_start_at
-                            == AgentPaperMarketWindowRecord.window_start_at,
-                            PaperExecutionWindowAuthorityRecord.window_end_at
-                            == AgentPaperMarketWindowRecord.window_end_at,
-                            PaperExecutionWindowAuthorityRecord.source_authority_id
-                            == AgentPaperMarketWindowRecord.source_authority_id,
-                        )
-                    )
+                    if advance_result is None:
+                        return False
+                    if advance_result.action in {"no_data", "no_capacity"}:
+                        return action_result == AgentPaperLoopAction.STOP_ORDER_UNAVAILABLE
+                    return action_result is None
                 return persisted is not None and action_result is None
         except Exception:
             return False

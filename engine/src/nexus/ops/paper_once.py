@@ -6,11 +6,12 @@ import hashlib
 import json
 import sys
 from datetime import UTC, datetime
-from typing import Literal, Never, get_args
+from decimal import Decimal
+from typing import Literal, Never, cast, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -21,9 +22,12 @@ from nexus.paper.errors import (
     PaperExecutionErrorCode,
 )
 from nexus.paper.execution_service import (
+    PaperAdvanceResult,
     advance_internal_paper_order,
+    canonical_paper_advance_result,
     paper_advance_request_hash,
 )
+from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.paper import (
@@ -35,6 +39,7 @@ from nexus.persistence.models.paper import (
     PaperOrderRecord,
     PaperRequestIdempotencyRecord,
 )
+from nexus.persistence.models.runtime import IdempotencyRecord
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import BrokerSyncPersistenceError
 from nexus.risk.authority import prepare_risk_market_snapshot
@@ -52,7 +57,7 @@ from nexus.strategy.snapshot_reader import (
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _AGENT_WINDOW_ROUTE = "agent-paper-order-window-advance"
-_AGENT_WINDOW_SCHEMA = "agent_paper_window_advance_v1"
+_AGENT_WINDOW_SCHEMA = "agent_paper_window_advance_v2"
 _SAFE_CODES = {
     "PAPER_ONCE_REQUEST_INVALID",
     "PAPER_ONCE_DATABASE_UNCONFIGURED",
@@ -239,7 +244,7 @@ async def _exact_agent_window_fill_output(
     *,
     request: PaperAdvanceRequest,
     window: AgentPaperMarketWindowRecord,
-) -> dict[str, object] | None:
+) -> PaperAdvanceResult | None:
     row = (
         await session.execute(
             select(
@@ -247,6 +252,9 @@ async def _exact_agent_window_fill_output(
                 PaperFillRecord.occurred_at,
                 PaperRequestIdempotencyRecord.idempotency_key,
                 PaperRequestIdempotencyRecord.request_hash,
+                PaperRequestIdempotencyRecord.result_hash,
+                PaperOrderEventRecord.event_seq,
+                PaperFillRecord.id.label("fill_id"),
             )
             .join(PaperFillRecord, PaperFillRecord.id == PaperOrderEventRecord.source_fill_id)
             .join(
@@ -283,22 +291,266 @@ async def _exact_agent_window_fill_output(
     status = row.to_status
     if status not in {"partially_filled", "filled"}:
         return None
-    expected_window_id = (
-        window.id
-        if row.idempotency_key == f"agent-paper-loop-advance-v2:{request.order_id}:{window.id}"
-        else None
-    )
+    legacy_key = f"agent-paper-loop-advance:{request.order_id}"
+    v2_key = f"agent-paper-loop-advance-v2:{request.order_id}:{window.id}"
+    if row.idempotency_key not in {legacy_key, v2_key}:
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    expected_window_id = window.id if row.idempotency_key == v2_key else None
     if row.request_hash != paper_advance_request_hash(
         order_id=request.order_id,
         evaluated_at=row.occurred_at,
         expected_agent_market_window_id=expected_window_id,
     ):
         raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
-    return {
-        "status": status,
-        "action": status,
-        "order_id": str(request.order_id),
-    }
+    order = await session.get(PaperOrderRecord, request.order_id)
+    filled_quantity = await session.scalar(
+        select(func.coalesce(func.sum(PaperFillRecord.quantity), 0))
+        .join(
+            PaperOrderEventRecord,
+            PaperOrderEventRecord.source_fill_id == PaperFillRecord.id,
+        )
+        .where(
+            PaperOrderEventRecord.account_id == request.account_id,
+            PaperOrderEventRecord.order_id == request.order_id,
+            PaperOrderEventRecord.event_seq <= row.event_seq,
+        )
+    )
+    if order is None or not isinstance(filled_quantity, Decimal):
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    result = canonical_paper_advance_result(
+        order_id=request.order_id,
+        account_id=request.account_id,
+        action=cast(Literal["partially_filled", "filled"], status),
+        status=cast(InternalOrderStatus, status),
+        filled_quantity=filled_quantity,
+        total_quantity=order.quantity,
+        result_event_seq=row.event_seq,
+        fill_id=row.fill_id,
+    )
+    if result.result_hash != row.result_hash:
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    return result
+
+
+async def _coordinator_agent_window_result(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    cycle_id: UUID,
+    order_id: UUID,
+    window: AgentPaperMarketWindowRecord,
+    idempotency_key: str,
+) -> tuple[bool, PaperAdvanceResult | None]:
+    rows = tuple(
+        await session.scalars(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.actor_id == f"paper-account:{account_id}",
+                IdempotencyRecord.route == _AGENT_WINDOW_ROUTE,
+                IdempotencyRecord.idempotency_key == idempotency_key,
+            )
+        )
+    )
+    if not rows:
+        return False, None
+    if len(rows) != 1:
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    coordinator = rows[0]
+    payload = coordinator.response_payload
+    raw_paper_request_id = payload.get("paper_request_id")
+    raw_evaluated_at = payload.get("evaluated_at")
+    raw_result = payload.get("result")
+    identity_request = PaperAdvanceRequest(
+        action="advance",
+        account_id=account_id,
+        order_id=order_id,
+        evaluated_at=window.evaluated_at,
+        idempotency_key=idempotency_key,
+        agent_cycle_id=cycle_id,
+        agent_market_window_id=window.id,
+    )
+    if (
+        coordinator.schema_version != _AGENT_WINDOW_SCHEMA
+        or coordinator.request_hash
+        != _agent_window_request_hash(request=identity_request, window=window)
+        or payload.get("state") != "completed"
+        or payload.get("cycle_id") != str(cycle_id)
+        or payload.get("market_window_id") != str(window.id)
+        or payload.get("order_id") != str(order_id)
+        or not isinstance(raw_paper_request_id, str)
+        or not isinstance(raw_evaluated_at, str)
+        or not isinstance(raw_result, dict)
+    ):
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    try:
+        paper_request_id = UUID(raw_paper_request_id)
+        evaluated_at = datetime.fromisoformat(raw_evaluated_at)
+        result_payload = dict(raw_result)
+        result_payload["filled_quantity"] = Decimal(str(result_payload["filled_quantity"]))
+        result_payload["remaining_quantity"] = Decimal(str(result_payload["remaining_quantity"]))
+        result = PaperAdvanceResult.model_validate(result_payload)
+    except (KeyError, TypeError, ValueError):
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN") from None
+    if evaluated_at.tzinfo is None or evaluated_at.utcoffset() != UTC.utcoffset(evaluated_at):
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    canonical = canonical_paper_advance_result(
+        order_id=result.order_id,
+        account_id=result.account_id,
+        action=result.action,
+        status=result.status,
+        filled_quantity=result.filled_quantity,
+        total_quantity=result.filled_quantity + result.remaining_quantity,
+        result_event_seq=result.result_event_seq,
+        fill_id=result.fill_id,
+    )
+    paper_request = await session.get(PaperRequestIdempotencyRecord, paper_request_id)
+    matching_request_ids = (
+        set(
+            await session.scalars(
+                select(PaperRequestIdempotencyRecord.id).where(
+                    PaperRequestIdempotencyRecord.account_id == account_id,
+                    PaperRequestIdempotencyRecord.order_id == order_id,
+                    PaperRequestIdempotencyRecord.operation == "advance",
+                    PaperRequestIdempotencyRecord.request_hash
+                    == (paper_request.request_hash if paper_request is not None else ""),
+                    PaperRequestIdempotencyRecord.result_event_seq
+                    == result.result_event_seq,
+                    PaperRequestIdempotencyRecord.result_hash == result.result_hash,
+                )
+            )
+        )
+        if paper_request is not None
+        else set()
+    )
+    if (
+        result != canonical
+        or result.order_id != order_id
+        or result.account_id != account_id
+        or paper_request is None
+        or paper_request.account_id != account_id
+        or paper_request.order_id != order_id
+        or paper_request.operation != "advance"
+        or paper_request.idempotency_key != idempotency_key
+        or paper_request.request_hash
+        != paper_advance_request_hash(
+            order_id=order_id,
+            evaluated_at=evaluated_at,
+            expected_agent_market_window_id=window.id,
+        )
+        or paper_request.result_hash != result.result_hash
+        or matching_request_ids != {paper_request_id}
+    ):
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    if result.result_event_seq is None:
+        if result.action not in {"not_due", "no_data", "no_capacity"} or result.fill_id is not None:
+            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+        return True, result
+    event = await session.scalar(
+        select(PaperOrderEventRecord).where(
+            PaperOrderEventRecord.account_id == account_id,
+            PaperOrderEventRecord.order_id == order_id,
+            PaperOrderEventRecord.event_seq == result.result_event_seq,
+        )
+    )
+    if event is None or event.to_status != result.status:
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    cumulative_filled = await session.scalar(
+        select(func.coalesce(func.sum(PaperFillRecord.quantity), 0))
+        .join(
+            PaperOrderEventRecord,
+            PaperOrderEventRecord.source_fill_id == PaperFillRecord.id,
+        )
+        .where(
+            PaperOrderEventRecord.account_id == account_id,
+            PaperOrderEventRecord.order_id == order_id,
+            PaperOrderEventRecord.event_seq <= result.result_event_seq,
+        )
+    )
+    if not isinstance(cumulative_filled, Decimal) or cumulative_filled != result.filled_quantity:
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    if result.action in {"partially_filled", "filled"}:
+        if result.fill_id is None or event.source_fill_id != result.fill_id:
+            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+        fill_window_id = await session.scalar(
+            select(PaperExecutionWindowAuthorityRecord.id)
+            .join(
+                PaperFillRecord,
+                PaperFillRecord.execution_window_authority_id
+                == PaperExecutionWindowAuthorityRecord.id,
+            )
+            .where(
+                PaperFillRecord.id == result.fill_id,
+                PaperFillRecord.account_id == account_id,
+                PaperFillRecord.order_id == order_id,
+                PaperExecutionWindowAuthorityRecord.window_start_at == window.window_start_at,
+                PaperExecutionWindowAuthorityRecord.window_end_at == window.window_end_at,
+                PaperExecutionWindowAuthorityRecord.source_authority_id
+                == window.source_authority_id,
+            )
+        )
+        if fill_window_id is None:
+            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    elif result.action == "cancelled":
+        if result.fill_id is not None or event.source_fill_id is not None:
+            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    elif result.action == "terminal":
+        if result.fill_id is not None or result.status not in {
+            "risk_rejected",
+            "filled",
+            "cancelled",
+            "rejected",
+        }:
+            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    else:
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    return True, result
+
+
+async def read_agent_window_advance_result(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    cycle_id: UUID,
+    order_id: UUID,
+    market_window_id: UUID,
+) -> PaperAdvanceResult | None:
+    """Read one exact Agent window result; reject ambiguity without writing."""
+    window = await session.scalar(
+        select(AgentPaperMarketWindowRecord).where(
+            AgentPaperMarketWindowRecord.id == market_window_id,
+            AgentPaperMarketWindowRecord.cycle_id == cycle_id,
+            AgentPaperMarketWindowRecord.order_id == order_id,
+            AgentPaperMarketWindowRecord.purpose == "paper_fill",
+        )
+    )
+    if window is None:
+        raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    key = f"agent-paper-loop-advance-v2:{order_id}:{market_window_id}"
+    coordinator_exists, coordinator_result = await _coordinator_agent_window_result(
+        session,
+        account_id=account_id,
+        cycle_id=cycle_id,
+        order_id=order_id,
+        window=window,
+        idempotency_key=key,
+    )
+    if coordinator_exists:
+        if coordinator_result is None:
+            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+        return coordinator_result
+    legacy_request = PaperAdvanceRequest(
+        action="advance",
+        account_id=account_id,
+        order_id=order_id,
+        evaluated_at=window.evaluated_at,
+        idempotency_key=key,
+        agent_cycle_id=cycle_id,
+        agent_market_window_id=market_window_id,
+    )
+    return await _exact_agent_window_fill_output(
+        session,
+        request=legacy_request,
+        window=window,
+    )
 
 
 async def _legacy_agent_advance_is_resolved_before_window(
@@ -381,13 +633,33 @@ async def _advance_agent_market_window(
     )
     if window is None:
         raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+    coordinator_exists, coordinator_result = await _coordinator_agent_window_result(
+        session,
+        account_id=request.account_id,
+        cycle_id=request.agent_cycle_id,
+        order_id=request.order_id,
+        window=window,
+        idempotency_key=request.idempotency_key,
+    )
+    if coordinator_exists:
+        if coordinator_result is None:
+            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+        return {
+            "status": coordinator_result.status,
+            "action": coordinator_result.action,
+            "order_id": str(coordinator_result.order_id),
+        }
     existing_fill = await _exact_agent_window_fill_output(
         session,
         request=request,
         window=window,
     )
     if existing_fill is not None:
-        return existing_fill
+        return {
+            "status": existing_fill.status,
+            "action": existing_fill.action,
+            "order_id": str(existing_fill.order_id),
+        }
     if not await _legacy_agent_advance_is_resolved_before_window(
         session,
         request=request,
@@ -407,50 +679,20 @@ async def _advance_agent_market_window(
     except BrokerSyncPersistenceError as error:
         raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN") from error
     if not inserted:
-        payload = claim.response_payload
-        raw_paper_request_id = payload.get("paper_request_id")
-        raw_paper_request_hash = payload.get("paper_request_hash")
-        raw_paper_result_hash = payload.get("paper_result_hash")
-        if (
-            claim.schema_version != _AGENT_WINDOW_SCHEMA
-            or claim.request_hash != request_hash
-            or payload.get("state") != "completed"
-            or payload.get("cycle_id") != str(request.agent_cycle_id)
-            or payload.get("market_window_id") != str(window.id)
-            or payload.get("order_id") != str(request.order_id)
-            or payload.get("action")
-            not in {
-                "no_data",
-                "no_capacity",
-                "partially_filled",
-                "filled",
-                "cancelled",
-                "terminal",
-            }
-            or not isinstance(payload.get("status"), str)
-            or not isinstance(raw_paper_request_id, str)
-            or not isinstance(raw_paper_request_hash, str)
-            or not isinstance(raw_paper_result_hash, str)
-        ):
-            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
-        try:
-            paper_request_id = UUID(raw_paper_request_id)
-        except (TypeError, ValueError):
-            raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN") from None
-        paper_request = await session.get(PaperRequestIdempotencyRecord, paper_request_id)
-        if (
-            paper_request is None
-            or paper_request.account_id != request.account_id
-            or paper_request.order_id != request.order_id
-            or paper_request.idempotency_key != request.idempotency_key
-            or paper_request.request_hash != raw_paper_request_hash
-            or paper_request.result_hash != raw_paper_result_hash
-        ):
+        _, replay = await _coordinator_agent_window_result(
+            session,
+            account_id=request.account_id,
+            cycle_id=request.agent_cycle_id,
+            order_id=request.order_id,
+            window=window,
+            idempotency_key=request.idempotency_key,
+        )
+        if replay is None:
             raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
         return {
-            "status": payload["status"],
-            "action": payload["action"],
-            "order_id": str(request.order_id),
+            "status": replay.status,
+            "action": replay.action,
+            "order_id": str(replay.order_id),
         }
     result = await advance_internal_paper_order(
         session,
@@ -477,11 +719,8 @@ async def _advance_agent_market_window(
         "market_window_id": str(window.id),
         "order_id": str(request.order_id),
         "evaluated_at": request.evaluated_at.isoformat(),
-        "status": result.status,
-        "action": result.action,
         "paper_request_id": str(paper_request.id),
-        "paper_request_hash": paper_request.request_hash,
-        "paper_result_hash": paper_request.result_hash,
+        "result": result.model_dump(mode="json"),
     }
     return {
         "status": result.status,

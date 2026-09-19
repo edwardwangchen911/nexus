@@ -274,6 +274,93 @@ def _result(
     )
 
 
+def canonical_paper_advance_result(
+    *,
+    order_id: UUID,
+    account_id: UUID,
+    action: Literal[
+        "not_due",
+        "no_data",
+        "no_capacity",
+        "partially_filled",
+        "filled",
+        "cancelled",
+        "terminal",
+    ],
+    status: InternalOrderStatus,
+    filled_quantity: Decimal,
+    total_quantity: Decimal,
+    result_event_seq: int | None,
+    fill_id: UUID | None,
+) -> PaperAdvanceResult:
+    """Build the canonical persisted result for exact read-only verification."""
+    return _result(
+        order_id=order_id,
+        account_id=account_id,
+        action=action,
+        status=status,
+        filled_quantity=filled_quantity,
+        total_quantity=total_quantity,
+        result_event_seq=result_event_seq,
+        fill_id=fill_id,
+    )
+
+
+async def _validate_expected_agent_market_window(
+    session: AsyncSession,
+    *,
+    order: PaperOrderRecord,
+    source_policy_id: UUID,
+    calendar: ExecutionCalendarSession,
+    model: ExecutionModel,
+    evaluated_at: datetime,
+    expected_agent_market_window_id: UUID,
+) -> None:
+    window = await session.get(
+        AgentPaperMarketWindowRecord,
+        expected_agent_market_window_id,
+    )
+    if (
+        window is None
+        or window.order_id != order.id
+        or window.instrument_id != order.instrument_id
+        or window.purpose != "paper_fill"
+        or window.evaluated_at > evaluated_at
+        or window.data_available_at > evaluated_at
+    ):
+        raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+    prior_window = await session.scalar(
+        select(PaperExecutionWindowAuthorityRecord)
+        .where(PaperExecutionWindowAuthorityRecord.order_id == order.id)
+        .order_by(PaperExecutionWindowAuthorityRecord.window_seq.desc())
+        .limit(1)
+    )
+    if source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
+        if prior_window is not None or window.source != "schwab":
+            raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+        return
+    if source_policy_id != PAPER_EXECUTION_SOURCE_POLICY_ID or window.source != "alpaca":
+        raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+    window_seq = 1 if prior_window is None else prior_window.window_seq + 1
+    expected_start = calendar.market_open_at + timedelta(
+        minutes=(window_seq - 1) * model.window_minutes
+    )
+    if (
+        window.window_start_at != expected_start
+        or window.window_end_at != expected_start + timedelta(minutes=model.window_minutes)
+        or (
+            prior_window is not None
+            and (
+                window.window_start_at != prior_window.window_end_at
+                or window.source != prior_window.source
+                or window.feed != prior_window.feed
+                or window.delivery_mode != prior_window.delivery_mode
+            )
+        )
+    ):
+        raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+
+
 def _cancel_result(
     *,
     order: PaperOrderRecord,
@@ -616,6 +703,11 @@ async def _qualified_window(
             return None
         schwab_binding = await session.scalar(
             select(AgentPaperMarketWindowRecord).where(
+                *(
+                    (AgentPaperMarketWindowRecord.id == expected_agent_market_window_id,)
+                    if expected_agent_market_window_id is not None
+                    else ()
+                ),
                 AgentPaperMarketWindowRecord.order_id == order.id,
                 AgentPaperMarketWindowRecord.instrument_id == order.instrument_id,
                 AgentPaperMarketWindowRecord.purpose == "paper_fill",
@@ -1384,6 +1476,16 @@ async def advance_internal_paper_order(
             record=existing_request,
             calendar=calendar,
             execution_source_policy_id=execution_source_policy_id,
+        )
+    if expected_agent_market_window_id is not None:
+        await _validate_expected_agent_market_window(
+            session,
+            order=order,
+            source_policy_id=execution_source_policy_id,
+            calendar=calendar,
+            model=model,
+            evaluated_at=evaluated_at,
+            expected_agent_market_window_id=expected_agent_market_window_id,
         )
     if events and evaluated_at < events[-1].occurred_at:
         raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
