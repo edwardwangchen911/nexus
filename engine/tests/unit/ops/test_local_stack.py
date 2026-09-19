@@ -131,6 +131,66 @@ def test_runner_returns_only_safe_step_metadata(repo_root: Path) -> None:
     assert "fixture-secret" not in repr(results)
 
 
+def test_runner_injects_the_exact_checkout_revision(repo_root: Path) -> None:
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "user.name=NEXUS Test",
+            "-c",
+            "user.email=nexus-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test fixture",
+        ),
+        check=True,
+    )
+    observed_revisions: list[str] = []
+
+    def runner(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        observed_revisions.append(str(environment["NEXUS_RELEASE_REVISION"]))
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            stdout = '{"status":"running"}'
+        elif "--service-status" in argv:
+            stdout = json.dumps(
+                {
+                    "heartbeat": {"status": "fresh"},
+                    "preflight": {
+                        "status": "ready",
+                        "execution_locked": True,
+                        "external_requests": 0,
+                        "blocking_codes": [],
+                        "optional_codes": [],
+                    },
+                }
+            )
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    results = run_local_stack(
+        LocalStackAction.STATUS,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    expected = subprocess.run(
+        ("git", "-C", str(repo_root), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert all(result.exit_code == 0 for result in results)
+    assert observed_revisions and set(observed_revisions) == {expected}
+
+
 def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path) -> None:
     """The host service must never get ahead of the app dependencies it consumes."""
     calls: list[tuple[str, ...]] = []

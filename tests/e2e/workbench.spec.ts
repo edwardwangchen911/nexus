@@ -40,7 +40,7 @@ const readyWorkbench = (): WorkbenchPayload => ({
       unrealized_pnl: paperPortfolio.performance!.unrealized_pnl,
     },
     readiness: { stage: "completed", blocker: "none", reason_code: "NO_ORDER_REQUIRED", previous_cycle_id: null, changes: [] },
-    compatibility: { status: "compatible", expected_process_version: "agent-paper-loop-v1", expected_migration_head: "0064_prompt_release_channel", reported_process_version: "agent-paper-loop-v1", reported_migration_head: "0064_prompt_release_channel", database_migration_heads: ["0064_prompt_release_channel"] },
+    compatibility: { status: "compatible", release_status: "matching", expected_process_version: "agent-paper-loop-v1", expected_release_revision: "a".repeat(40), expected_migration_head: "0064_prompt_release_channel", reported_process_version: "agent-paper-loop-v1+a" + "a".repeat(39), reported_release_revision: "a".repeat(40), reported_migration_head: "0064_prompt_release_channel", database_migration_heads: ["0064_prompt_release_channel"] },
     attention: [],
   },
   meta: { ...meta(), schema_version: "1" as const },

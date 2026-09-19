@@ -21,6 +21,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 LABEL = "com.nexus.agent-paper-loop"
+_RELEASE_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 @contextmanager
@@ -129,11 +130,26 @@ def _service_working_directory() -> str:
     return str(Path(_runtime_executable()).parent)
 
 
+def _checkout_revision(root: Path) -> str | None:
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    revision = completed.stdout.strip()
+    return revision if completed.returncode == 0 and _RELEASE_REVISION.fullmatch(revision) else None
+
+
 def _engine_environment(root: Path) -> dict[str, str]:
-    return {
+    environment = {
         **_runtime_environment(),
         "__PYVENV_LAUNCHER__": str(root / ".venv/bin/python3"),
     }
+    release_revision = _checkout_revision(root)
+    if release_revision is not None:
+        environment["NEXUS_RELEASE_REVISION"] = release_revision
+    return environment
 
 
 def _program_arguments(root: Path, env_file: Path, project: str) -> list[str]:
@@ -224,6 +240,9 @@ def _write_service_plist(
         "RunAtLoad": False,
         "KeepAlive": False,
     }
+    release_revision = _checkout_revision(root)
+    if release_revision is not None:
+        payload["EnvironmentVariables"] = {"NEXUS_RELEASE_REVISION": release_revision}
     temporary_path: Path | None = None
     try:
         with NamedTemporaryFile(

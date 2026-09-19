@@ -213,13 +213,17 @@ it("explains readiness, compatibility, and adjacent-cycle changes without new ac
   };
   payload.data.compatibility = {
     status: "incompatible", expected_process_version: "agent-paper-loop-v1",
+    release_status: "mismatching", expected_release_revision: "a".repeat(40),
     expected_migration_head: "0064_prompt_release_channel", reported_process_version: "old-loop",
+    reported_release_revision: "b".repeat(40),
     reported_migration_head: "0061_agent_paper_job_isolation", database_migration_heads: ["0064_prompt_release_channel"],
   };
   render(<WorkbenchPanel state="ready" payload={payload} refreshing={false} onRefresh={vi.fn()} />);
   const readiness = screen.getByRole("region", { name: "运行就绪与阻断" });
   expect(readiness).toHaveTextContent("研究未通过交易准入");
-  expect(readiness).toHaveTextContent("服务 / 版本不兼容");
+  expect(readiness).toHaveTextContent("服务运行的代码提交与当前 API 不一致");
+  expect(readiness).toHaveTextContent("aaaaaaaaaaaa");
+  expect(readiness).toHaveTextContent("bbbbbbbbbbbb");
   expect(readiness).toHaveTextContent("old-loop");
   expect(readiness).toHaveTextContent("阻断分类、结果代码");
   expect(readiness).toHaveTextContent("下一可运行时段");

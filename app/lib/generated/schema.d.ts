@@ -7676,10 +7676,19 @@ export interface components {
             expected_migration_head: string;
             /** Expected Process Version */
             expected_process_version: string;
+            /** Expected Release Revision */
+            expected_release_revision?: string | null;
+            /**
+             * Release Status
+             * @enum {string}
+             */
+            release_status: "matching" | "mismatching" | "unknown";
             /** Reported Migration Head */
             reported_migration_head: string | null;
             /** Reported Process Version */
             reported_process_version: string | null;
+            /** Reported Release Revision */
+            reported_release_revision?: string | null;
             /**
              * Status
              * @enum {string}

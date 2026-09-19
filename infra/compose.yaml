@@ -54,6 +54,7 @@ services:
     command: ["nexus-engine-api"]
     environment:
       - NEXUS_ENV
+      - NEXUS_RELEASE_REVISION
       - DATABASE_URL
       - OBJECT_STORE_ENDPOINT
       - OBJECT_STORE_REGION
@@ -82,6 +83,7 @@ services:
     command: ["nexus-engine-worker"]
     environment:
       - NEXUS_ENV
+      - NEXUS_RELEASE_REVISION
       - DATABASE_URL
       - OBJECT_STORE_ENDPOINT
       - OBJECT_STORE_REGION

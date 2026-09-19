@@ -100,9 +100,12 @@ class WorkbenchReadinessResponse(_StrictSchema):
 
 class WorkbenchCompatibilityResponse(_StrictSchema):
     status: Literal["compatible", "incompatible", "unknown"]
+    release_status: Literal["matching", "mismatching", "unknown"]
     expected_process_version: str = Field(max_length=100)
+    expected_release_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     expected_migration_head: str = Field(max_length=100)
     reported_process_version: str | None = Field(max_length=100)
+    reported_release_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     reported_migration_head: str | None = Field(max_length=100)
     database_migration_heads: tuple[str, ...] = Field(max_length=10)
 

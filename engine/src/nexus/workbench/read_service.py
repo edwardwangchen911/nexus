@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,10 @@ from nexus.api.schemas.workbench import (
     WorkbenchLoopResponse,
     WorkbenchResponse,
 )
-from nexus.ops.agent_paper_loop import _classify_agent_paper_service_heartbeat
+from nexus.ops.agent_paper_loop import (
+    _classify_agent_paper_service_heartbeat,
+    parse_agent_paper_process_version,
+)
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import (
     AGENT_PAPER_LOOP_PROCESS_VERSION,
@@ -31,11 +35,18 @@ from nexus.workbench.readiness import cycle_blocker, runtime_readiness
 
 
 class WorkbenchReadService:
-    def __init__(self, session: AsyncSession, request_time: datetime) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        request_time: datetime,
+        *,
+        expected_release_revision: str | None = None,
+    ) -> None:
         if request_time.tzinfo is None or request_time.utcoffset() is None:
             raise ValueError("request_time must be timezone-aware")
         self._session = session
         self._request_time = request_time.astimezone(UTC)
+        self._expected_release_revision = expected_release_revision
 
     async def read(self) -> WorkbenchResponse:
         paper = PaperReadService(self._session, self._request_time)
@@ -84,17 +95,34 @@ class WorkbenchReadService:
             if row is None
             else _classify_agent_paper_service_heartbeat(row[0], heartbeat)["status"]
         )
+        _, reported_release_revision = parse_agent_paper_process_version(
+            heartbeat.process_version if heartbeat else None
+        )
+        release_status: Literal["matching", "mismatching", "unknown"] = (
+            "unknown"
+            if self._expected_release_revision is None or reported_release_revision is None
+            else (
+                "matching"
+                if self._expected_release_revision == reported_release_revision
+                else "mismatching"
+            )
+        )
+        if release_status == "mismatching":
+            classification = "incompatible"
         compatibility = WorkbenchCompatibilityResponse(
             status="unknown"
-            if classification in {"missing", "unavailable"}
+            if classification in {"missing", "unavailable"} or release_status == "unknown"
             else (
                 "incompatible"
                 if classification == "incompatible" or heads != (CURRENT_MIGRATION_HEAD,)
                 else "compatible"
             ),
+            release_status=release_status,
             expected_process_version=AGENT_PAPER_LOOP_PROCESS_VERSION,
+            expected_release_revision=self._expected_release_revision,
             expected_migration_head=CURRENT_MIGRATION_HEAD,
             reported_process_version=heartbeat.process_version if heartbeat else None,
+            reported_release_revision=reported_release_revision,
             reported_migration_head=heartbeat.migration_head if heartbeat else None,
             database_migration_heads=heads,
         )

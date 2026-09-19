@@ -6,6 +6,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -134,6 +135,32 @@ from nexus.research.fred_storage import FredResearchObservation, read_fred_obser
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
+
+_RELEASE_REVISION = re.compile(r"^[0-9a-f]{40}$")
+
+
+def agent_paper_process_version(release_revision: str | None) -> str:
+    """Bind the protocol version to one optional canonical checkout revision."""
+    if release_revision is None:
+        return AGENT_PAPER_LOOP_PROCESS_VERSION
+    if _RELEASE_REVISION.fullmatch(release_revision) is None:
+        raise ValueError("release_revision must be a canonical Git SHA")
+    return f"{AGENT_PAPER_LOOP_PROCESS_VERSION}+{release_revision}"
+
+
+def parse_agent_paper_process_version(value: object) -> tuple[str | None, str | None]:
+    """Read current and legacy heartbeat versions without guessing malformed revisions."""
+    if value == AGENT_PAPER_LOOP_PROCESS_VERSION:
+        return AGENT_PAPER_LOOP_PROCESS_VERSION, None
+    if not isinstance(value, str):
+        return None, None
+    prefix = f"{AGENT_PAPER_LOOP_PROCESS_VERSION}+"
+    if not value.startswith(prefix):
+        return None, None
+    release_revision = value.removeprefix(prefix)
+    if _RELEASE_REVISION.fullmatch(release_revision) is None:
+        return None, None
+    return AGENT_PAPER_LOOP_PROCESS_VERSION, release_revision
 
 
 class AgentPaperLoopAction(StrEnum):
@@ -719,7 +746,7 @@ async def heartbeat_agent_paper_loop(
                 session,
                 queue=QueueName.AGENT_PAPER,
                 worker_id=worker_id,
-                process_version=AGENT_PAPER_LOOP_PROCESS_VERSION,
+                process_version=agent_paper_process_version(settings.release_revision),
                 migration_head=CURRENT_MIGRATION_HEAD,
                 started_at=started_at,
                 seen_at=seen_at,
@@ -3960,9 +3987,10 @@ def _classify_agent_paper_service_heartbeat(
     ):
         return {"status": "unavailable"}
     process_version = getattr(heartbeat, "process_version", None)
+    process_protocol, release_revision = parse_agent_paper_process_version(process_version)
     migration_head = getattr(heartbeat, "migration_head", None)
     if (
-        process_version != AGENT_PAPER_LOOP_PROCESS_VERSION
+        process_protocol != AGENT_PAPER_LOOP_PROCESS_VERSION
         or migration_head != CURRENT_MIGRATION_HEAD
     ):
         return {"status": "incompatible"}
@@ -3975,6 +4003,7 @@ def _classify_agent_paper_service_heartbeat(
         "seen_at": seen_at.isoformat(),
         "started_at": started_at.isoformat(),
         "process_version": process_version,
+        "release_revision": release_revision,
         "migration_head": migration_head,
     }
 
@@ -4042,10 +4071,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error_code": code}))
             return 1
     try:
-        environment = (
-            load_agent_paper_service_environment(root, {}, env_file=env_file)
-            if env_file is not None
-            else load_agent_paper_service_environment(root, os.environ)
+        process_environment: Mapping[str, str] = os.environ
+        if env_file is not None:
+            process_environment = {
+                name: value
+                for name in ("NEXUS_RELEASE_REVISION",)
+                if (value := os.environ.get(name))
+            }
+        environment = load_agent_paper_service_environment(
+            root,
+            process_environment,
+            env_file=env_file,
         )
         if args.service_startup_preflight:
             try:

@@ -2254,6 +2254,7 @@ def test_explicit_config_cli_preflight_and_runtime_ignore_business_process_overr
         "DATABASE_URL": "postgresql+asyncpg://wrong/other",
         "ALPACA_API_KEY_ID": "process-canary",
         "FRED_API_KEY": "process-only-canary",
+        "NEXUS_RELEASE_REVISION": "a" * 40,
     }.items():
         monkeypatch.setenv(name, value)
     seen = []
@@ -2264,6 +2265,7 @@ def test_explicit_config_cli_preflight_and_runtime_ignore_business_process_overr
         assert environment["DATABASE_URL"] == enabled_environment()["DATABASE_URL"]
         assert environment["ALPACA_API_KEY_ID"] == "alpaca-key"
         assert "FRED_API_KEY" not in environment
+        assert environment["NEXUS_RELEASE_REVISION"] == "a" * 40
         return {"status": "ready"}
 
     async def runtime(settings, *, account_id, repo_root, env_file):
@@ -2273,6 +2275,7 @@ def test_explicit_config_cli_preflight_and_runtime_ignore_business_process_overr
         assert settings.database_url == enabled_environment()["DATABASE_URL"]
         assert settings.agent_paper_cycle_enabled
         assert settings.agent_runtime_mode.value == "codex_sdk"
+        assert settings.release_revision == "a" * 40
         return A.STOP_REQUESTED
 
     monkeypatch.setattr(loop, "agent_paper_service_preflight", preflight)

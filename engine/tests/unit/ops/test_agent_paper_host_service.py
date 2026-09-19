@@ -205,6 +205,47 @@ def test_start_binds_exact_config_and_repeated_start_is_idempotent(tmp_path):
     assert path.stat().st_mtime_ns == before
 
 
+def test_start_binds_the_exact_checkout_revision_to_launchd(tmp_path):
+    root, env = _service_root(tmp_path)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=NEXUS Test",
+            "-c",
+            "user.email=nexus-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test fixture",
+        ],
+        check=True,
+    )
+    revision = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    result = _invoke(root, env, "start")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    service = plistlib.loads((root / ".secrets/nexus-agent-paper/service.plist").read_bytes())
+    assert service["EnvironmentVariables"] == {"NEXUS_RELEASE_REVISION": revision}
+
+    run_result = _invoke(root, env, "run")
+
+    assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+    assert any(
+        call[0] == "environment" and "NEXUS_RELEASE_REVISION" in call[1:]
+        for call in _calls(root)
+    )
+
+
 def test_service_control_lock_serializes_launchd_owner_mutations(tmp_path):
     root, env = _service_root(tmp_path)
     lock_directory = Path(env["HOME"]) / "Library" / "Application Support" / "NEXUS" / "runtime"

@@ -14,6 +14,7 @@ from helpers.paper_execution import seed_paper_execution
 from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
 from nexus.paper.agent_cycle_models import candidate_manifest_hash, canonical_cycle_event_hash
 from nexus.paper.read_service import PaperReadService
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
@@ -26,6 +27,7 @@ from nexus.workbench.read_service import WorkbenchReadService
 from sqlalchemy import select
 
 ACTIVE_DECISION_TIME = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
+RELEASE_REVISION = "a" * 40
 
 
 @pytest.mark.asyncio
@@ -52,8 +54,9 @@ async def test_workbench_reads_online_loop_active_order_and_empty_account(
     assert result.loop.reason_code is None
     assert result.loop.last_seen_at == heartbeat_time
     assert result.compatibility is not None
-    assert result.compatibility.status == "compatible"
-    assert result.compatibility.database_migration_heads == ("0064_prompt_release_channel",)
+    assert result.compatibility.status == "unknown"
+    assert result.compatibility.release_status == "unknown"
+    assert result.compatibility.database_migration_heads == (CURRENT_MIGRATION_HEAD,)
     assert result.readiness is not None
     assert result.readiness.previous_cycle_id is None
     assert result.latest_cycle is None
@@ -104,7 +107,7 @@ async def test_workbench_keeps_no_order_cycle_empty_and_reports_only_stale_loop(
 async def test_workbench_reports_incompatible_agent_paper_heartbeat(
     migrated_database_url: str,
 ) -> None:
-    request_time = datetime(2026, 8, 27, 13, 45, tzinfo=UTC)
+    request_time = datetime.now(UTC)
     await heartbeat_agent_paper_loop(
         settings(migrated_database_url),
         worker_id="agent-paper-loop-72000000-0000-0000-0000-000000000003",
@@ -126,6 +129,63 @@ async def test_workbench_reports_incompatible_agent_paper_heartbeat(
 
     assert result.loop.status == "offline"
     assert result.loop.reason_code == "HEARTBEAT_INCOMPATIBLE"
+
+
+@pytest.mark.asyncio
+async def test_workbench_reports_matching_runtime_release_revision(
+    migrated_database_url: str,
+) -> None:
+    request_time = datetime.now(UTC)
+    runtime_settings = settings(migrated_database_url).model_copy(
+        update={"release_revision": RELEASE_REVISION}
+    )
+    await heartbeat_agent_paper_loop(
+        runtime_settings,
+        worker_id="agent-paper-loop-72000000-0000-0000-0000-000000000004",
+        started_at=request_time - timedelta(minutes=1),
+        seen_at=request_time - timedelta(seconds=5),
+    )
+
+    factory = session_factory(runtime_settings)
+    async with factory() as session:
+        result = await WorkbenchReadService(
+            session, request_time, expected_release_revision=RELEASE_REVISION
+        ).read()
+
+    assert result.loop.status == "online"
+    assert result.compatibility is not None
+    assert result.compatibility.status == "compatible"
+    assert result.compatibility.release_status == "matching"
+    assert result.compatibility.expected_release_revision == RELEASE_REVISION
+    assert result.compatibility.reported_release_revision == RELEASE_REVISION
+
+
+@pytest.mark.asyncio
+async def test_workbench_reports_runtime_release_mismatch_as_incompatible(
+    migrated_database_url: str,
+) -> None:
+    request_time = datetime.now(UTC)
+    runtime_settings = settings(migrated_database_url).model_copy(
+        update={"release_revision": "b" * 40}
+    )
+    await heartbeat_agent_paper_loop(
+        runtime_settings,
+        worker_id="agent-paper-loop-72000000-0000-0000-0000-000000000005",
+        started_at=request_time - timedelta(minutes=1),
+        seen_at=request_time - timedelta(seconds=5),
+    )
+
+    factory = session_factory(runtime_settings)
+    async with factory() as session:
+        result = await WorkbenchReadService(
+            session, request_time, expected_release_revision=RELEASE_REVISION
+        ).read()
+
+    assert result.loop.status == "offline"
+    assert result.loop.reason_code == "HEARTBEAT_INCOMPATIBLE"
+    assert result.compatibility is not None
+    assert result.compatibility.status == "incompatible"
+    assert result.compatibility.release_status == "mismatching"
 
 
 @pytest.mark.asyncio

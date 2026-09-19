@@ -210,7 +210,13 @@ function validReadiness(value: unknown): boolean {
 function validCompatibility(value: unknown): boolean {
   if (value === undefined || value === null) return true;
   return isPlain(value) && ["compatible", "incompatible", "unknown"].includes(String(value.status))
+    && ["matching", "mismatching", "unknown"].includes(String(value.release_status))
     && typeof value.expected_process_version === "string" && typeof value.expected_migration_head === "string"
+    && isNullableRevision(value.expected_release_revision) && isNullableRevision(value.reported_release_revision)
     && isNullableString(value.reported_process_version) && isNullableString(value.reported_migration_head)
     && Array.isArray(value.database_migration_heads) && value.database_migration_heads.every((head) => typeof head === "string");
+}
+
+function isNullableRevision(value: unknown): boolean {
+  return value === null || (typeof value === "string" && /^[0-9a-f]{40}$/.test(value));
 }

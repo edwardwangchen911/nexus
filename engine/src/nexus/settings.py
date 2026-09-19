@@ -46,6 +46,11 @@ class EngineSettings(_SafeSettings):
         validation_alias="NEXUS_ENV",
     )
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    release_revision: str | None = Field(
+        default=None,
+        validation_alias="NEXUS_RELEASE_REVISION",
+        pattern=r"^[0-9a-f]{40}$",
+    )
     object_store_endpoint: str | None = Field(
         default=None,
         validation_alias="OBJECT_STORE_ENDPOINT",

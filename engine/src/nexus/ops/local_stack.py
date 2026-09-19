@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -65,6 +66,18 @@ _HOST_ERROR_CODES = frozenset(
 )
 _SAFE_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
 _SAFE_TEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}")
+_RELEASE_REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def _checkout_revision(repo_root: Path) -> str | None:
+    completed = subprocess.run(
+        ("git", "-C", str(repo_root), "rev-parse", "--verify", "HEAD"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    revision = completed.stdout.strip()
+    return revision if completed.returncode == 0 and _RELEASE_REVISION.fullmatch(revision) else None
 
 
 def build_local_stack_commands(
@@ -168,6 +181,10 @@ def run_local_stack(
         env_file=resolved_env,
         project_name=project_name,
     )
+    command_environment = dict(os.environ)
+    release_revision = _checkout_revision(root)
+    if release_revision is not None:
+        command_environment["NEXUS_RELEASE_REVISION"] = release_revision
     results: list[LocalStackStepResult] = []
 
     def run_command(command: LocalStackCommand, *, fact: str = "compose") -> tuple[int, str]:
@@ -180,6 +197,7 @@ def run_local_stack(
                 check=False,
                 text=True,
                 capture_output=True,
+                env=command_environment,
             )
         except subprocess.TimeoutExpired:
             results.append(
@@ -271,6 +289,7 @@ def run_local_stack(
                 check=False,
                 text=True,
                 capture_output=True,
+                env=command_environment,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             result_code = (

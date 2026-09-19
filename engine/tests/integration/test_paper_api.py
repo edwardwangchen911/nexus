@@ -674,6 +674,9 @@ async def test_workbench_endpoint_is_authenticated_read_only_and_rejects_queries
     assert response.json()["data"]["mode"] == "internal_paper"
     assert response.json()["data"]["execution_locked"] is True
     assert response.json()["data"]["loop"]["status"] == "unknown"
+    assert response.json()["data"]["compatibility"]["release_status"] == "unknown"
+    assert response.json()["data"]["compatibility"]["expected_release_revision"] is None
+    assert response.json()["data"]["compatibility"]["reported_release_revision"] is None
     assert "account_id" not in response.text.lower()
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"

@@ -24,6 +24,10 @@ const nextReasons: Record<NonNullable<Workbench["session"]["next_eligible_reason
   CALENDAR_UNAVAILABLE: "等待交易日历证据",
 };
 
+function shortRevision(revision: string | null | undefined): string {
+  return revision ? revision.slice(0, 12) : "未知";
+}
+
 export function ReadinessSummary({ workbench }: { workbench: Workbench }): React.ReactElement {
   const { readiness, compatibility, session, loop } = workbench;
   const incompatible = compatibility?.status === "incompatible";
@@ -35,7 +39,9 @@ export function ReadinessSummary({ workbench }: { workbench: Workbench }): React
       <div><dt>当前阶段</dt><dd>{recovery ? stages.recovery : readiness ? stages[readiness.stage] : "当前服务尚未提供运行解释"}</dd></div>
       <div><dt>本周期阻断</dt><dd>{readiness ? blockers[readiness.blocker] : "原因尚不能确定"}</dd></div>
       <div><dt>下一可运行时段</dt><dd>{session.next_eligible_at ? `${formatDisplayTime(session.next_eligible_at)} · ${nextReason}` : nextReason}</dd></div>
-      <div><dt>服务兼容性</dt><dd>{incompatible ? "服务 / 版本不兼容" : compatibility?.status === "compatible" ? "代码、迁移与心跳报告匹配" : "兼容状态未知"}</dd></div>
+      <div><dt>服务兼容性</dt><dd>{incompatible
+        ? compatibility?.release_status === "mismatching" ? "服务运行的代码提交与当前 API 不一致" : "服务 / 版本不兼容"
+        : compatibility?.status === "compatible" ? "代码提交、迁移与心跳报告匹配" : "兼容状态未知"}</dd></div>
     </dl>
     {readiness ? <p>已保存阶段：{stages[readiness.stage]} · <code>{readiness.reason_code}</code></p> : null}
     {readiness?.blocker === "research_not_actionable" ? <p>现有记录只证明研究未通过交易准入；不据此推断具体资料缺口，也不等同于已形成充分证据的不调整结论。</p> : null}
@@ -49,11 +55,13 @@ export function ReadinessSummary({ workbench }: { workbench: Workbench }): React
       <dl className="workbench-readiness-facts">
         <div><dt>代码预期进程</dt><dd>{compatibility?.expected_process_version ?? "未知"}</dd></div>
         <div><dt>心跳报告进程</dt><dd>{compatibility?.reported_process_version ?? "未知"}</dd></div>
+        <div><dt>API 代码提交</dt><dd title={compatibility?.expected_release_revision ?? undefined}>{shortRevision(compatibility?.expected_release_revision)}</dd></div>
+        <div><dt>循环代码提交</dt><dd title={compatibility?.reported_release_revision ?? undefined}>{shortRevision(compatibility?.reported_release_revision)}</dd></div>
         <div><dt>代码预期迁移</dt><dd>{compatibility?.expected_migration_head ?? "未知"}</dd></div>
         <div><dt>数据库迁移</dt><dd>{compatibility?.database_migration_heads.join("、") || "未知"}</dd></div>
         <div><dt>心跳报告迁移</dt><dd>{compatibility?.reported_migration_head ?? "未知"}</dd></div>
       </dl>
     </details>
-    <p>阶段来自持久化记录；心跳只证明最近存活，版本匹配不证明已加载当前 Git 提交。下一时段不是启动承诺。刷新不会触发行情、模型、订单或恢复。</p>
+    <p>阶段来自持久化记录；只有 API 与循环都报告同一代码提交时，页面才显示提交匹配。下一时段不是启动承诺。刷新不会触发行情、模型、订单或恢复。</p>
   </section>;
 }

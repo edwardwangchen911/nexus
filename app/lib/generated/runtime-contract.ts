@@ -15662,6 +15662,27 @@ export const runtimeContractSchemas = {
         "title": "Expected Process Version",
         "type": "string"
       },
+      "expected_release_revision": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{40}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Expected Release Revision"
+      },
+      "release_status": {
+        "enum": [
+          "matching",
+          "mismatching",
+          "unknown"
+        ],
+        "title": "Release Status",
+        "type": "string"
+      },
       "reported_migration_head": {
         "anyOf": [
           {
@@ -15686,6 +15707,18 @@ export const runtimeContractSchemas = {
         ],
         "title": "Reported Process Version"
       },
+      "reported_release_revision": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{40}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reported Release Revision"
+      },
       "status": {
         "enum": [
           "compatible",
@@ -15698,6 +15731,7 @@ export const runtimeContractSchemas = {
     },
     "required": [
       "status",
+      "release_status",
       "expected_process_version",
       "expected_migration_head",
       "reported_process_version",
