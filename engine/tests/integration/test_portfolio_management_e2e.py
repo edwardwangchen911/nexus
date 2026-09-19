@@ -421,6 +421,9 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
             )
 
             before_reads = await _business_facts(session)
+            assert before_reads[BrokerBatchApprovalRecord.__tablename__] == ()
+            assert before_reads[BrokerCommandRecord.__tablename__] == ()
+            assert before_reads[BrokerCommandAttemptRecord.__tablename__] == ()
             imbalances = (
                 await session.execute(
                     select(PaperLedgerEntryRecord.transaction_id)
