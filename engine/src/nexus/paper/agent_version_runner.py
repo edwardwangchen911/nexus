@@ -1053,11 +1053,13 @@ def _validate_existing_initialization(
         if (
             catalog != _LEDGER_CATALOG
             or len(funding) != 1
+            or funding[0].transaction_type != "funding"
             or funding[0].reference_type != "initial_funding"
             or funding[0].order_id is not None
             or funding[0].reference_hash != reference_hash
             or funding[0].occurred_at != evaluation.created_at
             or len(initial_event) != 1
+            or initial_event[0].event_seq != 1
             or initial_event[0].from_state is not None
             or initial_event[0].to_state != "unlocked"
             or initial_event[0].drawdown_ratio != 0

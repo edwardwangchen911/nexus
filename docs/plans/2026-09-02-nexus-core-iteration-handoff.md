@@ -6,6 +6,14 @@
 
 ## 2026-09-19 主线与组合分支集成交接
 
+- 主线 `2a7120d6` 已修复评价账户在首槽真实成交后无法进入下一槽的问题：初始化
+  完整性只核对唯一原始注资、两条初始分录和初始锁事件，同时允许后续合法交易与
+  回撤事件。本次增补恢复了 `transaction_type='funding'` 与初始锁事件
+  `event_seq=1` 的显式断言；真实 PostgreSQL 回归还覆盖重复进入不重复注资/Job、
+  损坏原始 hash、后续事实复用初始化语义及初始事件序号篡改均 fail-closed。
+  两个相关 PostgreSQL 模块共 70 项通过，Ruff、Mypy 通过。完整 Engine 回归另有
+  9 项既有失败，已分类为 Agent execution fixture、历史 migration-head 断言及
+  current ETF identity；不能据此写成全仓全绿。
 - 共享 Agent Paper 运行逻辑由主线任务统一负责，冻结同步点为 `main@2fc4aca7`；
   组合管理第一切片仍由任务 `01a09987-af26-7692-95ec-a9e9483a13d2` 负责，
   实现分支为 `edward/portfolio-management-first-slice-implementation@f4fc10d5`，
