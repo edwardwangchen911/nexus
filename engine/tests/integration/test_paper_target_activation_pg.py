@@ -1,7 +1,7 @@
 import asyncio
 from datetime import timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from integration.test_portfolio_proposal_pg import proposal_source
@@ -849,16 +849,14 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hashlib
-    import json
     from copy import deepcopy
-    from uuid import UUID
 
     import httpx
     from helpers.paper_api import app, headers
-    from integration.test_agent_paper_cycle_pg import _safe_no_trade_intent
+    from integration.test_agent_execution_pg import _ActionableFixtureCommittee
     from integration.test_paper_cancel_result_read_pg import _seed_target_associated_plan
     from integration.test_portfolio_synthesis_persistence_pg import synthesis_intent
+    from nexus.agents.execution import execute_research_run
     from nexus.agents.paper_context import prepare_agent_paper_research_snapshot
     from nexus.agents.portfolio_synthesis_persistence import admit_portfolio_synthesis
     from nexus.agents.portfolio_synthesis_worker import (
@@ -866,8 +864,10 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
         run_synthesis_job_once,
     )
     from nexus.agents.responses_budget import UsageSnapshot
-    from nexus.domain.evidence import EvidenceRef
     from nexus.jobs.daily_research import admit_agent_paper_research
+    from nexus.jobs.models import JobType, QueueName, RetryPolicy
+    from nexus.jobs.registry import JobHandlerResult, JobHandlerSpec, JobRegistry
+    from nexus.jobs.worker import run_job_worker_once
     from nexus.paper.agent_cycle import (
         _append_event,
         _events,
@@ -877,19 +877,29 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
     from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
     from nexus.paper.execution_service import cancel_internal_paper_order
     from nexus.paper.projection import load_paper_projection
-    from nexus.persistence.models.agents import (
-        AgentResearchOutputEvidenceRecord,
-        AgentResearchOutputRecord,
-        AgentResearchRunRecord,
+    from nexus.persistence.migrations import (
+        CURRENT_GENERAL_WORKER_PROCESS_VERSION,
+        CURRENT_MIGRATION_HEAD,
     )
+    from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
     from nexus.persistence.models.paper import (
         AgentPaperCycleRecord,
         PaperOrderEventRecord,
         PaperOrderRecord,
     )
-    from nexus.persistence.models.research import ResearchEvidenceRef
     from nexus.persistence.models.runtime import Job
-    from sqlalchemy import text
+    from nexus.worker import _AgentResearchJobPayload
+
+    async def execute_fixture_research(context):
+        result = await execute_research_run(
+            context.session,
+            run_id=UUID(context.payload.run_id),
+            committee=_ActionableFixtureCommittee(),
+            allow_fixture_evidence=True,
+            allow_fixture_price_authority=True,
+        )
+        assert result.status == "completed"
+        return JobHandlerResult(outcome="succeeded", result_code="AGENT_COMPLETED")
 
     engine, sessions, args, first_proposal, first_activation = (
         await _seed_target_associated_plan(migrated_database_url, monkeypatch)
@@ -940,8 +950,8 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
             await _append_event(session, second_cycle, None, "prepared", "CYCLE_PREPARED", {})
 
             run_ids = []
-            output_ids = []
-            for index, candidate in enumerate(manifest):
+            job_ids = []
+            for candidate in manifest:
                 snapshot = await prepare_agent_paper_research_snapshot(
                     session,
                     cycle_id=second_cycle.id,
@@ -960,96 +970,12 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
                 )
                 run = await session.get(AgentResearchRunRecord, admission.run_id)
                 assert run is not None
-                bound_records = [
-                    await session.get(ResearchEvidenceRef, UUID(frozen["id"]))
-                    for frozen in run.evidence_manifest
-                ]
-                assert all(bound is not None for bound in bound_records)
-                intent = _safe_no_trade_intent(
-                    run=run,
-                    evidence=bound_records[0],
-                    valid_until=new_time + timedelta(days=1),
-                ).model_copy(
-                    update={
-                        "display_symbol": "AAPL" if index == 0 else "T2",
-                        "evidence_refs": tuple(
-                            EvidenceRef(
-                                source=bound.source,
-                                object_id=bound.provider_object_id,
-                                available_at=bound.available_at,
-                                location=bound.location,
-                                content_hash=bound.content_hash,
-                            )
-                            for bound in bound_records
-                        ),
-                    }
-                )
-                document = intent.model_dump(mode="json")
-                payload = {"quality_status": intent.quality_status}
-                content = {
-                    "status": "completed",
-                    "role": None,
-                    "payload": payload,
-                    "intent": document,
-                }
-                output = AgentResearchOutputRecord(
-                    id=uuid4(),
-                    run_id=run.id,
-                    sequence=1,
-                    status="completed",
-                    role=None,
-                    prompt_hash=None,
-                    payload=payload,
-                    intent=document,
-                    content_hash=hashlib.sha256(
-                        json.dumps(
-                            content,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            default=str,
-                        ).encode()
-                    ).hexdigest(),
-                    created_at=new_time + timedelta(minutes=1),
-                )
-                session.add(output)
-                await session.flush()
-                for bound in bound_records:
-                    session.add(
-                        AgentResearchOutputEvidenceRecord(
-                            output_id=output.id,
-                            evidence_ref_id=bound.id,
-                            source=bound.source,
-                            provider_object_id=bound.provider_object_id,
-                            revision=bound.revision,
-                            available_at=bound.available_at,
-                            location=bound.location,
-                            content_hash=bound.content_hash,
-                        )
-                    )
-                await session.execute(
-                    text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
-                )
-                await session.execute(
-                    text("UPDATE agent_research_runs SET status='completed' WHERE id=:id"),
-                    {"id": run.id},
-                )
-                await session.execute(
-                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
-                )
                 job = await session.scalar(
                     select(Job).where(Job.payload["run_id"].as_string() == str(run.id))
                 )
                 assert job is not None
-                job.status = "running"
-                job.started_at = new_time
-                job.attempt_count = 1
-                job.version += 1
-                await session.flush()
-                job.status = "succeeded"
-                job.finished_at = new_time + timedelta(minutes=1)
-                job.version += 1
                 run_ids.append(run.id)
-                output_ids.append(output.id)
+                job_ids.append(job.id)
             await _append_event(
                 session,
                 second_cycle,
@@ -1058,6 +984,54 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
                 "RESEARCH_JOBS_PREPARED",
                 {"research_run_ids": [str(value) for value in run_ids]},
             )
+
+        research_registry = JobRegistry(
+            (
+                JobHandlerSpec(
+                    job_type=JobType.AGENT_PAPER_RESEARCH,
+                    schema_version="agent_research_job_v1",
+                    payload_model=_AgentResearchJobPayload,
+                    queue=QueueName.GENERAL,
+                    timeout_seconds=120,
+                    retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+                    max_attempts=1,
+                    idempotency_namespace="agent.research",
+                    handler=execute_fixture_research,
+                ),
+            )
+        )
+        for job_id in job_ids:
+            assert await run_job_worker_once(
+                sessions,
+                registry=research_registry,
+                queue=QueueName.GENERAL,
+                worker_id=f"target-activation-test-{job_id}",
+                worker_started_at=new_time,
+                process_version=CURRENT_GENERAL_WORKER_PROCESS_VERSION,
+                migration_head=CURRENT_MIGRATION_HEAD,
+                clock=lambda: new_time + timedelta(minutes=1),
+                claim_registered_only=True,
+                job_ids=(job_id,),
+            )
+        async with sessions.begin() as session:
+            output_ids = []
+            for run_id, job_id in zip(run_ids, job_ids, strict=True):
+                run = await session.get(AgentResearchRunRecord, run_id)
+                job = await session.get(Job, job_id)
+                output = await session.scalar(
+                    select(AgentResearchOutputRecord).where(
+                        AgentResearchOutputRecord.run_id == run_id,
+                        AgentResearchOutputRecord.status == "completed",
+                    )
+                )
+                assert run is not None and job is not None
+                assert (run.status, job.status, job.last_error_code) == (
+                    "completed",
+                    "succeeded",
+                    None,
+                )
+                assert output is not None
+                output_ids.append(output.id)
             admitted = await admit_portfolio_synthesis(
                 session,
                 cycle_id=second_cycle.id,
