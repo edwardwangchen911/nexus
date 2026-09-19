@@ -5237,7 +5237,23 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
                     ),
                 )
             )
-            await asyncio.sleep(0)
+            blocked_on_legacy = False
+            async with sessions() as observer:
+                for _ in range(100):
+                    blocked_on_legacy = bool(
+                        await observer.scalar(
+                            text(
+                                "SELECT EXISTS ("
+                                "SELECT 1 FROM pg_locks "
+                                "WHERE locktype='advisory' AND NOT granted"
+                                ")"
+                            )
+                        )
+                    )
+                    if blocked_on_legacy:
+                        break
+                    await asyncio.sleep(0)
+            assert blocked_on_legacy
             legacy_first_fill = await advance_internal_paper_order(
                 session,
                 order_id=completed.order_ids[0],
