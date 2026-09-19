@@ -13,13 +13,15 @@ import { DataState, dataStateLabels, type DataStateKind } from "../../components
 import { AgentPaperCycle, AgentPaperSessionSummary, AgentPaperVersionHistory, type AgentPaperCycleFact, type AgentPaperSessionSummaryFact, type AgentPaperVersionObservationFact } from "../../components/agent-paper-cycle";
 import { AgentVersionEvaluation, type AgentVersionEvaluationFact } from "../../components/agent-version-evaluation";
 import { DecisionPath } from "../../components/decision-path";
+import { AdjustmentPlanLoader } from "../../components/paper/adjustment-plan";
+import { CancelResultCheck, type CancelAttempt } from "../../components/paper/cancel-result-check";
 import { formatPaperDecimal, formatPaperTime, OrderTimeline, type PaperOrder } from "../../components/order-timeline";
 import type { components } from "../../lib/generated/schema";
 
 export type PaperPortfolio = components["schemas"]["PaperPortfolioResponse"];
 type OrderStatus = PaperOrder["status"];
 type Notice = { kind: "success" | "error"; text: string } | null;
-type PendingCancel = { order: PaperOrder; idempotencyKey: string; unknown: boolean };
+type PendingCancel = { order: PaperOrder; idempotencyKey: string; unknown: boolean; requestedAt: string };
 type PaperPanelProps = {
   state: DataStateKind;
   portfolio: PaperPortfolio | null;
@@ -34,6 +36,7 @@ type PaperPanelProps = {
   versionHistory?: AgentPaperVersionObservationFact[];
   versionEvaluation?: AgentVersionEvaluationFact | null;
   cycleUnavailable?: boolean;
+  management?: React.ReactNode;
   onRefresh: () => void;
   onStatusFilter: (status: "" | OrderStatus) => void;
   onLoadMore: () => void;
@@ -68,6 +71,8 @@ export default function PaperPage(): React.ReactElement {
   const [notice, setNotice] = useState<Notice>(null);
   const [pendingCancel, setPendingCancel] = useState<PendingCancel | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [managementRefresh, setManagementRefresh] = useState(0);
+  const [lastAttempt, setLastAttempt] = useState<CancelAttempt | null>(null);
   const loadVersion = useRef(0);
   const orderVersion = useRef(0);
   const portfolioRef = useRef<PaperPortfolio | null>(null);
@@ -76,6 +81,7 @@ export default function PaperPage(): React.ReactElement {
   const cursorHistory = useRef(new Set<string>());
   const cancelInFlight = useRef(false);
   const returnFocus = useRef<HTMLElement | null>(null);
+  const cancelAttempts = useRef(new Map<string, PendingCancel>());
 
   const clearFacts = useCallback((): void => {
     portfolioRef.current = null;
@@ -89,6 +95,7 @@ export default function PaperPage(): React.ReactElement {
     setVersionEvaluation(null);
     setCycleUnavailable(false);
     setNextCursor(null);
+    setLastAttempt(null);
   }, []);
 
   const refresh = useCallback(async (): Promise<boolean> => {
@@ -97,6 +104,7 @@ export default function PaperPage(): React.ReactElement {
     orderVersion.current += 1;
     setNotice(null);
     if (!portfolioRef.current) setState("loading");
+    setManagementRefresh((value) => value + 1);
     try {
       const filter = filterRef.current;
       const [portfolioResponse, orderResponse, cycleResponse] = await Promise.all([
@@ -209,7 +217,7 @@ export default function PaperPage(): React.ReactElement {
   function openCancel(order: PaperOrder, trigger?: HTMLButtonElement): void {
     if (!order.cancellable || cancelInFlight.current) return;
     returnFocus.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    setPendingCancel({ order, idempotencyKey: `paper-cancel-${crypto.randomUUID()}`, unknown: false });
+    setPendingCancel(cancelAttempts.current.get(order.order_id) ?? { order, idempotencyKey: `paper-cancel-${crypto.randomUUID()}`, unknown: false, requestedAt: new Date().toISOString() });
   }
 
   function closeCancel(): void {
@@ -222,6 +230,8 @@ export default function PaperPage(): React.ReactElement {
   async function confirmCancel(): Promise<void> {
     const pending = pendingCancel;
     if (!pending || cancelInFlight.current) return;
+    if (pending.unknown) return;
+    setLastAttempt({ orderId: pending.order.order_id, key: pending.idempotencyKey, requestedAt: pending.requestedAt });
     cancelInFlight.current = true; setCancelling(true); setNotice(null);
     try {
       const response = await fetch(`/api/v1/paper/orders/${encodeURIComponent(pending.order.order_id)}/cancel`, {
@@ -244,6 +254,7 @@ export default function PaperPage(): React.ReactElement {
         return;
       }
       if (response.status >= 500 || response.ok) {
+        cancelAttempts.current.set(pending.order.order_id, { ...pending, unknown: true });
         setPendingCancel({ ...pending, unknown: true });
         setNotice({ kind: "error", text: "取消结果未知。该订单保持锁定；请继续确认原操作结果。" });
         return;
@@ -261,6 +272,7 @@ export default function PaperPage(): React.ReactElement {
       setPendingCancel(null);
       setNotice({ kind: "error", text: "模拟订单未取消；请刷新订单事实后重试。" });
     } catch {
+      cancelAttempts.current.set(pending.order.order_id, { ...pending, unknown: true });
       setPendingCancel({ ...pending, unknown: true });
       setNotice({ kind: "error", text: "取消结果未知。该订单保持锁定；请继续确认原操作结果。" });
     } finally {
@@ -270,6 +282,7 @@ export default function PaperPage(): React.ReactElement {
 
   return <>
     <PaperPanel state={state} portfolio={portfolio} orders={orders} nextCursor={nextCursor}
+      management={<AdjustmentPlanLoader refreshVersion={managementRefresh} attempt={pendingCancel ? null : lastAttempt} />}
       cycles={cycles} cycleUnavailable={cycleUnavailable}
       cycleSummary={cycleSummary}
       versionObservation={versionObservation}
@@ -283,14 +296,15 @@ export default function PaperPage(): React.ReactElement {
   </>;
 }
 
-export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
+export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, management, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
   const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
       <header className="page-heading">
-        <div><p className="eyebrow">内部模拟 · 美元现金账户</p><h1>内部模拟盘</h1><p>先看账户绩效和风险暴露，再核对持仓、归因与订单账簿。这里不是实盘。</p></div>
+        <div><p className="eyebrow">内部模拟 · 美元现金账户</p><h1>内部模拟盘</h1><p>先核对当前调整计划、原操作结果与资源占用，再查看历史绩效。这里不是实盘。</p></div>
         <div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新事实</button></div>
       </header>
+      {state !== "forbidden" ? management : null}
       <DecisionPath current="paper" />
       <div role="status" aria-label="模拟盘操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
@@ -306,9 +320,11 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         {versionEvaluation ? <AgentVersionEvaluation evaluation={versionEvaluation} /> : null}
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
+        <section id="paper-actual-facts" className="page-stack" aria-label="独立实际账户事实">
         <PerformanceFacts portfolio={portfolio} />
         {portfolio.comparison ? <PaperComparison comparison={portfolio.comparison} /> : null}
         <Positions portfolio={portfolio} />
+        </section>
         <Attributions portfolio={portfolio} />
         <section className="paper-orders" aria-labelledby="paper-orders-title">
           <header className="paper-orders__heading"><div><p className="eyebrow">已保存的订单记录</p><h2 id="paper-orders-title">订单与模拟成交</h2><p>订单状态与可取消性以已保存的最新记录为准。</p></div><label className="paper-orders__filter">订单状态筛选<select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as "" | OrderStatus)} disabled={loadingMore}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label></header>
@@ -376,7 +392,7 @@ function PaperCancelDialog({ pending, submitting, onDismiss, onConfirm }: { pend
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
-  return <div className="confirmation-dialog" role="presentation"><dialog open aria-modal="true" aria-labelledby="paper-cancel-title" aria-describedby="paper-cancel-detail" onKeyDown={onKeyDown}><h3 id="paper-cancel-title">确认取消 {symbol} 模拟订单</h3><p id="paper-cancel-detail">将按当前事件版本 <strong className="numeric-data">{pending.order.current_event_seq}</strong> 请求取消剩余 <strong className="numeric-data">{formatPaperDecimal(pending.order.remaining_quantity)}</strong> 股。该操作只影响内部模拟账本，不会发送券商订单。</p>{pending.unknown ? <p className="inline-notice inline-notice--error">上次取消结果未知。继续确认会沿用原请求，不会重复发起取消。</p> : null}<div className="confirmation-dialog__actions"><button ref={backRef} className="button button--quiet" type="button" onClick={onDismiss} disabled={submitting}>返回订单</button><button className="button button--danger" type="button" onClick={onConfirm} disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在确认" : pending.unknown ? "继续确认原操作结果" : "确认取消模拟订单"}</button></div></dialog></div>;
+  return <div className="confirmation-dialog" role="presentation"><dialog open aria-modal="true" aria-labelledby="paper-cancel-title" aria-describedby="paper-cancel-detail" onKeyDown={onKeyDown}><h3 id="paper-cancel-title">{pending.unknown ? "核对" : "确认取消"} {symbol} 模拟订单</h3><p id="paper-cancel-detail">{pending.unknown ? "上次取消结果未知；仅读取原取消尝试，不再提交取消。" : <>将按当前事件版本 <strong className="numeric-data">{pending.order.current_event_seq}</strong> 请求取消剩余 <strong className="numeric-data">{formatPaperDecimal(pending.order.remaining_quantity)}</strong> 股。该操作只影响内部模拟账本，不会发送券商订单。</>}</p>{pending.unknown ? <CancelResultCheck attempt={{ orderId: pending.order.order_id, key: pending.idempotencyKey, requestedAt: pending.requestedAt }} /> : null}<div className="confirmation-dialog__actions"><button ref={backRef} className="button button--quiet" type="button" onClick={onDismiss} disabled={submitting}>返回订单</button>{!pending.unknown ? <button className="button button--danger" type="button" onClick={onConfirm} disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在确认" : "确认取消模拟订单"}</button> : null}</div></dialog></div>;
 }
 
 function MoneyFact({ term, value, signed = false }: { term: string; value: string; signed?: boolean }): React.ReactElement {

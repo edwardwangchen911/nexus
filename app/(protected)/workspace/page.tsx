@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AccountSummary } from "../../components/workbench/account-summary";
+import { ManagementSummaryCard } from "../../components/paper/management-summary";
 import { AttentionList } from "../../components/workbench/attention-list";
 import { LatestDecision } from "../../components/workbench/latest-decision";
 import { ModeStrip } from "../../components/workbench/mode-strip";
@@ -108,6 +109,7 @@ export function WorkbenchPanel({
 
       {payload ? <>
         <ModeStrip workbench={payload.data} />
+        <ManagementSummaryCard />
         <ReadinessSummary workbench={payload.data} />
         <div className="workbench-primary-grid">
           <LatestDecision cycle={payload.data.latest_cycle} orders={payload.data.active_orders} />

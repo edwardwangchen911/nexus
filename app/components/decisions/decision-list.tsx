@@ -62,6 +62,8 @@ function decisionKey(cycle: DecisionCycle): DecisionKey {
 }
 
 function finalPresentation(cycle: DecisionCycle, riskLabel: string): { label: string; tone: string } {
+  if (cycle.result_code === "TARGET_ACTIVATION_BLOCKED") return { label: "提案未生效", tone: "warning" };
+  if (cycle.result_code === "POLICY_UNCONFIRMED") return { label: "政策未确认", tone: "warning" };
   if (cycle.status === "unavailable") return { label: "数据不足", tone: "warning" };
   if (cycle.status === "failed") return { label: "模型失败", tone: "critical" };
   if (riskLabel === "风控拒绝") return { label: "风控拒绝", tone: "critical" };

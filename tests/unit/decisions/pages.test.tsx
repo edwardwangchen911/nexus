@@ -10,10 +10,11 @@ import DecisionsPage, { DecisionsPanel } from "../../../app/(protected)/decision
 import type { DataStateKind } from "../../../app/components/data-state";
 import type { components } from "../../../app/lib/generated/schema";
 import { agentPaperCycle, cancellableOrder, meta } from "../paper/fixtures";
+import { managementDetail, managementId } from "../paper/management-fixtures";
 
 type Cycle = components["schemas"]["AgentPaperCycleResponse"];
 type CyclePage = components["schemas"]["AgentPaperCyclePageResponse"];
-type Detail = components["schemas"]["AgentPaperCycleDetailResponse"];
+type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -22,6 +23,22 @@ afterEach(() => {
 
 function cycle(suffix: string, changes: Partial<Cycle>): Cycle {
   return { ...structuredClone(agentPaperCycle), cycle_id: `0198f7a0-1111-7777-8111-1111111111${suffix}`, ...changes };
+}
+
+function detail(cycle: Cycle, orders = [cancellableOrder]): Detail {
+  return {
+    cycle,
+    orders,
+    candidate_batch: null,
+    security_research: [],
+    synthesis: null,
+    proposal: null,
+    active_target: null,
+    activation_result: null,
+    blocker: null,
+    blocking_plan: null,
+    plan_summary: null,
+  };
 }
 
 const cycles = (): Cycle[] => [
@@ -41,6 +58,63 @@ const summary: CyclePage["summary"] = {
 };
 
 describe("decision records", () => {
+  it.each([false, true])("keeps a legacy unassociated order batch in the ledger (account target: %s)", (hasCurrentTarget) => {
+    const legacy = detail(agentPaperCycle);
+    legacy.active_target = hasCurrentTarget ? managementDetail.active_target : null;
+    legacy.plan_summary = { ...managementDetail.blocking_plan!, target_version_id: null };
+    render(<DecisionDetailPanel state="ready" detail={legacy} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("region", { name: "市场与研究证据" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "订单结论" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "执行结果" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "本轮组合取舍" })).not.toBeInTheDocument();
+  });
+  it("keeps a legacy cycle's research and execution ledger when the account has a current target", () => {
+    const legacy = detail(agentPaperCycle);
+    legacy.active_target = managementDetail.active_target;
+    render(<DecisionDetailPanel state="ready" detail={legacy} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("region", { name: "市场与研究证据" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "订单结论" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "执行结果" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "本轮组合取舍" })).not.toBeInTheDocument();
+  });
+  it("uses the producer's blocked activation shape and links only the blocking plan", () => {
+    expect(managementDetail.activation_result?.target_version_id).toBeNull();
+    expect(managementDetail.activation_result?.batch_id).toBeNull();
+    expect(managementDetail.blocking_plan?.batch_id).toBe(managementId(10));
+  });
+  it("does not call a resource-blocked proposal completed in the list", () => {
+    render(<DecisionsPanel state="ready" page={{ items: [managementDetail.cycle], summary, version_observation: null, version_history: [], version_evaluation: null }} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("list", { name: "决策记录" })).toHaveTextContent("提案未生效");
+  });
+  it("labels the producer's inherited-target reason without renewing research", () => {
+    const value = structuredClone(managementDetail);
+    value.proposal!.targets[0].reason_code = "INHERITED_TARGET";
+    render(<DecisionDetailPanel state="ready" detail={value} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("table", { name: "确定性目标对照" })).toHaveTextContent("不更新研究有效期");
+  });
+  it("separates blocked proposal, Agent judgment and deterministic target authority", () => {
+    render(<DecisionDetailPanel state="ready" detail={managementDetail} onRefresh={vi.fn()} />);
+    const conclusion = screen.getByRole("note", { name: "目标生效结论" });
+    expect(conclusion).toHaveTextContent("未生效");
+    expect(conclusion).toHaveTextContent("目标 V7 继续生效");
+    expect(conclusion).toHaveTextContent("提案 …0008");
+    expect(within(conclusion).getByTitle(managementId(8))).toHaveTextContent("…0008");
+    expect(screen.getByRole("table", { name: "确定性目标对照" })).toHaveTextContent("标的 …0009");
+    expect(screen.getAllByTitle(managementId(9)).length).toBeGreaterThan(0);
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings.indexOf("本轮组合取舍")).toBeLessThan(headings.indexOf("当前目标与提案对照"));
+    expect(screen.getByRole("table", { name: "确定性目标对照" })).toHaveTextContent("不更新研究有效期");
+    expect(screen.getByRole("link", { name: "查看调整计划" })).toHaveAttribute("href", `/paper?plan=${managementId(10)}`);
+    expect(screen.queryByRole("button", { name: /批准|立即生效/ })).not.toBeInTheDocument();
+  });
+  it.each(["initial", "unchanged", "policy"])("keeps %s target authority explicit", (variant) => {
+    const value = structuredClone(managementDetail); value.blocker = null; value.blocking_plan = null;
+    if (variant === "initial") { value.active_target = null; value.activation_result = null; }
+    if (variant === "unchanged") value.activation_result = { ...value.activation_result!, result_code: "NO_ORDER_REQUIRED" };
+    if (variant === "policy") { value.proposal = null; value.activation_result = null; value.blocker = { category: "policy_unconfirmed", code: "POLICY_UNCONFIRMED", source_stage: "policy", proposal_rejection_code: null, as_of: meta().as_of }; }
+    render(<DecisionDetailPanel state="ready" detail={value} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("note", { name: "目标生效结论" })).toHaveTextContent(variant === "initial" ? "尚未建立目标" : variant === "policy" ? "政策未确认" : "目标 V7 继续生效");
+  });
   it("renders one semantic row per cycle and keeps distinct product outcomes", () => {
     render(<DecisionsPanel state="ready" page={{ items: cycles(), summary, version_observation: null, version_history: [], version_evaluation: null }} onRefresh={vi.fn()} />);
 
@@ -72,8 +146,7 @@ describe("decision records", () => {
   });
 
   it("renders every evidence-to-outcome stage in order", () => {
-    const detail: Detail = { cycle: agentPaperCycle, orders: [cancellableOrder] };
-    render(<DecisionDetailPanel state="ready" detail={detail} onRefresh={vi.fn()} />);
+    render(<DecisionDetailPanel state="ready" detail={detail(agentPaperCycle)} onRefresh={vi.fn()} />);
 
     const headings = screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent);
     expect(headings).toEqual([
@@ -91,7 +164,7 @@ describe("decision records", () => {
       status: "partially_filled", result_code: "PAPER_RESULT_INCOMPLETE", decision: null,
       decision_market: null, order_ids: [], candidates: [],
     });
-    render(<DecisionDetailPanel state="ready" detail={{ cycle: unknown, orders: [] }} onRefresh={vi.fn()} />);
+    render(<DecisionDetailPanel state="ready" detail={detail(unknown, [])} onRefresh={vi.fn()} />);
 
     expect(screen.getAllByText("未知").length).toBeGreaterThanOrEqual(4);
     expect(screen.getByRole("region", { name: "订单结论" })).toHaveTextContent("没有关联订单事实，无法证明订单结果");
@@ -104,7 +177,7 @@ describe("decision records", () => {
       status: "completed", result_code: "NO_ORDER_REQUIRED", order_ids: [],
       candidates: [{ ...agentPaperCycle.candidates[0], stance: "watch", sizing_action: "none" }],
     });
-    render(<DecisionDetailPanel state="ready" detail={{ cycle: noOrder, orders: [] }} onRefresh={vi.fn()} />);
+    render(<DecisionDetailPanel state="ready" detail={detail(noOrder, [])} onRefresh={vi.fn()} />);
 
     const execution = screen.getByRole("region", { name: "执行结果" });
     expect(execution).toHaveTextContent("无需下单");
@@ -128,7 +201,7 @@ describe("decision records", () => {
     await waitFor(() => expect(screen.getByRole("region", { name: "决策详情页面" })).toHaveAttribute("data-state", "ready"));
     expect(calls).toEqual([
       { path: "/api/v1/paper/cycles?limit=20", method: "GET" },
-      { path: `/api/v1/paper/cycles/${agentPaperCycle.cycle_id}`, method: "GET" },
+      { path: `/api/v1/paper/management/cycles/${agentPaperCycle.cycle_id}`, method: "GET" },
     ]);
   });
 
