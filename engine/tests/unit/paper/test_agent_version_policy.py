@@ -180,6 +180,30 @@ def test_agent_version_v1_gate_truth_table(
     assert (report.status, report.reason_code) == (status, reason)
 
 
+@pytest.mark.parametrize(
+    ("hard_failure", "reason"),
+    [
+        ({"hard_risk_violation_count": 1}, "HARD_RISK_VIOLATION"),
+        ({"ledger_conserved": False}, "LEDGER_CONSERVATION_FAILED"),
+        ({"duplicate_execution_fact_count": 1}, "DUPLICATE_EXECUTION_FACT"),
+    ],
+)
+def test_agent_version_v1_hard_failure_is_not_masked_by_unknown_authority(
+    hard_failure: dict[str, object], reason: str
+) -> None:
+    report = evaluate_agent_version_metrics(
+        PASS_FACTS.model_copy(
+            update={
+                "authority_complete": False,
+                "comparison_authority_complete": False,
+                **hard_failure,
+            }
+        )
+    )
+
+    assert (report.status, report.reason_code) == ("FAIL", reason)
+
+
 def test_agent_version_metric_facts_reject_binary_float() -> None:
     with pytest.raises(ValidationError, match="AGENT_VERSION_METRIC_DECIMAL_INVALID"):
         AgentVersionMetricFacts.model_validate(

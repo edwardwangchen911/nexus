@@ -275,7 +275,9 @@ def evaluate_agent_version_metrics(facts: AgentVersionMetricFacts) -> AgentVersi
             threshold=_decimal(MAX_DRAWDOWN_DEGRADATION),
         ),
     )
-    first = next((gate for gate in checks if gate.status != "PASS"), None)
+    first = next((gate for gate in checks if gate.status == "FAIL"), None)
+    if first is None:
+        first = next((gate for gate in checks if gate.status == "UNKNOWN"), None)
     return AgentVersionGateReport(
         status="PASS" if first is None else first.status,
         reason_code="OOS_IMPROVEMENT_PROVEN" if first is None else first.reason_code,
