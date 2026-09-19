@@ -961,11 +961,17 @@ function proposalChoicesValid(proposal: Record<string, unknown>, synthesis: Reco
     const choice = choices.find((item) => isPlain(item)
       && item.action !== "defer"
       && sameUuid(item.instrument_id, target.instrument_id));
-    return isPlain(choice)
-      && target.role === choice.role
-      && target.rank === choice.rank
-      && nullableUuidEqual(target.replaces_instrument_id, choice.replaces_instrument_id)
-      && uuidArraysEqual(target.depends_on_instrument_ids, choice.depends_on_instrument_ids);
+    if (isPlain(choice)) {
+      return target.role === choice.role
+        && target.rank === choice.rank
+        && nullableUuidEqual(target.replaces_instrument_id, choice.replaces_instrument_id)
+        && uuidArraysEqual(target.depends_on_instrument_ids, choice.depends_on_instrument_ids);
+    }
+    return target.reason_code === "INHERITED_TARGET"
+      && target.rank === null
+      && target.replaces_instrument_id === null
+      && Array.isArray(target.depends_on_instrument_ids)
+      && target.depends_on_instrument_ids.length === 0;
   });
 }
 
@@ -979,8 +985,10 @@ function paperManagementSummarySemanticsValid(value: Record<string, unknown>): b
     || !orderedTimes(proposal?.as_of, value.read_as_of)) return false;
   if (plan !== null
     && !["occupied", "unknown"].includes(String(plan.occupation_state))) return false;
-  return plan === null || target === null || plan.target_version_id === null
-    || sameUuid(plan.target_version_id, target.target_version_id);
+  if (plan === null || plan.target_version_id === null) return true;
+  return target !== null
+    && sameUuid(plan.target_version_id, target.target_version_id)
+    && sameUuid(plan.strategy_decision_id, target.strategy_decision_id);
 }
 
 function planSummaryCoherent(plan: Record<string, unknown>): boolean {

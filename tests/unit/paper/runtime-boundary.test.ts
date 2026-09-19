@@ -300,6 +300,43 @@ describe("internal-paper Engine response boundary", () => {
     const forgedTarget = structuredClone(bounded) as Record<string, unknown>;
     (((forgedTarget.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[1]).instrument_id = requestId;
     expect((await sanitizeEngineResponse(json({ data: forgedTarget, meta }), undefined, path, "GET")).status).toBe(500);
+
+    const inherited = structuredClone(valid) as Record<string, unknown>;
+    const inheritedProposal = inherited.proposal as Record<string, unknown>;
+    inheritedProposal.cash_weight = "0.7";
+    (inheritedProposal.targets as Array<Record<string, unknown>>).push({
+      instrument_id: secondInstrumentId,
+      target_weight: "0.1",
+      exit: false,
+      role: "core",
+      reason_code: "INHERITED_TARGET",
+      rank: null,
+      replaces_instrument_id: null,
+      depends_on_instrument_ids: [],
+    });
+    const inheritedTarget = inherited.active_target as Record<string, unknown>;
+    inheritedTarget.cash_weight = "0.7";
+    (inheritedTarget.targets as Array<Record<string, unknown>>).push({
+      instrument_id: secondInstrumentId,
+      target_weight: "0.1",
+      exit: false,
+      role: "core",
+      reason_code: "INHERITED_TARGET",
+    });
+    expect((await sanitizeEngineResponse(json({ data: inherited, meta }), undefined, path, "GET")).status).toBe(200);
+    for (const forged of [
+      { reason_code: "SYNTHESIS_INCLUDE" },
+      { rank: 2 },
+      { replaces_instrument_id: thirdInstrumentId },
+      { depends_on_instrument_ids: [thirdInstrumentId] },
+    ]) {
+      const invalidInherited = structuredClone(inherited) as Record<string, unknown>;
+      Object.assign(
+        ((invalidInherited.proposal as Record<string, unknown>).targets as Array<Record<string, unknown>>)[1],
+        forged,
+      );
+      expect((await sanitizeEngineResponse(json({ data: invalidInherited, meta }), undefined, path, "GET")).status).toBe(500);
+    }
   });
 
   it("keeps management, plan, and cancellation facts as distinct strict reads", async () => {
@@ -331,6 +368,8 @@ describe("internal-paper Engine response boundary", () => {
       { ...structuredClone(summary), occupying_plan: { ...summary.occupying_plan, reconciliation_as_of: "2026-08-26T22:00:01Z" } },
       { ...structuredClone(summary), latest_proposal: { ...summary.latest_proposal, as_of: "2026-08-26T22:00:01Z" } },
       { ...structuredClone(summary), occupying_plan: { ...summary.occupying_plan, target_version_id: orderId } },
+      { ...structuredClone(summary), current_target: null },
+      { ...structuredClone(summary), occupying_plan: { ...summary.occupying_plan, strategy_decision_id: orderId } },
     ]) {
       expect((await sanitizeEngineResponse(json({ data: drift, meta }), undefined, summaryPath, "GET")).status).toBe(500);
     }
