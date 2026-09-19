@@ -99,6 +99,7 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
+    PaperDrawdownLockEventRecord,
     PaperExecutionWindowAuthorityRecord,
     PaperExecutionWindowMemberRecord,
     PaperFillRecord,
@@ -2855,8 +2856,10 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
     train_slots = slots(train_dates)
     oos_slots = slots(oos_dates)
 
+    database_time = train_slots[0]
+
     async def historical_database_now(_session: AsyncSession) -> datetime:
-        return train_slots[0]
+        return database_time
 
     monkeypatch.setattr(agent_version_runner, "_database_now", historical_database_now)
     try:
@@ -3403,6 +3406,190 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
             )
         assert replay.model_copy(update={"replayed": False}) == paired
         assert replay.replayed is True
+
+        database_time = train_slots[1]
+        async with sessions.begin() as session:
+            account_ids = (
+                registration.incumbent_account_id,
+                registration.challenger_account_id,
+            )
+            session.add_all(
+                PaperDrawdownLockEventRecord(
+                    id=uuid4(),
+                    account_id=account_id,
+                    event_seq=2,
+                    from_state="unlocked",
+                    to_state="locked",
+                    drawdown_ratio=Decimal("0.08"),
+                    user_acknowledged=False,
+                    reason_code="DRAWDOWN_LIMIT_REACHED",
+                    occurred_at=train_slots[1] - timedelta(seconds=1),
+                    payload_hash=sha256(f"later-drawdown:{account_id}".encode()).hexdigest(),
+                    created_at=train_slots[1] - timedelta(seconds=1),
+                )
+                for account_id in account_ids
+            )
+            next_artifact_id = UUID("63000000-0000-0000-0000-0000000000a0")
+            next_revision = "a" * 64
+            next_quote_hash = canonical_quote_observation(
+                instrument_id=INSTRUMENTS[0][0],
+                source="schwab",
+                feed="l1",
+                delivery_mode="real_time",
+                event_kind="quote",
+                bid=Decimal("100.90"),
+                ask=Decimal("101.10"),
+                last=None,
+                observed_at=train_slots[1] - timedelta(seconds=10),
+                available_at=train_slots[1],
+                received_at=train_slots[1],
+                revision=next_revision,
+            )
+            session.add_all(
+                (
+                    DataArtifact(
+                        id=next_artifact_id,
+                        uri=f"memory://raw/market/schwab/stream/{next_revision}.json",
+                        sha256=next_revision,
+                        byte_size=100,
+                        mime_type="application/json",
+                        schema_version="schwab_level_one_stream_v1",
+                        source="schwab",
+                        observed_at=train_slots[1] - timedelta(seconds=10),
+                        available_at=train_slots[1],
+                        received_at=train_slots[1],
+                        created_at=train_slots[1],
+                    ),
+                    LatestQuote(
+                        id=UUID("63000000-0000-0000-0000-0000000000a1"),
+                        instrument_id=INSTRUMENTS[0][0],
+                        source="schwab",
+                        feed="l1",
+                        delivery_mode="real_time",
+                        bid=Decimal("100.90"),
+                        ask=Decimal("101.10"),
+                        last=None,
+                        observed_at=train_slots[1] - timedelta(seconds=10),
+                        available_at=train_slots[1],
+                        received_at=train_slots[1],
+                        revision=next_revision,
+                        quality_flags=[],
+                        event_kind="quote",
+                        content_hash=sha256(next_quote_hash).hexdigest(),
+                        evidence_status="verified",
+                        data_artifact_id=next_artifact_id,
+                        created_at=train_slots[1],
+                    ),
+                )
+            )
+            for index, kind in enumerate(
+                ("corporate_action", "suspension", "delisting"), start=1
+            ):
+                watermark = f"{index}" * 64
+                session.add(
+                    RiskQueryAuthorityRecord(
+                        id=UUID(int=0x63000000000000000000000000000A10 + index),
+                        source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                        universe_snapshot_id=registered.decision.universe_snapshot_id,
+                        decision_session=train_slots[1].date(),
+                        kind=kind,
+                        required_instrument_ids=[INSTRUMENTS[0][0]],
+                        blocked_instrument_ids=[],
+                        complete=True,
+                        source_watermark_hash=watermark,
+                        available_at=train_slots[1],
+                        content_hash=canonical_query_authority_hash(
+                            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                            universe_snapshot_id=registered.decision.universe_snapshot_id,
+                            decision_session=train_slots[1].date(),
+                            kind=kind,
+                            required_instrument_ids=[INSTRUMENTS[0][0]],
+                            blocked_instrument_ids=[],
+                            complete=True,
+                            source_watermark_hash=watermark,
+                            available_at=train_slots[1],
+                        ),
+                        created_at=train_slots[1],
+                    )
+                )
+            await session.flush()
+            next_slot = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[1],
+                daily_limit_usd=Decimal("3"),
+                now=train_slots[1],
+            )
+            initial_funding_counts = {
+                account_id: int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperLedgerTransactionRecord)
+                        .where(
+                            PaperLedgerTransactionRecord.account_id == account_id,
+                            PaperLedgerTransactionRecord.transaction_type == "funding",
+                            PaperLedgerTransactionRecord.reference_type == "initial_funding",
+                        )
+                    )
+                    or 0
+                )
+                for account_id in account_ids
+            }
+            transaction_counts = {
+                account_id: int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperLedgerTransactionRecord)
+                        .where(PaperLedgerTransactionRecord.account_id == account_id)
+                    )
+                    or 0
+                )
+                for account_id in account_ids
+            }
+            next_slot_job_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.payload["version_evaluation_id"].as_string()
+                        == str(registration.evaluation_id)
+                    )
+                )
+                or 0
+            )
+
+        assert next_slot.status == "running", next_slot.reason_code
+        assert next_slot.reason_code == "PAIR_JOBS_PREPARED"
+        assert next_slot.decision_slot_at == train_slots[1]
+        assert next_slot.replayed is False
+        assert initial_funding_counts == {
+            registration.incumbent_account_id: 1,
+            registration.challenger_account_id: 1,
+        }
+        assert all(count > 1 for count in transaction_counts.values())
+
+        async with sessions.begin() as session:
+            next_slot_replay = await advance_agent_version_slot(
+                session,
+                evaluation_id=registration.evaluation_id,
+                decision_slot_at=train_slots[1],
+                daily_limit_usd=Decimal("3"),
+                now=train_slots[1],
+            )
+            replay_job_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.payload["version_evaluation_id"].as_string()
+                        == str(registration.evaluation_id)
+                    )
+                )
+                or 0
+            )
+        assert next_slot_replay.model_copy(update={"replayed": False}) == next_slot
+        assert next_slot_replay.replayed is True
+        assert replay_job_count == next_slot_job_count
     finally:
         await engine.dispose()
 

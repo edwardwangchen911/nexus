@@ -1212,6 +1212,96 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
         assert resumed.reason_code == "PAIR_CYCLES_UNAVAILABLE"
         assert resumed.replayed is True
         assert incumbent_source.source_run_id == INCUMBENT_RUN_ID
+
+        async with factory.begin() as session:
+            original_reference_hash = await session.scalar(
+                select(PaperLedgerTransactionRecord.reference_hash).where(
+                    PaperLedgerTransactionRecord.account_id
+                    == registration.incumbent_account_id,
+                    PaperLedgerTransactionRecord.transaction_type == "funding",
+                    PaperLedgerTransactionRecord.reference_type == "initial_funding",
+                )
+            )
+            assert original_reference_hash is not None
+            await session.execute(
+                text("ALTER TABLE paper_ledger_transactions DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE paper_ledger_transactions SET reference_hash=:corrupt_hash "
+                        "WHERE account_id=:account_id AND transaction_type='funding' "
+                        "AND reference_type='initial_funding'"
+                    ),
+                    {
+                        "account_id": registration.incumbent_account_id,
+                        "corrupt_hash": "f" * 64,
+                    },
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE paper_ledger_transactions ENABLE TRIGGER USER")
+                )
+
+        async with factory.begin() as session:
+            with pytest.raises(
+                ValueError,
+                match="AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID",
+            ):
+                await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=slot,
+                    daily_limit_usd=Decimal("3"),
+                    now=slot,
+                )
+
+        async with factory.begin() as session:
+            await session.execute(
+                text("ALTER TABLE paper_ledger_transactions DISABLE TRIGGER USER")
+            )
+            await session.execute(
+                text("ALTER TABLE paper_drawdown_lock_events DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE paper_ledger_transactions SET reference_hash=:reference_hash "
+                        "WHERE account_id=:account_id AND transaction_type='funding' "
+                        "AND reference_type='initial_funding'"
+                    ),
+                    {
+                        "account_id": registration.incumbent_account_id,
+                        "reference_hash": original_reference_hash,
+                    },
+                )
+                await session.execute(
+                    text(
+                        "UPDATE paper_drawdown_lock_events SET event_seq=2 "
+                        "WHERE account_id=:account_id AND event_seq=1"
+                    ),
+                    {"account_id": registration.incumbent_account_id},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE paper_drawdown_lock_events ENABLE TRIGGER USER")
+                )
+                await session.execute(
+                    text("ALTER TABLE paper_ledger_transactions ENABLE TRIGGER USER")
+                )
+
+        async with factory.begin() as session:
+            with pytest.raises(
+                ValueError,
+                match="AGENT_VERSION_ACCOUNT_INITIALIZATION_INVALID",
+            ):
+                await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=slot,
+                    daily_limit_usd=Decimal("3"),
+                    now=slot,
+                )
     finally:
         await engine.dispose()
 
