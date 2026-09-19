@@ -177,7 +177,7 @@ def _spec(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("timeout,attempts,elapsed,lease", [(2, 3, 1, 60), (120, 1, 75, 135)])
+@pytest.mark.parametrize("timeout,attempts,elapsed,lease", [(2, 3, 1, 60), (135, 1, 90, 150)])
 async def test_worker_lease_covers_bounded_handler_and_terminal_write(
     migrated_database_url,
     timeout,

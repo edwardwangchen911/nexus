@@ -252,8 +252,8 @@ async def claim_next_job(
     """Claim the highest-priority ready Job without blocking another worker."""
     now = _utc(now, field="now")
     worker_id = _worker_id(worker_id)
-    if not 1 <= lease_seconds <= 135:
-        raise ValueError("lease_seconds must be between 1 and 135")
+    if not 1 <= lease_seconds <= 150:
+        raise ValueError("lease_seconds must be between 1 and 150")
     if job_types is not None and not job_types:
         return None
     if job_ids is not None and not job_ids:

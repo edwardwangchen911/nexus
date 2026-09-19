@@ -925,7 +925,7 @@ async def test_worker_allows_three_individually_bounded_stages_past_40_seconds(m
 
     async def invoke(payload, *, output_model):
         nonlocal elapsed
-        elapsed += 25  # Each stage fits its 35s limit; all three need 75s.
+        elapsed += 25  # Each stage fits its 40s limit; all three need 75s.
         return json.dumps(_staged_batch(payload["stage"], payload["requested_roles"])), (
             UsageSnapshot(input_tokens=300, output_tokens=80)
         )
@@ -1688,7 +1688,7 @@ async def test_timeout_closes_sdk_without_retry(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_portfolio_sdk_timeout_is_isolated_from_the_default(monkeypatch):
+async def test_research_sdk_keeps_a_tail_latency_margin_without_changing_portfolio(monkeypatch):
     observed: list[int] = []
 
     async def invoke(
@@ -1703,7 +1703,7 @@ async def test_portfolio_sdk_timeout_is_isolated_from_the_default(monkeypatch):
     await codex_sdk.invoke_codex({})
     await codex_sdk.invoke_codex_portfolio({})
 
-    assert observed == [35, 45]
+    assert observed == [40, 45]
 
 
 @pytest.mark.asyncio
