@@ -373,6 +373,7 @@ class PaperReadService:
                 decision=decision,
                 target=cycle_target,
                 batch=batch,
+                strict_identity=cycle.candidate_batch_id is not None,
             ),
             blocker=self._cycle_blocker(
                 event=latest_event,
@@ -407,28 +408,26 @@ class PaperReadService:
     async def _cycle_activation_event(
         self, cycle_id: UUID
     ) -> AgentPaperCycleEventRecord | None:
-        events = tuple(
-            await self._session.scalars(
+        return cast(
+            AgentPaperCycleEventRecord | None,
+            await self._session.scalar(
                 select(AgentPaperCycleEventRecord)
                 .where(
                     AgentPaperCycleEventRecord.cycle_id == cycle_id,
                     AgentPaperCycleEventRecord.result_code.in_(
-                        ("TARGET_ACTIVATION_BLOCKED", "PAPER_BATCH_EVALUATED", "NO_ORDER_REQUIRED")
+                        (
+                            "TARGET_ACTIVATION_BLOCKED",
+                            "PAPER_BATCH_EVALUATED",
+                            "NO_ORDER_REQUIRED",
+                        )
                     ),
                     AgentPaperCycleEventRecord.occurred_at <= self._request_time,
                     AgentPaperCycleEventRecord.created_at <= self._request_time,
                 )
                 .order_by(AgentPaperCycleEventRecord.sequence.desc())
-                .limit(10)
+                .limit(1)
             )
         )
-        for event in events:
-            facts = event.fact_ids if isinstance(event.fact_ids, dict) else {}
-            if event.result_code == "TARGET_ACTIVATION_BLOCKED" or facts.get(
-                "target_version_id"
-            ) is not None:
-                return event
-        return None
 
     async def _portfolio_security_research(
         self, authority: SynthesisReadAuthority | None
@@ -744,6 +743,7 @@ class PaperReadService:
         decision: StrategyDecisionRecord | None,
         target: PaperTargetSummaryResponse | None,
         batch: PaperOrderBatchRecord | None,
+        strict_identity: bool = False,
     ) -> AgentPaperActivationResultResponse | None:
         if event is None:
             return None
@@ -757,6 +757,8 @@ class PaperReadService:
                 or target is not None
                 or batch_id is not None
                 or target_id is not None
+                or strict_identity
+                and (decision is None or decision_id != decision.id)
             ):
                 raise NexusError(
                     ErrorCode.DATA_PARTIAL,
@@ -772,7 +774,9 @@ class PaperReadService:
             )
         if decision is None or target is None:
             return None
-        if decision_id is not None and decision_id != decision.id:
+        if (strict_identity and decision_id != decision.id) or (
+            decision_id is not None and decision_id != decision.id
+        ):
             raise NexusError(
                 ErrorCode.DATA_PARTIAL,
                 "The Agent paper activation identity is incomplete.",

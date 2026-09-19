@@ -1008,14 +1008,11 @@ async def _resume_batch(
                 request_time=now,
                 idempotency_key=f"portfolio-target:{cycle.id}",
             )
-        except ValueError as error:
-            if not isinstance(error, TargetActivationBlockedError) and str(error) != (
-                "PORTFOLIO_PROPOSAL_BASELINE_CONFLICT"
-            ):
-                raise
-            facts: dict[str, object] = {"strategy_decision_id": str(decision_id)}
-            if isinstance(error, TargetActivationBlockedError):
-                facts["blocking_plan_id"] = str(error.blocking_plan_id)
+        except TargetActivationBlockedError as error:
+            facts: dict[str, object] = {
+                "strategy_decision_id": str(decision_id),
+                "blocking_plan_id": str(error.blocking_plan_id),
+            }
             await _append_event(
                 session,
                 cycle,
@@ -1025,6 +1022,10 @@ async def _resume_batch(
                 facts,
             )
             return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+        except ValueError as error:
+            if str(error) == "PORTFOLIO_PROPOSAL_BASELINE_CONFLICT":
+                raise ValueError("AGENT_PAPER_RESULT_UNKNOWN") from error
+            raise
         if activation.batch_id is None:
             await _append_event(
                 session,

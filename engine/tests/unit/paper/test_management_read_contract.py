@@ -129,3 +129,42 @@ async def test_one_exact_occupying_batch_is_carried_by_the_typed_blocker() -> No
             projection=cast(Any, projection),
         )
     assert caught.value.blocking_plan_id == batch_id
+
+
+@pytest.mark.asyncio
+async def test_latest_recognized_activation_event_is_never_hidden_by_missing_facts() -> None:
+    now = datetime(2026, 9, 19, tzinfo=UTC)
+    cycle_id = uuid4()
+    latest = SimpleNamespace(
+        sequence=5,
+        result_code="PAPER_BATCH_EVALUATED",
+        fact_ids={"strategy_decision_id": str(uuid4())},
+        occurred_at=now,
+    )
+    session = SimpleNamespace(scalar=AsyncMock(return_value=latest))
+    service = PaperReadService(cast(AsyncSession, session), now)
+
+    event = await service._cycle_activation_event(cycle_id)
+
+    assert event is latest
+
+
+def test_candidate_batch_activation_requires_every_exact_event_identity() -> None:
+    now = datetime(2026, 9, 19, tzinfo=UTC)
+    decision_id = uuid4()
+    target_id = uuid4()
+    service = PaperReadService(cast(AsyncSession, None), now)
+    event = SimpleNamespace(
+        result_code="NO_ORDER_REQUIRED",
+        fact_ids={"target_version_id": str(target_id)},
+        occurred_at=now,
+    )
+
+    with pytest.raises(NexusError):
+        service._activation_result(
+            event=cast(Any, event),
+            decision=cast(Any, SimpleNamespace(id=decision_id)),
+            target=cast(Any, SimpleNamespace(target_version_id=target_id)),
+            batch=None,
+            strict_identity=True,
+        )

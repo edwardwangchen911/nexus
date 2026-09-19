@@ -838,3 +838,51 @@ async def test_cycle_persists_exact_blocking_plan_from_activation_result(
         assert event.fact_ids["strategy_decision_id"] == str(proposal.decision_id)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_baseline_never_becomes_a_planless_resource_blocker(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.paper.agent_cycle import _append_event, _events, _resume_batch
+    from nexus.persistence.models.paper import AgentPaperCycleRecord
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            proposal = await persist_portfolio_proposal(session, **args)
+            await _append_event(
+                session,
+                cycle,
+                "researching",
+                "decision_recorded",
+                "TARGET_ACTIVATION_PENDING",
+                {"strategy_decision_id": str(proposal.decision_id)},
+            )
+
+        async def stale_baseline(*args, **kwargs):
+            raise ValueError("PORTFOLIO_PROPOSAL_BASELINE_CONFLICT")
+
+        monkeypatch.setattr(
+            "nexus.paper.target_service.activate_portfolio_target",
+            stale_baseline,
+        )
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            before = await _events(session, cycle.id)
+            with pytest.raises(ValueError, match="^AGENT_PAPER_RESULT_UNKNOWN$"):
+                await _resume_batch(
+                    session,
+                    cycle=cycle,
+                    events=before,
+                    now=args["now"],
+                )
+            after = await _events(session, cycle.id)
+            assert after == before
+            assert all(event.result_code != "TARGET_ACTIVATION_BLOCKED" for event in after)
+    finally:
+        await engine.dispose()

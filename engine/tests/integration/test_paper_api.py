@@ -172,6 +172,62 @@ async def test_portfolio_management_cycle_and_summary_preserve_exact_fact_identi
 
 
 @pytest.mark.asyncio
+async def test_management_summary_ignores_more_than_fifty_unoccupied_historical_batches(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from integration.test_paper_cancel_result_read_pg import _seed_target_associated_plan
+
+    engine, sessions, args, _, activated = await _seed_target_associated_plan(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        async with sessions.begin() as session:
+            await session.execute(
+                text(
+                    "ALTER TABLE paper_order_batches "
+                    "DROP CONSTRAINT uq_paper_order_batches_account_decision, "
+                    "DROP CONSTRAINT uq_paper_order_batches_idempotency"
+                )
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO paper_order_batches ("
+                    "id, account_id, strategy_decision_id, target_version_id, risk_policy_id, "
+                    "idempotency_record_id, request_hash, projection_hash, risk_input_hash, "
+                    "result_hash, batch_hash, evaluated_at, created_at"
+                    ") SELECT gen_random_uuid(), account_id, strategy_decision_id, "
+                    "target_version_id, risk_policy_id, idempotency_record_id, "
+                    "repeat(md5('request-' || series), 2), "
+                    "repeat(md5('projection-' || series), 2), "
+                    "repeat(md5('risk-' || series), 2), "
+                    "repeat(md5('result-' || series), 2), "
+                    "repeat(md5('batch-' || series), 2), "
+                    "evaluated_at + make_interval(secs => series), "
+                    "created_at + make_interval(secs => series) "
+                    "FROM paper_order_batches CROSS JOIN generate_series(1, 51) AS series "
+                    "WHERE id = :batch_id"
+                ),
+                {"batch_id": activated.batch_id},
+            )
+
+        path = "/internal/v1/paper/management/portfolio"
+        read_at = args["now"] + timedelta(minutes=2)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=read_at)),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["occupying_plan"]["batch_id"] == str(
+            activated.batch_id
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_policy_unconfirmed_exposes_synthesis_without_invented_proposal_weights(
     migrated_database_url: str,
 ) -> None:
@@ -196,8 +252,96 @@ async def test_policy_unconfirmed_exposes_synthesis_without_invented_proposal_we
         assert facts["activation_result"] is None
         assert facts["blocker"]["code"] == "POLICY_UNCONFIRMED"
         assert "weight" not in json.dumps(facts["blocker"]).lower()
+        summary_path = "/internal/v1/paper/management/portfolio"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=args["now"] + timedelta(seconds=1))
+            ),
+            base_url="http://testserver",
+        ) as client:
+            summary = await client.get(
+                summary_path, headers=headers("GET", summary_path)
+            )
+        assert summary.status_code == 200, summary.text
+        assert summary.json()["data"]["occupying_plan"] is None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_management_summary_rejects_two_persisted_occupying_batch_identities(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.paper.service import create_paper_order_batch
+
+    seed = await seed_paper_batch(migrated_database_url)
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        await create_paper_order_batch(
+            session,
+            account_id=seed.account_id,
+            strategy_decision_id=seed.decision_id,
+            idempotency_key="management-two-occupying-batches",
+            request_time=seed.request_time,
+        )
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE paper_order_batches "
+                "DROP CONSTRAINT uq_paper_order_batches_account_decision, "
+                "DROP CONSTRAINT uq_paper_order_batches_idempotency"
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE risk_evaluations "
+                "DROP CONSTRAINT fk_risk_evaluations_order"
+            )
+        )
+        second_batch_id = await session.scalar(
+            text(
+                "INSERT INTO paper_order_batches ("
+                "id, account_id, strategy_decision_id, target_version_id, risk_policy_id, "
+                "idempotency_record_id, request_hash, projection_hash, risk_input_hash, "
+                "result_hash, batch_hash, evaluated_at, created_at"
+                ") SELECT gen_random_uuid(), account_id, strategy_decision_id, "
+                "target_version_id, risk_policy_id, idempotency_record_id, "
+                "repeat(md5('second-request'), 2), repeat(md5('second-projection'), 2), "
+                "repeat(md5('second-risk'), 2), repeat(md5('second-result'), 2), "
+                "repeat(md5('second-batch'), 2), evaluated_at, created_at "
+                "FROM paper_order_batches WHERE account_id = :account_id "
+                "RETURNING id"
+            ),
+            {"account_id": seed.account_id},
+        )
+        assert second_batch_id is not None
+        await session.execute(text("ALTER TABLE paper_orders DISABLE TRIGGER USER"))
+        await session.execute(
+            text(
+                "UPDATE paper_orders SET batch_id = :second_batch_id "
+                "WHERE id = (SELECT id FROM paper_orders "
+                "WHERE account_id = :account_id ORDER BY id LIMIT 1)"
+            ),
+            {"account_id": seed.account_id, "second_batch_id": second_batch_id},
+        )
+        await session.execute(text("ALTER TABLE paper_orders ENABLE TRIGGER USER"))
+
+    path = "/internal/v1/paper/management/portfolio"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(migrated_database_url, now=seed.request_time)
+        ),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
 
 
 @pytest.mark.asyncio
@@ -311,6 +455,7 @@ async def test_management_cycle_rejects_terminal_synthesis_without_output(
     try:
         async with sessions.begin() as session:
             proposal = await persist_portfolio_proposal(session, **args)
+        async with sessions.begin() as session:
             await _corrupt_target_proposal_authority(
                 session,
                 decision_id=proposal.decision_id,
