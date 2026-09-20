@@ -1013,6 +1013,7 @@ def test_service_status_reads_one_heartbeat_without_producers_or_business_writes
         "seen_at": seen_at.isoformat(),
         "started_at": (seen_at - timedelta(minutes=5)).isoformat(),
         "process_version": agent_paper_loop.AGENT_PAPER_LOOP_PROCESS_VERSION,
+        "release_revision": None,
         "migration_head": agent_paper_loop.CURRENT_MIGRATION_HEAD,
     }
     assert result["preflight"]["status"] == "blocked"
