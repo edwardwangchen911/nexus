@@ -1847,13 +1847,51 @@ async def run_foreground_loop(
         await sleep(delay_seconds)
         return None
 
-    async def persist_heartbeat() -> None:
+    last_heartbeat_at: datetime | None = None
+
+    async def persist_heartbeat() -> datetime:
+        nonlocal last_heartbeat_at
+        seen_at = clock()
         async with asyncio.timeout(interval_seconds):
-            await heartbeat(clock())
+            await heartbeat(seen_at)
+        last_heartbeat_at = seen_at
+        return seen_at
 
     def stop_unknown(stage: str, *, error: Exception | None = None) -> AgentPaperLoopAction:
         _emit_agent_paper_unknown_failure(stage, clock(), error=error)
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+
+    async def wait_before_reinspection(
+        *,
+        snapshot_now: datetime,
+        wait_until: datetime,
+        elapsed_by_monotonic: bool,
+    ) -> AgentPaperLoopAction | None:
+        """Wait until due, but break early when wall time jumps across the target."""
+        remaining = max(0.0, (wait_until - snapshot_now).total_seconds())
+        deadline = monotonic() + remaining
+        wall_started_at = last_heartbeat_at
+        while remaining > 0:
+            duration = min(remaining, interval_seconds)
+            await sleep(duration)
+            if shutdown_requested():
+                return AgentPaperLoopAction.STOP_REQUESTED
+            try:
+                seen_at = await persist_heartbeat()
+            except Exception as error:
+                return stop_unknown("heartbeat", error=error)
+            if (
+                wall_started_at is not None
+                and seen_at >= wall_started_at
+                and snapshot_now + (seen_at - wall_started_at) >= wait_until
+            ):
+                break
+            remaining = (
+                deadline - monotonic()
+                if elapsed_by_monotonic
+                else remaining - duration
+            )
+        return None
 
     if shutdown_requested():
         return AgentPaperLoopAction.STOP_REQUESTED
@@ -1885,46 +1923,33 @@ async def run_foreground_loop(
             return action
         if action == AgentPaperLoopAction.WAIT_FOR_SLOT:
             next_slot = floor_decision_slot(snapshot.now) + timedelta(minutes=5)
-            remaining = (next_slot - snapshot.now).total_seconds()
-            while remaining > 0:
-                duration = min(remaining, interval_seconds)
-                await sleep(duration)
-                if shutdown_requested():
-                    return AgentPaperLoopAction.STOP_REQUESTED
-                try:
-                    await persist_heartbeat()
-                except Exception as error:
-                    return stop_unknown("heartbeat", error=error)
-                remaining -= duration
+            stopped = await wait_before_reinspection(
+                snapshot_now=snapshot.now,
+                wait_until=next_slot,
+                elapsed_by_monotonic=False,
+            )
+            if stopped is not None:
+                return stopped
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_EVALUATION:
             assert snapshot.evaluation_slot_at is not None
-            deadline = monotonic() + (snapshot.evaluation_slot_at - snapshot.now).total_seconds()
-            while (remaining := deadline - monotonic()) > 0:
-                duration = min(remaining, interval_seconds)
-                await sleep(duration)
-                if shutdown_requested():
-                    return AgentPaperLoopAction.STOP_REQUESTED
-                try:
-                    await persist_heartbeat()
-                except Exception as error:
-                    return stop_unknown("heartbeat", error=error)
+            stopped = await wait_before_reinspection(
+                snapshot_now=snapshot.now,
+                wait_until=snapshot.evaluation_slot_at,
+                elapsed_by_monotonic=True,
+            )
+            if stopped is not None:
+                return stopped
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_EVALUATION_JOB:
             assert snapshot.research_job_lease_expires_at is not None
-            deadline = monotonic() + max(
-                0.0,
-                (snapshot.research_job_lease_expires_at - snapshot.now).total_seconds(),
+            stopped = await wait_before_reinspection(
+                snapshot_now=snapshot.now,
+                wait_until=snapshot.research_job_lease_expires_at,
+                elapsed_by_monotonic=True,
             )
-            while (remaining := deadline - monotonic()) > 0:
-                duration = min(remaining, interval_seconds)
-                await sleep(duration)
-                if shutdown_requested():
-                    return AgentPaperLoopAction.STOP_REQUESTED
-                try:
-                    await persist_heartbeat()
-                except Exception as error:
-                    return stop_unknown("heartbeat", error=error)
+            if stopped is not None:
+                return stopped
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_SESSION:
             assert snapshot.decision_window_start_at is not None
@@ -1940,30 +1965,23 @@ async def run_foreground_loop(
                 and snapshot.now < snapshot.decision_window_end_at < wait_until
             ):
                 wait_until = snapshot.decision_window_end_at
-            deadline = monotonic() + (wait_until - snapshot.now).total_seconds()
-            while (remaining := deadline - monotonic()) > 0:
-                duration = min(remaining, interval_seconds)
-                await sleep(duration)
-                if shutdown_requested():
-                    return AgentPaperLoopAction.STOP_REQUESTED
-                try:
-                    await persist_heartbeat()
-                except Exception as error:
-                    return stop_unknown("heartbeat", error=error)
+            stopped = await wait_before_reinspection(
+                snapshot_now=snapshot.now,
+                wait_until=wait_until,
+                elapsed_by_monotonic=True,
+            )
+            if stopped is not None:
+                return stopped
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_MARKET:
             assert snapshot.market_window_end_at is not None
-            remaining = (snapshot.market_window_end_at - snapshot.now).total_seconds()
-            while remaining > 0:
-                duration = min(remaining, interval_seconds)
-                await sleep(duration)
-                if shutdown_requested():
-                    return AgentPaperLoopAction.STOP_REQUESTED
-                try:
-                    await persist_heartbeat()
-                except Exception as error:
-                    return stop_unknown("heartbeat", error=error)
-                remaining -= duration
+            stopped = await wait_before_reinspection(
+                snapshot_now=snapshot.now,
+                wait_until=snapshot.market_window_end_at,
+                elapsed_by_monotonic=False,
+            )
+            if stopped is not None:
+                return stopped
             continue
         action_task: asyncio.Future[AgentPaperLoopAction | None] = asyncio.ensure_future(
             execute(action, snapshot)
