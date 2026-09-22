@@ -17,6 +17,7 @@ from nexus.agents.paper_context import (
     read_agent_paper_research_context,
 )
 from nexus.agents.persistence import load_actionable_research_output
+from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_research import (
     AGENT_VERSION_CHALLENGER_ACTOR,
@@ -61,7 +62,7 @@ from nexus.paper.portfolio_proposal import KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
-from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.agents import AgentPromptVersionRecord, AgentResearchRunRecord
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
@@ -130,6 +131,7 @@ async def reserve_schwab_agent_paper_trigger(
     now: datetime,
     candidate_batch_id: UUID | None = None,
     trigger_mode: Literal["scheduled", "manual_recovery"] = "scheduled",
+    require_synthesis_prompt: bool = False,
 ) -> AgentPaperTriggerReservation:
     """Reserve one database-derived decision slot before provider work begins."""
     if (
@@ -219,6 +221,20 @@ async def reserve_schwab_agent_paper_trigger(
         candidate_batch_hash=batch.batch_hash,
     )
     if inserted:
+        if require_synthesis_prompt:
+            prompt = await session.scalar(
+                select(AgentPromptVersionRecord).where(
+                    AgentPromptVersionRecord.role == "portfolio_decision",
+                    AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
+                    AgentPromptVersionRecord.release_channel == "active",
+                )
+            )
+            if (
+                prompt is None
+                or prompt.created_at > now
+                or sha256(prompt.content.encode()).hexdigest() != prompt.content_hash
+            ):
+                raise ValueError("PORTFOLIO_SYNTHESIS_PROMPT_INVALID")
         if trigger_mode == "manual_recovery":
             existing_cycle = await session.scalar(
                 select(AgentPaperCycleRecord.id)

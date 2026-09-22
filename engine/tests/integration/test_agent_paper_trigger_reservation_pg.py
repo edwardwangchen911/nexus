@@ -3,10 +3,12 @@ from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
+from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
 from nexus.jobs.models import job_input_hash
 from nexus.paper import agent_cycle
 from nexus.paper.agent_cycle_models import AgentPaperCycleResult
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+from nexus.persistence.models.agents import AgentPromptVersionRecord
 from nexus.persistence.models.paper import (
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
     AgentPaperCandidateBatchRecord,
@@ -38,6 +40,56 @@ async def _seed_trigger(database_url):
                 created_at=NOW,
             )
             return SimpleNamespace(account_id=ACCOUNT_ID, batch_id=batch.batch_id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_trigger_preflight_rejects_missing_synthesis_prompt_before_claim(
+    migrated_database_url: str,
+) -> None:
+    seed = await _seed_trigger(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        with pytest.raises(ValueError, match="PORTFOLIO_SYNTHESIS_PROMPT_INVALID"):
+            async with sessions.begin() as session:
+                await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=seed.account_id,
+                    candidate_batch_id=seed.batch_id,
+                    client_idempotency_key="prompt-missing",
+                    now=datetime(2026, 9, 18, 14, 1, tzinfo=UTC),
+                    require_synthesis_prompt=True,
+                )
+        async with sessions() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(agent_cycle.IdempotencyRecord)
+                .where(agent_cycle.IdempotencyRecord.route == "agent-paper-schwab-trigger-v2")
+            )
+            assert count == 0
+        async with sessions.begin() as session:
+            content = "frozen synthesis prompt"
+            session.add(
+                AgentPromptVersionRecord(
+                    role="portfolio_decision",
+                    version=SYNTHESIS_PROMPT_VERSION,
+                    content=content,
+                    content_hash=sha256(content.encode()).hexdigest(),
+                    created_at=datetime(2026, 9, 17, 14, tzinfo=UTC),
+                )
+            )
+        async with sessions.begin() as session:
+            reservation = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                session,
+                account_id=seed.account_id,
+                candidate_batch_id=seed.batch_id,
+                client_idempotency_key="prompt-ready",
+                now=datetime(2026, 9, 18, 14, 1, tzinfo=UTC),
+                require_synthesis_prompt=True,
+            )
+            assert reservation.replay is None
     finally:
         await engine.dispose()
 

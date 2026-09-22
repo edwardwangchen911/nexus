@@ -177,9 +177,7 @@ async def _seed_legacy_prepared_cycle(session, *, authority, decision_slot_at):
     await session.flush()
     await agent_cycle._append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", {})
     if same_session:
-        await prepare_schwab_realtime_risk_snapshot(
-            session, cycle=cycle, max_instruments=5
-        )
+        await prepare_schwab_realtime_risk_snapshot(session, cycle=cycle, max_instruments=5)
     return cycle
 
 
@@ -367,9 +365,7 @@ async def test_schwab_batch_rejects_capacity_before_capture(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("max_instruments", [5, 10, 30])
-async def test_schwab_batch_dispatches_once_at_configured_capacity(
-    tmp_path, max_instruments
-):
+async def test_schwab_batch_dispatches_once_at_configured_capacity(tmp_path, max_instruments):
     from nexus.ops import schwab_market_stream as stream
 
     captures = 0
@@ -3500,9 +3496,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                     ),
                 )
             )
-            for index, kind in enumerate(
-                ("corporate_action", "suspension", "delisting"), start=1
-            ):
+            for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
                 watermark = f"{index}" * 64
                 session.add(
                     RiskQueryAuthorityRecord(
@@ -3765,8 +3759,10 @@ async def test_trigger_once_persists_and_replays_safe_terminal_failure(
         client_idempotency_key: str,
         now: datetime,
         candidate_batch_id: UUID,
+        require_synthesis_prompt: bool,
     ):
         del now
+        assert require_synthesis_prompt
         return await reserve_schwab_agent_paper_trigger(
             session,
             account_id=account_id,
@@ -3850,8 +3846,10 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         client_idempotency_key: str,
         now: datetime,
         candidate_batch_id: UUID,
+        require_synthesis_prompt: bool,
     ):
         del now
+        assert require_synthesis_prompt
         return await reserve_schwab_agent_paper_trigger(
             session,
             account_id=account_id,
@@ -6683,8 +6681,7 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
         )
 
         coordinator_key = (
-            f"agent-paper-loop-advance-v2:{completed.order_ids[0]}:"
-            f"{second_market.authority_id}"
+            f"agent-paper-loop-advance-v2:{completed.order_ids[0]}:{second_market.authority_id}"
         )
         async with sessions.begin() as session:
             coordinator = await session.scalar(

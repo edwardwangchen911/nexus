@@ -57,6 +57,9 @@ NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID=<confirmed batch_id>
 
 先查 cycle → Job → Output → order 的持久状态。正常组合只允许在 XNYS 交易日纽约时间
 10:00–10:04:59 启动一次；当天已有组合周期、错过该窗口或结果不明时都不得换 key 补跑。
+触发入口会在认领前核对已登记的组合合成提示词；若返回
+`PORTFOLIO_SYNTHESIS_PROMPT_INVALID`，先用现有本地 `nexus-openai-local setup` 补齐配置，
+不要运行行情采集或研究。该拒绝不创建触发认领。
 合法窗口内没有周期时，使用同一个显式批次启动一次：
 
 ```bash

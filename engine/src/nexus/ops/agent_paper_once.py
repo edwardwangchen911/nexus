@@ -921,6 +921,7 @@ async def trigger_once(
                 client_idempotency_key=request.idempotency_key,
                 now=now,
                 candidate_batch_id=request.candidate_batch_id,
+                require_synthesis_prompt=True,
                 **(
                     {"trigger_mode": request.trigger_mode}
                     if request.trigger_mode != "scheduled"
@@ -1572,6 +1573,7 @@ def main(argv: list[str] | None = None) -> int:
             "AGENT_PAPER_DATABASE_NOT_LOCAL",
             "AGENT_PAPER_MARKET_WINDOW_CLOSED",
             "AGENT_PAPER_MANUAL_RECOVERY_UNAVAILABLE",
+            "PORTFOLIO_SYNTHESIS_PROMPT_INVALID",
             "AGENT_PAPER_TIME_IN_FUTURE",
             "AGENT_PAPER_MARKET_CONFIG_INVALID",
             "AGENT_PAPER_OUTSIDE_WINDOW",
