@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +43,7 @@ from nexus.market.current_uit_identity import validate_uit_originals
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
-from nexus.providers.broker.fosun_contracts import AccountItem, PositionItem
+from nexus.providers.broker.fosun_contracts import AccountItem, OrderItem, PositionItem
 from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 from nexus.research.fmp_profile_archive import _read
 
@@ -88,6 +88,23 @@ class CurrentHoldingBinding(BaseModel):
     sha256: str
 
 
+class CurrentOpenOrderBinding(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    account_source_request_id: str
+    orders_source_request_id: str
+    accounts_as_of: AwareDatetime
+    orders_as_of: AwareDatetime
+    provider_code: str
+    provider_status: Literal["10", "20", "21", "22", "40", "60"]
+    submitted_at: AwareDatetime
+    updated_at: AwareDatetime | None
+    account_quality: Literal["PASS"] = "PASS"
+    orders_quality: Literal["PARTIAL"] = "PARTIAL"
+    order_active: Literal[True] = True
+    order_id_sha256: str
+    sha256: str
+
+
 class CurrentHeldEtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     identity: (
@@ -101,14 +118,25 @@ class CurrentHeldEtfProof(BaseModel):
     alias_id: UUID
     alias_valid_from: date
     checked_at: AwareDatetime
-    scope: Literal["fosun_current_holding"] = "fosun_current_holding"
-    holding: CurrentHoldingBinding
+    scope: Literal["fosun_current_holding", "fosun_current_open_order"] = "fosun_current_holding"
+    holding: CurrentHoldingBinding | None = None
+    order: CurrentOpenOrderBinding | None = None
     sec_url: str
     artifacts: tuple[ArtifactBinding, ...]
     universe_published: Literal[False] = False
     new_position_eligible: Literal[False] = False
     historical_backtest_eligible: Literal[False] = False
     execution_locked: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _one_broker_exposure(self) -> "CurrentHeldEtfProof":
+        if (self.holding is None) == (self.order is None):
+            raise ValueError("CURRENT_ETF_BROKER_EXPOSURE_INVALID")
+        if self.scope == "fosun_current_holding" and self.holding is None:
+            raise ValueError("CURRENT_ETF_BROKER_EXPOSURE_INVALID")
+        if self.scope == "fosun_current_open_order" and self.order is None:
+            raise ValueError("CURRENT_ETF_BROKER_EXPOSURE_INVALID")
+        return self
 
 
 def _private_files(directory: Path, names: tuple[str, ...]) -> tuple[bytes, ...]:
@@ -192,12 +220,14 @@ async def load_current_held_etf_archives(
     )
 
 
-def _held_revision(inputs: EtfInputs, *, holding: CurrentHoldingBinding) -> str:
+def _broker_exposure_revision(
+    inputs: EtfInputs, *, binding: CurrentHoldingBinding | CurrentOpenOrderBinding
+) -> str:
     return sha256(
         (
             HELD_SCHEMA
             + inputs.identity.symbol
-            + holding.sha256
+            + binding.sha256
             + ":".join(sha256(raw).hexdigest() for raw in inputs.contents)
         ).encode()
     ).hexdigest()
@@ -226,6 +256,118 @@ def _binding_payload(
 
 def _binding_digest(payload: dict[str, object]) -> str:
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+_ACTIVE_ORDER_STATUSES = frozenset({"10", "20", "21", "22", "40", "60"})
+
+
+def _order_binding_payload(
+    *,
+    account_source_request_id: str,
+    orders_source_request_id: str,
+    accounts_as_of: datetime,
+    orders_as_of: datetime,
+    provider_code: str,
+    provider_status: Literal["10", "20", "21", "22", "40", "60"],
+    submitted_at: datetime,
+    updated_at: datetime | None,
+    order_id_sha256: str,
+) -> dict[str, object]:
+    return {
+        "account_source_request_id": account_source_request_id,
+        "orders_source_request_id": orders_source_request_id,
+        "accounts_as_of": require_utc(accounts_as_of).isoformat(),
+        "orders_as_of": require_utc(orders_as_of).isoformat(),
+        "provider_code": provider_code,
+        "provider_status": provider_status,
+        "submitted_at": require_utc(submitted_at).isoformat(),
+        "updated_at": require_utc(updated_at).isoformat() if updated_at is not None else None,
+        "account_quality": "PASS",
+        "orders_quality": "PARTIAL",
+        "order_active": True,
+        "order_id_sha256": order_id_sha256,
+    }
+
+
+def current_open_order_binding(
+    *,
+    symbol: str,
+    accounts_page: GatewayResponsePage,
+    orders_page: GatewayResponsePage,
+    now: datetime,
+) -> CurrentOpenOrderBinding:
+    try:
+        if (
+            symbol != symbol.strip().upper()
+            or not symbol
+            or accounts_page.quality != "PASS"
+            or orders_page.quality != "PARTIAL"
+            or accounts_page.has_more
+            or orders_page.has_more
+            or not accounts_page.as_of <= orders_page.as_of <= now
+            or now - accounts_page.as_of > HELD_BINDING_MAX_AGE
+            or now - orders_page.as_of > HELD_BINDING_MAX_AGE
+        ):
+            raise ValueError
+        accounts = tuple(AccountItem.model_validate(item) for item in accounts_page.items)
+        orders = tuple(OrderItem.model_validate(item) for item in orders_page.items)
+        if len(accounts) != 1:
+            raise ValueError
+        provider_code = "us" + symbol
+        matches = [
+            item
+            for item in orders
+            if item.instrument_code == provider_code and item.status in _ACTIVE_ORDER_STATUSES
+        ]
+        if len(matches) != 1:
+            raise ValueError
+        order = matches[0]
+        if order.submitted_at > orders_page.as_of or (
+            order.updated_at is not None and order.updated_at > orders_page.as_of
+        ):
+            raise ValueError
+        order_id_sha256 = sha256(order.external_order_id.encode()).hexdigest()
+        provider_status = cast(Literal["10", "20", "21", "22", "40", "60"], order.status)
+        payload = _order_binding_payload(
+            account_source_request_id=accounts_page.source_request_id,
+            orders_source_request_id=orders_page.source_request_id,
+            accounts_as_of=accounts_page.as_of,
+            orders_as_of=orders_page.as_of,
+            provider_code=provider_code,
+            provider_status=provider_status,
+            submitted_at=order.submitted_at,
+            updated_at=order.updated_at,
+            order_id_sha256=order_id_sha256,
+        )
+        return CurrentOpenOrderBinding.model_validate(
+            {**payload, "sha256": _binding_digest(payload)}
+        )
+    except (ValueError, TypeError, KeyError):
+        raise ValueError("CURRENT_ETF_OPEN_ORDER_INVALID") from None
+
+
+def _validate_frozen_order_binding(
+    binding: CurrentOpenOrderBinding, *, symbol: str, now: datetime
+) -> None:
+    payload = _order_binding_payload(
+        account_source_request_id=binding.account_source_request_id,
+        orders_source_request_id=binding.orders_source_request_id,
+        accounts_as_of=binding.accounts_as_of,
+        orders_as_of=binding.orders_as_of,
+        provider_code=binding.provider_code,
+        provider_status=binding.provider_status,
+        submitted_at=binding.submitted_at,
+        updated_at=binding.updated_at,
+        order_id_sha256=binding.order_id_sha256,
+    )
+    if (
+        binding.provider_code != "us" + symbol
+        or binding.sha256 != _binding_digest(payload)
+        or not binding.accounts_as_of <= binding.orders_as_of <= now
+        or now - binding.accounts_as_of > HELD_BINDING_MAX_AGE
+        or now - binding.orders_as_of > HELD_BINDING_MAX_AGE
+    ):
+        raise ValueError("CURRENT_ETF_OPEN_ORDER_INVALID")
 
 
 def current_holding_binding(
@@ -271,9 +413,7 @@ def current_holding_binding(
             holdings_as_of=holdings_at,
             provider_code=provider_code,
         )
-        return CurrentHoldingBinding.model_validate(
-            {**payload, "sha256": _binding_digest(payload)}
-        )
+        return CurrentHoldingBinding.model_validate({**payload, "sha256": _binding_digest(payload)})
     except (ValueError, TypeError, KeyError):
         raise ValueError("CURRENT_HELD_ETF_HOLDING_INVALID") from None
 
@@ -447,7 +587,7 @@ async def import_current_etf(
         return CurrentIdentityImportResult("created", instrument.id, snapshot.id)
 
 
-async def import_current_held_etf(
+async def _import_current_etf_exposure(
     session: AsyncSession,
     store: IdentityStore,
     *,
@@ -456,9 +596,10 @@ async def import_current_held_etf(
     sec_archive: Path,
     mapping_file: Path,
     accounts_page: GatewayResponsePage,
-    holdings_page: GatewayResponsePage,
+    holdings_page: GatewayResponsePage | None = None,
+    orders_page: GatewayResponsePage | None = None,
 ) -> CurrentIdentityImportResult:
-    """Persist a proven current holding without publishing it to a research universe."""
+    """Persist one proven broker exposure without publishing a research universe."""
 
     async with session.begin_nested():
         await session.execute(
@@ -467,12 +608,27 @@ async def import_current_held_etf(
         )
         now = await session.scalar(select(func.clock_timestamp()))
         assert isinstance(now, datetime)
-        holding = current_holding_binding(
-            symbol=symbol,
-            accounts_page=accounts_page,
-            holdings_page=holdings_page,
-            now=now,
-        )
+        if (holdings_page is None) == (orders_page is None):
+            raise ValueError("CURRENT_ETF_BROKER_EXPOSURE_INVALID")
+        exposure_binding: CurrentHoldingBinding | CurrentOpenOrderBinding
+        scope: Literal["fosun_current_holding", "fosun_current_open_order"]
+        if holdings_page is not None:
+            exposure_binding = current_holding_binding(
+                symbol=symbol,
+                accounts_page=accounts_page,
+                holdings_page=holdings_page,
+                now=now,
+            )
+            scope = "fosun_current_holding"
+        else:
+            assert orders_page is not None
+            exposure_binding = current_open_order_binding(
+                symbol=symbol,
+                accounts_page=accounts_page,
+                orders_page=orders_page,
+                now=now,
+            )
+            scope = "fosun_current_open_order"
         inputs = await load_current_held_etf_archives(
             symbol=symbol,
             fmp_archive=fmp_archive,
@@ -498,7 +654,7 @@ async def import_current_held_etf(
             inputs.identity,
         )
         instrument_id = UUID(str(stable_instrument_id(symbol)))
-        revision = _held_revision(inputs, holding=holding)
+        revision = _broker_exposure_revision(inputs, binding=exposure_binding)
         existing = await session.scalar(
             select(DataSnapshot).where(
                 DataSnapshot.source == HELD_SOURCE,
@@ -597,10 +753,10 @@ async def import_current_held_etf(
                 )
             if artifact is None or artifact.source != source:
                 raise ValueError("CURRENT_ETF_ARTIFACT_CONFLICT")
-            binding = _binding(artifact)
-            if await _read_artifact(store, binding) != content:
+            artifact_binding = _binding(artifact)
+            if await _read_artifact(store, artifact_binding) != content:
                 raise ValueError("CURRENT_ETF_ARTIFACT_CONFLICT")
-            artifacts.append(binding)
+            artifacts.append(artifact_binding)
 
         checked = await session.scalar(select(func.clock_timestamp()))
         assert isinstance(checked, datetime)
@@ -630,7 +786,13 @@ async def import_current_held_etf(
             alias_id=alias.id,
             checked_at=checked,
             alias_valid_from=alias.valid_from,
-            holding=holding,
+            scope=scope,
+            holding=(
+                exposure_binding if isinstance(exposure_binding, CurrentHoldingBinding) else None
+            ),
+            order=(
+                exposure_binding if isinstance(exposure_binding, CurrentOpenOrderBinding) else None
+            ),
             sec_url=inputs.sec_url,
             artifacts=tuple(artifacts),
         )
@@ -650,6 +812,52 @@ async def import_current_held_etf(
         return CurrentIdentityImportResult("created", instrument.id, snapshot.id)
 
 
+async def import_current_held_etf(
+    session: AsyncSession,
+    store: IdentityStore,
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    mapping_file: Path,
+    accounts_page: GatewayResponsePage,
+    holdings_page: GatewayResponsePage,
+) -> CurrentIdentityImportResult:
+    return await _import_current_etf_exposure(
+        session,
+        store,
+        symbol=symbol,
+        fmp_archive=fmp_archive,
+        sec_archive=sec_archive,
+        mapping_file=mapping_file,
+        accounts_page=accounts_page,
+        holdings_page=holdings_page,
+    )
+
+
+async def import_current_open_order_etf(
+    session: AsyncSession,
+    store: IdentityStore,
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    mapping_file: Path,
+    accounts_page: GatewayResponsePage,
+    orders_page: GatewayResponsePage,
+) -> CurrentIdentityImportResult:
+    return await _import_current_etf_exposure(
+        session,
+        store,
+        symbol=symbol,
+        fmp_archive=fmp_archive,
+        sec_archive=sec_archive,
+        mapping_file=mapping_file,
+        accounts_page=accounts_page,
+        orders_page=orders_page,
+    )
+
+
 async def read_current_held_etf(
     session: AsyncSession, store: IdentityStore, *, snapshot_id: UUID
 ) -> CurrentHeldEtfProof:
@@ -664,11 +872,23 @@ async def read_current_held_etf(
         ):
             raise ValueError
         proof = CurrentHeldEtfProof.model_validate(snapshot.payload)
-        _validate_frozen_holding_binding(
-            proof.holding,
-            symbol=proof.identity.symbol,
-            now=proof.checked_at,
-        )
+        exposure_binding: CurrentHoldingBinding | CurrentOpenOrderBinding
+        if proof.holding is not None:
+            _validate_frozen_holding_binding(
+                proof.holding,
+                symbol=proof.identity.symbol,
+                now=proof.checked_at,
+            )
+            exposure_binding = proof.holding
+        elif proof.order is not None:
+            _validate_frozen_order_binding(
+                proof.order,
+                symbol=proof.identity.symbol,
+                now=proof.checked_at,
+            )
+            exposure_binding = proof.order
+        else:
+            raise ValueError
         if (
             (snapshot.observed_at, snapshot.received_at, snapshot.available_at)
             != (proof.checked_at,) * 3
@@ -678,17 +898,17 @@ async def read_current_held_etf(
         ):
             raise ValueError
         contents = []
-        for number, binding in enumerate(proof.artifacts):
+        for number, artifact_binding in enumerate(proof.artifacts):
             artifact = await session.scalar(
-                select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
+                select(DataArtifact).where(DataArtifact.sha256 == artifact_binding.sha256)
             )
             if (
                 artifact is None
-                or _binding(artifact) != binding
+                or _binding(artifact) != artifact_binding
                 or artifact.source != ("fmp" if number < 2 else "sec")
             ):
                 raise ValueError
-            contents.append(await _read_artifact(store, binding))
+            contents.append(await _read_artifact(store, artifact_binding))
         inputs = await validate_current_held_etf_originals(
             symbol=proof.identity.symbol,
             contents=tuple(contents),
@@ -697,7 +917,7 @@ async def read_current_held_etf(
         expected_id = UUID(str(stable_instrument_id(proof.identity.symbol)))
         if (
             inputs.identity != proof.identity
-            or _held_revision(inputs, holding=proof.holding) != snapshot.revision
+            or _broker_exposure_revision(inputs, binding=exposure_binding) != snapshot.revision
             or inputs.sec_url != proof.sec_url
             or proof.instrument_id != expected_id
             or snapshot.provider_object_id != f"identity:{proof.identity.symbol}"

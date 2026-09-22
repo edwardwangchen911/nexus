@@ -459,7 +459,7 @@ def _current_held_nasdaq_identity(
         section(
             strategy_heading,
             (r"Principal Investment Risks\b", r"Principal Risks\b", r"Investment Risks\b"),
-            7000,
+            10000,
         )
         if re.search(strategy_heading, tail, re.IGNORECASE)
         else objective
@@ -472,10 +472,15 @@ def _current_held_nasdaq_identity(
     )
     derivative_equity = (
         "swap agreement" in equity_text
-        and "underlying security" in equity_text
         and re.search(r"\b(?:equity|stocks?|shares)\b", provider_text) is not None
     )
     fixed_income = re.search(r"\b(?:fixed income|bonds?|debt)\b", equity_text) is not None
+    leveraged_equity_collateral = bool(
+        derivative_equity
+        and "daily" in objective.casefold()
+        and "collateral" in strategy.casefold()
+        and re.search(r"\b(?:leveraged|2x|two times)\b", provider_text)
+    )
     unsupported = re.search(
         r"\b(?:bitcoin|ether|bullion|commodit(?:y|ies)|futures?)\b", equity_text
     )
@@ -513,7 +518,7 @@ def _current_held_nasdaq_identity(
         filing_index_class_name=class_name,
         strategy_statement=strategy,
     )
-    if fixed_income:
+    if fixed_income and not leveraged_equity_collateral:
         return CurrentHeldMultiAssetEtfIdentity.model_validate(values)
     return CurrentHeldNasdaqEtfIdentity.model_validate(values)
 

@@ -313,6 +313,80 @@ Ticker: SYNX Unlike most ETFs, shares trade in the secondary market.
 
 
 @pytest.mark.asyncio
+async def test_current_open_order_etf_import_is_read_only_and_outside_universe(
+    migrated_database_url, tmp_path
+):
+    from nexus.market.current_etf_identity_storage import (
+        import_current_open_order_etf,
+        read_current_held_etf,
+    )
+
+    symbol = "SYNX"
+    document = b"""<html><body>497K Summary Prospectus May 1, 2026
+Ticker: SYNX Synthetic Leveraged Equity ETF listed on The Nasdaq Stock Market LLC.
+Investment Objective The Fund seeks daily results linked to shares of a United States company.
+Fund Fees and Expenses Costs apply.
+Principal Investment Strategies The Fund obtains equity exposure through common stocks and swaps.
+Principal Risks Market risks apply.
+Ticker: SYNX Unlike most ETFs, shares trade in the secondary market.
+</body></html>"""
+    settings = config(migrated_database_url)
+    fm, sec, mapping = archives(
+        tmp_path,
+        symbol=symbol,
+        exchange="NASDAQ",
+        company_name="Synthetic Leveraged Equity ETF",
+        document=document,
+    )
+    accounts_page, _, _ = held_pages(symbol)
+    orders_page = GatewayResponsePage(
+        items=(
+            {
+                "kind": "order",
+                "external_order_id": "private-order-id",
+                "instrument_code": "us" + symbol,
+                "side": "buy",
+                "quantity": "1",
+                "filled_quantity": "0",
+                "price": "10",
+                "status": "40",
+                "submitted_at": (accounts_page.as_of - timedelta(hours=1)).isoformat(),
+                "updated_at": None,
+            },
+        ),
+        source_request_id="synthetic-orders-request",
+        has_more=False,
+        next_cursor=None,
+        as_of=accounts_page.as_of,
+        quality="PARTIAL",
+    )
+    store = MemoryStore()
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            result = await import_current_open_order_etf(
+                session,
+                store,
+                symbol=symbol,
+                fmp_archive=fm,
+                sec_archive=sec,
+                mapping_file=mapping,
+                accounts_page=accounts_page,
+                orders_page=orders_page,
+            )
+        async with factory() as session:
+            proof = await read_current_held_etf(session, store, snapshot_id=result.snapshot_id)
+            assert proof.scope == "fosun_current_open_order"
+            assert proof.holding is None and proof.order is not None
+            assert proof.order.order_id_sha256 != "private-order-id"
+            assert proof.identity.asset_type == "equity_etf"
+            assert proof.execution_locked and not proof.new_position_eligible
+            assert await session.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias(
     migrated_database_url, tmp_path
 ):

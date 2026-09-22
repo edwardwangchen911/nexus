@@ -117,6 +117,35 @@ Ticker: SYNX Unlike most ETFs, shares trade in the secondary market.
 
 
 @pytest.mark.asyncio
+async def test_leveraged_equity_etf_does_not_become_multi_asset_from_collateral():
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    document = b"""<html><body>497K Summary Prospectus May 1, 2026
+Ticker: SYNX Synthetic Daily Equity ETF listed on The Nasdaq Stock Market LLC.
+Investment Objective The Fund seeks two times the daily performance of shares of a company.
+Fund Fees and Expenses Costs apply.
+Principal Investment Strategies The Fund obtains leveraged exposure through swap agreements.
+The Fund may hold short-term fixed income instruments as collateral for those swaps.
+Principal Risks Market risks apply.
+Ticker: SYNX Unlike most ETFs, shares trade in the secondary market.
+</body></html>"""
+    result = await validate_current_held_etf_originals(
+        symbol=symbol,
+        contents=originals(
+            symbol=symbol,
+            exchange="NASDAQ",
+            company_name="Synthetic Daily Equity ETF",
+            description="A 2x leveraged ETF providing daily exposure to common stock shares.",
+            document=document,
+        ),
+        now=datetime.now(UTC),
+    )
+
+    assert result.identity.asset_type == "equity_etf"
+
+
+@pytest.mark.asyncio
 async def test_current_held_validation_fails_closed_when_fixed_definition_is_unavailable(
     monkeypatch,
 ):
@@ -220,6 +249,38 @@ Principal Risks Investing in equity securities involves market risk.
     assert result.identity.exchange == "XNAS"
     assert result.identity.asset_type == "equity_etf"
     assert "equity exposure" in result.identity.strategy_statement
+
+
+@pytest.mark.asyncio
+async def test_current_held_equity_etf_accepts_bounded_long_497k_strategy():
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    name = "Synthetic Long Strategy ETF"
+    filler = " The Fund applies its reviewed allocation process." * 150
+    document = f"""<html><body>Summary Prospectus May 1, 2026
+Ticker: {symbol} {name} is an exchange-traded fund listed on The Nasdaq Stock Market LLC.
+Investment Objective The Fund seeks daily results linked to shares of a United States company.
+Fund Fees and Expenses Expenses apply.
+Principal Investment Strategies The Fund obtains equity exposure through common stocks and swaps.
+{filler}
+Principal Risks Investing in equity securities involves market risk.
+Ticker: {symbol} Shares trade in the secondary market.
+</body></html>""".encode()
+
+    result = await validate_current_held_etf_originals(
+        symbol=symbol,
+        contents=originals(
+            symbol=symbol,
+            exchange="NASDAQ",
+            company_name=name,
+            document=document,
+        ),
+        now=datetime.now(UTC),
+    )
+
+    assert result.identity.asset_type == "equity_etf"
+    assert 7000 < len(result.identity.strategy_statement) < 10000
 
 
 def test_current_held_etf_proof_has_fail_closed_scope_flags():

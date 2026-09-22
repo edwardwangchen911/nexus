@@ -12,24 +12,24 @@ def originals(
     index_class="C000000002",
     symbol="IWM",
     company_name="Synthetic Equity Fund",
+    description=None,
     index_name="",
     index_symbol=None,
 ):
     stamp = "2026-01-03T00:00:00+00:00"
     accession = "0000123456-26-000001"
     base = "https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/"
-    fmp = json.dumps(
-        [
-            dict(
-                symbol=symbol,
-                companyName=company_name,
-                cik="0000123456",
-                currency="USD",
-                exchange=exchange,
-                isEtf=is_etf,
-            )
-        ]
-    ).encode()
+    profile = dict(
+        symbol=symbol,
+        companyName=company_name,
+        cik="0000123456",
+        currency="USD",
+        exchange=exchange,
+        isEtf=is_etf,
+    )
+    if description is not None:
+        profile["description"] = description
+    fmp = json.dumps([profile]).encode()
     receipt = json.dumps(
         dict(
             schema="fmp_profile_receipt_v1",
