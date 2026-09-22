@@ -9,16 +9,25 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.domain.ids import new_uuid7
 from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
 from nexus.persistence.idempotency import IdempotencyClaimError, claim_idempotency
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+from nexus.persistence.models.data import PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
+    SectorExposure,
     UniverseMember,
     UniverseSnapshot,
 )
-from nexus.persistence.models.paper import AgentPaperCandidateBatchRecord, PaperAccountRecord
+from nexus.persistence.models.paper import (
+    PAPER_DECISION_SOURCE_POLICY_ID,
+    AgentPaperCandidateBatchRecord,
+    PaperAccountRecord,
+)
 from nexus.persistence.models.portfolio import Account
 from nexus.persistence.models.runtime import IdempotencyRecord
 
@@ -248,6 +257,115 @@ async def validate_agent_paper_candidate_batch(
         created_at=as_of,
     )
     return batch, identities
+
+
+async def inspect_agent_paper_candidate_static_readiness(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    batch_id: UUID,
+    as_of: datetime,
+) -> dict[str, object]:
+    """Read candidate evidence before the one daily formal decision window."""
+    as_of = _require_utc(as_of)
+    batch, identities = await validate_agent_paper_candidate_batch(
+        session, batch_id=batch_id, account_id=account_id, as_of=as_of
+    )
+    calendar = await select_agent_paper_service_calendar_authority(session, now=as_of)
+    prior_session = await session.scalar(
+        select(ExchangeCalendarSessionRecord.session)
+        .where(
+            ExchangeCalendarSessionRecord.calendar_authority_id == calendar.calendar_authority_id,
+            ExchangeCalendarSessionRecord.session < calendar.session,
+            ExchangeCalendarSessionRecord.created_at <= as_of,
+        )
+        .order_by(ExchangeCalendarSessionRecord.session.desc())
+        .limit(1)
+    )
+    if prior_session is None:
+        raise ValueError("AGENT_PAPER_CALENDAR_PRIOR_SESSION_MISSING")
+    selected_universe = await session.scalar(
+        select(UniverseSnapshot)
+        .where(
+            UniverseSnapshot.key == "us_liquid",
+            UniverseSnapshot.version == "us_liquid_v1",
+            UniverseSnapshot.source == "fosun_local_read_only",
+            UniverseSnapshot.effective_from <= calendar.session,
+            UniverseSnapshot.published_at <= as_of,
+            UniverseSnapshot.created_at <= as_of,
+        )
+        .order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id)
+        .limit(1)
+    )
+    universe_matches = (
+        selected_universe is not None and selected_universe.id == batch.universe_snapshot_id
+    )
+    candidates: list[dict[str, object]] = []
+    for identity in sorted(identities, key=lambda item: item.symbol):
+        missing: list[str] = []
+        snapshot = await select_authoritative_snapshot(
+            session, instrument_id=identity.instrument_id, as_of=as_of
+        )
+        if (
+            snapshot is None
+            or snapshot.source != "nexus_research"
+            or snapshot.schema_version != "research_filings_v1"
+        ):
+            missing.append("RESEARCH_SNAPSHOT_MISSING")
+        reviewed_sector = await session.scalar(
+            select(SectorExposure.id)
+            .where(
+                SectorExposure.instrument_id == identity.instrument_id,
+                SectorExposure.as_of <= calendar.session,
+                SectorExposure.reviewed.is_(True),
+                SectorExposure.created_at <= as_of,
+            )
+            .limit(1)
+        )
+        if reviewed_sector is None:
+            missing.append("REVIEWED_SECTOR_MISSING")
+        daily_authority = await session.scalar(
+            select(PriceBarSetAuthority.id)
+            .join(
+                PriceSeriesManifest,
+                PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
+            )
+            .join(
+                PriceBarRecord,
+                PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
+            )
+            .where(
+                PriceBarSetAuthority.source_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
+                PriceBarSetAuthority.available_at <= as_of,
+                PriceBarSetAuthority.created_at <= as_of,
+                PriceBarRecord.instrument_id == identity.instrument_id,
+                PriceBarRecord.session == prior_session,
+                PriceBarRecord.available_at <= as_of,
+                PriceBarRecord.created_at <= as_of,
+                PriceSeriesManifest.created_at <= as_of,
+                PriceSeriesManifest.source == "alpaca",
+                PriceSeriesManifest.feed == "sip",
+                PriceSeriesManifest.delivery_mode == "delayed",
+                PriceSeriesManifest.adjustment == "all",
+                PriceSeriesManifest.interval == "1Day",
+            )
+            .limit(1)
+        )
+        if daily_authority is None:
+            missing.append("PRIOR_DAILY_AUTHORITY_MISSING")
+        candidates.append({"symbol": identity.symbol, "missing": missing})
+    return {
+        "status": "ready_static"
+        if universe_matches and all(not item["missing"] for item in candidates)
+        else "blocked",
+        "decision_session": calendar.session.isoformat(),
+        "prior_session": prior_session.isoformat(),
+        "universe_status": "matched" if universe_matches else "mismatch",
+        "candidates": candidates,
+        "window_evidence_status": "not_evaluated",
+        "execution_locked": True,
+        "external_requests": 0,
+    }
 
 
 async def _lock_candidate_batch_account(session: AsyncSession, *, account_id: UUID) -> None:

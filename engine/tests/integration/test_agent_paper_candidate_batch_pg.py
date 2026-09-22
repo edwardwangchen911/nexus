@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from nexus.ops import agent_paper_once as candidate_cli
 from nexus.ops.agent_paper_once import AgentPaperPrepareCandidatesRequest
+from nexus.paper import candidate_batch as batch_module
 from nexus.paper.candidate_batch import (
     create_agent_paper_candidate_batch,
     load_agent_paper_candidate_batch,
@@ -14,6 +15,10 @@ from nexus.paper.candidate_batch import (
 from nexus.persistence.models.agents import (
     AgentPortfolioSynthesisRunRecord,
     AgentResearchRunRecord,
+)
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
 )
 from nexus.persistence.models.market import (
     Instrument,
@@ -358,6 +363,83 @@ async def _seed_scope(
             text("UPDATE universe_snapshots SET published_at=:published WHERE id=:id"),
             {"published": created, "id": UNIVERSE_ID},
         )
+
+
+@pytest.mark.asyncio
+async def test_static_readiness_reports_each_missing_candidate_input_without_writing(
+    migrated_database_url: str,
+) -> None:
+    await _seed_scope(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    calendar_id = uuid4()
+    created = NOW.replace(day=17)
+    async with factory() as session, session.begin():
+        session.add(
+            ExchangeCalendarAuthorityRecord(
+                id=calendar_id,
+                exchange="XNYS",
+                version="static-readiness-fixture",
+                source="fixture",
+                range_start=date(2026, 9, 17),
+                range_end=date(2026, 9, 30),
+                query_parameters={},
+                completeness_status="complete",
+                content_hash="b" * 64,
+                published_at=created,
+                created_at=created,
+            )
+        )
+        for day in (17, 18, 21, 22):
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=calendar_id,
+                    session=date(2026, 9, day),
+                    market_open_at=datetime(2026, 9, day, 13, 30, tzinfo=UTC),
+                    market_close_at=datetime(2026, 9, day, 20, tzinfo=UTC),
+                    decision_at=datetime(2026, 9, day, 21, tzinfo=UTC),
+                    created_at=created,
+                )
+            )
+        batch = await create_agent_paper_candidate_batch(
+            session,
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=UNIVERSE_ID,
+            instrument_ids=(AAPL_ID, NVDA_ID),
+            idempotency_key="static-readiness",
+            created_at=NOW,
+        )
+    async with factory() as session, session.begin():
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        result = await batch_module.inspect_agent_paper_candidate_static_readiness(
+            session,
+            account_id=ACCOUNT_ID,
+            batch_id=batch.batch_id,
+            as_of=NOW,
+        )
+        assert result["status"] == "blocked"
+        assert result["decision_session"] == "2026-09-18"
+        assert result["prior_session"] == "2026-09-17"
+        assert result["candidates"] == [
+            {
+                "symbol": "AAPL",
+                "missing": [
+                    "RESEARCH_SNAPSHOT_MISSING",
+                    "REVIEWED_SECTOR_MISSING",
+                    "PRIOR_DAILY_AUTHORITY_MISSING",
+                ],
+            },
+            {
+                "symbol": "NVDA",
+                "missing": [
+                    "RESEARCH_SNAPSHOT_MISSING",
+                    "REVIEWED_SECTOR_MISSING",
+                    "PRIOR_DAILY_AUTHORITY_MISSING",
+                ],
+            },
+        ]
+        assert result["execution_locked"] is True
+        assert result["external_requests"] == 0
+        assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
 
 
 @pytest.mark.asyncio

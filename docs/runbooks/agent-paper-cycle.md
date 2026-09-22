@@ -14,6 +14,22 @@ Agent-version evaluation，不能通过正常组合入口继续创建。周期�
 
 ## 1. Preflight：先查状态，不先发请求
 
+在等待 10:00 正式窗口时，可先运行只读候选预检：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-readiness --repo-root "$PWD"
+```
+
+它从受保护的本地配置读取现有账户和候选批次，在数据库只读事务中核对下一适用
+XNYS 交易日、批次与正式研究 Universe、每只候选的研究快照、已审核行业证据和
+前一完整交易日 Alpaca `all` 日线权威。`blocked` 会逐只列出缺口；
+`ready_static` 只表示上述已存证据齐备，返回中的
+`window_evidence_status=not_evaluated` 表示同日 Schwab 行情、风险查询、
+研究 Job、内部模拟执行和页面结果仍须分别验收。该命令不调用 Provider、模型，
+不创建周期、订单或任何业务事实。运行前还须核对 `nexus-local-stack status` 的
+代码提交身份；宿主提交与当前 checkout 不一致时状态命令会报
+`AGENT_PAPER_HEARTBEAT_RELEASE_MISMATCH`。
+
 只在当前代码、API、普通 Worker、PostgreSQL、MinIO 和 Web 来自同一 head，数据库位于当前
 Alembic head，且本地 BFF readiness 可解释时继续。`/health/live` 或 Compose `Up` 不足以证明
 业务就绪。
