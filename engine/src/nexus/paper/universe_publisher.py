@@ -98,27 +98,36 @@ async def inspect_reviewed_research_universe(
         )
         if snapshot is None or snapshot.created_at > as_of:
             missing.append("RESEARCH_SNAPSHOT_MISSING")
-        sector = await session.scalar(
-            select(SectorExposure)
-            .where(
-                SectorExposure.instrument_id == instrument_id,
-                SectorExposure.as_of <= effective_from,
-                SectorExposure.created_at <= as_of,
-                SectorExposure.reviewed.is_(True),
-                SectorExposure.synthetic.is_(False),
+        latest_sectors = tuple(
+            await session.scalars(
+                select(SectorExposure)
+                .where(
+                    SectorExposure.instrument_id == instrument_id,
+                    SectorExposure.as_of <= effective_from,
+                    SectorExposure.created_at <= as_of,
+                    SectorExposure.reviewed.is_(True),
+                    SectorExposure.synthetic.is_(False),
+                )
+                .order_by(
+                    SectorExposure.as_of.desc(),
+                    SectorExposure.created_at.desc(),
+                    SectorExposure.id.desc(),
+                )
+                .limit(2)
             )
-            .order_by(
-                SectorExposure.as_of.desc(),
-                SectorExposure.created_at.desc(),
-                SectorExposure.id.desc(),
-            )
-            .limit(1)
+        )
+        sector = latest_sectors[0] if latest_sectors else None
+        duplicate_latest = (
+            sector is not None
+            and len(latest_sectors) == 2
+            and latest_sectors[1].as_of == sector.as_of
         )
         sector_source = urlsplit(sector.source_url) if sector is not None else None
         if sector is None:
             missing.append("REVIEWED_SECTOR_MISSING")
         elif (
-            sector.sector_code not in EQUITY_SECTOR_CODES
+            duplicate_latest
+            or sector.sector_code not in EQUITY_SECTOR_CODES
             or sector.weight != Decimal(1)
             or len(sector.content_hash) != 64
             or any(character not in "0123456789abcdef" for character in sector.content_hash)

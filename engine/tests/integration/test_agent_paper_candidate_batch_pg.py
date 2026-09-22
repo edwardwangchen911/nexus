@@ -180,6 +180,29 @@ async def test_reviewed_universe_publisher_requires_evidence_and_replays_immutab
     assert published_result["status"] == "published"
     assert published_result["universe_snapshot_id"] != str(first.id)
 
+    async with factory() as session, session.begin():
+        session.add(SectorExposure(
+            instrument_id=AAPL_ID, sector_code="information_technology",
+            weight=Decimal(1), as_of=created.date(),
+            source_url="https://example.test/duplicate-reviewed-sector",
+            content_hash="e" * 64,
+            synthetic=False, reviewed=True, created_at=NOW,
+        ))
+    duplicate = await universe_cli.run(
+        EngineSettings(database_url=migrated_database_url),
+        instrument_ids=ids, effective_from=future_session, publish=False,
+    )
+    assert duplicate["status"] == "blocked"
+    assert duplicate["candidates"] == [
+        {"symbol": "AAPL", "missing": ["REVIEWED_SECTOR_INVALID"]},
+        {"symbol": "NVDA", "missing": []},
+    ]
+    with pytest.raises(ValueError, match="REVIEWED_UNIVERSE_EVIDENCE_MISSING"):
+        async with factory() as session, session.begin():
+            await publish_reviewed_research_universe(
+                session, instrument_ids=ids, effective_from=future_session, as_of=NOW,
+            )
+
 
 @pytest.mark.asyncio
 async def test_reviewed_research_universe_accepts_multi_stock_without_rewriting_legacy(
