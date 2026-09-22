@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import pytest
@@ -485,12 +486,21 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
         cycle_path = f"/internal/v1/paper/management/cycles/{cycle.id}"
         summary_path = "/internal/v1/paper/management/portfolio"
         cycles_path = "/internal/v1/paper/cycles?limit=20"
+        orders_path = "/internal/v1/paper/orders?limit=50"
+        actual_path = "/internal/v1/paper/actual"
         envelopes = {}
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app(migrated_database_url, now=api_now)),
             base_url="http://testserver",
         ) as client:
-            for path in (plan_path, cycle_path, summary_path, cycles_path):
+            for path in (
+                plan_path,
+                cycle_path,
+                summary_path,
+                cycles_path,
+                orders_path,
+                actual_path,
+            ):
                 for _ in range(2):
                     response = await client.get(path, headers=headers("GET", path))
                     assert response.status_code == 200, response.text
@@ -501,6 +511,8 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
         detail = envelopes[cycle_path]["data"]
         summary = envelopes[summary_path]["data"]
         cycle_page = envelopes[cycles_path]["data"]
+        order_page = envelopes[orders_path]["data"]
+        actual_readback = envelopes[actual_path]["data"]
         assert plan["batch_id"] == str(batch_id)
         target_id = plan["target"]["target_version_id"]
         assert detail["active_target"]["target_version_id"] == target_id
@@ -515,6 +527,30 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
         assert plan["plan"]["occupation_state"] == ("occupied" if first_partial else "released")
         assert all(item["confirmed_fills"] for item in plan["plan"]["items"])
         assert detail["cycle"]["execution_locked"] is True
+        assert order_page["next_cursor"] is None
+        assert {item["order_id"] for item in order_page["items"]} == {
+            str(order.id) for order in orders
+        }
+        assert {
+            UUID(item["order_id"]): {UUID(fill["fill_id"]) for fill in item["fills"]}
+            for item in order_page["items"]
+        } == {
+            order.id: {fill.id for fill in fills if fill.order_id == order.id}
+            for order in orders
+        }
+        assert all(item["fills"] for item in order_page["items"])
+        assert all(
+            [event["event_seq"] for event in item["events"]]
+            == list(range(1, item["current_event_seq"] + 1))
+            for item in order_page["items"]
+        )
+        assert actual_readback["data_state"] == "READY"
+        assert {
+            UUID(position["instrument_id"]): Decimal(position["quantity"])
+            for position in actual_readback["positions"]
+        } == filled_by_instrument
+        assert Decimal(actual_readback["available_cash"]) == actual.available_cash
+        assert Decimal(actual_readback["reserved_cash"]) == actual.reserved_cash
         assert cycle_page["version_history"] == []
         assert cycle_page["summary"]["next_eligible_reason"] != "NEXT_SLOT"
         async with sessions() as session:
