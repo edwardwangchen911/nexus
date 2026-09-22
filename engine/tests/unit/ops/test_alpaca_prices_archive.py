@@ -186,10 +186,12 @@ def test_bad_arguments_make_no_http_or_archive(invoke, extra):
     "end,now,allowed",
     [
         (date(2024, 11, 29), datetime(2024, 11, 29, 18, 29, 59, tzinfo=UTC), False),
-        (date(2024, 11, 29), datetime(2024, 11, 29, 18, 30, tzinfo=UTC), True),
+        (date(2024, 11, 29), datetime(2024, 11, 29, 18, 30, tzinfo=UTC), False),
+        (date(2024, 11, 29), datetime(2024, 11, 29, 18, 45, 59, tzinfo=UTC), False),
+        (date(2024, 11, 29), datetime(2024, 11, 29, 18, 46, tzinfo=UTC), True),
     ],
 )
-def test_current_session_must_have_completed_buffer(end, now, allowed):
+def test_current_session_sip_end_must_be_old_enough(end, now, allowed):
     from uuid import UUID
 
     from nexus.research.alpaca_prices_archive import collection_window
@@ -197,7 +199,7 @@ def test_current_session_must_have_completed_buffer(end, now, allowed):
     identifier = UUID("00000000-0000-4000-8000-000000000001")
     if allowed:
         request, _ = collection_window(identifier, end, end, "raw", now=now)
-        assert request.end == now
+        assert request.end == datetime(2024, 11, 29, 18, 30, tzinfo=UTC)
     else:
         with pytest.raises(ValueError, match="SESSION_NOT_COMPLETED"):
             collection_window(identifier, end, end, "raw", now=now)

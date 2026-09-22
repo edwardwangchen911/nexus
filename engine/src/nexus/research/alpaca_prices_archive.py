@@ -64,7 +64,9 @@ def collection_window(
         raise ValueError("ALPACA_PRICES_REQUEST_INVALID")
     close = calendar.session_close(end).to_pydatetime()
     end_at = close + timedelta(minutes=30)
-    if end_at > clock:
+    # Historical SIP access without a real-time subscription requires the
+    # requested end to be at least 15 minutes old; leave one minute for clock skew.
+    if end_at + timedelta(minutes=16) > clock:
         raise ValueError("ALPACA_PRICES_SESSION_NOT_COMPLETED")
     request = BarsRequest(
         instrument_id=InstrumentId(instrument_id),
