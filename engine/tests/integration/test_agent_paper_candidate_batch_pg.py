@@ -75,6 +75,16 @@ async def test_reviewed_universe_publisher_requires_evidence_and_replays_immutab
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     created = NOW.replace(day=17)
     ids = (AAPL_ID, NVDA_ID)
+    monkeypatch.setattr(universe_cli, "func", SimpleNamespace(clock_timestamp=lambda: literal(NOW)))
+    blocked = await universe_cli.run(
+        EngineSettings(database_url=migrated_database_url),
+        instrument_ids=ids, effective_from=NOW.date(), publish=False,
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["candidates"] == [
+        {"symbol": "AAPL", "missing": ["RESEARCH_SNAPSHOT_MISSING", "REVIEWED_SECTOR_MISSING"]},
+        {"symbol": "NVDA", "missing": ["RESEARCH_SNAPSHOT_MISSING", "REVIEWED_SECTOR_MISSING"]},
+    ]
     with pytest.raises(ValueError, match="REVIEWED_UNIVERSE_EVIDENCE_MISSING"):
         async with factory() as session, session.begin():
             await publish_reviewed_research_universe(
@@ -153,7 +163,6 @@ async def test_reviewed_universe_publisher_requires_evidence_and_replays_immutab
         for member in members
     )
     assert published == 2
-    monkeypatch.setattr(universe_cli, "func", SimpleNamespace(clock_timestamp=lambda: literal(NOW)))
     future_session = date(2026, 9, 19)
     checked = await universe_cli.run(
         EngineSettings(database_url=migrated_database_url),
@@ -168,7 +177,7 @@ async def test_reviewed_universe_publisher_requires_evidence_and_replays_immutab
     assert checked["status"] == "publishable"
     assert count_after_check == 2
     assert published_result["status"] == "published"
-    assert published_result["universe_snapshot_id"] == checked["universe_snapshot_id"]
+    assert published_result["universe_snapshot_id"] != str(first.id)
 
 
 @pytest.mark.asyncio

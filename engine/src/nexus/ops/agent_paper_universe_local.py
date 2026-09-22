@@ -9,11 +9,14 @@ from datetime import date, datetime
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 
 from nexus.ops.fosun_local import load_local_environment
-from nexus.paper.universe_publisher import publish_reviewed_research_universe
+from nexus.paper.universe_publisher import (
+    inspect_reviewed_research_universe,
+    publish_reviewed_research_universe,
+)
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 
@@ -38,8 +41,27 @@ async def run(
     _require_local_database(settings)
     async with session_factory(settings)() as session:
         async with session.begin():
+            if not publish:
+                await session.execute(text("SET TRANSACTION READ ONLY"))
             now = await session.scalar(select(func.clock_timestamp()))
             assert isinstance(now, datetime)
+            if not publish:
+                _, candidates = await inspect_reviewed_research_universe(
+                    session,
+                    instrument_ids=instrument_ids,
+                    effective_from=effective_from,
+                    as_of=now,
+                )
+                return {
+                    "status": (
+                        "blocked" if any(candidate["missing"] for candidate in candidates)
+                        else "publishable"
+                    ),
+                    "candidates": sorted(candidates, key=lambda candidate: candidate["symbol"]),
+                    "effective_from": effective_from.isoformat(),
+                    "execution_locked": True,
+                    "external_requests": 0,
+                }
             universe = await publish_reviewed_research_universe(
                 session,
                 instrument_ids=instrument_ids,
@@ -47,7 +69,7 @@ async def run(
                 as_of=now,
             )
             result: dict[str, object] = {
-                "status": "published" if publish else "publishable",
+                "status": "published",
                 "universe_snapshot_id": str(universe.id),
                 "version": universe.version,
                 "member_count": len(instrument_ids),
@@ -55,8 +77,6 @@ async def run(
                 "execution_locked": True,
                 "external_requests": 0,
             }
-            if not publish:
-                await session.rollback()
             return result
 
 
