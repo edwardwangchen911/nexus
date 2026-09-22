@@ -19,6 +19,7 @@ import { formatPaperDecimal, formatPaperTime, OrderTimeline, type PaperOrder } f
 import type { components } from "../../lib/generated/schema";
 
 export type PaperPortfolio = components["schemas"]["PaperPortfolioResponse"];
+type PaperActual = components["schemas"]["PaperPlanActualResponse"];
 type OrderStatus = PaperOrder["status"];
 type Notice = { kind: "success" | "error"; text: string } | null;
 type PendingCancel = { order: PaperOrder; idempotencyKey: string; unknown: boolean; requestedAt: string };
@@ -37,6 +38,7 @@ type PaperPanelProps = {
   versionEvaluation?: AgentVersionEvaluationFact | null;
   cycleUnavailable?: boolean;
   management?: React.ReactNode;
+  actual?: React.ReactNode;
   onRefresh: () => void;
   onStatusFilter: (status: "" | OrderStatus) => void;
   onLoadMore: () => void;
@@ -283,6 +285,7 @@ export default function PaperPage(): React.ReactElement {
   return <>
     <PaperPanel state={state} portfolio={portfolio} orders={orders} nextCursor={nextCursor}
       management={<AdjustmentPlanLoader refreshVersion={managementRefresh} attempt={pendingCancel ? null : lastAttempt} />}
+      actual={<CurrentPaperActual refreshVersion={managementRefresh} />}
       cycles={cycles} cycleUnavailable={cycleUnavailable}
       cycleSummary={cycleSummary}
       versionObservation={versionObservation}
@@ -296,7 +299,7 @@ export default function PaperPage(): React.ReactElement {
   </>;
 }
 
-export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, management, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
+export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, management, actual, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
   const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
@@ -305,6 +308,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         <div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新事实</button></div>
       </header>
       {state !== "forbidden" ? management : null}
+      {state !== "forbidden" ? actual : null}
       <DecisionPath current="paper" />
       <div role="status" aria-label="模拟盘操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
@@ -334,6 +338,37 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
       </>}
     </section>
   );
+}
+
+function CurrentPaperActual({ refreshVersion }: { refreshVersion: number }): React.ReactElement {
+  const [actual, setActual] = useState<PaperActual | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetchWithTimeout("/api/v1/paper/actual");
+        if (!response.ok) throw new Error("paper actual unavailable");
+        const payload = await response.json() as { data?: PaperActual };
+        if (!payload.data || !["READY", "UNKNOWN"].includes(payload.data.data_state)) throw new Error("paper actual invalid");
+        if (!cancelled) { setActual(payload.data); setUnavailable(false); }
+      } catch {
+        if (!cancelled) { setActual(null); setUnavailable(true); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [refreshVersion]);
+
+  return <section id="paper-current-actual" className="paper-table-section" aria-labelledby="paper-current-actual-title">
+    <header><div><p className="eyebrow">最新已保存的模拟账本</p><h2 id="paper-current-actual-title">当前实际持仓与现金</h2></div><p>成交与预留按当前账本读取；参考净值按订单冻结收盘价估算，并非实时行情或已发布绩效。</p></header>
+    {unavailable ? <p className="paper-state-warning">当前实际账本读取失败，请刷新核对；不能据此判断持仓为空。</p> : null}
+    {!unavailable && actual?.data_state === "UNKNOWN" ? <p className="paper-state-warning">当前实际账本无法核定，请核对账本记录。</p> : null}
+    {!unavailable && actual?.data_state === "READY" ? <>
+      <p>读取时间 {formatPaperTime(actual.as_of!)} · 可用现金 USD {formatPaperDecimal(actual.available_cash!, 2)} · 预留现金 USD {formatPaperDecimal(actual.reserved_cash!, 2)}</p>
+      {actual.positions!.length === 0 ? <p className="paper-orders__empty">当前模拟账本持仓为 0。</p> : <div className="table-scroll" role="region" aria-label="当前实际模拟持仓表，可横向滚动"><table className="paper-position-table numeric-data" aria-label="当前实际模拟持仓"><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">预留数量</th></tr></thead><tbody>{actual.positions!.map((position) => <tr key={position.instrument_id}><th scope="row" title={position.instrument_id}>{position.symbol ?? "未知标的"}</th><td>{formatPaperDecimal(position.quantity)}</td><td>{formatPaperDecimal(position.reserved_quantity)}</td></tr>)}</tbody></table></div>}
+    </> : null}
+  </section>;
 }
 
 function PaperComparison({ comparison }: { comparison: NonNullable<PaperPortfolio["comparison"]> }): React.ReactElement {
@@ -370,7 +405,7 @@ function PerformanceFacts({ portfolio }: { portfolio: PaperPortfolio }): React.R
 function Positions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <section className="paper-table-section" aria-labelledby="paper-positions-title"><header><div><p className="eyebrow">持仓 · 准入收盘价</p><h2 id="paper-positions-title">持仓</h2></div><p>参考价格采用已核验的收盘价，并非实时价格。</p></header>{portfolio.positions.length === 0 ? <p className="paper-orders__empty">当前没有模拟持仓。</p> : <div className="table-scroll" role="region" aria-label="内部模拟持仓表，可横向滚动" tabIndex={0}><table className="paper-position-table numeric-data" aria-label="内部模拟持仓"><caption>数量、成本、市值与价格时点来自同一份已保存快照。</caption><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">可用 / 预留</th><th scope="col">平均成本</th><th scope="col">参考收盘</th><th scope="col">市值</th><th scope="col">未实现损益</th><th scope="col">来源 / 数据通道</th><th scope="col">交付</th><th scope="col">价格时点</th></tr></thead><tbody>{portfolio.positions.map((position) => <tr key={position.instrument_id}><th scope="row">{position.symbol ?? "未知标的"}</th><td>{formatPaperDecimal(position.quantity)}</td><td>{formatPaperDecimal(position.available_quantity)} / {formatPaperDecimal(position.reserved_quantity)}</td><td>USD {formatPaperDecimal(position.average_cost, 2)}</td><td>USD {formatPaperDecimal(position.reference_close, 2)}</td><td>USD {formatPaperDecimal(position.market_value, 2)}</td><td>USD {formatPaperDecimal(position.unrealized_pnl, 2)}</td><td>{position.price_source} / {position.price_feed}</td><td>{marketDeliveryModeLabel(position.delivery_mode)}</td><td>{formatPaperTime(position.price_as_of)}</td></tr>)}</tbody></table></div>}</section>;
+  return <section className="paper-table-section" aria-labelledby="paper-positions-title"><header><div><p className="eyebrow">最近已发布收盘快照</p><h2 id="paper-positions-title">收盘持仓</h2></div><p>参考价格采用已核验的收盘价，并非实时价格。</p></header>{portfolio.positions.length === 0 ? <p className="paper-orders__empty">最近已发布的收盘快照中没有持仓；请查看上方当前实际账本。</p> : <div className="table-scroll" role="region" aria-label="内部模拟持仓表，可横向滚动" tabIndex={0}><table className="paper-position-table numeric-data" aria-label="内部模拟持仓"><caption>数量、成本、市值与价格时点来自同一份已保存快照。</caption><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">可用 / 预留</th><th scope="col">平均成本</th><th scope="col">参考收盘</th><th scope="col">市值</th><th scope="col">未实现损益</th><th scope="col">来源 / 数据通道</th><th scope="col">交付</th><th scope="col">价格时点</th></tr></thead><tbody>{portfolio.positions.map((position) => <tr key={position.instrument_id}><th scope="row">{position.symbol ?? "未知标的"}</th><td>{formatPaperDecimal(position.quantity)}</td><td>{formatPaperDecimal(position.available_quantity)} / {formatPaperDecimal(position.reserved_quantity)}</td><td>USD {formatPaperDecimal(position.average_cost, 2)}</td><td>USD {formatPaperDecimal(position.reference_close, 2)}</td><td>USD {formatPaperDecimal(position.market_value, 2)}</td><td>USD {formatPaperDecimal(position.unrealized_pnl, 2)}</td><td>{position.price_source} / {position.price_feed}</td><td>{marketDeliveryModeLabel(position.delivery_mode)}</td><td>{formatPaperTime(position.price_as_of)}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function Attributions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {

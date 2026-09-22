@@ -7443,6 +7443,17 @@ export const runtimeContractSchemas = {
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Reserved Quantity",
         "type": "string"
+      },
+      "symbol": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Symbol"
       }
     },
     "required": [
@@ -16065,6 +16076,8 @@ export const experimentDetailRuntimeSchema = runtimeContractSchemas.ExperimentDe
 export const evolutionActionRuntimeSchema = runtimeContractSchemas.EvolutionActionResponse;
 
 export const paperPortfolioRuntimeSchema = runtimeContractSchemas.PaperPortfolioResponse;
+
+export const paperActualRuntimeSchema = runtimeContractSchemas.PaperPlanActualResponse;
 
 export const agentPaperCycleRuntimeSchema = runtimeContractSchemas.AgentPaperCycleResponse;
 

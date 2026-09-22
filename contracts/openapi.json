@@ -7181,6 +7181,23 @@
         "title": "OverviewResponse",
         "type": "object"
       },
+      "PaperActualEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PaperPlanActualResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "PaperActualEnvelope",
+        "type": "object"
+      },
       "PaperAttributionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -8252,6 +8269,17 @@
             "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
             "title": "Reserved Quantity",
             "type": "string"
+          },
+          "symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbol"
           }
         },
         "required": [
@@ -19705,6 +19733,64 @@
           }
         },
         "summary": "Get Overview"
+      }
+    },
+    "/internal/v1/paper/actual": {
+      "get": {
+        "operationId": "getInternalPaperCurrentActual",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperActualEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Paper Current Actual"
       }
     },
     "/internal/v1/paper/cycles": {

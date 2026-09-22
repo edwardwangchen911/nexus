@@ -42,6 +42,7 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.session import session_factory
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
 @pytest.fixture(autouse=True)
@@ -1470,6 +1471,47 @@ async def test_paper_portfolio_returns_redacted_authoritative_performance(
     assert "account_id" not in wire
     assert "client_order_id" not in wire
     assert "provider_object" not in wire
+
+
+@pytest.mark.asyncio
+async def test_current_actual_reads_filled_position_before_close_publication(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_execution(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            filled = await advance_internal_paper_order(
+                session,
+                order_id=seed.order_id,
+                evaluated_at=seed.evaluation_times[0],
+                idempotency_key="paper-api-current-actual-before-close",
+            )
+    finally:
+        await engine.dispose()
+    assert filled.action == "filled"
+
+    path = "/internal/v1/paper/actual"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 200, response.text
+    actual = response.json()["data"]
+    assert actual["data_state"] == "READY"
+    assert actual["positions"] == [
+        {
+            "instrument_id": str(seed.instrument_id),
+            "symbol": "TST1",
+            "quantity": str(seed.quantity),
+            "reserved_quantity": "0",
+        }
+    ]
+    assert Decimal(actual["available_cash"]) > 0
+    assert actual["as_of"] is not None
 
 
 @pytest.mark.asyncio

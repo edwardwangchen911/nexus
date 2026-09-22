@@ -500,6 +500,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/actual": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Paper Current Actual */
+        get: operations["getInternalPaperCurrentActual"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/cycles": {
         parameters: {
             query?: never;
@@ -3882,6 +3899,11 @@ export interface components {
             /** Trading Day */
             trading_day: string | null;
         };
+        /** PaperActualEnvelope */
+        PaperActualEnvelope: {
+            data: components["schemas"]["PaperPlanActualResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
         /** PaperAttributionResponse */
         PaperAttributionResponse: {
             /**
@@ -4228,6 +4250,8 @@ export interface components {
             quantity: string;
             /** Reserved Quantity */
             reserved_quantity: string;
+            /** Symbol */
+            symbol?: string | null;
         };
         /** PaperPlanActualResponse */
         PaperPlanActualResponse: {
@@ -9318,6 +9342,62 @@ export interface operations {
                 };
             };
             /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPaperCurrentActual: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperActualEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
             422: {
                 headers: {
                     [name: string]: unknown;

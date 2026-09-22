@@ -17,6 +17,7 @@ from nexus.api.schemas.paper import (
     AgentPaperCycleEnvelope,
     AgentPaperCyclePageEnvelope,
     AgentPaperManagementCycleEnvelope,
+    PaperActualEnvelope,
     PaperCancelEnvelope,
     PaperCancelRequest,
     PaperCancelResponse,
@@ -93,6 +94,30 @@ async def get_paper_portfolio(
     data = await PaperReadService(session, now).portfolio()
     return PaperPortfolioEnvelope(
         data=data,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/actual",
+    operation_id="getInternalPaperCurrentActual",
+    response_model=PaperActualEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_paper_current_actual(
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+    now: datetime = Depends(_utc_now),
+) -> PaperActualEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR,
+            "The paper actual query is invalid.",
+            status_code=422,
+        )
+    return PaperActualEnvelope(
+        data=await PaperReadService(session, now).current_actual(),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
 

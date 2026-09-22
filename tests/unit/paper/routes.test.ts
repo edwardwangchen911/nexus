@@ -112,6 +112,16 @@ describe("internal-paper BFF routes", () => {
     expect(engineFetch).not.toHaveBeenCalled();
   });
 
+  it("forwards the current actual read without query parameters", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/actual/route");
+    await GET(new Request("https://nexus.test/api/v1/paper/actual"));
+    expect(engineFetch).toHaveBeenCalledWith("/internal/v1/paper/actual", { method: "GET", actor });
+    engineFetch.mockClear();
+    const rejected = await GET(new Request("https://nexus.test/api/v1/paper/actual?account_id=secret"));
+    expect(rejected.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
   it("forwards the management summary as one query-free GET", async () => {
     const { GET } = await import("../../../app/api/v1/paper/management/portfolio/route");
     await GET(new Request("https://nexus.test/api/v1/paper/management/portfolio"));

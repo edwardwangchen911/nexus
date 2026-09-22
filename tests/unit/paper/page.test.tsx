@@ -33,6 +33,28 @@ function evaluationSlots(paired = 0): Array<Record<string, unknown>> {
 }
 
 describe("internal paper page", () => {
+  it("shows a filled current position even before any close performance is published", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/paper/actual") return Response.json({ data: {
+        data_state: "READY", as_of: "2026-09-22T20:00:00Z", available_cash: "8000",
+        reserved_cash: "0", nav: "10000", positions: [{ instrument_id: paperPortfolio.positions[0].instrument_id, symbol: "AAPL", quantity: "10", reserved_quantity: "0" }],
+      }, meta: meta() });
+      if (url === "/api/v1/paper/management/portfolio") return Response.json({ data: { ...managementSummary, occupying_plan: null }, meta: meta() });
+      if (url === "/api/v1/paper/portfolio") return Response.json({ data: { ...paperPortfolio, data_state: "EMPTY", performance: null, comparison: null, positions: [], attributions: [] }, meta: meta() });
+      if (url.includes("/paper/orders?")) return Response.json({ data: { items: [], next_cursor: null }, meta: meta() });
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    render(<PaperPage />);
+    const current = await screen.findByRole("heading", { name: "当前实际持仓与现金" });
+    const section = current.closest("section")!;
+    await waitFor(() => expect(section).toHaveTextContent("AAPL"));
+    expect(section).toHaveTextContent("USD 8,000.00");
+    expect(section).toHaveTextContent("10");
+    expect(screen.queryByText("当前模拟账本持仓为 0。")).not.toBeInTheDocument();
+    expect(fetcher).not.toHaveBeenCalledWith(expect.stringContaining("/cancel"), expect.anything());
+  });
   it("keeps current target details reachable without inventing an occupying plan", async () => {
     const fetcher = vi.fn(async () => Response.json({ data: { ...managementSummary, occupying_plan: null }, meta: meta() }));
     vi.stubGlobal("fetch", fetcher);

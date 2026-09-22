@@ -864,6 +864,7 @@ class PaperPlanFactsResponse(_StrictSchema):
 
 class PaperPlanActualPositionResponse(_StrictSchema):
     instrument_id: UUID
+    symbol: str | None = None
     quantity: DecimalString
     reserved_quantity: DecimalString
 
@@ -888,6 +889,11 @@ class PaperPlanActualResponse(_StrictSchema):
         if self.data_state == "UNKNOWN" and self.as_of is not None:
             raise ValueError("unknown actual projection has no authoritative cutoff")
         return self
+
+
+class PaperActualEnvelope(_StrictSchema):
+    data: PaperPlanActualResponse
+    meta: SuccessMetaResponse
 
 
 class PaperPlanResponse(_StrictSchema):

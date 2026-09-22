@@ -2220,6 +2220,44 @@ class PaperReadService:
             order_ids=order_ids,
         )
 
+    async def current_actual(self) -> PaperPlanActualResponse:
+        account, _ = await self.account()
+        try:
+            projection = await load_paper_projection(
+                self._session,
+                account_id=account.id,
+                as_of=self._request_time,
+            )
+        except ValueError:
+            return PaperPlanActualResponse(
+                data_state="UNKNOWN",
+                as_of=None,
+                available_cash=None,
+                reserved_cash=None,
+                nav=None,
+                positions=None,
+            )
+        symbols = await self._symbols(
+            tuple(position.instrument_id for position in projection.positions),
+            projection.as_of,
+        )
+        return PaperPlanActualResponse(
+            data_state="READY",
+            as_of=projection.as_of,
+            available_cash=decimal_to_string(projection.available_cash),
+            reserved_cash=decimal_to_string(projection.reserved_cash),
+            nav=decimal_to_string(projection.nav),
+            positions=tuple(
+                PaperPlanActualPositionResponse(
+                    instrument_id=position.instrument_id,
+                    symbol=symbols.get(position.instrument_id),
+                    quantity=decimal_to_string(position.quantity),
+                    reserved_quantity=decimal_to_string(position.reserved_quantity),
+                )
+                for position in projection.positions
+            ),
+        )
+
     async def portfolio(self) -> PaperPortfolioResponse:
         account, portfolio = await self.account()
         snapshot = await self._session.scalar(

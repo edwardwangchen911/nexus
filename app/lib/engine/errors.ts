@@ -21,6 +21,7 @@ import {
   paperOrderPageRuntimeSchema,
   paperPlanRuntimeSchema,
   paperPortfolioRuntimeSchema,
+  paperActualRuntimeSchema,
   agentPaperCycleRuntimeSchema,
   agentPaperCycleDetailRuntimeSchema,
   agentPaperManagementCycleRuntimeSchema,
@@ -332,6 +333,19 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       && matchesRuntimeSchema(data, paperManagementSummaryRuntimeSchema)
       && isPlain(data)
       && paperManagementSummarySemanticsValid(data)
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/paper/actual") {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, paperActualRuntimeSchema)
+      && isPlain(data)
+      && (data.data_state === "UNKNOWN"
+        ? data.as_of === null && data.available_cash === null && data.reserved_cash === null
+          && data.nav === null && data.positions === null
+        : data.data_state === "READY" && data.as_of !== null
+          && data.available_cash !== null && data.reserved_cash !== null
+          && data.nav !== null && Array.isArray(data.positions))
       ? data
       : INVALID_DATA;
   }
