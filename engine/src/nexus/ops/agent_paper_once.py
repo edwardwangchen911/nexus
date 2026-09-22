@@ -188,6 +188,7 @@ class AgentPaperTriggerRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     action: Literal["trigger"]
+    trigger_mode: Literal["scheduled", "manual_recovery"] = "scheduled"
     account_id: UUID
     candidate_batch_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
@@ -311,6 +312,10 @@ def parser() -> argparse.ArgumentParser:
     trigger.add_argument("--account-id", required=True)
     trigger.add_argument("--idempotency-key", required=True)
     trigger.add_argument("--candidate-batch-id")
+    manual_recovery = commands.add_parser("trigger-manual-recovery")
+    manual_recovery.add_argument("--account-id", required=True)
+    manual_recovery.add_argument("--idempotency-key", required=True)
+    manual_recovery.add_argument("--candidate-batch-id")
     resume = commands.add_parser("resume")
     resume.add_argument("--cycle-id", required=True)
     resume.add_argument("--idempotency-key", required=True)
@@ -916,6 +921,11 @@ async def trigger_once(
                 client_idempotency_key=request.idempotency_key,
                 now=now,
                 candidate_batch_id=request.candidate_batch_id,
+                **(
+                    {"trigger_mode": request.trigger_mode}
+                    if request.trigger_mode != "scheduled"
+                    else {}
+                ),
             )
         if reservation.replay is not None:
             return reservation.replay
@@ -1501,9 +1511,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         if action == "run":
             request = AgentPaperRunRequest.model_validate(values)
-        elif action == "trigger":
+        elif action in {"trigger", "trigger-manual-recovery"}:
             if values.get("candidate_batch_id") is None:
                 return _emit_error("CANDIDATE_BATCH_REQUIRED")
+            if action == "trigger-manual-recovery":
+                values["action"] = "trigger"
+                values["trigger_mode"] = "manual_recovery"
             request = AgentPaperTriggerRequest.model_validate(values)
         elif action == "resume":
             request = AgentPaperResumeRequest.model_validate(values)
@@ -1558,6 +1571,7 @@ def main(argv: list[str] | None = None) -> int:
             "AGENT_PAPER_DATABASE_UNCONFIGURED",
             "AGENT_PAPER_DATABASE_NOT_LOCAL",
             "AGENT_PAPER_MARKET_WINDOW_CLOSED",
+            "AGENT_PAPER_MANUAL_RECOVERY_UNAVAILABLE",
             "AGENT_PAPER_TIME_IN_FUTURE",
             "AGENT_PAPER_MARKET_CONFIG_INVALID",
             "AGENT_PAPER_OUTSIDE_WINDOW",

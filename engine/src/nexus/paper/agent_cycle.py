@@ -1,9 +1,9 @@
 """Resumable, append-only coordination for one internal Agent paper cycle."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
 from hashlib import sha256
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -119,6 +119,7 @@ _TRIGGER_FAILURE_CODES = frozenset(
         "CANDIDATE_BATCH_INVALID",
     }
 )
+_MANUAL_RECOVERY_FAILURE_CODES = frozenset({"SCHWAB_L1_FRESHNESS_UNPROVEN", "SCHWAB_L1_INCOMPLETE"})
 
 
 async def reserve_schwab_agent_paper_trigger(
@@ -128,6 +129,7 @@ async def reserve_schwab_agent_paper_trigger(
     client_idempotency_key: str,
     now: datetime,
     candidate_batch_id: UUID | None = None,
+    trigger_mode: Literal["scheduled", "manual_recovery"] = "scheduled",
 ) -> AgentPaperTriggerReservation:
     """Reserve one database-derived decision slot before provider work begins."""
     if (
@@ -144,8 +146,39 @@ async def reserve_schwab_agent_paper_trigger(
         tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
     )
     scheduled_slot = scheduled_local.astimezone(UTC)
-    if floor_decision_slot(now) != scheduled_slot:
-        raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
+    if trigger_mode == "scheduled":
+        if floor_decision_slot(now) != scheduled_slot:
+            raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
+        decision_slot_at = scheduled_slot
+        route = "agent-paper-schwab-trigger-v2"
+        schema = "agent_paper_schwab_trigger_v2"
+        claim_key = decision_slot_at.isoformat()
+    elif trigger_mode == "manual_recovery":
+        # One distinct same-day opportunity only after the scheduled trigger
+        # has failed before creating a cycle. The fixed v1 schedule is unchanged.
+        if not time(10, 5) <= local_time.time().replace(tzinfo=None) < time(15, 0):
+            raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
+        decision_slot_at = floor_decision_slot(now)
+        route = "agent-paper-manual-trigger-v1"
+        schema = "agent_paper_manual_trigger_v1"
+        claim_key = f"manual-recovery:{local_time.date().isoformat()}"
+        scheduled_claim = await session.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account_id}",
+                IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                IdempotencyRecord.idempotency_key == scheduled_slot.isoformat(),
+                IdempotencyRecord.schema_version == "agent_paper_schwab_trigger_v2",
+            )
+        )
+        payload = None if scheduled_claim is None else scheduled_claim.response_payload
+        if (
+            not isinstance(payload, dict)
+            or payload.get("outcome") != "failed"
+            or payload.get("error_code") not in _MANUAL_RECOVERY_FAILURE_CODES
+        ):
+            raise ValueError("AGENT_PAPER_MANUAL_RECOVERY_UNAVAILABLE")
+    else:
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
         raise AgentPaperCycleError("CANDIDATE_BATCH_INVALID")
@@ -154,37 +187,49 @@ async def reserve_schwab_agent_paper_trigger(
     batch = await load_agent_paper_candidate_batch(session, batch_id=candidate_batch_id)
     if batch is None or batch.account_id != account_id:
         raise ValueError("CANDIDATE_BATCH_INVALID")
-    decision_slot_at = scheduled_slot
-    request_hash = job_input_hash(
-        {
-            "schema": "agent-paper-schwab-trigger-v2",
-            "account_id": str(account_id),
-            "decision_session": local_time.date().isoformat(),
-            "decision_slot_at": decision_slot_at.isoformat(),
-            "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
-            "client_idempotency_hash": sha256(client_idempotency_key.encode()).hexdigest(),
-            "candidate_batch_id": str(batch.batch_id),
-            "candidate_batch_hash": batch.batch_hash,
-        }
-    )
+    request_payload = {
+        "schema": route,
+        "account_id": str(account_id),
+        "decision_session": local_time.date().isoformat(),
+        "decision_slot_at": decision_slot_at.isoformat(),
+        "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
+        "client_idempotency_hash": sha256(client_idempotency_key.encode()).hexdigest(),
+        "candidate_batch_id": str(batch.batch_id),
+        "candidate_batch_hash": batch.batch_hash,
+    }
+    if trigger_mode == "manual_recovery":
+        request_payload["trigger_mode"] = trigger_mode
+    request_hash = job_input_hash(request_payload)
     claim, inserted = await claim_or_lock(
         session,
         f"local-agent-paper-schwab:{account_id}",
-        "agent-paper-schwab-trigger-v2",
-        decision_slot_at.isoformat(),
+        route,
+        claim_key,
         request_hash,
-        "agent_paper_schwab_trigger_v2",
+        schema,
     )
     if claim.request_hash != request_hash:
         raise ValueError("AGENT_PAPER_IDEMPOTENCY_CONFLICT")
     reservation = AgentPaperTriggerReservation(
         claim_id=claim.id,
+        trigger_mode=trigger_mode,
         decision_session=local_time.date(),
         decision_slot_at=decision_slot_at,
         candidate_batch_id=batch.batch_id,
         candidate_batch_hash=batch.batch_hash,
     )
     if inserted:
+        if trigger_mode == "manual_recovery":
+            existing_cycle = await session.scalar(
+                select(AgentPaperCycleRecord.id)
+                .where(
+                    AgentPaperCycleRecord.account_id == account_id,
+                    AgentPaperCycleRecord.decision_session == local_time.date(),
+                )
+                .limit(1)
+            )
+            if existing_cycle is not None:
+                raise ValueError("AGENT_PAPER_MANUAL_RECOVERY_UNAVAILABLE")
         await validate_agent_paper_candidate_batch(
             session,
             batch_id=batch.batch_id,
@@ -226,11 +271,26 @@ async def finish_schwab_agent_paper_trigger(
         .where(IdempotencyRecord.id == reservation.claim_id)
         .with_for_update()
     )
+    route = (
+        "agent-paper-schwab-trigger-v2"
+        if reservation.trigger_mode == "scheduled"
+        else "agent-paper-manual-trigger-v1"
+    )
+    schema = (
+        "agent_paper_schwab_trigger_v2"
+        if reservation.trigger_mode == "scheduled"
+        else "agent_paper_manual_trigger_v1"
+    )
+    claim_key = (
+        reservation.decision_slot_at.isoformat()
+        if reservation.trigger_mode == "scheduled"
+        else f"manual-recovery:{reservation.decision_session.isoformat()}"
+    )
     if (
         claim is None
-        or claim.route != "agent-paper-schwab-trigger-v2"
-        or claim.schema_version != "agent_paper_schwab_trigger_v2"
-        or claim.idempotency_key != reservation.decision_slot_at.isoformat()
+        or claim.route != route
+        or claim.schema_version != schema
+        or claim.idempotency_key != claim_key
     ):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     payload: dict[str, object]

@@ -40,6 +40,10 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 重放的许可。存在非终态订单时先对账，不删除事实、不重建周期。`unavailable` 是保留的诚实终态，
 不恢复、不删除；到下一合法槽后可以新建周期。
 
+当天 10:00 行情采集失败且未创建周期时，唯一例外是用户明确要求的
+[同日一次手动恢复](portfolio-management-first-slice.md#同日一次手动恢复)。它有独立入口和持久化
+认领，不改变上述正常组合时间窗，也不重放失败槽位。
+
 运行前还必须满足：
 
 - 1–5 个候选都来自同一个已发布 `us_liquid/us_liquid_v1` 批次，且各自有当前研究快照、前一完整交易日

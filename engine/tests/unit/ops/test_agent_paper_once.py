@@ -55,6 +55,50 @@ def test_trigger_accepts_explicit_candidate_batch() -> None:
     assert request.candidate_batch_id == UUID(int=20)
 
 
+def test_manual_recovery_command_marks_new_trigger_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "load_local_environment",
+        lambda *_args: {
+            "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+            "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
+            "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+    observed: list[str] = []
+
+    async def trigger(_settings, request, **_kwargs):
+        observed.append(request.trigger_mode)
+        return AgentPaperCycleResult(
+            cycle_id=UUID(int=7),
+            status="researching",
+            result_code="RESEARCH_JOBS_PREPARED",
+            replayed=False,
+        )
+
+    monkeypatch.setattr(cli, "trigger_once", trigger)
+    assert (
+        main(
+            [
+                "trigger-manual-recovery",
+                "--candidate-batch-id",
+                str(UUID(int=20)),
+                "--account-id",
+                str(UUID(int=1)),
+                "--idempotency-key",
+                "manual-once",
+            ]
+        )
+        == 0
+    )
+    assert observed == ["manual_recovery"]
+    assert json.loads(capsys.readouterr().out)["status"] == "researching"
+
+
 def test_request_requires_explicit_utc_time() -> None:
     with pytest.raises(ValueError, match="explicit UTC time is required"):
         AgentPaperRunRequest(

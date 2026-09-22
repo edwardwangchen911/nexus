@@ -70,6 +70,29 @@ uv run --project engine nexus-engine-agent-paper-once trigger \
 `collect-window` 和受管宿主推进流程。失败或输出不明时先读持久状态，不换 key、不自动重试、
 不放宽证据、时间窗或风控。
 
+### 同日一次手动恢复
+
+仅当当天 10:00 的定时认领已持久化为 `SCHWAB_L1_INCOMPLETE` 或
+`SCHWAB_L1_FRESHNESS_UNPROVEN`、且当天没有组合周期时，可由用户明确要求在纽约时间
+10:05–14:59 发起一次独立的手动恢复。它使用当前真实五分钟决策槽、单独的幂等路由和
+当天唯一的手动认领；不重放、改写或伪造 10:00 的失败结果。原 `trigger` 命令仍只接受
+10:00–10:04:59。组合分配参数沿用冻结的 v1，`decision_local_time=10:00` 仍是自动调度
+时点；手动例外的实际决策时刻记录在 cycle 中。
+
+先只读核对原认领、同日 cycle/Job/order、候选批次与行情准备状态。未知结果、已有周期、
+研究或订单占用不允许手动恢复；缺失研究输入必须如实显示为缺失，不为通过准入而重标。
+满足条件时，以新的固定 `TRIGGER_KEY` 调用一次：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-once trigger-manual-recovery \
+  --account-id "$PAPER_ACCOUNT_ID" \
+  --candidate-batch-id "$CANDIDATE_BATCH_ID" \
+  --idempotency-key "$TRIGGER_KEY"
+```
+
+超时先核对 `agent-paper-manual-trigger-v1` 的持久化认领和 cycle；只用原 key 读取结果，
+不在新槽位换 key 重试。此入口仅写入本地内部模拟事实，保持 `execution_locked=true`。
+
 ## 4. 只读核对同一事实链
 
 Web 已在本机运行后，使用同一个 `CYCLE_ID`、`PLAN_ID` 和原取消尝试键读取：
