@@ -159,7 +159,10 @@ def test_runner_injects_the_exact_checkout_revision(repo_root: Path) -> None:
         elif "--service-status" in argv:
             stdout = json.dumps(
                 {
-                    "heartbeat": {"status": "fresh"},
+                    "heartbeat": {
+                        "status": "fresh",
+                        "release_revision": environment["NEXUS_RELEASE_REVISION"],
+                    },
                     "preflight": {
                         "status": "ready",
                         "execution_locked": True,
@@ -356,6 +359,78 @@ def test_status_preserves_nonfresh_heartbeat_classification(
     assert heartbeat.result_code == f"AGENT_PAPER_HEARTBEAT_{heartbeat_status.upper()}"
     assert heartbeat.details == (("status", heartbeat_status),)
     assert heartbeat.exit_code == 1
+
+
+def test_status_rejects_fresh_heartbeat_from_an_older_release(repo_root: Path) -> None:
+    """A live old loop must not make the current checkout look ready for acceptance."""
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ),
+        check=True,
+    )
+    expected = subprocess.run(
+        ("git", "-C", str(repo_root), "rev-parse", "HEAD"),
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.strip()
+    reported = "a" * 40 if expected != "a" * 40 else "b" * 40
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        if argv[-2:] == ("ps", "-a"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, '{"status":"running"}', "")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "heartbeat": {
+                        "status": "fresh",
+                        "seen_at": "2026-09-23T10:00:00+00:00",
+                        "started_at": "2026-09-23T09:00:00+00:00",
+                        "process_version": f"agent-paper-loop-v2+{reported}",
+                        "release_revision": reported,
+                        "migration_head": "0065_portfolio_management",
+                    },
+                    "preflight": {
+                        "status": "ready",
+                        "execution_locked": True,
+                        "external_requests": 0,
+                        "blocking_codes": [],
+                        "optional_codes": [],
+                    },
+                }
+            ),
+            "",
+        )
+
+    results = run_local_stack(
+        LocalStackAction.STATUS,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    heartbeat = results[2]
+    assert heartbeat.result_code == "AGENT_PAPER_HEARTBEAT_RELEASE_MISMATCH"
+    assert heartbeat.exit_code == 1
+    assert ("expected_release_revision", expected) in heartbeat.details
+    assert ("reported_release_revision", reported) in heartbeat.details
+    assert results[3].result_code == "AGENT_PAPER_PREFLIGHT_READY"
 
 
 def test_status_continues_when_compose_executable_is_unavailable(repo_root: Path) -> None:

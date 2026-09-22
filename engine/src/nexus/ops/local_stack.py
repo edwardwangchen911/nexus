@@ -313,6 +313,7 @@ def run_local_stack(
                     action=action,
                     first_ordinal=len(results) + 1,
                     stdout=completed.stdout,
+                    expected_release_revision=release_revision,
                 )
             )
     return tuple(results)
@@ -482,7 +483,11 @@ def _safe_codes(value: object) -> tuple[str, ...] | None:
 
 
 def _parse_service_status_results(
-    *, action: LocalStackAction, first_ordinal: int, stdout: str
+    *,
+    action: LocalStackAction,
+    first_ordinal: int,
+    stdout: str,
+    expected_release_revision: str | None,
 ) -> tuple[LocalStackStepResult, LocalStackStepResult]:
     payload = _json_object(stdout)
     heartbeat = payload.get("heartbeat") if payload is not None else None
@@ -508,6 +513,17 @@ def _parse_service_status_results(
         if valid:
             heartbeat_details = tuple(details)
             heartbeat_code = f"AGENT_PAPER_HEARTBEAT_{str(heartbeat['status']).upper()}"
+            if heartbeat["status"] == "fresh" and expected_release_revision is not None:
+                reported = _safe_text(heartbeat.get("release_revision"))
+                if reported is None or _RELEASE_REVISION.fullmatch(reported) is None:
+                    heartbeat_code = "AGENT_PAPER_HEARTBEAT_RELEASE_UNVERIFIED"
+                    heartbeat_details += (("expected_release_revision", expected_release_revision),)
+                elif reported != expected_release_revision:
+                    heartbeat_code = "AGENT_PAPER_HEARTBEAT_RELEASE_MISMATCH"
+                    heartbeat_details += (
+                        ("expected_release_revision", expected_release_revision),
+                        ("reported_release_revision", reported),
+                    )
 
     preflight_details: tuple[tuple[str, object], ...] = ()
     preflight_code = "AGENT_PAPER_PREFLIGHT_OUTPUT_INVALID"
@@ -537,7 +553,9 @@ def _parse_service_status_results(
             action=action,
             ordinal=first_ordinal,
             exit_code=(
-                0 if heartbeat_details and dict(heartbeat_details)["status"] == "fresh" else 1
+                0
+                if heartbeat_details and heartbeat_code == "AGENT_PAPER_HEARTBEAT_FRESH"
+                else 1
             ),
             result_code=heartbeat_code,
             fact="heartbeat",
