@@ -9,6 +9,7 @@ from nexus.ops import agent_paper_once as candidate_cli
 from nexus.ops.agent_paper_once import AgentPaperPrepareCandidatesRequest
 from nexus.paper import agent_cycle
 from nexus.paper import candidate_batch as batch_module
+from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
 from nexus.paper.candidate_batch import (
     create_agent_paper_candidate_batch,
     load_agent_paper_candidate_batch,
@@ -24,6 +25,7 @@ from nexus.persistence.models.backtest import (
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
+    SectorExposure,
     UniverseMember,
     UniverseSnapshot,
 )
@@ -41,6 +43,7 @@ from nexus.persistence.models.paper import (
 from nexus.persistence.models.portfolio import Account, Portfolio
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
+from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
 from sqlalchemy import func, literal, select, text
 
@@ -55,6 +58,107 @@ OUTSIDE_ID = UUID("20000000-0000-0000-0000-000000000003")
 MSFT_ID = UUID("20000000-0000-0000-0000-000000000004")
 NVDA_ID = UUID("20000000-0000-0000-0000-000000000005")
 GOOG_ID = UUID("20000000-0000-0000-0000-000000000006")
+REVIEWED_UNIVERSE_ID = UUID("10000000-0000-0000-0000-000000000007")
+
+
+@pytest.mark.asyncio
+async def test_reviewed_research_universe_accepts_multi_stock_without_rewriting_legacy(
+    migrated_database_url: str,
+) -> None:
+    await _seed_scope(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    created = NOW.replace(day=17)
+    async with factory() as session, session.begin():
+        calendar_id = uuid4()
+        session.add(ExchangeCalendarAuthorityRecord(
+            id=calendar_id,
+            exchange="XNYS",
+            version="reviewed-universe-fixture",
+            source="fixture",
+            range_start=date(2026, 9, 17),
+            range_end=date(2026, 9, 30),
+            query_parameters={},
+            completeness_status="complete",
+            content_hash="c" * 64,
+            published_at=created,
+            created_at=created,
+        ))
+        session.add_all(
+            ExchangeCalendarSessionRecord(
+                calendar_authority_id=calendar_id,
+                session=date(2026, 9, day),
+                market_open_at=datetime(2026, 9, day, 13, 30, tzinfo=UTC),
+                market_close_at=datetime(2026, 9, day, 20, tzinfo=UTC),
+                decision_at=datetime(2026, 9, day, 21, tzinfo=UTC),
+                created_at=created,
+            )
+            for day in (17, 18, 21)
+        )
+        session.add(UniverseSnapshot(
+            id=REVIEWED_UNIVERSE_ID,
+            key="agent_paper_research",
+            version=f"reviewed_v1_{'b' * 16}",
+            effective_from=date(2026, 9, 18),
+            source="nexus_local_reviewed_research",
+            content_hash="b" * 64,
+            published_at=None,
+            created_at=created,
+        ))
+        await session.flush()
+        session.add_all(
+            UniverseMember(
+                universe_snapshot_id=REVIEWED_UNIVERSE_ID,
+                instrument_id=instrument_id,
+                inclusion_reason="reviewed research scope",
+                created_at=created,
+            )
+            for instrument_id in (AAPL_ID, NVDA_ID)
+        )
+        await session.flush()
+        await session.execute(
+            text("UPDATE universe_snapshots SET published_at=:at WHERE id=:id"),
+            {"at": created, "id": REVIEWED_UNIVERSE_ID},
+        )
+        batch = await create_agent_paper_candidate_batch(
+            session,
+            account_id=ACCOUNT_ID,
+            universe_snapshot_id=REVIEWED_UNIVERSE_ID,
+            instrument_ids=(AAPL_ID, NVDA_ID),
+            idempotency_key="reviewed-multi-stock-scope",
+            created_at=NOW,
+        )
+    async with factory() as session, session.begin():
+        validated, identities = await batch_module.validate_agent_paper_candidate_batch(
+            session, batch_id=batch.batch_id, account_id=ACCOUNT_ID, as_of=NOW,
+        )
+        readiness = await batch_module.inspect_agent_paper_candidate_static_readiness(
+            session, account_id=ACCOUNT_ID, batch_id=batch.batch_id, as_of=NOW,
+        )
+        authority = await load_quasi_realtime_cycle_authority(
+            session,
+            account_id=ACCOUNT_ID,
+            now=NOW,
+            expected_calendar_authority_id=calendar_id,
+            expected_universe_snapshot_id=REVIEWED_UNIVERSE_ID,
+        )
+        risk_scope = await inspect_query_authority_scope(
+            session,
+            decision_session=date(2026, 9, 18),
+            symbol="NVDA",
+            as_of=NOW,
+            universe_snapshot_id=REVIEWED_UNIVERSE_ID,
+            source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+        )
+        legacy = await session.get(UniverseSnapshot, UNIVERSE_ID)
+    assert validated == batch
+    assert {identity.symbol for identity in identities} == {"AAPL", "NVDA"}
+    assert {identity.universe_snapshot_id for identity in identities} == {REVIEWED_UNIVERSE_ID}
+    assert readiness["universe_status"] == "matched"
+    assert readiness["status"] == "blocked"
+    assert {candidate["symbol"] for candidate in readiness["candidates"]} == {"AAPL", "NVDA"}
+    assert authority.universe_snapshot_id == REVIEWED_UNIVERSE_ID
+    assert risk_scope.instrument_id == NVDA_ID
+    assert legacy is not None and legacy.version == "us_liquid_v1"
 
 
 @pytest.mark.asyncio
@@ -403,6 +507,17 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
                     created_at=created,
                 )
             )
+        session.add(SectorExposure(
+            instrument_id=AAPL_ID,
+            sector_code="information_technology",
+            weight=Decimal(1),
+            as_of=date(2026, 9, 17),
+            source_url="https://example.test/fixture-sector",
+            content_hash="d" * 64,
+            synthetic=True,
+            reviewed=True,
+            created_at=created,
+        ))
         batch = await create_agent_paper_candidate_batch(
             session,
             account_id=ACCOUNT_ID,

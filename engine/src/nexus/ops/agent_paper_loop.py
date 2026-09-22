@@ -830,6 +830,7 @@ async def _inspect_prior_daily_scope(
                 account_id=account_id,
                 now=database_now,
                 expected_calendar_authority_id=expected_calendar_authority_id,
+                expected_universe_snapshot_id=candidate.universe_snapshot_id,
             )
             if (
                 service_calendar.calendar_authority_id != expected_calendar_authority_id

@@ -6,8 +6,8 @@ from hashlib import sha256
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy import select, text
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.persistence import select_authoritative_snapshot
@@ -15,6 +15,7 @@ from nexus.domain.ids import new_uuid7
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
+from nexus.paper.universe_scope import is_formal_agent_paper_universe
 from nexus.persistence.idempotency import IdempotencyClaimError, claim_idempotency
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest
@@ -69,6 +70,7 @@ class CandidateInstrumentIdentity(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instrument_id: UUID
+    universe_snapshot_id: UUID | None = Field(default=None, exclude=True)
     symbol: str
     asset_type: str
     exchange: str
@@ -121,16 +123,13 @@ async def resolve_agent_paper_candidate_identities(
     universe = await session.scalar(
         select(UniverseSnapshot).where(
             UniverseSnapshot.id == universe_snapshot_id,
-            UniverseSnapshot.key == "us_liquid",
-            UniverseSnapshot.version == "us_liquid_v1",
-            UniverseSnapshot.source == "fosun_local_read_only",
             UniverseSnapshot.effective_from <= created_at.date(),
             UniverseSnapshot.published_at.is_not(None),
             UniverseSnapshot.published_at <= created_at,
             UniverseSnapshot.created_at <= created_at,
         )
     )
-    if universe is None:
+    if universe is None or not is_formal_agent_paper_universe(universe):
         raise ValueError("CANDIDATE_BATCH_INVALID")
     rows = tuple(
         (
@@ -170,6 +169,7 @@ async def resolve_agent_paper_candidate_identities(
     identities = tuple(
         CandidateInstrumentIdentity(
             instrument_id=instrument_id,
+            universe_snapshot_id=universe_snapshot_id,
             symbol=by_instrument[instrument_id][0][1].symbol,
             asset_type=by_instrument[instrument_id][0][0].asset_type,
             exchange=by_instrument[instrument_id][0][0].exchange,
@@ -350,18 +350,23 @@ async def inspect_agent_paper_candidate_static_readiness(
     selected_universe = await session.scalar(
         select(UniverseSnapshot)
         .where(
-            UniverseSnapshot.key == "us_liquid",
-            UniverseSnapshot.version == "us_liquid_v1",
-            UniverseSnapshot.source == "fosun_local_read_only",
+            or_(
+                (UniverseSnapshot.key == "us_liquid")
+                & (UniverseSnapshot.source == "fosun_local_read_only"),
+                (UniverseSnapshot.key == "agent_paper_research")
+                & (UniverseSnapshot.source == "nexus_local_reviewed_research"),
+            ),
             UniverseSnapshot.effective_from <= calendar.session,
             UniverseSnapshot.published_at <= as_of,
             UniverseSnapshot.created_at <= as_of,
         )
-        .order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id)
+        .order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id.desc())
         .limit(1)
     )
     universe_matches = (
-        selected_universe is not None and selected_universe.id == batch.universe_snapshot_id
+        selected_universe is not None
+        and is_formal_agent_paper_universe(selected_universe)
+        and selected_universe.id == batch.universe_snapshot_id
     )
     candidates: list[dict[str, object]] = []
     for identity in sorted(identities, key=lambda item: item.symbol):
@@ -381,6 +386,7 @@ async def inspect_agent_paper_candidate_static_readiness(
                 SectorExposure.instrument_id == identity.instrument_id,
                 SectorExposure.as_of <= calendar.session,
                 SectorExposure.reviewed.is_(True),
+                SectorExposure.synthetic.is_(False),
                 SectorExposure.created_at <= as_of,
             )
             .limit(1)

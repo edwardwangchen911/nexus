@@ -15,6 +15,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.paper.universe_scope import is_formal_agent_paper_universe
 from nexus.persistence.models.data import SourcePolicy
 from nexus.persistence.models.market import (
     Instrument,
@@ -236,8 +237,7 @@ async def inspect_query_authority_scope(
         policy is None
         or policy.created_at > as_of
         or universe is None
-        or universe.key != "us_liquid"
-        or universe.source != "fosun_local_read_only"
+        or not is_formal_agent_paper_universe(universe)
         or universe.effective_from > decision_session
         or universe.published_at is None
         or universe.published_at > as_of

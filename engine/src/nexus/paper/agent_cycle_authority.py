@@ -12,6 +12,7 @@ from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.domain.time import require_utc
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
+from nexus.paper.universe_scope import is_formal_agent_paper_universe
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -125,19 +126,22 @@ async def load_quasi_realtime_cycle_authority(
     if local_now.time().replace(tzinfo=None) < time(7) or now >= calendar_session.market_close_at:
         raise ValueError("AGENT_PAPER_MARKET_WINDOW_CLOSED")
     universe_query = select(UniverseSnapshot).where(
-        UniverseSnapshot.key == "us_liquid",
-        UniverseSnapshot.version == "us_liquid_v1",
-        UniverseSnapshot.source == "fosun_local_read_only",
         UniverseSnapshot.effective_from <= calendar_session.session,
         UniverseSnapshot.published_at <= now,
         UniverseSnapshot.created_at <= now,
     )
     if expected_universe_snapshot_id is not None:
         universe_query = universe_query.where(UniverseSnapshot.id == expected_universe_snapshot_id)
+    else:
+        universe_query = universe_query.where(
+            UniverseSnapshot.key == "us_liquid",
+            UniverseSnapshot.version == "us_liquid_v1",
+            UniverseSnapshot.source == "fosun_local_read_only",
+        )
     universe = await session.scalar(
         universe_query.order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id).limit(1)
     )
-    if universe is None:
+    if universe is None or not is_formal_agent_paper_universe(universe):
         raise ValueError(
             "CANDIDATE_BATCH_INVALID"
             if expected_universe_snapshot_id is not None
