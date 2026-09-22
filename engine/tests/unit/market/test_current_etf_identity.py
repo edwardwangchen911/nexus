@@ -87,6 +87,36 @@ Purchase and Sale of Fund Shares Shares trade on an exchange. Tax Information.</
 
 
 @pytest.mark.asyncio
+async def test_current_held_multi_asset_etf_keeps_read_only_non_equity_identity():
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    symbol = "SYNX"
+    document = b"""<html><body>497K Summary Prospectus May 1, 2026
+Ticker: SYNX Synthetic Allocation ETF listed on The Nasdaq Stock Market LLC.
+Investment Objective The Fund seeks total return from a diversified allocation.
+Fund Fees and Expenses Costs apply.
+Principal Investment Strategies The Fund invests substantially in common stocks and equity
+securities and also invests in bonds, debt securities, and other fixed income instruments.
+Principal Risks Market and credit risks apply.
+Ticker: SYNX Unlike most ETFs, shares trade in the secondary market.
+</body></html>"""
+    result = await validate_current_held_etf_originals(
+        symbol=symbol,
+        contents=originals(
+            symbol=symbol,
+            exchange="NASDAQ",
+            company_name="Synthetic Allocation ETF",
+            document=document,
+        ),
+        now=datetime.now(UTC),
+    )
+
+    assert result.identity.asset_type == "non_equity_etf"
+    assert result.identity.risk_bucket == "MULTI_ASSET"
+    assert result.identity.exchange == "XNAS"
+
+
+@pytest.mark.asyncio
 async def test_current_held_validation_fails_closed_when_fixed_definition_is_unavailable(
     monkeypatch,
 ):

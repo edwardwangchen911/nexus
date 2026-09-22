@@ -127,6 +127,38 @@ class CurrentHeldNasdaqEtfIdentity(CurrentEtfIdentity):
     )
 
 
+class CurrentHeldMultiAssetEtfIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    symbol: str
+    cik: str
+    series_id: str
+    class_id: str
+    legal_name: str
+    asset_type: Literal["non_equity_etf"] = "non_equity_etf"
+    risk_bucket: Literal["MULTI_ASSET"] = "MULTI_ASSET"
+    currency: Literal["USD"] = "USD"
+    exchange: Literal["ARCX", "XNAS"]
+    fmp_name: str | None = None
+    fmp_name_matches_sec: bool | None = None
+    fmp_exchange: str
+    fmp_cik: str | None
+    fmp_cik_matches_sec: bool | None
+    filing_index_class_name: str
+    listing_basis: Literal["bound_sec_497k_cover"] = "bound_sec_497k_cover"
+    fmp_exchange_precision: Literal["provider_label_only"] = "provider_label_only"
+    objective: str
+    strategy_statement: str
+    legal_type_statement: str
+    mapping_stored_at: datetime
+    mapping_original_received_at: None = None
+    allocation_basis: Literal["bound_497k_equity_and_fixed_income_strategy"] = (
+        "bound_497k_equity_and_fixed_income_strategy"
+    )
+    ticker_binding_basis: Literal["current_directory_and_bound_497k_index"] = (
+        "current_directory_and_bound_497k_index"
+    )
+
+
 class CurrentGoldTrustIdentity(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     symbol: str
@@ -378,7 +410,7 @@ def _current_held_nasdaq_identity(
     fmp_cik: str | None,
     stored_at: datetime,
     now: datetime,
-) -> CurrentHeldNasdaqEtfIdentity:
+) -> CurrentHeldNasdaqEtfIdentity | CurrentHeldMultiAssetEtfIdentity:
     try:
         class_name, index_ticker = _bound_nasdaq_class(
             index=index, symbol=symbol, series=series, share_class=share_class
@@ -396,7 +428,13 @@ def _current_held_nasdaq_identity(
             raise ValueError from None
         class_name, index_ticker = bound[1] or fmp_name, symbol
     symbols = list(re.finditer(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", text))
-    if index_ticker != symbol or len(symbols) != 1:
+    labelled_symbols = all(
+        re.search(
+            r"(?:ticker|symbol)\s*:?\s*$", text[max(0, item.start() - 40) : item.start()], re.I
+        )
+        for item in symbols
+    )
+    if index_ticker != symbol or not symbols or (len(symbols) != 1 and not labelled_symbols):
         raise ValueError
     tail = text[symbols[0].start() :]
 
@@ -437,11 +475,12 @@ def _current_held_nasdaq_identity(
         and "underlying security" in equity_text
         and re.search(r"\b(?:equity|stocks?|shares)\b", provider_text) is not None
     )
-    excluded = re.search(
-        r"\b(?:bitcoin|ether|bullion|commodit(?:y|ies)|futures?|fixed income|bonds?|debt)\b",
-        equity_text + " " + provider_text,
+    fixed_income = re.search(r"\b(?:fixed income|bonds?|debt)\b", equity_text) is not None
+    unsupported = re.search(
+        r"\b(?:bitcoin|ether|bullion|commodit(?:y|ies)|futures?)\b", equity_text
     )
-    if not (sec_equity or company_index_equity or derivative_equity) or excluded:
+    has_equity = sec_equity or company_index_equity or derivative_equity
+    if not has_equity or unsupported or (fixed_income and not sec_equity):
         raise ValueError
     legal_matches = list(
         re.finditer(
@@ -456,7 +495,7 @@ def _current_held_nasdaq_identity(
     legal_excerpt = " ".join(
         text[max(0, legal.start() - 180) : min(len(text), legal.end() + 180)].split()
     )
-    return CurrentHeldNasdaqEtfIdentity(
+    values = dict(
         symbol=symbol,
         cik=identifier,
         series_id=series,
@@ -474,6 +513,9 @@ def _current_held_nasdaq_identity(
         filing_index_class_name=class_name,
         strategy_statement=strategy,
     )
+    if fixed_income:
+        return CurrentHeldMultiAssetEtfIdentity.model_validate(values)
+    return CurrentHeldNasdaqEtfIdentity.model_validate(values)
 
 
 def _treasury_identity(
@@ -663,6 +705,7 @@ def _share_class_identity(
 class EtfInputs:
     identity: (
         CurrentEtfIdentity
+        | CurrentHeldMultiAssetEtfIdentity
         | CurrentUitIdentity
         | CurrentTreasuryEtfIdentity
         | CurrentGoldTrustIdentity
@@ -815,6 +858,7 @@ async def _validate_etf_originals(
         name = " ".join(name.split())
         identity: (
             CurrentEtfIdentity
+            | CurrentHeldMultiAssetEtfIdentity
             | CurrentUitIdentity
             | CurrentTreasuryEtfIdentity
             | CurrentGoldTrustIdentity

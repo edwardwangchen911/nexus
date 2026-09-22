@@ -20,6 +20,7 @@ from nexus.market.current_etf_identity import (
     CurrentEtfIdentity,
     CurrentEtfShareClassIdentity,
     CurrentGoldTrustIdentity,
+    CurrentHeldMultiAssetEtfIdentity,
     CurrentHeldNasdaqEtfIdentity,
     CurrentNasdaqEtfIdentity,
     CurrentTreasuryEtfIdentity,
@@ -90,7 +91,8 @@ class CurrentHoldingBinding(BaseModel):
 class CurrentHeldEtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     identity: (
-        CurrentHeldNasdaqEtfIdentity
+        CurrentHeldMultiAssetEtfIdentity
+        | CurrentHeldNasdaqEtfIdentity
         | CurrentNasdaqEtfIdentity
         | CurrentEtfShareClassIdentity
         | CurrentEtfIdentity
@@ -342,6 +344,8 @@ async def import_current_etf(
             allow_treasury=allow_treasury,
             allow_gold=allow_gold,
         )
+        if isinstance(inputs.identity, CurrentHeldMultiAssetEtfIdentity):
+            raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
         if inputs.identity.asset_type != member.asset_type:
             raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
         existing = await session.scalar(
@@ -478,14 +482,16 @@ async def import_current_held_etf(
         )
         if not isinstance(
             inputs.identity,
-            CurrentHeldNasdaqEtfIdentity
+            CurrentHeldMultiAssetEtfIdentity
+            | CurrentHeldNasdaqEtfIdentity
             | CurrentNasdaqEtfIdentity
             | CurrentEtfShareClassIdentity
             | CurrentEtfIdentity,
         ):
             raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
         identity = cast(
-            CurrentHeldNasdaqEtfIdentity
+            CurrentHeldMultiAssetEtfIdentity
+            | CurrentHeldNasdaqEtfIdentity
             | CurrentNasdaqEtfIdentity
             | CurrentEtfShareClassIdentity
             | CurrentEtfIdentity,
@@ -505,13 +511,19 @@ async def import_current_held_etf(
             return CurrentIdentityImportResult("existing", proof.instrument_id, existing.id)
         instrument = await session.get(Instrument, instrument_id)
         aliases = await _current_aliases(session, symbol, instrument_id, now)
+        expected_asset_type = identity.asset_type
+        expected_risk_bucket = (
+            identity.risk_bucket
+            if isinstance(identity, CurrentHeldMultiAssetEtfIdentity)
+            else "EQUITY"
+        )
         if instrument is not None or aliases:
             if (
                 instrument is None
-                or instrument.asset_type != "equity_etf"
+                or instrument.asset_type != expected_asset_type
                 or instrument.exchange != identity.exchange
                 or instrument.currency != "USD"
-                or instrument.risk_bucket != "EQUITY"
+                or instrument.risk_bucket != expected_risk_bucket
                 or instrument.tick_size is not None
                 or len(aliases) != 1
                 or aliases[0].instrument_id != instrument_id
@@ -595,11 +607,11 @@ async def import_current_held_etf(
         if instrument is None:
             instrument = Instrument(
                 id=instrument_id,
-                asset_type="equity_etf",
+                asset_type=expected_asset_type,
                 exchange=identity.exchange,
                 currency="USD",
                 tick_size=None,
-                risk_bucket="EQUITY",
+                risk_bucket=expected_risk_bucket,
             )
             session.add(instrument)
             await session.flush()
@@ -693,13 +705,18 @@ async def read_current_held_etf(
             raise ValueError
         instrument = await session.get(Instrument, proof.instrument_id)
         aliases = await _current_aliases(session, proof.identity.symbol, proof.instrument_id, now)
+        expected_risk_bucket = (
+            proof.identity.risk_bucket
+            if isinstance(proof.identity, CurrentHeldMultiAssetEtfIdentity)
+            else "EQUITY"
+        )
         if (
             instrument is None
-            or instrument.asset_type != "equity_etf"
-            or proof.identity.asset_type != "equity_etf"
+            or instrument.asset_type != proof.identity.asset_type
+            or proof.identity.asset_type not in {"equity_etf", "non_equity_etf"}
             or instrument.exchange != proof.identity.exchange
             or instrument.currency != "USD"
-            or instrument.risk_bucket != "EQUITY"
+            or instrument.risk_bucket != expected_risk_bucket
             or instrument.tick_size is not None
             or len(aliases) != 1
             or aliases[0].id != proof.alias_id

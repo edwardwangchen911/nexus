@@ -259,6 +259,60 @@ Tax Information</body></html>"""
 
 
 @pytest.mark.asyncio
+async def test_current_held_multi_asset_etf_import_preserves_locked_identity(
+    migrated_database_url, tmp_path
+):
+    from nexus.market.current_etf_identity_storage import (
+        import_current_held_etf,
+        read_current_held_etf,
+    )
+
+    symbol = "SYNX"
+    document = b"""<html><body>497K Summary Prospectus May 1, 2026
+Ticker: SYNX Synthetic Allocation ETF listed on The Nasdaq Stock Market LLC.
+Investment Objective The Fund seeks total return from a diversified allocation.
+Fund Fees and Expenses Costs apply.
+Principal Investment Strategies The Fund invests substantially in common stocks and equity
+securities and also invests in bonds, debt securities, and other fixed income instruments.
+Principal Risks Market and credit risks apply.
+Ticker: SYNX Unlike most ETFs, shares trade in the secondary market.
+</body></html>"""
+    settings = config(migrated_database_url)
+    fm, sec, mapping = archives(
+        tmp_path,
+        symbol=symbol,
+        exchange="NASDAQ",
+        company_name="Synthetic Allocation ETF",
+        document=document,
+    )
+    accounts_page, holdings_page, _ = held_pages(symbol)
+    store = MemoryStore()
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            result = await import_current_held_etf(
+                session,
+                store,
+                symbol=symbol,
+                fmp_archive=fm,
+                sec_archive=sec,
+                mapping_file=mapping,
+                accounts_page=accounts_page,
+                holdings_page=holdings_page,
+            )
+        async with factory() as session:
+            proof = await read_current_held_etf(session, store, snapshot_id=result.snapshot_id)
+            instrument = await session.get(Instrument, proof.instrument_id)
+            assert proof.identity.asset_type == "non_equity_etf"
+            assert proof.identity.risk_bucket == "MULTI_ASSET"
+            assert instrument.asset_type == "non_equity_etf"
+            assert instrument.risk_bucket == "MULTI_ASSET"
+            assert proof.execution_locked and not proof.new_position_eligible
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 async def test_current_held_etn_import_preserves_debt_identity_and_refresh_alias(
     migrated_database_url, tmp_path
 ):
