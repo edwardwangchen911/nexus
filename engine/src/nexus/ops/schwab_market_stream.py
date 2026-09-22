@@ -90,9 +90,13 @@ class ProviderMarketStreamError(ValueError):
         code: str,
         *,
         capture_summary: Mapping[str, Any] | None = None,
+        failure_stage: str | None = None,
+        validation_reason: str | None = None,
     ) -> None:
         super().__init__(code)
         self.capture_summary = None if capture_summary is None else dict(capture_summary)
+        self.failure_stage = failure_stage
+        self.validation_reason = validation_reason
 
 
 @dataclass(frozen=True)
@@ -410,10 +414,9 @@ async def capture_and_import_schwab_level_one_batch(
         )
     except ValueError as error:
         raise ProviderMarketStreamError(str(error)) from None
-    if (
-        any(not isinstance(value, UUID) for value in bindings.values())
-        or len(set(bindings.values())) != len(bindings)
-    ):
+    if any(not isinstance(value, UUID) for value in bindings.values()) or len(
+        set(bindings.values())
+    ) != len(bindings):
         raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
     symbols = tuple(sorted(bindings))
     for symbol in symbols:
@@ -440,8 +443,21 @@ async def capture_and_import_schwab_level_one_batch(
             raise ProviderMarketStreamError(
                 "PROVIDER_MARKET_STREAM_INCOMPLETE", capture_summary=summary
             )
-        raw = pack_provider_market_stream_archive(directory)
-        archive = _unpack_provider_market_stream_archive(raw)
+        try:
+            raw = pack_provider_market_stream_archive(directory)
+        except ProviderMarketStreamError as error:
+            raise ProviderMarketStreamError(
+                str(error),
+                capture_summary=summary,
+                failure_stage="archive_pack",
+                validation_reason=error.validation_reason,
+            ) from error
+        try:
+            archive = _unpack_provider_market_stream_archive(raw)
+        except MarketProviderPayloadError as error:
+            raise ProviderMarketStreamError(
+                str(error), capture_summary=summary, failure_stage="archive_replay"
+            ) from error
         completed_at = datetime.fromisoformat(archive["receipt"]["ended_at"]).astimezone(UTC)
         try:
             batch = parse_schwab_snapshot_batch(
@@ -457,7 +473,9 @@ async def capture_and_import_schwab_level_one_batch(
                 ),
             )
         except MarketProviderPayloadError as error:
-            raise ProviderMarketStreamError(str(error)) from None
+            raise ProviderMarketStreamError(
+                str(error), capture_summary=summary, failure_stage="snapshot_parse"
+            ) from error
         if {row.symbol for row in batch.snapshots} != set(symbols) or any(
             row.quote is None
             or not timedelta(0) <= completed_at - row.quote.observed_at <= timedelta(seconds=60)
@@ -508,6 +526,8 @@ async def _collect(
     }
     byte_count = 0
     cancelled: asyncio.CancelledError | None = None
+    capture_ended_at: datetime | None = None
+    capture_elapsed: float | None = None
     private_logger = logging.Logger(
         "nexus.schwab_market_stream.private", level=logging.CRITICAL + 1
     )
@@ -593,13 +613,20 @@ async def _collect(
                 receipt["stop_reason"] = str(error)
             except Exception:
                 pass
+            finally:
+                # The receipt bounds received evidence, not the WebSocket close handshake.
+                capture_ended_at = datetime.now(UTC)
+                capture_elapsed = monotonic() - started_monotonic
     except asyncio.CancelledError as error:
         receipt["stop_reason"] = "CANCELLED"
         cancelled = error
     except Exception:
-        pass
-    receipt["ended_at"] = datetime.now(UTC).isoformat()
-    receipt["elapsed_monotonic_seconds"] = monotonic() - started_monotonic
+        if capture_ended_at is not None:
+            receipt["stop_reason"] = "CLOSE_FAILED"
+    receipt["ended_at"] = (capture_ended_at or datetime.now(UTC)).isoformat()
+    receipt["elapsed_monotonic_seconds"] = (
+        capture_elapsed if capture_elapsed is not None else monotonic() - started_monotonic
+    )
     receipt["frame_count"] = len(receipt["frames"])
     receipt["status"] = (
         "bounded_complete"
@@ -1274,12 +1301,21 @@ def _validate_receipt(receipt: dict[str, Any], frames: list[bytes]) -> None:
     started = datetime.fromisoformat(receipt["started_at"])
     ended = datetime.fromisoformat(receipt["ended_at"])
     if (
+        started.tzinfo is not None
+        and ended.tzinfo is not None
+        and (
+            not started <= ended <= started + timedelta(seconds=duration + CLOSE_TIMEOUT_SECONDS)
+            or not 0 <= receipt["elapsed_monotonic_seconds"] <= duration + CLOSE_TIMEOUT_SECONDS
+        )
+    ):
+        raise ProviderMarketStreamError(
+            "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID", validation_reason="CAPTURE_TIME_BOUND"
+        )
+    if (
         receipt["status"] != expected_status
         or receipt["origin"] != expected_origin
         or started.tzinfo is None
         or ended.tzinfo is None
-        or not started <= ended <= started + timedelta(seconds=duration + CLOSE_TIMEOUT_SECONDS)
-        or not 0 <= receipt["elapsed_monotonic_seconds"] <= duration + CLOSE_TIMEOUT_SECONDS
         or len(frames) > frame_limit
         or sum(map(len, frames)) > MAX_BYTES
         or (

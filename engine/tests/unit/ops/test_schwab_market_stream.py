@@ -561,6 +561,103 @@ async def test_schwab_market_stream_archive_rejects_tampered_frame(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_bounded_capture_archive_uses_receive_window_not_socket_close_time(
+    tmp_path, monkeypatch
+) -> None:
+    from nexus.ops import schwab_market_stream as stream
+
+    close_finished = False
+    original_monotonic = stream.monotonic
+
+    class SlowCloseSocket(Socket):
+        async def __aexit__(self, *args):
+            nonlocal close_finished
+            close_finished = True
+
+    def clock() -> float:
+        return original_monotonic() + (40 if close_finished else 0)
+
+    monkeypatch.setattr(stream, "monotonic", clock)
+    directory = tmp_path / "slow-close"
+    result = await collect_schwab_stream(
+        symbols=("AAPL",),
+        directory=directory,
+        streamer_url="wss://streamer-api.schwab.com/ws",
+        credentials=SCHWAB_CREDENTIALS,
+        duration=30,
+        max_frames=3,
+        connector=lambda *args, **kwargs: SlowCloseSocket(
+            [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, SCHWAB_DATA]
+        ),
+    )
+
+    assert result["status"] == "bounded_complete"
+    assert len(load_provider_market_stream_archive(directory)["observations"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_archive_failure_keeps_safe_phase_and_reason(tmp_path) -> None:
+    from nexus.ops import schwab_market_stream as stream
+
+    async def capture(arguments, client, *, now=None):
+        del client, now
+        summary = await collect_schwab_stream(
+            symbols=("AAPL",),
+            directory=arguments.output_dir,
+            streamer_url="wss://streamer-api.schwab.com/ws",
+            credentials=SCHWAB_CREDENTIALS,
+            duration=30,
+            max_frames=3,
+            connector=lambda *args, **kwargs: Socket(
+                [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, SCHWAB_DATA]
+            ),
+        )
+        receipt_path = arguments.output_dir / "receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["elapsed_monotonic_seconds"] = 40.0
+        receipt_path.write_text(json.dumps(receipt))
+        return summary
+
+    with pytest.raises(
+        stream.ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_ARCHIVE_INVALID"
+    ) as caught:
+        await stream.capture_and_import_schwab_level_one_batch(
+            object(),
+            object(),
+            repo_root=tmp_path,
+            client=object(),
+            bindings={"AAPL": UUID(int=1)},
+            capture=capture,
+        )
+    assert caught.value.failure_stage == "archive_pack"
+    assert caught.value.validation_reason == "CAPTURE_TIME_BOUND"
+    assert caught.value.capture_summary["status"] == "bounded_complete"
+
+
+@pytest.mark.asyncio
+async def test_close_failure_cannot_make_capture_complete(tmp_path) -> None:
+    class FailedCloseSocket(Socket):
+        async def __aexit__(self, *args):
+            raise RuntimeError("private close failure")
+
+    directory = tmp_path / "close-failed"
+    result = await collect_schwab_stream(
+        symbols=("AAPL",),
+        directory=directory,
+        streamer_url="wss://streamer-api.schwab.com/ws",
+        credentials=SCHWAB_CREDENTIALS,
+        max_frames=3,
+        connector=lambda *args, **kwargs: FailedCloseSocket(
+            [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, SCHWAB_DATA]
+        ),
+    )
+    assert result["status"] == "partial"
+    assert result["stop_reason"] == "CLOSE_FAILED"
+    with pytest.raises(ValueError, match="PROVIDER_MARKET_STREAM_INCOMPLETE"):
+        load_provider_market_stream_archive(directory)
+
+
+@pytest.mark.asyncio
 async def test_schwab_snapshot_parser_selects_latest_trade_and_two_sided_quote(tmp_path) -> None:
     older_millis = int((EVENT_AT - timedelta(seconds=1)).timestamp() * 1000)
     older = _data(

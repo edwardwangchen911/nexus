@@ -151,6 +151,7 @@ _SAFE_SCHWAB_HTTP_FAILURE_CODE = re.compile(
 )
 _SAFE_SCHWAB_CAPTURE_STOP_REASONS = _SAFE_SCHWAB_FAILURE_CODES | {
     "CANCELLED",
+    "CLOSE_FAILED",
     "CONNECT_FAILED",
     "DISCONNECTED",
     "DURATION_LIMIT",
@@ -551,6 +552,15 @@ def _raise_schwab_l1_incomplete(error: Exception, *, diagnostic_path: Path) -> N
         "stage": "capture_or_import",
         "provider_error_code": provider_error_code,
     }
+    failure_stage = getattr(error, "failure_stage", None)
+    if failure_stage in {
+        "archive_pack",
+        "archive_replay",
+        "snapshot_parse",
+    }:
+        payload["stage"] = failure_stage
+    if getattr(error, "validation_reason", None) == "CAPTURE_TIME_BOUND":
+        payload["validation_reason"] = "CAPTURE_TIME_BOUND"
     capture_summary = getattr(error, "capture_summary", None)
     if isinstance(capture_summary, Mapping):
         safe_capture_summary = {
