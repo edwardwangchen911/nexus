@@ -833,6 +833,13 @@ async def load_paper_projection(
         ).all()
     )
     adjustment_hashes = tuple(row.payload_hash for row in adjustment_rows)
+    published_peak = account.initial_capital if performance is None else performance.peak_nav
+    cash_balances = balance_ledger(ledger)
+    current_nav = (
+        cash_balances["asset.cash.available.usd"]
+        + cash_balances["asset.cash.reserved.usd"]
+        + sum((position.quantity * position.reference_close for position in positions), Decimal(0))
+    )
     projection = build_paper_projection(
         account_id=account_id,
         portfolio_id=account.portfolio_id,
@@ -841,7 +848,7 @@ async def load_paper_projection(
         orders=orders,
         reservations=reservations,
         positions=positions,
-        peak_nav=account.initial_capital if performance is None else performance.peak_nav,
+        peak_nav=max(published_peak, current_nav),
         additional_source_facts=(
             *(("paper_fill", value) for value in fill_hashes),
             *(("position_adjustment", value) for value in adjustment_hashes),
@@ -867,10 +874,19 @@ async def load_paper_projection(
             for row in drawdown_rows
         ),
     )
-    if performance is not None and (
-        performance.nav != projection.nav
-        or performance.cash != projection.available_cash + projection.reserved_cash
-        or performance.peak_nav != projection.peak_nav
+    newer_than_performance = performance is not None and (
+        any(row.occurred_at > performance.as_of for row in transaction_rows)
+        or any(row.occurred_at > performance.as_of for row in adjustment_rows)
+        or (latest_position_time is not None and latest_position_time > performance.as_of)
+    )
+    if (
+        performance is not None
+        and not newer_than_performance
+        and (
+            performance.nav != projection.nav
+            or performance.cash != projection.available_cash + projection.reserved_cash
+            or performance.peak_nav != projection.peak_nav
+        )
     ):
         raise ValueError("paper performance does not reconcile to projection")
     return projection
