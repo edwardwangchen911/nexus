@@ -174,8 +174,10 @@ def canonical_paper_source_facts_hash(
         raise ValueError("paper order ids must be unique")
     additional = []
     for kind, content_hash in additional_source_facts:
-        if not kind or len(content_hash) != 64 or any(
-            character not in "0123456789abcdef" for character in content_hash
+        if (
+            not kind
+            or len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
         ):
             raise ValueError("additional projection source fact is invalid")
         additional.append({"kind": kind, "content_hash": content_hash})
@@ -199,9 +201,7 @@ def canonical_paper_source_facts_hash(
                 "side": order.side,
                 "quantity": _source_decimal(order.quantity),
                 "worst_price": (
-                    _source_decimal(order.worst_price)
-                    if order.worst_price is not None
-                    else None
+                    _source_decimal(order.worst_price) if order.worst_price is not None else None
                 ),
                 "events": [
                     {
@@ -623,8 +623,7 @@ async def load_paper_projection(
                     PaperReservationRecord.account_id == account_id,
                     exists(
                         select(PaperReservationEventRecord.id).where(
-                            PaperReservationEventRecord.reservation_id
-                            == PaperReservationRecord.id,
+                            PaperReservationEventRecord.reservation_id == PaperReservationRecord.id,
                             PaperReservationEventRecord.event_seq == 1,
                             PaperReservationEventRecord.occurred_at <= as_of,
                         )
@@ -655,9 +654,7 @@ async def load_paper_projection(
     )
     events_by_reservation: dict[UUID, list[PaperReservationEventRecord]] = defaultdict(list)
     for reservation_event_row in reservation_event_rows:
-        events_by_reservation[reservation_event_row.reservation_id].append(
-            reservation_event_row
-        )
+        events_by_reservation[reservation_event_row.reservation_id].append(reservation_event_row)
     reservations = tuple(
         Reservation(
             reservation_id=row.id,
@@ -705,16 +702,105 @@ async def load_paper_projection(
         if latest_position_time is not None
         else ()
     )
-    positions = tuple(
-        PaperPositionBalance(
+    adjustment_rows = tuple(
+        (
+            await session.scalars(
+                select(PaperPositionAdjustmentEventRecord)
+                .where(
+                    PaperPositionAdjustmentEventRecord.account_id == account_id,
+                    PaperPositionAdjustmentEventRecord.occurred_at <= as_of,
+                )
+                .order_by(
+                    PaperPositionAdjustmentEventRecord.instrument_id,
+                    PaperPositionAdjustmentEventRecord.event_seq,
+                )
+            )
+        ).all()
+    )
+    adjustments_by_instrument: dict[UUID, list[PaperPositionAdjustmentEventRecord]] = defaultdict(
+        list
+    )
+    for row in adjustment_rows:
+        adjustments_by_instrument[row.instrument_id].append(row)
+    orders_by_id = {row.id: row for row in order_rows}
+    filled_order_ids = {
+        row.id for row in order_rows if row.instrument_id in adjustments_by_instrument
+    }
+    fill_rows = (
+        tuple(
+            (
+                await session.scalars(
+                    select(PaperFillRecord)
+                    .where(
+                        PaperFillRecord.account_id == account_id,
+                        PaperFillRecord.order_id.in_(filled_order_ids),
+                        PaperFillRecord.occurred_at <= as_of,
+                    )
+                    .order_by(PaperFillRecord.occurred_at, PaperFillRecord.id)
+                )
+            ).all()
+        )
+        if filled_order_ids
+        else ()
+    )
+    fills_by_id = {row.id: row for row in fill_rows}
+    reserved_by_instrument: dict[UUID, Decimal] = defaultdict(Decimal)
+    for open_order in _open_orders(account_id=account_id, orders=orders, reservations=reservations):
+        reserved_by_instrument[open_order.instrument_id] += open_order.reserved_quantity
+    positions_by_instrument = {
+        row.instrument_id: PaperPositionBalance(
             instrument_id=row.instrument_id,
             quantity=row.quantity,
-            reserved_quantity=row.reserved_quantity,
+            reserved_quantity=reserved_by_instrument[row.instrument_id],
             cost_basis=row.cost_basis,
             reference_close=row.reference_close,
         )
         for row in position_rows
-    )
+    }
+    from nexus.paper.performance import PositionAdjustment, fold_position_adjustments
+
+    for instrument_id, rows in adjustments_by_instrument.items():
+        if latest_position_time is not None and rows[-1].occurred_at <= latest_position_time:
+            continue
+        folded = fold_position_adjustments(
+            tuple(
+                PositionAdjustment(
+                    event_id=row.id,
+                    account_id=row.account_id,
+                    instrument_id=row.instrument_id,
+                    event_seq=row.event_seq,
+                    event_type=cast(
+                        Literal["fill", "split", "dividend", "delisting", "correction"],
+                        row.event_type,
+                    ),
+                    quantity_delta=row.quantity_delta,
+                    cost_delta=row.cost_delta,
+                    occurred_at=row.occurred_at,
+                    payload_hash=row.payload_hash,
+                )
+                for row in rows
+            )
+        )
+        if folded.quantity == 0:
+            positions_by_instrument.pop(instrument_id, None)
+            continue
+        latest_adjustment = rows[-1]
+        fill = (
+            None
+            if latest_adjustment.source_fill_id is None
+            else fills_by_id.get(latest_adjustment.source_fill_id)
+        )
+        order = None if fill is None else orders_by_id.get(fill.order_id)
+        if order is None or latest_adjustment.event_type != "fill":
+            raise ValueError("paper position reference price unavailable")
+        positions_by_instrument[instrument_id] = PaperPositionBalance(
+            instrument_id=instrument_id,
+            quantity=folded.quantity,
+            reserved_quantity=reserved_by_instrument[instrument_id],
+            cost_basis=folded.cost_basis,
+            reference_close=order.reference_close,
+        )
+    positions = tuple(positions_by_instrument.values())
     performance = await session.scalar(
         select(PaperPerformanceSnapshotRecord)
         .where(
@@ -746,16 +832,7 @@ async def load_paper_projection(
             )
         ).all()
     )
-    adjustment_hashes = tuple(
-        (
-            await session.scalars(
-                select(PaperPositionAdjustmentEventRecord.payload_hash).where(
-                    PaperPositionAdjustmentEventRecord.account_id == account_id,
-                    PaperPositionAdjustmentEventRecord.occurred_at <= as_of,
-                )
-            )
-        ).all()
-    )
+    adjustment_hashes = tuple(row.payload_hash for row in adjustment_rows)
     projection = build_paper_projection(
         account_id=account_id,
         portfolio_id=account.portfolio_id,

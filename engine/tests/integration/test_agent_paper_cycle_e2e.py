@@ -22,6 +22,7 @@ from nexus.paper.agent_cycle_models import (
     floor_decision_slot,
 )
 from nexus.paper.execution_service import advance_internal_paper_order
+from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.paper import (
     PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
@@ -76,14 +77,17 @@ async def test_agent_cycle_rejects_non_internal_account_without_persisting_a_cla
                 )
             await session.rollback()
         async with sessions() as session:
-            assert await session.scalar(
-                select(func.count()).select_from(AgentPaperCycleRecord)
-            ) == 0
-            assert await session.scalar(
-                select(func.count())
-                .select_from(IdempotencyRecord)
-                .where(IdempotencyRecord.actor_id.like("local-agent-paper-cycle:%"))
-            ) == 0
+            assert (
+                await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(IdempotencyRecord)
+                    .where(IdempotencyRecord.actor_id.like("local-agent-paper-cycle:%"))
+                )
+                == 0
+            )
     finally:
         await engine.dispose()
 
@@ -132,11 +136,14 @@ async def test_controlled_loop_preserves_policy_and_reaches_honest_outcomes(
             assert unavailable.action == "no_data"
             assert unavailable.fill_id is None
             async with sessions() as session:
-                assert await session.scalar(
-                    select(func.count())
-                    .select_from(PaperFillRecord)
-                    .where(PaperFillRecord.order_id == seed.order_id)
-                ) == 0
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperFillRecord)
+                        .where(PaperFillRecord.order_id == seed.order_id)
+                    )
+                    == 0
+                )
         elif case == "buy_partial_then_full":
             seed = await seed_paper_execution(
                 migrated_database_url,
@@ -157,6 +164,25 @@ async def test_controlled_loop_preserves_policy_and_reaches_honest_outcomes(
                     idempotency_key="controlled-buy-full",
                 )
             assert (partial.action, filled.action) == ("partially_filled", "filled")
+            async with sessions() as session:
+                fills = tuple(
+                    await session.scalars(
+                        select(PaperFillRecord)
+                        .where(PaperFillRecord.order_id == seed.order_id)
+                        .order_by(PaperFillRecord.fill_seq)
+                    )
+                )
+                projection = await load_paper_projection(
+                    session,
+                    account_id=seed.account_id,
+                    as_of=seed.evaluation_times[1] + timedelta(seconds=1),
+                )
+            assert len(fills) == 2
+            assert sum((item.quantity for item in fills), Decimal("0")) == seed.quantity
+            assert len(projection.positions) == 1
+            assert projection.positions[0].instrument_id == seed.instrument_id
+            assert projection.positions[0].quantity == seed.quantity
+            assert all(item.order_id != seed.order_id for item in projection.open_orders)
         elif case == "sell":
             seed = await seed_paper_execution(migrated_database_url)
             async with sessions.begin() as session:
@@ -248,8 +274,7 @@ async def test_controlled_loop_preserves_policy_and_reaches_honest_outcomes(
                     select(PaperPositionAdjustmentEventRecord)
                     .join(
                         PaperFillRecord,
-                        PaperFillRecord.id
-                        == PaperPositionAdjustmentEventRecord.source_fill_id,
+                        PaperFillRecord.id == PaperPositionAdjustmentEventRecord.source_fill_id,
                     )
                     .where(PaperFillRecord.order_id == sell_order_id)
                 )
