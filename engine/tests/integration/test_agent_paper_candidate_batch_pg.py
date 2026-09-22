@@ -692,6 +692,40 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
 
     async with factory() as session, session.begin():
+        session.add_all(
+            (
+                SectorExposure(
+                    instrument_id=AAPL_ID,
+                    sector_code="information_technology",
+                    weight=Decimal(1),
+                    as_of=date(2026, 9, 17),
+                    source_url="https://example.test/older-valid-sector",
+                    content_hash="f" * 64,
+                    synthetic=False,
+                    reviewed=True,
+                    created_at=created,
+                ),
+                SectorExposure(
+                    instrument_id=AAPL_ID,
+                    sector_code="information_technology",
+                    weight=Decimal("0.5"),
+                    as_of=date(2026, 9, 18),
+                    source_url="https://example.test/latest-incomplete-sector",
+                    content_hash="e" * 64,
+                    synthetic=False,
+                    reviewed=True,
+                    created_at=NOW,
+                ),
+            )
+        )
+    async with factory() as session, session.begin():
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        incomplete = await batch_module.inspect_agent_paper_candidate_static_readiness(
+            session, account_id=ACCOUNT_ID, batch_id=batch.batch_id, as_of=NOW
+        )
+        assert "REVIEWED_SECTOR_MISSING" in incomplete["candidates"][0]["missing"]
+
+    async with factory() as session, session.begin():
         session.add(
             IdempotencyRecord(
                 id=uuid4(),

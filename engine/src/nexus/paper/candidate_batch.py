@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -380,18 +381,37 @@ async def inspect_agent_paper_candidate_static_readiness(
             or snapshot.schema_version != "research_filings_v1"
         ):
             missing.append("RESEARCH_SNAPSHOT_MISSING")
-        reviewed_sector = await session.scalar(
-            select(SectorExposure.id)
-            .where(
-                SectorExposure.instrument_id == identity.instrument_id,
-                SectorExposure.as_of <= calendar.session,
-                SectorExposure.reviewed.is_(True),
-                SectorExposure.synthetic.is_(False),
-                SectorExposure.created_at <= as_of,
+        reviewed_sectors = tuple(
+            await session.scalars(
+                select(SectorExposure)
+                .where(
+                    SectorExposure.instrument_id == identity.instrument_id,
+                    SectorExposure.as_of <= calendar.session,
+                    SectorExposure.reviewed.is_(True),
+                    SectorExposure.synthetic.is_(False),
+                    SectorExposure.created_at <= as_of,
+                )
+                .order_by(SectorExposure.as_of.desc(), SectorExposure.id)
             )
-            .limit(1)
         )
-        if reviewed_sector is None:
+        latest_sectors = (
+            tuple(row for row in reviewed_sectors if row.as_of == reviewed_sectors[0].as_of)
+            if reviewed_sectors
+            else ()
+        )
+        sector_ready = (
+            bool(latest_sectors)
+            and (identity.asset_type != "common_stock" or len(latest_sectors) == 1)
+            and sum((row.weight for row in latest_sectors), start=Decimal(0)) == Decimal(1)
+            and all(
+                row.weight > 0
+                and bool(row.sector_code)
+                and len(row.content_hash) == 64
+                and all(character in "0123456789abcdef" for character in row.content_hash)
+                for row in latest_sectors
+            )
+        )
+        if not sector_ready:
             missing.append("REVIEWED_SECTOR_MISSING")
         daily_authority = await session.scalar(
             select(PriceBarSetAuthority.id)
