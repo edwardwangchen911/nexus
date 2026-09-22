@@ -40,6 +40,20 @@ uv run --package nexus-engine nexus-engine-schwab-market-stream schwab \
 
 实现固定只接受 `wss://streamer-api.schwab.com/ws`，先 LOGIN，成功后只订阅 `LEVELONE_EQUITIES`；支持服务端心跳与 change-frame 状态合并。启动采集前若 access token 已过期或将在 5 分钟内到期，会自动 refresh 一次并原子保存；刷新不重试，失败时停止采集并保留旧文件，需要重新运行 `authorize` 才能恢复已失效的 refresh token。单次最多 500 个不重复美股代码、300 秒、100 帧和 8 MiB，任何断线都只留 partial/failed，不重连。`delayed` 只保存嘉信帧明确给出的值；字段缺失保持未知。
 
+### Agent Paper 决策报价预检
+
+正式候选批次先运行 `nexus-engine-agent-paper-readiness` 核对静态证据。需要提前验证嘉信报价链路时，对该批次的实际标的各提供一条现有 Instrument 绑定，并使用全新私有目录：
+
+```sh
+uv run --project engine nexus-engine-schwab-market-stream paper-probe \
+  --repo-root "$PWD" \
+  --binding "AAPL=$AAPL_INSTRUMENT_ID" \
+  --output-dir "$PRIVATE_NEW_PROBE_DIRECTORY" \
+  --duration 30
+```
+
+该入口沿用正常采集、归档读回与 Agent Paper 报价解析合同；只有每只标的在采集结束时均有完整、非延迟且足够新的双边报价，才返回 `paper_quote_status=passed_at_observation`。来源调用有界且不自动重试；失败保留私有归档并返回固定错误码。它不导入业务库、不创建周期、订单或风险权威，`execution_locked` 始终为 true。盘后通过或失败都不能代替下一次合法决策窗口的行情与风控证据；窗口前尽量靠近决策时刻运行一次，才能提前发现授权、订阅或报价质量问题。
+
 ## 归档与判定
 
 输出目录为 0700，`frame-NNNNN.json` 与 `receipt.json` 为 0600；不保存出站认证消息，检测到入站帧反射密钥时拒绝落盘。加载器重新核对文件集合、权限、长度、hash、时间、终态、认证/订阅顺序和观察数，仅接受 `bounded_complete`。这表示本次有限窗口正常结束，不表示全天稳定性或全市场覆盖已经成立。

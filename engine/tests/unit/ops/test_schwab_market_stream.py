@@ -10,7 +10,9 @@ from uuid import UUID
 
 import httpx
 import pytest
+from nexus.ops import schwab_market_stream as stream
 from nexus.ops.schwab_market_stream import (
+    ProviderMarketStreamError,
     SchwabMarketStreamImportResult,
     build_parser,
     capture_and_import_schwab_level_one_once,
@@ -230,6 +232,22 @@ def test_market_stream_cli_supports_only_schwab_without_command_line_credentials
     )
     assert imported.source == "import"
     assert all("token" not in key and "secret" not in key for key in vars(imported))
+    paper_probe = build_parser().parse_args(
+        [
+            "paper-probe",
+            "--repo-root",
+            "/tmp/repo",
+            "--binding",
+            f"AAPL={AAPL_ID}",
+            "--output-dir",
+            "/tmp/paper-probe",
+            "--duration",
+            "30",
+        ]
+    )
+    assert paper_probe.source == "paper-probe"
+    assert paper_probe.binding == [f"AAPL={AAPL_ID}"]
+    assert all("token" not in key and "secret" not in key for key in vars(paper_probe))
     with pytest.raises(SystemExit):
         build_parser().parse_args(
             [
@@ -240,6 +258,104 @@ def test_market_stream_cli_supports_only_schwab_without_command_line_credentials
                 "/tmp/archive",
             ]
         )
+
+
+@pytest.mark.asyncio
+async def test_paper_quote_probe_requires_fresh_two_sided_quote_for_every_binding(tmp_path) -> None:
+    assert hasattr(stream, "validate_paper_quote_probe")
+    complete = await _packed_archive(
+        tmp_path,
+        ("AAPL",),
+        [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, _data()],
+    )
+    assert stream.validate_paper_quote_probe(complete, {"AAPL": UUID(str(AAPL_ID))}) == {
+        "paper_quote_status": "passed_at_observation",
+        "candidate_count": 1,
+        "execution_locked": True,
+    }
+
+    trade_only = await _packed_archive(
+        tmp_path,
+        ("AAPL",),
+        [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, _data(**{"1": None, "2": None})],
+    )
+    with pytest.raises(ProviderMarketStreamError, match="SCHWAB_L1_INCOMPLETE"):
+        stream.validate_paper_quote_probe(trade_only, {"AAPL": UUID(str(AAPL_ID))})
+
+
+@pytest.mark.asyncio
+async def test_paper_quote_probe_rejects_stale_quote_at_capture_end(tmp_path) -> None:
+    assert hasattr(stream, "validate_paper_quote_probe")
+    stale_millis = int((EVENT_AT - timedelta(seconds=61)).timestamp() * 1000)
+    stale = await _packed_archive(
+        tmp_path,
+        ("AAPL",),
+        [
+            SCHWAB_LOGIN,
+            SCHWAB_SUBSCRIBED,
+            _data(
+                **{
+                    "34": stale_millis,
+                    "35": stale_millis,
+                    "37": stale_millis,
+                    "38": stale_millis,
+                }
+            ),
+        ],
+        completed_at=EVENT_AT,
+    )
+    with pytest.raises(ProviderMarketStreamError, match="SCHWAB_MARKET_STREAM_EVIDENCE_STALE"):
+        stream.validate_paper_quote_probe(stale, {"AAPL": UUID(str(AAPL_ID))})
+
+
+@pytest.mark.asyncio
+async def test_paper_probe_cli_checks_same_archive_without_import(tmp_path, monkeypatch) -> None:
+    await _packed_archive(
+        tmp_path,
+        ("AAPL",),
+        [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, _data()],
+    )
+    source = tmp_path / "archive-0"
+    output = tmp_path / "paper-probe"
+
+    async def capture(arguments, _client, **_kwargs):
+        source.rename(arguments.output_dir)
+        return {
+            "status": "bounded_complete",
+            "stop_reason": "FRAME_LIMIT",
+            "authenticated": True,
+            "subscription_confirmed": True,
+            "observation_count": 1,
+            "frame_count": 3,
+        }
+
+    monkeypatch.setattr(stream, "run_schwab_stream", capture)
+    arguments = build_parser().parse_args(
+        [
+            "paper-probe",
+            "--repo-root",
+            str(tmp_path),
+            "--binding",
+            f"AAPL={AAPL_ID}",
+            "--output-dir",
+            str(output),
+        ]
+    )
+    async with httpx.AsyncClient() as client:
+        result = await stream._run(arguments, client=client)
+
+    assert result == {
+        "status": "bounded_complete",
+        "stop_reason": "FRAME_LIMIT",
+        "authenticated": True,
+        "subscription_confirmed": True,
+        "observation_count": 1,
+        "frame_count": 3,
+        "paper_quote_status": "passed_at_observation",
+        "candidate_count": 1,
+        "execution_locked": True,
+    }
+    assert output.is_dir()
 
 
 @pytest.mark.asyncio

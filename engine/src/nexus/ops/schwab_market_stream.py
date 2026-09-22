@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     child.add_argument("--output-dir", type=Path, required=True)
     child.add_argument("--duration", type=float, default=60)
     child.add_argument("--max-frames", type=int, default=100)
+    paper_probe = subparsers.add_parser("paper-probe")
+    paper_probe.add_argument("--repo-root", type=Path, required=True)
+    paper_probe.add_argument("--binding", action="append", required=True)
+    paper_probe.add_argument("--output-dir", type=Path, required=True)
+    paper_probe.add_argument("--duration", type=float, default=30)
     import_parser = subparsers.add_parser("import")
     import_parser.add_argument("--repo-root", type=Path, required=True)
     import_parser.add_argument("--binding", action="append", required=True)
@@ -311,6 +316,33 @@ async def _run(
             process_environment=os.environ,
             now=now,
         )
+    if arguments.source == "paper-probe":
+        bindings = _parse_bindings(arguments.binding)
+        if len(bindings) > 5:
+            raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
+        _limits(arguments.duration, MAX_FRAMES)
+        if arguments.output_dir.exists() or arguments.output_dir.is_symlink():
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_NEW_OUTPUT_REQUIRED")
+        capture = await run_schwab_stream(
+            argparse.Namespace(
+                repo_root=arguments.repo_root,
+                symbol=sorted(bindings),
+                output_dir=arguments.output_dir,
+                duration=arguments.duration,
+                max_frames=MAX_FRAMES,
+            ),
+            client,
+            now=now,
+            process_environment={},
+        )
+        if capture.get("status") != "bounded_complete":
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_INCOMPLETE")
+        return {
+            **_summary(capture),
+            **validate_paper_quote_probe(
+                pack_provider_market_stream_archive(arguments.output_dir), bindings
+            ),
+        }
     return await run_schwab_stream(arguments, client, now=now)
 
 
@@ -893,6 +925,42 @@ def parse_schwab_snapshot_batch(
             delivery_mode="real_time",
         ),
     )
+
+
+def validate_paper_quote_probe(
+    raw_payload: bytes, bindings: Mapping[str, UUID]
+) -> dict[str, object]:
+    """Check the decision quote contract without importing or claiming a cycle."""
+    if not 1 <= len(bindings) <= 5 or len(set(bindings.values())) != len(bindings):
+        raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
+    try:
+        archive = _unpack_provider_market_stream_archive(raw_payload)
+        completed_at = datetime.fromisoformat(archive["receipt"]["ended_at"]).astimezone(UTC)
+        batch = parse_schwab_snapshot_batch(
+            raw_payload,
+            IntradaySnapshotRequest(
+                instruments=tuple(
+                    SnapshotInstrument(
+                        instrument_id=InstrumentId(bindings[symbol]), symbol=symbol
+                    )
+                    for symbol in sorted(bindings)
+                ),
+                symbol_as_of=completed_at.date(),
+                feed="l1",
+                delivery_mode="real_time",
+            ),
+        )
+    except MarketProviderPayloadError as error:
+        raise ProviderMarketStreamError(str(error)) from None
+    if {item.symbol for item in batch.snapshots} != set(bindings) or any(
+        item.quote is None for item in batch.snapshots
+    ):
+        raise ProviderMarketStreamError("SCHWAB_L1_INCOMPLETE")
+    return {
+        "paper_quote_status": "passed_at_observation",
+        "candidate_count": len(bindings),
+        "execution_locked": True,
+    }
 
 
 async def import_schwab_market_stream(
