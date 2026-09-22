@@ -34,6 +34,15 @@ XNYS 交易日、批次与正式研究 Universe、每只候选的研究快照、
 代码提交身份；宿主提交与当前 checkout 不一致时状态命令会报
 `AGENT_PAPER_HEARTBEAT_RELEASE_MISMATCH`。
 
+本机 Web 已在 `127.0.0.1:3000` 运行且 `nexus-local-stack status` 确认同版本后，可在当天反复运行只读页面整链核对：
+
+```bash
+NEXUS_LOCAL_PAPER_READONLY=1 ./node_modules/.bin/playwright test \
+  --config playwright.local-paper.config.ts
+```
+
+该用例从正常 BFF 读取一条已完成的组合周期，核对决策、提案、当前目标在 API 中的身份一致，再打开 Workspace、Decisions 列表与详情、Paper、Portfolio；它拒绝浏览期间的写请求，并在最后复核业务身份未变。浏览器不保存截图、录屏或 trace。需要已有完成周期；通过只证明这些持久化事实的页面可读性，不替代真实行情、自然时间窗或成交验收。
+
 只在当前代码、API、普通 Worker、PostgreSQL、MinIO 和 Web 来自同一 head，数据库位于当前
 Alembic head，且本地 BFF readiness 可解释时继续。`/health/live` 或 Compose `Up` 不足以证明
 业务就绪。
