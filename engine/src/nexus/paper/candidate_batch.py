@@ -1,9 +1,10 @@
 """Create and read bounded explicit research scopes for Agent paper cycles."""
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import select, text
@@ -13,6 +14,7 @@ from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.domain.ids import new_uuid7
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
+from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
 from nexus.persistence.idempotency import IdempotencyClaimError, claim_idempotency
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest
@@ -26,6 +28,8 @@ from nexus.persistence.models.market import (
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     AgentPaperCandidateBatchRecord,
+    AgentPaperCycleEventRecord,
+    AgentPaperCycleRecord,
     PaperAccountRecord,
 )
 from nexus.persistence.models.portfolio import Account
@@ -284,6 +288,65 @@ async def inspect_agent_paper_candidate_static_readiness(
     )
     if prior_session is None:
         raise ValueError("AGENT_PAPER_CALENDAR_PRIOR_SESSION_MISSING")
+    scheduled_slot = datetime.combine(
+        calendar.local_date,
+        PORTFOLIO_ALLOCATION_V1.decision_local_time,
+        tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
+    ).astimezone(UTC)
+    scheduled_claim = await session.scalar(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account_id}",
+            IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+            IdempotencyRecord.idempotency_key == scheduled_slot.isoformat(),
+            IdempotencyRecord.schema_version == "agent_paper_schwab_trigger_v2",
+            IdempotencyRecord.created_at <= as_of,
+        )
+    )
+    scheduled_payload = None if scheduled_claim is None else scheduled_claim.response_payload
+    scheduled_trigger: dict[str, object] | None = None
+    if scheduled_claim is not None:
+        outcome = scheduled_payload.get("outcome") if isinstance(scheduled_payload, dict) else None
+        scheduled_trigger = {
+            "status": outcome if outcome in {"completed", "failed"} else "unknown",
+            "error_code": (
+                scheduled_payload.get("error_code")
+                if isinstance(scheduled_payload, dict)
+                and isinstance(scheduled_payload.get("error_code"), str)
+                else None
+            ),
+        }
+    current_cycles = tuple(
+        (
+            await session.scalars(
+                select(AgentPaperCycleRecord)
+                .where(
+                    AgentPaperCycleRecord.account_id == account_id,
+                    AgentPaperCycleRecord.decision_session == calendar.local_date,
+                    AgentPaperCycleRecord.candidate_batch_id.is_not(None),
+                    AgentPaperCycleRecord.created_at <= as_of,
+                )
+                .order_by(AgentPaperCycleRecord.decision_slot_at, AgentPaperCycleRecord.id)
+            )
+        ).all()
+    )
+    current_session_cycles: list[dict[str, object]] = []
+    for cycle in current_cycles:
+        event = await session.scalar(
+            select(AgentPaperCycleEventRecord)
+            .where(
+                AgentPaperCycleEventRecord.cycle_id == cycle.id,
+                AgentPaperCycleEventRecord.occurred_at <= as_of,
+            )
+            .order_by(AgentPaperCycleEventRecord.sequence.desc())
+            .limit(1)
+        )
+        current_session_cycles.append(
+            {
+                "cycle_id": str(cycle.id),
+                "status": event.to_status if event is not None else "unknown",
+                "result_code": event.result_code if event is not None else None,
+            }
+        )
     selected_universe = await session.scalar(
         select(UniverseSnapshot)
         .where(
@@ -354,12 +417,27 @@ async def inspect_agent_paper_candidate_static_readiness(
         if daily_authority is None:
             missing.append("PRIOR_DAILY_AUTHORITY_MISSING")
         candidates.append({"symbol": identity.symbol, "missing": missing})
+    static_ready = universe_matches and all(not item["missing"] for item in candidates)
+    if current_session_cycles:
+        normal_cycle_start_status = "blocked_existing_cycle"
+    elif scheduled_trigger is not None:
+        normal_cycle_start_status = "blocked_scheduled_claim"
+    elif not static_ready:
+        normal_cycle_start_status = "blocked_static_inputs"
+    elif calendar.session != calendar.local_date or not (
+        scheduled_slot <= as_of < scheduled_slot + timedelta(minutes=5)
+    ):
+        normal_cycle_start_status = "outside_normal_window"
+    else:
+        normal_cycle_start_status = "requires_window_evidence"
     return {
-        "status": "ready_static"
-        if universe_matches and all(not item["missing"] for item in candidates)
-        else "blocked",
+        "status": "ready_static" if static_ready else "blocked",
         "decision_session": calendar.session.isoformat(),
         "prior_session": prior_session.isoformat(),
+        "current_session": calendar.local_date.isoformat(),
+        "scheduled_trigger": scheduled_trigger,
+        "current_session_cycles": current_session_cycles,
+        "normal_cycle_start_status": normal_cycle_start_status,
         "universe_status": "matched" if universe_matches else "mismatch",
         "candidates": candidates,
         "window_evidence_status": "not_evaluated",

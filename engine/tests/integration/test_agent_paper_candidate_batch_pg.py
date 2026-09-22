@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from nexus.ops import agent_paper_once as candidate_cli
 from nexus.ops.agent_paper_once import AgentPaperPrepareCandidatesRequest
+from nexus.paper import agent_cycle
 from nexus.paper import candidate_batch as batch_module
 from nexus.paper.candidate_batch import (
     create_agent_paper_candidate_batch,
@@ -27,6 +28,8 @@ from nexus.persistence.models.market import (
     UniverseSnapshot,
 )
 from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
     AgentPaperCandidateBatchRecord,
     AgentPaperCycleRecord,
     PaperAccountRecord,
@@ -440,6 +443,74 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         assert result["execution_locked"] is True
         assert result["external_requests"] == 0
         assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
+
+    async with factory() as session, session.begin():
+        session.add(
+            IdempotencyRecord(
+                id=uuid4(),
+                actor_id=f"local-agent-paper-schwab:{ACCOUNT_ID}",
+                route="agent-paper-schwab-trigger-v2",
+                idempotency_key="2026-09-18T14:00:00+00:00",
+                request_hash="a" * 64,
+                schema_version="agent_paper_schwab_trigger_v2",
+                response_payload={
+                    "outcome": "failed",
+                    "error_code": "SCHWAB_L1_INCOMPLETE",
+                },
+                created_at=NOW,
+            )
+        )
+    async with factory() as session, session.begin():
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        claimed = await batch_module.inspect_agent_paper_candidate_static_readiness(
+            session, account_id=ACCOUNT_ID, batch_id=batch.batch_id, as_of=NOW
+        )
+        assert claimed["scheduled_trigger"] == {
+            "status": "failed",
+            "error_code": "SCHWAB_L1_INCOMPLETE",
+        }
+        assert claimed["normal_cycle_start_status"] == "blocked_scheduled_claim"
+
+    cycle_id = uuid4()
+    async with factory() as session, session.begin():
+        cycle = AgentPaperCycleRecord(
+                id=cycle_id,
+                account_id=ACCOUNT_ID,
+                portfolio_id=PORTFOLIO_ID,
+                decision_session=date(2026, 9, 18),
+                decision_time=NOW,
+                decision_slot_at=NOW,
+                execution_session=date(2026, 9, 18),
+                universe_snapshot_id=UNIVERSE_ID,
+                quality_report_id=None,
+                candidate_batch_id=batch.batch_id,
+                decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                candidate_manifest=[],
+                candidate_hash="a" * 64,
+                sizing_policy_version="portfolio_allocation_v1",
+                sizing_policy_hash="d7b719f47edbf3cb7ebb40dbe555a51f717ca581162a72d05c23391b8b083dd7",
+                execution_locked=True,
+                created_at=NOW,
+        )
+        session.add(cycle)
+        await session.flush()
+        await agent_cycle._append_event(
+            session, cycle, None, "prepared", "CYCLE_PREPARED", {}
+        )
+    async with factory() as session, session.begin():
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        occupied = await batch_module.inspect_agent_paper_candidate_static_readiness(
+            session, account_id=ACCOUNT_ID, batch_id=batch.batch_id, as_of=NOW
+        )
+        assert occupied["current_session_cycles"] == [
+            {
+                "cycle_id": str(cycle_id),
+                "status": "prepared",
+                "result_code": "CYCLE_PREPARED",
+            }
+        ]
+        assert occupied["normal_cycle_start_status"] == "blocked_existing_cycle"
 
 
 @pytest.mark.asyncio
