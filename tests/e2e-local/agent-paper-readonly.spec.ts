@@ -6,6 +6,7 @@ type Cycle = components["schemas"]["AgentPaperCycleResponse"];
 type CyclePage = components["schemas"]["AgentPaperCyclePageResponse"];
 type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 type Summary = components["schemas"]["PaperManagementSummaryResponse"];
+type Actual = components["schemas"]["PaperPlanActualResponse"];
 
 test("one persisted portfolio cycle agrees across four read-only pages", async ({ page, request }) => {
   test.skip(!enabled, "explicit local read-only acceptance only");
@@ -22,8 +23,13 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
 
   const detailResponse = await request.get(`/api/v1/paper/management/cycles/${cycle.cycle_id}`);
   const summaryResponse = await request.get("/api/v1/paper/management/portfolio");
+  const actualResponse = await request.get("/api/v1/paper/actual");
   expect(detailResponse.status()).toBe(200);
   expect(summaryResponse.status()).toBe(200);
+  expect(actualResponse.status()).toBe(200);
+  const actual = (await actualResponse.json()).data as Actual;
+  expect(actual.data_state).toBe("READY");
+  expect(actual.as_of).not.toBeNull();
   const detail = (await detailResponse.json()).data as Detail;
   const summary = (await summaryResponse.json()).data as Summary;
   expect(detail.cycle.cycle_id).toBe(cycle.cycle_id);
@@ -57,6 +63,8 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
   await page.goto("/paper");
   await page.waitForLoadState("networkidle");
   await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "当前实际持仓与现金" })).toBeVisible();
+  await expect(page.locator("#paper-current-actual")).toContainText("可用现金");
   await page.locator(`select:has(option[value="${cycle.cycle_id}"])`).selectOption(cycle.cycle_id);
   await expect(page.locator("body")).toContainText(cycle.result_code);
   await expect(page.locator("body")).toContainText(targetId!);
