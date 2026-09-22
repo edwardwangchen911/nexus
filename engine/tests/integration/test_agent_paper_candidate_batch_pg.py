@@ -1,10 +1,12 @@
 import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from hashlib import sha256
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
 from nexus.ops import agent_paper_loop as loop_module
 from nexus.ops import agent_paper_once as candidate_cli
 from nexus.ops import agent_paper_universe_local as universe_cli
@@ -20,6 +22,7 @@ from nexus.paper.universe_publisher import publish_reviewed_research_universe
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
     AgentPortfolioSynthesisRunRecord,
+    AgentPromptVersionRecord,
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.backtest import (
@@ -712,7 +715,27 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         ]
         assert result["execution_locked"] is True
         assert result["external_requests"] == 0
+        assert result["synthesis_prompt_status"] == "missing_or_invalid"
         assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
+
+    async with factory() as session, session.begin():
+        content = "frozen synthesis prompt"
+        session.add(
+            AgentPromptVersionRecord(
+                role="portfolio_decision",
+                version=SYNTHESIS_PROMPT_VERSION,
+                content=content,
+                content_hash=sha256(content.encode()).hexdigest(),
+                created_at=created,
+            )
+        )
+    async with factory() as session, session.begin():
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        with_prompt = await batch_module.inspect_agent_paper_candidate_static_readiness(
+            session, account_id=ACCOUNT_ID, batch_id=batch.batch_id, as_of=NOW
+        )
+        assert with_prompt["synthesis_prompt_status"] == "ready"
+        assert with_prompt["status"] == "blocked"  # Candidate evidence is still missing.
 
     async with factory() as session, session.begin():
         session.add_all(

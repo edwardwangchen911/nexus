@@ -21,8 +21,9 @@ uv run --project engine nexus-engine-agent-paper-readiness --repo-root "$PWD"
 ```
 
 它从受保护的本地配置读取现有账户和候选批次，在数据库只读事务中核对下一适用
-XNYS 交易日、批次与正式研究 Universe、每只候选的研究快照、已审核行业证据和
-前一完整交易日 Alpaca `all` 日线权威。`blocked` 会逐只列出缺口；
+XNYS 交易日、批次与正式研究 Universe、组合合成提示词的有效登记、每只候选的研究快照、
+已审核行业证据和前一完整交易日 Alpaca `all` 日线权威。`blocked` 会逐只列出候选缺口，
+`synthesis_prompt_status` 单独显示提示词是否有效；
 `ready_static` 只表示上述已存证据齐备，返回中的
 `window_evidence_status=not_evaluated` 表示同日 Schwab 行情、风险查询、
 研究 Job、内部模拟执行和页面结果仍须分别验收。该命令不调用 Provider、模型，

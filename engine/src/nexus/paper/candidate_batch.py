@@ -12,12 +12,14 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.persistence import select_authoritative_snapshot
+from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
 from nexus.domain.ids import new_uuid7
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
 from nexus.paper.universe_scope import is_formal_agent_paper_universe
 from nexus.persistence.idempotency import IdempotencyClaimError, claim_idempotency
+from nexus.persistence.models.agents import AgentPromptVersionRecord
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.market import (
@@ -96,6 +98,24 @@ def _require_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
         raise ValueError("CANDIDATE_BATCH_INVALID")
     return value
+
+
+async def has_active_portfolio_synthesis_prompt(
+    session: AsyncSession, *, as_of: datetime
+) -> bool:
+    """Mirror the formal trigger's prompt authority before its decision window."""
+    prompt = await session.scalar(
+        select(AgentPromptVersionRecord).where(
+            AgentPromptVersionRecord.role == "portfolio_decision",
+            AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
+            AgentPromptVersionRecord.release_channel == "active",
+        )
+    )
+    return (
+        prompt is not None
+        and prompt.created_at <= as_of
+        and sha256(prompt.content.encode()).hexdigest() == prompt.content_hash
+    )
 
 
 def _canonical_hash(
@@ -289,6 +309,7 @@ async def inspect_agent_paper_candidate_static_readiness(
     )
     if prior_session is None:
         raise ValueError("AGENT_PAPER_CALENDAR_PRIOR_SESSION_MISSING")
+    synthesis_prompt_ready = await has_active_portfolio_synthesis_prompt(session, as_of=as_of)
     scheduled_slot = datetime.combine(
         calendar.local_date,
         PORTFOLIO_ALLOCATION_V1.decision_local_time,
@@ -443,7 +464,11 @@ async def inspect_agent_paper_candidate_static_readiness(
         if daily_authority is None:
             missing.append("PRIOR_DAILY_AUTHORITY_MISSING")
         candidates.append({"symbol": identity.symbol, "missing": missing})
-    static_ready = universe_matches and all(not item["missing"] for item in candidates)
+    static_ready = (
+        universe_matches
+        and synthesis_prompt_ready
+        and all(not item["missing"] for item in candidates)
+    )
     if calendar.session != calendar.local_date:
         normal_cycle_start_status = "outside_normal_window"
     elif current_session_cycles:
@@ -465,6 +490,7 @@ async def inspect_agent_paper_candidate_static_readiness(
         "current_session_cycles": current_session_cycles,
         "normal_cycle_start_status": normal_cycle_start_status,
         "universe_status": "matched" if universe_matches else "mismatch",
+        "synthesis_prompt_status": "ready" if synthesis_prompt_ready else "missing_or_invalid",
         "candidates": candidates,
         "window_evidence_status": "not_evaluated",
         "execution_locked": True,

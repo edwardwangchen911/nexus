@@ -53,6 +53,7 @@ from nexus.paper.agent_decision_store import (
     persist_portfolio_proposal,
 )
 from nexus.paper.candidate_batch import (
+    has_active_portfolio_synthesis_prompt,
     load_agent_paper_candidate_batch,
     validate_agent_paper_candidate_batch,
 )
@@ -338,18 +339,7 @@ async def reserve_schwab_agent_paper_trigger(
     )
     if inserted:
         if require_synthesis_prompt:
-            prompt = await session.scalar(
-                select(AgentPromptVersionRecord).where(
-                    AgentPromptVersionRecord.role == "portfolio_decision",
-                    AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
-                    AgentPromptVersionRecord.release_channel == "active",
-                )
-            )
-            if (
-                prompt is None
-                or prompt.created_at > now
-                or sha256(prompt.content.encode()).hexdigest() != prompt.content_hash
-            ):
+            if not await has_active_portfolio_synthesis_prompt(session, as_of=now):
                 raise ValueError("PORTFOLIO_SYNTHESIS_PROMPT_INVALID")
         if trigger_mode == "manual_recovery":
             existing_cycle = await session.scalar(
