@@ -418,15 +418,15 @@ async def inspect_agent_paper_candidate_static_readiness(
             missing.append("PRIOR_DAILY_AUTHORITY_MISSING")
         candidates.append({"symbol": identity.symbol, "missing": missing})
     static_ready = universe_matches and all(not item["missing"] for item in candidates)
-    if current_session_cycles:
+    if calendar.session != calendar.local_date:
+        normal_cycle_start_status = "outside_normal_window"
+    elif current_session_cycles:
         normal_cycle_start_status = "blocked_existing_cycle"
     elif scheduled_trigger is not None:
         normal_cycle_start_status = "blocked_scheduled_claim"
     elif not static_ready:
         normal_cycle_start_status = "blocked_static_inputs"
-    elif calendar.session != calendar.local_date or not (
-        scheduled_slot <= as_of < scheduled_slot + timedelta(minutes=5)
-    ):
+    elif not (scheduled_slot <= as_of < scheduled_slot + timedelta(minutes=5)):
         normal_cycle_start_status = "outside_normal_window"
     else:
         normal_cycle_start_status = "requires_window_evidence"

@@ -512,6 +512,18 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         ]
         assert occupied["normal_cycle_start_status"] == "blocked_existing_cycle"
 
+    async with factory() as session, session.begin():
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        after_close = await batch_module.inspect_agent_paper_candidate_static_readiness(
+            session,
+            account_id=ACCOUNT_ID,
+            batch_id=batch.batch_id,
+            as_of=NOW.replace(hour=20, minute=1),
+        )
+        assert after_close["current_session"] == "2026-09-18"
+        assert after_close["decision_session"] == "2026-09-21"
+        assert after_close["normal_cycle_start_status"] == "outside_normal_window"
+
 
 @pytest.mark.asyncio
 async def test_candidate_batch_persists_canonical_scope_and_replays_exact_result(
