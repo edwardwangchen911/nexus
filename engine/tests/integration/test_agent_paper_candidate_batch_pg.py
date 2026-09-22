@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from nexus.ops import agent_paper_once as candidate_cli
+from nexus.ops import agent_paper_universe_local as universe_cli
 from nexus.ops.agent_paper_once import AgentPaperPrepareCandidatesRequest
 from nexus.paper import agent_cycle
 from nexus.paper import candidate_batch as batch_module
@@ -14,7 +15,9 @@ from nexus.paper.candidate_batch import (
     create_agent_paper_candidate_batch,
     load_agent_paper_candidate_batch,
 )
+from nexus.paper.universe_publisher import publish_reviewed_research_universe
 from nexus.persistence.models.agents import (
+    AgentDataSnapshotEvidenceRecord,
     AgentPortfolioSynthesisRunRecord,
     AgentResearchRunRecord,
 )
@@ -22,6 +25,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
@@ -41,6 +45,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.portfolio import Account, Portfolio
+from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
@@ -59,6 +64,111 @@ MSFT_ID = UUID("20000000-0000-0000-0000-000000000004")
 NVDA_ID = UUID("20000000-0000-0000-0000-000000000005")
 GOOG_ID = UUID("20000000-0000-0000-0000-000000000006")
 REVIEWED_UNIVERSE_ID = UUID("10000000-0000-0000-0000-000000000007")
+
+
+@pytest.mark.asyncio
+async def test_reviewed_universe_publisher_requires_evidence_and_replays_immutable_scope(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_scope(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    created = NOW.replace(day=17)
+    ids = (AAPL_ID, NVDA_ID)
+    with pytest.raises(ValueError, match="REVIEWED_UNIVERSE_EVIDENCE_MISSING"):
+        async with factory() as session, session.begin():
+            await publish_reviewed_research_universe(
+                session, instrument_ids=ids, effective_from=NOW.date(), as_of=NOW,
+            )
+    async with factory() as session, session.begin():
+        for index, instrument_id in enumerate(ids, start=1):
+            evidence_hash = str(index + 3) * 64
+            evidence = ResearchEvidenceRef(
+                source="sec", provider_object_id=f"reviewed:{instrument_id}",
+                revision="v1", available_at=created,
+                location=f"memory://sha256/{evidence_hash}",
+                content_hash=evidence_hash, byte_length=10, created_at=created,
+            )
+            snapshot = DataSnapshot(
+                source="nexus_research", provider_object_id=str(instrument_id),
+                revision="reviewed-v1", observed_at=created, available_at=created,
+                received_at=created, schema_version="research_filings_v1",
+                payload={"scope": "persisted_research_observations"}, created_at=created,
+            )
+            session.add_all((evidence, snapshot))
+            await session.flush()
+            session.add(Filing(
+                instrument_id=instrument_id, evidence_ref_id=evidence.id,
+                source=evidence.source, provider_object_id=evidence.provider_object_id,
+                revision=evidence.revision, accession_number=f"000000000{index}-26-000001",
+                form="10-Q", filed_at=created, accepted_at=created, created_at=created,
+            ))
+            await session.flush()
+            session.add(AgentDataSnapshotEvidenceRecord(
+                data_snapshot_id=snapshot.id, instrument_id=instrument_id,
+                evidence_ref_id=evidence.id, authority_kind="research", selected_at=None,
+                source=evidence.source, provider_object_id=evidence.provider_object_id,
+                revision=evidence.revision, available_at=created,
+                location=evidence.location, content_hash=evidence.content_hash,
+                created_at=created,
+            ))
+            session.add(SectorExposure(
+                instrument_id=instrument_id, sector_code="information_technology",
+                weight=Decimal(1), as_of=created.date(),
+                source_url="https://example.test/reviewed-sector",
+                content_hash=evidence_hash,
+                synthetic=index == 2, reviewed=True, created_at=created,
+            ))
+    with pytest.raises(ValueError, match="REVIEWED_UNIVERSE_EVIDENCE_MISSING"):
+        async with factory() as session, session.begin():
+            await publish_reviewed_research_universe(
+                session, instrument_ids=ids, effective_from=NOW.date(), as_of=NOW,
+            )
+    async with factory() as session, session.begin():
+        session.add(SectorExposure(
+            instrument_id=NVDA_ID, sector_code="information_technology",
+            weight=Decimal(1), as_of=created.date(),
+            source_url="https://example.test/reviewed-sector",
+            content_hash="f" * 64,
+            synthetic=False, reviewed=True, created_at=created,
+        ))
+    async with factory() as session, session.begin():
+        first = await publish_reviewed_research_universe(
+            session, instrument_ids=ids, effective_from=NOW.date(), as_of=NOW,
+        )
+        replay = await publish_reviewed_research_universe(
+            session, instrument_ids=tuple(reversed(ids)), effective_from=NOW.date(), as_of=NOW,
+        )
+        members = tuple(await session.scalars(select(UniverseMember).where(
+            UniverseMember.universe_snapshot_id == first.id,
+        )))
+        published = await session.scalar(select(func.count()).select_from(UniverseSnapshot))
+    assert first.id == replay.id
+    assert first.published_at == NOW
+    assert first.key == "agent_paper_research"
+    assert first.version == f"reviewed_v1_{first.content_hash[:16]}"
+    assert {member.instrument_id for member in members} == set(ids)
+    assert all(
+        "research=" in member.inclusion_reason and "sector=" in member.inclusion_reason
+        for member in members
+    )
+    assert published == 2
+    monkeypatch.setattr(universe_cli, "func", SimpleNamespace(clock_timestamp=lambda: literal(NOW)))
+    future_session = date(2026, 9, 19)
+    checked = await universe_cli.run(
+        EngineSettings(database_url=migrated_database_url),
+        instrument_ids=ids, effective_from=future_session, publish=False,
+    )
+    async with factory() as session:
+        count_after_check = await session.scalar(select(func.count()).select_from(UniverseSnapshot))
+    published_result = await universe_cli.run(
+        EngineSettings(database_url=migrated_database_url),
+        instrument_ids=ids, effective_from=future_session, publish=True,
+    )
+    assert checked["status"] == "publishable"
+    assert count_after_check == 2
+    assert published_result["status"] == "published"
+    assert published_result["universe_snapshot_id"] == checked["universe_snapshot_id"]
 
 
 @pytest.mark.asyncio

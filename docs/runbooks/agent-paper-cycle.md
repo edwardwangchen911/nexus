@@ -78,7 +78,8 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 
 运行前还必须满足：
 
-- 1–5 个候选都来自同一个已发布 `us_liquid/us_liquid_v1` 批次，且各自有当前研究快照、前一完整交易日
+- 1–5 个候选都来自同一个已发布的正式研究 Universe（历史 `us_liquid/us_liquid_v1` 或
+  `agent_paper_research/reviewed_v1_*`）批次，且各自有当前研究快照、前一完整交易日
   Alpaca SIP delayed `all` 日线、审核行业 authority、完整 XNYS 日历和三类风险查询证据；
 - 宏观工具只读取当前时点可见的 `DFF`、`DGS2`、`DGS10`、`CPIAUCSL`、`UNRATE`
   和 `VIXCLS` 严格 FRED vintage；宏观证据不是价格、风控或下单权威；

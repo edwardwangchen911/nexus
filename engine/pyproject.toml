@@ -43,6 +43,7 @@ nexus-engine-agent-version-evaluation = "nexus.ops.agent_version_evaluation:main
 nexus-engine-agent-challenger = "nexus.ops.agent_challenger:main"
 nexus-engine-agent-risk-authority = "nexus.ops.agent_risk_authority:main"
 nexus-engine-sector-exposure-local = "nexus.ops.sector_exposure_local:main"
+nexus-engine-agent-paper-universe-local = "nexus.ops.agent_paper_universe_local:main"
 nexus-engine-schwab-market-stream = "nexus.ops.schwab_market_stream:main"
 nexus-fosun-local = "nexus.ops.fosun_local:main"
 nexus-pending-identity-local = "nexus.ops.pending_identity_local:main"

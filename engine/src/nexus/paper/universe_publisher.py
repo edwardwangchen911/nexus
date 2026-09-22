@@ -1,0 +1,187 @@
+"""Publish an immutable, evidence-bound local research Universe for Agent Paper."""
+
+import json
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from hashlib import sha256
+from urllib.parse import urlsplit
+from uuid import UUID, uuid5
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.agents.persistence import select_authoritative_snapshot
+from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.market.universe import EQUITY_SECTOR_CODES
+from nexus.persistence.models.market import (
+    Instrument,
+    InstrumentAlias,
+    SectorExposure,
+    UniverseMember,
+    UniverseSnapshot,
+)
+
+_KEY = "agent_paper_research"
+_SOURCE = "nexus_local_reviewed_research"
+_NAMESPACE = UUID("17c7443d-a8b2-4385-9168-833085a68010")
+
+
+async def publish_reviewed_research_universe(
+    session: AsyncSession,
+    *,
+    instrument_ids: tuple[UUID, ...],
+    effective_from: date,
+    as_of: datetime,
+) -> UniverseSnapshot:
+    """Admit 2–5 stocks with point-in-time research and reviewed sector evidence."""
+    if (
+        as_of.tzinfo is None
+        or as_of.utcoffset() != UTC.utcoffset(as_of)
+        or not 2 <= len(instrument_ids) <= 5
+        or len(set(instrument_ids)) != len(instrument_ids)
+        or effective_from < as_of.date()
+    ):
+        raise ValueError("REVIEWED_UNIVERSE_REQUEST_INVALID")
+    ordered = tuple(sorted(instrument_ids, key=lambda item: item.int))
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext('agent-paper-reviewed-universe'))")
+    )
+    evidence: list[dict[str, str]] = []
+    for instrument_id in ordered:
+        instrument = await session.get(Instrument, instrument_id)
+        aliases = tuple(
+            await session.scalars(
+                select(InstrumentAlias).where(
+                    InstrumentAlias.instrument_id == instrument_id,
+                    InstrumentAlias.alias_type == "ticker",
+                    InstrumentAlias.valid_from <= effective_from,
+                    (InstrumentAlias.valid_to.is_(None))
+                    | (InstrumentAlias.valid_to >= effective_from),
+                    InstrumentAlias.created_at <= as_of,
+                )
+            )
+        )
+        if (
+            instrument is None
+            or instrument.created_at > as_of
+            or instrument.asset_type != "common_stock"
+            or instrument.currency != "USD"
+            or instrument.exchange not in US_EQUITY_EXCHANGES
+            or len(aliases) != 1
+        ):
+            raise ValueError("REVIEWED_UNIVERSE_IDENTITY_INVALID")
+        snapshot = await select_authoritative_snapshot(
+            session, instrument_id=instrument_id, as_of=as_of
+        )
+        sector = await session.scalar(
+            select(SectorExposure)
+            .where(
+                SectorExposure.instrument_id == instrument_id,
+                SectorExposure.as_of <= effective_from,
+                SectorExposure.created_at <= as_of,
+                SectorExposure.reviewed.is_(True),
+                SectorExposure.synthetic.is_(False),
+            )
+            .order_by(
+                SectorExposure.as_of.desc(),
+                SectorExposure.created_at.desc(),
+                SectorExposure.id.desc(),
+            )
+            .limit(1)
+        )
+        sector_source = urlsplit(sector.source_url) if sector is not None else None
+        if (
+            snapshot is None
+            or snapshot.created_at > as_of
+            or sector is None
+            or sector.sector_code not in EQUITY_SECTOR_CODES
+            or sector.weight != Decimal(1)
+            or len(sector.content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in sector.content_hash)
+            or sector_source is None
+            or sector_source.scheme != "https"
+            or not sector_source.hostname
+            or sector_source.username is not None
+            or sector_source.password is not None
+            or bool(sector_source.fragment)
+        ):
+            raise ValueError("REVIEWED_UNIVERSE_EVIDENCE_MISSING")
+        evidence.append(
+            {
+                "instrument_id": str(instrument_id),
+                "symbol": aliases[0].symbol,
+                "research_snapshot_id": str(snapshot.id),
+                "sector_exposure_id": str(sector.id),
+            }
+        )
+    if len({item["symbol"] for item in evidence}) != len(evidence):
+        raise ValueError("REVIEWED_UNIVERSE_IDENTITY_INVALID")
+    content = {
+        "schema": "agent_paper_reviewed_universe_v1",
+        "key": _KEY,
+        "source": _SOURCE,
+        "effective_from": effective_from.isoformat(),
+        "members": evidence,
+    }
+    digest = sha256(
+        json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    version = f"reviewed_v1_{digest[:16]}"
+    existing = await session.scalar(
+        select(UniverseSnapshot).where(
+            UniverseSnapshot.key == _KEY,
+            UniverseSnapshot.version == version,
+        )
+    )
+    if existing is not None:
+        members = tuple(
+            await session.scalars(
+                select(UniverseMember)
+                .where(UniverseMember.universe_snapshot_id == existing.id)
+                .order_by(UniverseMember.instrument_id)
+            )
+        )
+        if (
+            existing.content_hash != digest
+            or existing.source != _SOURCE
+            or existing.effective_from != effective_from
+            or existing.published_at is None
+            or existing.published_at > as_of
+            or existing.created_at > as_of
+            or tuple(member.instrument_id for member in members) != ordered
+            or any(member.created_at > as_of for member in members)
+            or tuple(member.inclusion_reason for member in members)
+            != tuple(
+                f"research={item['research_snapshot_id']};sector={item['sector_exposure_id']}"
+                for item in evidence
+            )
+        ):
+            raise ValueError("REVIEWED_UNIVERSE_CONFLICT")
+        return existing
+    universe = UniverseSnapshot(
+        id=uuid5(_NAMESPACE, digest),
+        key=_KEY,
+        version=version,
+        effective_from=effective_from,
+        source=_SOURCE,
+        content_hash=digest,
+        published_at=None,
+        created_at=as_of,
+    )
+    session.add(universe)
+    await session.flush()
+    session.add_all(
+        UniverseMember(
+            universe_snapshot_id=universe.id,
+            instrument_id=UUID(item["instrument_id"]),
+            inclusion_reason=(
+                f"research={item['research_snapshot_id']};sector={item['sector_exposure_id']}"
+            ),
+            created_at=as_of,
+        )
+        for item in evidence
+    )
+    await session.flush()
+    universe.published_at = as_of
+    await session.flush()
+    return universe

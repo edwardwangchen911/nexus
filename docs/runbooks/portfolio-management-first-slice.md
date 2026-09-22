@@ -33,7 +33,24 @@ uv run --project engine nexus-engine-agent-paper-once approve-initial-target \
 
 ## 2. 创建唯一候选批次
 
-先从已批准 Universe 中确定 1–5 个互不重复的 instrument UUID，再运行：
+正式多股票研究池先核对每只股票的唯一身份、已持久化研究快照和人工审核、非合成的行业证据。
+行业资料的审核和导入见[本地受审核行业暴露导入](sector-exposure-local.md)。只读预检发布条件：
+
+```bash
+uv run --project engine nexus-engine-agent-paper-universe-local \
+  --repo-root "$PWD" \
+  --effective-from "$EFFECTIVE_SESSION" \
+  --instrument-id "$INSTRUMENT_ID_1" \
+  --instrument-id "$INSTRUMENT_ID_2"
+```
+
+返回 `publishable` 后，再以相同参数加 `--publish`，将 2–5 只普通美股股票发布为新的
+不可变 `agent_paper_research/reviewed_v1_*` Universe。返回的 `universe_snapshot_id` 和版本
+用于下面的候选批次；重跑相同证据会读回同一版本。新证据只能产生新版本，不回填历史周期。
+该入口不采集资料、不调用模型、不创建订单；发布前须确认行业原件已人工核对，且只写本地业务库。
+发布不等于周期准入，前一交易日行情、当日行情和风险查询仍由后续预检与周期入口核验。
+
+从已批准 Universe 中确定 1–5 个互不重复的 instrument UUID，再运行：
 
 ```bash
 uv run --project engine nexus-engine-agent-paper-once prepare-candidates \
