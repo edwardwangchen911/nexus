@@ -84,8 +84,9 @@ async def load_quasi_realtime_cycle_authority(
     account_id: UUID,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    expected_universe_snapshot_id: UUID | None = None,
 ) -> CycleAuthority:
-    """Load one same-session AAPL cycle root from a server-owned UTC clock."""
+    """Load a same-session root, pinned to the explicit batch when supplied."""
     if now.tzinfo is None or now.utcoffset() != UTC.utcoffset(now):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     local_now = now.astimezone(ZoneInfo("America/New_York"))
@@ -123,21 +124,25 @@ async def load_quasi_realtime_cycle_authority(
     calendar, calendar_session = row
     if local_now.time().replace(tzinfo=None) < time(7) or now >= calendar_session.market_close_at:
         raise ValueError("AGENT_PAPER_MARKET_WINDOW_CLOSED")
+    universe_query = select(UniverseSnapshot).where(
+        UniverseSnapshot.key == "us_liquid",
+        UniverseSnapshot.version == "us_liquid_v1",
+        UniverseSnapshot.source == "fosun_local_read_only",
+        UniverseSnapshot.effective_from <= calendar_session.session,
+        UniverseSnapshot.published_at <= now,
+        UniverseSnapshot.created_at <= now,
+    )
+    if expected_universe_snapshot_id is not None:
+        universe_query = universe_query.where(UniverseSnapshot.id == expected_universe_snapshot_id)
     universe = await session.scalar(
-        select(UniverseSnapshot)
-        .where(
-            UniverseSnapshot.key == "us_liquid",
-            UniverseSnapshot.version == "us_liquid_v1",
-            UniverseSnapshot.source == "fosun_local_read_only",
-            UniverseSnapshot.effective_from <= calendar_session.session,
-            UniverseSnapshot.published_at <= now,
-            UniverseSnapshot.created_at <= now,
-        )
-        .order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id)
-        .limit(1)
+        universe_query.order_by(UniverseSnapshot.published_at.desc(), UniverseSnapshot.id).limit(1)
     )
     if universe is None:
-        raise ValueError("AGENT_PAPER_ROOT_AUTHORITY_UNAVAILABLE")
+        raise ValueError(
+            "CANDIDATE_BATCH_INVALID"
+            if expected_universe_snapshot_id is not None
+            else "AGENT_PAPER_ROOT_AUTHORITY_UNAVAILABLE"
+        )
     return CycleAuthority(
         account_id=account.id,
         portfolio_id=account.portfolio_id,

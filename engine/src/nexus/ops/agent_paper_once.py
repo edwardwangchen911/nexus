@@ -652,6 +652,7 @@ async def prepare_schwab_decision_authority(
         account_id=account_id,
         now=initial_time,
         expected_calendar_authority_id=calendar_authority_id,
+        expected_universe_snapshot_id=expected_universe_snapshot_id,
     )
     if initial_authority.calendar_authority_id != calendar_authority_id:
         raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")
@@ -841,6 +842,7 @@ async def prepare_schwab_decision_authority(
         account_id=account_id,
         now=decision_time,
         expected_calendar_authority_id=calendar_authority_id,
+        expected_universe_snapshot_id=expected_universe_snapshot_id,
     )
     if authority.calendar_authority_id != calendar_authority_id:
         raise ValueError("AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH")

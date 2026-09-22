@@ -2391,6 +2391,7 @@ async def _load_loop_candidates(
                 account_id=account_id,
                 now=now,
                 expected_calendar_authority_id=expected_calendar_authority_id,
+                expected_universe_snapshot_id=batch.universe_snapshot_id,
             )
             if batch.universe_snapshot_id != authority.universe_snapshot_id:
                 raise ValueError("CANDIDATE_BATCH_INVALID")

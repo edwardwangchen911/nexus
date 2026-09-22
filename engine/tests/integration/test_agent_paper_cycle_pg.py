@@ -3666,6 +3666,23 @@ async def test_quasi_realtime_authority_uses_database_time_window_and_same_sessi
         assert at_open.decision_time == datetime(2026, 8, 26, 11, tzinfo=UTC)
         assert before_close.decision_time == datetime(2026, 8, 26, 19, 59, 59, tzinfo=UTC)
         assert at_open.quality_report_id is None
+        async with sessions() as session:
+            pinned = await load_quasi_realtime_cycle_authority(
+                session,
+                account_id=seed.account_id,
+                now=datetime(2026, 8, 26, 13, tzinfo=UTC),
+                expected_calendar_authority_id=CALENDAR_ID,
+                expected_universe_snapshot_id=at_open.universe_snapshot_id,
+            )
+            with pytest.raises(ValueError, match="CANDIDATE_BATCH_INVALID"):
+                await load_quasi_realtime_cycle_authority(
+                    session,
+                    account_id=seed.account_id,
+                    now=datetime(2026, 8, 26, 13, tzinfo=UTC),
+                    expected_calendar_authority_id=CALENDAR_ID,
+                    expected_universe_snapshot_id=UUID(int=0),
+                )
+        assert pinned.universe_snapshot_id == at_open.universe_snapshot_id
     finally:
         await engine.dispose()
 
