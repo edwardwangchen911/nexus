@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -77,6 +77,7 @@ def test_activation_result_requires_exact_event_batch_and_target_identity() -> N
             "batch_id": str(batch_id),
         },
         occurred_at=now,
+        created_at=now + timedelta(minutes=2),
     )
     result = service._activation_result(
         event=cast(Any, exact),
@@ -87,6 +88,7 @@ def test_activation_result_requires_exact_event_batch_and_target_identity() -> N
     assert result is not None
     assert result.result_code == "PLAN_CREATED"
     assert result.batch_id == batch_id
+    assert result.as_of == exact.created_at
 
     missing_batch = SimpleNamespace(
         result_code="PAPER_BATCH_EVALUATED",
@@ -103,6 +105,35 @@ def test_activation_result_requires_exact_event_batch_and_target_identity() -> N
             target=cast(Any, target),
             batch=cast(Any, batch),
         )
+
+
+def test_no_order_activation_reports_recorded_time_after_proposal() -> None:
+    decision_time = datetime(2026, 9, 22, 16, 30, tzinfo=UTC)
+    recorded_at = decision_time + timedelta(minutes=3)
+    decision_id = uuid4()
+    target_id = uuid4()
+    event = SimpleNamespace(
+        result_code="NO_ORDER_REQUIRED",
+        fact_ids={
+            "strategy_decision_id": str(decision_id),
+            "target_version_id": str(target_id),
+        },
+        occurred_at=decision_time,
+        created_at=recorded_at,
+    )
+    service = PaperReadService(cast(AsyncSession, None), recorded_at)
+
+    result = service._activation_result(
+        event=cast(Any, event),
+        decision=cast(Any, SimpleNamespace(id=decision_id)),
+        target=cast(Any, SimpleNamespace(target_version_id=target_id)),
+        batch=None,
+        strict_identity=True,
+    )
+
+    assert result is not None
+    assert result.result_code == "NO_ORDER_REQUIRED"
+    assert result.as_of == recorded_at
 
 
 def test_blocked_activation_never_accepts_target_or_plan_facts() -> None:

@@ -800,7 +800,7 @@ class PaperReadService:
                 strategy_decision_id=decision_id,
                 target_version_id=None,
                 batch_id=None,
-                as_of=event.occurred_at,
+                as_of=event.created_at,
             )
         if strict_identity and (decision is None or target is None):
             raise NexusError(
@@ -844,7 +844,7 @@ class PaperReadService:
             strategy_decision_id=decision.id,
             target_version_id=target.target_version_id,
             batch_id=None if batch is None else batch.id,
-            as_of=event.occurred_at,
+            as_of=event.created_at,
         )
 
     def _cycle_blocker(
