@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from nexus.ops import agent_paper_loop as loop_module
 from nexus.ops import agent_paper_once as candidate_cli
 from nexus.ops import agent_paper_universe_local as universe_cli
 from nexus.ops.agent_paper_once import AgentPaperPrepareCandidatesRequest
@@ -183,6 +184,7 @@ async def test_reviewed_universe_publisher_requires_evidence_and_replays_immutab
 @pytest.mark.asyncio
 async def test_reviewed_research_universe_accepts_multi_stock_without_rewriting_legacy(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _seed_scope(migrated_database_url)
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
@@ -278,6 +280,17 @@ async def test_reviewed_research_universe_accepts_multi_stock_without_rewriting_
     assert authority.universe_snapshot_id == REVIEWED_UNIVERSE_ID
     assert risk_scope.instrument_id == NVDA_ID
     assert legacy is not None and legacy.version == "us_liquid_v1"
+    monkeypatch.setattr(loop_module, "func", SimpleNamespace(clock_timestamp=lambda: literal(NOW)))
+    host_candidates = await loop_module._load_loop_candidates(
+        EngineSettings(database_url=migrated_database_url),
+        account_id=ACCOUNT_ID,
+        batch_id=batch.batch_id,
+        expected_calendar_authority_id=calendar_id,
+    )
+    assert {candidate.symbol for candidate in host_candidates} == {"AAPL", "NVDA"}
+    assert {candidate.universe_snapshot_id for candidate in host_candidates} == {
+        REVIEWED_UNIVERSE_ID
+    }
 
 
 @pytest.mark.asyncio

@@ -218,7 +218,7 @@ async def test_later_single_candidate_risk_scope_includes_inherited_instruments(
             source_bar = await session.scalar(
                 select(PriceBarRecord).where(
                     PriceBarRecord.instrument_id == inherited_msft,
-                    PriceBarRecord.revision == "second-prior",
+                    PriceBarRecord.revision == "candidate-2-prior",
                 )
             )
             await ingest_price_page(
