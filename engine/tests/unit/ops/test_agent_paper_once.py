@@ -1407,6 +1407,37 @@ def test_schwab_failure_preserves_only_safe_root_cause_diagnostic(tmp_path) -> N
         "validation_reason": "CAPTURE_TIME_BOUND",
     }
 
+    import_diagnostic = tmp_path / "stream-import-invalid.json"
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._raise_schwab_l1_incomplete(
+            cli.ProviderMarketStreamError(
+                "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID",
+                failure_stage="stream_import",
+                capture_summary={
+                    "status": "bounded_complete",
+                    "stop_reason": "FRAME_LIMIT",
+                    "authenticated": True,
+                    "subscription_confirmed": True,
+                    "observation_count": 1,
+                    "frame_count": 3,
+                },
+            ),
+            diagnostic_path=import_diagnostic,
+        )
+    assert json.loads(import_diagnostic.read_text()) == {
+        "capture_summary": {
+            "authenticated": True,
+            "frame_count": 3,
+            "observation_count": 1,
+            "status": "bounded_complete",
+            "stop_reason": "FRAME_LIMIT",
+            "subscription_confirmed": True,
+        },
+        "provider_error_code": "PROVIDER_MARKET_STREAM_ARCHIVE_INVALID",
+        "schema": "nexus_schwab_l1_failure_v1",
+        "stage": "stream_import",
+    }
+
     summarized = tmp_path / "summarized.json"
     with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
         cli._raise_schwab_l1_incomplete(

@@ -566,6 +566,7 @@ def _raise_schwab_l1_incomplete(error: Exception, *, diagnostic_path: Path) -> N
         "archive_pack",
         "archive_replay",
         "snapshot_parse",
+        "stream_import",
     }:
         payload["stage"] = failure_stage
     if getattr(error, "validation_reason", None) == "CAPTURE_TIME_BOUND":

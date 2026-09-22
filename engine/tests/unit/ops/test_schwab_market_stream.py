@@ -751,6 +751,55 @@ async def test_capture_archive_failure_keeps_safe_phase_and_reason(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_capture_import_failure_keeps_safe_capture_summary(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def capture(arguments, client, *, now=None):
+        del client, now
+        frame = json.loads(json.dumps(SCHWAB_DATA))
+        observed_ms = int((datetime.now(UTC) - timedelta(seconds=2)).timestamp() * 1000)
+        frame["data"][0]["timestamp"] = observed_ms
+        for field in ("34", "35", "37", "38"):
+            frame["data"][0]["content"][0][field] = observed_ms
+        return await collect_schwab_stream(
+            symbols=("AAPL",),
+            directory=arguments.output_dir,
+            streamer_url="wss://streamer-api.schwab.com/ws",
+            credentials=SCHWAB_CREDENTIALS,
+            duration=30,
+            max_frames=3,
+            connector=lambda *args, **kwargs: Socket(
+                [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, frame]
+            ),
+        )
+
+    async def fail_import(*args, **kwargs):
+        del args, kwargs
+        raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_ARCHIVE_INVALID")
+
+    class Session:
+        async def scalar(self, statement):
+            del statement
+            return datetime.now(UTC)
+
+    monkeypatch.setattr(stream, "import_schwab_market_stream", fail_import)
+    with pytest.raises(
+        ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_ARCHIVE_INVALID"
+    ) as caught:
+        await stream.capture_and_import_schwab_level_one_batch(
+            Session(),
+            object(),
+            repo_root=tmp_path,
+            client=object(),
+            bindings={"AAPL": UUID(int=1)},
+            capture=capture,
+        )
+    assert caught.value.failure_stage == "stream_import"
+    assert caught.value.capture_summary["status"] == "bounded_complete"
+    assert caught.value.capture_summary["observation_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_close_failure_cannot_make_capture_complete(tmp_path) -> None:
     class FailedCloseSocket(Socket):
         async def __aexit__(self, *args):

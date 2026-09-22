@@ -519,9 +519,18 @@ async def capture_and_import_schwab_level_one_batch(
         imported_at = await session.scalar(select(func.clock_timestamp()))
         if not isinstance(imported_at, datetime):
             raise RuntimeError("SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID")
-        return await import_schwab_market_stream(
-            session, store, bindings=dict(bindings), directory=directory, imported_at=imported_at
-        )
+        try:
+            return await import_schwab_market_stream(
+                session,
+                store,
+                bindings=dict(bindings),
+                directory=directory,
+                imported_at=imported_at,
+            )
+        except ProviderMarketStreamError as error:
+            raise ProviderMarketStreamError(
+                str(error), capture_summary=summary, failure_stage="stream_import"
+            ) from error
 
 
 async def _collect(
