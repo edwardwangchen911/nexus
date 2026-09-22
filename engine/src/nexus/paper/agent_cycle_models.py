@@ -83,7 +83,7 @@ class AgentPaperTriggerReservation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     claim_id: UUID
-    trigger_mode: Literal["scheduled", "manual_recovery"] = "scheduled"
+    trigger_mode: Literal["scheduled", "manual_recovery", "synthesis_recovery"] = "scheduled"
     decision_session: date
     decision_slot_at: datetime
     candidate_batch_id: UUID | None = None

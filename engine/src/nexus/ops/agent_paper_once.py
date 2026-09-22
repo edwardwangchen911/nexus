@@ -188,7 +188,7 @@ class AgentPaperTriggerRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     action: Literal["trigger"]
-    trigger_mode: Literal["scheduled", "manual_recovery"] = "scheduled"
+    trigger_mode: Literal["scheduled", "manual_recovery", "synthesis_recovery"] = "scheduled"
     account_id: UUID
     candidate_batch_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
@@ -316,6 +316,10 @@ def parser() -> argparse.ArgumentParser:
     manual_recovery.add_argument("--account-id", required=True)
     manual_recovery.add_argument("--idempotency-key", required=True)
     manual_recovery.add_argument("--candidate-batch-id")
+    synthesis_recovery = commands.add_parser("trigger-synthesis-recovery")
+    synthesis_recovery.add_argument("--account-id", required=True)
+    synthesis_recovery.add_argument("--idempotency-key", required=True)
+    synthesis_recovery.add_argument("--candidate-batch-id")
     resume = commands.add_parser("resume")
     resume.add_argument("--cycle-id", required=True)
     resume.add_argument("--idempotency-key", required=True)
@@ -1512,12 +1516,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         if action == "run":
             request = AgentPaperRunRequest.model_validate(values)
-        elif action in {"trigger", "trigger-manual-recovery"}:
+        elif action in {"trigger", "trigger-manual-recovery", "trigger-synthesis-recovery"}:
             if values.get("candidate_batch_id") is None:
                 return _emit_error("CANDIDATE_BATCH_REQUIRED")
             if action == "trigger-manual-recovery":
                 values["action"] = "trigger"
                 values["trigger_mode"] = "manual_recovery"
+            elif action == "trigger-synthesis-recovery":
+                values["action"] = "trigger"
+                values["trigger_mode"] = "synthesis_recovery"
             request = AgentPaperTriggerRequest.model_validate(values)
         elif action == "resume":
             request = AgentPaperResumeRequest.model_validate(values)
@@ -1573,6 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
             "AGENT_PAPER_DATABASE_NOT_LOCAL",
             "AGENT_PAPER_MARKET_WINDOW_CLOSED",
             "AGENT_PAPER_MANUAL_RECOVERY_UNAVAILABLE",
+            "AGENT_PAPER_SYNTHESIS_RECOVERY_UNAVAILABLE",
             "PORTFOLIO_SYNTHESIS_PROMPT_INVALID",
             "AGENT_PAPER_TIME_IN_FUTURE",
             "AGENT_PAPER_MARKET_CONFIG_INVALID",

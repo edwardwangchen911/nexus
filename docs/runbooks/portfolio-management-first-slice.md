@@ -96,6 +96,25 @@ uv run --project engine nexus-engine-agent-paper-once trigger-manual-recovery \
 超时先核对 `agent-paper-manual-trigger-v1` 的持久化认领和 cycle；只用原 key 读取结果，
 不在新槽位换 key 重试。此入口仅写入本地内部模拟事实，保持 `execution_locked=true`。
 
+### 合成配置缺失后的独立恢复
+
+若上述手动周期的 AAPL 研究 Job 已成功，但周期因当时尚未登记组合合成提示词而以
+`PORTFOLIO_SYNTHESIS_UNAVAILABLE` 终止，不改写或重开该终态。先通过现有本地 setup
+登记并核对合成提示词；系统仅在提示词的真实登记时间晚于失败事件、原研究输出仍可校验、
+原周期没有合成 Run 或决策、同日只有该一个组合周期时，允许用户明确要求再创建一次
+独立周期。它有单独的 `agent-paper-synthesis-recovery-v1` 认领和当天唯一 key；会重新采集
+有界行情并运行一次研究模型，不复用旧研究结果伪造新决策。仅限纽约时间 10:05–14:59，
+且保持 `execution_locked=true`。原失败周期和它的 Job/Output 原样保留。
+
+```bash
+uv run --project engine nexus-engine-agent-paper-once trigger-synthesis-recovery \
+  --account-id "$PAPER_ACCOUNT_ID" \
+  --candidate-batch-id "$CANDIDATE_BATCH_ID" \
+  --idempotency-key "$SYNTHESIS_RECOVERY_KEY"
+```
+
+结果未知时只按原 key、claim 和 cycle 读回，不能发起第三次周期或绕过证据与风控。
+
 ## 4. 只读核对同一事实链
 
 Web 已在本机运行后，使用同一个 `CYCLE_ID`、`PLAN_ID` 和原取消尝试键读取：

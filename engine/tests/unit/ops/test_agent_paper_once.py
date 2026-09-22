@@ -55,8 +55,18 @@ def test_trigger_accepts_explicit_candidate_batch() -> None:
     assert request.candidate_batch_id == UUID(int=20)
 
 
+@pytest.mark.parametrize(
+    ("command", "expected_mode"),
+    [
+        ("trigger-manual-recovery", "manual_recovery"),
+        ("trigger-synthesis-recovery", "synthesis_recovery"),
+    ],
+)
 def test_manual_recovery_command_marks_new_trigger_mode(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    expected_mode: str,
 ) -> None:
     monkeypatch.setattr(
         cli,
@@ -84,7 +94,7 @@ def test_manual_recovery_command_marks_new_trigger_mode(
     assert (
         main(
             [
-                "trigger-manual-recovery",
+                command,
                 "--candidate-batch-id",
                 str(UUID(int=20)),
                 "--account-id",
@@ -95,7 +105,7 @@ def test_manual_recovery_command_marks_new_trigger_mode(
         )
         == 0
     )
-    assert observed == ["manual_recovery"]
+    assert observed == [expected_mode]
     assert json.loads(capsys.readouterr().out)["status"] == "researching"
 
 

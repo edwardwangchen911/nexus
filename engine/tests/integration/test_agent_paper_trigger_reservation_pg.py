@@ -444,3 +444,83 @@ async def test_manual_recovery_rejects_non_market_scheduled_failure(
                 )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_recovery_requires_a_known_predecessor(
+    migrated_database_url: str,
+) -> None:
+    seed = await _seed_trigger(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        with pytest.raises(ValueError, match="AGENT_PAPER_SYNTHESIS_RECOVERY_UNAVAILABLE"):
+            async with sessions.begin() as session:
+                await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=seed.account_id,
+                    candidate_batch_id=seed.batch_id,
+                    client_idempotency_key="no-predecessor",
+                    now=datetime(2026, 9, 18, 16, 31, tzinfo=UTC),
+                    trigger_mode="synthesis_recovery",
+                )
+        async with sessions() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(agent_cycle.IdempotencyRecord)
+                .where(agent_cycle.IdempotencyRecord.route == "agent-paper-synthesis-recovery-v1")
+            )
+            assert count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_recovery_uses_one_distinct_claim(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await _seed_trigger(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def known_predecessor(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(agent_cycle, "_require_synthesis_recovery_predecessor", known_predecessor)
+    now = datetime(2026, 9, 18, 16, 31, tzinfo=UTC)
+    try:
+        async with sessions.begin() as session:
+            claim = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                session,
+                account_id=seed.account_id,
+                candidate_batch_id=seed.batch_id,
+                client_idempotency_key="synthesis-once",
+                now=now,
+                trigger_mode="synthesis_recovery",
+            )
+            assert claim.decision_slot_at == datetime(2026, 9, 18, 16, 30, tzinfo=UTC)
+            await agent_cycle.finish_schwab_agent_paper_trigger(
+                session, reservation=claim, error_code="SCHWAB_L1_INCOMPLETE"
+            )
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+                await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=seed.account_id,
+                    candidate_batch_id=seed.batch_id,
+                    client_idempotency_key="synthesis-once",
+                    now=now,
+                    trigger_mode="synthesis_recovery",
+                )
+            with pytest.raises(ValueError, match="AGENT_PAPER_IDEMPOTENCY_CONFLICT"):
+                await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=seed.account_id,
+                    candidate_batch_id=seed.batch_id,
+                    client_idempotency_key="new-key",
+                    now=now,
+                    trigger_mode="synthesis_recovery",
+                )
+    finally:
+        await engine.dispose()

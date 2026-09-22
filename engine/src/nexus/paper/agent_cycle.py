@@ -1,6 +1,6 @@
 """Resumable, append-only coordination for one internal Agent paper cycle."""
 
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from hashlib import sha256
 from typing import Literal, cast
@@ -62,7 +62,11 @@ from nexus.paper.portfolio_proposal import KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.agent_versions import AgentVersionEvaluationRecord
-from nexus.persistence.models.agents import AgentPromptVersionRecord, AgentResearchRunRecord
+from nexus.persistence.models.agents import (
+    AgentPortfolioSynthesisRunRecord,
+    AgentPromptVersionRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.paper import (
     PAPER_DECISION_SOURCE_POLICY_ID,
     PAPER_EXECUTION_SOURCE_POLICY_ID,
@@ -123,6 +127,111 @@ _TRIGGER_FAILURE_CODES = frozenset(
 _MANUAL_RECOVERY_FAILURE_CODES = frozenset({"SCHWAB_L1_FRESHNESS_UNPROVEN", "SCHWAB_L1_INCOMPLETE"})
 
 
+async def _require_synthesis_recovery_predecessor(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    decision_session: date,
+    candidate_batch_id: UUID,
+    now: datetime,
+) -> None:
+    """Permit one new cycle only after a fully known pre-synthesis terminal failure."""
+    code = "AGENT_PAPER_SYNTHESIS_RECOVERY_UNAVAILABLE"
+    prior_claim = await session.scalar(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account_id}",
+            IdempotencyRecord.route == "agent-paper-manual-trigger-v1",
+            IdempotencyRecord.idempotency_key == f"manual-recovery:{decision_session.isoformat()}",
+            IdempotencyRecord.schema_version == "agent_paper_manual_trigger_v1",
+        )
+    )
+    payload = None if prior_claim is None else prior_claim.response_payload
+    raw_result = payload.get("result") if isinstance(payload, dict) else None
+    if payload is None or payload.get("outcome") != "completed" or not isinstance(raw_result, dict):
+        raise ValueError(code)
+    try:
+        prior_result = AgentPaperCycleResult.model_validate(raw_result)
+    except ValueError:
+        raise ValueError(code) from None
+    cycles = tuple(
+        await session.scalars(
+            select(AgentPaperCycleRecord)
+            .where(
+                AgentPaperCycleRecord.account_id == account_id,
+                AgentPaperCycleRecord.decision_session == decision_session,
+            )
+            .limit(2)
+        )
+    )
+    if len(cycles) != 1:
+        raise ValueError(code)
+    cycle = cycles[0]
+    if (
+        cycle.id != prior_result.cycle_id
+        or cycle.candidate_batch_id != candidate_batch_id
+        or not cycle.execution_locked
+    ):
+        raise ValueError(code)
+    events = await _events(session, cycle.id)
+    if (
+        len(events) != 3
+        or [event.to_status for event in events] != ["prepared", "researching", "unavailable"]
+        or events[1].result_code != "RESEARCH_JOBS_PREPARED"
+        or events[2].from_status != "researching"
+        or events[2].result_code != "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+    ):
+        raise ValueError(code)
+    prompt = await session.scalar(
+        select(AgentPromptVersionRecord).where(
+            AgentPromptVersionRecord.role == "portfolio_decision",
+            AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
+            AgentPromptVersionRecord.release_channel == "active",
+        )
+    )
+    if prompt is None or not events[2].created_at < prompt.created_at <= now:
+        raise ValueError(code)
+    raw_run_ids = events[1].fact_ids.get("research_run_ids")
+    if not isinstance(raw_run_ids, list) or not 1 <= len(raw_run_ids) <= 5:
+        raise ValueError(code)
+    try:
+        run_ids = tuple(UUID(str(value)) for value in raw_run_ids)
+    except ValueError:
+        raise ValueError(code) from None
+    jobs = tuple(
+        await session.scalars(
+            select(Job).where(
+                Job.job_type.in_(
+                    (JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)
+                ),
+                Job.payload["run_id"].as_string().in_(tuple(str(value) for value in run_ids)),
+            )
+        )
+    )
+    if (
+        len(run_ids) != len(set(run_ids))
+        or len(jobs) != len(run_ids)
+        or any(job.status != "succeeded" or job.finished_at is None for job in jobs)
+    ):
+        raise ValueError(code)
+    try:
+        for run_id in run_ids:
+            await load_actionable_research_output(
+                session, run_id=run_id, decision_time=now, allow_safe_no_trade=True
+            )
+    except ActionableResearchError:
+        raise ValueError(code) from None
+    if await session.scalar(
+        select(AgentPortfolioSynthesisRunRecord.id).where(
+            AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
+        )
+    ) or await session.scalar(
+        select(StrategyDecisionRecord.id).where(
+            StrategyDecisionRecord.agent_paper_cycle_id == cycle.id
+        )
+    ):
+        raise ValueError(code)
+
+
 async def reserve_schwab_agent_paper_trigger(
     session: AsyncSession,
     *,
@@ -130,7 +239,7 @@ async def reserve_schwab_agent_paper_trigger(
     client_idempotency_key: str,
     now: datetime,
     candidate_batch_id: UUID | None = None,
-    trigger_mode: Literal["scheduled", "manual_recovery"] = "scheduled",
+    trigger_mode: Literal["scheduled", "manual_recovery", "synthesis_recovery"] = "scheduled",
     require_synthesis_prompt: bool = False,
 ) -> AgentPaperTriggerReservation:
     """Reserve one database-derived decision slot before provider work begins."""
@@ -179,6 +288,13 @@ async def reserve_schwab_agent_paper_trigger(
             or payload.get("error_code") not in _MANUAL_RECOVERY_FAILURE_CODES
         ):
             raise ValueError("AGENT_PAPER_MANUAL_RECOVERY_UNAVAILABLE")
+    elif trigger_mode == "synthesis_recovery":
+        if not time(10, 5) <= local_time.time().replace(tzinfo=None) < time(15, 0):
+            raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
+        decision_slot_at = floor_decision_slot(now)
+        route = "agent-paper-synthesis-recovery-v1"
+        schema = "agent_paper_synth_recovery_v1"
+        claim_key = f"synthesis-recovery:{local_time.date().isoformat()}"
     else:
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     account = await session.get(PaperAccountRecord, account_id)
@@ -199,7 +315,7 @@ async def reserve_schwab_agent_paper_trigger(
         "candidate_batch_id": str(batch.batch_id),
         "candidate_batch_hash": batch.batch_hash,
     }
-    if trigger_mode == "manual_recovery":
+    if trigger_mode != "scheduled":
         request_payload["trigger_mode"] = trigger_mode
     request_hash = job_input_hash(request_payload)
     claim, inserted = await claim_or_lock(
@@ -246,6 +362,14 @@ async def reserve_schwab_agent_paper_trigger(
             )
             if existing_cycle is not None:
                 raise ValueError("AGENT_PAPER_MANUAL_RECOVERY_UNAVAILABLE")
+        elif trigger_mode == "synthesis_recovery":
+            await _require_synthesis_recovery_predecessor(
+                session,
+                account_id=account_id,
+                decision_session=local_time.date(),
+                candidate_batch_id=batch.batch_id,
+                now=now,
+            )
         await validate_agent_paper_candidate_batch(
             session,
             batch_id=batch.batch_id,
@@ -287,21 +411,18 @@ async def finish_schwab_agent_paper_trigger(
         .where(IdempotencyRecord.id == reservation.claim_id)
         .with_for_update()
     )
-    route = (
-        "agent-paper-schwab-trigger-v2"
-        if reservation.trigger_mode == "scheduled"
-        else "agent-paper-manual-trigger-v1"
-    )
-    schema = (
-        "agent_paper_schwab_trigger_v2"
-        if reservation.trigger_mode == "scheduled"
-        else "agent_paper_manual_trigger_v1"
-    )
-    claim_key = (
-        reservation.decision_slot_at.isoformat()
-        if reservation.trigger_mode == "scheduled"
-        else f"manual-recovery:{reservation.decision_session.isoformat()}"
-    )
+    if reservation.trigger_mode == "scheduled":
+        route = "agent-paper-schwab-trigger-v2"
+        schema = "agent_paper_schwab_trigger_v2"
+        claim_key = reservation.decision_slot_at.isoformat()
+    elif reservation.trigger_mode == "manual_recovery":
+        route = "agent-paper-manual-trigger-v1"
+        schema = "agent_paper_manual_trigger_v1"
+        claim_key = f"manual-recovery:{reservation.decision_session.isoformat()}"
+    else:
+        route = "agent-paper-synthesis-recovery-v1"
+        schema = "agent_paper_synth_recovery_v1"
+        claim_key = f"synthesis-recovery:{reservation.decision_session.isoformat()}"
     if (
         claim is None
         or claim.route != route

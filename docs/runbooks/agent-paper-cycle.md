@@ -43,6 +43,9 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 当天 10:00 行情采集失败且未创建周期时，唯一例外是用户明确要求的
 [同日一次手动恢复](portfolio-management-first-slice.md#同日一次手动恢复)。它有独立入口和持久化
 认领，不改变上述正常组合时间窗，也不重放失败槽位。
+该手动周期若因随后发现的合成提示词缺失而在成功研究后终止，只能按
+[合成配置缺失后的独立恢复](portfolio-management-first-slice.md#合成配置缺失后的独立恢复)
+审查一次新的周期；原终态不可重开，第二次仍失败则当天停止。
 
 运行前还必须满足：
 
