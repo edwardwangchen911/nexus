@@ -875,6 +875,7 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         )
         assert after_close["current_session"] == "2026-09-18"
         assert after_close["decision_session"] == "2026-09-21"
+        assert after_close["scheduled_trigger"] is None
         assert after_close["normal_cycle_start_status"] == "outside_normal_window"
         assert projected_slots == [datetime(2026, 9, 21, 14, tzinfo=UTC)]
 

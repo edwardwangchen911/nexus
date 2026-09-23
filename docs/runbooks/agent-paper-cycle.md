@@ -35,8 +35,9 @@ XNYS 交易日、批次与正式研究 Universe、组合合成提示词的有效
 `ready_static` 只表示上述已存证据齐备，返回中的
 `window_evidence_status=not_evaluated` 表示同日 Schwab 行情、风险查询、
 研究 Job、内部模拟执行和页面结果仍须分别验收。该命令不调用 Provider、模型，
-不创建周期、订单或任何业务事实。`scheduled_trigger` 和
-`current_session_cycles` 读回当天已认领的正常槽位及已创建的组合周期；
+不创建周期、订单或任何业务事实。`scheduled_trigger` 只读回 `decision_session`
+对应的正常槽位，`current_session_cycles` 读回纽约当地日期已创建的组合周期；
+盘后预检下一交易日时，前一交易日的失败触发不会显示成下一交易日的失败。
 `normal_cycle_start_status=blocked_scheduled_claim/blocked_existing_cycle` 时不得换 key
 启动新的正常周期。`requires_window_evidence` 也不等于可以直接触发，仍须核对
 当日风险和行情证据。运行前还须核对 `nexus-local-stack status` 的

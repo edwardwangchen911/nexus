@@ -338,7 +338,7 @@ async def inspect_agent_paper_candidate_static_readiness(
         raise ValueError("AGENT_PAPER_CALENDAR_PRIOR_SESSION_MISSING")
     synthesis_prompt_ready = await has_active_portfolio_synthesis_prompt(session, as_of=as_of)
     scheduled_slot = datetime.combine(
-        calendar.local_date,
+        calendar.session,
         PORTFOLIO_ALLOCATION_V1.decision_local_time,
         tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
     ).astimezone(UTC)
