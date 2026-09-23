@@ -1769,14 +1769,14 @@ def _normal_wait_until(
     return wait_until
 
 
-_SAFE_EVALUATION_FAILURE_PHASES = frozenset(
+_SAFE_PREPARATION_FAILURE_PHASES = frozenset(
     {"configuration", "prior_daily", "macro", "current_trends", "prepare_pair"}
 )
 
 
 def _annotate_agent_paper_failure(error: Exception, *, phase: str) -> None:
     """Attach one allowlisted diagnostic phase without exposing exception details."""
-    if phase not in _SAFE_EVALUATION_FAILURE_PHASES:
+    if phase not in _SAFE_PREPARATION_FAILURE_PHASES:
         return
     try:
         setattr(error, "_nexus_agent_paper_failure_phase", phase)
@@ -1812,7 +1812,7 @@ def _emit_agent_paper_unknown_failure(
                 else "unexpected_exception"
             )
         phase = getattr(error, "_nexus_agent_paper_failure_phase", None)
-        if phase in _SAFE_EVALUATION_FAILURE_PHASES:
+        if phase in _SAFE_PREPARATION_FAILURE_PHASES:
             payload["failure_phase"] = phase
         print(
             json.dumps(payload, sort_keys=True),
@@ -2441,19 +2441,23 @@ async def execute_agent_paper_loop_action(
             < _portfolio_slot(snapshot.decision_window_start_at)
         ):
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        environment = (
-            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
-            if env_file is not None
-            else load_agent_paper_service_environment(repo_root, os.environ)
-        )
-        trigger_settings = (
-            _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
-        ).model_validate(environment)
-        if env_file is not None:
-            _require_explicit_schwab_config(environment)
-        macro_settings = (
-            _FileDailySettings if env_file is not None else DailyOnceSettings
-        ).model_validate(environment)
+        try:
+            environment = (
+                load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                if env_file is not None
+                else load_agent_paper_service_environment(repo_root, os.environ)
+            )
+            trigger_settings = (
+                _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
+            ).model_validate(environment)
+            if env_file is not None:
+                _require_explicit_schwab_config(environment)
+            macro_settings = (
+                _FileDailySettings if env_file is not None else DailyOnceSettings
+            ).model_validate(environment)
+        except Exception as error:
+            _annotate_agent_paper_failure(error, phase="configuration")
+            raise
         candidates = await _load_loop_candidates(
             trigger_settings,
             account_id=account_id,
@@ -2461,37 +2465,49 @@ async def execute_agent_paper_loop_action(
             expected_calendar_authority_id=snapshot.calendar_authority_id,
         )
         for candidate in candidates:
-            daily = await prepare_prior_daily_once(
-                trigger_settings,
-                account_id=account_id,
-                repo_root=repo_root,
-                now=snapshot.now,
-                expected_calendar_authority_id=snapshot.calendar_authority_id,
-                candidate=candidate,
-            )
+            try:
+                daily = await prepare_prior_daily_once(
+                    trigger_settings,
+                    account_id=account_id,
+                    repo_root=repo_root,
+                    now=snapshot.now,
+                    expected_calendar_authority_id=snapshot.calendar_authority_id,
+                    candidate=candidate,
+                )
+            except Exception as error:
+                _annotate_agent_paper_failure(error, phase="prior_daily")
+                raise
             if daily not in {"ready", "prepared", "unavailable"}:
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         for candidate in candidates:
-            macro = await prepare_macro_once(
-                macro_settings,
-                fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
-                account_id=account_id,
-                repo_root=repo_root,
-                now=snapshot.now,
-                expected_calendar_authority_id=snapshot.calendar_authority_id,
-                candidate=candidate,
-            )
+            try:
+                macro = await prepare_macro_once(
+                    macro_settings,
+                    fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+                    account_id=account_id,
+                    repo_root=repo_root,
+                    now=snapshot.now,
+                    expected_calendar_authority_id=snapshot.calendar_authority_id,
+                    candidate=candidate,
+                )
+            except Exception as error:
+                _annotate_agent_paper_failure(error, phase="macro")
+                raise
             if macro not in {"ready", "prepared", "unavailable"}:
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         for candidate in candidates:
-            trends = await prepare_current_trends_once(
-                trigger_settings,
-                account_id=account_id,
-                repo_root=repo_root,
-                now=snapshot.now,
-                expected_calendar_authority_id=snapshot.calendar_authority_id,
-                candidate=candidate,
-            )
+            try:
+                trends = await prepare_current_trends_once(
+                    trigger_settings,
+                    account_id=account_id,
+                    repo_root=repo_root,
+                    now=snapshot.now,
+                    expected_calendar_authority_id=snapshot.calendar_authority_id,
+                    candidate=candidate,
+                )
+            except Exception as error:
+                _annotate_agent_paper_failure(error, phase="current_trends")
+                raise
             if trends not in {"ready", "prepared", "unavailable"}:
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         return None

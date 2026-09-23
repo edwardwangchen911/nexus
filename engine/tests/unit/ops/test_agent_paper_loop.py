@@ -261,6 +261,54 @@ def test_opening_preparation_binds_every_candidate_without_trigger(monkeypatch) 
     ]
 
 
+@pytest.mark.parametrize("failure_phase", ["prior_daily", "macro", "current_trends"])
+def test_opening_preparation_reports_safe_failure_phase(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure_phase: str
+) -> None:
+    async def load(*_args, **_kwargs):
+        return (TEST_CANDIDATE,)
+
+    async def prepare(*_args, **_kwargs):
+        return "ready"
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("private-provider-detail")
+
+    monkeypatch.setattr(
+        loop,
+        "load_agent_paper_service_environment",
+        lambda *a, **k: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+    monkeypatch.setattr(loop, "_load_loop_candidates", load)
+    for phase, method in (
+        ("prior_daily", "prepare_prior_daily_once"),
+        ("macro", "prepare_macro_once"),
+        ("current_trends", "prepare_current_trends_once"),
+    ):
+        monkeypatch.setattr(loop, method, fail if phase == failure_phase else prepare)
+    market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
+    with pytest.raises(RuntimeError, match="private-provider-detail") as caught:
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=Path("/unused"),
+                action=A.PREPARE_INPUTS,
+                snapshot=snapshot(now=market_open, market_open_at=market_open),
+            )
+        )
+    loop._emit_agent_paper_unknown_failure(
+        "execute", market_open, action=A.PREPARE_INPUTS, error=caught.value
+    )
+    diagnostic = capsys.readouterr().err
+    assert json.loads(diagnostic)["failure_phase"] == failure_phase
+    assert "private-provider-detail" not in diagnostic
+
+
 def test_foreground_prepares_once_then_waits_for_formal_slot() -> None:
     market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
     slot = market_open + timedelta(minutes=30)
