@@ -10,7 +10,12 @@ from helpers.paper_batch import INSTRUMENTS
 from integration.test_portfolio_proposal_pg import proposal_source
 from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
 from nexus.agents.responses_budget import UsageSnapshot
-from nexus.ops.portfolio_challenger import ProposeRequest, execute_propose
+from nexus.ops.portfolio_challenger import (
+    ProposeRequest,
+    PublishRequest,
+    execute_propose,
+    execute_publish,
+)
 from nexus.paper import agent_challenger
 from nexus.paper import agent_challenger_runtime as challenger_runtime
 from nexus.paper.agent_challenger import (
@@ -19,6 +24,7 @@ from nexus.paper.agent_challenger import (
     PortfolioChallengerRetrospectiveV1,
 )
 from nexus.paper.agent_cycle import _events, _resume_portfolio_synthesis
+from nexus.persistence.models.agents import AgentPromptVersionRecord
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.settings import EngineSettings
@@ -252,6 +258,39 @@ async def test_portfolio_proposal_job_is_persisted_and_replayed_once(
                 )
             )
         assert count == 1
+
+        publication_request = PublishRequest(
+            action="publish", proposal_hash=first.proposal.proposal_hash
+        )
+        publication = await execute_publish(settings, publication_request)
+        publication_replay = await execute_publish(settings, publication_request)
+        assert publication_replay.model_copy(update={"replayed": False}) == publication
+        assert publication_replay.replayed is True
+        assert publication.challenger_model_config_id == first.proposal.incumbent_model_config_id
+        async with sessions() as session:
+            prompt = await session.get(
+                AgentPromptVersionRecord, publication.challenger_prompt_version_id
+            )
+            assert prompt is not None
+            assert prompt.role == "portfolio_decision"
+            assert prompt.release_channel == "challenger"
+            assert first.proposal.prompt_addendum in prompt.content
+            assert prompt.content_hash == publication.challenger_prompt_hash
+            incumbent = await session.get(
+                AgentPromptVersionRecord, first.proposal.incumbent_prompt_version_id
+            )
+            assert incumbent is not None
+            assert incumbent.release_channel == "active"
+            publication_count = await session.scalar(
+                select(func.count(AuditEvent.id)).where(
+                    AuditEvent.action == "portfolio.challenger.published"
+                )
+            )
+            assert publication_count == 1
+        with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_PROPOSAL_UNKNOWN"):
+            await execute_publish(
+                settings, PublishRequest(action="publish", proposal_hash="0" * 64)
+            )
 
         class FailingRuntime:
             calls = 0

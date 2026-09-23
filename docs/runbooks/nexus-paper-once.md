@@ -61,6 +61,31 @@ addendum，其余 7 个角色逐字节复制 incumbent。默认 Agent 运行只�
 challenger orchestrator ID 只作为整套 bundle 的锚，缺角色或混入 active 时 fail closed。发布
 不会切换 active、注册或推进 4+20、启动调度、创建订单或改变 `execution_locked=true`。
 
+## 多股票组合决策 challenger：提案与隔离发布
+
+这条入口针对正式 `portfolio_decision` 组合选仓提示词，与上面的固定 AAPL 八角色研究
+challenger 不共用评价合同。至少一个已完成的正式组合周期须包含 2–5 个候选、完整研究与综合决策、
+确定性执行终态；未完成或单候选周期不会成为复盘样本。命令复用已落盘事实，同一幂等键不重放
+模型调用：
+
+```sh
+uv run --project engine nexus-engine-portfolio-challenger propose \
+  --account-id <内部模拟账户 UUID> \
+  --history-limit 20 \
+  --idempotency-key <固定键>
+```
+
+人工核对提案的证据、假设、提示词附录与失效条件后，使用原提案的精确 hash 发布隔离候选：
+
+```sh
+uv run --project engine nexus-engine-portfolio-challenger publish \
+  --proposal-hash <已审阅的64位hash>
+```
+
+发布仅新增 `release_channel=challenger` 的 `portfolio_decision` 提示词和审计事件，
+不替换正式 `active` 版本，不启动模型评价、调度或任何订单。现有固定 AAPL 4+20 评价
+不能验证这一组合提示词；多股票组合级对照及样本外结论须另行完成。
+
 ## Agent 版本并行评价：先查持久化状态
 
 版本评价只允许固定 AAPL、两个冻结版本、独立内部账户以及预先登记的 4 个训练槽和 20 个

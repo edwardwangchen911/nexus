@@ -92,6 +92,7 @@ You have no tools."""
 PORTFOLIO_PROPOSER_PROMPT_HASH = hashlib.sha256(PORTFOLIO_PROPOSER_PROMPT.encode()).hexdigest()
 PORTFOLIO_PROVIDER_PROJECTION_VERSION = "portfolio-challenger-provider-v1"
 PORTFOLIO_CHALLENGER_PROPOSAL_ACTION = "portfolio.challenger.proposed"
+PORTFOLIO_CHALLENGER_PUBLICATION_ACTION = "portfolio.challenger.published"
 PORTFOLIO_PROMPT_CONTRACT_SUFFIX = """Portfolio-decision contract preservation:
 - Compare every frozen candidate; output exactly one existing choice per compared instrument.
 - Keep evidence references, replacement dependencies, role/rank and cash rationale semantics.
@@ -945,6 +946,16 @@ class PortfolioChallengerJobOutputV1(_FrozenModel):
     tool_calls: Literal[0]
 
 
+class PortfolioChallengerPublicationV1(_FrozenModel):
+    schema_version: Literal["portfolio_challenger_pub_v1"]
+    proposal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    incumbent_prompt_version_id: UUID
+    challenger_prompt_version_id: UUID
+    challenger_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    challenger_model_config_id: UUID
+    replayed: bool
+
+
 def freeze_portfolio_challenger_proposal_v1(
     retrospective: PortfolioChallengerRetrospectiveV1,
     suggestion: PortfolioChallengerSuggestionV1,
@@ -970,6 +981,157 @@ def freeze_portfolio_challenger_proposal_v1(
     return PortfolioChallengerProposalV1.model_validate(
         {**payload, "proposal_hash": _hash(payload)}
     )
+
+
+async def publish_portfolio_challenger(
+    session: AsyncSession, *, proposal_hash: str, actor_id: str, now: datetime
+) -> PortfolioChallengerPublicationV1:
+    """Publish one reviewed candidate without changing the active synthesis prompt."""
+    if len(proposal_hash) != 64 or any(char not in "0123456789abcdef" for char in proposal_hash):
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_PROPOSAL_HASH_INVALID")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1422))"),
+        {"scope": f"portfolio-challenger-publish:{proposal_hash}"},
+    )
+    publication_event = await session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.action == PORTFOLIO_CHALLENGER_PUBLICATION_ACTION,
+            AuditEvent.schema_version == "portfolio_challenger_pub_v1",
+            AuditEvent.payload["proposal_hash"].as_string() == proposal_hash,
+        )
+    )
+    if publication_event is not None:
+        published = PortfolioChallengerPublicationV1.model_validate(publication_event.payload)
+        prompt = await session.get(AgentPromptVersionRecord, published.challenger_prompt_version_id)
+        if (
+            prompt is None
+            or prompt.role != "portfolio_decision"
+            or prompt.release_channel != "challenger"
+            or prompt.content_hash != published.challenger_prompt_hash
+            or hashlib.sha256(prompt.content.encode()).hexdigest() != prompt.content_hash
+        ):
+            raise AgentChallengerError("PORTFOLIO_CHALLENGER_PUBLICATION_INVALID")
+        return published.model_copy(update={"replayed": True})
+
+    proposal_event = await session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.action == PORTFOLIO_CHALLENGER_PROPOSAL_ACTION,
+            AuditEvent.schema_version == "portfolio_challenger_output_v1",
+            AuditEvent.payload["proposal"]["proposal_hash"].as_string() == proposal_hash,
+        )
+    )
+    if proposal_event is None:
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_PROPOSAL_UNKNOWN")
+    output = PortfolioChallengerJobOutputV1.model_validate(proposal_event.payload)
+    proposal = output.proposal
+    job = await session.get(Job, output.job_id)
+    if (
+        job is None
+        or job.job_type != "agent.challenger_propose"
+        or job.schema_version != "portfolio_challenger_job_v1"
+        or job.status != "succeeded"
+        or job.result_code != "PORTFOLIO_CHALLENGER_PROPOSED"
+        or job.queue != "general"
+        or job.scope_kind != "portfolio"
+        or job.scope_id != str(proposal.portfolio_id)
+        or job.retry_policy != "never"
+        or job.max_attempts != 1
+        or job.attempt_count != 1
+        or job.input_hash != job_input_hash(job.payload)
+        or job.payload.get("proposer_prompt_version") != PORTFOLIO_PROPOSER_PROMPT_VERSION
+        or job.payload.get("proposer_prompt_hash") != PORTFOLIO_PROPOSER_PROMPT_HASH
+        or job.payload.get("provider_projection_version") != PORTFOLIO_PROVIDER_PROJECTION_VERSION
+        or output.proposer_prompt_hash != PORTFOLIO_PROPOSER_PROMPT_HASH
+    ):
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_JOB_AUTHORITY_INVALID")
+    try:
+        retrospective = PortfolioChallengerRetrospectiveV1.model_validate(
+            job.payload["retrospective"]
+        )
+    except (KeyError, ValueError) as error:
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_JOB_AUTHORITY_INVALID") from error
+    history_limit = job.payload.get("history_limit")
+    request_hash = (
+        job_input_hash(
+            {
+                "schema_version": "portfolio_challenger_request_v1",
+                "account_id": str(retrospective.account_id),
+                "history_limit": history_limit,
+            }
+        )
+        if type(history_limit) is int and 1 <= history_limit <= 20
+        else None
+    )
+    if (
+        request_hash is None
+        or job.payload.get("request_hash") != request_hash
+        or retrospective.source_hash != proposal.source_hash
+        or retrospective.account_id != proposal.account_id
+        or retrospective.portfolio_id != proposal.portfolio_id
+        or tuple(item.cycle_id for item in retrospective.cycles) != proposal.source_cycle_ids
+        or retrospective.incumbent_prompt_version_id != proposal.incumbent_prompt_version_id
+        or retrospective.incumbent_prompt_hash != proposal.incumbent_prompt_hash
+        or retrospective.incumbent_model_config_id != proposal.incumbent_model_config_id
+        or retrospective.incumbent_model_hash != proposal.incumbent_model_hash
+    ):
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_JOB_AUTHORITY_INVALID")
+    incumbent = await session.get(AgentPromptVersionRecord, proposal.incumbent_prompt_version_id)
+    model = await session.get(AgentModelConfigRecord, proposal.incumbent_model_config_id)
+    if (
+        incumbent is None
+        or incumbent.role != "portfolio_decision"
+        or incumbent.version != SYNTHESIS_PROMPT_VERSION
+        or incumbent.release_channel != "active"
+        or incumbent.content != retrospective.incumbent_prompt_content
+        or incumbent.content_hash != proposal.incumbent_prompt_hash
+        or hashlib.sha256(incumbent.content.encode()).hexdigest() != incumbent.content_hash
+        or model is None
+        or model.config_hash != proposal.incumbent_model_hash
+    ):
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_INCUMBENT_CHANGED")
+    version = f"portfolio-challenger-{proposal_hash[:16]}"
+    content = (
+        f"{incumbent.content.rstrip()}\n\n"
+        "## Frozen challenger addendum\n"
+        f"{proposal.prompt_addendum.strip()}\n"
+    )
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    prompt = await session.scalar(
+        select(AgentPromptVersionRecord).where(
+            AgentPromptVersionRecord.role == "portfolio_decision",
+            AgentPromptVersionRecord.version == version,
+        )
+    )
+    if prompt is not None:
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_PROMPT_VERSION_CONFLICT")
+    prompt = AgentPromptVersionRecord(
+        id=new_uuid7(),
+        role="portfolio_decision",
+        version=version,
+        release_channel="challenger",
+        content_hash=content_hash,
+        content=content,
+    )
+    session.add(prompt)
+    await session.flush()
+    publication = PortfolioChallengerPublicationV1(
+        schema_version="portfolio_challenger_pub_v1",
+        proposal_hash=proposal_hash,
+        incumbent_prompt_version_id=incumbent.id,
+        challenger_prompt_version_id=prompt.id,
+        challenger_prompt_hash=content_hash,
+        challenger_model_config_id=model.id,
+        replayed=False,
+    )
+    await append_audit_event(
+        session,
+        actor_id=actor_id,
+        action=PORTFOLIO_CHALLENGER_PUBLICATION_ACTION,
+        schema_version=publication.schema_version,
+        payload=publication.model_dump(mode="json"),
+        occurred_at=now,
+    )
+    return publication
 
 
 def freeze_agent_challenger_retrospective_v4(

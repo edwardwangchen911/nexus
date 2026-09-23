@@ -33,9 +33,11 @@ from nexus.paper.agent_challenger import (
     PORTFOLIO_PROVIDER_PROJECTION_VERSION,
     AgentChallengerError,
     PortfolioChallengerJobOutputV1,
+    PortfolioChallengerPublicationV1,
     PortfolioChallengerRetrospectiveV1,
     collect_portfolio_challenger_retrospective,
     freeze_portfolio_challenger_proposal_v1,
+    publish_portfolio_challenger,
 )
 from nexus.paper.agent_challenger_runtime import (
     CodexPortfolioChallengerRuntime,
@@ -57,6 +59,13 @@ class ProposeRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
 
 
+class PublishRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    action: Literal["publish"]
+    proposal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="nexus-engine-portfolio-challenger")
     commands = root.add_subparsers(dest="action", required=True)
@@ -64,6 +73,8 @@ def parser() -> argparse.ArgumentParser:
     propose.add_argument("--account-id", required=True)
     propose.add_argument("--history-limit", type=int, default=20)
     propose.add_argument("--idempotency-key", required=True)
+    publish = commands.add_parser("publish")
+    publish.add_argument("--proposal-hash", required=True)
     return root
 
 
@@ -263,12 +274,39 @@ async def _load_job_output(session, job_id: UUID) -> PortfolioChallengerJobOutpu
     return PortfolioChallengerJobOutputV1.model_validate(event.payload)
 
 
+async def execute_publish(
+    settings: EngineSettings, request: PublishRequest
+) -> PortfolioChallengerPublicationV1:
+    _validate_local_database(settings.database_url)
+    assert settings.database_url is not None
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            return await publish_portfolio_challenger(
+                session,
+                proposal_hash=request.proposal_hash,
+                actor_id="human-local",
+                now=datetime.now(UTC),
+            )
+    finally:
+        await engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         values = vars(parser().parse_args(argv))
-        request = ProposeRequest.model_validate(values)
+        request: ProposeRequest | PublishRequest = (
+            ProposeRequest.model_validate(values)
+            if values.get("action") == "propose"
+            else PublishRequest.model_validate(values)
+        )
         settings = EngineSettings.model_validate(load_local_environment(Path.cwd(), {}))
-        result = asyncio.run(execute_propose(settings, request))
+        result = asyncio.run(
+            execute_propose(settings, request)
+            if isinstance(request, ProposeRequest)
+            else execute_publish(settings, request)
+        )
     except Exception as error:
         code = str(error)
         if not code.startswith("PORTFOLIO_CHALLENGER_") and code not in {
