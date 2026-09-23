@@ -5,8 +5,13 @@ from datetime import timedelta
 import pytest
 from helpers.paper_batch import INSTRUMENTS
 from integration.test_portfolio_proposal_pg import proposal_source
+from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
 from nexus.paper import agent_challenger
-from nexus.paper.agent_challenger import AgentChallengerError, PortfolioChallengerCycleSampleV1
+from nexus.paper.agent_challenger import (
+    AgentChallengerError,
+    PortfolioChallengerCycleSampleV1,
+    PortfolioChallengerRetrospectiveV1,
+)
 from nexus.paper.agent_cycle import _events, _resume_portfolio_synthesis
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 
@@ -52,6 +57,23 @@ async def test_completed_portfolio_cycle_yields_all_candidate_evidence(
         )
         assert sample.synthesis_intent.compared_instrument_ids == sample.candidate_instrument_ids
         assert len(sample.source_hash) == 64
+        async with sessions() as session:
+            retrospective = await agent_challenger.collect_portfolio_challenger_retrospective(
+                session,
+                account_id=cycle.account_id,
+                as_of=args["now"] + timedelta(minutes=2),
+            )
+        assert tuple(item.cycle_id for item in retrospective.cycles) == (cycle.id,)
+        assert retrospective.incumbent_prompt_version == SYNTHESIS_PROMPT_VERSION
+        assert retrospective.incumbent_prompt_hash == sample.synthesis_prompt_hash
+        assert retrospective.incumbent_prompt_version_id == sample.synthesis_prompt_version_id
+        assert len(retrospective.source_hash) == 64
+        altered_history = retrospective.model_dump(mode="json")
+        altered_history["as_of"] = (
+            (args["now"] + timedelta(minutes=3)).isoformat().replace("+00:00", "Z")
+        )
+        with pytest.raises(ValueError, match="PORTFOLIO_CHALLENGER_RETROSPECTIVE_INVALID"):
+            PortfolioChallengerRetrospectiveV1.model_validate(altered_history)
         tampered = sample.model_dump(mode="json")
         tampered["result_code"] = "PAPER_ORDER_FILLED"
         with pytest.raises(ValueError, match="PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE"):
@@ -76,6 +98,13 @@ async def test_unfinished_portfolio_cycle_is_not_an_improvement_sample(
             async with sessions() as session:
                 await agent_challenger.collect_portfolio_challenger_cycle_sample(
                     session, cycle_id=args["cycle_id"], as_of=args["now"] + timedelta(minutes=2)
+                )
+        with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT"):
+            async with sessions() as session:
+                cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+                assert cycle is not None
+                await agent_challenger.collect_portfolio_challenger_retrospective(
+                    session, account_id=cycle.account_id, as_of=args["now"] + timedelta(minutes=2)
                 )
     finally:
         await engine.dispose()

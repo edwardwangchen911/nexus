@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.agents.portfolio_synthesis_contracts import (
+    SYNTHESIS_PROMPT_VERSION,
     PortfolioChoiceV1,
     PortfolioSynthesisIntentV1,
 )
@@ -329,6 +330,9 @@ class PortfolioChallengerCycleSampleV1(_FrozenModel):
 
     schema_version: Literal["portfolio_challenger_cycle_sample_v1"]
     cycle_id: UUID
+    account_id: UUID
+    portfolio_id: UUID
+    decision_slot_at: AwareDatetime
     candidate_batch_id: UUID
     candidate_instrument_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
     research_run_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
@@ -339,6 +343,10 @@ class PortfolioChallengerCycleSampleV1(_FrozenModel):
     synthesis_run_id: UUID
     synthesis_output_id: UUID
     synthesis_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    synthesis_prompt_version_id: UUID
+    synthesis_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    synthesis_model_config_id: UUID
+    synthesis_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     synthesis_intent: PortfolioSynthesisIntentV1
     strategy_decision_id: UUID
     decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -445,6 +453,20 @@ async def collect_portfolio_challenger_cycle_sample(
         or synthesis_run.candidate_batch_id != batch.id
         or synthesis_run.completed_at is None
         or synthesis_run.completed_at > as_of
+    ):
+        raise AgentChallengerError(code)
+    synthesis_prompt = await session.get(AgentPromptVersionRecord, synthesis_run.prompt_version_id)
+    synthesis_model = await session.get(AgentModelConfigRecord, synthesis_run.model_config_id)
+    if (
+        synthesis_prompt is None
+        or synthesis_prompt.role != "portfolio_decision"
+        or synthesis_prompt.version != SYNTHESIS_PROMPT_VERSION
+        or synthesis_prompt.release_channel != "active"
+        or hashlib.sha256(synthesis_prompt.content.encode()).hexdigest()
+        != synthesis_run.prompt_hash
+        or synthesis_prompt.content_hash != synthesis_run.prompt_hash
+        or synthesis_model is None
+        or synthesis_model.config_hash != synthesis_run.model_hash
     ):
         raise AgentChallengerError(code)
     try:
@@ -693,6 +715,9 @@ async def collect_portfolio_challenger_cycle_sample(
     payload = {
         "schema_version": "portfolio_challenger_cycle_sample_v1",
         "cycle_id": str(cycle_id),
+        "account_id": str(cycle.account_id),
+        "portfolio_id": str(cycle.portfolio_id),
+        "decision_slot_at": cycle.decision_slot_at.isoformat().replace("+00:00", "Z"),
         "candidate_batch_id": str(batch.id),
         "candidate_instrument_ids": [str(value) for value in instrument_ids],
         "research_run_ids": [str(run.id) for _, run in sorted(rows, key=lambda pair: pair[1].id)],
@@ -701,6 +726,10 @@ async def collect_portfolio_challenger_cycle_sample(
         "synthesis_run_id": str(synthesis_run.id),
         "synthesis_output_id": str(synthesis_output.id),
         "synthesis_content_hash": synthesis_output.content_hash,
+        "synthesis_prompt_version_id": str(synthesis_prompt.id),
+        "synthesis_prompt_hash": synthesis_prompt.content_hash,
+        "synthesis_model_config_id": str(synthesis_model.id),
+        "synthesis_model_hash": synthesis_model.config_hash,
         "synthesis_intent": synthesis_intent.model_dump(mode="json"),
         "strategy_decision_id": str(decision.id),
         "decision_hash": decision.decision_hash,
@@ -717,6 +746,124 @@ async def collect_portfolio_challenger_cycle_sample(
         ),
     }
     return PortfolioChallengerCycleSampleV1.model_validate(
+        {**payload, "source_hash": _hash(payload)}
+    )
+
+
+class PortfolioChallengerRetrospectiveV1(_FrozenModel):
+    """Exact portfolio-decision incumbent and bounded historical observations."""
+
+    schema_version: Literal["portfolio_challenger_retrospective_v1"]
+    account_id: UUID
+    portfolio_id: UUID
+    as_of: AwareDatetime
+    incumbent_prompt_version_id: UUID
+    incumbent_prompt_version: str = Field(min_length=1, max_length=100)
+    incumbent_prompt_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    incumbent_prompt_content: str = Field(min_length=1)
+    incumbent_model_config_id: UUID
+    incumbent_model_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cycles: tuple[PortfolioChallengerCycleSampleV1, ...] = Field(min_length=1, max_length=20)
+    source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _bound_history(self) -> PortfolioChallengerRetrospectiveV1:
+        if (
+            hashlib.sha256(self.incumbent_prompt_content.encode()).hexdigest()
+            != self.incumbent_prompt_hash
+            or len({item.cycle_id for item in self.cycles}) != len(self.cycles)
+            or tuple(sorted(self.cycles, key=lambda item: (item.decision_slot_at, item.cycle_id)))
+            != self.cycles
+            or any(
+                item.account_id != self.account_id
+                or item.portfolio_id != self.portfolio_id
+                or item.synthesis_prompt_version_id != self.incumbent_prompt_version_id
+                or item.synthesis_prompt_hash != self.incumbent_prompt_hash
+                or item.synthesis_model_config_id != self.incumbent_model_config_id
+                or item.synthesis_model_hash != self.incumbent_model_hash
+                or item.decision_slot_at > self.as_of
+                for item in self.cycles
+            )
+            or _hash(self.model_dump(mode="json", exclude={"source_hash"})) != self.source_hash
+        ):
+            raise ValueError("PORTFOLIO_CHALLENGER_RETROSPECTIVE_INVALID")
+        return self
+
+
+async def collect_portfolio_challenger_retrospective(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    as_of: datetime,
+    limit: int = 20,
+) -> PortfolioChallengerRetrospectiveV1:
+    """Freeze up to twenty settled portfolio cycles under one actual synthesis prompt."""
+    if as_of.tzinfo is None or as_of.utcoffset() is None or not 1 <= limit <= 20:
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_REQUEST_INVALID")
+    cycle_ids = tuple(
+        await session.scalars(
+            select(AgentPaperCycleRecord.id)
+            .where(
+                AgentPaperCycleRecord.account_id == account_id,
+                AgentPaperCycleRecord.candidate_batch_id.is_not(None),
+                AgentPaperCycleRecord.decision_time <= as_of,
+            )
+            .order_by(
+                AgentPaperCycleRecord.decision_slot_at.desc(), AgentPaperCycleRecord.id.desc()
+            )
+            .limit(100)
+        )
+    )
+    samples: list[PortfolioChallengerCycleSampleV1] = []
+    anchor: PortfolioChallengerCycleSampleV1 | None = None
+    for cycle_id in cycle_ids:
+        try:
+            sample = await collect_portfolio_challenger_cycle_sample(
+                session, cycle_id=cycle_id, as_of=as_of
+            )
+        except AgentChallengerError as error:
+            if error.reason_code != "PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE":
+                raise
+            continue
+        if anchor is None:
+            anchor = sample
+        if (
+            sample.portfolio_id == anchor.portfolio_id
+            and sample.synthesis_prompt_version_id == anchor.synthesis_prompt_version_id
+            and sample.synthesis_prompt_hash == anchor.synthesis_prompt_hash
+            and sample.synthesis_model_config_id == anchor.synthesis_model_config_id
+            and sample.synthesis_model_hash == anchor.synthesis_model_hash
+        ):
+            samples.append(sample)
+        if len(samples) == limit:
+            break
+    if anchor is None:
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT")
+    prompt = await session.get(AgentPromptVersionRecord, anchor.synthesis_prompt_version_id)
+    if (
+        prompt is None
+        or prompt.role != "portfolio_decision"
+        or prompt.version != SYNTHESIS_PROMPT_VERSION
+        or prompt.release_channel != "active"
+        or prompt.content_hash != anchor.synthesis_prompt_hash
+        or hashlib.sha256(prompt.content.encode()).hexdigest() != prompt.content_hash
+    ):
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_PROMPT_INVALID")
+    ordered = tuple(sorted(samples, key=lambda item: (item.decision_slot_at, item.cycle_id)))
+    payload = {
+        "schema_version": "portfolio_challenger_retrospective_v1",
+        "account_id": str(account_id),
+        "portfolio_id": str(anchor.portfolio_id),
+        "as_of": as_of.isoformat().replace("+00:00", "Z"),
+        "incumbent_prompt_version_id": str(prompt.id),
+        "incumbent_prompt_version": prompt.version,
+        "incumbent_prompt_hash": prompt.content_hash,
+        "incumbent_prompt_content": prompt.content,
+        "incumbent_model_config_id": str(anchor.synthesis_model_config_id),
+        "incumbent_model_hash": anchor.synthesis_model_hash,
+        "cycles": [item.model_dump(mode="json") for item in ordered],
+    }
+    return PortfolioChallengerRetrospectiveV1.model_validate(
         {**payload, "source_hash": _hash(payload)}
     )
 
