@@ -29,6 +29,7 @@ class PortfolioChallengerCase:
     source_input_hash: str
     challenger_input_hash: str
     challenger_prompt_hash: str
+    challenger_prompt_version: str
     frozen_input: PortfolioSynthesisInputV1
     instructions: str
 
@@ -71,6 +72,8 @@ def freeze_prospective_portfolio_challenger_case(
     ):
         raise AgentChallengerError("PORTFOLIO_CHALLENGER_CASE_NOT_PROSPECTIVE")
     document = frozen.model_dump(mode="json")
+    # prompt_version is the synthesis contract version; the record's distinct
+    # challenger release version is retained separately in the comparison Job.
     document["prompt_version_id"] = str(challenger_prompt.id)
     document["prompt_hash"] = challenger_prompt.content_hash
     challenger_input = PortfolioSynthesisInputV1.model_validate(document)
@@ -79,6 +82,7 @@ def freeze_prospective_portfolio_challenger_case(
         source_input_hash=run.input_hash,
         challenger_input_hash=canonical_portfolio_synthesis_hash(challenger_input),
         challenger_prompt_hash=challenger_prompt.content_hash,
+        challenger_prompt_version=challenger_prompt.version,
         frozen_input=challenger_input,
         instructions=challenger_prompt.content,
     )

@@ -29,8 +29,12 @@ from nexus.agents.portfolio_synthesis_persistence import (
     admit_portfolio_synthesis,
     persist_portfolio_synthesis_terminal,
 )
+from nexus.agents.responses_budget import UsageSnapshot
+from nexus.audit.service import append_audit_event
 from nexus.domain.evidence import EvidenceRef
+from nexus.ops.portfolio_challenger_compare import CompareRequest, execute_compare
 from nexus.paper.agent_challenger import (
+    PORTFOLIO_CHALLENGER_PUBLICATION_ACTION,
     AgentChallengerError,
     PortfolioChallengerPublicationV1,
 )
@@ -40,6 +44,7 @@ from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
 from nexus.paper.portfolio_challenger_case import freeze_prospective_portfolio_challenger_case
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
     AgentPortfolioSynthesisBudgetReservationRecord,
     AgentPortfolioSynthesisOutputRecord,
     AgentPortfolioSynthesisRunRecord,
@@ -49,7 +54,8 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.research import ResearchEvidenceRef
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import AuditEvent, Job
+from nexus.settings import EngineSettings
 from nexus.strategy.forward import load_forward_strategy_decision
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -322,6 +328,115 @@ async def test_portfolio_challenger_case_requires_publication_before_new_frozen_
                     published_at=frozen.admitted_at,
                     now=frozen.admitted_at + timedelta(seconds=1),
                 )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_failure", [False, True])
+async def test_portfolio_challenger_compare_is_once_only_and_cannot_create_orders(
+    migrated_database_url, model_failure,
+):
+    from nexus.persistence.models.paper import PaperOrderRecord
+
+    engine, sessions, kwargs = await seed_synthesis(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            incumbent = await session.scalar(
+                select(AgentPromptVersionRecord).where(
+                    AgentPromptVersionRecord.role == "portfolio_decision",
+                    AgentPromptVersionRecord.release_channel == "active",
+                )
+            )
+            model = await session.scalar(select(AgentModelConfigRecord))
+            assert incumbent is not None and model is not None
+            content = incumbent.content + "\nKeep candidate evidence separate."
+            challenger = AgentPromptVersionRecord(
+                id=uuid4(),
+                role="portfolio_decision",
+                version="portfolio-challenger-comparison-test-v1",
+                release_channel="challenger",
+                content=content,
+                content_hash=sha256(content.encode()).hexdigest(),
+                created_at=kwargs["now"] - timedelta(seconds=1),
+            )
+            session.add(challenger)
+            await session.flush()
+            publication = PortfolioChallengerPublicationV1(
+                schema_version="portfolio_challenger_pub_v1",
+                proposal_hash="b" * 64,
+                incumbent_prompt_version_id=incumbent.id,
+                challenger_prompt_version_id=challenger.id,
+                challenger_prompt_hash=challenger.content_hash,
+                challenger_model_config_id=model.id,
+                replayed=False,
+            )
+            await append_audit_event(
+                session,
+                actor_id="human-local",
+                action=PORTFOLIO_CHALLENGER_PUBLICATION_ACTION,
+                schema_version=publication.schema_version,
+                payload=publication.model_dump(mode="json"),
+                occurred_at=kwargs["now"] - timedelta(seconds=1),
+            )
+        async with sessions.begin() as session:
+            run = (await admit_portfolio_synthesis(session, **kwargs)).run
+            assert run.model_config_id == model.id
+
+        class FakeTransport:
+            calls = 0
+
+            def supports(self, _model):
+                return True
+
+            async def invoke(self, payload):
+                self.calls += 1
+                if model_failure:
+                    raise RuntimeError("private-model-detail")
+                intent = synthesis_intent(run).model_copy(
+                    update={"input_hash": payload["input_hash"]}
+                )
+                return intent.model_dump_json(), UsageSnapshot(
+                    input_tokens=100,
+                    output_tokens=50,
+                    provider_calls=1,
+                    tool_calls=0,
+                )
+
+        fake = FakeTransport()
+        request = CompareRequest(cycle_id=run.cycle_id, proposal_hash=publication.proposal_hash)
+        settings = EngineSettings(
+            database_url=migrated_database_url, agent_runtime_mode="codex_sdk"
+        )
+        observed_at = kwargs["now"] + timedelta(seconds=1)
+        if model_failure:
+            with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_RESULT_UNKNOWN"):
+                await execute_compare(settings, request, transport=fake, clock=lambda: observed_at)
+            with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_RESULT_UNKNOWN"):
+                await execute_compare(settings, request, transport=fake, clock=lambda: observed_at)
+        else:
+            first = await execute_compare(
+                settings, request, transport=fake, clock=lambda: observed_at
+            )
+            replay = await execute_compare(
+                settings,
+                request,
+                transport=fake,
+                clock=lambda: observed_at + timedelta(days=1),
+            )
+            assert first == replay
+            assert first.intent.input_hash == first.challenger_input_hash
+            assert first.challenger_input_hash != run.input_hash
+        assert fake.calls == 1
+        async with sessions() as session:
+            assert await session.scalar(select(func.count(PaperOrderRecord.id))) == 0
+            assert await session.scalar(
+                select(func.count(AuditEvent.id)).where(
+                    AuditEvent.action == "portfolio.challenger.compared"
+                )
+            ) == (0 if model_failure else 1)
+            current_run = await session.get(AgentPortfolioSynthesisRunRecord, run.id)
+            assert current_run is not None and current_run.status == "prepared"
     finally:
         await engine.dispose()
 

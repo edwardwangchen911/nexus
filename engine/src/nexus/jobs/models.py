@@ -65,6 +65,7 @@ class JobType(StrEnum):
     AGENT_PORTFOLIO_DECISION = "agent.portfolio_decision"
     AGENT_PORTFOLIO_SYNTHESIS = "agent.portfolio_synthesis"
     AGENT_CHALLENGER_PROPOSE = "agent.challenger_propose"
+    AGENT_PORTFOLIO_CHALLENGER_COMPARE = "agent.portfolio_challenger_compare"
     OPTIMIZATION_PROPOSE = "optimization.propose"
     PAPER_ADMIT_ORDERS = "paper.admit_orders"
     PAPER_PERFORMANCE = "paper.performance"
@@ -90,6 +91,7 @@ JOB_PRIORITIES: dict[JobType, int] = {
     JobType.AGENT_PORTFOLIO_DECISION: 180,
     JobType.AGENT_PORTFOLIO_SYNTHESIS: 180,
     JobType.AGENT_CHALLENGER_PROPOSE: 180,
+    JobType.AGENT_PORTFOLIO_CHALLENGER_COMPARE: 180,
     JobType.OPTIMIZATION_PROPOSE: 180,
     JobType.PAPER_ADMIT_ORDERS: 180,
     JobType.DAILY_PIPELINE: 280,
