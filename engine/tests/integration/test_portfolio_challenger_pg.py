@@ -6,7 +6,7 @@ import pytest
 from helpers.paper_batch import INSTRUMENTS
 from integration.test_portfolio_proposal_pg import proposal_source
 from nexus.paper import agent_challenger
-from nexus.paper.agent_challenger import AgentChallengerError
+from nexus.paper.agent_challenger import AgentChallengerError, PortfolioChallengerCycleSampleV1
 from nexus.paper.agent_cycle import _events, _resume_portfolio_synthesis
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 
@@ -44,6 +44,18 @@ async def test_completed_portfolio_cycle_yields_all_candidate_evidence(
         assert len(sample.research_run_ids) == 2
         assert sample.synthesis_output_id == args["synthesis_output_id"]
         assert sample.result_code == "NO_ORDER_REQUIRED"
+        assert {item.instrument_id for item in sample.candidate_facts} == set(
+            sample.candidate_instrument_ids
+        )
+        assert {item.choice.instrument_id for item in sample.candidate_facts} == set(
+            sample.candidate_instrument_ids
+        )
+        assert sample.synthesis_intent.compared_instrument_ids == sample.candidate_instrument_ids
+        assert len(sample.source_hash) == 64
+        tampered = sample.model_dump(mode="json")
+        tampered["result_code"] = "PAPER_ORDER_FILLED"
+        with pytest.raises(ValueError, match="PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE"):
+            PortfolioChallengerCycleSampleV1.model_validate(tampered)
         assert sample.order_ids == ()
         assert sample.fill_ids == ()
         assert sample.fill_ledger_transaction_ids == ()

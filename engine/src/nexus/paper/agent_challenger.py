@@ -23,12 +23,17 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.committee import ROLE_ORDER, AgentRole
+from nexus.agents.portfolio_synthesis_contracts import (
+    PortfolioChoiceV1,
+    PortfolioSynthesisIntentV1,
+)
 from nexus.audit.canonical import canonical_json
 from nexus.audit.service import append_audit_event
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.models import job_input_hash
 from nexus.paper.agent_cycle_models import CandidateManifestEntry, candidate_manifest_hash
+from nexus.paper.management_read_authority import load_synthesis_read_authority
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPortfolioSynthesisOutputRecord,
@@ -269,6 +274,25 @@ class AgentChallengerError(ValueError):
         self.reason_code = reason_code
 
 
+class PortfolioChallengerCandidateFactV1(_FrozenModel):
+    instrument_id: UUID
+    research_run_id: UUID
+    research_output_id: UUID
+    research_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    research_intent: ResearchIntent
+    choice: PortfolioChoiceV1
+    sizing_action: Literal["increase", "reduce", "maintain", "none"]
+
+    @model_validator(mode="after")
+    def _candidate_bound(self) -> PortfolioChallengerCandidateFactV1:
+        if (
+            self.research_intent.instrument_id != self.instrument_id
+            or self.choice.instrument_id != self.instrument_id
+        ):
+            raise ValueError("PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE")
+        return self
+
+
 class PortfolioChallengerCycleSampleV1(_FrozenModel):
     """One complete, immutable multi-candidate input for a future portfolio review."""
 
@@ -278,9 +302,13 @@ class PortfolioChallengerCycleSampleV1(_FrozenModel):
     candidate_instrument_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
     research_run_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
     research_output_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
+    candidate_facts: tuple[PortfolioChallengerCandidateFactV1, ...] = Field(
+        min_length=2, max_length=5
+    )
     synthesis_run_id: UUID
     synthesis_output_id: UUID
     synthesis_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    synthesis_intent: PortfolioSynthesisIntentV1
     strategy_decision_id: UUID
     decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     result_code: str = Field(min_length=1, max_length=100)
@@ -289,6 +317,21 @@ class PortfolioChallengerCycleSampleV1(_FrozenModel):
     order_terminal_statuses: tuple[str, ...] = Field(max_length=5)
     fill_ids: tuple[UUID, ...]
     fill_ledger_transaction_ids: tuple[UUID, ...]
+    source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _complete_frozen_source(self) -> PortfolioChallengerCycleSampleV1:
+        if (
+            {item.instrument_id for item in self.candidate_facts}
+            != set(self.candidate_instrument_ids)
+            or {item.choice.instrument_id for item in self.candidate_facts}
+            != set(self.candidate_instrument_ids)
+            or set(self.synthesis_intent.compared_instrument_ids)
+            != set(self.candidate_instrument_ids)
+            or _hash(self.model_dump(mode="json", exclude={"source_hash"})) != self.source_hash
+        ):
+            raise ValueError("PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE")
+        return self
 
 
 async def collect_portfolio_challenger_cycle_sample(
@@ -366,6 +409,19 @@ async def collect_portfolio_challenger_cycle_sample(
         or synthesis_run.completed_at > as_of
     ):
         raise AgentChallengerError(code)
+    try:
+        synthesis_authority = await load_synthesis_read_authority(
+            session, cycle=cycle, read_as_of=as_of
+        )
+    except ValueError:
+        raise AgentChallengerError(code) from None
+    if (
+        synthesis_authority is None
+        or synthesis_authority.output.id != synthesis_output.id
+        or synthesis_authority.intent is None
+    ):
+        raise AgentChallengerError(code)
+    synthesis_intent = synthesis_authority.intent
     bindings = tuple(
         await session.scalars(
             select(StrategyDecisionAgentOutputRecord).where(
@@ -418,6 +474,53 @@ async def collect_portfolio_challenger_cycle_sample(
         )
     ):
         raise AgentChallengerError(code)
+    manifest_by_instrument = {item.instrument_id: item for item in manifest}
+    choice_by_instrument = {item.instrument_id: item for item in synthesis_intent.choices}
+    binding_by_output = {item.agent_research_output_id: item for item in bindings}
+    if set(choice_by_instrument) != set(instrument_ids):
+        raise AgentChallengerError(code)
+    candidate_facts: list[PortfolioChallengerCandidateFactV1] = []
+    for output, run in sorted(rows, key=lambda pair: pair[1].instrument_id):
+        if output.intent is None:
+            raise AgentChallengerError(code)
+        try:
+            intent = ResearchIntent.model_validate(output.intent)
+        except ValueError:
+            raise AgentChallengerError(code) from None
+        content = {
+            "status": output.status,
+            "role": output.role,
+            "payload": output.payload,
+            "intent": output.intent,
+        }
+        content_hash = hashlib.sha256(
+            json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        if (
+            output.content_hash != content_hash
+            or intent.model_dump(mode="json") != output.intent
+            or intent.instrument_id != run.instrument_id
+            or intent.data_snapshot_id != run.data_snapshot_id
+            or intent.decision_time != run.decision_time
+            or intent.display_symbol != manifest_by_instrument[run.instrument_id].symbol
+        ):
+            raise AgentChallengerError(code)
+        sizing_action = binding_by_output[output.id].sizing_action
+        if sizing_action not in {"increase", "reduce", "maintain", "none"}:
+            raise AgentChallengerError(code)
+        candidate_facts.append(
+            PortfolioChallengerCandidateFactV1(
+                instrument_id=run.instrument_id,
+                research_run_id=run.id,
+                research_output_id=output.id,
+                research_content_hash=output.content_hash,
+                research_intent=intent,
+                choice=choice_by_instrument[run.instrument_id],
+                sizing_action=cast(
+                    Literal["increase", "reduce", "maintain", "none"], sizing_action
+                ),
+            )
+        )
     order_batch = await session.scalar(
         select(PaperOrderBatchRecord).where(
             PaperOrderBatchRecord.strategy_decision_id == decision.id
@@ -498,24 +601,29 @@ async def collect_portfolio_challenger_cycle_sample(
         if latest.to_status != "completed" or latest.result_code != "NO_ORDER_REQUIRED":
             raise AgentChallengerError(code)
         execution_state = "no_order"
-    return PortfolioChallengerCycleSampleV1(
-        schema_version="portfolio_challenger_cycle_sample_v1",
-        cycle_id=cycle_id,
-        candidate_batch_id=batch.id,
-        candidate_instrument_ids=instrument_ids,
-        research_run_ids=tuple(sorted(run.id for _, run in rows)),
-        research_output_ids=tuple(sorted(output_ids)),
-        synthesis_run_id=synthesis_run.id,
-        synthesis_output_id=synthesis_output.id,
-        synthesis_content_hash=synthesis_output.content_hash,
-        strategy_decision_id=decision.id,
-        decision_hash=decision.decision_hash,
-        result_code=latest.result_code,
-        execution_state=execution_state,
-        order_ids=tuple(order.id for order in orders),
-        order_terminal_statuses=statuses,
-        fill_ids=tuple(fill.id for fill in fills),
-        fill_ledger_transaction_ids=tuple(fill.ledger_transaction_id for fill in fills),
+    payload = {
+        "schema_version": "portfolio_challenger_cycle_sample_v1",
+        "cycle_id": str(cycle_id),
+        "candidate_batch_id": str(batch.id),
+        "candidate_instrument_ids": [str(value) for value in instrument_ids],
+        "research_run_ids": [str(run.id) for _, run in sorted(rows, key=lambda pair: pair[1].id)],
+        "research_output_ids": [str(value) for value in sorted(output_ids)],
+        "candidate_facts": [item.model_dump(mode="json") for item in candidate_facts],
+        "synthesis_run_id": str(synthesis_run.id),
+        "synthesis_output_id": str(synthesis_output.id),
+        "synthesis_content_hash": synthesis_output.content_hash,
+        "synthesis_intent": synthesis_intent.model_dump(mode="json"),
+        "strategy_decision_id": str(decision.id),
+        "decision_hash": decision.decision_hash,
+        "result_code": latest.result_code,
+        "execution_state": execution_state,
+        "order_ids": [str(order.id) for order in orders],
+        "order_terminal_statuses": list(statuses),
+        "fill_ids": [str(fill.id) for fill in fills],
+        "fill_ledger_transaction_ids": [str(fill.ledger_transaction_id) for fill in fills],
+    }
+    return PortfolioChallengerCycleSampleV1.model_validate(
+        {**payload, "source_hash": _hash(payload)}
     )
 
 

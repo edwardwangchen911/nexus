@@ -486,6 +486,10 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
                     session, cycle_id=cycle.id, as_of=api_now
                 )
             assert sample.order_ids == tuple(sorted(order.id for order in orders))
+            assert {item.instrument_id for item in sample.candidate_facts} == {
+                order.instrument_id for order in orders
+            }
+            assert all(item.choice.action == "include" for item in sample.candidate_facts)
             assert sample.order_terminal_statuses == ("filled", "filled")
             assert len(sample.fill_ids) == 2
             assert len(sample.fill_ledger_transaction_ids) == 2
