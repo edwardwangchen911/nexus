@@ -12,13 +12,14 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisIntentV1,
     validate_portfolio_synthesis_intent,
 )
+from nexus.agents.portfolio_synthesis_persistence import _frozen_run
 from nexus.agents.portfolio_synthesis_worker import CodexSynthesisTransport, SynthesisTransport
 from nexus.audit.service import append_audit_event
 from nexus.jobs.models import JobKeyV1, JobStatus, JobType, QueueName, RetryPolicy, job_input_hash
@@ -30,13 +31,17 @@ from nexus.paper.agent_challenger import (
     AgentChallengerError,
     PortfolioChallengerPublicationV1,
 )
-from nexus.paper.portfolio_challenger_case import freeze_prospective_portfolio_challenger_case
+from nexus.paper.portfolio_challenger_case import (
+    compare_portfolio_challenger_decisions,
+    freeze_prospective_portfolio_challenger_case,
+)
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
+    AgentPortfolioSynthesisOutputRecord,
     AgentPortfolioSynthesisRunRecord,
     AgentPromptVersionRecord,
 )
-from nexus.persistence.models.runtime import AuditEvent, Job
+from nexus.persistence.models.runtime import AuditEvent, Job, JobLease
 from nexus.settings import AgentRuntimeMode, EngineSettings
 
 _JOB_SCHEMA = "portfolio_challenger_cmp_v1"
@@ -80,6 +85,17 @@ class ComparisonOutput(BaseModel):
     tool_calls: Literal[0]
 
 
+class ComparisonStatus(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    status: Literal["not_run", "pending", "result_unknown", "incumbent_pending", "compared"]
+    job_id: UUID | None = None
+    selection_changed: bool | None = None
+    reasoning_changed: bool | None = None
+    changed_candidate_count: int | None = Field(default=None, ge=0, le=5)
+    economic_result: Literal["not_evaluated"] = "not_evaluated"
+
+
 async def _read_output(session, job: Job) -> ComparisonOutput:  # type: ignore[no-untyped-def]
     events = tuple(
         await session.scalars(
@@ -112,6 +128,113 @@ async def _read_output(session, job: Job) -> ComparisonOutput:  # type: ignore[n
     ):
         raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
     return output
+
+
+async def inspect_compare(settings: EngineSettings, request: CompareRequest) -> ComparisonStatus:
+    """Read persisted comparison and incumbent decision without model or paper writes."""
+    _validate_local_database(settings.database_url)
+    assert settings.database_url is not None
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with async_sessionmaker(engine)() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            run = await session.scalar(
+                select(AgentPortfolioSynthesisRunRecord).where(
+                    AgentPortfolioSynthesisRunRecord.cycle_id == request.cycle_id
+                )
+            )
+            if run is None:
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_SOURCE_INVALID")
+            jobs = tuple(
+                await session.scalars(
+                    select(Job).where(
+                        Job.job_type == JobType.AGENT_PORTFOLIO_CHALLENGER_COMPARE.value,
+                        Job.payload["source_run_id"].as_string() == str(run.id),
+                        Job.payload["proposal_hash"].as_string() == request.proposal_hash,
+                    )
+                )
+            )
+            if not jobs:
+                return ComparisonStatus(status="not_run")
+            if len(jobs) != 1:
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
+            job = jobs[0]
+            if job.status == JobStatus.QUEUED.value:
+                return ComparisonStatus(status="pending", job_id=job.id)
+            if job.status == JobStatus.RUNNING.value:
+                lease = await session.scalar(
+                    select(JobLease).where(JobLease.job_id == job.id)
+                )
+                database_now = await session.scalar(select(func.clock_timestamp()))
+                if lease is None or database_now is None or database_now >= lease.expires_at:
+                    return ComparisonStatus(status="result_unknown", job_id=job.id)
+                return ComparisonStatus(status="pending", job_id=job.id)
+            if job.status != JobStatus.SUCCEEDED.value:
+                return ComparisonStatus(status="result_unknown", job_id=job.id)
+            candidate_output = await _read_output(session, job)
+            incumbent_output = await session.scalar(
+                select(AgentPortfolioSynthesisOutputRecord).where(
+                    AgentPortfolioSynthesisOutputRecord.run_id == run.id
+                )
+            )
+            if incumbent_output is None or incumbent_output.status != "completed":
+                return ComparisonStatus(status="incumbent_pending", job_id=job.id)
+            publication_id = job.payload.get("publication_event_id")
+            publication_event = (
+                await session.get(AuditEvent, UUID(publication_id))
+                if isinstance(publication_id, str)
+                else None
+            )
+            if (
+                publication_event is None
+                or publication_event.action != PORTFOLIO_CHALLENGER_PUBLICATION_ACTION
+                or publication_event.schema_version != "portfolio_challenger_pub_v1"
+                or publication_event.created_at > run.created_at
+            ):
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
+            publication = PortfolioChallengerPublicationV1.model_validate(
+                publication_event.payload
+            )
+            incumbent_prompt = await session.get(
+                AgentPromptVersionRecord, publication.incumbent_prompt_version_id
+            )
+            challenger_prompt = await session.get(
+                AgentPromptVersionRecord, publication.challenger_prompt_version_id
+            )
+            if incumbent_prompt is None or challenger_prompt is None:
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
+            incumbent_input = _frozen_run(run)
+            case = freeze_prospective_portfolio_challenger_case(
+                run=run,
+                incumbent_prompt=incumbent_prompt,
+                challenger_prompt=challenger_prompt,
+                publication=publication,
+                published_at=publication_event.occurred_at,
+                now=incumbent_input.admitted_at,
+            )
+            if (
+                candidate_output.source_input_hash != run.input_hash
+                or candidate_output.challenger_input_hash != case.challenger_input_hash
+                or incumbent_output.intent is None
+            ):
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
+            difference = compare_portfolio_challenger_decisions(
+                incumbent_input=incumbent_input,
+                incumbent_intent=PortfolioSynthesisIntentV1.model_validate(
+                    incumbent_output.intent
+                ),
+                challenger_input=case.frozen_input,
+                challenger_intent=candidate_output.intent,
+            )
+            return ComparisonStatus(
+                status="compared",
+                job_id=job.id,
+                selection_changed=difference.selection_changed,
+                reasoning_changed=difference.reasoning_changed,
+                changed_candidate_count=len(difference.changed_instrument_ids),
+            )
+    finally:
+        await engine.dispose()
 
 
 async def execute_compare(
@@ -324,16 +447,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexus-engine-portfolio-challenger-compare")
     parser.add_argument("--cycle-id", required=True)
     parser.add_argument("--proposal-hash", required=True)
+    parser.add_argument("--status", action="store_true", help="只读核对已保存的对照结果")
     try:
-        request = CompareRequest.model_validate(vars(parser.parse_args(argv)))
+        values = vars(parser.parse_args(argv))
+        status_only = values.pop("status")
+        request = CompareRequest.model_validate(values)
         settings = EngineSettings.model_validate(load_local_environment(Path.cwd(), {}))
-        result = asyncio.run(execute_compare(settings, request))
+        if status_only:
+            status = asyncio.run(inspect_compare(settings, request))
+        else:
+            result = asyncio.run(execute_compare(settings, request))
     except Exception as error:
         code = str(error)
         if code not in _SAFE_ERROR_CODES:
             code = "PORTFOLIO_CHALLENGER_RESULT_UNKNOWN"
         print(json.dumps({"error_code": code}, sort_keys=True))
         return 1
+    if status_only:
+        print(json.dumps(status.model_dump(mode="json"), sort_keys=True))
+        return 0
     print(
         json.dumps(
             {

@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
+from typing import Literal
 from uuid import UUID
 
 from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisInputV1,
+    PortfolioSynthesisIntentV1,
     canonical_portfolio_synthesis_hash,
+    validate_portfolio_synthesis_intent,
 )
 from nexus.agents.portfolio_synthesis_persistence import _frozen_run
 from nexus.domain.time import require_utc
@@ -32,6 +35,63 @@ class PortfolioChallengerCase:
     challenger_prompt_version: str
     frozen_input: PortfolioSynthesisInputV1
     instructions: str
+
+
+@dataclass(frozen=True)
+class PortfolioChallengerDecisionDifference:
+    selection_changed: bool
+    reasoning_changed: bool
+    changed_instrument_ids: tuple[UUID, ...]
+    economic_result: Literal["not_evaluated"] = "not_evaluated"
+
+
+def compare_portfolio_challenger_decisions(
+    *,
+    incumbent_input: PortfolioSynthesisInputV1,
+    incumbent_intent: PortfolioSynthesisIntentV1,
+    challenger_input: PortfolioSynthesisInputV1,
+    challenger_intent: PortfolioSynthesisIntentV1,
+) -> PortfolioChallengerDecisionDifference:
+    """Compare admitted decision semantics; this does not infer investment value."""
+    validate_portfolio_synthesis_intent(incumbent_intent, incumbent_input)
+    validate_portfolio_synthesis_intent(challenger_intent, challenger_input)
+    if incumbent_input.model_dump(
+        mode="json", exclude={"prompt_version_id", "prompt_hash"}
+    ) != challenger_input.model_dump(mode="json", exclude={"prompt_version_id", "prompt_hash"}):
+        raise AgentChallengerError("PORTFOLIO_CHALLENGER_SOURCE_MISMATCH")
+    incumbent = {choice.instrument_id: choice for choice in incumbent_intent.choices}
+    challenger = {choice.instrument_id: choice for choice in challenger_intent.choices}
+    changed = tuple(
+        instrument_id
+        for instrument_id in incumbent_input.candidate_instrument_ids
+        if incumbent[instrument_id].model_dump(
+            mode="json", exclude={"thesis", "counter_thesis", "invalidation"}
+        )
+        != challenger[instrument_id].model_dump(
+            mode="json", exclude={"thesis", "counter_thesis", "invalidation"}
+        )
+    )
+    reasoning_changed = (
+        incumbent_intent.cash_rationale != challenger_intent.cash_rationale
+        or any(
+            (
+                incumbent[instrument_id].thesis,
+                incumbent[instrument_id].counter_thesis,
+                incumbent[instrument_id].invalidation,
+            )
+            != (
+                challenger[instrument_id].thesis,
+                challenger[instrument_id].counter_thesis,
+                challenger[instrument_id].invalidation,
+            )
+            for instrument_id in incumbent_input.candidate_instrument_ids
+        )
+    )
+    return PortfolioChallengerDecisionDifference(
+        selection_changed=bool(changed),
+        reasoning_changed=reasoning_changed,
+        changed_instrument_ids=changed,
+    )
 
 
 def freeze_prospective_portfolio_challenger_case(

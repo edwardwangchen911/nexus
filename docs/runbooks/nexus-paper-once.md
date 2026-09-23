@@ -100,6 +100,9 @@ uv run --project engine nexus-engine-portfolio-challenger-compare \
 这条入口只产生一次候选模型 Job 和隔离审计输出，不写正式决策、风控、订单、成交或持仓。
 输出通过同一输入的证据绑定校验也仅代表决策语义可比较；收益、费用与回撤的样本外比较
 仍须等待两侧对应的真实后续绩效事实，不得据此自动晋升候选。
+同一命令加 `--status` 只读原 Job、审计输出和正式综合决策，报告选仓动作与研究理由是否变化；
+正式综合决策尚未完成时显示 `incumbent_pending`，失败或未知 Job 显示 `result_unknown`，
+均不触发新调用。
 
 ## Agent 版本并行评价：先查持久化状态
 

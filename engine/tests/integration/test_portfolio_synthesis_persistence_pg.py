@@ -32,7 +32,7 @@ from nexus.agents.portfolio_synthesis_persistence import (
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.audit.service import append_audit_event
 from nexus.domain.evidence import EvidenceRef
-from nexus.ops.portfolio_challenger_compare import CompareRequest, execute_compare
+from nexus.ops.portfolio_challenger_compare import CompareRequest, execute_compare, inspect_compare
 from nexus.paper.agent_challenger import (
     PORTFOLIO_CHALLENGER_PUBLICATION_ACTION,
     AgentChallengerError,
@@ -41,7 +41,10 @@ from nexus.paper.agent_challenger import (
 from nexus.paper.agent_cycle import _start_cycle
 from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
-from nexus.paper.portfolio_challenger_case import freeze_prospective_portfolio_challenger_case
+from nexus.paper.portfolio_challenger_case import (
+    compare_portfolio_challenger_decisions,
+    freeze_prospective_portfolio_challenger_case,
+)
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
@@ -317,6 +320,33 @@ async def test_portfolio_challenger_case_requires_publication_before_new_frozen_
                 update={"input_hash": case.challenger_input_hash}
             )
             validate_portfolio_synthesis_intent(challenger_intent, case.frozen_input)
+            same = compare_portfolio_challenger_decisions(
+                incumbent_input=frozen,
+                incumbent_intent=old_intent,
+                challenger_input=case.frozen_input,
+                challenger_intent=challenger_intent,
+            )
+            assert not same.selection_changed and not same.reasoning_changed
+            changed_choice = challenger_intent.choices[0].model_copy(
+                update={
+                    "thesis": challenger_intent.choices[0].thesis.model_copy(
+                        update={"text": "The same evidence remains unresolved for this candidate."}
+                    )
+                }
+            )
+            changed_intent = PortfolioSynthesisIntentV1.model_validate(
+                challenger_intent.model_copy(
+                    update={"choices": (changed_choice, *challenger_intent.choices[1:])}
+                ).model_dump(mode="json")
+            )
+            reasoning = compare_portfolio_challenger_decisions(
+                incumbent_input=frozen,
+                incumbent_intent=old_intent,
+                challenger_input=case.frozen_input,
+                challenger_intent=changed_intent,
+            )
+            assert not reasoning.selection_changed and reasoning.reasoning_changed
+            assert reasoning.economic_result == "not_evaluated"
             with pytest.raises(
                 AgentChallengerError, match="PORTFOLIO_CHALLENGER_CASE_NOT_PROSPECTIVE"
             ):
@@ -408,6 +438,7 @@ async def test_portfolio_challenger_compare_is_once_only_and_cannot_create_order
         settings = EngineSettings(
             database_url=migrated_database_url, agent_runtime_mode="codex_sdk"
         )
+        assert (await inspect_compare(settings, request)).status == "not_run"
         observed_at = kwargs["now"] + timedelta(seconds=1)
         if model_failure:
             with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_RESULT_UNKNOWN"):
@@ -428,6 +459,30 @@ async def test_portfolio_challenger_compare_is_once_only_and_cannot_create_order
             assert first.intent.input_hash == first.challenger_input_hash
             assert first.challenger_input_hash != run.input_hash
         assert fake.calls == 1
+        observed = await inspect_compare(settings, request)
+        assert observed.status == ("result_unknown" if model_failure else "incumbent_pending")
+        if not model_failure:
+            async with sessions.begin() as session:
+                current_run = await session.get(AgentPortfolioSynthesisRunRecord, run.id)
+                assert current_run is not None
+                current_run.status = "running"
+            async with sessions.begin() as session:
+                await persist_portfolio_synthesis_terminal(
+                    session,
+                    run_id=run.id,
+                    input_hash=run.input_hash,
+                    status="completed",
+                    intent=synthesis_intent(run),
+                    input_tokens=10,
+                    output_tokens=20,
+                    now=kwargs["now"] + timedelta(minutes=1),
+                )
+            compared = await inspect_compare(settings, request)
+            assert compared.status == "compared"
+            assert compared.selection_changed is False
+            assert compared.reasoning_changed is False
+            assert compared.changed_candidate_count == 0
+            assert compared.economic_result == "not_evaluated"
         async with sessions() as session:
             assert await session.scalar(select(func.count(PaperOrderRecord.id))) == 0
             assert await session.scalar(
@@ -436,7 +491,8 @@ async def test_portfolio_challenger_compare_is_once_only_and_cannot_create_order
                 )
             ) == (0 if model_failure else 1)
             current_run = await session.get(AgentPortfolioSynthesisRunRecord, run.id)
-            assert current_run is not None and current_run.status == "prepared"
+            assert current_run is not None
+            assert current_run.status == ("prepared" if model_failure else "completed")
     finally:
         await engine.dispose()
 
