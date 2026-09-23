@@ -3952,6 +3952,7 @@ async def test_loop_inspection_exposes_known_failed_trigger_for_current_slot(
 
     assert snapshot.trigger_attempt_slot_at == slot
     assert snapshot.trigger_failure_code == failure_code
+    assert snapshot.market_open_at == datetime(2026, 8, 26, 13, 30, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

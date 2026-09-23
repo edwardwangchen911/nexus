@@ -176,6 +176,7 @@ class AgentPaperLoopAction(StrEnum):
     WAIT_FOR_EVALUATION = "wait_for_evaluation"
     WAIT_FOR_EVALUATION_JOB = "wait_for_evaluation_job"
     TRIGGER = "trigger"
+    PREPARE_INPUTS = "prepare_inputs"
     RUN_RESEARCH_JOB = "run_research_job"
     RESUME = "resume"
     COLLECT_WINDOW = "collect_window"
@@ -203,6 +204,7 @@ class AgentPaperLoopSnapshot:
     now: datetime
     enabled: bool = True
     calendar_authority_id: UUID | None = None
+    market_open_at: datetime | None = None
     decision_window_start_at: datetime | None = None
     decision_window_end_at: datetime | None = None
     next_decision_window_start_at: datetime | None = None
@@ -1444,7 +1446,12 @@ def select_active_order_identity(
     if len(rows) > 50 or len({row[0] for row in rows}) != len(rows):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     settled_or_executable = {
-        "submitted", "partially_filled", "filled", "cancelled", "rejected", "risk_rejected"
+        "submitted",
+        "partially_filled",
+        "filled",
+        "cancelled",
+        "rejected",
+        "risk_rejected",
     }
     if any(status not in settled_or_executable for _order_id, _instrument_id, status in rows):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -1464,9 +1471,7 @@ def select_active_order_identity(
         ),
         key=lambda row: row[0],
     )
-    priority = (
-        (partial, submitted) if additional_market_windows_allowed else (submitted, partial)
-    )
+    priority = (partial, submitted) if additional_market_windows_allowed else (submitted, partial)
     return next((rows[0] for rows in priority if rows), None)
 
 
@@ -1528,8 +1533,7 @@ def snapshot_from_cycle_view(
         has_open_order
         and not market_window_ready
         and not (
-            action_cycle_status == "partially_filled"
-            and not additional_market_windows_allowed
+            action_cycle_status == "partially_filled" and not additional_market_windows_allowed
         )
     ):
         scope_cycle_id = getattr(market_scope, "cycle_id", None)
@@ -1567,6 +1571,7 @@ def snapshot_from_cycle_view(
     return AgentPaperLoopSnapshot(
         now=now,
         calendar_authority_id=calendar.calendar_authority_id,
+        market_open_at=calendar.market_open_at,
         decision_window_start_at=calendar.decision_window_start_at,
         decision_window_end_at=calendar.market_close_at,
         next_decision_window_start_at=calendar.next_decision_window_start_at,
@@ -1589,7 +1594,9 @@ def snapshot_from_cycle_view(
     )
 
 
-def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction:
+def choose_loop_action(
+    snapshot: AgentPaperLoopSnapshot, *, prepared_market_open_at: datetime | None = None
+) -> AgentPaperLoopAction:
     """Choose one safe next action without performing I/O or retrying unknown work."""
     if not snapshot.enabled:
         return AgentPaperLoopAction.STOP_DISABLED
@@ -1703,6 +1710,13 @@ def choose_loop_action(snapshot: AgentPaperLoopSnapshot) -> AgentPaperLoopAction
 
     decision_slot = _portfolio_slot(snapshot.decision_window_start_at)
     if snapshot.now < decision_slot:
+        if (
+            snapshot.market_open_at is not None
+            and snapshot.market_open_at <= snapshot.now
+            and snapshot.market_open_at < decision_slot
+            and prepared_market_open_at != snapshot.market_open_at
+        ):
+            return AgentPaperLoopAction.PREPARE_INPUTS
         return AgentPaperLoopAction.WAIT_FOR_SESSION
     if snapshot.now >= snapshot.decision_window_end_at:
         return AgentPaperLoopAction.WAIT_FOR_SESSION
@@ -1736,13 +1750,15 @@ def _normal_wait_until(
         return snapshot.market_window_end_at
     if action != AgentPaperLoopAction.WAIT_FOR_SESSION:
         return None
-    if (
-        snapshot.decision_window_start_at is None
-        or snapshot.next_decision_window_start_at is None
-    ):
+    if snapshot.decision_window_start_at is None or snapshot.next_decision_window_start_at is None:
         return None
     if snapshot.now < _portfolio_slot(snapshot.decision_window_start_at):
         wait_until = _portfolio_slot(snapshot.decision_window_start_at)
+        if (
+            snapshot.market_open_at is not None
+            and snapshot.now < snapshot.market_open_at < wait_until
+        ):
+            wait_until = snapshot.market_open_at
     else:
         wait_until = _portfolio_slot(snapshot.next_decision_window_start_at)
     if (
@@ -1838,6 +1854,7 @@ async def run_foreground_loop(
         return None
 
     last_heartbeat_at: datetime | None = None
+    prepared_market_open_at: datetime | None = None
 
     async def persist_heartbeat() -> datetime:
         nonlocal last_heartbeat_at
@@ -1876,11 +1893,7 @@ async def run_foreground_loop(
                 and snapshot_now + (seen_at - wall_started_at) >= wait_until
             ):
                 break
-            remaining = (
-                deadline - monotonic()
-                if elapsed_by_monotonic
-                else remaining - duration
-            )
+            remaining = deadline - monotonic() if elapsed_by_monotonic else remaining - duration
         return None
 
     if shutdown_requested():
@@ -1899,7 +1912,7 @@ async def run_foreground_loop(
             raise
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
-        action = choose_loop_action(snapshot)
+        action = choose_loop_action(snapshot, prepared_market_open_at=prepared_market_open_at)
         if action in {
             AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
             AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE,
@@ -1942,19 +1955,13 @@ async def run_foreground_loop(
                 return stopped
             continue
         if action == AgentPaperLoopAction.WAIT_FOR_SESSION:
-            assert snapshot.decision_window_start_at is not None
-            assert snapshot.next_decision_window_start_at is not None
-            if snapshot.now < _portfolio_slot(snapshot.decision_window_start_at):
-                wait_until = _portfolio_slot(snapshot.decision_window_start_at)
-            else:
-                wait_until = _portfolio_slot(snapshot.next_decision_window_start_at)
-            # Reinspect at today's frozen close so performance/summary publication
-            # is not postponed to the next decision (possibly after a weekend).
+            wait_until = _normal_wait_until(snapshot, action)
+            assert wait_until is not None
             if (
-                snapshot.decision_window_end_at is not None
-                and snapshot.now < snapshot.decision_window_end_at < wait_until
+                prepared_market_open_at == snapshot.market_open_at
+                and snapshot.decision_window_start_at is not None
             ):
-                wait_until = snapshot.decision_window_end_at
+                wait_until = max(wait_until, _portfolio_slot(snapshot.decision_window_start_at))
             stopped = await wait_before_reinspection(
                 snapshot_now=snapshot.now,
                 wait_until=wait_until,
@@ -2023,6 +2030,8 @@ async def run_foreground_loop(
             raise action_error
         if heartbeat_error is not None:
             return stop_unknown("heartbeat", error=heartbeat_error)
+        if action == AgentPaperLoopAction.PREPARE_INPUTS and stop is None:
+            prepared_market_open_at = snapshot.market_open_at
         try:
             await persist_heartbeat()
         except Exception as error:
@@ -2252,9 +2261,7 @@ async def run_local_agent_paper_loop(
                 )
                 if evaluation is not None and evaluation.cycle_status != "evaluation_waiting":
                     return evaluation
-                evaluation_wait_at = (
-                    None if evaluation is None else evaluation.evaluation_slot_at
-                )
+                evaluation_wait_at = None if evaluation is None else evaluation.evaluation_slot_at
                 if evaluation is not None and evaluation_wait_at is None:
                     return evaluation
                 normal = await inspect_agent_paper_loop(
@@ -2266,10 +2273,7 @@ async def run_local_agent_paper_loop(
                     return normal
                 assert evaluation_wait_at is not None
                 normal_wait_until = _normal_wait_until(normal, choose_loop_action(normal))
-                if (
-                    normal_wait_until is not None
-                    and evaluation_wait_at <= normal_wait_until
-                ):
+                if normal_wait_until is not None and evaluation_wait_at <= normal_wait_until:
                     return evaluation
                 return normal
 
@@ -2427,6 +2431,70 @@ async def execute_agent_paper_loop_action(
     env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
+    if action == AgentPaperLoopAction.PREPARE_INPUTS:
+        if (
+            snapshot.calendar_authority_id is None
+            or snapshot.market_open_at is None
+            or snapshot.decision_window_start_at is None
+            or not snapshot.market_open_at
+            <= snapshot.now
+            < _portfolio_slot(snapshot.decision_window_start_at)
+        ):
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        environment = (
+            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            if env_file is not None
+            else load_agent_paper_service_environment(repo_root, os.environ)
+        )
+        trigger_settings = (
+            _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
+        ).model_validate(environment)
+        if env_file is not None:
+            _require_explicit_schwab_config(environment)
+        macro_settings = (
+            _FileDailySettings if env_file is not None else DailyOnceSettings
+        ).model_validate(environment)
+        candidates = await _load_loop_candidates(
+            trigger_settings,
+            account_id=account_id,
+            batch_id=_candidate_batch_setting(environment),
+            expected_calendar_authority_id=snapshot.calendar_authority_id,
+        )
+        for candidate in candidates:
+            daily = await prepare_prior_daily_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+                candidate=candidate,
+            )
+            if daily not in {"ready", "prepared", "unavailable"}:
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            macro = await prepare_macro_once(
+                macro_settings,
+                fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+                candidate=candidate,
+            )
+            if macro not in {"ready", "prepared", "unavailable"}:
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        for candidate in candidates:
+            trends = await prepare_current_trends_once(
+                trigger_settings,
+                account_id=account_id,
+                repo_root=repo_root,
+                now=snapshot.now,
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+                candidate=candidate,
+            )
+            if trends not in {"ready", "prepared", "unavailable"}:
+                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        return None
     if action == AgentPaperLoopAction.ADVANCE_EVALUATION:
         if (
             snapshot.evaluation_id is None
@@ -3444,6 +3512,7 @@ async def _inspect_portfolio_batch(
         return AgentPaperLoopSnapshot(
             now=now,
             calendar_authority_id=calendar.calendar_authority_id,
+            market_open_at=calendar.market_open_at,
             decision_window_start_at=calendar.decision_window_start_at,
             decision_window_end_at=calendar.market_close_at,
             next_decision_window_start_at=calendar.next_decision_window_start_at,
@@ -3635,6 +3704,7 @@ async def _inspect_portfolio_batch(
     return AgentPaperLoopSnapshot(
         now=now,
         calendar_authority_id=calendar.calendar_authority_id,
+        market_open_at=calendar.market_open_at,
         decision_window_start_at=calendar.decision_window_start_at,
         decision_window_end_at=calendar.market_close_at,
         next_decision_window_start_at=calendar.next_decision_window_start_at,
@@ -3791,6 +3861,7 @@ async def inspect_agent_paper_loop(
                 return AgentPaperLoopSnapshot(
                     now=now,
                     calendar_authority_id=calendar.calendar_authority_id,
+                    market_open_at=calendar.market_open_at,
                     decision_window_start_at=calendar.decision_window_start_at,
                     decision_window_end_at=calendar.market_close_at,
                     next_decision_window_start_at=calendar.next_decision_window_start_at,

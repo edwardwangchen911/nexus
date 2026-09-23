@@ -75,6 +75,51 @@ def test_normal_loop_only_triggers_ten_new_york_slot(slot: datetime) -> None:
     )
 
 
+def test_opening_preparation_is_once_per_session_and_never_triggers_early() -> None:
+    slot = datetime(2026, 9, 23, 14, tzinfo=UTC)
+    market_open = slot - timedelta(minutes=30)
+    state = loop.AgentPaperLoopSnapshot(
+        now=market_open,
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        market_open_at=market_open,
+        decision_window_start_at=market_open - timedelta(hours=2, minutes=30),
+        decision_window_end_at=slot + timedelta(hours=6),
+        next_decision_window_start_at=slot + timedelta(hours=21),
+    )
+    assert (
+        loop.choose_loop_action(replace(state, now=market_open - timedelta(seconds=1)))
+        == A.WAIT_FOR_SESSION
+    )
+    assert (
+        loop._normal_wait_until(
+            replace(state, now=market_open - timedelta(seconds=1)), A.WAIT_FOR_SESSION
+        )
+        == market_open
+    )
+    assert loop.choose_loop_action(state) == A.PREPARE_INPUTS
+    assert loop.choose_loop_action(state, prepared_market_open_at=market_open) == A.WAIT_FOR_SESSION
+    assert loop._normal_wait_until(state, A.WAIT_FOR_SESSION) == slot
+    assert (
+        loop.choose_loop_action(replace(state, now=slot), prepared_market_open_at=market_open)
+        == A.TRIGGER
+    )
+
+
+def test_preparation_does_not_override_active_cycle_or_performance() -> None:
+    market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
+    state = snapshot(now=market_open, market_open_at=market_open)
+    assert (
+        loop.choose_loop_action(replace(state, performance_due_at=market_open))
+        == A.PUBLISH_PERFORMANCE
+    )
+    assert (
+        loop.choose_loop_action(
+            replace(state, cycle_status="researching", research_job_status="queued")
+        )
+        == A.RUN_RESEARCH_JOB
+    )
+
+
 def test_multi_candidate_jobs_select_next_pending_without_early_completion() -> None:
     first, second = UUID(int=101), UUID(int=102)
     event = SimpleNamespace(fact_ids={"research_run_ids": [str(first), str(second)]})
@@ -152,6 +197,113 @@ def test_multi_candidate_executor_prepares_exact_scope_before_trigger(monkeypatc
             "trends:MSFT",
             "trigger",
         ]
+
+
+def test_opening_preparation_binds_every_candidate_without_trigger(monkeypatch) -> None:
+    second = TEST_CANDIDATE.model_copy(update={"instrument_id": UUID(int=21), "symbol": "MSFT"})
+    calls = []
+
+    async def load(*_args, **_kwargs):
+        calls.append("batch")
+        return (TEST_CANDIDATE, second)
+
+    async def daily(*_args, candidate, **_kwargs):
+        calls.append(f"daily:{candidate.symbol}")
+        return "prepared"
+
+    async def macro(*_args, candidate, **_kwargs):
+        calls.append(f"macro:{candidate.symbol}")
+        return "prepared"
+
+    async def trends(*_args, candidate, **_kwargs):
+        calls.append(f"trends:{candidate.symbol}")
+        return "prepared"
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("opening preparation must not create a cycle")
+
+    monkeypatch.setattr(
+        loop,
+        "load_agent_paper_service_environment",
+        lambda *a, **k: {
+            **enabled_environment(),
+            "ALPACA_API_KEY_ID": "key",
+            "ALPACA_API_SECRET_KEY": "secret",
+        },
+    )
+    monkeypatch.setattr(loop, "_load_loop_candidates", load)
+    monkeypatch.setattr(loop, "prepare_prior_daily_once", daily)
+    monkeypatch.setattr(loop, "prepare_macro_once", macro)
+    monkeypatch.setattr(loop, "prepare_current_trends_once", trends)
+    monkeypatch.setattr(loop, "trigger_once", forbidden)
+    market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
+    state = snapshot(now=market_open, market_open_at=market_open)
+    assert (
+        asyncio.run(
+            loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(),
+                account_id=UUID(int=1),
+                repo_root=Path("/unused"),
+                action=A.PREPARE_INPUTS,
+                snapshot=state,
+            )
+        )
+        is None
+    )
+    assert calls == [
+        "batch",
+        "daily:AAPL",
+        "daily:MSFT",
+        "macro:AAPL",
+        "macro:MSFT",
+        "trends:AAPL",
+        "trends:MSFT",
+    ]
+
+
+def test_foreground_prepares_once_then_waits_for_formal_slot() -> None:
+    market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
+    slot = market_open + timedelta(minutes=30)
+    base = loop.AgentPaperLoopSnapshot(
+        now=market_open,
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        market_open_at=market_open,
+        decision_window_start_at=market_open - timedelta(hours=2, minutes=30),
+        decision_window_end_at=slot + timedelta(hours=6),
+        next_decision_window_start_at=slot + timedelta(hours=21),
+    )
+    elapsed = 0.0
+    actions = []
+
+    async def inspect():
+        return replace(base, now=market_open + timedelta(seconds=elapsed))
+
+    async def execute(action, _snapshot):
+        actions.append(action)
+        if action == A.TRIGGER:
+            return A.STOP_REQUESTED
+        return None
+
+    async def sleep(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    async def heartbeat(_seen_at):
+        return None
+
+    result = asyncio.run(
+        loop.run_foreground_loop(
+            inspect=inspect,
+            execute=execute,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            clock=lambda: market_open + timedelta(seconds=elapsed),
+            monotonic=lambda: elapsed,
+        )
+    )
+    assert result == A.STOP_REQUESTED
+    assert actions == [A.PREPARE_INPUTS, A.TRIGGER]
+    assert elapsed >= 30 * 60
 
 
 def test_missing_protected_batch_stops_before_any_preparation(monkeypatch) -> None:
@@ -2432,9 +2584,7 @@ def test_waiting_evaluation_does_not_hide_normal_cycle_inspection(monkeypatch, t
     "evaluation_status",
     ["evaluation_pending", "researching", "evaluation_performance_due", "evaluation_complete"],
 )
-def test_due_evaluation_keeps_priority_over_normal_cycle(
-    monkeypatch, tmp_path, evaluation_status
-):
+def test_due_evaluation_keeps_priority_over_normal_cycle(monkeypatch, tmp_path, evaluation_status):
     env_file = explicit_service_config(tmp_path)
     evaluation = loop.AgentPaperLoopSnapshot(
         now=NOW,
@@ -2600,9 +2750,7 @@ def test_host_suspend_reinspects_wall_clock_schedule_before_stale_monotonic_dead
             evaluation_id=UUID(int=40),
             evaluation_slot_at=evaluation_slot,
             cycle_status=(
-                "evaluation_waiting"
-                if current[0] < evaluation_slot
-                else "evaluation_pending"
+                "evaluation_waiting" if current[0] < evaluation_slot else "evaluation_pending"
             ),
         )
 
@@ -2653,9 +2801,7 @@ def test_host_suspend_reinspects_wall_clock_schedule_before_stale_monotonic_dead
     assert sleeps == [pytest.approx(15)]
 
 
-def test_running_normal_action_finishes_before_due_evaluation_is_selected(
-    monkeypatch, tmp_path
-):
+def test_running_normal_action_finishes_before_due_evaluation_is_selected(monkeypatch, tmp_path):
     env_file = explicit_service_config(tmp_path)
     current = [NOW]
     evaluation_slot = NOW + timedelta(seconds=5)
