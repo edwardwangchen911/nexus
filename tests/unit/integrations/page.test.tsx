@@ -156,6 +156,19 @@ describe("integrations vertical slice", () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== "POST")).toHaveLength(1);
   });
 
+  it("shows the selected healthy source without blaming it for disabled integrations", async () => {
+    const fosun = { ...fosunFixture, mode: "read_only" as const, as_of: new Date().toISOString() };
+    const disabled = { ...fosunFixture, provider: "alpaca" as const, mode: "disabled" as const, quality: "PARTIAL" as const, as_of: null };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: [fosun, disabled], meta: responseMeta() })));
+
+    render(<IntegrationStatusProvider><GlobalSystemStatus /><IntegrationsPage /></IntegrationStatusProvider>);
+
+    expect(await screen.findByText("FOSUN · READ_ONLY")).toBeVisible();
+    expect(screen.getByRole("status", { name: "全局系统状态" })).toHaveAttribute("data-state", "ready");
+    expect(screen.getByText("数据源：数据已就绪")).toBeVisible();
+    expect(screen.getByRole("region", { name: "数据与能力状态页面" })).toHaveAttribute("data-state", "partial");
+  });
+
   it("treats an aborted mutation as unknown and reconciles before enabling another action", async () => {
     const disabled = { ...fosunFixture, mode: "disabled" as const, quality: "PARTIAL" as const, version: 2 };
     let getCount = 0;

@@ -7,7 +7,7 @@ import { formatDisplayTime } from "../lib/display-format";
 import { useEffect, useRef } from "react";
 import { Activity, ChevronDown, RefreshCw } from "lucide-react";
 import { dataStateLabels, type DataStateKind } from "./data-state";
-import { useIntegrationStatuses } from "../lib/integrations/browser";
+import { classifyIntegrationState, useIntegrationStatuses } from "../lib/integrations/browser";
 import type { IntegrationStatus as GeneratedIntegrationStatus } from "../lib/integrations/providers";
 
 export type IntegrationStatus = GeneratedIntegrationStatus;
@@ -22,9 +22,13 @@ type GlobalSystemStatusViewProps = {
 
 export function GlobalSystemStatus(): React.ReactElement {
   const resource = useIntegrationStatuses();
+  const selected = resource.integrations.find((integration) => integration.provider === "fosun") ?? resource.integrations[0];
+  const state = selected && ["ready", "partial", "stale"].includes(resource.state)
+    ? classifyIntegrationState([selected])
+    : resource.state;
   return (
     <GlobalSystemStatusView
-      state={resource.state}
+      state={state}
       integrations={resource.integrations}
       refreshing={resource.refreshing}
       onRefresh={() => void resource.refresh()}
@@ -87,7 +91,7 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
           <ChevronDown aria-hidden="true" size={17} strokeWidth={1.8} />
         </summary>
         <div className="global-status__details-body">
-          <p>此处汇总数据源状态；该时间不是行情或账户快照截止。资产快照质量与决策准入在具体页面单独标明。</p>
+          <p>此处显示当前数据源状态；其他来源在设置与运行页面单独查看。该时间不是行情或账户快照截止。资产快照质量与决策准入在具体页面单独标明。</p>
           <div className="global-status__details-heading">
             <p>状态证据与权限边界</p>
             <button className="button button--quiet" type="button" onClick={onRefresh} disabled={refreshing}>
