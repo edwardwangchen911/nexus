@@ -31,16 +31,17 @@ from nexus.paper.agent_challenger import (
     AgentChallengerError,
     PortfolioChallengerPublicationV1,
 )
+from nexus.paper.management_read_authority import load_synthesis_read_authority
 from nexus.paper.portfolio_challenger_case import (
     compare_portfolio_challenger_decisions,
     freeze_prospective_portfolio_challenger_case,
 )
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
-    AgentPortfolioSynthesisOutputRecord,
     AgentPortfolioSynthesisRunRecord,
     AgentPromptVersionRecord,
 )
+from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import AuditEvent, Job, JobLease
 from nexus.settings import AgentRuntimeMode, EngineSettings
 
@@ -162,9 +163,7 @@ async def inspect_compare(settings: EngineSettings, request: CompareRequest) -> 
             if job.status == JobStatus.QUEUED.value:
                 return ComparisonStatus(status="pending", job_id=job.id)
             if job.status == JobStatus.RUNNING.value:
-                lease = await session.scalar(
-                    select(JobLease).where(JobLease.job_id == job.id)
-                )
+                lease = await session.scalar(select(JobLease).where(JobLease.job_id == job.id))
                 database_now = await session.scalar(select(func.clock_timestamp()))
                 if lease is None or database_now is None or database_now >= lease.expires_at:
                     return ComparisonStatus(status="result_unknown", job_id=job.id)
@@ -172,12 +171,23 @@ async def inspect_compare(settings: EngineSettings, request: CompareRequest) -> 
             if job.status != JobStatus.SUCCEEDED.value:
                 return ComparisonStatus(status="result_unknown", job_id=job.id)
             candidate_output = await _read_output(session, job)
-            incumbent_output = await session.scalar(
-                select(AgentPortfolioSynthesisOutputRecord).where(
-                    AgentPortfolioSynthesisOutputRecord.run_id == run.id
+            cycle = await session.get(AgentPaperCycleRecord, request.cycle_id)
+            if cycle is None:
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
+            database_now = await session.scalar(select(func.clock_timestamp()))
+            if database_now is None:
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
+            try:
+                incumbent_authority = await load_synthesis_read_authority(
+                    session, cycle=cycle, read_as_of=database_now
                 )
-            )
-            if incumbent_output is None or incumbent_output.status != "completed":
+            except ValueError as error:
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN") from error
+            if incumbent_authority is None:
+                return ComparisonStatus(status="incumbent_pending", job_id=job.id)
+            if incumbent_authority.run.id != run.id:
+                raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
+            if incumbent_authority.output.status != "completed":
                 return ComparisonStatus(status="incumbent_pending", job_id=job.id)
             publication_id = job.payload.get("publication_event_id")
             publication_event = (
@@ -192,9 +202,7 @@ async def inspect_compare(settings: EngineSettings, request: CompareRequest) -> 
                 or publication_event.created_at > run.created_at
             ):
                 raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
-            publication = PortfolioChallengerPublicationV1.model_validate(
-                publication_event.payload
-            )
+            publication = PortfolioChallengerPublicationV1.model_validate(publication_event.payload)
             incumbent_prompt = await session.get(
                 AgentPromptVersionRecord, publication.incumbent_prompt_version_id
             )
@@ -215,14 +223,12 @@ async def inspect_compare(settings: EngineSettings, request: CompareRequest) -> 
             if (
                 candidate_output.source_input_hash != run.input_hash
                 or candidate_output.challenger_input_hash != case.challenger_input_hash
-                or incumbent_output.intent is None
+                or incumbent_authority.intent is None
             ):
                 raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
             difference = compare_portfolio_challenger_decisions(
                 incumbent_input=incumbent_input,
-                incumbent_intent=PortfolioSynthesisIntentV1.model_validate(
-                    incumbent_output.intent
-                ),
+                incumbent_intent=incumbent_authority.intent,
                 challenger_input=case.frozen_input,
                 challenger_intent=candidate_output.intent,
             )
@@ -260,8 +266,7 @@ async def execute_compare(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1423))"),
                 {
                     "scope": (
-                        f"portfolio-challenger-compare:{request.cycle_id}:"
-                        f"{request.proposal_hash}"
+                        f"portfolio-challenger-compare:{request.cycle_id}:{request.proposal_hash}"
                     )
                 },
             )
@@ -304,9 +309,7 @@ async def execute_compare(
             publication_event = publications[0]
             if publication_event.created_at > run.created_at:
                 raise AgentChallengerError("PORTFOLIO_CHALLENGER_CASE_NOT_PROSPECTIVE")
-            publication = PortfolioChallengerPublicationV1.model_validate(
-                publication_event.payload
-            )
+            publication = PortfolioChallengerPublicationV1.model_validate(publication_event.payload)
             incumbent = await session.get(
                 AgentPromptVersionRecord, publication.incumbent_prompt_version_id
             )

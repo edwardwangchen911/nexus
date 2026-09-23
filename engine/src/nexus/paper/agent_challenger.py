@@ -34,7 +34,10 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.models import job_input_hash
 from nexus.paper.agent_cycle_models import CandidateManifestEntry, candidate_manifest_hash
+from nexus.paper.execution_service import _ledger
+from nexus.paper.ledger import balance_ledger
 from nexus.paper.management_read_authority import load_synthesis_read_authority
+from nexus.paper.read_service import _fill_chain_is_valid, _order_chain_is_valid
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPortfolioSynthesisOutputRecord,
@@ -49,6 +52,7 @@ from nexus.persistence.models.paper import (
     AgentPaperCandidateBatchRecord,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
+    PaperExecutionWindowAuthorityRecord,
     PaperFillRecord,
     PaperLedgerTransactionRecord,
     PaperOrderBatchRecord,
@@ -641,6 +645,19 @@ async def collect_portfolio_challenger_cycle_sample(
             for event in latest_orders.values()
         ):
             raise AgentChallengerError(code)
+        if any(event.occurred_at > as_of for event in events) or any(
+            not _order_chain_is_valid(
+                order,
+                tuple(
+                    sorted(
+                        (event for event in events if event.order_id == order.id),
+                        key=lambda event: event.event_seq,
+                    )
+                ),
+            )
+            for order in orders
+        ):
+            raise AgentChallengerError(code)
         statuses = tuple(latest_orders[order.id].to_status for order in orders)
         fills = tuple(
             await session.scalars(
@@ -661,6 +678,30 @@ async def collect_portfolio_challenger_cycle_sample(
             )
         ):
             raise AgentChallengerError(code)
+        window_ids = tuple(fill.execution_window_authority_id for fill in fills)
+        windows = {
+            window.id: window
+            for window in await session.scalars(
+                select(PaperExecutionWindowAuthorityRecord).where(
+                    PaperExecutionWindowAuthorityRecord.id.in_(window_ids)
+                )
+            )
+        }
+        if any(
+            not _fill_chain_is_valid(
+                order,
+                tuple(
+                    sorted(
+                        (fill for fill in fills if fill.order_id == order.id),
+                        key=lambda fill: fill.fill_seq,
+                    )
+                ),
+                windows,
+                tuple(event for event in events if event.order_id == order.id),
+            )
+            for order in orders
+        ):
+            raise AgentChallengerError(code)
         ledger_ids = tuple(fill.ledger_transaction_id for fill in fills)
         ledgers = tuple(
             await session.scalars(
@@ -674,6 +715,23 @@ async def collect_portfolio_challenger_cycle_sample(
             ledger_by_id[fill.ledger_transaction_id].account_id != cycle.account_id
             or ledger_by_id[fill.ledger_transaction_id].order_id != fill.order_id
             or ledger_by_id[fill.ledger_transaction_id].transaction_type != "fill"
+            for fill in fills
+        ):
+            raise AgentChallengerError(code)
+        try:
+            account_ledger = await _ledger(session, cycle.account_id)
+            balance_ledger(account_ledger)
+        except ValueError as error:
+            raise AgentChallengerError(code) from error
+        valid_transactions = {item.transaction_id: item for item in account_ledger.transactions}
+        if any(
+            (transaction := valid_transactions.get(fill.ledger_transaction_id)) is None
+            or transaction.reference_type != "fill"
+            or transaction.reference_hash != fill.payload_hash
+            or transaction.occurred_at != fill.occurred_at
+            or transaction.occurred_at > as_of
+            or transaction.transaction_hash
+            != ledger_by_id[fill.ledger_transaction_id].transaction_hash
             for fill in fills
         ):
             raise AgentChallengerError(code)
