@@ -89,7 +89,14 @@ class ComparisonOutput(BaseModel):
 class ComparisonStatus(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
-    status: Literal["not_run", "pending", "result_unknown", "incumbent_pending", "compared"]
+    status: Literal[
+        "not_run",
+        "pending",
+        "result_unknown",
+        "incumbent_pending",
+        "incumbent_unavailable",
+        "compared",
+    ]
     job_id: UUID | None = None
     selection_changed: bool | None = None
     reasoning_changed: bool | None = None
@@ -188,7 +195,7 @@ async def inspect_compare(settings: EngineSettings, request: CompareRequest) -> 
             if incumbent_authority.run.id != run.id:
                 raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
             if incumbent_authority.output.status != "completed":
-                return ComparisonStatus(status="incumbent_pending", job_id=job.id)
+                return ComparisonStatus(status="incumbent_unavailable", job_id=job.id)
             publication_id = job.payload.get("publication_event_id")
             publication_event = (
                 await session.get(AuditEvent, UUID(publication_id))

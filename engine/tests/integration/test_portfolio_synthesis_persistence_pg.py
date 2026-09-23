@@ -71,8 +71,8 @@ async def seed_synthesis(
     complete_research=True,
     candidate_instruments=INSTRUMENTS[:2],
 ):
+    additional = tuple(item for item in candidate_instruments if item not in INSTRUMENTS)
     if normal_path is None:
-        additional = tuple(item for item in candidate_instruments if item not in INSTRUMENTS)
         seed = await seed_paper_batch(url, additional_instruments=additional)
         engine = create_async_engine(url)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -125,7 +125,11 @@ async def seed_synthesis(
         )
         assert len(started.research_run_ids) == len(candidate_instruments)
         outputs = []
-        for index, run_id in enumerate(started.research_run_ids):
+        symbol_by_instrument = {
+            instrument_id: "AAPL" if index == 1 else f"T{index}"
+            for index, (instrument_id, *_rest) in enumerate(INSTRUMENTS + additional, start=1)
+        }
+        for run_id in started.research_run_ids:
             if not complete_research:
                 continue
             run = await session.get(AgentResearchRunRecord, run_id)
@@ -134,7 +138,7 @@ async def seed_synthesis(
                 run=run, evidence=evidence, valid_until=decision_time + timedelta(days=1)
             )
             intent = intent.model_copy(
-                update={"display_symbol": "AAPL" if index == 0 else f"T{index + 1}"}
+                update={"display_symbol": symbol_by_instrument[run.instrument_id]}
             )
             bound_records = [
                 await session.get(ResearchEvidenceRef, UUID(frozen["id"]))
@@ -363,9 +367,14 @@ async def test_portfolio_challenger_case_requires_publication_before_new_frozen_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_failure", [False, True])
+@pytest.mark.parametrize(
+    ("model_failure", "incumbent_status"),
+    [(False, "completed"), (False, "abstained"), (True, None)],
+)
 async def test_portfolio_challenger_compare_is_once_only_and_cannot_create_orders(
-    migrated_database_url, model_failure,
+    migrated_database_url,
+    model_failure,
+    incumbent_status,
 ):
     from nexus.persistence.models.paper import PaperOrderRecord
 
@@ -471,18 +480,22 @@ async def test_portfolio_challenger_compare_is_once_only_and_cannot_create_order
                     session,
                     run_id=run.id,
                     input_hash=run.input_hash,
-                    status="completed",
-                    intent=synthesis_intent(run),
+                    status=incumbent_status,
+                    intent=synthesis_intent(run) if incumbent_status == "completed" else None,
                     input_tokens=10,
                     output_tokens=20,
                     now=kwargs["now"] + timedelta(minutes=1),
                 )
             compared = await inspect_compare(settings, request)
-            assert compared.status == "compared"
-            assert compared.selection_changed is False
-            assert compared.reasoning_changed is False
-            assert compared.changed_candidate_count == 0
-            assert compared.economic_result == "not_evaluated"
+            if incumbent_status == "completed":
+                assert compared.status == "compared"
+                assert compared.selection_changed is False
+                assert compared.reasoning_changed is False
+                assert compared.changed_candidate_count == 0
+                assert compared.economic_result == "not_evaluated"
+            else:
+                assert compared.status == "incumbent_unavailable"
+                assert compared.selection_changed is None
         async with sessions() as session:
             assert await session.scalar(select(func.count(PaperOrderRecord.id))) == 0
             assert await session.scalar(
@@ -492,7 +505,7 @@ async def test_portfolio_challenger_compare_is_once_only_and_cannot_create_order
             ) == (0 if model_failure else 1)
             current_run = await session.get(AgentPortfolioSynthesisRunRecord, run.id)
             assert current_run is not None
-            assert current_run.status == ("prepared" if model_failure else "completed")
+            assert current_run.status == ("prepared" if model_failure else incumbent_status)
     finally:
         await engine.dispose()
 
@@ -553,7 +566,7 @@ async def test_five_candidate_cycle_reaches_no_trade_and_replays_exactly_once(
                 )
             )
             frozen = PortfolioSynthesisInputV1.model_validate(synthesis.frozen_input)
-            assert frozen.candidate_instrument_ids == tuple(item[0] for item in candidates)
+            assert frozen.candidate_instrument_ids == tuple(sorted(item[0] for item in candidates))
             first = await _resume_research(
                 session,
                 cycle=cycle,
