@@ -33,6 +33,38 @@ function evaluationSlots(paired = 0): Array<Record<string, unknown>> {
 }
 
 describe("internal paper page", () => {
+  it("reads a selected historical cycle without changing the current account or orders", async () => {
+    const historical = { ...agentPaperCycle, decision_session: "2026-08-25" };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/paper/portfolio") return Response.json({ data: paperPortfolio, meta: meta() });
+      if (path === "/api/v1/paper/orders?limit=20") return Response.json({ data: { items: [], next_cursor: null }, meta: meta() });
+      if (path === "/api/v1/paper/cycles?limit=20") return Response.json({ data: {
+        items: [], summary: { decision_session: "2026-08-26", status: "not_started", cycle_count: 0,
+          completed_count: 0, latest_result_code: null, last_completed_decision_at: null,
+          next_eligible_at: null, next_eligible_reason: null, execution_locked: true },
+        version_observation: null, version_history: [], version_evaluation: null,
+      }, meta: meta() });
+      if (path === "/api/v1/paper/cycles?decision_session=2026-08-25&limit=20") return Response.json({ data: {
+        items: [historical], summary: { decision_session: "2026-08-25", status: "completed", cycle_count: 1,
+          completed_count: 1, latest_result_code: historical.result_code,
+          last_completed_decision_at: historical.decision_time, next_eligible_at: null,
+          next_eligible_reason: null, execution_locked: true },
+        version_observation: null, version_history: [], version_evaluation: null,
+      }, meta: meta() });
+      throw new Error(`unexpected path ${path}`);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    render(<PaperPage />);
+    expect(await screen.findByText("尚无 Agent 模拟周期。")).toBeVisible();
+    fireEvent.change(screen.getByLabelText("决策会话日期"), { target: { value: "2026-08-25" } });
+    expect(await screen.findByText(`记录代码：${historical.result_code}`)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "所选会话 Agent 模拟周期" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "所选会话运行状态" })).toBeVisible();
+    expect(fetcher.mock.calls.map(([path]) => String(path))).toContain("/api/v1/paper/cycles?decision_session=2026-08-25&limit=20");
+    expect(fetcher.mock.calls.every(([path]) => !String(path).includes("/cancel"))).toBe(true);
+  });
+
   it("shows a filled current position even before any close performance is published", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

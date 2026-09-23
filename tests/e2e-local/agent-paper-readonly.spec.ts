@@ -11,7 +11,12 @@ type Actual = components["schemas"]["PaperPlanActualResponse"];
 test("one persisted portfolio cycle agrees across four read-only pages", async ({ page, request }) => {
   test.skip(!enabled, "explicit local read-only acceptance only");
 
-  const cyclesResponse = await request.get("/api/v1/paper/cycles?limit=20");
+  const latestResponse = await request.get("/api/v1/paper/cycles/latest");
+  expect(latestResponse.status()).toBe(200);
+  const latest = (await latestResponse.json()).data as Cycle;
+  const cyclesResponse = await request.get(
+    `/api/v1/paper/cycles?decision_session=${latest.decision_session}&limit=20`,
+  );
   expect(cyclesResponse.status()).toBe(200);
   const cyclePage = (await cyclesResponse.json()).data as CyclePage;
   const cycle = (cyclePage.items as Cycle[]).find(
@@ -48,11 +53,12 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
   await page.goto("/workspace");
   await page.waitForLoadState("networkidle");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
-  await expect(page.locator("body")).toContainText(cycle.result_code);
+  await expect(page.locator("body")).toContainText("代码提交、迁移与心跳报告匹配");
 
   await page.goto("/decisions");
   await page.waitForLoadState("networkidle");
-  await expect(page.getByRole("heading", { name: "决策记录" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "决策记录", exact: true })).toBeVisible();
+  await expect(page.getByLabel("决策日期")).toHaveValue(cycle.decision_session);
   await expect(page.locator(`a[href="/decisions/${cycle.cycle_id}"]`)).toBeVisible();
 
   await page.goto(`/decisions/${cycle.cycle_id}`);
@@ -65,6 +71,8 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
   await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "当前实际持仓与现金" })).toBeVisible();
   await expect(page.locator("#paper-current-actual")).toContainText("可用现金");
+  await page.getByLabel("决策会话日期").fill(cycle.decision_session);
+  await expect(page.getByRole("heading", { name: "所选会话 Agent 模拟周期" })).toBeVisible();
   await page.locator(`select:has(option[value="${cycle.cycle_id}"])`).selectOption(cycle.cycle_id);
   await expect(page.locator("body")).toContainText(cycle.result_code);
   await expect(page.locator("body")).toContainText(targetId!);
