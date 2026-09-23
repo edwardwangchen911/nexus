@@ -14,7 +14,7 @@ const QUALITY_REASON_LABELS: Readonly<Record<string, string>> = {
   HISTORY_TRUNCATED: "历史行情已按页面上限截断",
   HISTORY_DELIVERY_UNVERIFIED: "K 线实时性尚未获得证明",
   FUTURE_DATA_EXCLUDED: "未来时点数据已排除",
-  FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE: "上游报价未提供成交时间",
+  FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE: "源报价时间尚未核实，当前仅有本机接收时间",
   FOSUN_ADJUSTMENT_REQUEST_UNVERIFIED: "未保存 SDK 不复权请求证明",
   INTRADAY_BID_ASK_UNAVAILABLE: "盘口买卖价未提供",
   INTRADAY_DELIVERY_UNVERIFIED: "实时性尚未获得证据",
