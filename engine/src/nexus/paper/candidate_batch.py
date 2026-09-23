@@ -19,7 +19,10 @@ from nexus.paper.agent_cycle_authority import select_agent_paper_service_calenda
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
 from nexus.paper.universe_scope import is_formal_agent_paper_universe
 from nexus.persistence.idempotency import IdempotencyClaimError, claim_idempotency
-from nexus.persistence.models.agents import AgentPromptVersionRecord
+from nexus.persistence.models.agents import (
+    AgentDataSnapshotEvidenceRecord,
+    AgentPromptVersionRecord,
+)
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.market import (
@@ -38,6 +41,8 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.portfolio import Account
 from nexus.persistence.models.runtime import IdempotencyRecord
+from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
+from nexus.research.current_price_trends_storage import read_current_price_trends
 
 _ROUTE = "agent-paper-candidate-batch-v1"
 _SCHEMA = "agent_paper_candidate_batch_v1"
@@ -391,6 +396,7 @@ async def inspect_agent_paper_candidate_static_readiness(
         and selected_universe.id == batch.universe_snapshot_id
     )
     candidates: list[dict[str, object]] = []
+    current_trends: list[dict[str, str]] = []
     for identity in sorted(identities, key=lambda item: item.symbol):
         missing: list[str] = []
         snapshot = await select_authoritative_snapshot(
@@ -464,6 +470,38 @@ async def inspect_agent_paper_candidate_static_readiness(
         if daily_authority is None:
             missing.append("PRIOR_DAILY_AUTHORITY_MISSING")
         candidates.append({"symbol": identity.symbol, "missing": missing})
+        trends = await read_current_price_trends(
+            session, instrument_id=identity.instrument_id, as_of=as_of
+        )
+        trend_ready = len(trends) == 1 and all(
+            trend.last_observed_on == prior_session
+            and all(
+                trend.features[name] is not None
+                for name in ("sma_20", "sma_200", "rsi_14", "volatility_20")
+            )
+            for trend in trends.values()
+        )
+        trend_bound = False
+        if trend_ready and snapshot is not None:
+            trend_ref_id = next(iter(trends))
+            trend_bound = bool(
+                await session.scalar(
+                    select(AgentDataSnapshotEvidenceRecord.evidence_ref_id).where(
+                        AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
+                        AgentDataSnapshotEvidenceRecord.instrument_id == identity.instrument_id,
+                        AgentDataSnapshotEvidenceRecord.authority_kind == "research",
+                        AgentDataSnapshotEvidenceRecord.source == CURRENT_TRENDS_SOURCE,
+                        AgentDataSnapshotEvidenceRecord.evidence_ref_id == trend_ref_id,
+                    )
+                )
+            )
+        current_trends.append(
+            {
+                "symbol": identity.symbol,
+                "evidence_status": "ready" if trend_ready else "missing",
+                "snapshot_status": "ready" if trend_bound else "missing",
+            }
+        )
     static_ready = (
         universe_matches
         and synthesis_prompt_ready
@@ -492,6 +530,7 @@ async def inspect_agent_paper_candidate_static_readiness(
         "universe_status": "matched" if universe_matches else "mismatch",
         "synthesis_prompt_status": "ready" if synthesis_prompt_ready else "missing_or_invalid",
         "candidates": candidates,
+        "research_inputs": {"current_trends": current_trends},
         "window_evidence_status": "not_evaluated",
         "execution_locked": True,
         "external_requests": 0,

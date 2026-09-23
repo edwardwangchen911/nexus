@@ -24,6 +24,9 @@ uv run --project engine nexus-engine-agent-paper-readiness --repo-root "$PWD"
 XNYS 交易日、批次与正式研究 Universe、组合合成提示词的有效登记、每只候选的研究快照、
 已审核行业证据和前一完整交易日 Alpaca `all` 日线权威。`blocked` 会逐只列出候选缺口，
 `synthesis_prompt_status` 单独显示提示词是否有效；
+`research_inputs.current_trends` 另列出每只候选的前一交易日趋势证据是否齐全，及其是否已绑定
+当前研究快照。它是补充研究输入的提前诊断，不改变 `ready_static` 的交易准入含义；
+盘前尚未绑定时显示 `snapshot_status=missing`，不能将证据存在误写为已被 Agent 消费。
 `ready_static` 只表示上述已存证据齐备，返回中的
 `window_evidence_status=not_evaluated` 表示同日 Schwab 行情、风险查询、
 研究 Job、内部模拟执行和页面结果仍须分别验收。该命令不调用 Provider、模型，

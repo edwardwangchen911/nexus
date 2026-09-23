@@ -716,6 +716,10 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         assert result["execution_locked"] is True
         assert result["external_requests"] == 0
         assert result["synthesis_prompt_status"] == "missing_or_invalid"
+        assert result["research_inputs"]["current_trends"] == [
+            {"symbol": "AAPL", "evidence_status": "missing", "snapshot_status": "missing"},
+            {"symbol": "NVDA", "evidence_status": "missing", "snapshot_status": "missing"},
+        ]
         assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
 
     async with factory() as session, session.begin():
