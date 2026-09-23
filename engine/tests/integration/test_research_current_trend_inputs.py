@@ -207,7 +207,9 @@ async def test_agent_paper_preparation_binds_existing_trend_without_recollecting
     calendar_id = UUID(int=711)
     calendar_now = datetime.now(UTC)
     today = calendar_now.astimezone(ZoneInfo("America/New_York")).date()
-    start = prior_session - timedelta(days=366)
+    # The bound service calendar covers the decision window, while the trend
+    # evidence was collected and persisted from an older historical window.
+    start = prior_session
     async with factory.begin() as session:
         session.add(
             ExchangeCalendarAuthorityRecord(
@@ -226,7 +228,7 @@ async def test_agent_paper_preparation_binds_existing_trend_without_recollecting
         )
         await session.flush()
         for day in sorted(
-            {start, prior_session, today, today + timedelta(days=1), today + timedelta(days=2)}
+            {prior_session, today, today + timedelta(days=1), today + timedelta(days=2)}
         ):
             session.add(
                 ExchangeCalendarSessionRecord(

@@ -242,7 +242,7 @@ class PriorDailyScope:
 @dataclass(frozen=True)
 class CurrentTrendsScope:
     instrument_id: UUID
-    start_session: date
+    start_session: date | None
     prior_session: date
     evidence_ready: bool
     snapshot_ready: bool
@@ -1187,29 +1187,6 @@ async def _inspect_current_trends_scope(
                 now=database_now,
                 expected_calendar_authority_id=expected_calendar_authority_id,
             )
-            required_start = prior.prior_session - timedelta(days=366)
-            authority_range_start = await session.scalar(
-                select(ExchangeCalendarAuthorityRecord.range_start).where(
-                    ExchangeCalendarAuthorityRecord.id == expected_calendar_authority_id,
-                    ExchangeCalendarAuthorityRecord.range_start <= required_start,
-                )
-            )
-            if not isinstance(authority_range_start, date):
-                raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
-            start_session = await session.scalar(
-                select(ExchangeCalendarSessionRecord.session)
-                .where(
-                    ExchangeCalendarSessionRecord.calendar_authority_id
-                    == expected_calendar_authority_id,
-                    ExchangeCalendarSessionRecord.session >= required_start,
-                    ExchangeCalendarSessionRecord.session <= prior.prior_session,
-                    ExchangeCalendarSessionRecord.created_at <= database_now,
-                )
-                .order_by(ExchangeCalendarSessionRecord.session.asc())
-                .limit(1)
-            )
-            if not isinstance(start_session, date):
-                raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
             documents = await read_current_price_trends(
                 session,
                 instrument_id=prior.instrument_id,
@@ -1242,6 +1219,31 @@ async def _inspect_current_trends_scope(
                         )
                     )
                 )
+            start_session = None
+            if not evidence_ready:
+                required_start = prior.prior_session - timedelta(days=366)
+                authority_range_start = await session.scalar(
+                    select(ExchangeCalendarAuthorityRecord.range_start).where(
+                        ExchangeCalendarAuthorityRecord.id == expected_calendar_authority_id,
+                        ExchangeCalendarAuthorityRecord.range_start <= required_start,
+                    )
+                )
+                if not isinstance(authority_range_start, date):
+                    raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
+                start_session = await session.scalar(
+                    select(ExchangeCalendarSessionRecord.session)
+                    .where(
+                        ExchangeCalendarSessionRecord.calendar_authority_id
+                        == expected_calendar_authority_id,
+                        ExchangeCalendarSessionRecord.session >= required_start,
+                        ExchangeCalendarSessionRecord.session <= prior.prior_session,
+                        ExchangeCalendarSessionRecord.created_at <= database_now,
+                    )
+                    .order_by(ExchangeCalendarSessionRecord.session.asc())
+                    .limit(1)
+                )
+                if not isinstance(start_session, date):
+                    raise ValueError("AGENT_PAPER_CALENDAR_UNAVAILABLE")
             return CurrentTrendsScope(
                 instrument_id=prior.instrument_id,
                 start_session=start_session,
@@ -1327,6 +1329,8 @@ async def prepare_current_trends_once(
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return "prepared"
+    if scope.start_session is None:
+        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if candidate.symbol == "AAPL" and (parent / scope.prior_session.isoformat()).exists():
