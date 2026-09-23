@@ -1,6 +1,7 @@
 """Create and read bounded explicit research scopes for Agent paper cycles."""
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -45,6 +46,7 @@ from nexus.persistence.models.runtime import IdempotencyRecord
 from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fred_storage import (
+    FredResearchObservation,
     inspect_persisted_fred_vintage_for_slot,
     read_fred_observations,
 )
@@ -53,6 +55,21 @@ _ROUTE = "agent-paper-candidate-batch-v1"
 _SCHEMA = "agent_paper_candidate_batch_v1"
 _SOURCE = "explicit_research_scope"
 _SUPPORTED_ASSET_TYPES = frozenset({"ETF", "common_stock"})
+
+
+def macro_snapshot_contains_required_observations(
+    observations: Sequence[FredResearchObservation], *, bound_ids: set[UUID]
+) -> bool:
+    """Require both the observation and calendar refs for every macro series."""
+    return all(
+        any(
+            observation.series == series
+            and observation.evidence_ref_id in bound_ids
+            and observation.calendar_evidence_ref_id in bound_ids
+            for observation in observations
+        )
+        for series in PAPER_MACRO_SERIES
+    )
 
 
 class CandidateBatchInput(BaseModel):
@@ -437,6 +454,7 @@ async def inspect_agent_paper_candidate_static_readiness(
     )
     candidates: list[dict[str, object]] = []
     current_trends: list[dict[str, str]] = []
+    macro_bindings: list[dict[str, str]] = []
     for identity in sorted(identities, key=lambda item: item.symbol):
         missing: list[str] = []
         snapshot = await select_authoritative_snapshot(
@@ -542,6 +560,24 @@ async def inspect_agent_paper_candidate_static_readiness(
                 "snapshot_status": "ready" if trend_bound else "missing",
             }
         )
+        macro_bound = False
+        if macro_complete and snapshot is not None:
+            bound_ids = set(
+                await session.scalars(
+                    select(AgentDataSnapshotEvidenceRecord.evidence_ref_id).where(
+                        AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
+                        AgentDataSnapshotEvidenceRecord.instrument_id == identity.instrument_id,
+                        AgentDataSnapshotEvidenceRecord.authority_kind == "research",
+                        AgentDataSnapshotEvidenceRecord.created_at <= as_of,
+                    )
+                )
+            )
+            macro_bound = macro_snapshot_contains_required_observations(
+                tuple(macro_observations.values()), bound_ids=bound_ids
+            )
+        macro_bindings.append(
+            {"symbol": identity.symbol, "status": "ready" if macro_bound else "missing"}
+        )
     static_ready = (
         universe_matches
         and synthesis_prompt_ready
@@ -579,6 +615,7 @@ async def inspect_agent_paper_candidate_static_readiness(
                 "available_at": (
                     macro_available_at.isoformat() if macro_available_at is not None else None
                 ),
+                "snapshot_bindings": macro_bindings,
             },
         },
         "window_evidence_status": "not_evaluated",

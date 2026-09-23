@@ -726,6 +726,10 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
             "status": "missing",
             "missing_series": ["CPIAUCSL", "DFF", "DGS10", "DGS2", "UNRATE", "VIXCLS"],
             "available_at": None,
+            "snapshot_bindings": [
+                {"symbol": "AAPL", "status": "missing"},
+                {"symbol": "NVDA", "status": "missing"},
+            ],
         }
         assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
 

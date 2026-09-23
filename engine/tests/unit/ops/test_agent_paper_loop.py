@@ -4158,6 +4158,11 @@ def test_macro_snapshot_is_not_ready_without_bound_calendar_evidence() -> None:
         observations,
         bound_ids=observation_evidence_ids,
     )
+    assert loop._macro_snapshot_contains_required_observations(
+        observations,
+        bound_ids=observation_evidence_ids
+        | {observation.calendar_evidence_ref_id for observation in observations},
+    )
 
 
 def test_macro_preparation_binds_complete_evidence_without_provider_call(

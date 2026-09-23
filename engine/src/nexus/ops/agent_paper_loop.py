@@ -83,6 +83,9 @@ from nexus.paper.candidate_batch import (
     CandidateInstrumentIdentity,
     validate_agent_paper_candidate_batch,
 )
+from nexus.paper.candidate_batch import (
+    macro_snapshot_contains_required_observations as _macro_snapshot_contains_required_observations,
+)
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
@@ -132,7 +135,7 @@ from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fred_collection import load_fred_collection
 from nexus.research.fred_observations import FredVintageRequest
-from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
+from nexus.research.fred_storage import read_fred_observations
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
@@ -678,20 +681,6 @@ def agent_paper_service_preflight(
         "optional_codes": optional_codes,
         **_normal_cycle_config_readiness(environment),
     }
-
-
-def _macro_snapshot_contains_required_observations(
-    observations: Sequence[FredResearchObservation], *, bound_ids: set[UUID]
-) -> bool:
-    return all(
-        any(
-            observation.series == series
-            and observation.evidence_ref_id in bound_ids
-            and observation.calendar_evidence_ref_id in bound_ids
-            for observation in observations
-        )
-        for series in _PAPER_MACRO_SERIES
-    )
 
 
 def _utc_now() -> datetime:
