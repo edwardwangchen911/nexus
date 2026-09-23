@@ -31,12 +31,15 @@ from nexus.jobs.models import job_input_hash
 from nexus.paper.agent_cycle_models import CandidateManifestEntry, candidate_manifest_hash
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
+    AgentPortfolioSynthesisOutputRecord,
+    AgentPortfolioSynthesisRunRecord,
     AgentPromptVersionRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.paper import (
+    AgentPaperCandidateBatchRecord,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
     StrategyDecisionAgentOutputRecord,
@@ -259,6 +262,147 @@ class AgentChallengerError(ValueError):
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+
+
+class PortfolioChallengerCycleSampleV1(_FrozenModel):
+    """One complete, immutable multi-candidate input for a future portfolio review."""
+
+    schema_version: Literal["portfolio_challenger_cycle_sample_v1"]
+    cycle_id: UUID
+    candidate_batch_id: UUID
+    candidate_instrument_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
+    research_run_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
+    research_output_ids: tuple[UUID, ...] = Field(min_length=2, max_length=5)
+    synthesis_run_id: UUID
+    synthesis_output_id: UUID
+    synthesis_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    strategy_decision_id: UUID
+    decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result_code: str = Field(min_length=1, max_length=100)
+
+
+async def collect_portfolio_challenger_cycle_sample(
+    session: AsyncSession, *, cycle_id: UUID, as_of: datetime
+) -> PortfolioChallengerCycleSampleV1:
+    """Read a completed portfolio cycle without dropping any candidate or authority binding."""
+    code = "PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE"
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise AgentChallengerError(code)
+    cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+    if (
+        cycle is None
+        or cycle.decision_time > as_of
+        or not cycle.execution_locked
+        or cycle.candidate_batch_id is None
+        or cycle.sizing_policy_version != "portfolio_allocation_v1"
+    ):
+        raise AgentChallengerError(code)
+    try:
+        manifest = tuple(
+            CandidateManifestEntry.model_validate(row) for row in cycle.candidate_manifest
+        )
+    except ValueError:
+        raise AgentChallengerError(code) from None
+    instrument_ids = tuple(sorted(item.instrument_id for item in manifest))
+    if (
+        not 2 <= len(instrument_ids) <= 5
+        or len(set(instrument_ids)) != len(instrument_ids)
+        or candidate_manifest_hash(manifest) != cycle.candidate_hash
+    ):
+        raise AgentChallengerError(code)
+    batch = await session.get(AgentPaperCandidateBatchRecord, cycle.candidate_batch_id)
+    if batch is None or set(batch.candidate_instrument_ids) != set(instrument_ids):
+        raise AgentChallengerError(code)
+    latest = await session.scalar(
+        select(AgentPaperCycleEventRecord)
+        .where(AgentPaperCycleEventRecord.cycle_id == cycle_id)
+        .order_by(AgentPaperCycleEventRecord.sequence.desc())
+        .limit(1)
+    )
+    if latest is None or latest.to_status != "completed" or latest.occurred_at > as_of:
+        raise AgentChallengerError(code)
+    decision = await session.scalar(
+        select(StrategyDecisionRecord).where(
+            StrategyDecisionRecord.agent_paper_cycle_id == cycle_id,
+            StrategyDecisionRecord.decision_origin == "agent_research",
+            StrategyDecisionRecord.strategy_version == "agent_portfolio_proposal_v1",
+        )
+    )
+    if (
+        decision is None
+        or decision.portfolio_synthesis_output_id is None
+        or decision.account_id != cycle.account_id
+        or decision.portfolio_id != cycle.portfolio_id
+        or decision.universe_snapshot_id != cycle.universe_snapshot_id
+        or decision.decision_time != cycle.decision_time
+    ):
+        raise AgentChallengerError(code)
+    synthesis_output = await session.get(
+        AgentPortfolioSynthesisOutputRecord, decision.portfolio_synthesis_output_id
+    )
+    if synthesis_output is None or synthesis_output.status != "completed":
+        raise AgentChallengerError(code)
+    synthesis_run = await session.get(AgentPortfolioSynthesisRunRecord, synthesis_output.run_id)
+    if (
+        synthesis_run is None
+        or synthesis_run.status != "completed"
+        or synthesis_run.cycle_id != cycle_id
+        or synthesis_run.candidate_batch_id != batch.id
+        or synthesis_run.completed_at is None
+        or synthesis_run.completed_at > as_of
+    ):
+        raise AgentChallengerError(code)
+    bindings = tuple(
+        await session.scalars(
+            select(StrategyDecisionAgentOutputRecord).where(
+                StrategyDecisionAgentOutputRecord.strategy_decision_id == decision.id
+            )
+        )
+    )
+    output_ids = tuple(binding.agent_research_output_id for binding in bindings)
+    if (
+        len(output_ids) != len(instrument_ids)
+        or len(set(output_ids)) != len(output_ids)
+        or set(output_ids) != set(synthesis_run.research_output_ids)
+    ):
+        raise AgentChallengerError(code)
+    rows = (
+        await session.execute(
+            select(AgentResearchOutputRecord, AgentResearchRunRecord)
+            .join(
+                AgentResearchRunRecord,
+                AgentResearchRunRecord.id == AgentResearchOutputRecord.run_id,
+            )
+            .where(AgentResearchOutputRecord.id.in_(output_ids))
+        )
+    ).all()
+    expected_snapshots = {item.instrument_id: item.research_snapshot_id for item in manifest}
+    if (
+        len(rows) != len(instrument_ids)
+        or {run.instrument_id for _, run in rows} != set(instrument_ids)
+        or any(
+            output.status != "completed"
+            or run.status != "completed"
+            or run.data_snapshot_id != expected_snapshots[run.instrument_id]
+            or run.decision_time != cycle.decision_time
+            for output, run in rows
+        )
+    ):
+        raise AgentChallengerError(code)
+    return PortfolioChallengerCycleSampleV1(
+        schema_version="portfolio_challenger_cycle_sample_v1",
+        cycle_id=cycle_id,
+        candidate_batch_id=batch.id,
+        candidate_instrument_ids=instrument_ids,
+        research_run_ids=tuple(sorted(run.id for _, run in rows)),
+        research_output_ids=tuple(sorted(output_ids)),
+        synthesis_run_id=synthesis_run.id,
+        synthesis_output_id=synthesis_output.id,
+        synthesis_content_hash=synthesis_output.content_hash,
+        strategy_decision_id=decision.id,
+        decision_hash=decision.decision_hash,
+        result_code=latest.result_code,
+    )
 
 
 def freeze_agent_challenger_retrospective_v4(
