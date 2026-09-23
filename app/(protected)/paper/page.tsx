@@ -37,9 +37,12 @@ type PaperPanelProps = {
   versionHistory?: AgentPaperVersionObservationFact[];
   versionEvaluation?: AgentVersionEvaluationFact | null;
   cycleUnavailable?: boolean;
+  currentCycleSession?: string | null;
+  selectedCycleSession?: string | null;
   management?: React.ReactNode;
   actual?: React.ReactNode;
   onRefresh: () => void;
+  onCycleSessionChange?: (session: string) => void;
   onStatusFilter: (status: "" | OrderStatus) => void;
   onLoadMore: () => void;
   onCancel: (order: PaperOrder, trigger?: HTMLButtonElement) => void;
@@ -67,6 +70,8 @@ export default function PaperPage(): React.ReactElement {
   const [versionHistory, setVersionHistory] = useState<AgentPaperVersionObservationFact[]>([]);
   const [versionEvaluation, setVersionEvaluation] = useState<AgentVersionEvaluationFact | null>(null);
   const [cycleUnavailable, setCycleUnavailable] = useState(false);
+  const [currentCycleSession, setCurrentCycleSession] = useState<string | null>(null);
+  const [selectedCycleSession, setSelectedCycleSession] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"" | OrderStatus>("");
   const [loadingMore, setLoadingMore] = useState(false);
@@ -80,6 +85,7 @@ export default function PaperPage(): React.ReactElement {
   const portfolioRef = useRef<PaperPortfolio | null>(null);
   const ordersRef = useRef<PaperOrder[]>([]);
   const filterRef = useRef<"" | OrderStatus>("");
+  const cycleSessionRef = useRef<string | null>(null);
   const cursorHistory = useRef(new Set<string>());
   const cancelInFlight = useRef(false);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -96,6 +102,9 @@ export default function PaperPage(): React.ReactElement {
     setVersionHistory([]);
     setVersionEvaluation(null);
     setCycleUnavailable(false);
+    setCurrentCycleSession(null);
+    setSelectedCycleSession(null);
+    cycleSessionRef.current = null;
     setNextCursor(null);
     setLastAttempt(null);
   }, []);
@@ -112,7 +121,9 @@ export default function PaperPage(): React.ReactElement {
       const [portfolioResponse, orderResponse, cycleResponse] = await Promise.all([
         fetchWithTimeout("/api/v1/paper/portfolio"),
         fetchWithTimeout(orderPath(filter, null)),
-        fetchWithTimeout("/api/v1/paper/cycles?limit=20").catch(() => new Response(null, { status: 502 })),
+        fetchWithTimeout(cycleSessionRef.current
+          ? `/api/v1/paper/cycles?decision_session=${encodeURIComponent(cycleSessionRef.current)}&limit=20`
+          : "/api/v1/paper/cycles?limit=20").catch(() => new Response(null, { status: 502 })),
       ]);
       if (version !== loadVersion.current) return false;
       if ([401, 403].includes(portfolioResponse.status) || [401, 403].includes(orderResponse.status)) {
@@ -144,6 +155,7 @@ export default function PaperPage(): React.ReactElement {
         const nextCycles = validCyclePage(cyclePayload.data);
         if (!nextCycles) throw new Error("paper cycles invalid");
         setCycles(nextCycles.items); setCycleSummary(nextCycles.summary); setCycleUnavailable(false);
+        if (cycleSessionRef.current === null) setCurrentCycleSession(nextCycles.summary.decision_session);
         setVersionObservation(nextCycles.version_observation);
         setVersionHistory(nextCycles.version_history);
         setVersionEvaluation(nextCycles.version_evaluation);
@@ -229,6 +241,15 @@ export default function PaperPage(): React.ReactElement {
     globalThis.setTimeout(() => target?.focus(), 0);
   }
 
+  function changeCycleSession(session: string): void {
+    const selected = session && session !== currentCycleSession ? session : null;
+    cycleSessionRef.current = selected;
+    setSelectedCycleSession(selected);
+    setCycles([]);
+    setCycleSummary(null);
+    void refresh();
+  }
+
   async function confirmCancel(): Promise<void> {
     const pending = pendingCancel;
     if (!pending || cancelInFlight.current) return;
@@ -287,19 +308,20 @@ export default function PaperPage(): React.ReactElement {
       management={<AdjustmentPlanLoader refreshVersion={managementRefresh} attempt={pendingCancel ? null : lastAttempt} />}
       actual={<CurrentPaperActual refreshVersion={managementRefresh} />}
       cycles={cycles} cycleUnavailable={cycleUnavailable}
+      currentCycleSession={currentCycleSession} selectedCycleSession={selectedCycleSession}
       cycleSummary={cycleSummary}
       versionObservation={versionObservation}
       versionHistory={versionHistory}
       versionEvaluation={versionEvaluation}
       statusFilter={statusFilter} loadingMore={loadingMore} notice={notice}
-      onRefresh={() => void refresh()} onStatusFilter={(value) => void changeStatusFilter(value)}
+      onRefresh={() => void refresh()} onCycleSessionChange={changeCycleSession} onStatusFilter={(value) => void changeStatusFilter(value)}
       onLoadMore={() => void loadMoreOrders()} onCancel={openCancel} />
     {pendingCancel ? <PaperCancelDialog pending={pendingCancel} submitting={cancelling}
       onDismiss={closeCancel} onConfirm={() => void confirmCancel()} /> : null}
   </>;
 }
 
-export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, management, actual, onRefresh, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
+export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, currentCycleSession = null, selectedCycleSession = null, management, actual, onRefresh, onCycleSessionChange = () => {}, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
   const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
@@ -319,10 +341,11 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
           <div><p className="eyebrow">模拟账户权威</p><h2>{portfolio.name}</h2><p>初始资金 <strong className="numeric-data">USD {formatPaperDecimal(portfolio.initial_capital, 2)}</strong> · 仅内部模拟成交 · 实盘能力保持关闭</p></div>
           <span className="mode-badge">不是实盘</span>
         </section>
-        {cycleSummary ? <AgentPaperSessionSummary summary={cycleSummary} /> : null}
+        <div className="paper-cycle-session"><label className="paper-orders__filter">决策会话日期<input type="date" value={selectedCycleSession ?? currentCycleSession ?? ""} onChange={(event) => onCycleSessionChange(event.target.value)} /></label><p>此日期只切换 Agent 周期；账户、订单和当前目标仍显示最新已保存事实。</p></div>
+        {cycleSummary ? <AgentPaperSessionSummary summary={cycleSummary} historical={selectedCycleSession !== null} /> : null}
         {versionObservation ? <AgentPaperVersionHistory history={versionHistory} /> : null}
         {versionEvaluation ? <AgentVersionEvaluation evaluation={versionEvaluation} /> : null}
-        <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} />
+        <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} historical={selectedCycleSession !== null} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         <section id="paper-actual-facts" className="page-stack" aria-label="独立实际账户事实">
         <PerformanceFacts portfolio={portfolio} />

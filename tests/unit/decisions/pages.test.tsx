@@ -189,7 +189,8 @@ describe("decision records", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       calls.push({ path, method: init?.method ?? "GET" });
-      if (path === "/api/v1/paper/cycles?limit=20") return Response.json({ data: { items: cycles(), summary }, meta: { ...meta(), schema_version: "1" } });
+      if (path === "/api/v1/paper/cycles/latest") return Response.json({ data: agentPaperCycle, meta: meta() });
+      if (path === "/api/v1/paper/cycles?decision_session=2026-08-26&limit=20") return Response.json({ data: { items: cycles(), summary }, meta: { ...meta(), schema_version: "1" } });
       if (path.endsWith(agentPaperCycle.cycle_id)) return Response.json({ data: { cycle: agentPaperCycle, orders: [cancellableOrder] }, meta: { ...meta(), schema_version: "1" } });
       throw new Error(`unexpected path ${path}`);
     }));
@@ -200,8 +201,37 @@ describe("decision records", () => {
     render(<DecisionDetailPage />);
     await waitFor(() => expect(screen.getByRole("region", { name: "决策详情页面" })).toHaveAttribute("data-state", "ready"));
     expect(calls).toEqual([
-      { path: "/api/v1/paper/cycles?limit=20", method: "GET" },
+      { path: "/api/v1/paper/cycles/latest", method: "GET" },
+      { path: "/api/v1/paper/cycles?decision_session=2026-08-26&limit=20", method: "GET" },
       { path: `/api/v1/paper/management/cycles/${agentPaperCycle.cycle_id}`, method: "GET" },
+    ]);
+  });
+
+  it("opens the latest saved session and loads a selected historical session", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      calls.push(path);
+      if (path === "/api/v1/paper/cycles/latest") return Response.json({ data: agentPaperCycle, meta: meta() });
+      if (path === "/api/v1/paper/cycles?decision_session=2026-08-26&limit=20") {
+        return Response.json({ data: { items: cycles(), summary }, meta: meta() });
+      }
+      if (path === "/api/v1/paper/cycles?decision_session=2026-08-25&limit=20") {
+        return Response.json({ data: { items: [cycle("29", { decision_session: "2026-08-25" })], summary: { ...summary, decision_session: "2026-08-25" } }, meta: meta() });
+      }
+      throw new Error(`unexpected path ${path}`);
+    }));
+
+    render(<DecisionsPage />);
+    expect(await screen.findByRole("list", { name: "决策记录" })).toHaveTextContent("NO_ORDER_REQUIRED");
+    expect(screen.getByLabelText("决策日期")).toHaveValue("2026-08-26");
+    fireEvent.change(screen.getByLabelText("决策日期"), { target: { value: "2026-08-25" } });
+    await waitFor(() => expect(screen.getByRole("link", { name: /查看决策/ })).toHaveAttribute("href", "/decisions/0198f7a0-1111-7777-8111-111111111129"));
+    expect(within(screen.getByRole("list", { name: "决策记录" })).getAllByRole("listitem")).toHaveLength(1);
+    expect(calls).toEqual([
+      "/api/v1/paper/cycles/latest",
+      "/api/v1/paper/cycles?decision_session=2026-08-26&limit=20",
+      "/api/v1/paper/cycles?decision_session=2026-08-25&limit=20",
     ]);
   });
 

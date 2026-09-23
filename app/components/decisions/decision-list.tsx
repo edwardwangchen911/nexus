@@ -18,18 +18,20 @@ const statusOptions: Array<["" | DecisionCycle["status"], string]> = [
   ["completed", "已完成"], ["unavailable", "数据不足"], ["failed", "模型失败"],
 ];
 
-export function DecisionList({ cycles }: { cycles: DecisionCycle[] }): React.ReactElement {
-  const [date, setDate] = useState("");
+export function DecisionList({ cycles, session = "", onSessionChange = () => {} }: {
+  cycles: DecisionCycle[];
+  session?: string;
+  onSessionChange?: (session: string) => void;
+}): React.ReactElement {
   const [decisionType, setDecisionType] = useState<"" | DecisionKey>("");
   const [status, setStatus] = useState<"" | DecisionCycle["status"]>("");
   const filtered = useMemo(() => cycles.filter((cycle) =>
-    (!date || cycle.decision_session === date)
-    && (!decisionType || decisionKey(cycle) === decisionType)
-    && (!status || cycle.status === status)), [cycles, date, decisionType, status]);
+    (!decisionType || decisionKey(cycle) === decisionType)
+    && (!status || cycle.status === status)), [cycles, decisionType, status]);
 
   return <section className="decision-records" aria-label="决策记录列表">
     <div className="decision-filters" aria-label="决策记录筛选">
-      <label><span>决策日期</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+      <label><span>决策日期</span><input type="date" value={session} onChange={(event) => onSessionChange(event.target.value)} /></label>
       <label><span>决策类型</span><select value={decisionType} onChange={(event) => setDecisionType(event.target.value as "" | DecisionKey)}>{decisionOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label>
       <label><span>最终状态</span><select value={status} onChange={(event) => setStatus(event.target.value as "" | DecisionCycle["status"])}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label>
     </div>
