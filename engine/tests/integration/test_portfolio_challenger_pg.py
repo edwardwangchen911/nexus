@@ -44,6 +44,9 @@ async def test_completed_portfolio_cycle_yields_all_candidate_evidence(
         assert len(sample.research_run_ids) == 2
         assert sample.synthesis_output_id == args["synthesis_output_id"]
         assert sample.result_code == "NO_ORDER_REQUIRED"
+        assert sample.order_ids == ()
+        assert sample.fill_ids == ()
+        assert sample.fill_ledger_transaction_ids == ()
     finally:
         await engine.dispose()
 

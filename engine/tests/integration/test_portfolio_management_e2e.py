@@ -21,6 +21,10 @@ from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesi
 from nexus.market.ingestion import ingest_price_page
 from nexus.ops import agent_paper_loop
 from nexus.ops import agent_paper_once as agent_paper_loop_once
+from nexus.paper.agent_challenger import (
+    AgentChallengerError,
+    collect_portfolio_challenger_cycle_sample,
+)
 from nexus.paper.agent_cycle import _events, _resume_portfolio_synthesis
 from nexus.paper.agent_decision_store import load_portfolio_proposal
 from nexus.paper.agent_market import collect_agent_paper_window, resolve_agent_paper_market_scope
@@ -285,6 +289,12 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
             )
             assert len(orders) == 2
 
+        with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE"):
+            async with sessions() as session:
+                await collect_portfolio_challenger_cycle_sample(
+                    session, cycle_id=cycle.id, as_of=args["now"] + timedelta(minutes=2)
+                )
+
         first_order, second_order = orders
         async with sessions() as session:
             first_scope = await resolve_agent_paper_market_scope(
@@ -462,6 +472,23 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
             orders=orders,
         )
         api_now = market_close + timedelta(seconds=1)
+        if first_partial:
+            with pytest.raises(
+                AgentChallengerError, match="PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE"
+            ):
+                async with sessions() as session:
+                    await collect_portfolio_challenger_cycle_sample(
+                        session, cycle_id=cycle.id, as_of=api_now
+                    )
+        else:
+            async with sessions() as session:
+                sample = await collect_portfolio_challenger_cycle_sample(
+                    session, cycle_id=cycle.id, as_of=api_now
+                )
+            assert sample.order_ids == tuple(sorted(order.id for order in orders))
+            assert sample.order_terminal_statuses == ("filled", "filled")
+            assert len(sample.fill_ids) == 2
+            assert len(sample.fill_ledger_transaction_ids) == 2
         actual = await agent_paper_loop_once.inspect_projection_once(
             agent_paper_loop_once.EngineSettings(database_url=migrated_database_url),
             agent_paper_loop_once.AgentPaperInspectProjectionRequest(

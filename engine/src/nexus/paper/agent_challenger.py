@@ -42,6 +42,11 @@ from nexus.persistence.models.paper import (
     AgentPaperCandidateBatchRecord,
     AgentPaperCycleEventRecord,
     AgentPaperCycleRecord,
+    PaperFillRecord,
+    PaperLedgerTransactionRecord,
+    PaperOrderBatchRecord,
+    PaperOrderEventRecord,
+    PaperOrderRecord,
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
 )
@@ -279,6 +284,11 @@ class PortfolioChallengerCycleSampleV1(_FrozenModel):
     strategy_decision_id: UUID
     decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     result_code: str = Field(min_length=1, max_length=100)
+    execution_state: Literal["no_order", "orders_terminal"]
+    order_ids: tuple[UUID, ...] = Field(max_length=5)
+    order_terminal_statuses: tuple[str, ...] = Field(max_length=5)
+    fill_ids: tuple[UUID, ...]
+    fill_ledger_transaction_ids: tuple[UUID, ...]
 
 
 async def collect_portfolio_challenger_cycle_sample(
@@ -319,7 +329,11 @@ async def collect_portfolio_challenger_cycle_sample(
         .order_by(AgentPaperCycleEventRecord.sequence.desc())
         .limit(1)
     )
-    if latest is None or latest.to_status != "completed" or latest.occurred_at > as_of:
+    if (
+        latest is None
+        or latest.to_status not in {"completed", "awaiting_market"}
+        or latest.occurred_at > as_of
+    ):
         raise AgentChallengerError(code)
     decision = await session.scalar(
         select(StrategyDecisionRecord).where(
@@ -376,19 +390,114 @@ async def collect_portfolio_challenger_cycle_sample(
             .where(AgentResearchOutputRecord.id.in_(output_ids))
         )
     ).all()
-    expected_snapshots = {item.instrument_id: item.research_snapshot_id for item in manifest}
+    prepared = tuple(
+        await session.scalars(
+            select(AgentPaperCycleEventRecord).where(
+                AgentPaperCycleEventRecord.cycle_id == cycle_id,
+                AgentPaperCycleEventRecord.result_code == "RESEARCH_JOBS_PREPARED",
+            )
+        )
+    )
+    raw_run_ids = prepared[0].fact_ids.get("research_run_ids") if len(prepared) == 1 else None
+    if not isinstance(raw_run_ids, list) or not all(isinstance(item, str) for item in raw_run_ids):
+        raise AgentChallengerError(code)
+    try:
+        prepared_run_ids = tuple(UUID(item) for item in raw_run_ids)
+    except ValueError:
+        raise AgentChallengerError(code) from None
     if (
         len(rows) != len(instrument_ids)
         or {run.instrument_id for _, run in rows} != set(instrument_ids)
+        or len(prepared_run_ids) != len(instrument_ids)
+        or set(prepared_run_ids) != {run.id for _, run in rows}
         or any(
             output.status != "completed"
             or run.status != "completed"
-            or run.data_snapshot_id != expected_snapshots[run.instrument_id]
             or run.decision_time != cycle.decision_time
             for output, run in rows
         )
     ):
         raise AgentChallengerError(code)
+    order_batch = await session.scalar(
+        select(PaperOrderBatchRecord).where(
+            PaperOrderBatchRecord.strategy_decision_id == decision.id
+        )
+    )
+    orders: tuple[PaperOrderRecord, ...] = ()
+    if order_batch is not None:
+        if order_batch.account_id != cycle.account_id:
+            raise AgentChallengerError(code)
+        orders = tuple(
+            await session.scalars(
+                select(PaperOrderRecord)
+                .where(PaperOrderRecord.batch_id == order_batch.id)
+                .order_by(PaperOrderRecord.id)
+            )
+        )
+    execution_state: Literal["no_order", "orders_terminal"]
+    statuses: tuple[str, ...] = ()
+    fills: tuple[PaperFillRecord, ...] = ()
+    if orders:
+        if latest.to_status != "awaiting_market" or not 1 <= len(orders) <= 5:
+            raise AgentChallengerError(code)
+        order_ids = tuple(order.id for order in orders)
+        events = tuple(
+            await session.scalars(
+                select(PaperOrderEventRecord)
+                .where(PaperOrderEventRecord.order_id.in_(order_ids))
+                .order_by(PaperOrderEventRecord.order_id, PaperOrderEventRecord.event_seq.desc())
+            )
+        )
+        latest_orders: dict[UUID, PaperOrderEventRecord] = {}
+        for event in events:
+            latest_orders.setdefault(event.order_id, event)
+        if len(latest_orders) != len(orders) or any(
+            event.to_status not in {"filled", "cancelled", "rejected", "risk_rejected"}
+            or event.occurred_at > as_of
+            for event in latest_orders.values()
+        ):
+            raise AgentChallengerError(code)
+        statuses = tuple(latest_orders[order.id].to_status for order in orders)
+        fills = tuple(
+            await session.scalars(
+                select(PaperFillRecord)
+                .where(PaperFillRecord.order_id.in_(order_ids))
+                .order_by(PaperFillRecord.id)
+            )
+        )
+        fill_event_ids = {event.source_fill_id for event in events if event.source_fill_id}
+        if (
+            any(fill.occurred_at > as_of or fill.account_id != cycle.account_id for fill in fills)
+            or {fill.id for fill in fills} != fill_event_ids
+            or any(
+                sum((fill.quantity for fill in fills if fill.order_id == order.id), Decimal(0))
+                != order.quantity
+                for order in orders
+                if latest_orders[order.id].to_status == "filled"
+            )
+        ):
+            raise AgentChallengerError(code)
+        ledger_ids = tuple(fill.ledger_transaction_id for fill in fills)
+        ledgers = tuple(
+            await session.scalars(
+                select(PaperLedgerTransactionRecord).where(
+                    PaperLedgerTransactionRecord.id.in_(ledger_ids)
+                )
+            )
+        )
+        ledger_by_id = {ledger.id: ledger for ledger in ledgers}
+        if len(ledger_by_id) != len(fills) or any(
+            ledger_by_id[fill.ledger_transaction_id].account_id != cycle.account_id
+            or ledger_by_id[fill.ledger_transaction_id].order_id != fill.order_id
+            or ledger_by_id[fill.ledger_transaction_id].transaction_type != "fill"
+            for fill in fills
+        ):
+            raise AgentChallengerError(code)
+        execution_state = "orders_terminal"
+    else:
+        if latest.to_status != "completed" or latest.result_code != "NO_ORDER_REQUIRED":
+            raise AgentChallengerError(code)
+        execution_state = "no_order"
     return PortfolioChallengerCycleSampleV1(
         schema_version="portfolio_challenger_cycle_sample_v1",
         cycle_id=cycle_id,
@@ -402,6 +511,11 @@ async def collect_portfolio_challenger_cycle_sample(
         strategy_decision_id=decision.id,
         decision_hash=decision.decision_hash,
         result_code=latest.result_code,
+        execution_state=execution_state,
+        order_ids=tuple(order.id for order in orders),
+        order_terminal_statuses=statuses,
+        fill_ids=tuple(fill.id for fill in fills),
+        fill_ledger_transaction_ids=tuple(fill.ledger_transaction_id for fill in fills),
     )
 
 
