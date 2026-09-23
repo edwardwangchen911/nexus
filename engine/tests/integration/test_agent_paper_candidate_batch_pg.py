@@ -633,6 +633,7 @@ async def _seed_scope(
 @pytest.mark.asyncio
 async def test_static_readiness_reports_each_missing_candidate_input_without_writing(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _seed_scope(migrated_database_url)
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
@@ -720,6 +721,12 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
             {"symbol": "AAPL", "evidence_status": "missing", "snapshot_status": "missing"},
             {"symbol": "NVDA", "evidence_status": "missing", "snapshot_status": "missing"},
         ]
+        assert result["research_inputs"]["macro_sources"] == {
+            "vintage": "2026-09-17",
+            "status": "missing",
+            "missing_series": ["CPIAUCSL", "DFF", "DGS10", "DGS2", "UNRATE", "VIXCLS"],
+            "available_at": None,
+        }
         assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
 
     async with factory() as session, session.begin():
@@ -843,6 +850,17 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         ]
         assert occupied["normal_cycle_start_status"] == "blocked_existing_cycle"
 
+    projected_slots: list[datetime] = []
+
+    async def inspect_projected_macro(
+        *args: object, decision_at: datetime, **kwargs: object
+    ) -> dict:
+        projected_slots.append(decision_at)
+        return {}
+
+    monkeypatch.setattr(
+        batch_module, "inspect_persisted_fred_vintage_for_slot", inspect_projected_macro
+    )
     async with factory() as session, session.begin():
         await session.execute(text("SET TRANSACTION READ ONLY"))
         after_close = await batch_module.inspect_agent_paper_candidate_static_readiness(
@@ -854,6 +872,7 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         assert after_close["current_session"] == "2026-09-18"
         assert after_close["decision_session"] == "2026-09-21"
         assert after_close["normal_cycle_start_status"] == "outside_normal_window"
+        assert projected_slots == [datetime(2026, 9, 21, 14, tzinfo=UTC)]
 
 
 @pytest.mark.asyncio

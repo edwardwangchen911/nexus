@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
 
 type CycleStatus = Literal[
     "prepared",

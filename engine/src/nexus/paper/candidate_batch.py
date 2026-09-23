@@ -16,6 +16,7 @@ from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
 from nexus.domain.ids import new_uuid7
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
+from nexus.paper.agent_cycle_models import PAPER_MACRO_SERIES
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
 from nexus.paper.universe_scope import is_formal_agent_paper_universe
 from nexus.persistence.idempotency import IdempotencyClaimError, claim_idempotency
@@ -43,6 +44,10 @@ from nexus.persistence.models.portfolio import Account
 from nexus.persistence.models.runtime import IdempotencyRecord
 from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
+from nexus.research.fred_storage import (
+    inspect_persisted_fred_vintage_for_slot,
+    read_fred_observations,
+)
 
 _ROUTE = "agent-paper-candidate-batch-v1"
 _SCHEMA = "agent_paper_candidate_batch_v1"
@@ -320,6 +325,41 @@ async def inspect_agent_paper_candidate_static_readiness(
         PORTFOLIO_ALLOCATION_V1.decision_local_time,
         tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
     ).astimezone(UTC)
+    target_decision_slot = datetime.combine(
+        calendar.session,
+        PORTFOLIO_ALLOCATION_V1.decision_local_time,
+        tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
+    ).astimezone(UTC)
+    macro_vintage = calendar.session - timedelta(days=1)
+    if target_decision_slot >= as_of:
+        macro_observations = await inspect_persisted_fred_vintage_for_slot(
+            session,
+            now=as_of,
+            decision_at=target_decision_slot,
+            series=PAPER_MACRO_SERIES,
+            vintage=macro_vintage,
+        )
+    else:
+        macro_observations = await read_fred_observations(
+            session,
+            as_of=target_decision_slot,
+            series=PAPER_MACRO_SERIES,
+            vintage=macro_vintage,
+        )
+    macro_series = {item.series for item in macro_observations.values()}
+    macro_complete = macro_series == PAPER_MACRO_SERIES
+    macro_available_at = (
+        max(item.available_at for item in macro_observations.values())
+        if macro_complete
+        else None
+    )
+    macro_status = (
+        "missing"
+        if not macro_complete
+        else "visible_now"
+        if macro_available_at is not None and macro_available_at <= as_of
+        else "projected_for_slot"
+    )
     scheduled_claim = await session.scalar(
         select(IdempotencyRecord).where(
             IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account_id}",
@@ -530,7 +570,17 @@ async def inspect_agent_paper_candidate_static_readiness(
         "universe_status": "matched" if universe_matches else "mismatch",
         "synthesis_prompt_status": "ready" if synthesis_prompt_ready else "missing_or_invalid",
         "candidates": candidates,
-        "research_inputs": {"current_trends": current_trends},
+        "research_inputs": {
+            "current_trends": current_trends,
+            "macro_sources": {
+                "vintage": macro_vintage.isoformat(),
+                "status": macro_status,
+                "missing_series": sorted(PAPER_MACRO_SERIES - macro_series),
+                "available_at": (
+                    macro_available_at.isoformat() if macro_available_at is not None else None
+                ),
+            },
+        },
         "window_evidence_status": "not_evaluated",
         "execution_locked": True,
         "external_requests": 0,

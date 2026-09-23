@@ -27,6 +27,10 @@ XNYS 交易日、批次与正式研究 Universe、组合合成提示词的有效
 `research_inputs.current_trends` 另列出每只候选的前一交易日趋势证据是否齐全，及其是否已绑定
 当前研究快照。它是补充研究输入的提前诊断，不改变 `ready_static` 的交易准入含义；
 盘前尚未绑定时显示 `snapshot_status=missing`，不能将证据存在误写为已被 Agent 消费。
+`research_inputs.macro_sources` 检验现已持久化的六项 FRED 原件能否在下一决策槽使用；
+`projected_for_slot` 表示原件校验通过但当前尚不可见，`available_at` 是预计最早可用时刻，
+`missing_series` 显示未通过校验的序列。正式周期仍按真实决策时刻重新核验可见性与快照绑定，
+不能将这一预测当作已发生的研究或订单准入。
 `ready_static` 只表示上述已存证据齐备，返回中的
 `window_evidence_status=not_evaluated` 表示同日 Schwab 行情、风险查询、
 研究 Job、内部模拟执行和页面结果仍须分别验收。该命令不调用 Provider、模型，

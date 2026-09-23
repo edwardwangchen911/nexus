@@ -16,6 +16,7 @@ from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.providers.fred_http import FredHttpTransport
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
+from nexus.research import fred_storage
 from nexus.research.fred_collection import collect_fred_vintage, load_fred_collection
 from nexus.research.fred_observations import SCHEMA, parse_collected_vintage
 from nexus.research.fred_storage import import_fred_vintage, read_fred_observations
@@ -79,8 +80,26 @@ async def test_same_today_archive_replays_before_conservative_availability(migra
     async with factory() as db, db.begin():
         ids = await import_fred_vintage(db, collection=sample, store=MemoryStore())
     async with factory() as db, db.begin():
-        assert (await db.get(MacroObservation, ids[0])).available_at > datetime.now(UTC)
-        assert await read_fred_observations(db, as_of=datetime.now(UTC)) == {}
+        available_at = (await db.get(MacroObservation, ids[0])).available_at
+        now = datetime.now(UTC)
+        assert available_at > now
+        assert await read_fred_observations(db, as_of=now) == {}
+        projected = await fred_storage.inspect_persisted_fred_vintage_for_slot(
+            db,
+            now=now,
+            decision_at=available_at,
+            series=frozenset({"DGS10"}),
+            vintage=sample.request.vintage,
+        )
+        assert len(projected) == 1
+        assert next(iter(projected.values())).available_at == available_at
+        assert await fred_storage.inspect_persisted_fred_vintage_for_slot(
+            db,
+            now=now,
+            decision_at=available_at - timedelta(microseconds=1),
+            series=frozenset({"DGS10"}),
+            vintage=sample.request.vintage,
+        ) == {}
         assert await import_fred_vintage(db, collection=sample, store=MemoryStore()) == ids
         assert await read_fred_observations(db, as_of=datetime.now(UTC)) == {}
 

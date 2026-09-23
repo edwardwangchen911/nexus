@@ -67,6 +67,7 @@ from nexus.paper.agent_cycle_authority import (
     load_quasi_realtime_cycle_authority,
     select_agent_paper_service_calendar_authority,
 )
+from nexus.paper.agent_cycle_models import PAPER_MACRO_SERIES as _PAPER_MACRO_SERIES
 from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.agent_market import resolve_agent_paper_market_scope
 from nexus.paper.agent_version_evaluation import (
@@ -303,7 +304,6 @@ _SLOT_TERMINAL_TRIGGER_FAILURE_CODES = frozenset(
     }
 )
 _MARKET_PUBLICATION_LAG = timedelta(seconds=60)
-_PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
 _PAPER_MONTHLY_MACRO_SERIES = frozenset({"CPIAUCSL", "UNRATE"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _SAFE_SCHWAB_PREFLIGHT_CODES = frozenset(

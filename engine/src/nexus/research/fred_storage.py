@@ -457,3 +457,57 @@ async def read_fred_observations(
         except (ValueError, TypeError, KeyError, AttributeError, StopIteration, OverflowError):
             continue
     return result
+
+
+async def inspect_persisted_fred_vintage_for_slot(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    decision_at: datetime,
+    series: frozenset[str],
+    vintage: date,
+) -> dict[UUID, FredResearchObservation]:
+    """Verify already stored originals that can become visible at a future decision slot.
+
+    This is a read-only preflight projection. Decision consumers must continue to use
+    ``read_fred_observations`` at their actual decision time.
+    """
+    current = require_utc(now)
+    cutoff = require_utc(decision_at)
+    if cutoff < current or not series:
+        raise ValueError("FRED_PREFLIGHT_WINDOW_INVALID")
+    query = (
+        select(MacroObservation, ResearchEvidenceRef, DataSnapshot)
+        .join(ResearchEvidenceRef, MacroObservation.evidence_ref_id == ResearchEvidenceRef.id)
+        .join(DataSnapshot, DataSnapshot.revision == ResearchEvidenceRef.content_hash)
+        .where(
+            MacroObservation.source == "fred",
+            MacroObservation.authority_version == "research_macro_v1",
+            MacroObservation.series.in_(series),
+            MacroObservation.real_time_start == vintage,
+            MacroObservation.real_time_end == vintage,
+            MacroObservation.created_at <= current,
+            MacroObservation.available_at <= cutoff,
+            ResearchEvidenceRef.created_at <= current,
+            DataSnapshot.created_at <= current,
+            DataSnapshot.source == "fred",
+            DataSnapshot.schema_version == SCHEMA,
+        )
+        .order_by(
+            MacroObservation.observed_at.desc(),
+            MacroObservation.available_at.desc(),
+            MacroObservation.id,
+        )
+        .limit(512)
+    )
+    result: dict[UUID, FredResearchObservation] = {}
+    for row, ref, snapshot in await session.execute(query):
+        try:
+            observation = await _read_one(
+                session, row, ref, snapshot, current, require_visible=False
+            )
+        except (ValueError, TypeError, KeyError, AttributeError, StopIteration, OverflowError):
+            continue
+        if observation.available_at <= cutoff:
+            result[ref.id] = observation
+    return result
