@@ -61,7 +61,7 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
         <span className="numeric-data">分钟截止 {formatUtc(monitor.bar_as_of)}</span>
         <span className="numeric-data">{receiptOnly ? "成交记录网关接收时间" : "成交源时间"} {formatUtc(monitor.trade_as_of)}</span>
         <span className="numeric-data">{receiptOnly ? "盘口记录网关接收时间" : "盘口源时间"} {formatUtc(monitor.quote_as_of)}</span>
-        {receiptOnly ? <span>报价源时间 未知（上游未提供）</span> : null}
+        {receiptOnly ? <span>报价源时间 未知（尚未完成校验）</span> : null}
         <span className="numeric-data">分钟年龄（快照时点） {formatAge(monitor.bar_age_seconds)}</span>
         <span className="numeric-data">{receiptOnly ? "接收记录年龄（快照时点）" : "盘口年龄（快照时点）"} {formatAge(monitor.quote_age_seconds)}</span>
       </div>

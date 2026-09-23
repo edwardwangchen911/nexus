@@ -407,7 +407,7 @@ export function MarketPanel({
                       <EvidenceFact term={selectedItem.source === "fosun" ? "本机接收时间（网关响应）" : "本机接收时间"} value={formatUtc(selectedItem.received_at)} />
                     </> : <>
                       <EvidenceFact term={isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? "网关接收时间" : "行情记录时间"} value={formatUtc(selectedItem.as_of)} />
-                      {isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? <EvidenceFact term="报价源时间" value="未知（上游未提供）" /> : null}
+                      {isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? <EvidenceFact term="报价源时间" value="未知（尚未完成校验）" /> : null}
                     </>}
                     <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(selectedItem.delivery_mode)} />
                     <EvidenceFact term="报价质量" value={`${marketQualityLabel(selectedItem.quality)} · ${selectedItem.quality}`} />
