@@ -30,9 +30,14 @@ from nexus.agents.portfolio_synthesis_persistence import (
     persist_portfolio_synthesis_terminal,
 )
 from nexus.domain.evidence import EvidenceRef
+from nexus.paper.agent_challenger import (
+    AgentChallengerError,
+    PortfolioChallengerPublicationV1,
+)
 from nexus.paper.agent_cycle import _start_cycle
 from nexus.paper.agent_cycle_models import floor_decision_slot
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+from nexus.paper.portfolio_challenger_case import freeze_prospective_portfolio_challenger_case
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.agents import (
     AgentPortfolioSynthesisBudgetReservationRecord,
@@ -252,6 +257,73 @@ def synthesis_intent(run):
             "cash_rationale": choices[0]["thesis"],
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_portfolio_challenger_case_requires_publication_before_new_frozen_run(
+    migrated_database_url,
+):
+    engine, sessions, kwargs = await seed_synthesis(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            run = (await admit_portfolio_synthesis(session, **kwargs)).run
+            frozen = PortfolioSynthesisInputV1.model_validate(run.frozen_input)
+            incumbent = await session.get(AgentPromptVersionRecord, run.prompt_version_id)
+            assert incumbent is not None
+            challenger_content = incumbent.content + "\nCompare unresolved evidence separately."
+            challenger = AgentPromptVersionRecord(
+                id=uuid4(),
+                role="portfolio_decision",
+                version="portfolio-challenger-test-v1",
+                release_channel="challenger",
+                content=challenger_content,
+                content_hash=sha256(challenger_content.encode()).hexdigest(),
+                created_at=frozen.admitted_at - timedelta(seconds=1),
+            )
+            session.add(challenger)
+            await session.flush()
+            publication = PortfolioChallengerPublicationV1(
+                schema_version="portfolio_challenger_pub_v1",
+                proposal_hash="a" * 64,
+                incumbent_prompt_version_id=incumbent.id,
+                challenger_prompt_version_id=challenger.id,
+                challenger_prompt_hash=challenger.content_hash,
+                challenger_model_config_id=run.model_config_id,
+                replayed=False,
+            )
+            case = freeze_prospective_portfolio_challenger_case(
+                run=run,
+                incumbent_prompt=incumbent,
+                challenger_prompt=challenger,
+                publication=publication,
+                published_at=frozen.admitted_at - timedelta(seconds=1),
+                now=frozen.admitted_at + timedelta(seconds=1),
+            )
+            assert len(case.frozen_input.candidate_instrument_ids) == 2
+            assert case.source_input_hash == run.input_hash
+            assert case.challenger_input_hash != run.input_hash
+            assert case.frozen_input.prompt_version_id == challenger.id
+            assert run.frozen_input["prompt_version_id"] == str(incumbent.id)
+            old_intent = synthesis_intent(run)
+            with pytest.raises(ValueError, match="portfolio synthesis input binding mismatch"):
+                validate_portfolio_synthesis_intent(old_intent, case.frozen_input)
+            challenger_intent = old_intent.model_copy(
+                update={"input_hash": case.challenger_input_hash}
+            )
+            validate_portfolio_synthesis_intent(challenger_intent, case.frozen_input)
+            with pytest.raises(
+                AgentChallengerError, match="PORTFOLIO_CHALLENGER_CASE_NOT_PROSPECTIVE"
+            ):
+                freeze_prospective_portfolio_challenger_case(
+                    run=run,
+                    incumbent_prompt=incumbent,
+                    challenger_prompt=challenger,
+                    publication=publication,
+                    published_at=frozen.admitted_at,
+                    now=frozen.admitted_at + timedelta(seconds=1),
+                )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
