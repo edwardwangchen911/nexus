@@ -1,0 +1,136 @@
+"""Read an isolated controlled Paper cycle through the real local BFF and browser."""
+
+import asyncio
+import os
+import socket
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from uuid import UUID
+
+import httpx
+import uvicorn
+from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET
+from helpers.paper_api import app, headers
+
+
+def _listen_socket() -> socket.socket:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    return listener
+
+
+async def _wait_for_web(url: str, process: asyncio.subprocess.Process) -> None:
+    async with httpx.AsyncClient(timeout=2) as client:
+        for _ in range(200):
+            if process.returncode is not None:
+                raise AssertionError("controlled Web process exited before readiness")
+            try:
+                response = await client.get(f"{url}/__debug")
+                if response.status_code == 200:
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0.1)
+    raise AssertionError("controlled Web readiness timed out")
+
+
+async def verify_controlled_browser(
+    database_url: str,
+    *,
+    api_now: datetime,
+    cycle_id: UUID,
+    order_ids: tuple[UUID, UUID],
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+    if not (root / "node_modules/.bin/vinext").exists():
+        raise AssertionError("controlled browser dependencies are unavailable")
+    api_socket = _listen_socket()
+    api_port = api_socket.getsockname()[1]
+    web_socket = _listen_socket()
+    web_port = web_socket.getsockname()[1]
+    web_socket.close()
+    server = uvicorn.Server(
+        uvicorn.Config(app(database_url, now=api_now), log_config=None, access_log=False)
+    )
+    server_task = asyncio.create_task(server.serve(sockets=[api_socket]))
+    web_process: asyncio.subprocess.Process | None = None
+    web_log = tempfile.TemporaryFile(mode="w+b")
+    try:
+        for _ in range(100):
+            if server.started:
+                break
+            if server_task.done():
+                raise AssertionError("controlled Engine API stopped before readiness")
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError("controlled Engine API readiness timed out")
+        order_path = "/internal/v1/paper/orders?limit=50"
+        async with httpx.AsyncClient(timeout=5) as client:
+            direct = await client.get(
+                f"http://127.0.0.1:{api_port}{order_path}",
+                headers=headers("GET", order_path),
+            )
+            assert direct.status_code == 200, f"controlled Engine API: {direct.status_code}"
+        environment = {
+            key: value
+            for key in ("PATH", "HOME", "LANG", "TMPDIR")
+            if (value := os.environ.get(key)) is not None
+        }
+        environment.update(
+            NEXUS_ENV="test",
+            AGENT_RUNTIME_MODE="fixture",
+            NEXUS_PROVIDER_JOBS_ENABLED="false",
+            NEXUS_ENGINE_BASE_URL=f"http://127.0.0.1:{api_port}",
+            NEXUS_ENGINE_HMAC_CURRENT_KEY_ID=TEST_HMAC_KEY_ID,
+            NEXUS_ENGINE_HMAC_CURRENT_SECRET=TEST_HMAC_SECRET,
+            CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV="false",
+            CLOUDFLARE_INCLUDE_PROCESS_ENV="false",
+            NEXUS_CONTROLLED_WEB_URL=f"http://127.0.0.1:{web_port}",
+            NEXUS_CONTROLLED_CYCLE_ID=str(cycle_id),
+            NEXUS_CONTROLLED_ORDER_IDS=",".join(str(order_id) for order_id in order_ids),
+            WRANGLER_LOG_PATH=".wrangler/wrangler.log",
+        )
+        web_process = await asyncio.create_subprocess_exec(
+            str(root / "node_modules/.bin/vinext"),
+            "dev",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            str(web_port),
+            cwd=root,
+            env=environment,
+            stdout=web_log,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        await _wait_for_web(environment["NEXUS_CONTROLLED_WEB_URL"], web_process)
+        browser = await asyncio.create_subprocess_exec(
+            str(root / "node_modules/.bin/playwright"),
+            "test",
+            "--config",
+            "playwright.controlled-paper.config.ts",
+            cwd=root,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await asyncio.wait_for(browser.communicate(), timeout=120)
+        if browser.returncode != 0:
+            web_log.seek(0)
+            raise AssertionError(
+                output.decode(errors="replace")[-3000:]
+                + "\nWeb log:\n"
+                + web_log.read().decode(errors="replace")[-3000:]
+            )
+    finally:
+        if web_process is not None and web_process.returncode is None:
+            web_process.terminate()
+            try:
+                await asyncio.wait_for(web_process.wait(), timeout=5)
+            except TimeoutError:
+                web_process.kill()
+                await web_process.wait()
+        server.should_exit = True
+        await asyncio.wait_for(server_task, timeout=10)
+        web_log.close()

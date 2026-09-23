@@ -883,7 +883,7 @@ async def test_plan_preserves_target_and_proposal_identity_without_merging_actua
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    engine, _, args, proposal, activated = await _seed_target_associated_plan(
+    engine, sessions, args, proposal, activated = await _seed_target_associated_plan(
         migrated_database_url,
         monkeypatch,
     )
@@ -904,7 +904,13 @@ async def test_plan_preserves_target_and_proposal_identity_without_merging_actua
         assert data["proposal"]["strategy_decision_id"] == str(proposal.decision_id)
         assert data["proposal"]["decision_hash"] == proposal.proposal.decision_hash
         assert data["target"]["as_of"] != data["actual"]["as_of"]
-        assert data["plan"]["reconciliation_as_of"] == data["plan"]["plan_created_at"]
+        async with sessions() as session:
+            batch = await session.get(PaperOrderBatchRecord, activated.batch_id)
+        assert batch is not None
+        assert datetime.fromisoformat(data["plan"]["plan_created_at"].replace("Z", "+00:00")) == (
+            batch.created_at
+        )
+        assert data["plan"]["reconciliation_as_of"] >= data["plan"]["plan_created_at"]
         assert data["plan"]["occupation_state"] == "occupied"
     finally:
         await engine.dispose()

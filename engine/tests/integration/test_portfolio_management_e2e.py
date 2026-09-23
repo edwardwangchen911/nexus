@@ -1,11 +1,13 @@
+import os
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
 import httpx
 import pytest
+from helpers.controlled_browser import verify_controlled_browser
 from helpers.paper_api import app, headers
 from helpers.paper_batch import CALENDAR_ID
 from integration.test_agent_paper_cycle_pg import (
@@ -46,7 +48,7 @@ from nexus.persistence.models.paper import (
     PaperTargetVersionRecord,
 )
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 
 async def _business_facts(session):
@@ -233,6 +235,23 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
                 args["synthesis_output_id"],
             )
             assert output is not None and output.status == "completed", output
+            # The shared isolated-DB template freezes server defaults at January 1.
+            # This end-to-end read needs the synthetic output's actual event time.
+            await session.execute(
+                text("ALTER TABLE agent_portfolio_synthesis_outputs DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_portfolio_synthesis_outputs SET created_at=:at WHERE id=:id"
+                    ),
+                    {"at": args["now"], "id": output.id},
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE agent_portfolio_synthesis_outputs ENABLE TRIGGER USER")
+                )
+            await session.refresh(output)
             cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
             assert cycle is not None
             result = await _resume_portfolio_synthesis(
@@ -514,11 +533,16 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
         order_page = envelopes[orders_path]["data"]
         actual_readback = envelopes[actual_path]["data"]
         assert plan["batch_id"] == str(batch_id)
+        async with sessions() as session:
+            persisted_batch = await session.get(PaperOrderBatchRecord, batch_id)
+        assert persisted_batch is not None
+        assert datetime.fromisoformat(plan["plan"]["plan_created_at"].replace("Z", "+00:00")) == (
+            persisted_batch.created_at
+        )
+        assert persisted_batch.created_at != persisted_batch.evaluated_at
         target_id = plan["target"]["target_version_id"]
         assert detail["active_target"]["target_version_id"] == target_id
-        assert detail["cycle"]["decision"]["sizing_policy_version"] == (
-            "portfolio_allocation_v1"
-        )
+        assert detail["cycle"]["decision"]["sizing_policy_version"] == ("portfolio_allocation_v1")
         assert summary["current_target"]["target_version_id"] == target_id
         assert detail["activation_result"]["batch_id"] == str(batch_id)
         assert {item["order_id"] for item in plan["plan"]["items"]} == {
@@ -535,8 +559,7 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
             UUID(item["order_id"]): {UUID(fill["fill_id"]) for fill in item["fills"]}
             for item in order_page["items"]
         } == {
-            order.id: {fill.id for fill in fills if fill.order_id == order.id}
-            for order in orders
+            order.id: {fill.id for fill in fills if fill.order_id == order.id} for order in orders
         }
         assert all(item["fills"] for item in order_page["items"])
         assert all(
@@ -555,6 +578,39 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
         assert cycle_page["summary"]["next_eligible_reason"] != "NEXT_SLOT"
         async with sessions() as session:
             assert before_reads == await _business_facts(session)
+        if not first_partial and os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1":
+            async with sessions.begin() as session:
+                await session.execute(
+                    text("ALTER TABLE agent_paper_cycle_events DISABLE TRIGGER USER")
+                )
+                try:
+                    await session.execute(
+                        text(
+                            "UPDATE agent_paper_cycle_events SET created_at=:at "
+                            "WHERE cycle_id=:cycle_id AND result_code='PAPER_BATCH_EVALUATED'"
+                        ),
+                        {"cycle_id": cycle.id, "at": args["now"] + timedelta(seconds=2)},
+                    )
+                finally:
+                    await session.execute(
+                        text("ALTER TABLE agent_paper_cycle_events ENABLE TRIGGER USER")
+                    )
+                await session.execute(text("ALTER TABLE paper_order_batches DISABLE TRIGGER USER"))
+                try:
+                    await session.execute(
+                        text("UPDATE paper_order_batches SET created_at=:at WHERE id=:id"),
+                        {"id": batch_id, "at": args["now"] + timedelta(seconds=3)},
+                    )
+                finally:
+                    await session.execute(
+                        text("ALTER TABLE paper_order_batches ENABLE TRIGGER USER")
+                    )
+            await verify_controlled_browser(
+                migrated_database_url,
+                api_now=api_now,
+                cycle_id=cycle.id,
+                order_ids=(first_order.id, second_order.id),
+            )
 
     finally:
         await engine.dispose()

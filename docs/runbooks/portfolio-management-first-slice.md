@@ -151,3 +151,19 @@ curl -fsS \
 
 最后依次查看 `/workspace`、`/decisions/$CYCLE_ID`、`/portfolio` 和 `/paper`。外部券商模拟写入和
 实盘交易在本切片中不可用，不能因内部模拟成交、页面可见或绩效发布而启用。
+
+## 5. 开盘前受控页面验收
+
+用独立的 PostgreSQL 测试实例运行以下用例。它会在临时数据库中生成两笔内部模拟成交，启动临时
+Engine API 和 Web，核对订单、成交、持仓与上述四个页面，然后停止临时服务；不会读取或写入正式
+模拟账户。测试实例的 `DATABASE_URL` 须指向测试库服务，不能指向本地业务库。
+
+```bash
+DATABASE_URL="$ISOLATED_TEST_POSTGRES_URL" \
+PYTHONPATH=engine/src:engine/tests \
+NEXUS_CONTROLLED_BROWSER=1 \
+uv run pytest engine/tests/integration/test_portfolio_management_e2e.py -q
+```
+
+此项通过只证明冻结的两笔成交样例能贯通 PostgreSQL、Engine API、Web 接口和浏览器；真实行情、
+正式多股票候选池、自然时间窗及用户账户的验收仍须分别核对。

@@ -3386,7 +3386,7 @@ class PaperReadService:
             target=target,
             proposal=proposal,
             plan=PaperPlanFactsResponse(
-                plan_created_at=batch.evaluated_at,
+                plan_created_at=batch.created_at,
                 reconciliation_as_of=max(reconciliation_times),
                 occupation_state=(
                     "unknown" if occupation_unknown else "occupied" if occupied else "released"
