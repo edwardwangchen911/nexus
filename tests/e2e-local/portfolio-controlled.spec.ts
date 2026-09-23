@@ -5,9 +5,10 @@ type OrderPage = components["schemas"]["PaperOrderPageResponse"];
 type Actual = components["schemas"]["PaperPlanActualResponse"];
 type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 
-test("controlled two-fill cycle is readable through BFF and four pages", async ({ page, request }) => {
+test("controlled multi-candidate two-fill cycle is readable through BFF and four pages", async ({ page, request }) => {
   const cycleId = process.env.NEXUS_CONTROLLED_CYCLE_ID;
   const expectedOrderIds = process.env.NEXUS_CONTROLLED_ORDER_IDS?.split(",");
+  const candidateCount = Number(process.env.NEXUS_CONTROLLED_CANDIDATE_COUNT);
   test.skip(!cycleId || expectedOrderIds?.length !== 2, "isolated controlled PostgreSQL cycle required");
   if (!cycleId || !expectedOrderIds) return;
 
@@ -30,6 +31,9 @@ test("controlled two-fill cycle is readable through BFF and four pages", async (
   expect(actual.positions).toHaveLength(2);
   expect(detail.cycle.cycle_id).toBe(cycleId);
   expect(detail.cycle.execution_locked).toBe(true);
+  expect(detail.cycle.candidates).toHaveLength(candidateCount);
+  expect(detail.synthesis?.choices).toHaveLength(candidateCount);
+  expect(detail.synthesis?.choices.filter((choice) => choice.action === "defer")).toHaveLength(candidateCount - 2);
   const targetId = detail.active_target?.target_version_id;
   expect(targetId).toBeTruthy();
 
@@ -39,6 +43,7 @@ test("controlled two-fill cycle is readable through BFF and four pages", async (
   });
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
+  await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
 
   await page.goto("/decisions");
   await expect(page.getByRole("heading", { name: "决策记录", exact: true })).toBeVisible();
@@ -46,6 +51,8 @@ test("controlled two-fill cycle is readable through BFF and four pages", async (
   await page.goto(`/decisions/${cycleId}`);
   await expect(page.getByRole("heading", { name: "组合决策详情" })).toBeVisible();
   await expect(page.locator("body")).toContainText(targetId!);
+  await expect(page.locator(".pm-agent strong")).toHaveCount(candidateCount);
+  if (candidateCount === 3) await expect(page.locator(".pm-agent strong").filter({ hasText: "暂缓" })).toHaveCount(1);
 
   await page.goto("/paper");
   await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();

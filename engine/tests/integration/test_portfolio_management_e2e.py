@@ -9,7 +9,7 @@ import httpx
 import pytest
 from helpers.controlled_browser import verify_controlled_browser
 from helpers.paper_api import app, headers
-from helpers.paper_batch import CALENDAR_ID
+from helpers.paper_batch import CALENDAR_ID, INSTRUMENTS
 from integration.test_agent_paper_cycle_pg import (
     _IexProvider,
     _ObjectStore,
@@ -179,14 +179,15 @@ async def _publish_portfolio_close(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "first_partial",
-    [True, False],
-    ids=["partial-then-second", "two-full-fills"],
+    ("first_partial", "candidate_count"),
+    [(True, 2), (False, 2), (False, 3)],
+    ids=["partial-then-second", "two-full-fills", "three-candidates-two-fills"],
 )
 async def test_normal_host_advances_second_schwab_order_after_first_partial_window(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     first_partial: bool,
+    candidate_count: int,
 ) -> None:
     """A consumed partial Schwab order must not starve the next submitted order."""
     import integration.test_portfolio_synthesis_persistence_pg as seed_module
@@ -226,7 +227,11 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
         )
 
     monkeypatch.setattr(seed_module, "_safe_no_trade_intent", complete_buy)
-    seeded = await _seed_normal_synthesis(migrated_database_url, monkeypatch)
+    seeded = await _seed_normal_synthesis(
+        migrated_database_url,
+        monkeypatch,
+        candidate_instruments=INSTRUMENTS[:candidate_count],
+    )
     engine, sessions, args = await proposal_source(
         migrated_database_url,
         seeded=seeded,
@@ -494,9 +499,17 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
                 )
             assert sample.order_ids == tuple(sorted(order.id for order in orders))
             assert {item.instrument_id for item in sample.candidate_facts} == {
-                order.instrument_id for order in orders
+                instrument[0] for instrument in INSTRUMENTS[:candidate_count]
             }
-            assert all(item.choice.action == "include" for item in sample.candidate_facts)
+            assert {
+                item.instrument_id
+                for item in sample.candidate_facts
+                if item.choice.action == "include"
+            } == {order.instrument_id for order in orders}
+            assert (
+                len([item for item in sample.candidate_facts if item.choice.action == "defer"])
+                == candidate_count - 2
+            )
             assert sample.order_terminal_statuses == ("filled", "filled")
             assert len(sample.fill_ids) == 2
             assert len(sample.fill_ledger_transaction_ids) == 2
@@ -654,6 +667,7 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
                 api_now=api_now,
                 cycle_id=cycle.id,
                 order_ids=(first_order.id, second_order.id),
+                candidate_count=candidate_count,
             )
 
     finally:

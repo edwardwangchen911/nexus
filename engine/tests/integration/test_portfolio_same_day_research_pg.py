@@ -38,7 +38,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 NOW = datetime(2026, 8, 27, 14, tzinfo=UTC)
 
 
-async def seed_normal_path(url, monkeypatch, *, occupied=False):
+async def seed_normal_path(
+    url, monkeypatch, *, occupied=False, candidate_instruments=INSTRUMENTS[:2]
+):
     seed = await seed_paper_batch(url)
     engine = create_async_engine(url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -66,6 +68,7 @@ async def seed_normal_path(url, monkeypatch, *, occupied=False):
             registered,
             decision_time=NOW,
             source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+            candidate_instruments=candidate_instruments,
         )
         # Persist synthetic authorities before the chosen historical cutoff. This
         # never changes runtime facts; fixtures live in an isolated test database.
@@ -105,9 +108,9 @@ async def seed_normal_path(url, monkeypatch, *, occupied=False):
         manifest = await prepare_candidates(
             session,
             authority=authority,
-            requested_instrument_ids=(INSTRUMENTS[1][0], INSTRUMENTS[0][0]),
+            requested_instrument_ids=tuple(item[0] for item in reversed(candidate_instruments)),
         )
-        assert len(manifest) == 2
+        assert len(manifest) == len(candidate_instruments)
     return engine, sessions, authority, manifest
 
 

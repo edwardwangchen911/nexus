@@ -42,6 +42,7 @@ async def verify_controlled_browser(
     api_now: datetime,
     cycle_id: UUID,
     order_ids: tuple[UUID, UUID],
+    candidate_count: int = 2,
 ) -> None:
     root = Path(__file__).resolve().parents[3]
     if not (root / "node_modules/.bin/vinext").exists():
@@ -90,6 +91,7 @@ async def verify_controlled_browser(
             NEXUS_CONTROLLED_WEB_URL=f"http://127.0.0.1:{web_port}",
             NEXUS_CONTROLLED_CYCLE_ID=str(cycle_id),
             NEXUS_CONTROLLED_ORDER_IDS=",".join(str(order_id) for order_id in order_ids),
+            NEXUS_CONTROLLED_CANDIDATE_COUNT=str(candidate_count),
             WRANGLER_LOG_PATH=".wrangler/wrangler.log",
         )
         web_process = await asyncio.create_subprocess_exec(
