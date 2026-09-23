@@ -676,9 +676,13 @@ async def test_schwab_market_stream_archive_rejects_tampered_frame(tmp_path) -> 
         load_provider_market_stream_archive(directory)
 
 
+@pytest.mark.parametrize(
+    ("symbols", "observation_count"),
+    [(("AAPL",), 1), (("AAPL", "AVGO", "NVDA"), 3)],
+)
 @pytest.mark.asyncio
 async def test_bounded_capture_archive_uses_receive_window_not_socket_close_time(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, symbols, observation_count
 ) -> None:
     from nexus.ops import schwab_market_stream as stream
 
@@ -694,21 +698,24 @@ async def test_bounded_capture_archive_uses_receive_window_not_socket_close_time
         return original_monotonic() + (40 if close_finished else 0)
 
     monkeypatch.setattr(stream, "monotonic", clock)
+    data = json.loads(json.dumps(SCHWAB_DATA))
+    row = data["data"][0]["content"][0]
+    data["data"][0]["content"] = [{**row, "key": symbol} for symbol in symbols]
     directory = tmp_path / "slow-close"
     result = await collect_schwab_stream(
-        symbols=("AAPL",),
+        symbols=symbols,
         directory=directory,
         streamer_url="wss://streamer-api.schwab.com/ws",
         credentials=SCHWAB_CREDENTIALS,
         duration=30,
         max_frames=3,
         connector=lambda *args, **kwargs: SlowCloseSocket(
-            [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, SCHWAB_DATA]
+            [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, data]
         ),
     )
 
     assert result["status"] == "bounded_complete"
-    assert len(load_provider_market_stream_archive(directory)["observations"]) == 1
+    assert len(load_provider_market_stream_archive(directory)["observations"]) == observation_count
 
 
 @pytest.mark.asyncio
