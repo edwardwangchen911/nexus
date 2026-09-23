@@ -472,6 +472,13 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
             orders=orders,
         )
         api_now = market_close + timedelta(seconds=1)
+        if not first_partial:
+            async with sessions() as session:
+                before_close = await collect_portfolio_challenger_cycle_sample(
+                    session, cycle_id=cycle.id, as_of=market_close - timedelta(seconds=1)
+                )
+            assert before_close.performance_state == "missing"
+            assert before_close.account_performance is None
         if first_partial:
             with pytest.raises(
                 AgentChallengerError, match="PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE"
@@ -493,6 +500,12 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
             assert sample.order_terminal_statuses == ("filled", "filled")
             assert len(sample.fill_ids) == 2
             assert len(sample.fill_ledger_transaction_ids) == 2
+            assert len(sample.fill_facts) == 2
+            assert all(item.quantity > 0 and item.fee >= 0 for item in sample.fill_facts)
+            assert sample.performance_state == "account_observed"
+            assert sample.account_performance is not None
+            assert sample.account_performance.as_of == market_close
+            assert sample.account_performance.nav > 0
         actual = await agent_paper_loop_once.inspect_projection_once(
             agent_paper_loop_once.EngineSettings(database_url=migrated_database_url),
             agent_paper_loop_once.AgentPaperInspectProjectionRequest(

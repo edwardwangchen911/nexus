@@ -59,6 +59,9 @@ async def test_completed_portfolio_cycle_yields_all_candidate_evidence(
         assert sample.order_ids == ()
         assert sample.fill_ids == ()
         assert sample.fill_ledger_transaction_ids == ()
+        assert sample.fill_facts == ()
+        assert sample.performance_state == "missing"
+        assert sample.account_performance is None
     finally:
         await engine.dispose()
 

@@ -42,6 +42,7 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.paper import (
     AgentPaperCandidateBatchRecord,
@@ -52,6 +53,7 @@ from nexus.persistence.models.paper import (
     PaperOrderBatchRecord,
     PaperOrderEventRecord,
     PaperOrderRecord,
+    PaperPerformanceSnapshotRecord,
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
 )
@@ -293,6 +295,35 @@ class PortfolioChallengerCandidateFactV1(_FrozenModel):
         return self
 
 
+class PortfolioChallengerFillFactV1(_FrozenModel):
+    fill_id: UUID
+    order_id: UUID
+    instrument_id: UUID
+    side: Literal["buy", "sell"]
+    quantity: Decimal = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    notional: Decimal = Field(gt=0)
+    fee: Decimal = Field(ge=0)
+    occurred_at: AwareDatetime
+    fill_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    ledger_transaction_id: UUID
+    ledger_transaction_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PortfolioChallengerAccountPerformanceV1(_FrozenModel):
+    """Account-level observation; it does not attribute NAV change to one cycle."""
+
+    snapshot_id: UUID
+    as_of: AwareDatetime
+    nav: Decimal = Field(gt=0)
+    cash: Decimal = Field(ge=0)
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    fees: Decimal = Field(ge=0)
+    drawdown_ratio: Decimal = Field(ge=0, le=1)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class PortfolioChallengerCycleSampleV1(_FrozenModel):
     """One complete, immutable multi-candidate input for a future portfolio review."""
 
@@ -317,6 +348,9 @@ class PortfolioChallengerCycleSampleV1(_FrozenModel):
     order_terminal_statuses: tuple[str, ...] = Field(max_length=5)
     fill_ids: tuple[UUID, ...]
     fill_ledger_transaction_ids: tuple[UUID, ...]
+    fill_facts: tuple[PortfolioChallengerFillFactV1, ...]
+    performance_state: Literal["missing", "account_observed"]
+    account_performance: PortfolioChallengerAccountPerformanceV1 | None
     source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
@@ -328,6 +362,10 @@ class PortfolioChallengerCycleSampleV1(_FrozenModel):
             != set(self.candidate_instrument_ids)
             or set(self.synthesis_intent.compared_instrument_ids)
             != set(self.candidate_instrument_ids)
+            or {item.fill_id for item in self.fill_facts} != set(self.fill_ids)
+            or {item.ledger_transaction_id for item in self.fill_facts}
+            != set(self.fill_ledger_transaction_ids)
+            or (self.account_performance is None) != (self.performance_state == "missing")
             or _hash(self.model_dump(mode="json", exclude={"source_hash"})) != self.source_hash
         ):
             raise ValueError("PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE")
@@ -540,6 +578,7 @@ async def collect_portfolio_challenger_cycle_sample(
     execution_state: Literal["no_order", "orders_terminal"]
     statuses: tuple[str, ...] = ()
     fills: tuple[PaperFillRecord, ...] = ()
+    ledger_by_id: dict[UUID, PaperLedgerTransactionRecord] = {}
     if orders:
         if latest.to_status != "awaiting_market" or not 1 <= len(orders) <= 5:
             raise AgentChallengerError(code)
@@ -601,6 +640,56 @@ async def collect_portfolio_challenger_cycle_sample(
         if latest.to_status != "completed" or latest.result_code != "NO_ORDER_REQUIRED":
             raise AgentChallengerError(code)
         execution_state = "no_order"
+    order_by_id = {order.id: order for order in orders}
+    fill_facts = tuple(
+        PortfolioChallengerFillFactV1(
+            fill_id=fill.id,
+            order_id=fill.order_id,
+            instrument_id=fill.instrument_id,
+            side=cast(Literal["buy", "sell"], order_by_id[fill.order_id].side),
+            quantity=fill.quantity,
+            price=fill.price,
+            notional=fill.notional,
+            fee=fill.fee,
+            occurred_at=fill.occurred_at,
+            fill_payload_hash=fill.payload_hash,
+            ledger_transaction_id=fill.ledger_transaction_id,
+            ledger_transaction_hash=ledger_by_id[fill.ledger_transaction_id].transaction_hash,
+        )
+        for fill in fills
+    )
+    latest_execution_at = max((fill.occurred_at for fill in fills), default=cycle.decision_time)
+    execution_calendar = await session.scalar(
+        select(ExchangeCalendarSessionRecord).where(
+            ExchangeCalendarSessionRecord.calendar_authority_id == decision.calendar_authority_id,
+            ExchangeCalendarSessionRecord.session == cycle.execution_session,
+        )
+    )
+    performance = None
+    if execution_calendar is not None and execution_calendar.market_close_at > latest_execution_at:
+        performance = await session.scalar(
+            select(PaperPerformanceSnapshotRecord).where(
+                PaperPerformanceSnapshotRecord.account_id == cycle.account_id,
+                PaperPerformanceSnapshotRecord.as_of == execution_calendar.market_close_at,
+                PaperPerformanceSnapshotRecord.as_of <= as_of,
+                PaperPerformanceSnapshotRecord.created_at <= as_of,
+            )
+        )
+    account_performance = (
+        None
+        if performance is None
+        else PortfolioChallengerAccountPerformanceV1(
+            snapshot_id=performance.id,
+            as_of=performance.as_of,
+            nav=performance.nav,
+            cash=performance.cash,
+            realized_pnl=performance.realized_pnl,
+            unrealized_pnl=performance.unrealized_pnl,
+            fees=performance.fees,
+            drawdown_ratio=performance.drawdown_ratio,
+            content_hash=performance.content_hash,
+        )
+    )
     payload = {
         "schema_version": "portfolio_challenger_cycle_sample_v1",
         "cycle_id": str(cycle_id),
@@ -621,6 +710,11 @@ async def collect_portfolio_challenger_cycle_sample(
         "order_terminal_statuses": list(statuses),
         "fill_ids": [str(fill.id) for fill in fills],
         "fill_ledger_transaction_ids": [str(fill.ledger_transaction_id) for fill in fills],
+        "fill_facts": [item.model_dump(mode="json") for item in fill_facts],
+        "performance_state": "missing" if performance is None else "account_observed",
+        "account_performance": (
+            None if account_performance is None else account_performance.model_dump(mode="json")
+        ),
     }
     return PortfolioChallengerCycleSampleV1.model_validate(
         {**payload, "source_hash": _hash(payload)}
