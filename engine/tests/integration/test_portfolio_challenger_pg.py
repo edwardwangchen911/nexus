@@ -1,12 +1,18 @@
 """Frozen multi-candidate cycle samples for Agent challenger retrospectives."""
 
+import json
 from datetime import timedelta
+from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from helpers.paper_batch import INSTRUMENTS
 from integration.test_portfolio_proposal_pg import proposal_source
 from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
+from nexus.agents.responses_budget import UsageSnapshot
+from nexus.ops.portfolio_challenger import ProposeRequest, execute_propose
 from nexus.paper import agent_challenger
+from nexus.paper import agent_challenger_runtime as challenger_runtime
 from nexus.paper.agent_challenger import (
     AgentChallengerError,
     PortfolioChallengerCycleSampleV1,
@@ -14,11 +20,15 @@ from nexus.paper.agent_challenger import (
 )
 from nexus.paper.agent_cycle import _events, _resume_portfolio_synthesis
 from nexus.persistence.models.paper import AgentPaperCycleRecord
+from nexus.persistence.models.runtime import AuditEvent
+from nexus.settings import EngineSettings
+from sqlalchemy import func, select
 
 
 @pytest.mark.asyncio
 async def test_completed_portfolio_cycle_yields_all_candidate_evidence(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dropping a candidate or synthesis output would corrupt the improvement sample."""
     engine, sessions, args = await proposal_source(migrated_database_url)
@@ -68,6 +78,71 @@ async def test_completed_portfolio_cycle_yields_all_candidate_evidence(
         assert retrospective.incumbent_prompt_hash == sample.synthesis_prompt_hash
         assert retrospective.incumbent_prompt_version_id == sample.synthesis_prompt_version_id
         assert len(retrospective.source_hash) == 64
+        suggestion = agent_challenger.PortfolioChallengerSuggestionV1(
+            source_hash=retrospective.source_hash,
+            observed_pattern="The frozen portfolio cycles deferred both candidates.",
+            hypothesis="Make each deferral condition explicit before ranking candidates.",
+            target_role="portfolio_decision",
+            prompt_addendum=(
+                "For each deferred candidate, state the exact evidence gap and its effect."
+            ),
+            expected_behavior_changes=("More specific portfolio deferral reasons",),
+            invalidation_conditions=("No change in deferral diagnosis",),
+            execution_locked=True,
+            deterministic_risk_unchanged=True,
+            broker_writes_forbidden=True,
+            output_schema_unchanged=True,
+            human_review_required=True,
+        )
+        proposal = agent_challenger.freeze_portfolio_challenger_proposal_v1(
+            retrospective, suggestion
+        )
+        assert proposal.target_role == "portfolio_decision"
+        assert proposal.source_cycle_ids == (cycle.id,)
+        assert proposal.incumbent_prompt_hash == retrospective.incumbent_prompt_hash
+        assert proposal.performance_attribution == "not_established"
+        assert proposal.human_review_required is True
+        projected = challenger_runtime.compact_portfolio_challenger_retrospective(retrospective)
+        assert len(projected["cycles"]) == 1
+        assert len(projected["cycles"][0]["candidates"]) == 2
+        model = SimpleNamespace(
+            id=retrospective.incumbent_model_config_id,
+            config_hash=retrospective.incumbent_model_hash,
+            model_id=challenger_runtime.MODEL_ID,
+            max_input_tokens=96000,
+            max_output_tokens=8192,
+            input_usd_per_million=Decimal(0),
+            output_usd_per_million=Decimal(0),
+        )
+        calls = []
+
+        async def fake_invoke(payload, *, output_model):
+            calls.append(payload)
+            assert output_model is challenger_runtime.PortfolioChallengerSuggestionWireV1
+            return (
+                json.dumps(
+                    suggestion.model_dump(
+                        mode="json",
+                        exclude={
+                            "execution_locked",
+                            "deterministic_risk_unchanged",
+                            "broker_writes_forbidden",
+                            "output_schema_unchanged",
+                            "human_review_required",
+                        },
+                    )
+                ),
+                UsageSnapshot(input_tokens=100, output_tokens=50, provider_calls=1),
+            )
+
+        monkeypatch.setattr(challenger_runtime, "invoke_codex", fake_invoke)
+        runtime = challenger_runtime.CodexPortfolioChallengerRuntime(model)  # type: ignore[arg-type]
+        generated, usage = await runtime.generate(retrospective)
+        assert generated == suggestion
+        assert usage.provider_calls == 1
+        assert len(calls) == 1
+        with pytest.raises(ValueError, match="PORTFOLIO_CHALLENGER_REPLAY_FORBIDDEN"):
+            await runtime.generate(retrospective)
         altered_history = retrospective.model_dump(mode="json")
         altered_history["as_of"] = (
             (args["now"] + timedelta(minutes=3)).isoformat().replace("+00:00", "Z")
@@ -106,5 +181,99 @@ async def test_unfinished_portfolio_cycle_is_not_an_improvement_sample(
                 await agent_challenger.collect_portfolio_challenger_retrospective(
                     session, account_id=cycle.account_id, as_of=args["now"] + timedelta(minutes=2)
                 )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_portfolio_proposal_job_is_persisted_and_replayed_once(
+    migrated_database_url: str,
+) -> None:
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, args["cycle_id"])
+            assert cycle is not None
+            result = await _resume_portfolio_synthesis(
+                session,
+                cycle=cycle,
+                events=await _events(session, cycle.id),
+                run_ids=(),
+                now=args["now"] + timedelta(seconds=1),
+                daily_limit_usd=None,
+            )
+            assert result.status == "completed"
+
+        class FakeRuntime:
+            calls = 0
+
+            async def generate(self, source):
+                self.calls += 1
+                suggestion = agent_challenger.PortfolioChallengerSuggestionV1(
+                    source_hash=source.source_hash,
+                    observed_pattern="Two candidates were deferred.",
+                    hypothesis="Explain evidence gaps separately for each candidate.",
+                    target_role="portfolio_decision",
+                    prompt_addendum=(
+                        "Name each candidate's unresolved evidence before deferring it."
+                    ),
+                    expected_behavior_changes=("More precise deferral reasons",),
+                    invalidation_conditions=("No change in deferral reasons",),
+                    execution_locked=True,
+                    deterministic_risk_unchanged=True,
+                    broker_writes_forbidden=True,
+                    output_schema_unchanged=True,
+                    human_review_required=True,
+                )
+                return suggestion, UsageSnapshot(
+                    input_tokens=100, output_tokens=50, provider_calls=1
+                )
+
+        runtime = FakeRuntime()
+        settings = EngineSettings(
+            database_url=migrated_database_url, agent_runtime_mode="codex_sdk"
+        )
+        request = ProposeRequest(
+            action="propose",
+            account_id=cycle.account_id,
+            history_limit=1,
+            idempotency_key="portfolio-challenger-first-cycle",
+        )
+        first = await execute_propose(settings, request, runtime=runtime)
+        replay = await execute_propose(settings, request, runtime=runtime)
+        assert first == replay
+        assert first.proposal.source_cycle_ids == (cycle.id,)
+        assert first.proposal.target_role == "portfolio_decision"
+        assert runtime.calls == 1
+        async with sessions() as session:
+            count = await session.scalar(
+                select(func.count(AuditEvent.id)).where(
+                    AuditEvent.action == "portfolio.challenger.proposed"
+                )
+            )
+        assert count == 1
+
+        class FailingRuntime:
+            calls = 0
+
+            async def generate(self, source):
+                self.calls += 1
+                raise ValueError("CODEX_TIMEOUT")
+
+        failed_runtime = FailingRuntime()
+        failed_request = request.model_copy(
+            update={"idempotency_key": "portfolio-challenger-timeout"}
+        )
+        for _ in range(2):
+            with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_RESULT_UNKNOWN"):
+                await execute_propose(settings, failed_request, runtime=failed_runtime)
+        assert failed_runtime.calls == 1
+        async with sessions() as session:
+            count_after_failure = await session.scalar(
+                select(func.count(AuditEvent.id)).where(
+                    AuditEvent.action == "portfolio.challenger.proposed"
+                )
+            )
+        assert count_after_failure == 1
     finally:
         await engine.dispose()

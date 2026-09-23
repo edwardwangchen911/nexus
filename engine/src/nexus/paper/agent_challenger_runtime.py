@@ -18,12 +18,18 @@ from nexus.agents.codex_sdk import (
 from nexus.agents.codex_token_budget import INPUT_RESERVE
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.paper.agent_challenger import (
+    PORTFOLIO_PROPOSER_PROMPT,
+    PORTFOLIO_PROPOSER_PROMPT_HASH,
+    PORTFOLIO_PROPOSER_PROMPT_VERSION,
+    PORTFOLIO_PROVIDER_PROJECTION_VERSION,
     PROPOSER_PROMPT,
     PROPOSER_PROMPT_HASH,
     PROPOSER_PROMPT_VERSION,
     PROVIDER_PROJECTION_VERSION,
     AgentChallengerRetrospectiveV4,
     AgentChallengerSuggestionV4,
+    PortfolioChallengerRetrospectiveV1,
+    PortfolioChallengerSuggestionV1,
 )
 from nexus.persistence.models.agents import AgentModelConfigRecord
 
@@ -43,6 +49,172 @@ class AgentChallengerSuggestionWireV4(BaseModel):
     prompt_addendum: str = Field(min_length=1, max_length=4000)
     expected_behavior_changes: tuple[str, ...] = Field(min_length=1, max_length=5)
     invalidation_conditions: tuple[str, ...] = Field(min_length=1, max_length=5)
+
+
+class PortfolioChallengerSuggestionWireV1(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observed_pattern: str = Field(min_length=1, max_length=1000)
+    hypothesis: str = Field(min_length=1, max_length=1000)
+    target_role: Literal["portfolio_decision"]
+    prompt_addendum: str = Field(min_length=1, max_length=4000)
+    expected_behavior_changes: tuple[str, ...] = Field(min_length=1, max_length=5)
+    invalidation_conditions: tuple[str, ...] = Field(min_length=1, max_length=5)
+
+
+class PortfolioChallengerRuntime(Protocol):
+    async def generate(
+        self, retrospective: PortfolioChallengerRetrospectiveV1
+    ) -> tuple[PortfolioChallengerSuggestionV1, UsageSnapshot]: ...
+
+
+def compact_portfolio_challenger_retrospective(
+    retrospective: PortfolioChallengerRetrospectiveV1,
+) -> dict[str, object]:
+    """Expose bounded decision semantics while retaining exact source-hash authority."""
+    cycles: list[dict[str, object]] = []
+    for cycle in retrospective.cycles:
+        candidates: list[dict[str, object]] = []
+        for fact in cycle.candidate_facts:
+            assessment = fact.research_intent.synthesis_assessment
+            candidates.append(
+                {
+                    "instrument_id": str(fact.instrument_id),
+                    "symbol": fact.research_intent.display_symbol,
+                    "research_content_hash": fact.research_content_hash,
+                    "stance": fact.research_intent.stance,
+                    "exposure_action": fact.research_intent.exposure_action,
+                    "quality_status": fact.research_intent.quality_status,
+                    "evidence_audit": fact.research_intent.evidence_audit,
+                    "uncertainties": list(fact.research_intent.uncertainties),
+                    "review_conclusion": None
+                    if assessment is None
+                    else assessment.review_conclusion,
+                    "reviews": (
+                        []
+                        if assessment is None
+                        else [
+                            {
+                                "claim_id": review.claim_id,
+                                "status": review.status,
+                                "resolved": review.resolved,
+                                "missing_evidence": list(review.missing_evidence),
+                                "prevented_conclusion": review.prevented_conclusion,
+                            }
+                            for review in assessment.reviews
+                        ]
+                    ),
+                    "choice": fact.choice.model_dump(mode="json"),
+                    "sizing_action": fact.sizing_action,
+                }
+            )
+        cycles.append(
+            {
+                "cycle_id": str(cycle.cycle_id),
+                "source_hash": cycle.source_hash,
+                "result_code": cycle.result_code,
+                "compared_instrument_ids": [str(value) for value in cycle.candidate_instrument_ids],
+                "candidates": candidates,
+                "cash_rationale": cycle.synthesis_intent.cash_rationale.model_dump(mode="json"),
+                "execution_state": cycle.execution_state,
+                "order_terminal_statuses": list(cycle.order_terminal_statuses),
+                "fills": [
+                    {
+                        "instrument_id": str(fill.instrument_id),
+                        "side": fill.side,
+                        "quantity": str(fill.quantity),
+                        "price": str(fill.price),
+                        "fee": str(fill.fee),
+                    }
+                    for fill in cycle.fill_facts
+                ],
+                "performance_state": cycle.performance_state,
+                "account_performance": (
+                    None
+                    if cycle.account_performance is None
+                    else {
+                        "as_of": cycle.account_performance.as_of.isoformat(),
+                        "nav": str(cycle.account_performance.nav),
+                        "drawdown_ratio": str(cycle.account_performance.drawdown_ratio),
+                        "fees": str(cycle.account_performance.fees),
+                        "account_level_only": True,
+                    }
+                ),
+            }
+        )
+    return {
+        "schema_version": PORTFOLIO_PROVIDER_PROJECTION_VERSION,
+        "source_hash": retrospective.source_hash,
+        "incumbent_prompt_content": retrospective.incumbent_prompt_content,
+        "incumbent_prompt_hash": retrospective.incumbent_prompt_hash,
+        "performance_attribution": "not_established",
+        "cycles": cycles,
+    }
+
+
+class CodexPortfolioChallengerRuntime:
+    """One tool-free model proposal for the actual portfolio-decision prompt."""
+
+    def __init__(self, model: AgentModelConfigRecord) -> None:
+        if (
+            model.model_id != MODEL_ID
+            or model.max_input_tokens < CHALLENGER_MAX_REPORTED_INPUT_TOKENS
+            or model.max_output_tokens < 8_192
+            or model.input_usd_per_million != 0
+            or model.output_usd_per_million != 0
+        ):
+            raise ValueError("PORTFOLIO_CHALLENGER_MODEL_UNSUPPORTED")
+        self._model_id = model.id
+        self._model_hash = model.config_hash
+        self._max_input_tokens = model.max_input_tokens
+        self._attempted = False
+
+    async def generate(
+        self, retrospective: PortfolioChallengerRetrospectiveV1
+    ) -> tuple[PortfolioChallengerSuggestionV1, UsageSnapshot]:
+        if self._attempted:
+            raise ValueError("PORTFOLIO_CHALLENGER_REPLAY_FORBIDDEN")
+        if (
+            retrospective.incumbent_model_config_id != self._model_id
+            or retrospective.incumbent_model_hash != self._model_hash
+        ):
+            raise ValueError("PORTFOLIO_CHALLENGER_MODEL_AUTHORITY_CHANGED")
+        self._attempted = True
+        payload = {
+            "schema_version": "portfolio_challenger_codex_input_v1",
+            "instructions": PORTFOLIO_PROPOSER_PROMPT,
+            "proposer_prompt_version": PORTFOLIO_PROPOSER_PROMPT_VERSION,
+            "proposer_prompt_hash": PORTFOLIO_PROPOSER_PROMPT_HASH,
+            "retrospective": compact_portfolio_challenger_retrospective(retrospective),
+        }
+        wire = codex_request_wire(payload)
+        allowance = codex_input_allowance(
+            wire, codex_output_schema(PortfolioChallengerSuggestionWireV1)
+        )
+        if allowance > min(
+            self._max_input_tokens, CHALLENGER_MAX_EXPLICIT_INPUT_UNITS + INPUT_RESERVE
+        ):
+            raise ValueError("PORTFOLIO_CHALLENGER_INPUT_TOO_LARGE")
+        raw, usage = await invoke_codex(payload, output_model=PortfolioChallengerSuggestionWireV1)
+        wire_suggestion = PortfolioChallengerSuggestionWireV1.model_validate_json(raw)
+        suggestion = PortfolioChallengerSuggestionV1(
+            **wire_suggestion.model_dump(),
+            execution_locked=True,
+            deterministic_risk_unchanged=True,
+            broker_writes_forbidden=True,
+            output_schema_unchanged=True,
+            human_review_required=True,
+        )
+        if suggestion.source_hash != retrospective.source_hash:
+            raise ValueError("PORTFOLIO_CHALLENGER_SOURCE_MISMATCH")
+        if (
+            usage.input_tokens > CHALLENGER_MAX_REPORTED_INPUT_TOKENS
+            or usage.provider_calls != 1
+            or usage.tool_calls != 0
+        ):
+            raise ValueError("PORTFOLIO_CHALLENGER_USAGE_INVALID")
+        return suggestion, usage
 
 
 class AgentChallengerRuntime(Protocol):
