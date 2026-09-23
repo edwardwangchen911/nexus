@@ -259,6 +259,35 @@ def run_local_stack(
             return False
         return True
 
+    if action is LocalStackAction.UP and agent_paper_enabled:
+        if not run_host("status"):
+            return tuple(results)
+        if dict(results[-1].details).get("status") in {"running", "started"}:
+            if release_revision is None:
+                results.append(
+                    LocalStackStepResult(
+                        action=action,
+                        ordinal=len(results) + 1,
+                        exit_code=1,
+                        result_code="LOCAL_STACK_RELEASE_UNVERIFIED",
+                        fact="release",
+                    )
+                )
+                return tuple(results)
+            diagnostic = _service_status_command(repo_root=root, env_file=resolved_env)
+            exit_code, stdout = run_command(diagnostic, fact="heartbeat")
+            if exit_code == -1:
+                return tuple(results)
+            heartbeat, _ = _parse_service_status_results(
+                action=action,
+                first_ordinal=results[-1].ordinal,
+                stdout=stdout,
+                expected_release_revision=release_revision,
+            )
+            results[-1] = heartbeat
+            if heartbeat.exit_code != 0:
+                return tuple(results)
+
     if action is LocalStackAction.DOWN:
         if not run_host("stop"):
             return tuple(results)
@@ -316,6 +345,34 @@ def run_local_stack(
                     expected_release_revision=release_revision,
                 )
             )
+        if results[0].exit_code == 0:
+            compose_prefix = commands[0].argv[:-2]
+            for service in ("api", "worker"):
+                release_command = LocalStackCommand(
+                    (*compose_prefix, "exec", "-T", service, "printenv", "NEXUS_RELEASE_REVISION"),
+                    30,
+                )
+                exit_code, stdout = run_command(release_command, fact=f"{service}_release")
+                if exit_code == 0:
+                    reported = stdout.strip()
+                    details: tuple[tuple[str, object], ...] = ()
+                    if release_revision is not None:
+                        details = (("expected_release_revision", release_revision),)
+                    if _RELEASE_REVISION.fullmatch(reported) is not None:
+                        details += (("reported_release_revision", reported),)
+                    matched = release_revision is not None and reported == release_revision
+                    results[-1] = replace(
+                        results[-1],
+                        exit_code=0 if matched else 1,
+                        result_code=(
+                            "LOCAL_STACK_RELEASE_MATCHED"
+                            if matched
+                            else "LOCAL_STACK_RELEASE_MISMATCH"
+                            if _RELEASE_REVISION.fullmatch(reported) is not None
+                            else "LOCAL_STACK_RELEASE_UNVERIFIED"
+                        ),
+                        details=details,
+                    )
     return tuple(results)
 
 
@@ -553,9 +610,7 @@ def _parse_service_status_results(
             action=action,
             ordinal=first_ordinal,
             exit_code=(
-                0
-                if heartbeat_details and heartbeat_code == "AGENT_PAPER_HEARTBEAT_FRESH"
-                else 1
+                0 if heartbeat_details and heartbeat_code == "AGENT_PAPER_HEARTBEAT_FRESH" else 1
             ),
             result_code=heartbeat_code,
             fact="heartbeat",
