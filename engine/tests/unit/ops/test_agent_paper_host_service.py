@@ -93,12 +93,15 @@ elif action == 'print':
     if options.get('duplicate_owner'):
         print(indent + 'working directory = ' + job['WorkingDirectory'])
     print('environment = {\\n\\tCANARY => private-launchctl-canary\\n}')
-    if 'exit' in job: print('last exit code = ' + str(job['exit']))
+    if 'exit' in job and not options.get('stop_exit_unreported'):
+        if not job.pop('hide_exit_once', False):
+            print('last exit code = ' + str(job['exit']))
     if job['state'] == 'config_error': print('last exit code = 78: EX_CONFIG')
     if job['state'] == 'delayed_config_error': job['state'] = 'config_error'
 elif action == 'kill':
     job['state'] = 'inactive'
     job['exit'] = options.get('stop_exit', 0)
+    job['hide_exit_once'] = options.get('stop_exit_delayed', False)
 elif action == 'bootout': job = {}
 state.write_text(json.dumps(job))
 """,
@@ -241,8 +244,7 @@ def test_start_binds_the_exact_checkout_revision_to_launchd(tmp_path):
 
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
     assert any(
-        call[0] == "environment" and "NEXUS_RELEASE_REVISION" in call[1:]
-        for call in _calls(root)
+        call[0] == "environment" and "NEXUS_RELEASE_REVISION" in call[1:] for call in _calls(root)
     )
 
 
@@ -410,6 +412,36 @@ def test_inactive_nonzero_exit_requires_explicit_acknowledgement(tmp_path):
         ["launchctl", "print", LABEL],
         ["launchctl", "bootout", LABEL],
     ]
+
+
+def test_stop_waits_for_clean_exit_code_after_process_becomes_inactive(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root)
+    (root.parent / "control").write_text(json.dumps({"stop_exit_delayed": True}))
+
+    result = _invoke(root, env, "stop")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["status"] == "stopped"
+    assert _calls(root) == [
+        ["launchctl", "print", LABEL],
+        ["launchctl", "kill", "SIGINT", LABEL],
+        ["launchctl", "print", LABEL],
+        ["launchctl", "print", LABEL],
+        ["launchctl", "bootout", LABEL],
+    ]
+
+
+def test_stop_preserves_registration_when_exit_code_never_appears(tmp_path):
+    root, env = _service_root(tmp_path)
+    _register(root)
+    (root.parent / "control").write_text(json.dumps({"stop_exit_unreported": True}))
+
+    result = _invoke(root, env, "stop")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"}
+    assert not any(call[1] == "bootout" for call in _calls(root))
 
 
 @pytest.mark.parametrize(("state", "exit_code"), [("running", 75), ("inactive", 0)])

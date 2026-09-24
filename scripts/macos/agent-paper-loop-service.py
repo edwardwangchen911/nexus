@@ -551,7 +551,7 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
                 )
                 _emit({"error_code": code})
                 return 1
-            if state != "running":
+            if state != "running" and not (state == "inactive" and last_exit_code is None):
                 break
             time.sleep(0.2)
         if state == "running" or last_exit_code == 75:
