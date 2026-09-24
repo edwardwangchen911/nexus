@@ -353,6 +353,8 @@ async def _run(
         if len(bindings) > 5:
             raise ProviderMarketStreamError("SCHWAB_MARKET_STREAM_BINDINGS_INVALID")
         _limits(arguments.duration, MAX_FRAMES)
+        if not arguments.output_dir.parent.is_dir() or arguments.output_dir.parent.is_symlink():
+            raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_OUTPUT_PARENT_REQUIRED")
         if arguments.output_dir.exists() or arguments.output_dir.is_symlink():
             raise ProviderMarketStreamError("PROVIDER_MARKET_STREAM_NEW_OUTPUT_REQUIRED")
         capture = await run_schwab_stream(

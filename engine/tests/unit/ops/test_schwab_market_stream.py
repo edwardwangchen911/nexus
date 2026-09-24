@@ -362,6 +362,65 @@ async def test_paper_probe_cli_checks_same_archive_without_import(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_paper_probe_requires_existing_output_parent_before_provider_call(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unexpected_capture(*args, **kwargs):
+        raise AssertionError("missing output parent must stop before provider access")
+
+    monkeypatch.setattr(stream, "run_schwab_stream", unexpected_capture)
+    output = tmp_path / "missing-parent" / "fresh-probe"
+    arguments = build_parser().parse_args(
+        [
+            "paper-probe",
+            "--repo-root",
+            str(tmp_path),
+            "--binding",
+            f"AAPL={AAPL_ID}",
+            "--output-dir",
+            str(output),
+        ]
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(
+            ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_OUTPUT_PARENT_REQUIRED"
+        ):
+            await stream._run(arguments, client=client)
+    assert not output.parent.exists()
+
+
+@pytest.mark.asyncio
+async def test_paper_probe_rejects_symlinked_output_parent_before_provider_call(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unexpected_capture(*args, **kwargs):
+        raise AssertionError("symlinked output parent must stop before provider access")
+
+    monkeypatch.setattr(stream, "run_schwab_stream", unexpected_capture)
+    real_parent = tmp_path / "private-parent"
+    real_parent.mkdir(mode=0o700)
+    link = tmp_path / "linked-parent"
+    link.symlink_to(real_parent, target_is_directory=True)
+    arguments = build_parser().parse_args(
+        [
+            "paper-probe",
+            "--repo-root",
+            str(tmp_path),
+            "--binding",
+            f"AAPL={AAPL_ID}",
+            "--output-dir",
+            str(link / "fresh-probe"),
+        ]
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(
+            ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_OUTPUT_PARENT_REQUIRED"
+        ):
+            await stream._run(arguments, client=client)
+    assert not (real_parent / "fresh-probe").exists()
+
+
+@pytest.mark.asyncio
 async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> None:
     socket = Socket([SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, SCHWAB_HEARTBEAT, SCHWAB_DATA])
     calls: list[tuple[str, dict[str, object]]] = []
