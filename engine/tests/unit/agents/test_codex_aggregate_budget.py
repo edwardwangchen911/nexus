@@ -33,6 +33,7 @@ async def test_frozen_aggregate_limit_controls_third_stage(limit, monkeypatch):
         with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
             await model.analyze("portfolio", request, evidence, prompts["portfolio"])
         assert called.await_count == 2
+        assert model.failure_reason == "model_stage_input_allowance_exhausted"
     else:
         await model.analyze("portfolio", request, evidence, prompts["portfolio"])
         assert model.usage.input_tokens == 90000 and called.await_count == 3
@@ -72,6 +73,23 @@ async def test_96k_keeps_wire_cap_before_provider_call(monkeypatch):
     with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
         await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
     called.assert_not_awaited()
+    assert model.failure_reason == "model_stage_wire_bytes_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_expired_stage_deadline_records_safe_reason_without_provider_call(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    called = AsyncMock()
+    monkeypatch.setattr(codex_staged, "invoke_codex", called)
+    model = codex_staged.StagedCodexCommittee(
+        prompts=prompts, tools=_tools(), deadline=0
+    )
+    with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    called.assert_not_awaited()
+    assert model.failure_reason == "model_stage_deadline_elapsed"
 
 
 @pytest.mark.parametrize("limit", [True, 64000.0, 80000, 96001])

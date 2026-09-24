@@ -496,7 +496,7 @@ async def test_staged_budget_exhaustion_stops_before_next_provider_call(monkeypa
     with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
         await model.analyze("bear", request, evidence, prompts["bear"])
     invoke.assert_awaited_once()
-    assert model.failure_reason == "model_stage_allowance_exhausted"
+    assert model.failure_reason == "model_stage_input_allowance_exhausted"
     assert model.last_stage_input is None
 
 

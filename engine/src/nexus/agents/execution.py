@@ -69,6 +69,12 @@ SAFE_MODEL_FAILURES: Final[frozenset[str]] = frozenset(
     {
         "model_usage_uncertain",
         "model_stage_allowance_exhausted",
+        "model_stage_wire_bytes_exceeded",
+        "model_stage_input_allowance_exhausted",
+        "model_stage_output_allowance_exhausted",
+        "model_stage_call_allowance_exhausted",
+        "model_stage_deadline_missing",
+        "model_stage_deadline_elapsed",
         "model_token_limit_exceeded",
         "model_stage_schema_invalid",
         "model_stage_output_invalid",

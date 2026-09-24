@@ -423,15 +423,21 @@ class StagedCodexCommittee(CodexCommittee):
                 self._frozen_inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")
             ).encode()
         ).hexdigest()
-        if (
-            len(wire.encode()) > self._max_wire_bytes
-            or self.usage.input_tokens + estimated_input > self._aggregate_input_tokens
-            or self.usage.output_tokens >= MAX_OUTPUT_TOKENS
-            or self.usage.provider_calls >= len(STAGES)
-            or self._deadline is None
-            or asyncio.get_running_loop().time() >= self._deadline
-        ):
-            self.failure_reason = "model_stage_allowance_exhausted"
+        allowance_reason: str | None = None
+        if len(wire.encode()) > self._max_wire_bytes:
+            allowance_reason = "model_stage_wire_bytes_exceeded"
+        elif self.usage.input_tokens + estimated_input > self._aggregate_input_tokens:
+            allowance_reason = "model_stage_input_allowance_exhausted"
+        elif self.usage.output_tokens >= MAX_OUTPUT_TOKENS:
+            allowance_reason = "model_stage_output_allowance_exhausted"
+        elif self.usage.provider_calls >= len(STAGES):
+            allowance_reason = "model_stage_call_allowance_exhausted"
+        elif self._deadline is None:
+            allowance_reason = "model_stage_deadline_missing"
+        elif asyncio.get_running_loop().time() >= self._deadline:
+            allowance_reason = "model_stage_deadline_elapsed"
+        if allowance_reason is not None:
+            self.failure_reason = allowance_reason
             raise ValueError("CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED")
         self.failure_reason = "model_usage_uncertain"
         self.last_stage_input = StageInputIdentity(
