@@ -10,6 +10,8 @@ import getpass
 import json
 import logging
 import os
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -30,6 +32,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from websockets.asyncio.client import connect
+from websockets.exceptions import InvalidHandshake, ProxyError
 
 from nexus.market.ingestion import MarketObjectStore, object_uri_matches_key
 from nexus.market.intraday_ingestion import _get_or_create_artifact, _insert_observation
@@ -112,6 +115,23 @@ class SchwabMarketStreamImportResult:
 class _FixedConnect(connect):
     def process_redirect(self, exc: Exception) -> Exception:
         return exc
+
+
+def _connect_failure_reason(error: Exception) -> str:
+    """Classify a failed handshake without persisting URLs or exception text."""
+    if isinstance(error, TimeoutError):
+        return "CONNECT_TIMEOUT"
+    if isinstance(error, ProxyError):
+        return "CONNECT_PROXY_FAILED"
+    if isinstance(error, ssl.SSLError):
+        return "CONNECT_TLS_FAILED"
+    if isinstance(error, socket.gaierror):
+        return "CONNECT_DNS_FAILED"
+    if isinstance(error, InvalidHandshake):
+        return "CONNECT_HANDSHAKE_FAILED"
+    if isinstance(error, OSError):
+        return "CONNECT_NETWORK_FAILED"
+    return "CONNECT_FAILED"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -661,9 +681,11 @@ async def _collect(
     except asyncio.CancelledError as error:
         receipt["stop_reason"] = "CANCELLED"
         cancelled = error
-    except Exception:
+    except Exception as error:
         if capture_ended_at is not None:
             receipt["stop_reason"] = "CLOSE_FAILED"
+        else:
+            receipt["stop_reason"] = _connect_failure_reason(error)
     receipt["ended_at"] = (capture_ended_at or datetime.now(UTC)).isoformat()
     receipt["elapsed_monotonic_seconds"] = (
         capture_elapsed if capture_elapsed is not None else monotonic() - started_monotonic
@@ -949,9 +971,7 @@ def validate_paper_quote_probe(
             raw_payload,
             IntradaySnapshotRequest(
                 instruments=tuple(
-                    SnapshotInstrument(
-                        instrument_id=InstrumentId(bindings[symbol]), symbol=symbol
-                    )
+                    SnapshotInstrument(instrument_id=InstrumentId(bindings[symbol]), symbol=symbol)
                     for symbol in sorted(bindings)
                 ),
                 symbol_as_of=completed_at.date(),

@@ -2,6 +2,8 @@ import asyncio
 import base64
 import hashlib
 import json
+import socket
+import ssl
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -28,6 +30,7 @@ from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     SnapshotInstrument,
 )
+from websockets.exceptions import InvalidHandshake, ProxyError
 
 
 class Socket:
@@ -404,6 +407,49 @@ async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connection_error", "expected_reason"),
+    [
+        (TimeoutError("private connection detail"), "CONNECT_TIMEOUT"),
+        (ProxyError("private proxy detail"), "CONNECT_PROXY_FAILED"),
+        (ssl.SSLError("private tls detail"), "CONNECT_TLS_FAILED"),
+        (socket.gaierror("private dns detail"), "CONNECT_DNS_FAILED"),
+        (OSError("private network detail"), "CONNECT_NETWORK_FAILED"),
+        (InvalidHandshake("private handshake detail"), "CONNECT_HANDSHAKE_FAILED"),
+        (RuntimeError("private unknown detail"), "CONNECT_FAILED"),
+    ],
+)
+async def test_schwab_stream_classifies_connect_failure_without_leaking_detail(
+    tmp_path, connection_error: Exception, expected_reason: str
+) -> None:
+    class FailedConnection:
+        async def __aenter__(self):
+            raise connection_error
+
+        async def __aexit__(self, *args):
+            return None
+
+    directory = tmp_path / "failed-connect"
+    result = await collect_schwab_stream(
+        symbols=("AAPL",),
+        directory=directory,
+        streamer_url="wss://streamer-api.schwab.com/ws",
+        credentials=SCHWAB_CREDENTIALS,
+        connector=lambda *args, **kwargs: FailedConnection(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["stop_reason"] == expected_reason
+    assert result["authenticated"] is False
+    assert result["frame_count"] == 0
+    receipt = (directory / "receipt.json").read_text()
+    assert "private" not in receipt
+    assert json.loads(receipt)["stop_reason"] == expected_reason
+    with pytest.raises(ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_INCOMPLETE"):
+        load_provider_market_stream_archive(directory)
+
+
+@pytest.mark.asyncio
 async def test_agent_decision_capture_is_one_aapl_attempt_with_fixed_limits(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -709,9 +755,7 @@ async def test_bounded_capture_archive_uses_receive_window_not_socket_close_time
         credentials=SCHWAB_CREDENTIALS,
         duration=30,
         max_frames=3,
-        connector=lambda *args, **kwargs: SlowCloseSocket(
-            [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, data]
-        ),
+        connector=lambda *args, **kwargs: SlowCloseSocket([SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, data]),
     )
 
     assert result["status"] == "bounded_complete"
@@ -775,9 +819,7 @@ async def test_capture_import_failure_keeps_safe_capture_summary(
             credentials=SCHWAB_CREDENTIALS,
             duration=30,
             max_frames=3,
-            connector=lambda *args, **kwargs: Socket(
-                [SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, frame]
-            ),
+            connector=lambda *args, **kwargs: Socket([SCHWAB_LOGIN, SCHWAB_SUBSCRIBED, frame]),
         )
 
     async def fail_import(*args, **kwargs):

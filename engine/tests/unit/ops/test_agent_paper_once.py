@@ -1469,6 +1469,32 @@ def test_schwab_failure_preserves_only_safe_root_cause_diagnostic(tmp_path) -> N
         "stage": "capture_or_import",
     }
 
+    connect_diagnostic = tmp_path / "connect-failure.json"
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._raise_schwab_l1_incomplete(
+            cli.ProviderMarketStreamError(
+                "PROVIDER_MARKET_STREAM_INCOMPLETE",
+                capture_summary={
+                    "status": "failed",
+                    "stop_reason": "CONNECT_PROXY_FAILED",
+                    "authenticated": False,
+                    "subscription_confirmed": False,
+                    "observation_count": 0,
+                    "frame_count": 0,
+                    "origin": "must-not-be-persisted",
+                },
+            ),
+            diagnostic_path=connect_diagnostic,
+        )
+    assert json.loads(connect_diagnostic.read_text())["capture_summary"] == {
+        "authenticated": False,
+        "frame_count": 0,
+        "observation_count": 0,
+        "status": "failed",
+        "stop_reason": "CONNECT_PROXY_FAILED",
+        "subscription_confirmed": False,
+    }
+
     with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
         cli._raise_schwab_l1_incomplete(
             cli.ProviderMarketStreamError("private upstream detail"),
