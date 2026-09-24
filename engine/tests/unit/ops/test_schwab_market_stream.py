@@ -4,6 +4,7 @@ import hashlib
 import json
 import socket
 import ssl
+import struct
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -511,6 +512,48 @@ async def test_schwab_stream_classifies_connect_failure_without_leaking_detail(
     assert json.loads(receipt)["stop_reason"] == expected_reason
     with pytest.raises(ProviderMarketStreamError, match="PROVIDER_MARKET_STREAM_INCOMPLETE"):
         load_provider_market_stream_archive(directory)
+
+
+@pytest.mark.asyncio
+async def test_schwab_stream_classifies_reset_during_proxy_tls_handshake(tmp_path) -> None:
+    async def reset_after_connect(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        await writer.drain()
+        await reader.read(1)
+        raw_socket = writer.get_extra_info("socket")
+        raw_socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        writer.transport.abort()
+
+    server = await asyncio.start_server(reset_after_connect, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        directory = tmp_path / "proxy-reset"
+        result = await collect_schwab_stream(
+            symbols=("AAPL",),
+            directory=directory,
+            streamer_url="wss://streamer-api.schwab.com/ws",
+            credentials=SCHWAB_CREDENTIALS,
+            duration=2,
+            connector=partial(stream._FixedConnect, proxy=f"http://127.0.0.1:{port}"),
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result == {
+        "status": "failed",
+        "stop_reason": "CONNECT_RESET",
+        "authenticated": False,
+        "subscription_confirmed": False,
+        "observation_count": 0,
+        "frame_count": 0,
+    }
+    receipt = json.loads((directory / "receipt.json").read_text())
+    assert receipt["stop_reason"] == "CONNECT_RESET"
+    assert "access-token" not in (directory / "receipt.json").read_text()
 
 
 @pytest.mark.asyncio
