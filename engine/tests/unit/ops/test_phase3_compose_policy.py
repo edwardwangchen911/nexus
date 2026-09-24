@@ -16,6 +16,16 @@ def test_app_profile_has_no_broker_simulation_service_or_secret_mapping() -> Non
         assert "NEXUS_BROKER_SIMULATION_MODE" not in block
 
 
+def test_local_business_storage_uses_named_volumes() -> None:
+    compose = (ROOT / "infra/compose.yaml").read_text()
+    postgres = _service_block(compose, "postgres")
+    minio = _service_block(compose, "minio")
+
+    assert "      - postgres-data:/var/lib/postgresql/data\n" in postgres
+    assert "      - minio-data:/data\n" in minio
+    assert "\nvolumes:\n  postgres-data:\n  minio-data:\n" in compose
+
+
 def test_simulation_profile_uses_distinct_process_and_host_secret_domains() -> None:
     compose = (ROOT / "infra/compose.yaml").read_text()
     gateway = _service_block(compose, "fosun-simulation-gateway")
