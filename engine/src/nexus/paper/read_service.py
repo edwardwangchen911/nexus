@@ -69,6 +69,7 @@ from nexus.api.schemas.paper import (
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
+from nexus.jobs.models import JobType
 from nexus.market.universe import stable_instrument_id
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
@@ -150,6 +151,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionTargetRecord,
 )
 from nexus.persistence.models.portfolio import Account, Portfolio
+from nexus.persistence.models.runtime import Job
 
 _MAX_POSITIONS = 500
 _MAX_ATTRIBUTIONS = 500
@@ -1943,6 +1945,84 @@ class PaperReadService:
                     ErrorCode.DATA_PARTIAL, "The Agent paper cycle is unbounded.", status_code=409
                 )
             outputs = {instrument_id: (output, binding) for instrument_id, output, binding in rows}
+        prepared_event = await self._session.scalar(
+            select(AgentPaperCycleEventRecord)
+            .where(
+                AgentPaperCycleEventRecord.cycle_id == cycle.id,
+                AgentPaperCycleEventRecord.result_code == "RESEARCH_JOBS_PREPARED",
+                AgentPaperCycleEventRecord.occurred_at <= self._request_time,
+                AgentPaperCycleEventRecord.created_at <= self._request_time,
+            )
+            .order_by(AgentPaperCycleEventRecord.sequence.desc())
+            .limit(1)
+        )
+        job_status_by_instrument: dict[UUID, str | None] = {}
+        if prepared_event is not None:
+            raw_run_ids = prepared_event.fact_ids.get("research_run_ids")
+            if (
+                not isinstance(raw_run_ids, list)
+                or not 1 <= len(raw_run_ids) <= 5
+                or not all(isinstance(value, str) for value in raw_run_ids)
+            ):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent research jobs are incomplete.",
+                    status_code=409,
+                )
+            try:
+                run_ids = tuple(UUID(value) for value in raw_run_ids)
+            except ValueError:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent research jobs are incomplete.",
+                    status_code=409,
+                ) from None
+            if len(set(run_ids)) != len(run_ids):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The Agent research jobs are incomplete.",
+                    status_code=409,
+                )
+            runs = tuple(
+                await self._session.scalars(
+                    select(AgentResearchRunRecord).where(
+                        AgentResearchRunRecord.id.in_(run_ids),
+                        AgentResearchRunRecord.created_at <= self._request_time,
+                    )
+                )
+            )
+            jobs = tuple(
+                await self._session.scalars(
+                    select(Job).where(
+                        Job.job_type.in_(
+                            (JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)
+                        ),
+                        Job.payload["run_id"]
+                        .as_string()
+                        .in_(tuple(str(value) for value in run_ids)),
+                        Job.created_at <= self._request_time,
+                    )
+                )
+            )
+            jobs_by_run: dict[UUID, list[Job]] = {}
+            for job in jobs:
+                try:
+                    job_run_id = UUID(str(job.payload.get("run_id")))
+                except ValueError:
+                    continue
+                jobs_by_run.setdefault(job_run_id, []).append(job)
+            for run in runs:
+                matching = jobs_by_run.get(run.id, [])
+                if len(matching) != 1 or run.instrument_id in job_status_by_instrument:
+                    job_status_by_instrument[run.instrument_id] = None
+                    continue
+                job = matching[0]
+                if job.finished_at is not None and job.finished_at <= self._request_time:
+                    job_status_by_instrument[run.instrument_id] = job.status
+                elif job.started_at is not None and job.started_at <= self._request_time:
+                    job_status_by_instrument[run.instrument_id] = "running"
+                else:
+                    job_status_by_instrument[run.instrument_id] = "queued"
         candidates = []
         for candidate in manifest:
             instrument_id = candidate.instrument_id
@@ -1956,6 +2036,13 @@ class PaperReadService:
                     symbol=candidate.symbol,
                     selection_reasons=(candidate.inclusion_reason,),
                     research_status="completed" if bound is not None else "pending",
+                    research_job_status=cast(
+                        Literal[
+                            "queued", "running", "succeeded", "failed", "skipped", "dead_letter"
+                        ]
+                        | None,
+                        job_status_by_instrument.get(instrument_id),
+                    ),
                     stance=cast(
                         Literal["buy_candidate", "reduce_candidate", "hold", "watch"] | None,
                         stance

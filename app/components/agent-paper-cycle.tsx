@@ -1,4 +1,5 @@
 import type { components } from "../lib/generated/schema";
+import { researchAdmissionLabel, researchJobLabel } from "../lib/paper-research-status";
 import { useState } from "react";
 import { formatPaperTime } from "./order-timeline";
 
@@ -9,7 +10,7 @@ export type AgentPaperVersionObservationFact = components["schemas"]["AgentPaper
 const statusLabels: Record<AgentPaperCycleFact["status"], string> = {
   prepared: "已准备", researching: "研究中", decision_recorded: "决策已保存",
   risk_evaluated: "风控已评估", awaiting_market: "等待行情", partially_filled: "部分成交",
-  completed: "已完成", unavailable: "资料不足", failed: "运行失败",
+  completed: "已完成", unavailable: "已停止", failed: "运行失败",
 };
 
 const marketStatusLabels: Record<AgentPaperCycleFact["execution_market"]["status"], string> = {
@@ -134,6 +135,6 @@ export function AgentPaperCycle({ cycles, unavailable = false, historical = fals
       <p className="numeric-data">记录代码：{cycle.result_code}</p>
     </aside>
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- bounded table is keyboard-scrollable */}
-    <div className="table-scroll" role="region" aria-label="Agent 模拟候选，可横向滚动" tabIndex={0}><table className="paper-position-table"><thead><tr><th>候选</th><th>准入原因</th><th>研究</th><th>方向</th><th>仓位动作</th></tr></thead><tbody>{cycle.candidates.map((candidate) => <tr key={candidate.instrument_id}><th>{candidate.symbol}</th><td>{candidate.selection_reasons.join("、")}</td><td>{candidate.research_status}</td><td>{candidate.stance ?? candidate.rejection_code ?? "待定"}</td><td>{candidate.sizing_action ?? "待定"}</td></tr>)}</tbody></table></div>
+    <div className="table-scroll" role="region" aria-label="Agent 模拟候选，可横向滚动" tabIndex={0}><table className="paper-position-table"><thead><tr><th>候选</th><th>准入原因</th><th>研究任务</th><th>决策采纳</th><th>方向</th><th>仓位动作</th></tr></thead><tbody>{cycle.candidates.map((candidate) => <tr key={candidate.instrument_id}><th>{candidate.symbol}</th><td>{candidate.selection_reasons.join("、")}</td><td>{researchJobLabel(candidate, cycle)}</td><td>{researchAdmissionLabel(candidate, cycle)}</td><td>{candidate.stance ?? candidate.rejection_code ?? "待定"}</td><td>{candidate.sizing_action ?? "待定"}</td></tr>)}</tbody></table></div>
   </section>;
 }

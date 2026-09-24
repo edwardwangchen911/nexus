@@ -373,6 +373,27 @@ describe("internal paper page", () => {
     expect(within(region).queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it("distinguishes each candidate's research job from decision admission after a stopped cycle", () => {
+    const cycle = structuredClone(agentPaperCycle);
+    cycle.status = "unavailable";
+    cycle.result_code = "RESEARCH_OUTPUT_NOT_ACTIONABLE";
+    cycle.decision = null;
+    cycle.candidates = [
+      { ...cycle.candidates[0], research_status: "pending", research_job_status: "succeeded", stance: null, sizing_action: null, output_id: null, intent_hash: null },
+      { ...cycle.candidates[0], instrument_id: "0198f7a0-1111-7777-8111-111111111124", symbol: "AVGO", research_status: "pending", research_job_status: "dead_letter", stance: null, sizing_action: null, output_id: null, intent_hash: null },
+      { ...cycle.candidates[0], instrument_id: "0198f7a0-1111-7777-8111-111111111125", symbol: "NVDA", research_status: "pending", research_job_status: "queued", stance: null, sizing_action: null, output_id: null, intent_hash: null },
+    ];
+    cycle.candidate_count = 3;
+
+    render(<AgentPaperCycle cycles={[cycle]} />);
+
+    expect(screen.getByRole("region", { name: "当日 Agent 模拟周期" })).toHaveTextContent("已停止");
+    const table = screen.getByRole("region", { name: "Agent 模拟候选，可横向滚动" });
+    expect(within(table).getByRole("row", { name: /AAPL.*任务成功.*未纳入决策/ })).toBeVisible();
+    expect(within(table).getByRole("row", { name: /AVGO.*任务失败.*未纳入决策/ })).toBeVisible();
+    expect(within(table).getByRole("row", { name: /NVDA.*未开始.*未纳入决策/ })).toBeVisible();
+  });
+
   it("switches between bounded same-session Agent cycles without triggering an action", () => {
     render(<AgentPaperCycle cycles={[agentPaperCycle, olderAgentPaperCycle]} />);
 

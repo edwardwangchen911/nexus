@@ -3,6 +3,7 @@ import { CheckCircle2, CircleDashed, ShieldAlert } from "lucide-react";
 import { formatDisplayDecimal } from "../../lib/display-decimal";
 import { formatDisplayTime } from "../../lib/display-format";
 import { cycleDecisionPresentation, executionPresentation, riskPresentation } from "../../lib/product-status";
+import { researchAdmissionLabel, researchJobLabel } from "../../lib/paper-research-status";
 import type { components } from "../../lib/generated/schema";
 
 type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
@@ -25,7 +26,7 @@ export function DecisionTimeline({ detail }: { detail: Detail }): React.ReactEle
     ? `Schwab Level One · 实时 · ${formatDisplayTime(cycle.decision_market.quote_at)}`
     : "未知：本周期没有单独保存决策报价投影。";
   const candidateFacts = cycle.candidates.length
-    ? cycle.candidates.map((candidate) => `${candidate.symbol} · ${candidate.research_status}`).join("；")
+    ? cycle.candidates.map((candidate) => `${candidate.symbol} · ${researchJobLabel(candidate, cycle)} · ${researchAdmissionLabel(candidate, cycle)}`).join("；")
     : "未知：本周期没有保存候选研究事实。";
 
   return <ol className="decision-timeline" aria-label="决策证据时间线">

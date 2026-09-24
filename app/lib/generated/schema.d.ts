@@ -1323,6 +1323,8 @@ export interface components {
             output_id: string | null;
             /** Rejection Code */
             rejection_code?: string | null;
+            /** Research Job Status */
+            research_job_status?: ("queued" | "running" | "succeeded" | "failed" | "skipped" | "dead_letter") | null;
             /**
              * Research Status
              * @enum {string}

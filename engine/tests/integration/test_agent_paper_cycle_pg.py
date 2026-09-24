@@ -914,6 +914,98 @@ async def test_explicit_batch_persists_two_research_jobs_and_remains_resumable(
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_terminal_cycle_projects_each_candidate_research_job_state(
+    migrated_database_url,
+):
+    from nexus.paper import agent_cycle
+    from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            assert registered is not None
+            authority = await _seed_two_candidate_authority(
+                session, registered, candidate_instruments=INSTRUMENTS
+            )
+            authority = authority.model_copy(update={"decision_time": seed.request_time})
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=seed.account_id,
+                universe_snapshot_id=authority.universe_snapshot_id,
+                instrument_ids=tuple(item[0] for item in INSTRUMENTS),
+                idempotency_key="candidate-research-job-readback",
+                created_at=seed.request_time,
+            )
+            started = await agent_cycle._start_cycle(
+                session,
+                authority=authority,
+                decision_slot_at=floor_decision_slot(DECISION_TIME),
+                daily_limit_usd=Decimal("3"),
+                candidate_batch_id=batch.batch_id,
+                requested_instrument_ids=batch.instrument_ids,
+            )
+            assert started.status == "researching"
+            runs = tuple(
+                await session.scalars(
+                    select(AgentResearchRunRecord).where(
+                        AgentResearchRunRecord.id.in_(started.research_run_ids)
+                    )
+                )
+            )
+            jobs = tuple(
+                await session.scalars(
+                    select(Job).where(
+                        Job.payload["run_id"].as_string().in_(tuple(str(run.id) for run in runs))
+                    )
+                )
+            )
+            assert len(runs) == len(jobs) == 3
+            by_run = {str(job.payload["run_id"]): job for job in jobs}
+            statuses = ("succeeded", "dead_letter")
+            terminal_runs = sorted(runs, key=lambda row: row.instrument_id)[:2]
+            for run in terminal_runs:
+                job = by_run[str(run.id)]
+                job.status = "running"
+                job.started_at = seed.request_time
+                job.attempt_count = 1
+                job.version += 1
+            await session.flush()
+            for run, status in zip(terminal_runs, statuses):
+                job = by_run[str(run.id)]
+                job.status = status
+                job.finished_at = seed.request_time
+                job.version += 1
+            await session.flush()
+            stopped = await agent_cycle._resume_research(
+                session,
+                cycle=await session.get(AgentPaperCycleRecord, started.cycle_id),
+                authority=authority,
+                events=await agent_cycle._events(session, started.cycle_id),
+            )
+            assert stopped.status == "unavailable"
+
+        async with sessions() as session:
+            cycle = await PaperReadService(session, datetime.now(UTC)).latest_agent_cycle()
+            assert cycle is not None
+            assert cycle.status == "unavailable"
+            assert {
+                candidate.symbol: candidate.research_job_status for candidate in cycle.candidates
+            } == {"AAPL": "succeeded", "T2": "dead_letter", "T3": "queued"}
+            assert all(candidate.research_status == "pending" for candidate in cycle.candidates)
+    finally:
+        await engine.dispose()
+
+
 async def _wait_for_advisory_wait(
     sessions: async_sessionmaker[AsyncSession], backend_pid: int
 ) -> None:
@@ -2742,6 +2834,7 @@ async def test_safe_no_trade_output_completes_without_order_and_reads_back_via_a
             "symbol": "AAPL",
             "selection_reasons": ["PAPER_BATCH_TEST"],
             "research_status": "completed",
+            "research_job_status": "succeeded",
             "stance": "watch",
             "sizing_action": "none",
             "output_id": str(output_id),

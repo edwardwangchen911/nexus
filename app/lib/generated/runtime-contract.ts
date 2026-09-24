@@ -319,6 +319,25 @@ export const runtimeContractSchemas = {
         ],
         "title": "Rejection Code"
       },
+      "research_job_status": {
+        "anyOf": [
+          {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "dead_letter"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Research Job Status"
+      },
       "research_status": {
         "enum": [
           "pending",

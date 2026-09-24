@@ -346,6 +346,9 @@ class AgentPaperCandidateResponse(_StrictSchema):
     symbol: str = Field(min_length=1, max_length=32)
     selection_reasons: tuple[str, ...] = Field(min_length=1, max_length=4)
     research_status: Literal["pending", "completed", "unavailable"]
+    research_job_status: (
+        Literal["queued", "running", "succeeded", "failed", "skipped", "dead_letter"] | None
+    ) = None
     stance: Literal["buy_candidate", "reduce_candidate", "hold", "watch"] | None
     sizing_action: Literal["increase", "reduce", "maintain", "none"] | None
     intent_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")

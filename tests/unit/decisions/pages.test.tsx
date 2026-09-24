@@ -173,6 +173,21 @@ describe("decision records", () => {
     expect(screen.getByText(/接口尚未提供该周期之后的统一表现归因/)).toBeVisible();
   });
 
+  it("shows research task failures separately from missing decision admission", () => {
+    const stopped = cycle("29", {
+      status: "unavailable", result_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE", decision: null, order_ids: [],
+      candidates: [
+        { ...agentPaperCycle.candidates[0], symbol: "AAPL", research_status: "pending", research_job_status: "succeeded", stance: null, sizing_action: null },
+        { ...agentPaperCycle.candidates[0], instrument_id: "0198f7a0-1111-7777-8111-111111111124", symbol: "AVGO", research_status: "pending", research_job_status: "dead_letter", stance: null, sizing_action: null },
+      ], candidate_count: 2,
+    });
+    render(<DecisionDetailPanel state="ready" detail={detail(stopped, [])} onRefresh={vi.fn()} />);
+
+    const research = screen.getByRole("region", { name: "市场与研究证据" });
+    expect(research).toHaveTextContent("AAPL · 任务成功 · 未纳入决策");
+    expect(research).toHaveTextContent("AVGO · 任务失败 · 未纳入决策");
+  });
+
   it("keeps missing stages visible as unknown with one safe action", () => {
     const unknown = cycle("27", {
       status: "partially_filled", result_code: "PAPER_RESULT_INCOMPLETE", decision: null,
