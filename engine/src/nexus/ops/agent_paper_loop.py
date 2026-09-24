@@ -1836,6 +1836,7 @@ async def run_foreground_loop(
         Awaitable[AgentPaperLoopAction | None],
     ],
     sleep: Callable[[float], Awaitable[None]],
+    wait_sleep: Callable[[float], Awaitable[None]] | None = None,
     heartbeat: Callable[[datetime], Awaitable[None]],
     shutdown_requested: Callable[[], bool] = lambda: False,
     confirm_shutdown: Callable[
@@ -1884,7 +1885,7 @@ async def run_foreground_loop(
         wall_started_at = last_heartbeat_at
         while remaining > 0:
             duration = min(remaining, interval_seconds)
-            await sleep(duration)
+            await (wait_sleep or sleep)(duration)
             if shutdown_requested():
                 return AgentPaperLoopAction.STOP_REQUESTED
             try:
@@ -2230,6 +2231,25 @@ async def run_local_agent_paper_loop(
     started_at = clock()
     with acquire_agent_paper_lock():
         shutdown = asyncio.Event()
+
+        async def wait_sleep(seconds: float) -> None:
+            async def wait_for_shutdown() -> None:
+                await shutdown.wait()
+
+            sleeper: asyncio.Future[None] = asyncio.ensure_future(sleep(seconds))
+            stopper = asyncio.create_task(wait_for_shutdown())
+            try:
+                done, _ = await asyncio.wait(
+                    {sleeper, stopper}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if sleeper in done:
+                    await sleeper
+            finally:
+                for task in (sleeper, stopper):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(sleeper, stopper, return_exceptions=True)
+
         event_loop = asyncio.get_running_loop()
         installed_signals: list[signal.Signals] = []
         try:
@@ -2320,6 +2340,7 @@ async def run_local_agent_paper_loop(
                     inspect=inspect,
                     execute=execute,
                     sleep=sleep,
+                    wait_sleep=wait_sleep,
                     heartbeat=heartbeat,
                     shutdown_requested=shutdown.is_set,
                     confirm_shutdown=confirm_shutdown,

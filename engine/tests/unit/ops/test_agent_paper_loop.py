@@ -1440,6 +1440,46 @@ def test_foreground_loop_stops_idle_wait_after_signal_without_reinspection() -> 
     assert heartbeat_count == 1
 
 
+def test_foreground_loop_idle_wait_can_wake_on_shutdown_without_waiting_for_heartbeat() -> None:
+    async def scenario() -> loop.AgentPaperLoopAction:
+        shutdown = asyncio.Event()
+        waiting = asyncio.Event()
+
+        async def inspect() -> loop.AgentPaperLoopSnapshot:
+            return snapshot(cycle_status="completed", cycle_slot_at=SLOT)
+
+        async def unexpected_execute(*_args) -> None:
+            raise AssertionError("idle shutdown must not execute")
+
+        async def unexpected_sleep(_seconds: float) -> None:
+            raise AssertionError("the idle wait must use the shutdown-aware sleeper")
+
+        async def wait_sleep(_seconds: float) -> None:
+            waiting.set()
+            await shutdown.wait()
+
+        async def signal_after_wait_begins() -> None:
+            await waiting.wait()
+            shutdown.set()
+
+        signal_task = asyncio.create_task(signal_after_wait_begins())
+        result = await asyncio.wait_for(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=unexpected_execute,
+                sleep=unexpected_sleep,
+                wait_sleep=wait_sleep,
+                heartbeat=noop_heartbeat,
+                shutdown_requested=shutdown.is_set,
+            ),
+            timeout=1,
+        )
+        await signal_task
+        return result
+
+    assert asyncio.run(scenario()) is A.STOP_REQUESTED
+
+
 def test_foreground_loop_stop_during_inspection_fences_all_new_actions() -> None:
     async def scenario() -> tuple[loop.AgentPaperLoopAction, int, int]:
         shutdown = asyncio.Event()
@@ -1818,6 +1858,59 @@ def test_local_runner_holds_lock_and_coalesces_signals_before_calendar_selection
         ("remove", signal.SIGTERM),
         "lock-exit",
     ]
+
+
+def test_local_runner_stop_signal_interrupts_real_idle_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def acquire_lock(*, runtime_root=None):
+        assert runtime_root is None
+        yield
+
+    async def scenario() -> loop.AgentPaperLoopAction:
+        handlers: dict[signal.Signals, object] = {}
+        event_loop = asyncio.get_running_loop()
+        monkeypatch.setattr(event_loop, "add_signal_handler", handlers.__setitem__)
+        monkeypatch.setattr(
+            event_loop, "remove_signal_handler", lambda item: handlers.pop(item, None) is not None
+        )
+        sleeping = asyncio.Event()
+
+        async def slow_sleep(seconds: float) -> None:
+            assert seconds == 15
+            sleeping.set()
+            await asyncio.sleep(seconds)
+
+        async def select_calendar(_settings) -> UUID:
+            return CALENDAR_AUTHORITY_ID
+
+        async def model_ready() -> None:
+            return None
+
+        async def run_loop(**kwargs) -> loop.AgentPaperLoopAction:
+            idle_wait = asyncio.create_task(kwargs["wait_sleep"](15))
+            await sleeping.wait()
+            callback = handlers[signal.SIGTERM]
+            assert callable(callback)
+            callback()
+            await asyncio.wait_for(idle_wait, timeout=2)
+            assert kwargs["shutdown_requested"]() is True
+            return A.STOP_REQUESTED
+
+        monkeypatch.setattr(loop, "acquire_agent_paper_lock", acquire_lock)
+        monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
+        monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_calendar)
+        monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+        return await loop.run_local_agent_paper_loop(
+            loop.EngineSettings(database_url="postgresql+asyncpg://user:password@127.0.0.1/nexus"),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            sleep=slow_sleep,
+        )
+
+    assert asyncio.run(scenario()) is A.STOP_REQUESTED
 
 
 def test_local_runner_lock_contention_stops_before_calendar_selection(
