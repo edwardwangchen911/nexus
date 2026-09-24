@@ -23,21 +23,33 @@ from openai_codex import ApprovalMode, Sandbox
 from openai_codex.generated.v2_all import ChatgptAccount, TurnStatus
 
 
-def _restore_view(value):
+def _restore_view(value, strings=()):
     """Test-only inverse of the documented model-facing JSON view."""
     if isinstance(value, list):
-        return [_restore_view(item) for item in value]
+        return [_restore_view(item, strings) for item in value]
+    if isinstance(value, str) and value.startswith("$nexus:") and strings:
+        return strings[int(value.removeprefix("$nexus:"))]
     if not isinstance(value, dict):
         return value
     if "$nexus_view" in value:
-        common = _restore_view(value["common_scope"])
-        return {name: {**common, **_restore_view(tool)} for name, tool in value["tools"].items()}
+        strings = value.get("$nexus_strings", ())
+        common = _restore_view(value["common_scope"], strings)
+        return {
+            name: {**common, **_restore_view(tool, strings)}
+            for name, tool in value["tools"].items()
+        }
     if "$nexus_columns" in value:
         return [
-            dict(zip(value["$nexus_columns"], [_restore_view(cell) for cell in row], strict=True))
+            dict(
+                zip(
+                    value["$nexus_columns"],
+                    [_restore_view(cell, strings) for cell in row],
+                    strict=True,
+                )
+            )
             for row in value["rows"]
         ]
-    return {key: _restore_view(item) for key, item in value.items()}
+    return {key: _restore_view(item, strings) for key, item in value.items()}
 
 
 def _view_payload():
@@ -99,6 +111,22 @@ def test_staged_input_view_is_lossless_and_smaller_including_format_note():
     assert _restore_view(encoded_rows)[-1]["count"] == 19
 
 
+def test_repeated_long_frozen_values_use_lossless_string_table():
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = _view_payload()
+    for row in payload["frozen_inputs"]["security"]["items"]:
+        row["authority_hash"] = "b" * 64
+    original = deepcopy(payload)
+
+    projected = project_staged_payload(payload)
+
+    assert "$nexus_strings" in projected["frozen_inputs"]
+    assert "$nexus:" in projected["instructions"]
+    assert _restore_view(projected["frozen_inputs"]) == original["frozen_inputs"]
+    assert payload == original
+
+
 @pytest.mark.parametrize("left,right", [(True, 1), (1, 1.0), (None, "missing")])
 def test_staged_input_view_does_not_hoist_different_json_types(left, right):
     from nexus.agents.codex_input_view import project_staged_payload
@@ -135,7 +163,7 @@ def test_staged_input_view_preserves_non_columnar_lists(rows):
     assert view["frozen_inputs"]["tools"]["security"]["other"] == rows
 
 
-@pytest.mark.parametrize("marker", ["$nexus_view", "$nexus_columns"])
+@pytest.mark.parametrize("marker", ["$nexus_view", "$nexus_columns", "$nexus_strings"])
 def test_staged_input_view_marker_collision_falls_back_to_complete_input(marker):
     from nexus.agents.codex_input_view import project_staged_payload
 
@@ -144,6 +172,20 @@ def test_staged_input_view_marker_collision_falls_back_to_complete_input(marker)
     before = deepcopy(payload)
     assert project_staged_payload(payload) is payload
     assert payload == before
+
+
+def test_string_table_does_not_reinterpret_source_marker_text():
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = _view_payload()
+    for row in payload["frozen_inputs"]["security"]["items"]:
+        row["authority_hash"] = "b" * 64
+    payload["frozen_inputs"]["security"]["items"][0]["source_text"] = "$nexus:0 is literal"
+
+    projected = project_staged_payload(payload)
+
+    assert "$nexus_strings" not in projected["frozen_inputs"]
+    assert _restore_view(projected["frozen_inputs"]) == payload["frozen_inputs"]
 
 
 def test_staged_input_view_without_net_savings_keeps_original_payload():
