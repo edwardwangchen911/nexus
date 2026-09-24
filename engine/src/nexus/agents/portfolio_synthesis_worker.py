@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nexus.agents.codex_input_view import project_portfolio_payload
 from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -72,7 +73,9 @@ class CodexSynthesisTransport:
 
     async def invoke(self, payload: Mapping[str, object]) -> tuple[str, UsageSnapshot]:
         return await invoke_codex_portfolio(
-            payload, output_model=PortfolioSynthesisIntentV1, max_wire_bytes=64000
+            project_portfolio_payload(payload),
+            output_model=PortfolioSynthesisIntentV1,
+            max_wire_bytes=64000,
         )
 
 
