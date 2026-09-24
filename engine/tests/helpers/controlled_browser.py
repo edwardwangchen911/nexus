@@ -3,7 +3,10 @@
 import asyncio
 import os
 import socket
+import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
@@ -19,6 +22,58 @@ def _listen_socket() -> socket.socket:
     listener.bind(("127.0.0.1", 0))
     listener.listen(128)
     return listener
+
+
+@contextmanager
+def _web_project_root(root: Path) -> Iterator[Path]:
+    """Keep a controlled Web instance separate from an existing local dev server."""
+    if not (root / ".vinext/dev/lock.json").is_file():
+        yield root
+        return
+    web_paths = (
+        "app",
+        "worker",
+        "public",
+        "package.json",
+        "package-lock.json",
+        "vite.config.ts",
+        "next.config.ts",
+        "tsconfig.json",
+        "postcss.config.mjs",
+        "playwright.controlled-paper.config.ts",
+        "tests/e2e-local/portfolio-controlled.spec.ts",
+    )
+    dirty = subprocess.run(
+        ("git", "-C", str(root), "status", "--porcelain", "--", *web_paths),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if dirty.stdout.strip():
+        raise AssertionError("CONTROLLED_WEB_CHECKOUT_DIRTY")
+    with tempfile.TemporaryDirectory(prefix="nexus-controlled-web-") as directory:
+        checkout = Path(directory) / "checkout"
+        created = subprocess.run(
+            ("git", "-C", str(root), "worktree", "add", "--detach", str(checkout), "HEAD"),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            raise AssertionError("CONTROLLED_WEB_ISOLATION_FAILED")
+        try:
+            (checkout / "node_modules").symlink_to(root / "node_modules", target_is_directory=True)
+            yield checkout
+        finally:
+            (checkout / "node_modules").unlink(missing_ok=True)
+            removed = subprocess.run(
+                ("git", "-C", str(root), "worktree", "remove", "--force", str(checkout)),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if removed.returncode != 0:
+                raise AssertionError("CONTROLLED_WEB_CLEANUP_FAILED")
 
 
 async def _wait_for_web(url: str, process: asyncio.subprocess.Process) -> None:
@@ -58,6 +113,7 @@ async def verify_controlled_browser(
     server_task = asyncio.create_task(server.serve(sockets=[api_socket]))
     web_process: asyncio.subprocess.Process | None = None
     web_log = tempfile.TemporaryFile(mode="w+b")
+    isolation = ExitStack()
     try:
         for _ in range(100):
             if server.started:
@@ -94,25 +150,26 @@ async def verify_controlled_browser(
             NEXUS_CONTROLLED_CANDIDATE_COUNT=str(candidate_count),
             WRANGLER_LOG_PATH=".wrangler/wrangler.log",
         )
+        web_root = isolation.enter_context(_web_project_root(root))
         web_process = await asyncio.create_subprocess_exec(
-            str(root / "node_modules/.bin/vinext"),
+            str(web_root / "node_modules/.bin/vinext"),
             "dev",
             "--hostname",
             "127.0.0.1",
             "--port",
             str(web_port),
-            cwd=root,
+            cwd=web_root,
             env=environment,
             stdout=web_log,
             stderr=asyncio.subprocess.STDOUT,
         )
         await _wait_for_web(environment["NEXUS_CONTROLLED_WEB_URL"], web_process)
         browser = await asyncio.create_subprocess_exec(
-            str(root / "node_modules/.bin/playwright"),
+            str(web_root / "node_modules/.bin/playwright"),
             "test",
             "--config",
             "playwright.controlled-paper.config.ts",
-            cwd=root,
+            cwd=web_root,
             env=environment,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -136,3 +193,4 @@ async def verify_controlled_browser(
         server.should_exit = True
         await asyncio.wait_for(server_task, timeout=10)
         web_log.close()
+        isolation.close()
