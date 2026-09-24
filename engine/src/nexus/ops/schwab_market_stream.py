@@ -129,8 +129,20 @@ def _connect_failure_reason(error: Exception) -> str:
         return "CONNECT_DNS_FAILED"
     if isinstance(error, InvalidHandshake):
         return "CONNECT_HANDSHAKE_FAILED"
+    if isinstance(error, ConnectionResetError):
+        return "CONNECT_RESET"
+    if isinstance(error, ConnectionRefusedError):
+        return "CONNECT_REFUSED"
     if isinstance(error, OSError):
         return "CONNECT_NETWORK_FAILED"
+    if isinstance(error, EOFError):
+        return "CONNECT_EOF"
+    if isinstance(error, RuntimeError):
+        return "CONNECT_RUNTIME_FAILED"
+    if isinstance(error, TypeError):
+        return "CONNECT_TYPE_INVALID"
+    if isinstance(error, ValueError):
+        return "CONNECT_VALUE_INVALID"
     return "CONNECT_FAILED"
 
 

@@ -1495,6 +1495,27 @@ def test_schwab_failure_preserves_only_safe_root_cause_diagnostic(tmp_path) -> N
         "subscription_confirmed": False,
     }
 
+    runtime_diagnostic = tmp_path / "connect-runtime-failure.json"
+    with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
+        cli._raise_schwab_l1_incomplete(
+            cli.ProviderMarketStreamError(
+                "PROVIDER_MARKET_STREAM_INCOMPLETE",
+                capture_summary={
+                    "status": "failed",
+                    "stop_reason": "CONNECT_RUNTIME_FAILED",
+                    "authenticated": False,
+                    "subscription_confirmed": False,
+                    "observation_count": 0,
+                    "frame_count": 0,
+                    "private_detail": "must-not-be-persisted",
+                },
+            ),
+            diagnostic_path=runtime_diagnostic,
+        )
+    runtime_summary = json.loads(runtime_diagnostic.read_text())["capture_summary"]
+    assert runtime_summary["stop_reason"] == "CONNECT_RUNTIME_FAILED"
+    assert "must-not-be-persisted" not in runtime_diagnostic.read_text()
+
     with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
         cli._raise_schwab_l1_incomplete(
             cli.ProviderMarketStreamError("private upstream detail"),

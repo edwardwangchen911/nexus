@@ -414,9 +414,14 @@ async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> N
         (ProxyError("private proxy detail"), "CONNECT_PROXY_FAILED"),
         (ssl.SSLError("private tls detail"), "CONNECT_TLS_FAILED"),
         (socket.gaierror("private dns detail"), "CONNECT_DNS_FAILED"),
+        (ConnectionResetError("private reset detail"), "CONNECT_RESET"),
+        (ConnectionRefusedError("private refused detail"), "CONNECT_REFUSED"),
         (OSError("private network detail"), "CONNECT_NETWORK_FAILED"),
         (InvalidHandshake("private handshake detail"), "CONNECT_HANDSHAKE_FAILED"),
-        (RuntimeError("private unknown detail"), "CONNECT_FAILED"),
+        (EOFError("private upstream detail"), "CONNECT_EOF"),
+        (RuntimeError("private client detail"), "CONNECT_RUNTIME_FAILED"),
+        (TypeError("private client detail"), "CONNECT_TYPE_INVALID"),
+        (ValueError("private client detail"), "CONNECT_VALUE_INVALID"),
     ],
 )
 async def test_schwab_stream_classifies_connect_failure_without_leaking_detail(
