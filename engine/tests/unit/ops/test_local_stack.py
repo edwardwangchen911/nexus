@@ -244,12 +244,39 @@ def test_runner_injects_the_exact_checkout_revision(repo_root: Path) -> None:
 def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path) -> None:
     """The host service must never get ahead of the app dependencies it consumes."""
     calls: list[tuple[str, ...]] = []
+    started = False
 
-    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+    def runner(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal started
         calls.append(argv)
         if "agent-paper-loop-service.py" in " ".join(argv):
-            status = "started" if "start" in argv else "stopped"
+            if argv[2] == "start":
+                started = True
+            status = "started" if argv[2] == "start" else "running" if started else "stopped"
             return subprocess.CompletedProcess(argv, 0, json.dumps({"status": status}), "private")
+        if "--service-status" in argv:
+            environment = kwargs["env"]
+            assert isinstance(environment, dict)
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "heartbeat": {
+                            "status": "fresh",
+                            "release_revision": environment["NEXUS_RELEASE_REVISION"],
+                        },
+                        "preflight": {
+                            "status": "ready",
+                            "execution_locked": True,
+                            "external_requests": 0,
+                            "blocking_codes": [],
+                            "optional_codes": [],
+                        },
+                    }
+                ),
+                "",
+            )
         return subprocess.CompletedProcess(argv, 0, "private", "private")
 
     env_file = repo_root / "infra/.env.local"
@@ -293,9 +320,12 @@ def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path)
         str(repo_root / "scripts/macos/agent-paper-loop-service.py"),
         "start",
     )
+    assert calls[10][2] == "status"
+    assert "--service-status" in calls[11]
     assert [result.fact for result in results] == ["host_service"] + ["compose"] * 8 + [
-        "host_service"
+        "host_service", "host_service", "heartbeat", "preflight"
     ]
+    assert all(result.exit_code == 0 for result in results)
 
     calls.clear()
     env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=false\n", encoding="utf-8")
@@ -308,6 +338,85 @@ def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path)
     )
     assert len(calls) == 8
     assert [result.fact for result in results] == ["compose"] * 8
+
+
+def test_up_rejects_host_that_exits_just_after_start(repo_root: Path) -> None:
+    """A launchd start receipt is not evidence that the scheduler stayed online."""
+    env_file = repo_root / "infra/.env.local"
+    env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=true\n", encoding="utf-8")
+    host_status_calls = 0
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        nonlocal host_status_calls
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            if argv[2] == "status":
+                host_status_calls += 1
+                status = "stopped" if host_status_calls == 1 else "inactive"
+            else:
+                status = "started"
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"status": status}), "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    results = run_local_stack(
+        LocalStackAction.UP,
+        repo_root=repo_root,
+        env_file=env_file,
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert host_status_calls == 2
+    assert results[-1].fact == "host_service"
+    assert results[-1].result_code == "AGENT_PAPER_SERVICE_INACTIVE"
+    assert results[-1].exit_code != 0
+
+
+def test_up_rejects_running_host_without_a_fresh_heartbeat(repo_root: Path) -> None:
+    """A live PID is not proof that the newly started loop can reach its database."""
+    env_file = repo_root / "infra/.env.local"
+    env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=true\n", encoding="utf-8")
+    started = False
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        nonlocal started
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            if argv[2] == "start":
+                started = True
+                status = "started"
+            else:
+                status = "running" if started else "stopped"
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"status": status}), "")
+        if "--service-status" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                json.dumps(
+                    {
+                        "heartbeat": {"status": "missing"},
+                        "preflight": {
+                            "status": "ready",
+                            "execution_locked": True,
+                            "external_requests": 0,
+                            "blocking_codes": [],
+                            "optional_codes": [],
+                        },
+                    }
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    results = run_local_stack(
+        LocalStackAction.UP,
+        repo_root=repo_root,
+        env_file=env_file,
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert results[-2].result_code == "AGENT_PAPER_HEARTBEAT_MISSING"
+    assert results[-2].exit_code != 0
+    assert results[-1].result_code == "AGENT_PAPER_PREFLIGHT_READY"
 
 
 def test_up_rejects_running_host_from_another_release_before_compose(repo_root: Path) -> None:
@@ -415,7 +524,11 @@ def test_up_repairs_dependencies_when_running_host_release_matches(repo_root: Pa
 
     assert results[1].result_code == "AGENT_PAPER_HEARTBEAT_FRESH"
     assert [result.fact for result in results[2:10]] == ["compose"] * 8
-    assert calls[-1][2] == "start"
+    assert any(
+        call[2] == "start" for call in calls if "agent-paper-loop-service.py" in " ".join(call)
+    )
+    assert results[-1].result_code == "AGENT_PAPER_PREFLIGHT_OUTPUT_INVALID"
+    assert results[-1].exit_code != 0
 
 
 def test_up_rejects_invalid_agent_paper_flag_before_compose(repo_root: Path) -> None:
