@@ -106,6 +106,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarSessionRecord,
 )
 from nexus.persistence.models.data import (
+    MacroObservation,
     PriceBarRecord,
     PriceBarSetAuthority,
     PriceSeriesManifest,
@@ -1276,6 +1277,53 @@ async def _prepare_current_trends_research_snapshot(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory.begin() as session:
+            if macro_vintage is None:
+                previous = await select_authoritative_snapshot(
+                    session, instrument_id=instrument_id, as_of=now
+                )
+                if previous is not None:
+                    bound_ids = set(
+                        await session.scalars(
+                            select(AgentDataSnapshotEvidenceRecord.evidence_ref_id).where(
+                                AgentDataSnapshotEvidenceRecord.data_snapshot_id == previous.id,
+                                AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
+                                AgentDataSnapshotEvidenceRecord.authority_kind == "research",
+                            )
+                        )
+                    )
+                    macro_rows = (
+                        await session.scalars(
+                            select(MacroObservation).where(
+                                MacroObservation.source == "fred",
+                                MacroObservation.evidence_ref_id.in_(bound_ids),
+                                MacroObservation.available_at <= now,
+                                MacroObservation.created_at <= now,
+                            )
+                        )
+                    ).all()
+                    prior_complete = all(
+                        any(
+                            row.series == series
+                            and row.calendar_evidence_ref_id in bound_ids
+                            and row.real_time_start == row.real_time_end
+                            for row in macro_rows
+                        )
+                        for series in _PAPER_MACRO_SERIES
+                    )
+                    vintages = {row.real_time_start for row in macro_rows}
+                    if prior_complete:
+                        if len(vintages) != 1:
+                            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                        candidate_vintage = vintages.pop()
+                        current = await read_fred_observations(
+                            session,
+                            as_of=now,
+                            series=_PAPER_MACRO_SERIES,
+                            vintage=candidate_vintage,
+                        )
+                        if {row.series for row in current.values()} != _PAPER_MACRO_SERIES:
+                            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+                        macro_vintage = candidate_vintage
             snapshot = await prepare_research_snapshot(
                 session,
                 instrument_id,

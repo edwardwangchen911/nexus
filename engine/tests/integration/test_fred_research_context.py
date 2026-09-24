@@ -382,6 +382,30 @@ async def test_agent_paper_binds_complete_macro_evidence_before_continuing(
     )
     assert scope.ready_series == loop._PAPER_MACRO_SERIES
     assert scope.snapshot_ready is True
+
+    # The next prep stage rebuilds the newest research snapshot for trends.
+    # It must retain the macro references that were just frozen above.
+    trend_prepared_at = datetime.now(UTC)
+    await loop._prepare_current_trends_research_snapshot(
+        settings,
+        instrument_id=INSTRUMENT,
+        now=trend_prepared_at,
+    )
+    scope_after_trends = await loop._inspect_macro_scope(
+        settings,
+        candidate=CandidateInstrumentIdentity(
+            instrument_id=INSTRUMENT,
+            symbol="AAPL",
+            asset_type="common_stock",
+            exchange="XNYS",
+            currency="USD",
+        ),
+        account_id=UUID(int=1),
+        now=datetime.now(UTC),
+        expected_calendar_authority_id=calendar_authority_id,
+    )
+    assert scope_after_trends.snapshot_ready is True
+
     async with factory() as session:
         read_now = await session.scalar(select(func.clock_timestamp()))
         assert isinstance(read_now, datetime)
