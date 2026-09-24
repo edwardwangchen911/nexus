@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -70,6 +71,7 @@ _RELEASE_REVISION = re.compile(r"[0-9a-f]{40}")
 _PINNED_ENGINE_BASE_ID = "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a"
 _PINNED_ENGINE_BASE_IMAGE = f"python:3.12-slim@{_PINNED_ENGINE_BASE_ID}"
 _LOCAL_ENGINE_BASE_IMAGE = "nexus-local-python-base:3.12"
+_START_HEARTBEAT_ATTEMPTS = 8
 
 
 def _verified_local_engine_base_image(
@@ -189,6 +191,7 @@ def run_local_stack(
     project_name: str,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     base_image: str = _PINNED_ENGINE_BASE_IMAGE,
+    pause: Callable[[float], None] = time.sleep,
 ) -> tuple[LocalStackStepResult, ...]:
     """Run the exact Compose and host-service lifecycle, emitting safe facts only."""
     root = repo_root.resolve()
@@ -338,7 +341,7 @@ def run_local_stack(
             if dict(results[-1].details).get("status") != "running":
                 results[-1] = replace(results[-1], exit_code=1)
                 return tuple(results)
-            for attempt in range(2):
+            for attempt in range(_START_HEARTBEAT_ATTEMPTS):
                 diagnostic = _service_status_command(repo_root=root, env_file=resolved_env)
                 exit_code, stdout = run_command(diagnostic, fact="heartbeat")
                 if exit_code == -1:
@@ -352,7 +355,7 @@ def run_local_stack(
                 results[-1] = heartbeat
                 results.append(preflight)
                 if (
-                    attempt == 1
+                    attempt == _START_HEARTBEAT_ATTEMPTS - 1
                     or heartbeat.result_code
                     not in {"AGENT_PAPER_HEARTBEAT_STALE", "AGENT_PAPER_HEARTBEAT_MISSING"}
                     or preflight.exit_code != 0
@@ -365,6 +368,8 @@ def run_local_stack(
                 if dict(results[-1].details).get("status") != "running":
                     results[-1] = replace(results[-1], exit_code=1)
                     return tuple(results)
+                results.pop()
+                pause(1.0)
         return tuple(results)
 
     if action is LocalStackAction.STATUS:

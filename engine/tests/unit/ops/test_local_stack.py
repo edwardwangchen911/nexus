@@ -412,6 +412,7 @@ def test_up_rejects_running_host_without_a_fresh_heartbeat(repo_root: Path) -> N
         env_file=env_file,
         project_name="nexus-phase3-local",
         runner=runner,
+        pause=lambda _: None,
     )
 
     assert results[-2].result_code == "AGENT_PAPER_HEARTBEAT_MISSING"
@@ -419,9 +420,9 @@ def test_up_rejects_running_host_without_a_fresh_heartbeat(repo_root: Path) -> N
     assert results[-1].result_code == "AGENT_PAPER_PREFLIGHT_READY"
 
 
-@pytest.mark.parametrize("second_heartbeat", ("fresh", "stale"))
+@pytest.mark.parametrize("ready_after", (2, 4, None))
 def test_up_rechecks_one_transient_startup_heartbeat(
-    repo_root: Path, second_heartbeat: str
+    repo_root: Path, ready_after: int | None
 ) -> None:
     """A stale prior heartbeat may clear after start, but polling is bounded."""
     env_file = repo_root / "infra/.env.local"
@@ -442,7 +443,9 @@ def test_up_rechecks_one_transient_startup_heartbeat(
             return subprocess.CompletedProcess(argv, 0, json.dumps({"status": status}), "")
         if "--service-status" in argv:
             diagnostic_calls += 1
-            status = "stale" if diagnostic_calls == 1 else second_heartbeat
+            status = (
+                "fresh" if ready_after is not None and diagnostic_calls >= ready_after else "stale"
+            )
             return subprocess.CompletedProcess(
                 argv,
                 0 if status == "fresh" else 1,
@@ -468,13 +471,16 @@ def test_up_rechecks_one_transient_startup_heartbeat(
         env_file=env_file,
         project_name="nexus-phase3-local",
         runner=runner,
+        pause=lambda _: None,
     )
 
-    assert diagnostic_calls == 2
-    assert host_status_calls == 3
+    assert diagnostic_calls == (ready_after or 8)
+    assert host_status_calls == diagnostic_calls + 1
     assert [result.fact for result in results[-2:]] == ["heartbeat", "preflight"]
-    assert results[-2].result_code == f"AGENT_PAPER_HEARTBEAT_{second_heartbeat.upper()}"
-    assert (results[-2].exit_code == 0) is (second_heartbeat == "fresh")
+    assert results[-2].result_code == (
+        "AGENT_PAPER_HEARTBEAT_FRESH" if ready_after is not None else "AGENT_PAPER_HEARTBEAT_STALE"
+    )
+    assert (results[-2].exit_code == 0) is (ready_after is not None)
 
 
 def test_up_rejects_running_host_from_another_release_before_compose(repo_root: Path) -> None:
