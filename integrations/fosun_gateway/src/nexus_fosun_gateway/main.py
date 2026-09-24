@@ -359,12 +359,12 @@ def _safe_request_id(request: Request) -> str | None:
     return str(actor.request_id) if isinstance(actor, VerifiedGatewayActor) else None
 
 
-def run() -> None:
+def run(settings: GatewaySettings | None = None) -> None:
     """Run the isolated gateway process."""
-    settings = GatewaySettings()
-    app = create_gateway_app(settings)
-    if settings.environment is Environment.PRODUCTION:
-        asyncio.run(_serve_production(app, settings))
+    resolved_settings = settings or GatewaySettings()
+    app = create_gateway_app(resolved_settings)
+    if resolved_settings.environment is Environment.PRODUCTION:
+        asyncio.run(_serve_production(app, resolved_settings))
         return
     uvicorn.run(app, host="0.0.0.0", port=BROKER_LISTENER_PORT)
 

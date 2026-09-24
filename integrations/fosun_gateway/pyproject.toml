@@ -16,6 +16,8 @@ dependencies = [
 
 [project.scripts]
 nexus-fosun-gateway = "nexus_fosun_gateway.main:run"
+nexus-fosun-gateway-local = "nexus_fosun_gateway.local_runtime:main"
+nexus-fosun-gateway-service = "nexus_fosun_gateway.local_service:main"
 nexus-fosun-gateway-ready = "nexus_fosun_gateway.readiness:main"
 nexus-fosun-activation-gate = "nexus_fosun_gateway.activation:main"
 nexus-fosun-read-only-probe = "nexus_fosun_gateway.probe_cli:run"

@@ -1,9 +1,11 @@
+import shutil
 import socket
 import ssl
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import nexus_fosun_gateway.local_service as local_service_module
 import nexus_fosun_gateway.security.tls as tls_module
 import pytest
 from cryptography import x509
@@ -191,6 +193,47 @@ def test_tls_handshake_without_client_certificate_fails(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
+@pytest.mark.parametrize("role", ["broker", "market"])
+def test_local_health_context_authenticates_each_client_role(tmp_path: Path, role: str) -> None:
+    material = _write_ephemeral_mtls_material(tmp_path)
+    local = tmp_path / ".secrets/nexus-fosun-local"
+    local.mkdir(parents=True, mode=0o700)
+    for name, source in (
+        ("server-ca.pem", material["ca_cert"]),
+        (f"{role}-client.pem", material[f"{role}_client_cert"]),
+        (f"{role}-client.key", material[f"{role}_client_key"]),
+    ):
+        target = local / name
+        shutil.copyfile(source, target)
+        target.chmod(0o600)
+    builder = getattr(local_service_module, "_client_ssl_context", None)
+    assert callable(builder)
+    client_context = builder(local, role)
+    ca = material["ca_cert"] if role == "broker" else material["market_ca_cert"]
+    server_context = create_server_ssl_context(material["server_cert"], material["server_key"], ca)
+    server_socket, client_socket = socket.socketpair()
+    server_errors: list[BaseException] = []
+
+    def accept() -> None:
+        try:
+            with server_context.wrap_socket(server_socket, server_side=True) as peer:
+                assert peer.recv(1) == b"x"
+        except BaseException as error:
+            server_errors.append(error)
+
+    thread = threading.Thread(target=accept)
+    thread.start()
+    try:
+        with client_context.wrap_socket(client_socket, server_hostname="localhost") as peer:
+            peer.sendall(b"x")
+    finally:
+        client_socket.close()
+        thread.join(timeout=2)
+        server_socket.close()
+    assert server_errors == []
+    assert not thread.is_alive()
+
+
 def test_tls_handshake_with_ephemeral_client_certificate_succeeds(tmp_path: Path) -> None:
     """The same temporary CA must admit the intended client certificate."""
     material = _write_ephemeral_mtls_material(tmp_path)
@@ -307,6 +350,21 @@ def _write_ephemeral_mtls_material(tmp_path: Path) -> dict[str, Path]:
         )
         .sign(ca_key, hashes.SHA256())
     )
+    market_client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    market_client_cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "NEXUS market client")]))
+        .issuer_name(market_ca_name)
+        .public_key(market_client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .sign(market_ca_key, hashes.SHA256())
+    )
     paths = {
         "ca_cert": tmp_path / "ca.pem",
         "alias_ca_cert": tmp_path / "alias-ca.pem",
@@ -315,6 +373,10 @@ def _write_ephemeral_mtls_material(tmp_path: Path) -> dict[str, Path]:
         "server_key": tmp_path / "server-key.pem",
         "client_cert": tmp_path / "client.pem",
         "client_key": tmp_path / "client-key.pem",
+        "broker_client_cert": tmp_path / "broker-client.pem",
+        "broker_client_key": tmp_path / "broker-client-key.pem",
+        "market_client_cert": tmp_path / "market-client.pem",
+        "market_client_key": tmp_path / "market-client-key.pem",
     }
     paths["ca_cert"].write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
     paths["alias_ca_cert"].write_bytes(alias_ca_cert.public_bytes(serialization.Encoding.PEM))
@@ -330,6 +392,18 @@ def _write_ephemeral_mtls_material(tmp_path: Path) -> dict[str, Path]:
     paths["client_cert"].write_bytes(client_cert.public_bytes(serialization.Encoding.PEM))
     paths["client_key"].write_bytes(
         client_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    paths["broker_client_cert"].write_bytes(client_cert.public_bytes(serialization.Encoding.PEM))
+    paths["broker_client_key"].write_bytes(paths["client_key"].read_bytes())
+    paths["market_client_cert"].write_bytes(
+        market_client_cert.public_bytes(serialization.Encoding.PEM)
+    )
+    paths["market_client_key"].write_bytes(
+        market_client_key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption(),
@@ -363,9 +437,7 @@ def _production_settings(material: dict[str, Path]) -> GatewaySettings:
             "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE": (
                 "/synthetic/fosun-publisher-public-key.b64u"
             ),
-            "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": (
-                "/synthetic/fosun-activation-contract.sha256"
-            ),
+            "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": ("/synthetic/fosun-activation-contract.sha256"),
             "FOSUN_PROVIDER_MANIFEST": "/synthetic/fosun-provider-manifest.json",
             "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
             "FSOPENAPI_API_KEY": "synthetic-api-key",
