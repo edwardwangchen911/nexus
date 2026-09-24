@@ -337,8 +337,8 @@ describe("market vertical slice", () => {
     expect(quote).toHaveTextContent("复星 L1（只读）");
     expect(quote).toHaveTextContent("网关接收时间");
     expect(quote).toHaveTextContent("实时性未获证明");
-    expect(quote).toHaveTextContent("报价源时间未知（上游未提供）");
-    expect(screen.getByText("上游报价未提供成交时间")).toBeVisible();
+    expect(quote).toHaveTextContent("报价源时间未知（尚未完成校验）");
+    expect(screen.getByText("源报价时间尚未核实，当前仅有本机接收时间")).toBeVisible();
     expect(screen.getByText("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")).toBeVisible();
   });
 

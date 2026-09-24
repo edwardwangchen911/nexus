@@ -148,10 +148,10 @@ describe("IntradayMonitor", () => {
     expect(region).toHaveTextContent("分钟截止 2026-08-22 04:00:00 北京时间");
     expect(region).toHaveTextContent("成交记录网关接收时间 2026-08-22 04:00:03 北京时间");
     expect(region).toHaveTextContent("盘口记录网关接收时间 2026-08-22 04:00:01 北京时间");
-    expect(region).toHaveTextContent("报价源时间 未知（上游未提供）");
+    expect(region).toHaveTextContent("报价源时间 未知（尚未完成校验）");
     expect(region).toHaveTextContent("接收记录年龄（快照时点） 14 秒");
     expect(region).not.toHaveTextContent("盘口源时间");
-    expect(region).toHaveTextContent("上游报价未提供成交时间");
+    expect(region).toHaveTextContent("源报价时间尚未核实，当前仅有本机接收时间");
     expect(region).toHaveTextContent("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE");
   });
 

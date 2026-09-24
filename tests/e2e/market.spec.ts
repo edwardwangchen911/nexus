@@ -103,7 +103,7 @@ for (const viewport of [
     await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).toContainText("复星 L1（只读）");
     await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).toContainText("盘口未提供");
     await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).not.toContainText("4.40 bps");
-    await expect(page.getByText("上游报价未提供成交时间").first()).toBeVisible();
+    await expect(page.getByText("源报价时间尚未核实，当前仅有本机接收时间").first()).toBeVisible();
     await expect(page.getByText("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE").first()).toBeVisible();
     await expect(page.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toContainText("227.5");
     const intradayTableRight = page.getByRole("button", { name: "向右浏览 AAPL 盘中表格" });
