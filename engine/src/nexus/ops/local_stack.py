@@ -67,6 +67,30 @@ _HOST_ERROR_CODES = frozenset(
 _SAFE_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
 _SAFE_TEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}")
 _RELEASE_REVISION = re.compile(r"[0-9a-f]{40}")
+_PINNED_ENGINE_BASE_ID = "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a"
+_PINNED_ENGINE_BASE_IMAGE = f"python:3.12-slim@{_PINNED_ENGINE_BASE_ID}"
+_LOCAL_ENGINE_BASE_IMAGE = "nexus-local-python-base:3.12"
+
+
+def _verified_local_engine_base_image(
+    *, inspector: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+) -> str | None:
+    """Use the cached base only when its image ID equals the reviewed digest."""
+    try:
+        completed = inspector(
+            ("docker", "image", "inspect", _LOCAL_ENGINE_BASE_IMAGE, "--format", "{{.Id}}"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    if completed.stdout.strip() != _PINNED_ENGINE_BASE_ID:
+        raise LocalStackConfigurationError("LOCAL_STACK_BASE_IMAGE_MISMATCH")
+    return _LOCAL_ENGINE_BASE_IMAGE
 
 
 def _checkout_revision(repo_root: Path) -> str | None:
@@ -164,6 +188,7 @@ def run_local_stack(
     env_file: Path,
     project_name: str,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    base_image: str = _PINNED_ENGINE_BASE_IMAGE,
 ) -> tuple[LocalStackStepResult, ...]:
     """Run the exact Compose and host-service lifecycle, emitting safe facts only."""
     root = repo_root.resolve()
@@ -182,6 +207,10 @@ def run_local_stack(
         project_name=project_name,
     )
     command_environment = dict(os.environ)
+    if action is LocalStackAction.UP:
+        if base_image not in {_PINNED_ENGINE_BASE_IMAGE, _LOCAL_ENGINE_BASE_IMAGE}:
+            raise LocalStackConfigurationError("LOCAL_STACK_BASE_IMAGE_INVALID")
+        command_environment["NEXUS_ENGINE_BASE_IMAGE"] = base_image
     release_revision = _checkout_revision(root)
     if release_revision is not None:
         command_environment["NEXUS_RELEASE_REVISION"] = release_revision
@@ -389,11 +418,16 @@ def main(argv: list[str] | None = None) -> int:
     if not env_file.is_absolute():
         env_file = repo_root / env_file
     try:
+        action = LocalStackAction(arguments.action)
+        base_image = _PINNED_ENGINE_BASE_IMAGE
+        if action is LocalStackAction.UP:
+            base_image = _verified_local_engine_base_image() or _PINNED_ENGINE_BASE_IMAGE
         results = run_local_stack(
-            LocalStackAction(arguments.action),
+            action,
             repo_root=repo_root,
             env_file=env_file,
             project_name=arguments.project_name,
+            base_image=base_image,
         )
     except LocalStackConfigurationError:
         sys.stderr.write("local-stack configuration rejected\n")

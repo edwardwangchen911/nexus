@@ -9,10 +9,53 @@ from nexus.ops.local_stack import (
     LocalStackAction,
     LocalStackConfigurationError,
     LocalStackStepResult,
+    _verified_local_engine_base_image,
     build_local_stack_commands,
     main,
     run_local_stack,
 )
+
+
+def test_local_engine_base_requires_exact_pinned_image_id() -> None:
+    image_id = "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a"
+
+    def matching(argv, **_):
+        assert argv[:3] == ("docker", "image", "inspect")
+        return subprocess.CompletedProcess(argv, 0, image_id + "\n", "")
+
+    assert _verified_local_engine_base_image(inspector=matching) == "nexus-local-python-base:3.12"
+
+    def missing(argv, **_):
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    assert _verified_local_engine_base_image(inspector=missing) is None
+
+    def mismatched(argv, **_):
+        return subprocess.CompletedProcess(argv, 0, "sha256:" + "0" * 64, "")
+
+    with pytest.raises(LocalStackConfigurationError, match="LOCAL_STACK_BASE_IMAGE_MISMATCH"):
+        _verified_local_engine_base_image(inspector=mismatched)
+
+
+def test_up_passes_selected_base_image_to_compose(repo_root: Path, monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_ENGINE_BASE_IMAGE", "unreviewed-image:latest")
+    observed = []
+
+    def runner(argv, **kwargs):
+        observed.append(kwargs["env"]["NEXUS_ENGINE_BASE_IMAGE"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    results = run_local_stack(
+        LocalStackAction.UP,
+        repo_root=repo_root,
+        env_file=repo_root / "infra/.env.local",
+        project_name="nexus-phase3-local",
+        runner=runner,
+        base_image="nexus-local-python-base:3.12",
+    )
+
+    assert len(results) == 8
+    assert observed == ["nexus-local-python-base:3.12"] * 8
 
 
 def test_up_uses_exact_app_services_and_never_broker_profile(repo_root: Path) -> None:
