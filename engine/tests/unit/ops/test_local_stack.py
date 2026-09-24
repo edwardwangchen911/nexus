@@ -419,6 +419,64 @@ def test_up_rejects_running_host_without_a_fresh_heartbeat(repo_root: Path) -> N
     assert results[-1].result_code == "AGENT_PAPER_PREFLIGHT_READY"
 
 
+@pytest.mark.parametrize("second_heartbeat", ("fresh", "stale"))
+def test_up_rechecks_one_transient_startup_heartbeat(
+    repo_root: Path, second_heartbeat: str
+) -> None:
+    """A stale prior heartbeat may clear after start, but polling is bounded."""
+    env_file = repo_root / "infra/.env.local"
+    env_file.write_text("NEXUS_AGENT_PAPER_CYCLE_ENABLED=true\n", encoding="utf-8")
+    started = False
+    diagnostic_calls = 0
+    host_status_calls = 0
+
+    def runner(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+        nonlocal started, diagnostic_calls, host_status_calls
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            if argv[2] == "start":
+                started = True
+                status = "started"
+            else:
+                host_status_calls += 1
+                status = "running" if started else "stopped"
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"status": status}), "")
+        if "--service-status" in argv:
+            diagnostic_calls += 1
+            status = "stale" if diagnostic_calls == 1 else second_heartbeat
+            return subprocess.CompletedProcess(
+                argv,
+                0 if status == "fresh" else 1,
+                json.dumps(
+                    {
+                        "heartbeat": {"status": status},
+                        "preflight": {
+                            "status": "ready",
+                            "execution_locked": True,
+                            "external_requests": 0,
+                            "blocking_codes": [],
+                            "optional_codes": [],
+                        },
+                    }
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    results = run_local_stack(
+        LocalStackAction.UP,
+        repo_root=repo_root,
+        env_file=env_file,
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+
+    assert diagnostic_calls == 2
+    assert host_status_calls == 3
+    assert [result.fact for result in results[-2:]] == ["heartbeat", "preflight"]
+    assert results[-2].result_code == f"AGENT_PAPER_HEARTBEAT_{second_heartbeat.upper()}"
+    assert (results[-2].exit_code == 0) is (second_heartbeat == "fresh")
+
+
 def test_up_rejects_running_host_from_another_release_before_compose(repo_root: Path) -> None:
     """Updating containers must not leave an older active scheduler beside them."""
     env_file = repo_root / "infra/.env.local"

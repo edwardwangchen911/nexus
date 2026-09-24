@@ -338,18 +338,33 @@ def run_local_stack(
             if dict(results[-1].details).get("status") != "running":
                 results[-1] = replace(results[-1], exit_code=1)
                 return tuple(results)
-            diagnostic = _service_status_command(repo_root=root, env_file=resolved_env)
-            exit_code, stdout = run_command(diagnostic, fact="heartbeat")
-            if exit_code == -1:
-                return tuple(results)
-            heartbeat, preflight = _parse_service_status_results(
-                action=action,
-                first_ordinal=results[-1].ordinal,
-                stdout=stdout,
-                expected_release_revision=release_revision,
-            )
-            results[-1] = heartbeat
-            results.append(preflight)
+            for attempt in range(2):
+                diagnostic = _service_status_command(repo_root=root, env_file=resolved_env)
+                exit_code, stdout = run_command(diagnostic, fact="heartbeat")
+                if exit_code == -1:
+                    return tuple(results)
+                heartbeat, preflight = _parse_service_status_results(
+                    action=action,
+                    first_ordinal=results[-1].ordinal,
+                    stdout=stdout,
+                    expected_release_revision=release_revision,
+                )
+                results[-1] = heartbeat
+                results.append(preflight)
+                if (
+                    attempt == 1
+                    or heartbeat.result_code
+                    not in {"AGENT_PAPER_HEARTBEAT_STALE", "AGENT_PAPER_HEARTBEAT_MISSING"}
+                    or preflight.exit_code != 0
+                ):
+                    break
+                results.pop()
+                results.pop()
+                if not run_host("status"):
+                    return tuple(results)
+                if dict(results[-1].details).get("status") != "running":
+                    results[-1] = replace(results[-1], exit_code=1)
+                    return tuple(results)
         return tuple(results)
 
     if action is LocalStackAction.STATUS:
