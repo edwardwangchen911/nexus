@@ -77,6 +77,47 @@ def test_tool_adjacent_indexes_follow_exact_identity_not_position_and_preserve_r
     assert items == before["frozen_inputs"]
 
 
+def test_columnar_stage_context_keeps_evidence_indexes_and_review_claim_order():
+    raw = payload()
+    for index in range(2, 12):
+        reference = {
+            **raw["evidence"][0],
+            "index": index,
+            "object_id": f"filing:extra-{index}",
+            "content_hash": f"{index:064x}",
+        }
+        raw["evidence"].append(reference)
+        raw["frozen_inputs"]["security_snapshot"]["items"].append(
+            {
+                "evidence_ref_id": f"ref-{index}",
+                "source": reference["source"],
+                "provider_object_id": reference["object_id"],
+                "content_hash": reference["content_hash"],
+                "available_at": reference["available_at"],
+            }
+        )
+    raw["previous_claims"] = [
+        {
+            "claim_id": f"bear:{index}",
+            "role": "bear",
+            "vote": "oppose",
+            "text": f"claim {index}",
+            "citations": [index % len(raw["evidence"])],
+        }
+        for index in range(14)
+    ]
+    before = deepcopy(raw)
+
+    projected = project_staged_payload(raw, inline_citations=True)
+
+    assert raw == before
+    assert restore(projected["evidence"]) == before["evidence"]
+    assert restore(projected["previous_claims"]) == before["previous_claims"]
+    assert [row["citation_index"] for row in restore(projected["frozen_inputs"])[
+        "filing_disclosures"
+    ]["items"]] == [1, 0]
+
+
 def test_derived_frozen_input_is_preserved_while_tool_rows_receive_citations():
     raw = payload()
     raw["frozen_inputs"]["trailing_valuation"] = {

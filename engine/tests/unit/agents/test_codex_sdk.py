@@ -127,6 +127,46 @@ def test_repeated_long_frozen_values_use_lossless_string_table():
     assert payload == original
 
 
+def test_staged_evidence_and_prior_claims_column_view_is_lossless_and_smaller():
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = _view_payload()
+    payload["evidence"] = [
+        {
+            "index": index,
+            "source": "official_source",
+            "object_id": f"object-{index}",
+            "available_at": "2026-09-04T00:00:00Z",
+            "location": f"section-{index}",
+            "content_hash": f"{index:064x}",
+        }
+        for index in range(12)
+    ]
+    payload["previous_claims"] = [
+        {
+            "claim_id": f"bear:{index}",
+            "role": "bear",
+            "vote": "oppose",
+            "text": f"证据疑问 {index}",
+            "citations": [index % 12],
+        }
+        for index in range(14)
+    ]
+    original = deepcopy(payload)
+
+    projected = project_staged_payload(payload)
+
+    assert payload == original
+    assert "$nexus_columns" in projected["evidence"]
+    assert "$nexus_columns" in projected["previous_claims"]
+    assert _restore_view(projected["evidence"]) == original["evidence"]
+    assert _restore_view(projected["previous_claims"]) == original["previous_claims"]
+    assert "evidence and previous_claims" in projected["instructions"]
+    assert len(codex_sdk.codex_request_wire(projected).encode()) < len(
+        codex_sdk.codex_request_wire(original).encode()
+    )
+
+
 @pytest.mark.parametrize("left,right", [(True, 1), (1, 1.0), (None, "missing")])
 def test_staged_input_view_does_not_hoist_different_json_types(left, right):
     from nexus.agents.codex_input_view import project_staged_payload
@@ -288,8 +328,9 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
     model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
     outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
     assert [p["stage"] for p in submitted] == ["research", "critique", "synthesis"]
-    assert [len(p["previous_claims"]) for p in submitted] == [0, 5, 7]
-    assert {p["role"]: (p["vote"], p["text"]) for p in submitted[2]["previous_claims"][-2:]} == {
+    assert [len(_restore_view(p["previous_claims"])) for p in submitted] == [0, 5, 7]
+    final_claims = _restore_view(submitted[2]["previous_claims"])
+    assert {p["role"]: (p["vote"], p["text"]) for p in final_claims[-2:]} == {
         "bear": ("abstain", "成交容量未知，不能判断退出速度。"),
         "evidence_audit": ("abstain", "估值时间缺失，尚不能验证可比性。"),
     }
@@ -299,7 +340,7 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
         for p in submitted
     )
     assert len(outputs[-1].claims) == 2
-    assert {p["claim_id"] for p in submitted[1]["previous_claims"]} == {
+    assert {p["claim_id"] for p in _restore_view(submitted[1]["previous_claims"])} == {
         f"{role}:0" for role in ROLE_ORDER[:5]
     }
     assert all(p["frozen_inputs"] == submitted[0]["frozen_inputs"] for p in submitted)
@@ -1881,6 +1922,7 @@ async def test_late_invalid_citation_does_not_publish_partial_batch(monkeypatch)
 
 
 def _assessment_payload(previous, *, invalid=None):
+    previous = _restore_view(previous)
     ids = [item["claim_id"] for item in previous if item["role"] in {"bear", "evidence_audit"}]
     reviews = [
         {
@@ -2042,7 +2084,7 @@ async def test_structured_request_preserves_audit_vote_and_resolution_contract(
                     assert text in descriptions
             assert all(
                 item["vote"] in {"support", "oppose", "abstain"}
-                for item in payload["previous_claims"]
+                for item in _restore_view(payload["previous_claims"])
             )
             expected_hash = hashlib.sha256(
                 json.dumps(
