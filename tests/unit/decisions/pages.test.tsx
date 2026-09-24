@@ -107,6 +107,20 @@ describe("decision records", () => {
     expect(screen.getByRole("link", { name: "查看调整计划" })).toHaveAttribute("href", `/paper?plan=${managementId(10)}`);
     expect(screen.queryByRole("button", { name: /批准|立即生效/ })).not.toBeInTheDocument();
   });
+  it("shows an unavailable portfolio cycle's saved research rejection in the visible conclusion", () => {
+    const value = structuredClone(managementDetail);
+    value.cycle = { ...value.cycle, status: "unavailable", result_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE", decision: null, order_ids: [] };
+    value.proposal = null;
+    value.synthesis = null;
+    value.blocker = null;
+    value.activation_result = null;
+    render(<DecisionDetailPanel state="ready" detail={value} onRefresh={vi.fn()} />);
+
+    const conclusion = screen.getByRole("note", { name: "目标生效结论" });
+    expect(conclusion).toHaveTextContent("研究未通过交易准入");
+    expect(conclusion).toHaveTextContent("研究未形成符合交易准入条件的结论");
+    expect(conclusion).toHaveTextContent("目标 V7 继续生效");
+  });
   it.each(["initial", "unchanged", "policy"])("keeps %s target authority explicit", (variant) => {
     const value = structuredClone(managementDetail); value.blocker = null; value.blocking_plan = null;
     if (variant === "initial") { value.active_target = null; value.activation_result = null; }
