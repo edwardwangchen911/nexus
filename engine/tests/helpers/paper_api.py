@@ -23,8 +23,16 @@ def settings(database_url: str) -> EngineSettings:
     )
 
 
-def app(database_url: str, *, now: datetime = MARKET_CLOSE):
-    engine_app = create_engine_app(settings(database_url))
+def app(
+    database_url: str,
+    *,
+    now: datetime = MARKET_CLOSE,
+    release_revision: str | None = None,
+):
+    runtime_settings = settings(database_url).model_copy(
+        update={"release_revision": release_revision}
+    )
+    engine_app = create_engine_app(runtime_settings)
     engine_app.state.utc_clock = lambda: now
     return engine_app
 

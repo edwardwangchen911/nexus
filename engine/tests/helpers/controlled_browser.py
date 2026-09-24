@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -15,6 +15,8 @@ import httpx
 import uvicorn
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET
 from helpers.paper_api import app, headers
+from helpers.paper_api import settings as paper_api_settings
+from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
 
 
 def _listen_socket() -> socket.socket:
@@ -42,6 +44,7 @@ def _web_project_root(root: Path) -> Iterator[Path]:
         "postcss.config.mjs",
         "playwright.controlled-paper.config.ts",
         "tests/e2e-local/portfolio-controlled.spec.ts",
+        "tests/e2e-local/agent-paper-readonly.spec.ts",
     )
     dirty = subprocess.run(
         ("git", "-C", str(root), "status", "--porcelain", "--", *web_paths),
@@ -102,13 +105,33 @@ async def verify_controlled_browser(
     root = Path(__file__).resolve().parents[3]
     if not (root / "node_modules/.bin/vinext").exists():
         raise AssertionError("controlled browser dependencies are unavailable")
+    revision_result = subprocess.run(
+        ("git", "-C", str(root), "rev-parse", "--verify", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    revision = revision_result.stdout.strip()
+    if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
+        raise AssertionError("controlled browser release revision is invalid")
+    heartbeat_at = datetime.now(UTC)
+    await heartbeat_agent_paper_loop(
+        paper_api_settings(database_url).model_copy(update={"release_revision": revision}),
+        worker_id=f"agent-paper-loop-{UUID(int=1)}",
+        started_at=heartbeat_at - timedelta(minutes=1),
+        seen_at=heartbeat_at,
+    )
     api_socket = _listen_socket()
     api_port = api_socket.getsockname()[1]
     web_socket = _listen_socket()
     web_port = web_socket.getsockname()[1]
     web_socket.close()
     server = uvicorn.Server(
-        uvicorn.Config(app(database_url, now=api_now), log_config=None, access_log=False)
+        uvicorn.Config(
+            app(database_url, now=api_now, release_revision=revision),
+            log_config=None,
+            access_log=False,
+        )
     )
     server_task = asyncio.create_task(server.serve(sockets=[api_socket]))
     web_process: asyncio.subprocess.Process | None = None
@@ -137,6 +160,7 @@ async def verify_controlled_browser(
         }
         environment.update(
             NEXUS_ENV="test",
+            NEXUS_RELEASE_REVISION=revision,
             AGENT_RUNTIME_MODE="fixture",
             NEXUS_PROVIDER_JOBS_ENABLED="false",
             NEXUS_ENGINE_BASE_URL=f"http://127.0.0.1:{api_port}",
@@ -148,6 +172,7 @@ async def verify_controlled_browser(
             NEXUS_CONTROLLED_CYCLE_ID=str(cycle_id),
             NEXUS_CONTROLLED_ORDER_IDS=",".join(str(order_id) for order_id in order_ids),
             NEXUS_CONTROLLED_CANDIDATE_COUNT=str(candidate_count),
+            NEXUS_LOCAL_PAPER_READONLY="1",
             WRANGLER_LOG_PATH=".wrangler/wrangler.log",
         )
         web_root = isolation.enter_context(_web_project_root(root))

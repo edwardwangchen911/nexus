@@ -71,9 +71,20 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
   await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "当前实际持仓与现金" })).toBeVisible();
   await expect(page.locator("#paper-current-actual")).toContainText("可用现金");
-  await page.getByLabel("决策会话日期").fill(cycle.decision_session);
-  await expect(page.getByRole("heading", { name: "所选会话 Agent 模拟周期" })).toBeVisible();
-  await page.locator(`select:has(option[value="${cycle.cycle_id}"])`).selectOption(cycle.cycle_id);
+  const sessionPicker = page.getByLabel("决策会话日期");
+  const isHistoricalSession = (await sessionPicker.inputValue()) !== cycle.decision_session;
+  await sessionPicker.fill(cycle.decision_session);
+  await expect(
+    page.getByRole("heading", {
+      name: isHistoricalSession ? "所选会话 Agent 模拟周期" : "当日 Agent 模拟周期",
+    }),
+  ).toBeVisible();
+  const cycleSelector = page.locator(`select:has(option[value="${cycle.cycle_id}"])`);
+  if (cyclePage.items.length > 1) {
+    await cycleSelector.selectOption(cycle.cycle_id);
+  } else {
+    await expect(cycleSelector).toHaveCount(0);
+  }
   await expect(page.locator("body")).toContainText(cycle.result_code);
   await expect(page.locator("body")).toContainText(targetId!);
 

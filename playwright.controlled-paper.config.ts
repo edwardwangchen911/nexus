@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests/e2e-local",
-  testMatch: "portfolio-controlled.spec.ts",
+  testMatch: ["portfolio-controlled.spec.ts", "agent-paper-readonly.spec.ts"],
   fullyParallel: false,
   retries: 0,
   workers: 1,
