@@ -4793,6 +4793,92 @@ def test_macro_preparation_degrades_only_known_provider_failure(
     assert result == "unavailable"
 
 
+def test_macro_preparation_degrades_archived_timeout_without_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    from nexus.ops.local_recovery import write_private
+
+    calls = 0
+
+    async def inspect(
+        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
+    ):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            vintage=date(2026, 9, 13),
+            ready_series=frozenset(),
+        )
+
+    async def collect(request, *, key, directory):
+        nonlocal calls
+        calls += 1
+        write_private(
+            directory / "failure.json",
+            json.dumps(
+                {
+                    "schema": "fred_collection_failure_v1",
+                    "stage": "observations_fetch",
+                    "offset": 16,
+                    "code": "FRED_COLLECTION_TIMEOUT",
+                    "capture_count": 2,
+                }
+            ).encode(),
+        )
+        raise TimeoutError
+
+    monkeypatch.setattr(loop, "_inspect_macro_scope", inspect)
+    monkeypatch.setattr(loop, "validate_local_import", lambda _settings: None)
+    monkeypatch.setattr(loop, "collect_fred", collect)
+
+    for _ in range(2):
+        result = asyncio.run(
+            loop.prepare_macro_once(
+                SimpleNamespace(),
+                candidate=TEST_CANDIDATE,
+                fred_key=object(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            )
+        )
+        assert result == "unavailable"
+    assert calls == 1
+
+
+def test_macro_preparation_propagates_timeout_without_failure_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+) -> None:
+    async def inspect(
+        _settings, *, account_id, now, expected_calendar_authority_id, candidate=None
+    ):
+        return SimpleNamespace(
+            instrument_id=UUID(int=20),
+            vintage=date(2026, 9, 13),
+            ready_series=frozenset(),
+        )
+
+    async def collect(request, *, key, directory):
+        raise TimeoutError
+
+    monkeypatch.setattr(loop, "_inspect_macro_scope", inspect)
+    monkeypatch.setattr(loop, "validate_local_import", lambda _settings: None)
+    monkeypatch.setattr(loop, "collect_fred", collect)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            loop.prepare_macro_once(
+                SimpleNamespace(),
+                candidate=TEST_CANDIDATE,
+                fred_key=object(),
+                account_id=UUID(int=1),
+                repo_root=tmp_path,
+                now=NOW,
+                expected_calendar_authority_id=CALENDAR_AUTHORITY_ID,
+            )
+        )
+
+
 def test_macro_preparation_propagates_unknown_provider_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
 ) -> None:

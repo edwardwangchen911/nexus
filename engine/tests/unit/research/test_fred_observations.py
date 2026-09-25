@@ -238,6 +238,46 @@ async def test_partial_fred_archive_records_safe_failure_stage_without_retry(
 
 
 @pytest.mark.asyncio
+async def test_collector_timeout_receipt_is_safe_to_classify_as_unavailable(tmp_path: Path):
+    from nexus.providers.fred_http import FredHttpTransport
+    from nexus.research.fred_collection import (
+        collect_fred_vintage,
+        has_archived_timeout_failure,
+    )
+
+    class Wire:
+        calls = 0
+
+        async def get_bytes(self, *_args):
+            self.calls += 1
+            raise TimeoutError
+
+    wire = Wire()
+    with pytest.raises(TimeoutError):
+        await collect_fred_vintage(
+            parse().request,
+            transport=FredHttpTransport(wire, SecretStr("private-test-key")),
+            output_dir=tmp_path,
+        )
+
+    assert wire.calls == 1
+    assert has_archived_timeout_failure(tmp_path)
+    assert not (tmp_path / "complete.json").exists()
+    receipt_path = tmp_path / "failure.json"
+    receipt = json.loads(receipt_path.read_bytes())
+    assert receipt == {
+        "schema": "fred_collection_failure_v1",
+        "stage": "metadata_fetch",
+        "offset": None,
+        "code": "FRED_COLLECTION_TIMEOUT",
+        "capture_count": 0,
+    }
+    receipt["code"] = "FRED_COLLECTION_FAILURE_UNKNOWN"
+    receipt_path.write_bytes(json.dumps(receipt).encode())
+    assert not has_archived_timeout_failure(tmp_path)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "defect", ["metadata_id", "metadata_unit", "metadata_vintage", "page_value"]
 )

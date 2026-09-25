@@ -160,6 +160,48 @@ def _read(path: Path) -> bytes:
         return stream.read(1024 * 1024 + 1)
 
 
+def has_archived_timeout_failure(directory: Path) -> bool:
+    """Only a complete private failure receipt makes a collection timeout known."""
+    if (directory / "complete.json").exists():
+        return False
+    try:
+        raw = _read(directory / "failure.json")
+        if len(raw) > 512:
+            return False
+        failure = decode(raw)
+        if set(failure) != {
+            "schema",
+            "stage",
+            "offset",
+            "code",
+            "capture_count",
+        }:
+            return False
+        offset = failure["offset"]
+        count = failure["capture_count"]
+        return (
+            failure["schema"] == "fred_collection_failure_v1"
+            and failure["code"] == "FRED_COLLECTION_TIMEOUT"
+            and (
+                (
+                    failure["stage"] == "metadata_fetch"
+                    and offset is None
+                    and type(count) is int
+                    and count == 0
+                )
+                or (
+                    failure["stage"] == "observations_fetch"
+                    and type(offset) is int
+                    and 0 <= offset <= 32
+                    and type(count) is int
+                    and 1 <= count <= MAX_PAGES + 1
+                )
+            )
+        )
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def load_fred_collection(directory: Path) -> FredVintageCollection:
     """No trust in a success boolean: reparse each exact original and request receipt."""
     try:

@@ -134,7 +134,7 @@ from nexus.providers.market.schwab_oauth import (
 from nexus.research.alpaca_prices_archive import collection_window
 from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
-from nexus.research.fred_collection import load_fred_collection
+from nexus.research.fred_collection import has_archived_timeout_failure, load_fred_collection
 from nexus.research.fred_observations import FredVintageRequest
 from nexus.research.fred_storage import read_fred_observations
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
@@ -1126,6 +1126,10 @@ async def prepare_macro_once(
                 key=fred_key,
                 directory=series_dir,
             )
+        except TimeoutError:
+            if has_archived_timeout_failure(series_dir):
+                return "unavailable"
+            raise
         except (HttpPolicyError, ValueError):
             return "unavailable"
         if collected.get("status") != "collected" or not collected.get("observation_count"):
