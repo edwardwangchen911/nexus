@@ -22,7 +22,13 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from helpers.paper_api import app, headers
-from helpers.paper_batch import CALENDAR_ID, DECISION_TIME, INSTRUMENTS, seed_paper_batch
+from helpers.paper_batch import (
+    CALENDAR_ID,
+    DECISION_TIME,
+    INSTRUMENTS,
+    UNIVERSE_ID,
+    seed_paper_batch,
+)
 from helpers.paper_performance import seed_paper_performance, seed_second_paper_close
 from nexus.agents.actionable_research import ActionableResearchDecision
 from nexus.agents.codex_sdk import MODEL_ID
@@ -4584,7 +4590,15 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         decision = SimpleNamespace(
             decision_time=monday_at,
             decision_session=monday,
-            universe_snapshot_id=UUID("51000000-0000-0000-0000-000000000002"),
+            universe_snapshot_id=UNIVERSE_ID,
+        )
+        candidate = agent_paper_loop.CandidateInstrumentIdentity(
+            instrument_id=INSTRUMENTS[0][0],
+            universe_snapshot_id=UNIVERSE_ID,
+            symbol="AAPL",
+            asset_type="common_stock",
+            exchange="NASDAQ",
+            currency="USD",
         )
         async with sessions.begin() as session:
             await _seed_adjusted_authority(
@@ -4653,7 +4667,7 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         )
         daily = await agent_paper_loop.prepare_prior_daily_once(
             trigger_settings,
-            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
+            candidate=candidate,
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
@@ -4661,7 +4675,7 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         )
         macro = await agent_paper_loop.prepare_macro_once(
             agent_paper_loop.DailyOnceSettings(database_url=migrated_database_url),
-            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
+            candidate=candidate,
             fred_key=agent_paper_loop.SecretStr("test-key"),
             account_id=seed.account_id,
             repo_root=tmp_path,
@@ -4678,7 +4692,7 @@ async def test_bound_calendar_stays_fixed_across_close_weekend_and_all_cycle_con
         trends_attempt.mkdir(mode=0o700, parents=True)
         trends = await agent_paper_loop.prepare_current_trends_once(
             trigger_settings,
-            candidate=SimpleNamespace(instrument_id=INSTRUMENTS[0][0], symbol="AAPL"),
+            candidate=candidate,
             account_id=seed.account_id,
             repo_root=tmp_path,
             now=monday_at,
