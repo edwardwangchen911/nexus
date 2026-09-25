@@ -11,6 +11,7 @@ from pathlib import Path
 
 from nexus.ops.local_recovery import write_private
 from nexus.providers.fred_http import FredHttpTransport
+from nexus.providers.http import HttpPolicyError
 from nexus.research.fred_observations import (
     MAX_PAGES,
     FredCapture,
@@ -25,6 +26,18 @@ from nexus.research.fred_observations import (
 )
 
 ORIGIN = "https://api.stlouisfed.org"
+_SAFE_HTTP_FAILURES = frozenset(
+    {
+        "DEADLINE_EXCEEDED",
+        "REDIRECT_REJECTED",
+        "RESPONSE_TOO_LARGE",
+        "RETRY_BUDGET_EXHAUSTED",
+        "STATUS_REJECTED",
+    }
+)
+_SAFE_VALIDATION_FAILURES = frozenset(
+    {"FRED_ORIGINAL_LIMIT", "FRED_PAGE_LIMIT", "FRED_VINTAGE_INVALID"}
+)
 
 
 def json_bytes(value: object) -> bytes:
@@ -45,6 +58,18 @@ def capture_receipt(request: FredVintageRequest, capture: FredCapture) -> dict[s
     }
 
 
+def _safe_failure_code(error: Exception) -> str:
+    if isinstance(error, HttpPolicyError):
+        code = str(error)
+        return code if code in _SAFE_HTTP_FAILURES else "FRED_HTTP_FAILURE_UNKNOWN"
+    if isinstance(error, TimeoutError):
+        return "FRED_COLLECTION_TIMEOUT"
+    if isinstance(error, ValueError):
+        code = str(error)
+        return code if code in _SAFE_VALIDATION_FAILURES else "FRED_VALIDATION_FAILURE_UNKNOWN"
+    return "FRED_COLLECTION_FAILURE_UNKNOWN"
+
+
 async def collect_fred_vintage(
     request: FredVintageRequest,
     *,
@@ -56,6 +81,8 @@ async def collect_fred_vintage(
     if any(output_dir.iterdir()):
         raise ValueError("FRED_NEW_DIRECTORY_REQUIRED")
     captures: list[FredCapture] = []
+    stage = "metadata_fetch"
+    offset: int | None = None
 
     def archive(capture: FredCapture) -> None:
         index = len(captures)
@@ -65,40 +92,63 @@ async def collect_fred_vintage(
         )
         captures.append(capture)
 
-    async with asyncio.timeout(60):
-        raw = await transport.fetch_vintage(series=request.series, vintage=request.vintage)
-        metadata = FredCapture("series", None, raw, clock())
-        archive(metadata)
-        # Reject an invalid metadata response before issuing another request.
-        metadata_unit(request, metadata)
-        offset = 0
-        for _ in range(MAX_PAGES):
-            raw = await transport.fetch_vintage(
-                series=request.series,
-                vintage=request.vintage,
-                observation_start=request.observation_start,
-                observation_end=request.observation_end,
-                offset=offset,
-            )
-            page = FredCapture("observations", offset, raw, clock())
-            archive(page)
-            validate_captured_pages(request, metadata, tuple(captures[1:]))
-            count, size = page_count(raw, expected_offset=offset)
-            offset += size
-            if offset == count:
-                result = parse_collected_vintage(request, metadata, tuple(captures[1:]))
-                write_private(
-                    output_dir / "complete.json",
-                    json_bytes(
-                        {
-                            "schema": "fred_collection_v1",
-                            "request": request.model_dump(mode="json"),
-                            "capture_count": len(captures),
-                        }
-                    ),
+    try:
+        async with asyncio.timeout(60):
+            raw = await transport.fetch_vintage(series=request.series, vintage=request.vintage)
+            stage = "metadata_validate"
+            metadata = FredCapture("series", None, raw, clock())
+            archive(metadata)
+            # Reject an invalid metadata response before issuing another request.
+            metadata_unit(request, metadata)
+            offset = 0
+            for _ in range(MAX_PAGES):
+                stage = "observations_fetch"
+                raw = await transport.fetch_vintage(
+                    series=request.series,
+                    vintage=request.vintage,
+                    observation_start=request.observation_start,
+                    observation_end=request.observation_end,
+                    offset=offset,
                 )
-                return result
-        raise ValueError("FRED_PAGE_LIMIT")
+                stage = "observations_validate"
+                page = FredCapture("observations", offset, raw, clock())
+                archive(page)
+                validate_captured_pages(request, metadata, tuple(captures[1:]))
+                count, size = page_count(raw, expected_offset=offset)
+                offset += size
+                if offset == count:
+                    stage = "complete"
+                    result = parse_collected_vintage(request, metadata, tuple(captures[1:]))
+                    write_private(
+                        output_dir / "complete.json",
+                        json_bytes(
+                            {
+                                "schema": "fred_collection_v1",
+                                "request": request.model_dump(mode="json"),
+                                "capture_count": len(captures),
+                            }
+                        ),
+                    )
+                    return result
+            raise ValueError("FRED_PAGE_LIMIT")
+    except Exception as error:
+        try:
+            write_private(
+                output_dir / "failure.json",
+                json_bytes(
+                    {
+                        "schema": "fred_collection_failure_v1",
+                        "stage": stage,
+                        "offset": offset,
+                        "code": _safe_failure_code(error),
+                        "capture_count": len(captures),
+                    }
+                ),
+            )
+        except OSError:
+            # Preserve the original provider or validation failure if diagnostics cannot be saved.
+            pass
+        raise
 
 
 def _read(path: Path) -> bytes:

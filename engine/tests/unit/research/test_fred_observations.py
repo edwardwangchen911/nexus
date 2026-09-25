@@ -188,6 +188,57 @@ async def test_normal_collector_archives_real_http_bytes_and_safe_receipt(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("wire_code", "receipt_code"),
+    [
+        ("RETRY_BUDGET_EXHAUSTED", "RETRY_BUDGET_EXHAUSTED"),
+        ("STATUS_REJECTED private-test-key", "FRED_HTTP_FAILURE_UNKNOWN"),
+    ],
+)
+async def test_partial_fred_archive_records_safe_failure_stage_without_retry(
+    tmp_path: Path, wire_code: str, receipt_code: str
+):
+    from nexus.providers.fred_http import FredHttpTransport
+    from nexus.providers.http import HttpPolicyError
+    from nexus.research.fred_collection import collect_fred_vintage
+
+    collection = parse()
+    metadata, page = captured_payloads()
+    page["observations"] = page["observations"][:2]
+
+    class Wire:
+        calls = 0
+
+        async def get_bytes(self, *_args):
+            self.calls += 1
+            if self.calls == 3:
+                raise HttpPolicyError(wire_code)
+            return json.dumps(metadata if self.calls == 1 else page).encode()
+
+    wire = Wire()
+    with pytest.raises(HttpPolicyError):
+        await collect_fred_vintage(
+            collection.request,
+            transport=FredHttpTransport(wire, SecretStr("private-test-key")),
+            output_dir=tmp_path,
+            clock=lambda: collection.received_at,
+        )
+
+    assert wire.calls == 3
+    assert not (tmp_path / "complete.json").exists()
+    assert (tmp_path / "001.raw.json").exists()
+    receipt_bytes = (tmp_path / "failure.json").read_bytes()
+    assert b"private-test-key" not in receipt_bytes and b"api_key" not in receipt_bytes
+    assert json.loads(receipt_bytes) == {
+        "schema": "fred_collection_failure_v1",
+        "stage": "observations_fetch",
+        "offset": 2,
+        "code": receipt_code,
+        "capture_count": 2,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "defect", ["metadata_id", "metadata_unit", "metadata_vintage", "page_value"]
 )
 async def test_first_semantic_error_stops_before_next_http(tmp_path, defect):
