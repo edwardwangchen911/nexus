@@ -105,6 +105,24 @@ def test_opening_preparation_is_once_per_session_and_never_triggers_early() -> N
     )
 
 
+def test_after_formal_slot_waits_for_next_bound_market_open() -> None:
+    next_market_open = datetime(2026, 9, 25, 13, 30, tzinfo=UTC)
+    state = loop.AgentPaperLoopSnapshot(
+        now=datetime(2026, 9, 24, 20, 1, tzinfo=UTC),
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        market_open_at=datetime(2026, 9, 24, 13, 30, tzinfo=UTC),
+        decision_window_start_at=datetime(2026, 9, 24, 11, tzinfo=UTC),
+        decision_window_end_at=datetime(2026, 9, 24, 20, tzinfo=UTC),
+        next_decision_window_start_at=datetime(2026, 9, 25, 11, tzinfo=UTC),
+        next_market_open_at=next_market_open,
+        cycle_status="unavailable",
+    )
+
+    action = loop.choose_loop_action(state)
+    assert action == A.WAIT_FOR_SESSION
+    assert loop._normal_wait_until(state, action) == next_market_open
+
+
 def test_preparation_does_not_override_active_cycle_or_performance() -> None:
     market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
     state = snapshot(now=market_open, market_open_at=market_open)

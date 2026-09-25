@@ -68,6 +68,7 @@ class ServiceCalendarAuthority(BaseModel):
     market_close_at: datetime
     next_session: date
     next_decision_window_start_at: datetime
+    next_market_open_at: datetime | None = None
     next_market_close_at: datetime
 
 
@@ -229,6 +230,7 @@ async def select_agent_paper_service_calendar_authority(
             time(7),
             tzinfo=ny,
         ).astimezone(UTC),
+        next_market_open_at=next_session.market_open_at,
         next_market_close_at=next_session.market_close_at,
     )
 
@@ -297,6 +299,7 @@ async def load_agent_paper_service_calendar_authority(
             time(7),
             tzinfo=ny,
         ).astimezone(UTC),
+        next_market_open_at=next_session.market_open_at,
         next_market_close_at=next_session.market_close_at,
     )
 

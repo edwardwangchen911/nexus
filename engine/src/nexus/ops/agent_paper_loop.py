@@ -209,6 +209,7 @@ class AgentPaperLoopSnapshot:
     decision_window_start_at: datetime | None = None
     decision_window_end_at: datetime | None = None
     next_decision_window_start_at: datetime | None = None
+    next_market_open_at: datetime | None = None
     cycle_id: UUID | None = None
     cycle_status: str | None = None
     cycle_result_code: str | None = None
@@ -1627,6 +1628,7 @@ def snapshot_from_cycle_view(
         decision_window_start_at=calendar.decision_window_start_at,
         decision_window_end_at=calendar.market_close_at,
         next_decision_window_start_at=calendar.next_decision_window_start_at,
+        next_market_open_at=calendar.next_market_open_at,
         cycle_id=cycle_id,
         cycle_status=action_cycle_status,
         cycle_slot_at=cycle_slot_at,
@@ -1813,6 +1815,11 @@ def _normal_wait_until(
             wait_until = snapshot.market_open_at
     else:
         wait_until = _portfolio_slot(snapshot.next_decision_window_start_at)
+        if (
+            snapshot.next_market_open_at is not None
+            and snapshot.now < snapshot.next_market_open_at < wait_until
+        ):
+            wait_until = snapshot.next_market_open_at
     if (
         snapshot.decision_window_end_at is not None
         and snapshot.now < snapshot.decision_window_end_at < wait_until
@@ -3605,6 +3612,7 @@ async def _inspect_portfolio_batch(
             decision_window_start_at=calendar.decision_window_start_at,
             decision_window_end_at=calendar.market_close_at,
             next_decision_window_start_at=calendar.next_decision_window_start_at,
+            next_market_open_at=calendar.next_market_open_at,
             cycle_id=cycle.id,
             cycle_status=event.to_status,
             cycle_slot_at=cycle.decision_slot_at,
@@ -3797,6 +3805,7 @@ async def _inspect_portfolio_batch(
         decision_window_start_at=calendar.decision_window_start_at,
         decision_window_end_at=calendar.market_close_at,
         next_decision_window_start_at=calendar.next_decision_window_start_at,
+        next_market_open_at=calendar.next_market_open_at,
         cycle_id=cycle.id,
         cycle_status=event.to_status,
         cycle_result_code=(
@@ -3954,6 +3963,7 @@ async def inspect_agent_paper_loop(
                     decision_window_start_at=calendar.decision_window_start_at,
                     decision_window_end_at=calendar.market_close_at,
                     next_decision_window_start_at=calendar.next_decision_window_start_at,
+                    next_market_open_at=calendar.next_market_open_at,
                     performance_due_at=performance_due_at,
                     trigger_attempt_slot_at=trigger_attempt_slot_at,
                     trigger_failure_code=trigger_failure_code,

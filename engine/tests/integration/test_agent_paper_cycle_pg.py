@@ -4297,6 +4297,7 @@ async def test_service_calendar_bound_loader_keeps_expected_authority_after_half
         assert loaded.market_close_at == datetime(2026, 11, 27, 18, tzinfo=UTC)
         assert loaded.next_session == date(2026, 11, 30)
         assert loaded.next_decision_window_start_at == datetime(2026, 11, 30, 12, tzinfo=UTC)
+        assert loaded.next_market_open_at == datetime(2026, 11, 30, 14, 30, tzinfo=UTC)
     finally:
         await engine.dispose()
 
@@ -6499,8 +6500,10 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             return SimpleNamespace(
                 calendar_authority_id=CALENDAR_ID,
                 decision_window_start_at=now - timedelta(hours=1),
+                market_open_at=now - timedelta(minutes=30),
                 market_close_at=market_close,
                 next_decision_window_start_at=market_close + timedelta(hours=15),
+                next_market_open_at=market_close + timedelta(hours=14, minutes=30),
             )
 
         monkeypatch.setattr(
