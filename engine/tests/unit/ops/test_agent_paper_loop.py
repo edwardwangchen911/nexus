@@ -105,22 +105,57 @@ def test_opening_preparation_is_once_per_session_and_never_triggers_early() -> N
     )
 
 
-def test_after_formal_slot_waits_for_next_bound_market_open() -> None:
-    next_market_open = datetime(2026, 9, 25, 13, 30, tzinfo=UTC)
+@pytest.mark.parametrize(
+    ("session_day", "next_session_day", "cycle_status"),
+    [
+        (24, 25, "unavailable"),
+        (25, 28, "completed"),
+    ],
+)
+def test_after_formal_slot_waits_for_next_bound_market_open(
+    session_day: int, next_session_day: int, cycle_status: str
+) -> None:
+    next_market_open = datetime(2026, 9, next_session_day, 13, 30, tzinfo=UTC)
     state = loop.AgentPaperLoopSnapshot(
-        now=datetime(2026, 9, 24, 20, 1, tzinfo=UTC),
+        now=datetime(2026, 9, session_day, 20, 1, tzinfo=UTC),
         calendar_authority_id=CALENDAR_AUTHORITY_ID,
-        market_open_at=datetime(2026, 9, 24, 13, 30, tzinfo=UTC),
-        decision_window_start_at=datetime(2026, 9, 24, 11, tzinfo=UTC),
-        decision_window_end_at=datetime(2026, 9, 24, 20, tzinfo=UTC),
-        next_decision_window_start_at=datetime(2026, 9, 25, 11, tzinfo=UTC),
+        market_open_at=datetime(2026, 9, session_day, 13, 30, tzinfo=UTC),
+        decision_window_start_at=datetime(2026, 9, session_day, 11, tzinfo=UTC),
+        decision_window_end_at=datetime(2026, 9, session_day, 20, tzinfo=UTC),
+        next_decision_window_start_at=datetime(2026, 9, next_session_day, 11, tzinfo=UTC),
         next_market_open_at=next_market_open,
-        cycle_status="unavailable",
+        cycle_status=cycle_status,
     )
 
     action = loop.choose_loop_action(state)
     assert action == A.WAIT_FOR_SESSION
     assert loop._normal_wait_until(state, action) == next_market_open
+
+
+def test_weekend_wait_prepares_monday_open_without_early_trigger() -> None:
+    friday_slot = datetime(2026, 9, 25, 14, tzinfo=UTC)
+    monday_open = datetime(2026, 9, 28, 13, 30, tzinfo=UTC)
+    monday_slot = datetime(2026, 9, 28, 14, tzinfo=UTC)
+    state = loop.AgentPaperLoopSnapshot(
+        now=monday_open,
+        calendar_authority_id=CALENDAR_AUTHORITY_ID,
+        market_open_at=monday_open,
+        decision_window_start_at=datetime(2026, 9, 28, 11, tzinfo=UTC),
+        decision_window_end_at=datetime(2026, 9, 28, 20, tzinfo=UTC),
+        next_decision_window_start_at=datetime(2026, 9, 29, 11, tzinfo=UTC),
+        cycle_slot_at=friday_slot,
+        cycle_status="completed",
+    )
+
+    assert loop.choose_loop_action(state) == A.PREPARE_INPUTS
+    assert loop.choose_loop_action(state, prepared_market_open_at=monday_open) == A.WAIT_FOR_SESSION
+    assert loop._normal_wait_until(state, A.WAIT_FOR_SESSION) == monday_slot
+    assert (
+        loop.choose_loop_action(
+            replace(state, now=monday_slot), prepared_market_open_at=monday_open
+        )
+        == A.TRIGGER
+    )
 
 
 def test_preparation_does_not_override_active_cycle_or_performance() -> None:
