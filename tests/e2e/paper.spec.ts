@@ -65,17 +65,21 @@ for (const viewport of [
     await page.goto("/paper");
 
     await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
+    const agentCycle = page.getByRole("region", { name: "当日 Agent 模拟周期" });
+    await expect(agentCycle).toContainText("决策报价 · Schwab Level One · 实时");
+    await expect(agentCycle).toContainText("执行分钟线 · Schwab pricehistory · 实时性未由响应声明");
     const currentStage = page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "内部模拟" });
     await expect(currentStage).toHaveAttribute("aria-current", "step");
-    await expect(currentStage).toBeInViewport();
+    await expect.poll(() => currentStage.evaluate((item) => {
+      const stage = item.getBoundingClientRect();
+      const scroller = item.closest(".decision-path")!.getBoundingClientRect();
+      return stage.left >= scroller.left && stage.right <= scroller.right;
+    })).toBe(true);
     await expect(page.getByRole("region", { name: "模拟账户边界" })).toContainText("不是实盘");
     const versionEvaluation = page.getByRole("region", { name: "Agent 版本并行评价" });
     await expect(versionEvaluation).toContainText("执行锁定 · 券商写入关闭 · 实盘写入关闭");
     await expect(versionEvaluation.getByRole("button")).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "当日 Agent 模拟周期" })).toBeVisible();
-    const agentCycle = page.getByRole("region", { name: "当日 Agent 模拟周期" });
-    await expect(agentCycle).toContainText("决策报价 · Schwab Level One · 实时");
-    await expect(agentCycle).toContainText("执行分钟线 · Schwab pricehistory · 实时性未由响应声明");
     await expect(agentCycle.getByRole("button")).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Agent 模拟候选，可横向滚动" })).toContainText("AAPL");
     await expect(page.getByLabel("模拟账户绩效事实")).toContainText("USD 8,500.00");
