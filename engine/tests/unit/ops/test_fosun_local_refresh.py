@@ -760,3 +760,67 @@ def test_order_failure_reaches_both_cli_outputs_without_payloads(
         "operation": "OrderList",
     }
     assert "canary" not in output.err
+
+
+@pytest.mark.parametrize(
+    "provider_code, category",
+    [
+        ("PROVIDER_RATE_LIMITED", "rate_limit"),
+        ("PROVIDER_UNAVAILABLE", "provider"),
+        ("PROVIDER_PERMISSION_DENIED", "permission"),
+        ("PROVIDER_AUTHENTICATION_FAILED", "auth"),
+        ("PROVIDER_MALFORMED_RESPONSE", "contract"),
+        ("PROVIDER_WINDOW_MISMATCH", "contract"),
+        ("GATEWAY_REPLAY_DRAINING", "not_ready"),
+    ],
+)
+def test_refresh_failure_preserves_only_known_gateway_codes(
+    provider_code: str, category: str
+) -> None:
+    error = GatewayClientError(f"gateway rejected request: {provider_code}")
+    assert safe_failure(error) == {
+        "status": "failed",
+        "category": category,
+        "code": f"LOCAL_GATEWAY_{provider_code}",
+    }
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "gateway rejected request: UNKNOWN_PROVIDER_CODE",
+        "gateway rejected request: PROVIDER_UNAVAILABLE private-account-payload",
+    ],
+)
+def test_unknown_gateway_error_content_is_not_exported(message: str) -> None:
+    assert _safe_failure_code(GatewayClientError(message)) == "LOCAL_READ_ONLY_REFRESH_FAILED"
+
+
+@pytest.mark.parametrize("entrypoint", ("local", "refresh"))
+def test_market_gateway_code_reaches_normal_cli_stderr(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def failed_refresh(_settings: object) -> dict[str, object]:
+        raise GatewayClientError("gateway rejected request: PROVIDER_RATE_LIMITED")
+
+    module = local_module if entrypoint == "local" else refresh_module
+    factory = (
+        SimpleNamespace(model_validate=lambda _environment: object())
+        if entrypoint == "local"
+        else lambda: object()
+    )
+    monkeypatch.setattr(module, "LocalFosunRefreshSettings", factory)
+    monkeypatch.setattr(module, "refresh_local_fosun", failed_refresh)
+    monkeypatch.setattr(local_module, "load_local_environment", lambda *_args: {})
+    monkeypatch.setattr("sys.argv", ["nexus-fosun-local", "refresh"])
+    with pytest.raises(SystemExit) as stopped:
+        module.main()
+    assert stopped.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    expected = {"status": "failed", "code": "LOCAL_GATEWAY_PROVIDER_RATE_LIMITED"}
+    if entrypoint == "local":
+        expected["category"] = "rate_limit"
+    assert json.loads(output.err) == expected

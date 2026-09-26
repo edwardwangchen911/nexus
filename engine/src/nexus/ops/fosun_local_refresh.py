@@ -1811,6 +1811,19 @@ class _UnusedSymbolResolver:
 
 def _safe_failure_code(error: Exception) -> str:
     message = str(error)
+    if isinstance(error, GatewayClientError):
+        # Exact allow-list only: never export provider text or unknown codes.
+        for code in (
+            "PROVIDER_RATE_LIMITED",
+            "PROVIDER_UNAVAILABLE",
+            "PROVIDER_PERMISSION_DENIED",
+            "PROVIDER_AUTHENTICATION_FAILED",
+            "PROVIDER_MALFORMED_RESPONSE",
+            "PROVIDER_WINDOW_MISMATCH",
+            "GATEWAY_REPLAY_DRAINING",
+        ):
+            if message == f"gateway rejected request: {code}":
+                return f"LOCAL_GATEWAY_{code}"
     if re.fullmatch(r"LOCAL_[A-Z0-9_]{1,59}", message):
         return message
     return "LOCAL_READ_ONLY_REFRESH_FAILED"
