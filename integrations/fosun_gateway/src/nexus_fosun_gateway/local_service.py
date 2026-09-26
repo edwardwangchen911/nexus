@@ -10,6 +10,7 @@ import shutil
 import ssl
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -68,19 +69,34 @@ def _service_control_lock(root: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
+def _runtime_executable() -> Path:
+    return Path(sys.executable).resolve()
+
+
+def _service_log_directory() -> Path:
+    return Path.home() / "Library/Logs/nexus-fosun-gateway"
+
+
+def _program_arguments(root: Path, runtime: Path) -> list[str]:
+    return [str(_runtime_executable()), str(runtime), "run", "--repo-root", str(root)]
+
+
 def build_service_plist(root: Path, runtime: Path, revision: str) -> dict[str, object]:
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise ValueError("LOCAL_GATEWAY_RELEASE_INVALID")
-    log_dir = root / ".secrets/nexus-fosun-local"
+    log_dir = _service_log_directory()
     return {
         "Label": LABEL,
-        "ProgramArguments": [str(runtime), "run", "--repo-root", str(root)],
-        "WorkingDirectory": str(root),
+        "ProgramArguments": _program_arguments(root, runtime),
+        "WorkingDirectory": str(_runtime_executable().parent),
         "StandardOutPath": str(log_dir / "service.stdout.log"),
         "StandardErrorPath": str(log_dir / "service.stderr.log"),
         "RunAtLoad": False,
         "KeepAlive": False,
-        "EnvironmentVariables": {"NEXUS_RELEASE_REVISION": revision},
+        "EnvironmentVariables": {
+            "NEXUS_RELEASE_REVISION": revision,
+            "__PYVENV_LAUNCHER__": str(root / ".venv/bin/python3"),
+        },
     }
 
 
@@ -95,7 +111,7 @@ def inspect_launchctl_output(
         raise ValueError("LOCAL_GATEWAY_SERVICE_OWNER_MISMATCH")
     working = re.findall(r"^\s*working directory = ([^\n]+)$", output, re.MULTILINE)
     starts = list(re.finditer(r"^(\t*)arguments = \{\n", output, re.MULTILINE))
-    if len(working) != 1 or working[0] != str(root) or len(starts) != 1:
+    if len(working) != 1 or len(starts) != 1:
         raise ValueError("LOCAL_GATEWAY_SERVICE_OWNER_MISMATCH")
     indent = starts[0].group(1)
     arguments: list[str] = []
@@ -107,7 +123,19 @@ def inspect_launchctl_output(
         arguments.append(line[len(indent) + 1 :])
     else:
         raise ValueError("LOCAL_GATEWAY_SERVICE_OWNER_MISMATCH")
-    if arguments != [str(runtime), "run", "--repo-root", str(root)]:
+    legacy = working[0] == str(root) and arguments == [
+        str(runtime),
+        "run",
+        "--repo-root",
+        str(root),
+    ]
+    current = working[0] == str(_runtime_executable().parent) and arguments == _program_arguments(
+        root, runtime
+    )
+    if current:
+        launchers = re.findall(r"^\t+__PYVENV_LAUNCHER__ => ([^\n]+)$", output, re.MULTILINE)
+        current = launchers == [str(root / ".venv/bin/python3")]
+    if not (legacy or current):
         raise ValueError("LOCAL_GATEWAY_SERVICE_OWNER_MISMATCH")
     if expected_revision is not None:
         releases = re.findall(
@@ -344,9 +372,18 @@ def _start(root: Path, runtime: Path, launchctl: str, domain_label: str) -> int:
             or stat.S_IMODE(info.st_mode) != 0o700
         ):
             raise ValueError
+        log_directory = _service_log_directory()
+        log_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        log_info = log_directory.lstat()
+        if (
+            not stat.S_ISDIR(log_info.st_mode)
+            or log_info.st_uid != os.getuid()
+            or stat.S_IMODE(log_info.st_mode) != 0o700
+        ):
+            raise ValueError
         for name in ("service.stdout.log", "service.stderr.log"):
             descriptor = os.open(
-                directory / name,
+                log_directory / name,
                 os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
                 0o600,
             )

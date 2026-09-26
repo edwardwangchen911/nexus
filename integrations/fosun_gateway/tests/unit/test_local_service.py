@@ -3,6 +3,7 @@
 import json
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,11 +24,22 @@ def test_plist_has_fixed_owner_no_secrets_and_no_restart(tmp_path: Path) -> None
     value = build_service_plist(root, runtime, revision)
 
     assert value["Label"] == "com.nexus.fosun-local-gateway"
-    assert value["ProgramArguments"] == [str(runtime), "run", "--repo-root", str(root)]
-    assert value["WorkingDirectory"] == str(root)
+    assert value["ProgramArguments"] == [
+        str(Path(sys.executable).resolve()),
+        str(runtime),
+        "run",
+        "--repo-root",
+        str(root),
+    ]
+    assert value["WorkingDirectory"] == str(Path(sys.executable).resolve().parent)
     assert value["KeepAlive"] is False
     assert value["RunAtLoad"] is False
-    assert value["EnvironmentVariables"] == {"NEXUS_RELEASE_REVISION": revision}
+    assert value["EnvironmentVariables"] == {
+        "NEXUS_RELEASE_REVISION": revision,
+        "__PYVENV_LAUNCHER__": str(root / ".venv/bin/python3"),
+    }
+    assert str(root) not in str(value["StandardOutPath"])
+    assert str(root) not in str(value["StandardErrorPath"])
     assert "SECRET" not in str(value)
 
 
@@ -173,6 +185,9 @@ def test_explicit_start_registers_nonrenewing_private_service(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.local_service._service_log_directory", lambda: tmp_path / "logs"
+    )
     root = tmp_path
     local = root / ".secrets/nexus-fosun-local"
     local.mkdir(parents=True, mode=0o700)
@@ -233,6 +248,9 @@ def test_stop_signals_only_exact_owner_then_boots_out(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.local_service._service_log_directory", lambda: tmp_path / "logs"
+    )
     root = tmp_path
     local = root / ".secrets/nexus-fosun-local"
     local.mkdir(parents=True, mode=0o700)
@@ -320,3 +338,27 @@ def test_start_checks_control_lock_before_launchctl(
     assert json.loads(capsys.readouterr().out) == {
         "error_code": "LOCAL_GATEWAY_SERVICE_CONTROL_UNSAFE"
     }
+
+
+@pytest.mark.parametrize("launcher_matches", [True, False])
+def test_external_python_registration_requires_exact_venv_binding(
+    tmp_path: Path,
+    launcher_matches: bool,
+) -> None:
+    root = tmp_path / "repo"
+    runtime = root / ".venv/bin/nexus-fosun-gateway-local"
+    executable = Path(sys.executable).resolve()
+    launcher = root / ".venv/bin/python3" if launcher_matches else tmp_path / "other/python3"
+    output = (
+        "\tstate = running\n\tpid = 123\n"
+        f"\tworking directory = {executable.parent}\n"
+        "\targuments = {\n"
+        f"\t\t{executable}\n\t\t{runtime}\n\t\trun\n\t\t--repo-root\n\t\t{root}\n"
+        "\t}\n"
+        f"\t\t__PYVENV_LAUNCHER__ => {launcher}\n"
+    )
+    if launcher_matches:
+        assert inspect_launchctl_output(output, root, runtime) == ("running", 123, None)
+    else:
+        with pytest.raises(ValueError, match="LOCAL_GATEWAY_SERVICE_OWNER_MISMATCH"):
+            inspect_launchctl_output(output, root, runtime)
