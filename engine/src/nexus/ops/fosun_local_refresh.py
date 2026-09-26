@@ -1338,7 +1338,7 @@ async def _persist_market_snapshot(
             session,
             rows=calendar_rows,
             range_start=request_start_at.date(),
-            range_end=authorized_at.date(),
+            range_end=calendar_rows[-1][0],
             published_at=min(quote_raw.received_at, *bars_received_at),
         )
         bar_provider = FosunMarketDataProvider(
@@ -1734,7 +1734,12 @@ def _daily_window(
         raise ValueError("LOCAL_COMPLETED_SESSION_UNAVAILABLE")
     request_end_at = datetime.combine(completed[-1].date(), time.min, tzinfo=UTC)
     request_start_at = request_end_at - timedelta(days=400)
-    sessions = calendar.sessions_in_range(request_start_at.date(), now.date())
+    # The service scheduler needs future sessions even after today's close.
+    # Calendar clocks are known in advance; market evidence remains bounded by
+    # request_end_at and expected_sessions filters future rows before collection.
+    sessions = calendar.sessions_in_range(
+        request_start_at.date(), now.date() + timedelta(days=30)
+    )
     rows = tuple(
         (
             session.date(),

@@ -380,3 +380,31 @@ async def test_local_ready_broker_snapshot_is_finalized_atomically(
     assert run.cash_flow_quality == "PASS"
     assert snapshot is not None and snapshot.status == "READY"
     assert snapshot.position_hash == canonical_position_hash(frozen.portfolio_snapshot.positions)
+
+
+@pytest.mark.asyncio
+async def test_refresh_calendar_supports_service_after_friday_close(
+    migrated_database_url: str,
+) -> None:
+    from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
+
+    now = datetime(2026, 9, 26, 3, 40, tzinfo=UTC)
+    start, market_end, rows = refresh_module._daily_window(now)
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session, session.begin():
+            authority = await _insert_calendar(
+                session,
+                rows=rows,
+                range_start=start.date(),
+                range_end=rows[-1][0],
+                published_at=now - timedelta(seconds=1),
+            )
+        async with factory() as session:
+            selected = await select_agent_paper_service_calendar_authority(session, now=now)
+        assert selected.calendar_authority_id == authority.id
+        assert selected.session == date(2026, 9, 28)
+        assert selected.next_session == date(2026, 9, 29)
+        assert market_end.date() == date(2026, 9, 25)
+    finally:
+        await factory.kw["bind"].dispose()

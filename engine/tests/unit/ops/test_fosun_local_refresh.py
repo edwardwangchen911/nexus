@@ -425,6 +425,25 @@ def test_daily_window_is_bounded_to_completed_xnys_sessions() -> None:
     assert all(market_open < market_close for _, market_open, market_close in rows)
 
 
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime(2026, 9, 26, 3, 40, tzinfo=UTC),
+        datetime(2026, 11, 28, 15, 0, tzinfo=UTC),
+    ],
+)
+def test_refresh_calendar_covers_future_service_sessions_without_future_bars(now: datetime) -> None:
+    start, end, rows = _daily_window(now)
+
+    upcoming = tuple(row for row in rows if row[1] > now)
+    assert len(upcoming) >= 2
+    assert rows[-1][0] <= now.date() + timedelta(days=30)
+    expected_market_sessions = tuple(row[0] for row in rows if row[0] <= end.date())
+    assert expected_market_sessions[-1] == end.date()
+    assert all(row[2] <= now - timedelta(minutes=30) for row in rows if row[0] <= end.date())
+    assert start == end - timedelta(days=400)
+
+
 def test_us_holding_codes_are_deduplicated_and_stably_sorted() -> None:
     holdings = (
         _position("usNVDA"),
