@@ -146,6 +146,57 @@ Ticker: SYNX Unlike most ETFs, shares trade in the secondary market.
 
 
 @pytest.mark.asyncio
+async def test_current_held_equity_etf_future_events_are_not_futures_exposure():
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    document = b"""<html><body>497K Summary Prospectus May 1, 2026
+SYNX Synthetic Equity ETF Summary Prospectus Principal U.S. Listing Exchange: NYSE Arca.
+Investment Objective The Fund seeks to track an index of U.S. equities.
+Fees and Expenses Costs apply. Principal Investment Strategies The Fund invests in common
+stocks of companies. A failure to disclose material future events may affect those companies.
+Principal Investment Risks Market risks apply. Purchase and Sale of Fund Shares Shares trade
+on an exchange. Tax Information.</body></html>"""
+    result = await validate_current_held_etf_originals(
+        symbol="SYNX", contents=originals(symbol="SYNX", document=document),
+        now=datetime.now(UTC),
+    )
+    assert result.identity.asset_type == "equity_etf"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exposure",
+    ["", "futures contracts", "a future contract", "a future-contract", "a future on an index"],
+)
+async def test_current_held_swap_equity_collateral_preserves_futures_rejection(exposure):
+    from nexus.market.current_etf_identity import validate_current_held_etf_originals
+
+    document = f"""<html><body>497K Summary Prospectus May 1, 2026
+Ticker: SYNX Synthetic Daily ETF listed on The Nasdaq Stock Market LLC.
+Investment Objective The Fund seeks two times the daily performance of a company.
+Fund Fees and Expenses Costs apply. Principal Investment Strategies The Fund obtains exposure
+through swap agreements rather than directly owning securities of companies. The Fund holds
+short-term fixed income instruments as collateral for the swaps.
+{'The Fund also invests in ' + exposure + '.' if exposure else ''}
+Principal Risks Market risks apply. Ticker: SYNX Unlike most ETFs, shares trade on an exchange.
+</body></html>""".encode()
+    contents = originals(
+        symbol="SYNX", exchange="NASDAQ", document=document,
+        description="A 2x leveraged ETF providing daily exposure to common stock shares.",
+    )
+    if exposure:
+        with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+            await validate_current_held_etf_originals(
+                symbol="SYNX", contents=contents, now=datetime.now(UTC)
+            )
+    else:
+        result = await validate_current_held_etf_originals(
+            symbol="SYNX", contents=contents, now=datetime.now(UTC)
+        )
+        assert result.identity.asset_type == "equity_etf"
+
+
+@pytest.mark.asyncio
 async def test_current_held_validation_fails_closed_when_fixed_definition_is_unavailable(
     monkeypatch,
 ):

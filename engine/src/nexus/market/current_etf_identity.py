@@ -482,10 +482,16 @@ def _current_held_nasdaq_identity(
         and re.search(r"\b(?:leveraged|2x|two times)\b", provider_text)
     )
     unsupported = re.search(
-        r"\b(?:bitcoin|ether|bullion|commodit(?:y|ies)|futures?)\b", equity_text
+        r"\b(?:bitcoin|ether|bullion|commodit(?:y|ies)|futures)\b"
+        r"|\bfuture(?:[ -]+contracts?\b|\s+on\b)",
+        equity_text,
     )
     has_equity = sec_equity or company_index_equity or derivative_equity
-    if not has_equity or unsupported or (fixed_income and not sec_equity):
+    if (
+        not has_equity
+        or unsupported
+        or (fixed_income and not (sec_equity or leveraged_equity_collateral))
+    ):
         raise ValueError
     legal_matches = list(
         re.finditer(
