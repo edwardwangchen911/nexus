@@ -241,9 +241,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     from nexus_fosun_gateway import main as gateway_main
 
+    # The pinned SDK reads these keys from process environment, even when its
+    # GatewaySettings caller has already loaded the fixed private material.
+    assert settings.fsopenapi_client_private_key is not None
+    assert settings.fsopenapi_server_public_key is not None
+    sdk_environment = {
+        "FSOPENAPI_CLIENT_PRIVATE_KEY": settings.fsopenapi_client_private_key.get_secret_value(),
+        "FSOPENAPI_SERVER_PUBLIC_KEY": settings.fsopenapi_server_public_key.get_secret_value(),
+    }
+    previous = {name: os.environ.get(name) for name in sdk_environment}
     try:
+        os.environ.update(sdk_environment)
         gateway_main.run(settings)
     except Exception:
         print(json.dumps({"status": "failed", "code": "LOCAL_GATEWAY_START_FAILED"}))
         return 1
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
     return 0

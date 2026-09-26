@@ -1,11 +1,42 @@
 """Host-local Gateway configuration never depends on diagnostic launch scripts."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 from nexus_fosun_gateway.local_runtime import load_local_gateway_settings, main
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_local_run_binds_sdk_keys_and_restores_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    fails: bool,
+) -> None:
+    root = _root(tmp_path)
+    monkeypatch.setattr("nexus_fosun_gateway.local_runtime._runtime_matches_repo", lambda _: True)
+    monkeypatch.setattr("nexus_fosun_gateway.local_runtime.checkout_release", lambda _: "a" * 40)
+    monkeypatch.setenv("NEXUS_RELEASE_REVISION", "a" * 40)
+    monkeypatch.setenv("FSOPENAPI_CLIENT_PRIVATE_KEY", "previous-private")
+    monkeypatch.delenv("FSOPENAPI_SERVER_PUBLIC_KEY", raising=False)
+    observed = []
+
+    def run_gateway(settings: object) -> None:
+        observed.append((os.environ.get("FSOPENAPI_CLIENT_PRIVATE_KEY"),
+                         os.environ.get("FSOPENAPI_SERVER_PUBLIC_KEY")))
+        if fails:
+            raise RuntimeError("provider secret must not reach output")
+
+    monkeypatch.setattr("nexus_fosun_gateway.main.run", run_gateway)
+    assert main(["run", "--repo-root", str(root)]) == int(fails)
+    assert observed == [("test-private-key\n", "test-server-key\n")]
+    assert os.environ["FSOPENAPI_CLIENT_PRIVATE_KEY"] == "previous-private"
+    assert "FSOPENAPI_SERVER_PUBLIC_KEY" not in os.environ
+    output = capsys.readouterr().out
+    assert "test-private-key" not in output
+    assert "test-server-key" not in output
+    assert "provider secret" not in output
 
 
 def _private(path: Path, content: str) -> None:
