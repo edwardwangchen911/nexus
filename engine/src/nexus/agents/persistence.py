@@ -524,11 +524,18 @@ async def admit_research_run(
     after_authority: Callable[[], Awaitable[None]] | None = None,
     job_type: JobType = JobType.AGENT_RESEARCH,
     reuse_latest_actor_agent_version: bool = False,
+    reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
     if now.tzinfo != UTC or request.decision_time > now:
         raise ValueError("point-in-time data authority is invalid")
+    if reuse_latest_actor_prompts_only and (
+        not reuse_latest_actor_agent_version
+        or model_config_id is None
+        or version_source_run_id is not None
+    ):
+        raise ValueError("Agent version authority is ambiguous")
     if version_source_run_id is not None and (
         reuse_latest_actor_agent_version
         or prompt_version_id is not None
@@ -583,10 +590,12 @@ async def admit_research_run(
         prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
     if prior_run is not None:
         model = await session.get(AgentModelConfigRecord, prior_run.model_config_id)
-        if model is not None and (
+        if model is None or (
             model.config_hash != prior_run.model_hash or model.version != prior_run.pricing_version
         ):
-            model = None
+            raise ValueError("point-in-time data authority is invalid")
+        if reuse_latest_actor_prompts_only:
+            model = await session.get(AgentModelConfigRecord, model_config_id)
     elif model_config_id is not None:
         model = await session.get(AgentModelConfigRecord, model_config_id)
     else:

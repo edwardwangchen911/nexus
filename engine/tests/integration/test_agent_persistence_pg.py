@@ -803,8 +803,21 @@ async def test_admission_pins_exact_version_source_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reuse_actor", "prompts_only", "model_id", "source_id"),
+    [
+        (True, False, _MODEL_ID, _RUN_IDS[0]),
+        (False, True, _MODEL_ID, None),
+        (True, True, None, None),
+        (True, True, _MODEL_ID, _RUN_IDS[0]),
+    ],
+)
 async def test_admission_rejects_ambiguous_version_authority(
     migrated_database_url: str,
+    reuse_actor: bool,
+    prompts_only: bool,
+    model_id: UUID | None,
+    source_id: UUID | None,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     await _seed_authority(factory)
@@ -823,11 +836,12 @@ async def test_admission_rejects_ambiguous_version_authority(
                 request_hash="8" * 64,
                 request=request,
                 prompt_version_id=_PROMPT_ID,
-                model_config_id=_MODEL_ID,
+                model_config_id=model_id,
                 daily_limit_usd=Decimal("100"),
                 now=_NOW,
-                reuse_latest_actor_agent_version=True,
-                version_source_run_id=_RUN_IDS[0],
+                reuse_latest_actor_agent_version=reuse_actor,
+                reuse_latest_actor_prompts_only=prompts_only,
+                version_source_run_id=source_id,
             )
 
 

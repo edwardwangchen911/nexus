@@ -2386,10 +2386,14 @@ def _safe_no_trade_intent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("paper_scope_upgrade", [False, True])
 async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exists(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    paper_scope_upgrade: bool,
 ) -> None:
+    from nexus.agents.codex_sdk import MODEL_ID
+    from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
     seed = await seed_paper_batch(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -2406,10 +2410,11 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
             assert registered is not None
             await _seed_cycle_research_authority(session, registered_decision=registered.decision)
 
+        source_cycle_id = uuid4()
         async with sessions.begin() as session:
             version_source = await admit_agent_paper_research(
                 session,
-                cycle_id=uuid4(),
+                cycle_id=source_cycle_id,
                 instrument_id=INSTRUMENTS[0][0],
                 research_snapshot_id=UUID(int=0x63000000000000000000000000000301),
                 research_as_of=DECISION_TIME,
@@ -2435,7 +2440,6 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
             assert first_run.model_hash == version_source.run.model_hash
             first_manifest = dict(first_run.prompt_manifest)
             first_model_config_id = first_run.model_config_id
-            first_model_hash = first_run.model_hash
             newer_content = "newer portfolio prompt must not replace the paper champion"
             session.add_all(
                 (
@@ -2448,14 +2452,16 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
                     ),
                     AgentModelConfigRecord(
                         id=UUID("f3000000-0000-0000-0000-000000000002"),
-                        model_id="newer-fixture-agent-paper",
-                        version="codex-sdk-chatgpt-v4-actionable",
+                        model_id=MODEL_ID if paper_scope_upgrade else "newer-fixture-agent-paper",
+                        version=ACTIONABLE_CONFIG_VERSION
+                        if paper_scope_upgrade
+                        else "codex-sdk-chatgpt-v4-actionable",
                         config_hash="f" * 64,
-                        max_input_tokens=100,
-                        max_tool_calls=1,
-                        max_output_tokens=100,
-                        input_usd_per_million=Decimal("1"),
-                        output_usd_per_million=Decimal("1"),
+                        max_input_tokens=96000 if paper_scope_upgrade else 100,
+                        max_tool_calls=0 if paper_scope_upgrade else 1,
+                        max_output_tokens=8192 if paper_scope_upgrade else 100,
+                        input_usd_per_million=Decimal("0" if paper_scope_upgrade else "1"),
+                        output_usd_per_million=Decimal("0" if paper_scope_upgrade else "1"),
                         pricing_available_at=first_run.decision_time - timedelta(days=1),
                         pricing_expires_at=first_run.decision_time + timedelta(days=1),
                     ),
@@ -2473,9 +2479,27 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
             )
 
         assert second.run.prompt_manifest == first_manifest
-        assert second.run.model_config_id == first_model_config_id
+        assert second.run.model_config_id == (
+            UUID("f3000000-0000-0000-0000-000000000002")
+            if paper_scope_upgrade
+            else first_model_config_id
+        )
         assert second.replayed is False
         assert second.run_id != first_run.id
+
+        async with sessions.begin() as session:
+            old_replay = await admit_agent_paper_research(
+                session,
+                cycle_id=source_cycle_id,
+                instrument_id=version_source.run.instrument_id,
+                research_snapshot_id=version_source.run.data_snapshot_id,
+                research_as_of=version_source.run.decision_time,
+                daily_limit_usd=Decimal("1"),
+                now=version_source.run.decision_time,
+            )
+        assert old_replay.replayed is True
+        assert old_replay.run_id == version_source.run_id
+        assert old_replay.run.model_config_id == version_source.run.model_config_id
 
         async def selected_version(
             session: AsyncSession, *, now: datetime
@@ -2586,7 +2610,12 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
             await _wait_for_advisory_wait(sessions, await backend_pid)
         third = await locked_admission
         assert third.run.prompt_manifest == first_manifest
-        assert third.run.model_config_id == first_model_config_id
+        assert third.run.model_config_id == (
+            UUID("f3000000-0000-0000-0000-000000000002")
+            if paper_scope_upgrade
+            else first_model_config_id
+        )
+        third_model_hash = third.run.model_hash
 
         async with sessions.begin() as session:
             await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
@@ -2617,7 +2646,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
                         "prompt_version_id=:prompt_version_id WHERE id=:run_id"
                     ),
                     {
-                        "model_hash": first_model_hash,
+                        "model_hash": third_model_hash,
                         "prompt_version_id": UUID("f3000000-0000-0000-0000-000000000001"),
                         "run_id": third.run_id,
                     },

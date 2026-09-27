@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION, ACTIONABLE_CONFIG_VERSIONS
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import ResearchAdmission, admit_research_run
 from nexus.agents.portfolio_context import read_portfolio_context
@@ -309,8 +309,10 @@ async def admit_agent_paper_research(
         )
     request_hash = job_input_hash(request_payload)
     reuse_latest_actor_agent_version = not evaluation_actor
+    reuse_latest_actor_prompts_only = False
     if not evaluation_actor:
         from nexus.paper.agent_version_evaluation import (
+            _model_is_agent_paper_compatible,
             load_selected_internal_agent_version,
         )
 
@@ -328,6 +330,17 @@ async def admit_agent_paper_research(
                     AgentModelConfigRecord.id.desc(),
                 )
                 .limit(1)
+            )
+            model = (
+                await session.get(AgentModelConfigRecord, model_config_id)
+                if model_config_id is not None
+                else None
+            )
+            reuse_latest_actor_prompts_only = (
+                model is not None
+                and model.version == ACTIONABLE_CONFIG_VERSION
+                and _model_is_agent_paper_compatible(model)
+                and model.max_tool_calls == 0
             )
         else:
             reuse_latest_actor_agent_version = False
@@ -350,5 +363,6 @@ async def admit_agent_paper_research(
         now=now,
         job_type=JobType.AGENT_PAPER_RESEARCH,
         reuse_latest_actor_agent_version=reuse_latest_actor_agent_version,
+        reuse_latest_actor_prompts_only=reuse_latest_actor_prompts_only,
         version_source_run_id=version_source_run_id,
     )
