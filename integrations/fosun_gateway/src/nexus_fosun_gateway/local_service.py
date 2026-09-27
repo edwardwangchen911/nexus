@@ -153,6 +153,9 @@ def inspect_launchctl_output(
     if states[0].strip() == "running" and len(pids) == 1:
         state = "running"
         pid: int | None = int(pids[0])
+    elif states[0].strip() == "xpcproxy":
+        state = "starting"
+        pid = int(pids[0]) if pids else None
     elif states[0].strip() in {"inactive", "not running", "exited"} and not pids:
         state = "inactive"
         pid = None
@@ -271,6 +274,9 @@ def _service_action(action: str, root: Path, runtime: Path) -> int:
             print(json.dumps({"error_code": code}))
             return 1
     if action == "status":
+        if state == "starting":
+            print(json.dumps({"status": "starting"}))
+            return 1
         if state == "running":
             try:
                 ready = local_health_ready(root, expected_pid=pid)
@@ -281,6 +287,9 @@ def _service_action(action: str, root: Path, runtime: Path) -> int:
         print(json.dumps({"status": state}))
         return 0
     if action == "start":
+        if state == "starting":
+            print(json.dumps({"status": "starting"}))
+            return 1
         if state == "running":
             ready = local_health_ready(root, expected_pid=pid)
             print(json.dumps({"status": "running" if ready else "degraded"}))
@@ -299,6 +308,9 @@ def _service_action(action: str, root: Path, runtime: Path) -> int:
                 print(json.dumps({"error_code": "LOCAL_GATEWAY_SERVICE_BOOTOUT_FAILED"}))
                 return 1
         return _start(root, runtime, launchctl, domain_label)
+    if state == "starting":
+        print(json.dumps({"error_code": "LOCAL_GATEWAY_SERVICE_STOP_UNCONFIRMED"}))
+        return 1
     if state == "stopped":
         print(json.dumps({"status": "stopped"}))
         return 0
@@ -482,7 +494,9 @@ def _start(root: Path, runtime: Path, launchctl: str, domain_label: str) -> int:
                 else "LOCAL_GATEWAY_SERVICE_STATUS_UNAVAILABLE"
             )
             break
-        if state == "inactive" and last_exit is None:
+        if (state == "inactive" and last_exit is None) or (
+            state == "starting" and last_exit in (None, 0)
+        ):
             time.sleep(1)
             continue
         if state != "running" or last_exit not in (None, 0):

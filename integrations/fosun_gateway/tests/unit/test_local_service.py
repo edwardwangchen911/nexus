@@ -238,10 +238,11 @@ def test_explicit_start_registers_nonrenewing_private_service(
     )
     monkeypatch.setattr("nexus_fosun_gateway.local_service.time.sleep", lambda _: None)
 
-    assert main(["start", "--repo-root", str(root)]) == (0 if initial_state == "inactive" else 1)
+    recognized = initial_state in {"inactive", "xpcproxy"}
+    assert main(["start", "--repo-root", str(root)]) == (0 if recognized else 1)
     assert json.loads(capsys.readouterr().out) == (
         {"status": "started"}
-        if initial_state == "inactive"
+        if recognized
         else {
             "error_code": "LOCAL_GATEWAY_SERVICE_START_UNCONFIRMED",
             "observation_stage": "launchctl_parse",
@@ -321,6 +322,45 @@ def test_stop_signals_only_exact_owner_then_boots_out(
     )
     assert commands.count("kill") == 1
     assert commands.count("bootout") == (1 if process_exits else 0)
+
+
+@pytest.mark.parametrize("action", ["status", "start", "stop"])
+def test_existing_starting_instance_is_observed_without_another_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+) -> None:
+    local = tmp_path / ".secrets/nexus-fosun-local"
+    local.mkdir(parents=True, mode=0o700)
+    (tmp_path / ".secrets").chmod(0o700)
+    runtime = tmp_path / ".venv/bin/nexus-fosun-gateway-local"
+    revision = "a" * 40
+    commands = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(argv[1])
+        assert argv[1] == "print"
+        output = (
+            "\tstate = xpcproxy\n\tpid = 123\n"
+            f"\tworking directory = {tmp_path}\n\targuments = {{\n"
+            f"\t\t{runtime}\n\t\trun\n\t\t--repo-root\n\t\t{tmp_path}\n\t}}\n"
+            f"\t\tNEXUS_RELEASE_REVISION => {revision}\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, output.encode(), b"")
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.local_service.shutil.which", lambda _: "/fake/launchctl"
+    )
+    monkeypatch.setattr("nexus_fosun_gateway.local_service.subprocess.run", run)
+    monkeypatch.setattr("nexus_fosun_gateway.local_service._checkout_revision", lambda _: revision)
+    assert main([action, "--repo-root", str(tmp_path)]) == 1
+    assert json.loads(capsys.readouterr().out) == (
+        {"error_code": "LOCAL_GATEWAY_SERVICE_STOP_UNCONFIRMED"}
+        if action == "stop"
+        else {"status": "starting"}
+    )
+    assert commands == ["print"]
 
 
 def test_control_lock_rejects_symlink(tmp_path: Path) -> None:

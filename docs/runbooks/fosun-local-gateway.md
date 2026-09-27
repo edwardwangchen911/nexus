@@ -32,6 +32,9 @@ uv run --package nexus-fosun-gateway nexus-fosun-gateway-service stop --repo-roo
 `LOCAL_GATEWAY_SERVICE_START_UNCONFIRMED` 只表示本次观察未确认启动，不能据此再次启动。
 输出中的 `observation_stage` 区分 launchd 读取、状态解析、进程退出与健康检查；
 `observation_code` 和 `observed_state` 仅输出固定安全值，未知状态不透传原始内容。
+launchd 的 `xpcproxy` 表示启动中，不是就绪；首次启动只在既有观察上限内等待
+同一实例变为 running 并通过健康检查。对已启动中的实例再调用 `start` 只报告
+`starting`，不重复注册或启动；`stop` 此时也不绕过退出确认。
 先用同一标签的 `status` 核对原实例，避免创建第二实例。显式 `stop` 在核对精确归属、
 确认无 PID 且状态为 inactive 后清理注册；macOS 的信号退出无需伪造数字退出码。
 
