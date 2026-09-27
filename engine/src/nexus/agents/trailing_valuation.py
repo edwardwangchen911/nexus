@@ -131,6 +131,11 @@ def _aligned_eps_components(
     if not isinstance(items, Sequence) or isinstance(items, str | bytes):
         return None
     facts = tuple(fact for item in items if (fact := _parse_eps_fact(item)) is not None)
+    if not facts:
+        return None
+    # Older interim reports remain useful evidence, but cannot make current
+    # valuation ambiguous or stand in for an incomplete latest reporting period.
+    latest_period_end = max(fact.period_end for fact in facts)
     annual = tuple(
         fact for fact in facts if 330 <= (fact.period_end - fact.period_start).days <= 380
     )
@@ -139,6 +144,8 @@ def _aligned_eps_components(
     ytd = tuple(fact for fact in facts if 75 <= (fact.period_end - fact.period_start).days <= 300)
     matches: list[tuple[_EpsFact, _EpsFact, _EpsFact]] = []
     for current in ytd:
+        if current.period_end != latest_period_end:
+            continue
         for prior in ytd:
             if not 350 <= (current.period_end - prior.period_end).days <= 380:
                 continue

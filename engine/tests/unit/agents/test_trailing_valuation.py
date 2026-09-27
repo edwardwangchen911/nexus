@@ -140,7 +140,7 @@ def test_trailing_valuation_accepts_aligned_first_quarter_and_half_year(
             _eps_fact("5.62", "2025-01-27", prior_end, evidence_ref_id="interim"),
             _eps_fact("6.88", "2026-01-26", current_end, evidence_ref_id="interim"),
             # A standalone quarter must not substitute for fiscal-year-to-date EPS.
-            _eps_fact("2.02", "2026-04-27", "2026-07-26", evidence_ref_id="interim"),
+            _eps_fact("2.02", "2025-04-28", "2025-07-27", evidence_ref_id="interim"),
         ],
     }
 
@@ -184,6 +184,45 @@ def test_half_year_valuation_preserves_component_authority(mutation: str) -> Non
         _security_snapshot(), {"status": "ok", "items": items}
     )
 
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "aligned_diluted_eps_unavailable"
+
+
+def _multiple_interim_facts() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "items": [
+            _eps_fact("7.46", "2024-11-04", "2025-11-02", evidence_ref_id="annual"),
+            _eps_fact("3.00", "2024-11-04", "2025-05-04", evidence_ref_id="half"),
+            _eps_fact("4.00", "2025-11-03", "2026-05-03", evidence_ref_id="half"),
+            _eps_fact("5.62", "2024-11-04", "2025-08-03", evidence_ref_id="nine"),
+            _eps_fact("6.88", "2025-11-03", "2026-08-02", evidence_ref_id="nine"),
+        ],
+    }
+
+
+def test_trailing_valuation_selects_latest_period_independent_of_item_order() -> None:
+    facts = _multiple_interim_facts()
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+    facts["items"].reverse()  # type: ignore[attr-defined]
+    assert codex_sdk.derive_trailing_valuation(_security_snapshot(), facts) == result
+    assert result["status"] == "available"
+    assert result["ttm_eps"]["value"] == "8.720000000000"  # type: ignore[index]
+    assert result["ttm_eps"]["components"][2]["period_end"] == "2026-08-02"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("mutation", ["prior_missing", "latest_conflict"])
+def test_trailing_valuation_does_not_fall_back_from_incomplete_or_conflicting_latest(
+    mutation: str,
+) -> None:
+    facts = _multiple_interim_facts()
+    if mutation == "prior_missing":
+        facts["items"].pop(3)  # type: ignore[attr-defined]
+    else:
+        duplicate = deepcopy(facts["items"][4])  # type: ignore[index]
+        duplicate["value"] = "7.00"
+        facts["items"].append(duplicate)  # type: ignore[attr-defined]
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
     assert result["status"] == "unavailable"
     assert result["reason"] == "aligned_diluted_eps_unavailable"
 
