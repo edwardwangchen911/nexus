@@ -243,10 +243,20 @@ def test_explicit_start_registers_nonrenewing_private_service(
     assert (local / "service.plist").stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize(
+    ("exit_evidence", "process_exits"),
+    [
+        ("\tlast exit code = 0\n", True),
+        ("\tlast terminating signal = Interrupt: 2\n", True),
+        ("\tlast terminating signal = Interrupt: 2\n", False),
+    ],
+)
 def test_stop_signals_only_exact_owner_then_boots_out(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    exit_evidence: str,
+    process_exits: bool,
 ) -> None:
     monkeypatch.setattr(
         "nexus_fosun_gateway.local_service._service_log_directory", lambda: tmp_path / "logs"
@@ -268,7 +278,7 @@ def test_stop_signals_only_exact_owner_then_boots_out(
                 return subprocess.CompletedProcess(argv, 113, b"", b"")
             output = (
                 f"\tstate = {state}\n"
-                + ("\tpid = 123\n" if state == "running" else "\tlast exit code = 0\n")
+                + ("\tpid = 123\n" if state == "running" else exit_evidence)
                 + f"\tworking directory = {root}\n"
                 + "\targuments = {\n"
                 + f"\t\t{runtime}\n\t\trun\n\t\t--repo-root\n\t\t{root}\n"
@@ -278,7 +288,8 @@ def test_stop_signals_only_exact_owner_then_boots_out(
             return subprocess.CompletedProcess(argv, 0, output.encode(), b"")
         if argv[1] == "kill":
             assert argv[2] == "SIGINT"
-            state = "inactive"
+            if process_exits:
+                state = "inactive"
         if argv[1] == "bootout":
             state = "stopped"
         return subprocess.CompletedProcess(argv, 0, b"", b"")
@@ -288,11 +299,16 @@ def test_stop_signals_only_exact_owner_then_boots_out(
     )
     monkeypatch.setattr("nexus_fosun_gateway.local_service.subprocess.run", run)
     monkeypatch.setattr("nexus_fosun_gateway.local_service._checkout_revision", lambda _: "a" * 40)
+    monkeypatch.setattr("nexus_fosun_gateway.local_service.time.sleep", lambda _: None)
 
-    assert main(["stop", "--repo-root", str(root)]) == 0
-    assert json.loads(capsys.readouterr().out) == {"status": "stopped"}
+    assert main(["stop", "--repo-root", str(root)]) == (0 if process_exits else 1)
+    assert json.loads(capsys.readouterr().out) == (
+        {"status": "stopped"}
+        if process_exits
+        else {"error_code": "LOCAL_GATEWAY_SERVICE_STOP_UNCONFIRMED"}
+    )
     assert commands.count("kill") == 1
-    assert commands.count("bootout") == 1
+    assert commands.count("bootout") == (1 if process_exits else 0)
 
 
 def test_control_lock_rejects_symlink(tmp_path: Path) -> None:

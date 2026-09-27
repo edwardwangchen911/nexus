@@ -327,10 +327,12 @@ def _service_action(action: str, root: Path, runtime: Path) -> int:
                 )
             except (UnicodeError, ValueError):
                 break
-            if state == "inactive" and last_exit is not None:
+            # launchd reports signal termination without a numeric exit code.
+            # The exact-owner parser already requires an inactive state with no PID.
+            if state == "inactive":
                 break
             time.sleep(0.2)
-        if state != "inactive" or last_exit is None:
+        if state != "inactive":
             print(json.dumps({"error_code": "LOCAL_GATEWAY_SERVICE_STOP_UNCONFIRMED"}))
             return 1
     removed = subprocess.run(
