@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 MAX_EXCERPT = 12000
 SCHEMA_VERSION = "sec_disclosure_v1"
-SEC_RESEARCH_FORMS = ("10-K", "10-Q", "8-K", "6-K", "497K")
+SEC_RESEARCH_FORMS = ("10-K", "10-Q", "8-K", "8-K/A", "6-K", "497K")
 
 
 class SecFundIdentity(BaseModel):

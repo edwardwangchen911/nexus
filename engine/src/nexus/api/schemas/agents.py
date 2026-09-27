@@ -129,6 +129,14 @@ class ResearchInputExhibit(ExhibitText):
     quarter_metrics: ExhibitQuarterMetrics | None = None
 
 
+class ResearchInputAmendment(_StrictAgentSchema):
+    relation_status: Literal["unknown"]
+    original_accession_number: None = None
+    content_coverage: Literal["primary_document_only"]
+    attachments_status: Literal["not_collected"]
+    accounting_revision_status: Literal["unverified"]
+
+
 class ResearchInputFiling(_StrictAgentSchema):
     evidence_ref_id: UUID
     source: Literal["sec"] = "sec"
@@ -140,6 +148,7 @@ class ResearchInputFiling(_StrictAgentSchema):
     content_hash: str = Field(pattern="^[0-9a-f]{64}$")
     disclosure_excerpt: str | None = Field(default=None, max_length=12000)
     disclosure_truncated: bool = False
+    amendment: ResearchInputAmendment | None = None
     exhibit: ResearchInputExhibit | None = None
     source_url: str | None = Field(
         default=None,

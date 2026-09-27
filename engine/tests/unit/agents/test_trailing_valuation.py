@@ -260,3 +260,11 @@ def test_trailing_valuation_fails_closed_for_unqualified_components(
     }
     assert security == original_security
     assert facts == original_facts
+
+
+def test_trailing_valuation_does_not_qualify_eps_pending_amendment_review():
+    facts = _financial_facts()
+    facts["items"][0]["amendment_review_status"] = "unverified"
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "sec_amendment_accounting_review_unverified"

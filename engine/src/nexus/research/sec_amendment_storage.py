@@ -49,9 +49,9 @@ async def verify_amendment_archive(
         or artifact.source != "sec"
         or artifact.schema_version != RAW_SCHEMA
         or artifact.byte_size != document.raw_byte_length
-        or artifact.received_at != document.received_at
-        or artifact.available_at != document.received_at
-        or artifact.observed_at != document.received_at
+        or artifact.received_at > document.received_at
+        or artifact.available_at != artifact.received_at
+        or artifact.observed_at != artifact.received_at
         or artifact.created_at > as_of
         or document.received_at > as_of
     ):
@@ -99,26 +99,35 @@ async def persist_amendment(
                 DataSnapshot.schema_version == SCHEMA_VERSION,
             )
         )
+        if snapshot is None:
+            raise ValueError("SEC_AMENDMENT_ACCESSION_CONFLICT")
+        saved = SecAmendmentDisclosure.model_validate(snapshot.payload)
+        saved_content = saved.canonical_bytes()
+        saved_digest = sha256(saved_content).hexdigest()
         if (
-            filing is None
+            document.received_at < saved.received_at
+            or saved.model_dump(mode="json", exclude={"received_at"})
+            != document.model_dump(mode="json", exclude={"received_at"})
+            or filing is None
             or filing.instrument_id != document.instrument_id
-            or snapshot is None
-            or existing.content_hash != digest
-            or existing.revision != digest
-            or snapshot.payload != document.model_dump(mode="json")
-            or existing.available_at != document.received_at
-            or existing.byte_length != len(content)
+            or existing.content_hash != saved_digest
+            or existing.revision != saved_digest
+            or existing.available_at != saved.received_at
+            or existing.byte_length != len(saved_content)
+            or filing.source != "sec"
+            or filing.provider_object_id != saved.accession_number
+            or filing.revision != saved_digest
             or filing.form != document.form
             or filing.accession_number != document.accession_number
             or filing.accepted_at != document.accepted_at
             or filing.filed_at != document.filed_at
-            or snapshot.received_at != document.received_at
-            or snapshot.available_at != document.received_at
+            or snapshot.received_at != saved.received_at
+            or snapshot.available_at != saved.received_at
             or snapshot.observed_at != document.accepted_at
         ):
             raise ValueError("SEC_AMENDMENT_ACCESSION_CONFLICT")
         await verify_amendment_archive(
-            session, store, document, canonical_uri=existing.location, as_of=now
+            session, store, saved, canonical_uri=existing.location, as_of=now
         )
         return False
     raw_uri = await store.put_if_absent(key=_raw_key(document), content=raw)
@@ -145,7 +154,9 @@ async def persist_amendment(
         or artifact.schema_version != RAW_SCHEMA
         or artifact.source != "sec"
         or artifact.byte_size != len(raw)
-        or artifact.received_at != document.received_at
+        or artifact.received_at > document.received_at
+        or artifact.available_at != artifact.received_at
+        or artifact.observed_at != artifact.received_at
     ):
         raise ValueError("SEC_AMENDMENT_ARTIFACT_CONFLICT")
     location = await store.put_if_absent(

@@ -411,3 +411,19 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app d
 入口（见 baseline 运行手册）；该入口当前只覆盖固定定义的普通股，其他类型或
 定义外标的保持明确缺口，不伪造身份。已有合法身份正常复用；已有字段与来源冲突
 时仍拒绝，不覆盖旧行或为了完成刷新更换UUID。订单中首次出现的新美股也适用。
+
+### SEC 普通披露与修订件
+
+正常 `nexus-openai-local refresh-disclosure --backend codex_sdk --instrument-id <Instrument UUID> --form 8-K`
+入口独立保存最新普通 8-K 和最新 8-K/A。首次冷读取最多四次 GET：公司名录、submissions、
+普通主文和修订主文；没有普通件时可只保存独立修订件。相同类型存在无法唯一选择的同刻
+文件时返回 `SEC_LOCAL_DISCLOSURE_AMBIGUOUS`，不按 accession 猜先后，不自动重试。
+
+新修订件使用 `sec_amendment_v1`：接收时间取响应到达后的数据库时钟，并用同一时点作
+可用时间。读取核对归档原件与规范字节、hash、长度、摘录、接收时间和冻结归属；重复观察
+相同原件保留首次接收时间，异内容同 accession 拒绝。旧 v1 与附件 v2 字节和历史冻结绑定不改。
+
+目前仅取得主文：原件关联未知、附件未采集、会计更正未核验。限制随新冻结证据进入
+Agent 工具与页面；未完成会计复核的 EPS 不提供可用 trailing valuation。不把独立修订件
+称为完整替代，不从文本写会计 facts，不据此满足内部模拟执行准入。此入口不创建研究
+Job、周期或订单；研究、组合和执行仍走各自正常入口与风控校验。

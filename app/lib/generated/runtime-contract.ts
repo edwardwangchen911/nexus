@@ -11071,6 +11071,43 @@ export const runtimeContractSchemas = {
     "title": "ResearchInputActionObservation",
     "type": "object"
   },
+  "ResearchInputAmendment": {
+    "additionalProperties": false,
+    "properties": {
+      "accounting_revision_status": {
+        "const": "unverified",
+        "title": "Accounting Revision Status",
+        "type": "string"
+      },
+      "attachments_status": {
+        "const": "not_collected",
+        "title": "Attachments Status",
+        "type": "string"
+      },
+      "content_coverage": {
+        "const": "primary_document_only",
+        "title": "Content Coverage",
+        "type": "string"
+      },
+      "original_accession_number": {
+        "title": "Original Accession Number",
+        "type": "null"
+      },
+      "relation_status": {
+        "const": "unknown",
+        "title": "Relation Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "relation_status",
+      "content_coverage",
+      "attachments_status",
+      "accounting_revision_status"
+    ],
+    "title": "ResearchInputAmendment",
+    "type": "object"
+  },
   "ResearchInputCompanyProfile": {
     "additionalProperties": false,
     "properties": {
@@ -11452,6 +11489,16 @@ export const runtimeContractSchemas = {
         "maxLength": 32,
         "title": "Accession Number",
         "type": "string"
+      },
+      "amendment": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchInputAmendment"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "content_hash": {
         "pattern": "^[0-9a-f]{64}$",

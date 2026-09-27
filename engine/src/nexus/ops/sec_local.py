@@ -1,16 +1,16 @@
-"""One-company SEC read: three GETs, local persistence, no Agent or broker calls."""
+"""One-company SEC read: bounded GETs, local persistence, no Agent or broker calls."""
 
 import asyncio
 import json
 import re
 from datetime import UTC, date, datetime
 from hashlib import sha256
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.engine import make_url
 
 from nexus.agents.snapshots import prepare_research_snapshot
@@ -23,6 +23,8 @@ from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpReque
 from nexus.providers.sec import SecCompanyFactsClient, SecInstrumentIdentity
 from nexus.providers.sec_http import SecHttpTransport
 from nexus.providers.settings import ProviderWorkerSettings
+from nexus.research.sec_amendment_storage import AmendmentStore, persist_amendment
+from nexus.research.sec_amendments import SecAmendmentDisclosure
 from nexus.research.sec_disclosures import SecDisclosure, disclosure_excerpt, persist_disclosure
 from nexus.research.sec_fact_projection import SavedSecEvidenceReader, append_saved_sec_facts
 from nexus.research.sec_funds import fetch_fund_disclosure, resolve_fund
@@ -118,9 +120,12 @@ async def project_saved_sec_facts(
         async with factory() as session, session.begin():
             created = await append_saved_sec_facts(session, filing_id, store)
         return {
-            "status": "SEC_FACTS_PROJECTED", "facts_created": created,
-            "provider_requests": 0, "model_requests": 0,
-            "execution_locked": True, "research_completed": False,
+            "status": "SEC_FACTS_PROJECTED",
+            "facts_created": created,
+            "provider_requests": 0,
+            "model_requests": 0,
+            "execution_locked": True,
+            "research_completed": False,
         }
     finally:
         await factory.kw["bind"].dispose()
@@ -195,7 +200,7 @@ async def refresh_sec_research(
         ):
             raise ValueError("SEC_LOCAL_US_INSTRUMENT_REQUIRED")
         symbol, exchange = symbols[0], instrument.exchange
-    budget = _Budget(4 if fund_accession else 3)
+    budget = _Budget(4 if fund_accession or (disclosure_only and disclosure_form == "8-K") else 3)
     owned_client = http_client is None
     client = http_client or httpx.AsyncClient(follow_redirects=False, timeout=30)
     try:
@@ -302,8 +307,7 @@ async def refresh_sec_research(
                         arrays.append(array)
                     if len({len(array) for array in arrays}) != 1:
                         raise ValueError("SEC_LOCAL_SUBMISSIONS_INVALID")
-                    candidates = []
-                    amendments = []
+                    candidates: list[tuple[datetime, str, date, str, str]] = []
                     for accession, accepted, filed, form, filename in zip(*arrays, strict=True):
                         is_amendment = disclosure_form == "8-K" and form == "8-K/A"
                         if form != disclosure_form and not is_amendment:
@@ -320,74 +324,111 @@ async def refresh_sec_research(
                             raise ValueError("SEC_LOCAL_ACCEPTANCE_TIME_INVALID") from None
                         if accepted_at.tzinfo is None:
                             raise ValueError("SEC_LOCAL_ACCEPTANCE_TIME_INVALID")
-                        if is_amendment:
-                            if (
-                                accepted_at > current.received_at
-                                or filed_date > current.received_at.date()
-                            ):
-                                raise ValueError("SEC_LOCAL_ACCEPTANCE_TIME_INVALID")
-                            amendments.append(accepted_at)
-                            continue
                         if (
-                            accepted_at <= current.received_at
-                            and filed_date <= current.received_at.date()
+                            accepted_at > current.received_at
+                            or filed_date > current.received_at.date()
                         ):
-                            candidates.append((accepted_at, accession, filed_date, filename))
-                    if not candidates:
-                        if disclosure_form == "8-K" and "8-K/A" in recent["form"]:
-                            raise ValueError("SEC_LOCAL_DISCLOSURE_AMENDMENT_UNSUPPORTED")
+                            raise ValueError("SEC_LOCAL_ACCEPTANCE_TIME_INVALID")
+                        candidates.append((accepted_at, accession, filed_date, filename, form))
+                    selected = []
+                    for form in (
+                        (disclosure_form, "8-K/A")
+                        if disclosure_form == "8-K"
+                        else (disclosure_form,)
+                    ):
+                        group = {row for row in candidates if row[4] == form}
+                        if not group:
+                            continue
+                        latest_at = max(row[0] for row in group)
+                        latest = [row for row in group if row[0] == latest_at]
+                        if len(latest) != 1:
+                            raise ValueError("SEC_LOCAL_DISCLOSURE_AMBIGUOUS")
+                        selected.append(latest[0])
+                    if not selected:
                         raise ValueError("SEC_LOCAL_DISCLOSURE_UNAVAILABLE")
-                    accepted_at, accession, filed, filename = max(candidates)
-                    if amendments and max(amendments) >= accepted_at:
-                        raise ValueError("SEC_LOCAL_DISCLOSURE_AMENDMENT_UNSUPPORTED")
-                    if not re.fullmatch(
-                        r"[0-9]{10}-[0-9]{2}-[0-9]{6}", accession
-                    ) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.html?", filename):
-                        raise ValueError("SEC_LOCAL_DISCLOSURE_PATH_INVALID")
-                    segments = (
-                        "Archives",
-                        "edgar",
-                        "data",
-                        str(int(identity.cik)),
-                        accession.replace("-", ""),
-                        filename,
-                    )
-                    raw = await directory.get_bytes(
-                        segments,
-                        (),
-                        (("User-Agent", f"NEXUS {contact}"), ("Accept-Encoding", "gzip, deflate")),
-                    )
-                    received_at = datetime.now(UTC)
-                    excerpt, truncated = disclosure_excerpt(raw)
-                    document = SecDisclosure(
-                        instrument_id=instrument_id,
-                        form=disclosure_form,
-                        accession_number=accession,
-                        accepted_at=accepted_at,
-                        filed_at=datetime.combine(filed, datetime.min.time(), tzinfo=UTC),
-                        source_url="https://www.sec.gov/" + "/".join(segments),
-                        raw_content_hash=sha256(raw).hexdigest(),
-                        excerpt=excerpt,
-                        truncated=truncated,
-                        issuer_cik=identity.cik if disclosure_form == "8-K" else None,
-                    )
-                    content = document.canonical_bytes()
-                    digest = sha256(content).hexdigest()
+                    # Validate both selected paths before any main-document request.
+                    for _, accession, _, filename, _ in selected:
+                        if not re.fullmatch(
+                            r"[0-9]{10}-[0-9]{2}-[0-9]{6}", accession
+                        ) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.html?", filename):
+                            raise ValueError("SEC_LOCAL_DISCLOSURE_PATH_INVALID")
                     await store.put_if_absent(
                         key=f"raw/sec/{today.isoformat()}/submissions/{sha256(current.raw_payload).hexdigest()}.json",
                         content=current.raw_payload,
                     )
-                    await store.put_if_absent(
-                        key=f"raw/sec/{today.isoformat()}/disclosure/{document.raw_content_hash}.html",
-                        content=raw,
-                    )
-                    location = await store.put_if_absent(
-                        key=f"evidence/sec/{accession}/{digest}.json", content=content
-                    )
-                    inserted = await persist_disclosure(
-                        session, document, location=location, received_at=received_at
-                    )
-                    created, replayed = int(inserted), int(not inserted)
+                    created, replayed = 0, 0
+                    for accepted_at, accession, filed, filename, form in selected:
+                        segments = (
+                            "Archives",
+                            "edgar",
+                            "data",
+                            str(int(identity.cik)),
+                            accession.replace("-", ""),
+                            filename,
+                        )
+                        raw = await directory.get_bytes(
+                            segments,
+                            (),
+                            (
+                                ("User-Agent", f"NEXUS {contact}"),
+                                ("Accept-Encoding", "gzip, deflate"),
+                            ),
+                        )
+                        received_at = datetime.now(UTC)
+                        excerpt, truncated = disclosure_excerpt(raw)
+                        common = dict(
+                            instrument_id=instrument_id,
+                            accession_number=accession,
+                            accepted_at=accepted_at,
+                            filed_at=datetime.combine(filed, datetime.min.time(), tzinfo=UTC),
+                            source_url="https://www.sec.gov/" + "/".join(segments),
+                            raw_content_hash=sha256(raw).hexdigest(),
+                            excerpt=excerpt,
+                            truncated=truncated,
+                        )
+                        if form == "8-K/A":
+                            # Timestamp local custody in the same database clock used
+                            # by availability/freeze validation, after response receipt.
+                            receipt_clock = await session.scalar(select(func.clock_timestamp()))
+                            if not isinstance(receipt_clock, datetime):
+                                raise ValueError("SEC_AMENDMENT_RECEIPT_TIME_INVALID")
+                            amendment = SecAmendmentDisclosure.model_validate(
+                                {
+                                    **common,
+                                    "form": "8-K/A",
+                                    "issuer_cik": identity.cik,
+                                    "received_at": receipt_clock,
+                                    "raw_byte_length": len(raw),
+                                    "http_status": 200,
+                                }
+                            )
+                            inserted = await persist_amendment(
+                                session, cast(AmendmentStore, store), amendment, raw=raw
+                            )
+                        else:
+                            document = SecDisclosure.model_validate(
+                                {
+                                    **common,
+                                    "form": disclosure_form,
+                                    "issuer_cik": identity.cik
+                                    if disclosure_form == "8-K"
+                                    else None,
+                                }
+                            )
+                            content = document.canonical_bytes()
+                            digest = sha256(content).hexdigest()
+                            await store.put_if_absent(
+                                key=f"raw/sec/{today.isoformat()}/disclosure/{document.raw_content_hash}.html",
+                                content=raw,
+                            )
+                            location = await store.put_if_absent(
+                                key=f"evidence/sec/{accession}/{digest}.json", content=content
+                            )
+                            inserted = await persist_disclosure(
+                                session, document, location=location, received_at=received_at
+                            )
+                        created += int(inserted)
+                        replayed += int(not inserted)
                 else:
                     created, replayed = await collect_sec_filings(
                         session,

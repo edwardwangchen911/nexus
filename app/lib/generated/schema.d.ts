@@ -5758,6 +5758,31 @@ export interface components {
             /** Unbound Event Count */
             unbound_event_count: number;
         };
+        /** ResearchInputAmendment */
+        ResearchInputAmendment: {
+            /**
+             * Accounting Revision Status
+             * @constant
+             */
+            accounting_revision_status: "unverified";
+            /**
+             * Attachments Status
+             * @constant
+             */
+            attachments_status: "not_collected";
+            /**
+             * Content Coverage
+             * @constant
+             */
+            content_coverage: "primary_document_only";
+            /** Original Accession Number */
+            original_accession_number?: null;
+            /**
+             * Relation Status
+             * @constant
+             */
+            relation_status: "unknown";
+        };
         /** ResearchInputCompanyProfile */
         ResearchInputCompanyProfile: {
             /**
@@ -5933,6 +5958,7 @@ export interface components {
             accepted_at: string;
             /** Accession Number */
             accession_number: string;
+            amendment?: components["schemas"]["ResearchInputAmendment"] | null;
             /** Content Hash */
             content_hash: string;
             /** Disclosure Excerpt */

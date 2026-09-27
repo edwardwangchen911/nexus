@@ -97,7 +97,20 @@ async def database_read_only_tools(
             run.decision_time,
         ),
     )
-    return ReadOnlyTools(executors=bound.executors)
+    amendment_bound = bool(
+        await session.scalar(
+            select(Filing.id)
+            .where(
+                Filing.instrument_id == run.instrument_id,
+                Filing.evidence_ref_id.in_(tuple(ref.id for ref in evidence)),
+                Filing.form == "8-K/A",
+                Filing.accepted_at <= run.decision_time,
+                Filing.created_at <= run.decision_time,
+            )
+            .limit(1)
+        )
+    )
+    return ReadOnlyTools(executors=bound.executors, allow_sec_amendments=amendment_bound)
 
 
 @dataclass(frozen=True)
@@ -265,9 +278,7 @@ class _BoundDatabaseExecutors:
                         else {}
                     ),
                     **(
-                        {
-                            "agent_paper_context": paper_context_value.model_dump(mode="json")
-                        }
+                        {"agent_paper_context": paper_context_value.model_dump(mode="json")}
                         if record.source == PAPER_CONTEXT_SOURCE
                         and record.id == paper_context_id
                         and paper_context_value is not None
@@ -282,6 +293,26 @@ class _BoundDatabaseExecutors:
         await self._require_snapshot_scope(payload)
         if not await self._current_evidence_authority_valid():
             return self._invalid_frozen_evidence_authority("get_financial_facts")
+        amendment_ids = tuple(
+            await self._session.scalars(
+                select(Filing.evidence_ref_id).where(
+                    Filing.instrument_id == self._instrument_id,
+                    Filing.evidence_ref_id.in_(self._evidence_ids),
+                    Filing.form == "8-K/A",
+                    Filing.accepted_at <= self._decision_time,
+                    Filing.created_at <= self._decision_time,
+                )
+            )
+        )
+        if amendment_ids:
+            verified = await read_disclosures(
+                self._session,
+                instrument_id=self._instrument_id,
+                evidence_ids=amendment_ids,
+                as_of=self._decision_time,
+            )
+            if set(verified) != set(amendment_ids):
+                return self._invalid_frozen_evidence_authority("get_financial_facts")
         fields = cast(tuple[str, ...], payload["fields"])
         records = tuple(
             await self._session.scalars(
@@ -318,6 +349,18 @@ class _BoundDatabaseExecutors:
                     "period_kind": record.period_kind,
                     "accepted_at": _timestamp(record.accepted_at),
                     "revision": record.revision,
+                    **(
+                        {
+                            "amendment_review_status": "unverified",
+                            "amendment_evidence_ref_ids": [str(ref) for ref in amendment_ids],
+                            "accounting_limitations": (
+                                "Amendments do not verify replacement accounting facts; "
+                                "affected values require reconciliation."
+                            ),
+                        }
+                        if amendment_ids
+                        else {}
+                    ),
                 }
                 for record in records
             ],
@@ -361,6 +404,11 @@ class _BoundDatabaseExecutors:
             evidence_ids=tuple(record.evidence_ref_id for record in records),
             as_of=self._decision_time,
         )
+        required_amendments = {
+            record.evidence_ref_id for record in records if record.form == "8-K/A"
+        }
+        if not required_amendments.issubset(disclosures):
+            return self._invalid_frozen_evidence_authority("search_filing_evidence")
         return self._result(
             "search_filing_evidence",
             [
@@ -860,6 +908,7 @@ class _BoundDatabaseExecutors:
         ) not in (None, self._instrument_id):
             raise ToolInputError("tool request exceeds frozen portfolio authority")
         return context
+
     async def proposal_comparison(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
         context = await read_portfolio_context(

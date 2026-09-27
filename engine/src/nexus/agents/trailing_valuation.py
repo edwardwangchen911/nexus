@@ -151,10 +151,13 @@ def _aligned_eps_components(
                 continue
             # A 52/53-week fiscal calendar can differ by one week, but unlike
             # end-date spacing alone this rejects unequal cumulative periods.
-            if abs(
-                (current.period_end - current.period_start).days
-                - (prior.period_end - prior.period_start).days
-            ) > 7:
+            if (
+                abs(
+                    (current.period_end - current.period_start).days
+                    - (prior.period_end - prior.period_start).days
+                )
+                > 7
+            ):
                 continue
             if (
                 current.evidence_ref_id != prior.evidence_ref_id
@@ -192,6 +195,18 @@ def derive_trailing_valuation(
 ) -> dict[str, object]:
     """Derive trailing P/E only when frozen quote and EPS periods align exactly."""
 
+    items = financial_facts.get("items")
+    if (
+        isinstance(items, Sequence)
+        and not isinstance(items, str | bytes)
+        and any(
+            isinstance(item, Mapping)
+            and item.get("fact") == "diluted_eps"
+            and item.get("amendment_review_status") == "unverified"
+            for item in items
+        )
+    ):
+        return _unavailable("sec_amendment_accounting_review_unverified")
     quote = _decision_quote(security_snapshot)
     if quote is None:
         return _unavailable("decision_quote_unavailable")
@@ -227,7 +242,5 @@ def derive_trailing_valuation(
                 _component("current_ytd", current_ytd),
             ],
         },
-        "metrics": {
-            "trailing_pe": format(trailing_pe.quantize(_TWELVE_PLACES), "f")
-        },
+        "metrics": {"trailing_pe": format(trailing_pe.quantize(_TWELVE_PLACES), "f")},
     }

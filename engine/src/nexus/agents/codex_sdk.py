@@ -589,7 +589,9 @@ class CodexCommittee:
                 "search_filing_evidence",
                 {
                     **scope,
-                    "forms": ["10-K", "10-Q", "8-K", "6-K", "497K"],
+                    "forms": list(
+                        getattr(self._tools, "filing_forms", ("10-K", "10-Q", "8-K", "6-K", "497K"))
+                    ),
                     "filed_from": (request.decision_time - timedelta(days=365)).date().isoformat(),
                     "filed_to": request.decision_time.date().isoformat(),
                 },

@@ -140,6 +140,10 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       <details className="portfolio-disclosure"><summary>查看证据版本与哈希</summary>
         <dl className="decision-card__versions"><div><dt>版本</dt><dd>{filing.revision}</dd></div><div><dt>内容 SHA-256</dt><dd>{filing.content_hash}</dd></div></dl>
       </details>
+      {filing.form === "8-K/A" ? <p>
+        这是独立修订件：原件关联尚未核实，附件尚未采集；相关财务数值是否需要更正仍待核验。
+        不能将它当作完整替代文件或执行许可。
+      </p> : null}
       {filing.disclosure_excerpt ? <>
         <p>文本披露，不是结构化财务指标；不代表完整覆盖，不据此推导财务数值。</p>
         <details className="portfolio-disclosure"><summary>{filing.exhibit ? "查看 8-K 父文件正文" : "查看冻结披露正文"}{filing.disclosure_truncated ? "（节选）" : ""}</summary>

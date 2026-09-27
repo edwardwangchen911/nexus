@@ -91,7 +91,9 @@ class ResponsesResearchModel:
     async def respond(
         self, request: ResearchRequest, tools: ReadOnlyToolRegistry
     ) -> Mapping[str, object]:
-        definitions = response_function_tools()
+        definitions = response_function_tools(
+            allow_sec_amendments=bool(getattr(tools, "allow_sec_amendments", False))
+        )
         if tuple(tools.names) != tuple(definitions):
             raise ValueError("fixed tool registry required")
         responses = getattr(self._client, "responses")
@@ -254,7 +256,9 @@ class ResponsesCommittee:
         evidence_refs: tuple[EvidenceRef, ...],
         prompt: PromptAsset,
     ) -> CommitteeRoleOutput:
-        definitions = response_function_tools()
+        definitions = response_function_tools(
+            allow_sec_amendments=bool(getattr(self._tools, "allow_sec_amendments", False))
+        )
         responses = getattr(self._client, "responses")
         create = getattr(responses, "create")
         input_items: list[Mapping[str, object]] = [

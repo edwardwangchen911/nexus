@@ -13,6 +13,7 @@ from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.api.action_inputs import project_action_observation
 from nexus.api.schemas.agents import (
     ResearchInputActionObservation,
+    ResearchInputAmendment,
     ResearchInputCompanyProfile,
     ResearchInputExhibit,
     ResearchInputFact,
@@ -167,7 +168,7 @@ async def read_research_inputs(
                 accession_number=filing.accession_number,
                 accepted_at=filing.accepted_at,
                 received_at=evidence.available_at
-                if evidence.id in disclosures and disclosures[evidence.id].form == "8-K"
+                if evidence.id in disclosures and disclosures[evidence.id].form in {"8-K", "8-K/A"}
                 else evidence.created_at,
                 revision=evidence.revision,
                 content_hash=evidence.content_hash,
@@ -177,6 +178,10 @@ async def read_research_inputs(
                 disclosure_truncated=disclosures[evidence.id].truncated
                 if evidence.id in disclosures
                 else False,
+                amendment=ResearchInputAmendment(
+                    relation_status="unknown", content_coverage="primary_document_only",
+                    attachments_status="not_collected", accounting_revision_status="unverified",
+                ) if isinstance(disclosures.get(evidence.id), SecAmendmentDisclosure) else None,
                 exhibit=_exhibit_input(disclosures.get(evidence.id)),
                 source_url=disclosures[evidence.id].source_url
                 if evidence.id in disclosures

@@ -179,3 +179,60 @@ async def test_accession_conflict_does_not_replace_original(migrated_database_ur
         )
         assert found[evidence.id].canonical_bytes() == doc.canonical_bytes()
         assert await session.scalar(select(func.count()).select_from(ResearchEvidenceRef)) == 1
+
+
+@pytest.mark.asyncio
+async def test_later_observation_reuses_original_receipt_without_rebinding(migrated_database_url):
+    from nexus.research.sec_amendment_storage import persist_amendment
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await seed_instrument(settings)
+    doc, store = document(), Store()
+    async with session_factory(settings)() as session, session.begin():
+        session.info["sec_exhibit_store"] = store
+        await persist_amendment(session, store, doc, raw=RAW)
+        before = dict(store.objects)
+        later = doc.model_copy(update={"received_at": doc.received_at + timedelta(hours=1)})
+        assert not await persist_amendment(session, store, later, raw=RAW)
+        assert store.objects == before
+        evidence = await session.scalar(select(ResearchEvidenceRef))
+        now = await session.scalar(select(func.clock_timestamp()))
+        found = await read_disclosures(
+            session, instrument_id=INSTRUMENT, evidence_ids=(evidence.id,), as_of=now
+        )
+        assert found[evidence.id].received_at == doc.received_at
+        assert evidence.available_at == doc.received_at
+
+
+@pytest.mark.asyncio
+async def test_distinct_accessions_share_bytes_but_keep_their_own_receipts(migrated_database_url):
+    from nexus.research.sec_amendment_storage import persist_amendment
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await seed_instrument(settings)
+    first, store = document(), Store()
+    second = first.model_copy(
+        update={
+            "accession_number": "0000320193-26-000003",
+            "source_url": first.source_url.replace("000032019326000002", "000032019326000003"),
+            "received_at": first.received_at + timedelta(hours=1),
+        }
+    )
+    async with session_factory(settings)() as session, session.begin():
+        session.info["sec_exhibit_store"] = store
+        assert await persist_amendment(session, store, first, raw=RAW)
+        assert await persist_amendment(session, store, second, raw=RAW)
+        assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
+        evidence = tuple(await session.scalars(select(ResearchEvidenceRef)))
+        assert len(evidence) == 2
+        now = await session.scalar(select(func.clock_timestamp()))
+        readback = await read_disclosures(
+            session,
+            instrument_id=INSTRUMENT,
+            evidence_ids=tuple(ref.id for ref in evidence),
+            as_of=now,
+        )
+        assert {doc.accession_number: doc.received_at for doc in readback.values()} == {
+            first.accession_number: first.received_at,
+            second.accession_number: second.received_at,
+        }

@@ -352,8 +352,7 @@ async def test_sec_only_refresh_freezes_latest_annual_and_quarterly_filings(
             ("0000320193-26-000001", "10-Q"),
         ]
         assert {
-            row.accession_number
-            for row in await session.scalars(select(FinancialFactRecord))
+            row.accession_number for row in await session.scalars(select(FinancialFactRecord))
         } == {"0000320193-25-000079", "0000320193-26-000001"}
 
 
@@ -671,7 +670,8 @@ async def test_8k_revision_preserves_old_frozen_text_and_receipt(migrated_databa
             session, snapshot_id=current.id, instrument_id=INSTRUMENT, as_of=later
         )
         assert [f.disclosure_excerpt for f in original.filings] == [document.excerpt]
-        assert {f.disclosure_excerpt for f in latest.filings} == {document.excerpt, revised.excerpt}
+        # One latest revision per accession; the prior frozen binding remains readable above.
+        assert [f.disclosure_excerpt for f in latest.filings] == [revised.excerpt]
         assert await session.scalar(select(func.count()).select_from(Filing)) == 2
         assert sorted(await session.scalars(select(ResearchEvidenceRef.available_at))) == [
             received,
@@ -683,8 +683,8 @@ async def test_8k_revision_preserves_old_frozen_text_and_receipt(migrated_databa
 @pytest.mark.parametrize(
     ("amended_at", "blocked"),
     [
-        ("2026-08-21T21:00:00Z", True),
-        ("2026-08-21T20:00:00Z", True),
+        ("2026-08-21T21:00:00Z", False),
+        ("2026-08-21T20:00:00Z", False),
         ("2026-08-21T19:00:00Z", False),
         ("unknown", True),
         ("2026-08-21T21:00:00", True),
@@ -695,6 +695,7 @@ async def test_8k_does_not_hide_a_newer_or_undated_amendment(
     migrated_database_url, amended_at, blocked
 ):
     from nexus.ops.sec_local import refresh_sec_research
+    from test_sec_amendment_storage import Store
 
     settings = EngineSettings(database_url=migrated_database_url)
     await seed_instrument(settings)
@@ -702,6 +703,9 @@ async def test_8k_does_not_hide_a_newer_or_undated_amendment(
     original = disclosure_responder(requests, form="8-K")
 
     def respond(request):
+        if request.url.path.endswith("amendment.htm"):
+            requests.append(request)
+            return httpx.Response(200, content=b"<p>Independent amendment text for investors.</p>")
         response = original(request)
         if request.url.path == "/submissions/CIK0000320193.json":
             payload = response.json()
@@ -723,18 +727,20 @@ async def test_8k_does_not_hide_a_newer_or_undated_amendment(
             INSTRUMENT,
             contact="test@example.invalid",
             http_client=client,
-            store=InMemoryRawEvidenceStore(),
+            store=Store(),
             disclosure_only=True,
             disclosure_form="8-K",
         )
         if blocked:
-            with pytest.raises(ValueError, match="AMENDMENT_UNSUPPORTED|ACCEPTANCE_TIME_INVALID"):
+            with pytest.raises(ValueError, match="ACCEPTANCE_TIME_INVALID"):
                 await call
         else:
-            assert (await call)["filings_created"] == 1
-    assert len(requests) == (2 if blocked else 3)
+            assert (await call)["filings_created"] == 2
+    assert len(requests) == (2 if blocked else 4)
     async with session_factory(settings)() as session:
-        assert await session.scalar(select(func.count()).select_from(Filing)) == int(not blocked)
+        assert await session.scalar(select(func.count()).select_from(Filing)) == (
+            0 if blocked else 2
+        )
 
 
 @pytest.mark.asyncio

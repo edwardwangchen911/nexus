@@ -85,6 +85,20 @@ class _FilingEvidenceInput(_SnapshotInput):
         return self
 
 
+class _AmendmentFilingEvidenceInput(_SnapshotInput):
+    forms: tuple[Literal["10-K", "10-Q", "8-K", "8-K/A", "6-K", "497K"], ...] = Field(
+        min_length=1, max_length=6
+    )
+    filed_from: date
+    filed_to: date
+
+    @model_validator(mode="after")
+    def bounded_date_range(self) -> "_AmendmentFilingEvidenceInput":
+        if self.filed_to < self.filed_from or (self.filed_to - self.filed_from).days > 366:
+            raise ValueError("filing date range must be ordered and no longer than 366 days")
+        return self
+
+
 class _PriceFeaturesInput(_SnapshotInput):
     features: tuple[Literal["close", "sma_20", "sma_200", "rsi_14", "volatility_20"], ...] = Field(
         min_length=1, max_length=5
@@ -146,11 +160,22 @@ class ReadOnlyTools:
 
     names: tuple[str, ...] = EXPECTED_READ_ONLY_TOOL_NAMES
 
-    def __init__(self, *, executors: Mapping[str, ToolExecutor] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        executors: Mapping[str, ToolExecutor] | None = None,
+        allow_sec_amendments: bool = False,
+    ) -> None:
         unknown = set(executors or ()) - set(self.names)
         if unknown:
             raise ToolInputError("executor is not in the fixed read-only catalogue")
         self._executors = dict(executors or {})
+        self.allow_sec_amendments = allow_sec_amendments
+
+    @property
+    def filing_forms(self) -> tuple[str, ...]:
+        legacy = ("10-K", "10-Q", "8-K", "6-K", "497K")
+        return (*legacy, "8-K/A") if self.allow_sec_amendments else legacy
 
     @property
     def configured_names(self) -> tuple[str, ...]:
@@ -159,6 +184,8 @@ class ReadOnlyTools:
     def validate(self, name: str, payload: Mapping[str, object]) -> dict[str, object]:
         """Return typed, JSON-safe fields or reject unknown/sensitive input before any lookup."""
         schema = _TOOL_INPUTS.get(name)
+        if self.allow_sec_amendments and name == "search_filing_evidence":
+            schema = _AmendmentFilingEvidenceInput
         if schema is None:
             raise ToolInputError("tool is not in the fixed read-only catalogue")
         try:
@@ -180,8 +207,13 @@ class ReadOnlyTools:
         return result
 
 
-def response_function_tools() -> Mapping[str, dict[str, object]]:
+def response_function_tools(
+    *, allow_sec_amendments: bool = False
+) -> Mapping[str, dict[str, object]]:
     """Expose fixed custom-function schemas; no built-in or dynamically named tool is possible."""
+    schemas = dict(_TOOL_INPUTS)
+    if allow_sec_amendments:
+        schemas["search_filing_evidence"] = _AmendmentFilingEvidenceInput
     return {
         name: {
             "type": "function",
@@ -190,5 +222,5 @@ def response_function_tools() -> Mapping[str, dict[str, object]]:
             "parameters": pydantic_function_tool(schema)["function"]["parameters"],
             "strict": True,
         }
-        for name, schema in _TOOL_INPUTS.items()
+        for name, schema in schemas.items()
     }
