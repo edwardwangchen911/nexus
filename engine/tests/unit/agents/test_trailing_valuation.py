@@ -127,6 +127,68 @@ def test_trailing_valuation_allows_negative_period_component_when_ttm_is_positiv
 
 
 @pytest.mark.parametrize(
+    ("prior_end", "current_end"),
+    [("2025-04-27", "2026-04-26"), ("2025-07-27", "2026-07-26")],
+)
+def test_trailing_valuation_accepts_aligned_first_quarter_and_half_year(
+    prior_end: str, current_end: str
+) -> None:
+    facts = {
+        "status": "ok",
+        "items": [
+            _eps_fact("7.46", "2025-01-27", "2026-01-25", evidence_ref_id="annual"),
+            _eps_fact("5.62", "2025-01-27", prior_end, evidence_ref_id="interim"),
+            _eps_fact("6.88", "2026-01-26", current_end, evidence_ref_id="interim"),
+            # A standalone quarter must not substitute for fiscal-year-to-date EPS.
+            _eps_fact("2.02", "2026-04-27", "2026-07-26", evidence_ref_id="interim"),
+        ],
+    }
+
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+
+    assert result["status"] == "available"
+    assert result["ttm_eps"]["value"] == "8.720000000000"  # type: ignore[index]
+
+
+def test_trailing_valuation_rejects_unequal_ytd_lengths_despite_annual_end_spacing() -> None:
+    facts = _financial_facts()
+    # Both fit the old nine-month range and end dates are one year apart,
+    # but one begins 14 days late and is not a comparable cumulative period.
+    facts["items"][2]["period_start"] = "2025-10-12"  # type: ignore[index]
+    facts["items"][0]["period_end"] = "2025-10-11"  # type: ignore[index]
+
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "aligned_diluted_eps_unavailable"
+
+
+@pytest.mark.parametrize("mutation", ["annual_missing", "quarter_only", "duplicate", "unit"])
+def test_half_year_valuation_preserves_component_authority(mutation: str) -> None:
+    items = [
+        _eps_fact("7.46", "2025-01-27", "2026-01-25", evidence_ref_id="annual"),
+        _eps_fact("5.62", "2025-01-27", "2025-07-27", evidence_ref_id="interim"),
+        _eps_fact("6.88", "2026-01-26", "2026-07-26", evidence_ref_id="interim"),
+    ]
+    if mutation == "annual_missing":
+        items.pop(0)
+    elif mutation == "quarter_only":
+        items[1]["period_start"] = "2025-04-28"
+        items[2]["period_start"] = "2026-04-27"
+    elif mutation == "duplicate":
+        items.append(deepcopy(items[2]))
+    else:
+        items[2]["unit"] = "shares"
+
+    result = codex_sdk.derive_trailing_valuation(
+        _security_snapshot(), {"status": "ok", "items": items}
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "aligned_diluted_eps_unavailable"
+
+
+@pytest.mark.parametrize(
     ("mutation", "reason"),
     [
         ("delayed_quote", "decision_quote_unavailable"),

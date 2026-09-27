@@ -134,11 +134,20 @@ def _aligned_eps_components(
     annual = tuple(
         fact for fact in facts if 330 <= (fact.period_end - fact.period_start).days <= 380
     )
-    ytd = tuple(fact for fact in facts if 240 <= (fact.period_end - fact.period_start).days <= 300)
+    # Interim reports carry fiscal-year-to-date EPS for one, two, or three
+    # quarters. Fiscal boundaries below distinguish YTD from standalone quarters.
+    ytd = tuple(fact for fact in facts if 75 <= (fact.period_end - fact.period_start).days <= 300)
     matches: list[tuple[_EpsFact, _EpsFact, _EpsFact]] = []
     for current in ytd:
         for prior in ytd:
             if not 350 <= (current.period_end - prior.period_end).days <= 380:
+                continue
+            # A 52/53-week fiscal calendar can differ by one week, but unlike
+            # end-date spacing alone this rejects unequal cumulative periods.
+            if abs(
+                (current.period_end - current.period_start).days
+                - (prior.period_end - prior.period_start).days
+            ) > 7:
                 continue
             if (
                 current.evidence_ref_id != prior.evidence_ref_id
