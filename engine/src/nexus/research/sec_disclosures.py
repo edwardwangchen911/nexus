@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime
 from html.parser import HTMLParser
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 from uuid import UUID
 
 from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
@@ -15,6 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
+
+if TYPE_CHECKING:
+    from nexus.research.sec_amendments import SecAmendmentDisclosure
 
 MAX_EXCERPT = 12000
 SCHEMA_VERSION = "sec_disclosure_v1"
@@ -220,8 +223,10 @@ async def read_disclosures(
     instrument_id: UUID,
     evidence_ids: tuple[UUID, ...],
     as_of: datetime,
-) -> dict[UUID, SecDisclosure]:
+) -> dict[UUID, "SecDisclosure | SecAmendmentDisclosure"]:
     """Only exact frozen evidence with matching content, owner and receipt time."""
+    from nexus.research.sec_amendments import SecAmendmentDisclosure
+
     if not evidence_ids:
         return {}
     rows = await session.execute(
@@ -239,18 +244,39 @@ async def read_disclosures(
             Filing.instrument_id == instrument_id,
             Filing.created_at <= as_of,
             ResearchEvidenceRef.created_at <= as_of,
-            DataSnapshot.schema_version.in_((SCHEMA_VERSION, "sec_8k_exhibit_v2")),
+            DataSnapshot.schema_version.in_(
+                (SCHEMA_VERSION, "sec_8k_exhibit_v2", "sec_amendment_v1")
+            ),
             DataSnapshot.created_at <= as_of,
             DataSnapshot.received_at <= as_of,
             DataSnapshot.available_at <= as_of,
         )
         .limit(20)
     )
-    result: dict[UUID, SecDisclosure] = {}
+    result: dict[UUID, SecDisclosure | SecAmendmentDisclosure] = {}
     for snapshot, evidence, filing in rows:
         try:
-            document: SecDisclosure
-            if snapshot.schema_version == "sec_8k_exhibit_v2":
+            document: SecDisclosure | SecAmendmentDisclosure
+            if snapshot.schema_version == "sec_amendment_v1":
+                from nexus.research.sec_amendment_storage import verify_amendment_archive
+                from nexus.research.sec_exhibit_storage import configured_exhibit_store
+
+                document = SecAmendmentDisclosure.model_validate(snapshot.payload)
+                if (
+                    document.received_at != snapshot.received_at
+                    or filing.source != "sec"
+                    or filing.provider_object_id != document.accession_number
+                    or filing.revision != evidence.revision
+                ):
+                    continue
+                await verify_amendment_archive(
+                    session,
+                    configured_exhibit_store(session),
+                    document,
+                    canonical_uri=evidence.location,
+                    as_of=as_of,
+                )
+            elif snapshot.schema_version == "sec_8k_exhibit_v2":
                 from nexus.research.sec_exhibit_storage import (
                     configured_exhibit_store,
                     verify_exhibit_originals,
@@ -269,12 +295,20 @@ async def read_disclosures(
             else:
                 document = SecDisclosure.model_validate(snapshot.payload)
         except (
-            ValidationError, ValueError, TypeError, KeyError, OSError, BotoCoreError, ClientError,
+            ValidationError,
+            ValueError,
+            TypeError,
+            KeyError,
+            OSError,
+            BotoCoreError,
+            ClientError,
         ):
             continue
         content = document.canonical_bytes()
         digest = hashlib.sha256(content).hexdigest()
-        available_at = snapshot.received_at if document.form == "8-K" else document.accepted_at
+        available_at = (
+            snapshot.received_at if document.form in {"8-K", "8-K/A"} else document.accepted_at
+        )
         if (
             document.instrument_id == instrument_id
             and document.accession_number == filing.accession_number == evidence.provider_object_id

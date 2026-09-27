@@ -38,6 +38,7 @@ from nexus.research.fmp_profile import SOURCE as PROFILE_SOURCE
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fred_storage import read_fred_observations
 from nexus.research.news_evidence import read_news_evidence
+from nexus.research.sec_amendments import SecAmendmentDisclosure
 from nexus.research.sec_disclosures import SecDisclosure, read_disclosures
 from nexus.research.sec_exhibits import SecExhibitDisclosure
 from nexus.research.ssga_distributions import SOURCE, read_distributions
@@ -48,7 +49,9 @@ from nexus.research.ssga_nav_history import NavObservation
 from nexus.research.ssga_nav_storage import nav_tool_payload, read_nav_histories
 
 
-def _exhibit_input(document: SecDisclosure | None) -> ResearchInputExhibit | None:
+def _exhibit_input(
+    document: SecDisclosure | SecAmendmentDisclosure | None,
+) -> ResearchInputExhibit | None:
     if not isinstance(document, SecExhibitDisclosure):
         return None
     return ResearchInputExhibit(

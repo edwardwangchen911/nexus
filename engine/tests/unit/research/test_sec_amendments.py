@@ -18,6 +18,9 @@ def payload(**changes):
         "source_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019326000002/doc.htm",
         "filed_at": datetime(2026, 9, 1, tzinfo=UTC),
         "accepted_at": datetime(2026, 9, 1, 20, tzinfo=UTC),
+        "received_at": datetime(2026, 9, 2, tzinfo=UTC),
+        "raw_byte_length": 100,
+        "http_status": 200,
         "raw_content_hash": "a" * 64,
         "excerpt": "This amendment adds limited disclosure; the original is not identified.",
         "truncated": False,
@@ -70,7 +73,10 @@ def test_unproven_identity_relation_completeness_and_accounting_claims_are_rejec
 def test_legacy_schema_does_not_accept_amendment_or_gain_new_canonical_fields():
     with pytest.raises(ValueError):
         SecDisclosure.model_validate(payload())
-    original = SecDisclosure.model_validate(payload(form="8-K"))
+    original_payload = payload(form="8-K")
+    for key in ("received_at", "raw_byte_length", "http_status"):
+        original_payload.pop(key)
+    original = SecDisclosure.model_validate(original_payload)
     content = original.canonical_bytes()
     assert "relation_status" not in json.loads(content)
     assert (

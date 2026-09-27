@@ -27,6 +27,9 @@ class SecAmendmentDisclosure(BaseModel):
     source_url: str = Field(max_length=512)
     filed_at: AwareDatetime
     accepted_at: AwareDatetime
+    received_at: AwareDatetime
+    raw_byte_length: int = Field(gt=0, le=8 * 1024 * 1024)
+    http_status: Literal[200]
     raw_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     excerpt: str = Field(min_length=20, max_length=MAX_EXCERPT)
     truncated: bool
@@ -39,6 +42,8 @@ class SecAmendmentDisclosure(BaseModel):
 
     @model_validator(mode="after")
     def check_issuer_and_accession(self) -> Self:
+        if max(self.accepted_at, self.filed_at) > self.received_at:
+            raise ValueError("SEC_AMENDMENT_RECEIPT_TIME_INVALID")
         # Reuse the existing issuer/path rules without extending or reserializing
         # the legacy schema. This check never returns a normal 8-K as evidence.
         SecDisclosure(
