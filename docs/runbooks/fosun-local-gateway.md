@@ -29,6 +29,12 @@ uv run --package nexus-fosun-gateway nexus-fosun-gateway-service stop --repo-roo
 账户数据可用。运行满 12 小时的本地只读授权到期后会安全退出，launchd 不自动重启；先检查
 状态和失败原因，再显式 `start` 建立新实例。原 replay sqlite 不删除、不替换。
 
+`LOCAL_GATEWAY_SERVICE_START_UNCONFIRMED` 只表示本次观察未确认启动，不能据此再次启动。
+输出中的 `observation_stage` 区分 launchd 读取、状态解析、进程退出与健康检查；
+`observation_code` 和 `observed_state` 仅输出固定安全值，未知状态不透传原始内容。
+先用同一标签的 `status` 核对原实例，避免创建第二实例。显式 `stop` 在核对精确归属、
+确认无 PID 且状态为 inactive 后清理注册；macOS 的信号退出无需伪造数字退出码。
+
 只有服务 `ready` 后才按现有本地产品入口执行一次正常只读刷新：
 
 ```bash

@@ -180,10 +180,12 @@ def test_running_registration_without_both_health_checks_is_degraded(
     assert json.loads(capsys.readouterr().out) == {"status": "degraded"}
 
 
+@pytest.mark.parametrize("initial_state", ["inactive", "xpcproxy", "sensitive-unrecognized"])
 def test_explicit_start_registers_nonrenewing_private_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    initial_state: str,
 ) -> None:
     monkeypatch.setattr(
         "nexus_fosun_gateway.local_service._service_log_directory", lambda: tmp_path / "logs"
@@ -210,7 +212,7 @@ def test_explicit_start_registers_nonrenewing_private_service(
             if registered is None:
                 return subprocess.CompletedProcess(argv, 113, b"", b"")
             post_bootstrap_checks += 1
-            state = "inactive" if post_bootstrap_checks == 1 else "running"
+            state = initial_state if post_bootstrap_checks == 1 else "running"
             output = (
                 f"\tstate = {state}\n"
                 + ("\tpid = 123\n" if state == "running" else "")
@@ -234,9 +236,19 @@ def test_explicit_start_registers_nonrenewing_private_service(
     monkeypatch.setattr(
         "nexus_fosun_gateway.local_service.local_health_ready", lambda *_args, **_kwargs: True
     )
+    monkeypatch.setattr("nexus_fosun_gateway.local_service.time.sleep", lambda _: None)
 
-    assert main(["start", "--repo-root", str(root)]) == 0
-    assert json.loads(capsys.readouterr().out) == {"status": "started"}
+    assert main(["start", "--repo-root", str(root)]) == (0 if initial_state == "inactive" else 1)
+    assert json.loads(capsys.readouterr().out) == (
+        {"status": "started"}
+        if initial_state == "inactive"
+        else {
+            "error_code": "LOCAL_GATEWAY_SERVICE_START_UNCONFIRMED",
+            "observation_stage": "launchctl_parse",
+            "observation_code": "LOCAL_GATEWAY_SERVICE_STATUS_UNAVAILABLE",
+            "observed_state": "xpcproxy" if initial_state == "xpcproxy" else "unknown",
+        }
+    )
     assert commands.count("bootstrap") == 1
     assert commands.count("kickstart") == 1
     assert registered is not None and registered["KeepAlive"] is False

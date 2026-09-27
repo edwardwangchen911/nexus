@@ -443,32 +443,70 @@ def _start(root: Path, runtime: Path, launchctl: str, domain_label: str) -> int:
     if started.returncode != 0:
         print(json.dumps({"error_code": "LOCAL_GATEWAY_SERVICE_START_FAILED"}))
         return 1
+    observation_stage = "launchctl_print"
+    observation_code = "LOCAL_GATEWAY_SERVICE_STATUS_UNAVAILABLE"
+    observed_state = "unknown"
     for _ in range(70):
         inspected = subprocess.run(
             [launchctl, "print", domain_label], check=False, capture_output=True
         )
         if inspected.returncode != 0:
+            observation_stage = "launchctl_print"
+            observation_code = "LOCAL_GATEWAY_SERVICE_STATUS_UNAVAILABLE"
             break
         try:
+            output = inspected.stdout.decode("utf-8")
+            raw_states = re.findall(r"^\t?state = ([^\n]+)$", output, re.MULTILINE)
+            observed_state = (
+                raw_states[0].strip()
+                if len(raw_states) == 1
+                and raw_states[0].strip()
+                in {"inactive", "not running", "exited", "running", "xpcproxy"}
+                else "unknown"
+            )
             state, pid, last_exit = inspect_launchctl_output(
-                inspected.stdout.decode("utf-8"),
+                output,
                 root,
                 runtime,
                 expected_revision=revision,
             )
-        except (UnicodeError, ValueError):
+        except (UnicodeError, ValueError) as error:
+            observation_stage = "launchctl_parse"
+            observation_code = (
+                str(error)
+                if str(error)
+                in {
+                    "LOCAL_GATEWAY_SERVICE_OWNER_MISMATCH",
+                    "LOCAL_GATEWAY_SERVICE_RELEASE_MISMATCH",
+                }
+                else "LOCAL_GATEWAY_SERVICE_STATUS_UNAVAILABLE"
+            )
             break
         if state == "inactive" and last_exit is None:
             time.sleep(1)
             continue
         if state != "running" or last_exit not in (None, 0):
+            observation_stage = "process_exit"
+            observation_code = "LOCAL_GATEWAY_SERVICE_PREVIOUS_EXIT_UNKNOWN"
             break
+        observation_stage = "health_ready"
+        observation_code = "LOCAL_GATEWAY_SERVICE_HEALTH_NOT_READY"
         try:
             if local_health_ready(root, expected_pid=pid):
                 print(json.dumps({"status": "started"}))
                 return 0
         except ValueError:
+            observation_code = "LOCAL_GATEWAY_SERVICE_PREFLIGHT_FAILED"
             break
         time.sleep(1)
-    print(json.dumps({"error_code": "LOCAL_GATEWAY_SERVICE_START_UNCONFIRMED"}))
+    print(
+        json.dumps(
+            {
+                "error_code": "LOCAL_GATEWAY_SERVICE_START_UNCONFIRMED",
+                "observation_stage": observation_stage,
+                "observation_code": observation_code,
+                "observed_state": observed_state,
+            }
+        )
+    )
     return 1
