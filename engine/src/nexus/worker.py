@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSION,
+    ACTIONABLE_CONFIG_VERSIONS,
     INLINE_CITATION_CONFIG_VERSION,
     PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
     SDK_CONFIG_VERSIONS,
@@ -478,8 +479,13 @@ async def _committee(
                 allow_fixture_price_evidence=False,
             ),
             **(
+                {"paper_stage_scope": True}
+                if model.version == ACTIONABLE_CONFIG_VERSION
+                else {}
+            ),
+            **(
                 {"inline_citations": True}
-                if model.version in {INLINE_CITATION_CONFIG_VERSION, ACTIONABLE_CONFIG_VERSION}
+                if model.version in ({INLINE_CITATION_CONFIG_VERSION} | ACTIONABLE_CONFIG_VERSIONS)
                 else {}
             ),
             **(

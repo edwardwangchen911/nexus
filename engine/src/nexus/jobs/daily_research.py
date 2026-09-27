@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import ResearchAdmission, admit_research_run
 from nexus.agents.portfolio_context import read_portfolio_context
@@ -319,7 +319,7 @@ async def admit_agent_paper_research(
             model_config_id = await session.scalar(
                 select(AgentModelConfigRecord.id)
                 .where(
-                    AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION,
+                    AgentModelConfigRecord.version.in_(ACTIONABLE_CONFIG_VERSIONS),
                     AgentModelConfigRecord.pricing_available_at <= now,
                     AgentModelConfigRecord.pricing_expires_at > now,
                 )

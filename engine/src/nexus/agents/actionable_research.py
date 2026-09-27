@@ -122,7 +122,7 @@ def admit_actionable_research_output(
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
     try:
-        from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
+        from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
 
         terminals = tuple(terminal_outputs)
         bindings = tuple(bound_evidence)
@@ -153,7 +153,7 @@ def admit_actionable_research_output(
             or len(terminals) != 1
             or terminals[0].id != output.id
             or terminals[0].status not in _TERMINAL
-            or run.pricing_version != ACTIONABLE_CONFIG_VERSION
+            or run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS
             or output.intent != intent_document
             or output.content_hash != _hash(content)
             or intent.instrument_id != run.instrument_id

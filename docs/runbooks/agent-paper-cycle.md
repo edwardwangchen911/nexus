@@ -112,7 +112,7 @@ cycle → cycle events → research Job/Run/Output → decision/bindings
 分钟线。不要临时改用 WebSocket 成交事件拼 K 线，不新增 04:00–07:00 决策专用状态机；若未来
 要提前正式窗口，应先用正常产品入口取得一次合格的精确五分钟 pricehistory 证据，再单独评审。
 
-首次使用 actionable v4 时只登记配置，不创建 Job、不调用模型：
+登记当前 actionable 研究版本时只登记配置，不创建 Job、不调用模型：
 
 ```bash
 uv run --project engine nexus-openai-local setup \
@@ -124,6 +124,15 @@ uv run --project engine nexus-openai-local setup \
   --actionable-paper \
   --skip-key
 ```
+
+当前入口登记 `codex-sdk-chatgpt-v5-paper-scope`，预算仍为 96k 聚合输入和 64k wire，
+不增加来源请求、模型轮数或执行权限。v5 明确单股研究使用冻结的候选仓位和现金比例；
+完整组合分配与约束交由后续 `portfolio_decision` 和确定性风控处理。阶段分工不能消除
+真实证据缺口或审计否决。`v4-actionable` 保留原输入说明，旧 Job 继续使用冻结版本；
+已明确选定的 Agent 版本和可复用的历史版本不被默认配置替换。没有这两类版本权威时，
+正式入口使用最新登记且合格的 actionable 配置；登记 v5 不代表已有主线自动切换。
+无需迁移或改写旧 Run/Output；回滚旧代码前须确认没有运行中的 v5 Job，
+旧代码继续选择其支持的 v4 配置，保留 v5 已落盘事实。
 
 ## 2. Trigger：冻结一次决策证据
 

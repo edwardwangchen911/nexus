@@ -310,8 +310,13 @@ def test_actionable_v4_fails_closed(mutation: str) -> None:
         admit_actionable_research_output(**_case(mutation))
 
 
-def test_actionable_v4_maps_direction_without_weight_or_quantity() -> None:
-    result = admit_actionable_research_output(**_case())
+@pytest.mark.parametrize(
+    "version", ["codex-sdk-chatgpt-v4-actionable", "codex-sdk-chatgpt-v5-paper-scope"]
+)
+def test_actionable_maps_direction_without_weight_or_quantity(version: str) -> None:
+    case = _case()
+    case["run"].pricing_version = version
+    result = admit_actionable_research_output(**case)
     assert result.sizing_action == "increase"
     assert result.evidence_ref_ids == (_EVIDENCE_ID,)
     assert not hasattr(result, "target_weight")

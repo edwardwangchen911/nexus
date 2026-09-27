@@ -9,7 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from nexus.agents.actionable_research import actionable_intent_shape_valid
 from nexus.agents.codex_versions import (
-    ACTIONABLE_CONFIG_VERSION,
+    ACTIONABLE_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
     STRUCTURED_CONFIG_VERSIONS,
 )
@@ -31,7 +31,7 @@ STAGED_SEMANTICS_UNCERTAINTY = "三阶段角色表态未明确投资方向或审
 
 def staged_intent_semantics_valid(intent: ResearchIntent, pricing_version: str) -> bool:
     """Legacy stage votes establish neither an investment action nor resolved objections."""
-    if pricing_version == ACTIONABLE_CONFIG_VERSION:
+    if pricing_version in ACTIONABLE_CONFIG_VERSIONS:
         return actionable_intent_shape_valid(intent)
     return pricing_version not in STAGED_CONFIG_VERSIONS or (
         intent.stance == "watch"
@@ -130,7 +130,7 @@ def synthesize_intent(
     counter_theses = oppose_claims or by_role["bear"].claims[:5]
     structured = model.version in STRUCTURED_CONFIG_VERSIONS
     staged = model.version in STAGED_CONFIG_VERSIONS
-    actionable = model.version == ACTIONABLE_CONFIG_VERSION
+    actionable = model.version in ACTIONABLE_CONFIG_VERSIONS
     assessment = by_role["portfolio"].synthesis_assessment if structured else None
     review_incomplete = staged and by_role["evidence_audit"].vote != "support"
     if staged:

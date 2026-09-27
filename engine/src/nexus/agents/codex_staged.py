@@ -247,6 +247,7 @@ class StagedCodexCommittee(CodexCommittee):
         aggregate_input_tokens: int = MAX_INPUT_TOKENS,
         max_wire_bytes: int = 55808,
         inline_citations: bool = False,
+        paper_stage_scope: bool = False,
     ) -> None:
         if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
@@ -260,6 +261,9 @@ class StagedCodexCommittee(CodexCommittee):
         if type(inline_citations) is not bool:
             raise ValueError("CODEX_INLINE_CITATIONS_INVALID")
         self._inline_citations = inline_citations
+        if type(paper_stage_scope) is not bool:
+            raise ValueError("CODEX_PAPER_STAGE_SCOPE_INVALID")
+        self._paper_stage_scope = paper_stage_scope
         self._max_wire_bytes = max_wire_bytes
         self._aggregate_input_tokens = aggregate_input_tokens
         # Reserve terminal writes inside the worker-owned aggregate deadline.
@@ -410,6 +414,20 @@ class StagedCodexCommittee(CodexCommittee):
                 "or price_features is unavailable. This context is not execution or fill "
                 "authority, does not grant target weights, and execution_locked remains true."
             )
+            if self._paper_stage_scope:
+                payload["instructions"] = cast(str, payload["instructions"]) + (
+                    " paper_portfolio supplies the frozen candidate_position_weight and "
+                    "cash_weight; projection_hash identifies the internal paper portfolio. "
+                    "Use these supplied facts and preserve their limits. Single-security "
+                    "research assesses the security evidence and a conditional stance. "
+                    "Full portfolio allocation, concentration limits and target weights are "
+                    "assessed by the later portfolio_decision stage and deterministic risk. "
+                    "Do not reject security research solely because that later-stage context "
+                    "is absent or execution_locked=true. This division of responsibility "
+                    "never resolves a genuine evidence gap, audit objection or factual "
+                    "conflict; name exactly which conclusion each unresolved issue prevents. "
+                    "Do not infer missing portfolio facts, assign weights or grant execution."
+                )
         payload = (
             project_staged_payload(payload, inline_citations=True)
             if self._inline_citations

@@ -1443,7 +1443,10 @@ async def test_sdk_keeps_issuer_evidence_and_close_separate_from_adjusted_featur
 
 
 @pytest.mark.asyncio
-async def test_staged_sdk_explains_frozen_paper_decision_price_context(monkeypatch):
+@pytest.mark.parametrize("paper_stage_scope", [False, True])
+async def test_staged_sdk_explains_frozen_paper_decision_price_context(
+    monkeypatch, paper_stage_scope
+):
     from nexus.agents import codex_staged
 
     request, evidence, prompts = _authority()
@@ -1452,6 +1455,11 @@ async def test_staged_sdk_explains_frozen_paper_decision_price_context(monkeypat
         "decision_quote": {"source": "schwab", "bid": "99.9", "ask": "100.1"},
         "prior_daily": {"source": "alpaca", "close": "100.0"},
         "execution_locked": True,
+        "paper_portfolio": {
+            "candidate_position_weight": "0.10",
+            "cash_weight": "0.50",
+            "projection_hash": "c" * 64,
+        },
     }
     security = {
         "status": "ok",
@@ -1491,6 +1499,7 @@ async def test_staged_sdk_explains_frozen_paper_decision_price_context(monkeypat
         prompts=prompts,
         tools=tools,
         inline_citations=False,
+        paper_stage_scope=paper_stage_scope,
     )
     for role in ROLE_ORDER:
         await model.analyze(role, request, evidence, prompts[role])
@@ -1500,6 +1509,10 @@ async def test_staged_sdk_explains_frozen_paper_decision_price_context(monkeypat
         assert payload["frozen_inputs"]["security_snapshot"] == security
         assert "current decision-price context" in payload["instructions"]
         assert "not execution or fill authority" in payload["instructions"]
+        assert ("paper_portfolio supplies" in payload["instructions"]) == paper_stage_scope
+        if paper_stage_scope:
+            assert "later portfolio_decision stage" in payload["instructions"]
+            assert "never resolves a genuine evidence gap" in payload["instructions"]
 
 
 def test_child_environment_excludes_secrets_and_parent_app_ipc(monkeypatch):
@@ -2344,3 +2357,46 @@ async def test_staged_request_advertises_existing_text_restrictions_and_clears_d
     model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
     result = await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
     assert result.role == "orchestrator" and model.failure_diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("version", "scope_enabled"),
+    [("codex-sdk-chatgpt-v4-actionable", False), ("codex-sdk-chatgpt-v5-paper-scope", True)],
+)
+async def test_worker_routes_paper_scope_only_for_new_frozen_model_version(
+    monkeypatch, version, scope_enabled
+):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from nexus import worker
+    from nexus.agents.codex_versions import aggregate_input_limit, wire_byte_limit
+    from nexus.agents.price_authority import FrozenPriceAuthorityStatus
+
+    _, _, prompts = _authority()
+    model = SimpleNamespace(
+        version=version,
+        model_id=codex_sdk.MODEL_ID,
+        config_hash="d" * 64,
+        max_input_tokens=96000,
+        max_output_tokens=8192,
+        input_usd_per_million=Decimal(0),
+        output_usd_per_million=Decimal(0),
+    )
+    session = SimpleNamespace(get=AsyncMock(return_value=model))
+    run = SimpleNamespace(model_config_id=uuid4(), pricing_version=version, model_hash="d" * 64)
+    monkeypatch.setattr(worker, "load_frozen_evidence", AsyncMock(return_value=(object(),)))
+    monkeypatch.setattr(
+        worker, "revalidate_frozen_price_authority",
+        AsyncMock(return_value=FrozenPriceAuthorityStatus.MISSING),
+    )
+    monkeypatch.setattr(worker, "load_frozen_prompts", AsyncMock(return_value=prompts))
+    committee = await worker._committee(
+        session, EngineSettings(agent_runtime_mode="codex_sdk"), run,
+        responses_client=None, tools=_tools(),
+    )
+    assert committee._paper_stage_scope is scope_enabled
+    assert committee._inline_citations is True
+    assert aggregate_input_limit(version) == 96000
+    assert wire_byte_limit(version) == 64000

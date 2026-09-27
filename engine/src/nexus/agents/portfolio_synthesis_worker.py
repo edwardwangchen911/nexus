@@ -19,7 +19,7 @@ from nexus.agents.codex_sdk import (
     CodexInvocationError,
     invoke_codex_portfolio,
 )
-from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
 from nexus.agents.portfolio_synthesis_contracts import (
     SYNTHESIS_PROMPT_VERSION,
     SYNTHESIS_TOOL_HASH,
@@ -64,7 +64,7 @@ class CodexSynthesisTransport:
     def supports(self, model: AgentModelConfigRecord) -> bool:
         return (
             model.model_id == MODEL_ID
-            and model.version == ACTIONABLE_CONFIG_VERSION
+            and model.version in ACTIONABLE_CONFIG_VERSIONS
             and model.max_input_tokens == 96000
             and model.max_output_tokens == MAX_OUTPUT_TOKENS
             and model.max_tool_calls == 0
