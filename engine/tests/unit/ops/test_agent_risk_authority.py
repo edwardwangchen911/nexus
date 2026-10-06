@@ -338,6 +338,7 @@ def test_batch_fetches_shared_nasdaq_once_and_actions_once_per_instrument(tmp_pa
     _, halt, directory = _responses(published)
     directory = directory.replace(b"File Creation", b"MSFT|Microsoft|Q|N|N|100|N|N\nFile Creation")
     requested = []
+    client_options = []
 
     async def respond(request):
         requested.append(request)
@@ -346,10 +347,15 @@ def test_batch_fetches_shared_nasdaq_once_and_actions_once_per_instrument(tmp_pa
         return httpx.Response(200, content=halt if request.url.path == "/rss.aspx" else directory)
 
     original = httpx.AsyncClient
+
+    def client(**kwargs):
+        client_options.append(kwargs)
+        return original(**kwargs, transport=httpx.MockTransport(respond))
+
     monkeypatch.setattr(
         cli.httpx,
         "AsyncClient",
-        lambda **kw: original(**kw, transport=httpx.MockTransport(respond)),
+        client,
     )
     assert hasattr(cli, "collect_source_proofs_batch"), "bounded batch collector missing"
     candidates = (cli.RiskCandidate("AAPL", UUID(int=1)), cli.RiskCandidate("MSFT", UUID(int=2)))
@@ -377,6 +383,7 @@ def test_batch_fetches_shared_nasdaq_once_and_actions_once_per_instrument(tmp_pa
     ]
     assert [r.url.path for r in requested].count("/dynamic/SymDir/nasdaqlisted.txt") == 1
     assert [r.url.path for r in requested].count("/rss.aspx") == 1
+    assert sum(options.get("trust_env") is False for options in client_options) == 3
     assert sorted(
         r.url.params["symbols"] for r in requested if r.url.host == "data.alpaca.markets"
     ) == ["AAPL", "MSFT"]

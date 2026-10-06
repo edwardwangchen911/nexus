@@ -96,7 +96,7 @@ async def collect_source_proofs_batch(
     except OSError as error:
         raise ValueError("AGENT_RISK_NEW_OUTPUT_REQUIRED") from error
     try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as http:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30, trust_env=False) as http:
             client = FixedOriginHttpClient(
                 provider_name="nasdaq_trader",
                 origin=_NASDAQ_ORIGIN,
@@ -239,7 +239,7 @@ async def collect_source_proofs(
             )
         )
 
-        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as http:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30, trust_env=False) as http:
             client = FixedOriginHttpClient(
                 provider_name="nasdaq_trader",
                 origin=_NASDAQ_ORIGIN,
