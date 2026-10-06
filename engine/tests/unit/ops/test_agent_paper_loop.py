@@ -5614,15 +5614,20 @@ def test_trigger_failure_snapshot_requires_complete_known_identity(changes):
     assert loop.choose_loop_action(snapshot(**changes)) == A.STOP_RESULT_UNKNOWN
 
 
-def test_capacity_exceeded_is_terminal_for_current_slot_and_allows_future_slot() -> None:
+@pytest.mark.parametrize(
+    "failure_code", ["AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED", "RISK_INPUT_REQUIRED"]
+)
+def test_persisted_trigger_failure_is_terminal_for_current_slot_and_allows_future_slot(
+    failure_code: str,
+) -> None:
     current = snapshot(
         trigger_attempt_slot_at=SLOT,
-        trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        trigger_failure_code=failure_code,
     )
     future = snapshot(
         now=NOW + timedelta(days=1),
         trigger_attempt_slot_at=SLOT,
-        trigger_failure_code="AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
+        trigger_failure_code=failure_code,
     )
 
     assert loop.choose_loop_action(current) == A.WAIT_FOR_SLOT
@@ -5673,8 +5678,11 @@ def test_policy_wait_publishes_close_once_then_keeps_waiting(status, close_hour)
         )
 
 
+@pytest.mark.parametrize("failure_code", ["SCHWAB_L1_INCOMPLETE", "RISK_INPUT_REQUIRED"])
 @pytest.mark.parametrize("persisted", [None, "SCHWAB_L1_FRESHNESS_UNPROVEN"])
-def test_trigger_failure_without_matching_persistence_stops_unknown(monkeypatch, persisted):
+def test_trigger_failure_without_matching_persistence_stops_unknown(
+    monkeypatch, persisted, failure_code
+):
     monkeypatch.setattr(
         loop,
         "load_local_environment",
@@ -5689,7 +5697,7 @@ def test_trigger_failure_without_matching_persistence_stops_unknown(monkeypatch,
         return "ready"
 
     async def failure(*args, **kwargs):
-        raise ValueError("SCHWAB_L1_INCOMPLETE")
+        raise ValueError(failure_code)
 
     async def read(*args, **kwargs):
         return persisted
@@ -5923,7 +5931,7 @@ def test_evaluation_closes_exactly_when_prior_daily_preparation_is_unavailable(
 
 @pytest.mark.parametrize(
     "failure_code",
-    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED"],
+    ["SCHWAB_L1_INCOMPLETE", "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED", "RISK_INPUT_REQUIRED"],
 )
 def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
     monkeypatch: pytest.MonkeyPatch,
