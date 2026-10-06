@@ -32,6 +32,15 @@ _MAX_TOKEN_FILE_BYTES = 32 * 1024
 _TOKEN_REFRESH_LOCK = ".refresh.lock"
 
 
+def schwab_http_client(*, timeout: float = 10) -> httpx.AsyncClient:
+    """Route only the fixed Schwab HTTP origin directly, retaining other source routes."""
+    return httpx.AsyncClient(
+        mounts={"https://api.schwabapi.com": httpx.AsyncHTTPTransport(retries=0)},
+        follow_redirects=False,
+        timeout=timeout,
+    )
+
+
 class SchwabOAuthError(ValueError):
     """Stable, value-free Schwab OAuth error."""
 

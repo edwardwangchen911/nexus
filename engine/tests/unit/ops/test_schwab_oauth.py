@@ -167,6 +167,65 @@ async def test_macos_authorize_command_uses_native_dialog_by_default(
 
 
 @pytest.mark.asyncio
+async def test_default_authorize_bypasses_broken_environment_proxy_for_schwab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path)
+    monkeypatch.setenv("HTTPS_PROXY", "http://broken-proxy.invalid:8080")
+    monkeypatch.setenv("NO_PROXY", "")
+    requests: list[tuple[str, str]] = []
+
+    def transport(**kwargs: object) -> httpx.MockTransport:
+        proxied = kwargs.get("proxy") is not None
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append((request.method, request.url.path))
+            if proxied:
+                raise httpx.ConnectError("test proxy connection failed", request=request)
+            return httpx.Response(200, json=_token_payload())
+
+        return httpx.MockTransport(respond)
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", transport)
+    monkeypatch.setattr("httpx._client.AsyncHTTPTransport", transport)
+    arguments = provider_market_stream.build_parser().parse_args(
+        ["authorize", "--repo-root", str(tmp_path)]
+    )
+    result = await provider_market_stream._run(
+        arguments, opener=lambda _url: True, callback_reader=lambda _prompt: CALLBACK, now=NOW
+    )
+
+    assert result["status"] == "authorized"
+    assert requests == [("POST", "/v1/oauth/token")]
+    assert schwab_oauth.load_schwab_token(tmp_path).expires_at == EXPIRES
+
+
+@pytest.mark.asyncio
+async def test_schwab_direct_http_route_preserves_other_provider_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://provider-proxy.invalid:8080")
+    monkeypatch.setenv("NO_PROXY", "")
+
+    def transport(**kwargs: object) -> httpx.MockTransport:
+        route = "proxy" if kwargs.get("proxy") is not None else "direct"
+        return httpx.MockTransport(lambda _request: httpx.Response(200, text=route))
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", transport)
+    monkeypatch.setattr("httpx._client.AsyncHTTPTransport", transport)
+    create_client = getattr(schwab_oauth, "schwab_http_client", None)
+    assert callable(create_client), "fixed Schwab HTTP route is missing"
+    async with create_client(timeout=30) as client:
+        schwab = await client.get("https://api.schwabapi.com/marketdata/v1/pricehistory")
+        alpaca = await client.get("https://data.alpaca.markets/v2/stocks/AAPL/bars")
+        lookalike = await client.get("https://api.schwabapi.com.example.org/")
+
+    assert schwab.text == "direct"
+    assert alpaca.text == "proxy"
+    assert lookalike.text == "proxy"
+
+
+@pytest.mark.asyncio
 async def test_schwab_authorization_code_is_exchanged_once_without_secret_output(
     tmp_path: Path,
 ) -> None:

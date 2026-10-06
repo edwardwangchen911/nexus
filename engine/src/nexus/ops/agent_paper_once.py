@@ -91,7 +91,7 @@ from nexus.providers.base import MarketDataProvider
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider
 from nexus.providers.market.alpaca_http import AlpacaHttpTransport, SqlInstrumentSymbolResolver
-from nexus.providers.market.schwab_oauth import SchwabOAuthError
+from nexus.providers.market.schwab_oauth import SchwabOAuthError, schwab_http_client
 from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
 from nexus.providers.market.schwab_stream import SchwabStreamError
 from nexus.reconciliation.admission_claim import claim_or_lock
@@ -954,7 +954,7 @@ async def trigger_once(
             async with (
                 factory() as session,
                 session.begin(),
-                httpx.AsyncClient(follow_redirects=False, timeout=30) as client,
+                schwab_http_client(timeout=30) as client,
             ):
                 result = await trigger_in_session(
                     session,
@@ -1193,7 +1193,7 @@ async def prepare_agent_version_slot_once(
             async with (
                 factory() as session,
                 session.begin(),
-                httpx.AsyncClient(follow_redirects=False, timeout=30) as client,
+                schwab_http_client(timeout=30) as client,
             ):
                 identities = (
                     await _evaluation_candidate(
@@ -1461,7 +1461,7 @@ async def collect_window_once(
         store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
         async with (
             factory() as resolver_session,
-            httpx.AsyncClient(follow_redirects=False, timeout=30) as http,
+            schwab_http_client(timeout=30) as http,
         ):
             scope = await resolve_agent_paper_market_scope(
                 resolver_session,

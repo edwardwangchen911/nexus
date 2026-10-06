@@ -54,6 +54,7 @@ from nexus.providers.market.schwab_oauth import (
     load_schwab_app_config,
     parse_schwab_callback,
     save_schwab_token,
+    schwab_http_client,
 )
 from nexus.providers.market.schwab_stream import (
     SchwabLevelOneState,
@@ -312,7 +313,7 @@ async def _run(
             "model_called": False,
         }
     if client is None:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=10) as transport:
+        async with schwab_http_client() as transport:
             return await _run(
                 arguments,
                 client=transport,
