@@ -161,3 +161,40 @@ def test_normal_cli_archives_before_parse_and_exactly_reads_back(invoke):
         ]
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in directory.iterdir())
+
+
+def test_normal_cli_reports_unfinished_session_without_configuration_or_provider_access(
+    invoke, monkeypatch
+):
+    class BeforeCompletion(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2024, 6, 14, 20, 45, 59, tzinfo=UTC)
+            return value.replace(tzinfo=None) if tz is None else value.astimezone(tz)
+
+    def forbidden_configuration(*args, **kwargs):
+        raise AssertionError("unfinished-session rejection must precede credential access")
+
+    monkeypatch.setattr(invoke.cli, "datetime", BeforeCompletion)
+    monkeypatch.setattr(invoke.cli, "load_local_environment", forbidden_configuration)
+    code, directory, captured = invoke([])
+    assert code == 1
+    assert json.loads(captured.err) == {
+        "status": "failed",
+        "code": "ALPACA_PRICES_SESSION_NOT_COMPLETED",
+    }
+    assert not directory.exists()
+    assert invoke.requests == []
+    assert invoke.queries == []
+
+
+def test_normal_cli_does_not_publish_unrecognized_calendar_error(invoke, monkeypatch):
+    def unexpected_calendar_error(*args, **kwargs):
+        raise ValueError("raw-private-canary")
+
+    monkeypatch.setattr(invoke.cli, "collection_window", unexpected_calendar_error)
+    code, directory, captured = invoke([])
+    assert code == 1
+    assert json.loads(captured.err) == {"status": "failed", "code": "ALPACA_PRICES_REQUEST_FAILED"}
+    assert not directory.exists()
+    assert invoke.requests == []

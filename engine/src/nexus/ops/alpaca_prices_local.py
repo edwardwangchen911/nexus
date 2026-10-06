@@ -140,11 +140,7 @@ async def _resolve_identity(database_url: str, request: BarsRequest, identity_as
                     ):
                         raise CollectionError("ALPACA_PRICES_IDENTITY_INVALID") from None
                     master = await session.get(Instrument, request.instrument_id)
-                    if (
-                        master is None
-                        or master.exchange != "ARCX"
-                        or master.currency != "USD"
-                    ):
+                    if master is None or master.exchange != "ARCX" or master.currency != "USD":
                         raise CollectionError("ALPACA_PRICES_IDENTITY_INVALID") from None
                     return "SPY"
     finally:
@@ -299,9 +295,18 @@ def main() -> int:
         args = parser.parse_args()
         if not 1 <= args.max_pages <= MAX_PAGES:
             raise CollectionError("ALPACA_PRICES_REQUEST_INVALID")
-        request, calendar = collection_window(
-            args.instrument_id, args.start, args.end, args.adjustment, now=datetime.now(UTC)
-        )
+        try:
+            request, calendar = collection_window(
+                args.instrument_id, args.start, args.end, args.adjustment, now=datetime.now(UTC)
+            )
+        except ValueError as error:
+            code = str(error)
+            if code not in {
+                "ALPACA_PRICES_REQUEST_INVALID",
+                "ALPACA_PRICES_SESSION_NOT_COMPLETED",
+            }:
+                raise
+            raise CollectionError(code) from None
         identity_date = args.identity_asof or request.end.date()
         if identity_date > datetime.now(UTC).date():
             raise CollectionError("ALPACA_PRICES_IDENTITY_DATE_INVALID")
