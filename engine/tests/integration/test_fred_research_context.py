@@ -38,6 +38,22 @@ from unit.market.test_object_store import FakeS3Client
 from unit.research.test_fred_observations import parse
 
 
+@pytest.fixture(autouse=True)
+def synthetic_fred_context_model(monkeypatch: pytest.MonkeyPatch):
+    # These storage/admission tests never call a model. Keep their synthetic
+    # configuration independent of expiring official production price evidence.
+    from nexus.ops import openai_local
+
+    configured = dict(openai_local._CONFIG)
+    configured.update(
+        model_id="synthetic-fred-context-model",
+        version="synthetic-fred-context-v1",
+        pricing_available_at="2026-09-01T00:00:00+00:00",
+        pricing_expires_at=(datetime.now(UTC) + timedelta(days=365)).isoformat(),
+    )
+    monkeypatch.setattr(openai_local, "_CONFIG", configured)
+
+
 def _macro_collection(
     series: str, *, vintage: date, received_at: datetime
 ) -> FredVintageCollection:
@@ -544,3 +560,48 @@ async def test_current_trends_snapshot_does_not_bind_partial_macro_vintage(
             },
         )
         assert result["items"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host_lead", [timedelta(seconds=25), timedelta(minutes=15)])
+async def test_current_trends_snapshot_is_immediately_visible_when_host_clock_leads_database(
+    migrated_database_url, monkeypatch: pytest.MonkeyPatch, host_lead: timedelta
+):
+    settings = DailyOnceSettings.model_validate(
+        {
+            "DATABASE_URL": migrated_database_url,
+            "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:9000",
+            "OBJECT_STORE_REGION": "us-east-1",
+            "OBJECT_STORE_BUCKET": "synthetic-clock-skew",
+            "OBJECT_STORE_PREFIX": "synthetic-clock-skew",
+            "OBJECT_STORE_ACCESS_KEY_ID": "synthetic-access",
+            "OBJECT_STORE_SECRET_ACCESS_KEY": "synthetic-secret",
+        }
+    )
+    await prepare_database(settings)
+    factory = session_factory(settings)
+    try:
+        async with factory.begin() as session:
+            await seed_filing(session)
+            database_before = await session.scalar(select(func.clock_timestamp()))
+        host_now = database_before + host_lead
+
+        class HostDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return host_now.replace(tzinfo=None) if tz is None else host_now.astimezone(tz)
+
+        monkeypatch.setattr(snapshot_module, "datetime", HostDateTime)
+        await loop._prepare_current_trends_research_snapshot(
+            settings, instrument_id=INSTRUMENT, now=host_now
+        )
+        async with factory() as session:
+            database_after = await session.scalar(select(func.clock_timestamp()))
+            snapshot = await select_authoritative_snapshot(
+                session, instrument_id=INSTRUMENT, as_of=database_after
+            )
+            assert snapshot is not None, "host clock skew must not create a future snapshot"
+            assert database_before <= snapshot.available_at <= database_after
+            assert snapshot.available_at < host_now
+    finally:
+        await factory.kw["bind"].dispose()

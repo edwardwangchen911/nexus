@@ -1286,6 +1286,14 @@ async def _prepare_current_trends_research_snapshot(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory.begin() as session:
+            database_now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(database_now, datetime):
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            # The next verifier reads on the database clock. Never freeze a
+            # future snapshot when the host leads it, or expand the caller's
+            # cutoff when the database leads the host. Original receipt and
+            # availability timestamps remain unchanged.
+            now = min(require_utc(now), require_utc(database_now))
             if macro_vintage is None:
                 previous = await select_authoritative_snapshot(
                     session, instrument_id=instrument_id, as_of=now
