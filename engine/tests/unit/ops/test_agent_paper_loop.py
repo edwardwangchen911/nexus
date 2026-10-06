@@ -4621,11 +4621,37 @@ def test_macro_vintage_advances_only_after_its_next_xnys_open(
     assert result == expected_vintage
 
 
+@pytest.mark.parametrize(
+    ("vintage", "available_cpi_period", "monthly_start", "monthly_end", "daily_start"),
+    [
+        (
+            date(2026, 9, 13),
+            date(2026, 8, 1),
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            date(2026, 8, 13),
+        ),
+        (date(2026, 10, 5), date(2026, 8, 1), date(2026, 8, 1), date(2026, 9, 1), date(2026, 9, 4)),
+        (
+            date(2027, 1, 4),
+            date(2026, 11, 1),
+            date(2026, 11, 1),
+            date(2026, 12, 1),
+            date(2026, 12, 4),
+        ),
+        (date(2028, 3, 3), date(2028, 1, 1), date(2028, 1, 1), date(2028, 2, 1), date(2028, 2, 1)),
+    ],
+)
 def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: loop.Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: loop.Path,
+    vintage: date,
+    available_cpi_period: date,
+    monthly_start: date,
+    monthly_end: date,
+    daily_start: date,
 ) -> None:
     instrument_id = UUID(int=20)
-    vintage = date(2026, 9, 13)
     all_series = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
     scopes = iter(
         (
@@ -4656,6 +4682,11 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
     async def collect(request, *, key, directory):
         assert directory.name == request.series
         requests.append(request)
+        # FRED can only return economic periods published by this fixed vintage.
+        if request.series == "CPIAUCSL" and not (
+            request.observation_start <= available_cpi_period <= request.observation_end
+        ):
+            return {"status": "collected", "observation_count": 0}
         return {"status": "collected", "observation_count": 1}
 
     def load(directory):
@@ -4693,14 +4724,14 @@ def test_macro_preparation_collects_imports_rebuilds_and_reads_back_once(
     daily = [request for request in requests if request.series not in {"CPIAUCSL", "UNRATE"}]
     monthly = [request for request in requests if request.series in {"CPIAUCSL", "UNRATE"}]
     assert all(
-        request.observation_start == date(2026, 8, 13)
+        request.observation_start == daily_start
         and request.observation_end == vintage
         and request.vintage == vintage
         for request in daily
     )
     assert all(
-        request.observation_start == date(2026, 8, 1)
-        and request.observation_end == date(2026, 8, 31)
+        request.observation_start == monthly_start
+        and request.observation_end == monthly_end
         and request.vintage == vintage
         for request in monthly
     )

@@ -1048,8 +1048,11 @@ async def _inspect_macro_scope(
 
 def _macro_request(series: str, vintage: date) -> FredVintageRequest:
     if series in _PAPER_MONTHLY_MACRO_SERIES:
-        observation_end = vintage.replace(day=1) - timedelta(days=1)
-        observation_start = observation_end.replace(day=1)
+        # Monthly releases can lag into the next month. Include both economic
+        # period anchors within the existing 31-day bound; the fixed vintage
+        # still excludes unpublished values and preserves each observed month.
+        observation_end = (vintage.replace(day=1) - timedelta(days=1)).replace(day=1)
+        observation_start = (observation_end - timedelta(days=1)).replace(day=1)
     else:
         observation_start = vintage - timedelta(days=31)
         observation_end = vintage
