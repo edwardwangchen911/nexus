@@ -471,6 +471,7 @@ async def test_schwab_stream_collects_one_bounded_private_archive(tmp_path) -> N
     ("connection_error", "expected_reason"),
     [
         (TimeoutError("private connection detail"), "CONNECT_TIMEOUT"),
+        (ImportError("private dependency detail"), "CONNECT_DEPENDENCY_MISSING"),
         (ProxyError("private proxy detail"), "CONNECT_PROXY_FAILED"),
         (ssl.SSLError("private tls detail"), "CONNECT_TLS_FAILED"),
         (socket.gaierror("private dns detail"), "CONNECT_DNS_FAILED"),
@@ -514,6 +515,18 @@ async def test_schwab_stream_classifies_connect_failure_without_leaking_detail(
         load_provider_market_stream_archive(directory)
 
 
+def test_default_schwab_connector_preserves_proxy_bypass_and_explicit_route(monkeypatch):
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: True)
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:9"})
+    assert stream._FixedConnect("wss://streamer-api.schwab.com/ws").proxy is None
+    assert (
+        stream._FixedConnect("wss://streamer-api.schwab.com/ws", proxy="http://127.0.0.1:8").proxy
+        == "http://127.0.0.1:8"
+    )
+
+
 @pytest.mark.asyncio
 async def test_schwab_stream_classifies_reset_during_proxy_tls_handshake(tmp_path) -> None:
     async def reset_after_connect(
@@ -554,6 +567,51 @@ async def test_schwab_stream_classifies_reset_during_proxy_tls_handshake(tmp_pat
     receipt = json.loads((directory / "receipt.json").read_text())
     assert receipt["stop_reason"] == "CONNECT_RESET"
     assert "access-token" not in (directory / "receipt.json").read_text()
+
+
+@pytest.mark.asyncio
+async def test_default_schwab_connector_uses_configured_https_proxy_before_system_socks(
+    tmp_path, monkeypatch
+) -> None:
+    import urllib.request
+
+    connected = []
+
+    async def reset_after_connect(reader, writer):
+        request = await reader.readuntil(b"\r\n\r\n")
+        connected.append(request.split(b"\r\n", 1)[0])
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        await writer.drain()
+        await reader.read(1)
+        writer.get_extra_info("socket").setsockopt(
+            socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+        )
+        writer.transport.abort()
+
+    server = await asyncio.start_server(reset_after_connect, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(
+        urllib.request,
+        "getproxies",
+        lambda: {"socks": "http://127.0.0.1:1", "https": f"http://127.0.0.1:{port}"},
+    )
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+    try:
+        result = await collect_schwab_stream(
+            symbols=("AAPL",),
+            directory=tmp_path / "system-proxy",
+            streamer_url="wss://streamer-api.schwab.com/ws",
+            credentials=SCHWAB_CREDENTIALS,
+            duration=2,
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert connected == [b"CONNECT streamer-api.schwab.com:443 HTTP/1.1"]
+    assert result["stop_reason"] == "CONNECT_RESET"
+    assert result["authenticated"] is False
+    assert result["frame_count"] == 0
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import webbrowser
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -114,6 +115,19 @@ class SchwabMarketStreamImportResult:
 
 
 class _FixedConnect(connect):
+    def __init__(self, uri: str, **kwargs: Any) -> None:
+        if kwargs.get("proxy", True) is True:
+            if urllib.request.proxy_bypass(urlsplit(uri).netloc):
+                kwargs["proxy"] = None
+            else:
+                proxies = urllib.request.getproxies()
+                # Pin the configured WSS/HTTPS route rather than letting the
+                # library prioritize macOS SOCKS and its optional dependency.
+                configured = proxies.get("wss") or proxies.get("https")
+                if configured is not None:
+                    kwargs["proxy"] = configured
+        super().__init__(uri, **kwargs)
+
     def process_redirect(self, exc: Exception) -> Exception:
         return exc
 
@@ -122,6 +136,8 @@ def _connect_failure_reason(error: Exception) -> str:
     """Classify a failed handshake without persisting URLs or exception text."""
     if isinstance(error, TimeoutError):
         return "CONNECT_TIMEOUT"
+    if isinstance(error, ImportError):
+        return "CONNECT_DEPENDENCY_MISSING"
     if isinstance(error, ProxyError):
         return "CONNECT_PROXY_FAILED"
     if isinstance(error, ssl.SSLError):
