@@ -559,12 +559,12 @@ def main() -> int:
     parser.add_argument(
         "--stage-time-budget",
         action="store_true",
-        help="Register experimental v6 only in nexus_test_/nexus_diag_ DB; no research",
+        help="Register v6 stage budget; isolated DBs by default; no research",
     )
     parser.add_argument(
         "--actionable-paper",
         action="store_true",
-        help="Setup the bounded v4 Agent paper research version",
+        help="Setup bounded Agent Paper research (v5 by default)",
     )
     for part in ("submissions", "parent", "exhibit"):
         parser.add_argument(f"--sec-{part}", type=Path)
