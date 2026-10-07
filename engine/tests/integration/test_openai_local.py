@@ -15,6 +15,41 @@ from sqlalchemy import func, select
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("actual_database", ["postgres", "other_isolated_database"])
+async def test_stage_budget_registration_checks_actual_database_before_writes(
+    migrated_database_url, monkeypatch, actual_database
+):
+    from nexus.ops import openai_local
+    from sqlalchemy.engine import make_url
+
+    actual_url = make_url(migrated_database_url)
+    if actual_database == "postgres":
+        actual_url = actual_url.set(database="postgres")
+    actual_factory = session_factory(
+        EngineSettings(database_url=actual_url.render_as_string(hide_password=False))
+    )
+    claimed_url = make_url(migrated_database_url).set(database="nexus_diag_claimed")
+    settings = EngineSettings(
+        database_url=claimed_url.render_as_string(hide_password=False),
+        agent_runtime_mode="codex_sdk",
+    )
+    monkeypatch.setattr(openai_local, "session_factory", lambda _: actual_factory)
+    try:
+        with pytest.raises(ValueError, match="CODEX_STAGE_TIME_BUDGET_ISOLATION_REQUIRED"):
+            await openai_local.prepare_database(
+                settings,
+                actionable_paper=True,
+                structured_synthesis=True,
+                aggregate_input_tokens=96000,
+                max_wire_bytes=64000,
+                inline_citations=True,
+                stage_time_budget=True,
+            )
+    finally:
+        await actual_factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "backend,staged,strategy_rnd",
     [
@@ -243,5 +278,57 @@ async def test_actionable_setup_is_idempotent_and_creates_no_work(migrated_datab
         assert synthesis_prompt is not None
         assert "must not by itself make a review unresolved" in synthesis_prompt.content
         assert "audit vote remains non-support" in synthesis_prompt.content
+        for model_type in (AgentResearchRunRecord, DataSnapshot, Job):
+            assert await session.scalar(select(func.count()).select_from(model_type)) == 0
+
+
+@pytest.mark.asyncio
+async def test_stage_budget_setup_freezes_new_identity_without_rewriting_v5(migrated_database_url):
+    from nexus.agents.codex_versions import (
+        ACTIONABLE_CONFIG_VERSION,
+        DEADLINE_BUDGET_CONFIG_VERSION,
+    )
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    options = dict(
+        actionable_paper=True,
+        structured_synthesis=True,
+        aggregate_input_tokens=96000,
+        max_wire_bytes=64000,
+        inline_citations=True,
+    )
+    await prepare_database(settings, **options)
+    async with session_factory(settings)() as session:
+        old = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION
+            )
+        )
+        old_identity = (old.id, old.config_hash)
+    await prepare_database(settings, **options, stage_time_budget=True)
+    await prepare_database(settings, **options, stage_time_budget=True)
+    async with session_factory(settings)() as session:
+        old = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == ACTIONABLE_CONFIG_VERSION
+            )
+        )
+        new = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == DEADLINE_BUDGET_CONFIG_VERSION
+            )
+        )
+        assert (old.id, old.config_hash) == old_identity
+        assert new.config_hash != old.config_hash
+        assert (new.max_input_tokens, new.max_output_tokens, new.max_tool_calls) == (96000, 8192, 0)
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(AgentModelConfigRecord)
+                .where(AgentModelConfigRecord.version == DEADLINE_BUDGET_CONFIG_VERSION)
+            )
+            == 1
+        )
         for model_type in (AgentResearchRunRecord, DataSnapshot, Job):
             assert await session.scalar(select(func.count()).select_from(model_type)) == 0

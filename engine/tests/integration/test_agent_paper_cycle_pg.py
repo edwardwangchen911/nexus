@@ -2386,14 +2386,21 @@ def _safe_no_trade_intent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("paper_scope_upgrade", [False, True])
+@pytest.mark.parametrize(
+    ("paper_scope_upgrade", "paper_scope_version"),
+    [
+        (False, "codex-sdk-chatgpt-v5-paper-scope"),
+        (True, "codex-sdk-chatgpt-v5-paper-scope"),
+        (True, "codex-sdk-chatgpt-v6-stage-time-budget"),
+    ],
+)
 async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exists(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     paper_scope_upgrade: bool,
+    paper_scope_version: str,
 ) -> None:
     from nexus.agents.codex_sdk import MODEL_ID
-    from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
     seed = await seed_paper_batch(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -2453,7 +2460,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
                     AgentModelConfigRecord(
                         id=UUID("f3000000-0000-0000-0000-000000000002"),
                         model_id=MODEL_ID if paper_scope_upgrade else "newer-fixture-agent-paper",
-                        version=ACTIONABLE_CONFIG_VERSION
+                        version=paper_scope_version
                         if paper_scope_upgrade
                         else "codex-sdk-chatgpt-v4-actionable",
                         config_hash="f" * 64,

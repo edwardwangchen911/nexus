@@ -7,6 +7,7 @@ MCP servers, user hooks, or automatic retry are enabled in the runtime.
 import asyncio
 import hashlib
 import json
+import math
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -123,6 +124,7 @@ class CodexInvocationError(ValueError):
 @dataclass
 class _InvocationState:
     provider_call_started: bool = False
+    stage_deadline: float | None = None
 
 
 class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
@@ -326,15 +328,36 @@ async def invoke_codex(
     *,
     output_model: type[BaseModel] = _Batch,
     max_wire_bytes: int = 55808,
+    timeout_seconds: float | None = None,
+    deadline_at: float | None = None,
 ) -> tuple[str, UsageSnapshot]:
-    state = _InvocationState()
+    if timeout_seconds is not None and (
+        type(timeout_seconds) not in {int, float}
+        or not math.isfinite(timeout_seconds)
+        or not 0 < timeout_seconds <= 108
+    ):
+        raise ValueError("CODEX_STAGE_TIMEOUT_INVALID")
+    if deadline_at is not None and (
+        timeout_seconds is None
+        or type(deadline_at) not in {int, float}
+        or not math.isfinite(deadline_at)
+        or deadline_at - asyncio.get_running_loop().time() > timeout_seconds
+    ):
+        raise ValueError("CODEX_STAGE_DEADLINE_INVALID")
+    state = _InvocationState(
+        stage_deadline=deadline_at
+        if deadline_at is not None
+        else asyncio.get_running_loop().time() + timeout_seconds
+        if timeout_seconds is not None
+        else None
+    )
     with _invocation_boundary("preflight", state=state):
         return await _invoke_codex(
             payload,
             invocation_state=state,
             output_model=output_model,
             max_wire_bytes=max_wire_bytes,
-            timeout_seconds=TIMEOUT_SECONDS,
+            timeout_seconds=TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds,
         )
 
 
@@ -361,7 +384,7 @@ async def _invoke_codex(
     *,
     output_model: type[BaseModel],
     max_wire_bytes: int,
-    timeout_seconds: int,
+    timeout_seconds: float,
     invocation_state: _InvocationState,
 ) -> tuple[str, UsageSnapshot]:
     wire = codex_request_wire(payload)
@@ -373,6 +396,9 @@ async def _invoke_codex(
     output_schema = codex_output_schema(output_model)
     if codex_input_allowance(wire, output_schema) > MAX_INPUT_TOKENS:
         raise CodexInvocationError("CODEX_INPUT_TOO_LARGE", phase="preflight")
+    stage_deadline = invocation_state.stage_deadline
+    if stage_deadline is not None and asyncio.get_running_loop().time() >= stage_deadline:
+        raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="preflight")
     with TemporaryDirectory(prefix="nexus-codex-") as temporary:
         directory = Path(temporary)
         with _invocation_boundary("client_init"):
@@ -380,8 +406,17 @@ async def _invoke_codex(
         run_task = None
         phase: InvocationPhase = "account"
         try:
-            async with asyncio.timeout(timeout_seconds):
+            async with (
+                asyncio.timeout_at(stage_deadline)
+                if stage_deadline is not None
+                else asyncio.timeout(timeout_seconds)
+            ):
                 with _invocation_boundary("account"):
+                    if (
+                        stage_deadline is not None
+                        and asyncio.get_running_loop().time() >= stage_deadline
+                    ):
+                        raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="account")
                     account = await client.account(refresh_token=False)
                     if account.account is None or not isinstance(
                         account.account.root, ChatgptAccount

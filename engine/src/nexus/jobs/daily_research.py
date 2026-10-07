@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION, ACTIONABLE_CONFIG_VERSIONS
+from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS, PAPER_SCOPE_CONFIG_VERSIONS
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import ResearchAdmission, admit_research_run
 from nexus.agents.portfolio_context import read_portfolio_context
@@ -338,7 +338,7 @@ async def admit_agent_paper_research(
             )
             reuse_latest_actor_prompts_only = (
                 model is not None
-                and model.version == ACTIONABLE_CONFIG_VERSION
+                and model.version in PAPER_SCOPE_CONFIG_VERSIONS
                 and _model_is_agent_paper_compatible(model)
                 and model.max_tool_calls == 0
             )

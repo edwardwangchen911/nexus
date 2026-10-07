@@ -19,12 +19,13 @@ from uuid import UUID
 import httpx
 from dotenv import dotenv_values
 from openai import AsyncOpenAI
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 
 from nexus.agents import codex_token_budget
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSION,
+    DEADLINE_BUDGET_CONFIG_VERSION,
     INLINE_CITATION_CONFIG_VERSION,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     PORTFOLIO_DECISION_MAX_INPUT_TOKENS,
@@ -179,6 +180,7 @@ async def prepare_database(
     max_wire_bytes: int = 55808,
     inline_citations: bool = False,
     actionable_paper: bool = False,
+    stage_time_budget: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -186,6 +188,14 @@ async def prepare_database(
     host = make_url(settings.database_url).host
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if type(stage_time_budget) is not bool or stage_time_budget and not actionable_paper:
+        raise ValueError("CODEX_STAGE_TIME_BUDGET_INVALID")
+    if stage_time_budget and not (make_url(settings.database_url).database or "").startswith(
+        ("nexus_test_", "nexus_diag_")
+    ):
+        # Registration becomes eligible for normal latest-model selection. Until
+        # representative-load validation, the experimental version is isolated.
+        raise ValueError("CODEX_STAGE_TIME_BUDGET_ISOLATION_REQUIRED")
     config = dict(_CONFIG)
     if (
         type(actionable_paper) is not bool
@@ -253,7 +263,9 @@ async def prepare_database(
                 else STRUCTURED_CONFIG_VERSION
             )
         if actionable_paper:
-            version = ACTIONABLE_CONFIG_VERSION
+            version = (
+                DEADLINE_BUDGET_CONFIG_VERSION if stage_time_budget else ACTIONABLE_CONFIG_VERSION
+            )
         if strategy_rnd:
             from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
 
@@ -273,6 +285,16 @@ async def prepare_database(
                 "billing_mode": "chatgpt_subscription",
                 "max_sdk_turns": 3 if staged or structured_synthesis else 1,
             }
+        )
+    if stage_time_budget:
+        config["stage_time_budget"] = json.dumps(
+            {
+                "job_absolute_seconds": 120,
+                "terminal_reserve_seconds": 5,
+                "sdk_close_reserve_seconds": 7,
+                "later_phase_reserve_seconds": {"research": 55, "critique": 30, "synthesis": 0},
+            },
+            sort_keys=True,
         )
     if max_wire_bytes != 55808:
         config["max_wire_bytes"] = max_wire_bytes
@@ -341,6 +363,14 @@ async def prepare_database(
         prompt = load_strategy_rnd_prompt()
         prompts.append((prompt.role, prompt.version, prompt.content, prompt.content_hash))
     async with session_factory(settings)() as session, session.begin():
+        if stage_time_budget:
+            database = await session.scalar(select(func.current_database()))
+            if (
+                not isinstance(database, str)
+                or database != make_url(settings.database_url).database
+                or not database.startswith(("nexus_test_", "nexus_diag_"))
+            ):
+                raise ValueError("CODEX_STAGE_TIME_BUDGET_ISOLATION_REQUIRED")
         for role, version, content, content_hash in prompts:
             existing = await session.scalar(
                 select(AgentPromptVersionRecord).where(
@@ -515,6 +545,11 @@ def main() -> int:
     parser.add_argument("--max-wire-bytes", type=int, choices=(55808, 64000), default=55808)
     parser.add_argument("--inline-citations", action="store_true")
     parser.add_argument(
+        "--stage-time-budget",
+        action="store_true",
+        help="Register experimental v6 only in nexus_test_/nexus_diag_ DB; no research",
+    )
+    parser.add_argument(
         "--actionable-paper",
         action="store_true",
         help="Setup the bounded v4 Agent paper research version",
@@ -545,6 +580,8 @@ def main() -> int:
         "--skip-key", action="store_true", help="Prepare local DB only; no key prompt or network"
     )
     args = parser.parse_args()
+    if args.stage_time_budget and args.action != "setup":
+        parser.error("--stage-time-budget is only valid with setup")
     root = Path.cwd().resolve()
     try:
         if args.actionable_paper and (
@@ -646,6 +683,7 @@ def main() -> int:
                     staged=args.staged,
                     strategy_rnd=args.strategy_rnd,
                     **({"actionable_paper": True} if args.actionable_paper else {}),
+                    **({"stage_time_budget": True} if args.stage_time_budget else {}),
                     **({"inline_citations": True} if args.inline_citations else {}),
                     **({"structured_synthesis": True} if args.structured_synthesis else {}),
                     **(

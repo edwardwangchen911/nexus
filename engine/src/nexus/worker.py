@@ -11,10 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
-    ACTIONABLE_CONFIG_VERSION,
     ACTIONABLE_CONFIG_VERSIONS,
+    DEADLINE_BUDGET_CONFIG_VERSION,
     INLINE_CITATION_CONFIG_VERSION,
+    PAPER_SCOPE_CONFIG_VERSIONS,
     PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
+    RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS,
+    RESEARCH_STAGE_JOB_TIMEOUT_SECONDS,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
     STRUCTURED_CONFIG_VERSIONS,
@@ -367,7 +370,9 @@ def _agent_registry(
                 schema_version=_JOB_SCHEMA,
                 payload_model=_AgentResearchJobPayload,
                 queue=QueueName.GENERAL,
-                timeout_seconds=135 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 45,
+                timeout_seconds=RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS
+                if runtime_mode is AgentRuntimeMode.CODEX_SDK
+                else 45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
                 max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
                 idempotency_namespace="agent.research",
@@ -461,6 +466,10 @@ async def _committee(
             if model.version == STAGED_CONFIG_VERSION
             else CodexCommittee
         )
+        if model.version == DEADLINE_BUDGET_CONFIG_VERSION and deadline is not None:
+            # The worker deadline includes transaction/handler grace. Anchor v6
+            # to the original worker start, never reset time after DB preparation.
+            deadline -= RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS - RESEARCH_STAGE_JOB_TIMEOUT_SECONDS
         return committee_type(
             prompts={
                 role: PromptAsset(
@@ -479,10 +488,11 @@ async def _committee(
                 allow_fixture_price_evidence=False,
             ),
             **(
-                {"paper_stage_scope": True}
-                if model.version == ACTIONABLE_CONFIG_VERSION
+                {"stage_time_budget": True}
+                if model.version == DEADLINE_BUDGET_CONFIG_VERSION
                 else {}
             ),
+            **({"paper_stage_scope": True} if model.version in PAPER_SCOPE_CONFIG_VERSIONS else {}),
             **(
                 {"inline_citations": True}
                 if model.version in ({INLINE_CITATION_CONFIG_VERSION} | ACTIONABLE_CONFIG_VERSIONS)

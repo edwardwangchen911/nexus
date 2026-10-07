@@ -83,9 +83,7 @@ async def test_expired_stage_deadline_records_safe_reason_without_provider_call(
     request, evidence, prompts = _authority()
     called = AsyncMock()
     monkeypatch.setattr(codex_staged, "invoke_codex", called)
-    model = codex_staged.StagedCodexCommittee(
-        prompts=prompts, tools=_tools(), deadline=0
-    )
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools(), deadline=0)
     with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
         await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
     called.assert_not_awaited()
@@ -150,19 +148,24 @@ async def test_worker_rejects_budget_that_does_not_bind_frozen_version(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_worker_builds_actionable_committee_with_exact_frozen_limits(monkeypatch):
+@pytest.mark.parametrize("allocated", [False, True])
+async def test_worker_builds_actionable_committee_with_exact_frozen_limits(monkeypatch, allocated):
+    import asyncio
     from types import SimpleNamespace
 
     from nexus import worker
     from nexus.agents.codex_sdk import MODEL_ID
     from nexus.agents.codex_staged import StructuredStagedCodexCommittee
-    from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSION
+    from nexus.agents.codex_versions import (
+        ACTIONABLE_CONFIG_VERSION,
+        DEADLINE_BUDGET_CONFIG_VERSION,
+    )
     from nexus.agents.price_authority import FrozenPriceAuthorityStatus
     from nexus.settings import EngineSettings
 
     _, _, prompts = _authority()
     model = SimpleNamespace(
-        version=ACTIONABLE_CONFIG_VERSION,
+        version=DEADLINE_BUDGET_CONFIG_VERSION if allocated else ACTIONABLE_CONFIG_VERSION,
         model_id=MODEL_ID,
         config_hash="a" * 64,
         max_input_tokens=96000,
@@ -181,17 +184,24 @@ async def test_worker_builds_actionable_committee_with_exact_frozen_limits(monke
         AsyncMock(return_value=FrozenPriceAuthorityStatus.MISSING),
     )
     monkeypatch.setattr(worker, "load_frozen_prompts", AsyncMock(return_value=prompts))
+    handler_deadline = asyncio.get_running_loop().time() + 135
     result = await worker._committee(
         session,
         EngineSettings(agent_runtime_mode="codex_sdk"),
         run,
         responses_client=None,
         tools=_tools(),
+        deadline=handler_deadline,
     )
     assert isinstance(result, StructuredStagedCodexCommittee)
     assert result._aggregate_input_tokens == 96000
     assert result._max_wire_bytes == 64000
     assert result._inline_citations is True
+
+    assert result._stage_time_budget is allocated
+    assert result._paper_stage_scope is True
+
+    assert result._deadline == handler_deadline - (15 if allocated else 0) - 5
 
 
 @pytest.mark.parametrize(

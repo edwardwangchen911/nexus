@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from enum import Enum
 from types import GenericAlias
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
@@ -232,6 +232,12 @@ def _stage_model_for_prior_claims(stage: str, claim_ids: tuple[str, ...]) -> typ
     )
 
 
+class _StageInvocationOptions(TypedDict, total=False):
+    timeout_seconds: float
+    deadline_at: float
+    max_wire_bytes: int
+
+
 class StagedCodexCommittee(CodexCommittee):
     """Reuse frozen tools and existing durable role outputs; never retry a failed call."""
 
@@ -248,6 +254,7 @@ class StagedCodexCommittee(CodexCommittee):
         max_wire_bytes: int = 55808,
         inline_citations: bool = False,
         paper_stage_scope: bool = False,
+        stage_time_budget: bool = False,
     ) -> None:
         if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
@@ -264,6 +271,9 @@ class StagedCodexCommittee(CodexCommittee):
         if type(paper_stage_scope) is not bool:
             raise ValueError("CODEX_PAPER_STAGE_SCOPE_INVALID")
         self._paper_stage_scope = paper_stage_scope
+        if type(stage_time_budget) is not bool:
+            raise ValueError("CODEX_STAGE_TIME_BUDGET_INVALID")
+        self._stage_time_budget = stage_time_budget
         self._max_wire_bytes = max_wire_bytes
         self._aggregate_input_tokens = aggregate_input_tokens
         # Reserve terminal writes inside the worker-owned aggregate deadline.
@@ -441,6 +451,16 @@ class StagedCodexCommittee(CodexCommittee):
                 self._frozen_inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")
             ).encode()
         ).hexdigest()
+        from nexus.agents.codex_versions import stage_timeout_seconds
+
+        allocated_timeout = None
+        allocated_deadline = None
+        if self._stage_time_budget and self._deadline is not None:
+            allocated_at = asyncio.get_running_loop().time()
+            allocated_timeout = stage_timeout_seconds(
+                stage, deadline=self._deadline, now=allocated_at
+            )
+            allocated_deadline = allocated_at + allocated_timeout
         allowance_reason: str | None = None
         if len(wire.encode()) > self._max_wire_bytes:
             allowance_reason = "model_stage_wire_bytes_exceeded"
@@ -453,6 +473,8 @@ class StagedCodexCommittee(CodexCommittee):
         elif self._deadline is None:
             allowance_reason = "model_stage_deadline_missing"
         elif asyncio.get_running_loop().time() >= self._deadline:
+            allowance_reason = "model_stage_deadline_elapsed"
+        elif allocated_timeout is not None and allocated_timeout <= 0:
             allowance_reason = "model_stage_deadline_elapsed"
         if allowance_reason is not None:
             self.failure_reason = allowance_reason
@@ -468,16 +490,17 @@ class StagedCodexCommittee(CodexCommittee):
             output_tokens=self.usage.output_tokens,
             provider_calls=self.usage.provider_calls + 1,
         )
+        invocation_options: _StageInvocationOptions = {}
+        if allocated_timeout is not None:
+            invocation_options["timeout_seconds"] = allocated_timeout
+            assert allocated_deadline is not None
+            invocation_options["deadline_at"] = allocated_deadline
+        if self._max_wire_bytes != 55808:
+            invocation_options["max_wire_bytes"] = self._max_wire_bytes
         try:
             async with asyncio.timeout_at(self._deadline):
                 raw, usage = await invoke_codex(
-                    payload,
-                    output_model=output_model,
-                    **(
-                        {"max_wire_bytes": self._max_wire_bytes}
-                        if self._max_wire_bytes != 55808
-                        else {}
-                    ),
+                    payload, output_model=output_model, **invocation_options
                 )
         except Exception as error:
             self.failure_diagnostic = StageFailureDiagnostic(

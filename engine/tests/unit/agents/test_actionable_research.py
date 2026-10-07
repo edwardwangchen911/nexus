@@ -311,7 +311,10 @@ def test_actionable_v4_fails_closed(mutation: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "version", ["codex-sdk-chatgpt-v4-actionable", "codex-sdk-chatgpt-v5-paper-scope"]
+    "version", [
+        "codex-sdk-chatgpt-v4-actionable", "codex-sdk-chatgpt-v5-paper-scope",
+        "codex-sdk-chatgpt-v6-stage-time-budget",
+    ]
 )
 def test_actionable_maps_direction_without_weight_or_quantity(version: str) -> None:
     case = _case()

@@ -2362,7 +2362,11 @@ async def test_staged_request_advertises_existing_text_restrictions_and_clears_d
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("version", "scope_enabled"),
-    [("codex-sdk-chatgpt-v4-actionable", False), ("codex-sdk-chatgpt-v5-paper-scope", True)],
+    [
+        ("codex-sdk-chatgpt-v4-actionable", False),
+        ("codex-sdk-chatgpt-v5-paper-scope", True),
+        ("codex-sdk-chatgpt-v6-stage-time-budget", True),
+    ],
 )
 async def test_worker_routes_paper_scope_only_for_new_frozen_model_version(
     monkeypatch, version, scope_enabled
@@ -2397,6 +2401,7 @@ async def test_worker_routes_paper_scope_only_for_new_frozen_model_version(
         responses_client=None, tools=_tools(),
     )
     assert committee._paper_stage_scope is scope_enabled
+    assert committee._stage_time_budget is (version == "codex-sdk-chatgpt-v6-stage-time-budget")
     assert committee._inline_citations is True
     assert aggregate_input_limit(version) == 96000
     assert wire_byte_limit(version) == 64000
