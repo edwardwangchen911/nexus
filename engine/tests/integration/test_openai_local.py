@@ -16,8 +16,9 @@ from sqlalchemy import func, select
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("actual_database", ["postgres", "other_isolated_database"])
+@pytest.mark.parametrize("allow_registration", [False, True])
 async def test_stage_budget_registration_checks_actual_database_before_writes(
-    migrated_database_url, monkeypatch, actual_database
+    migrated_database_url, monkeypatch, actual_database, allow_registration
 ):
     from nexus.ops import openai_local
     from sqlalchemy.engine import make_url
@@ -44,6 +45,7 @@ async def test_stage_budget_registration_checks_actual_database_before_writes(
                 max_wire_bytes=64000,
                 inline_citations=True,
                 stage_time_budget=True,
+                allow_stage_time_budget_registration=allow_registration,
             )
     finally:
         await actual_factory.kw["bind"].dispose()

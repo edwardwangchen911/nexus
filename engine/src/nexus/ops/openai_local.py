@@ -181,6 +181,7 @@ async def prepare_database(
     inline_citations: bool = False,
     actionable_paper: bool = False,
     stage_time_budget: bool = False,
+    allow_stage_time_budget_registration: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -188,13 +189,21 @@ async def prepare_database(
     host = make_url(settings.database_url).host
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if type(allow_stage_time_budget_registration) is not bool or (
+        allow_stage_time_budget_registration and not stage_time_budget
+    ):
+        raise ValueError("CODEX_STAGE_REGISTRATION_ARGUMENT_INVALID")
     if type(stage_time_budget) is not bool or stage_time_budget and not actionable_paper:
         raise ValueError("CODEX_STAGE_TIME_BUDGET_INVALID")
-    if stage_time_budget and not (make_url(settings.database_url).database or "").startswith(
-        ("nexus_test_", "nexus_diag_")
+    if (
+        stage_time_budget
+        and not allow_stage_time_budget_registration
+        and not (make_url(settings.database_url).database or "").startswith(
+            ("nexus_test_", "nexus_diag_")
+        )
     ):
-        # Registration becomes eligible for normal latest-model selection. Until
-        # representative-load validation, the experimental version is isolated.
+        # Registration can affect future latest-model selection. Business targets
+        # require an explicit setup opt-in; defaults remain isolated.
         raise ValueError("CODEX_STAGE_TIME_BUDGET_ISOLATION_REQUIRED")
     config = dict(_CONFIG)
     if (
@@ -368,7 +377,10 @@ async def prepare_database(
             if (
                 not isinstance(database, str)
                 or database != make_url(settings.database_url).database
-                or not database.startswith(("nexus_test_", "nexus_diag_"))
+                or (
+                    not allow_stage_time_budget_registration
+                    and not database.startswith(("nexus_test_", "nexus_diag_"))
+                )
             ):
                 raise ValueError("CODEX_STAGE_TIME_BUDGET_ISOLATION_REQUIRED")
         for role, version, content, content_hash in prompts:
@@ -579,7 +591,17 @@ def main() -> int:
     parser.add_argument(
         "--skip-key", action="store_true", help="Prepare local DB only; no key prompt or network"
     )
+    parser.add_argument(
+        "--allow-stage-time-budget-registration",
+        action="store_true",
+        help="Explicitly allow v6 registration in the configured local business database; "
+        "may change future model selection, never starts research or trading",
+    )
     args = parser.parse_args()
+    if args.allow_stage_time_budget_registration and (
+        args.action != "setup" or not args.stage_time_budget
+    ):
+        parser.error("--allow-stage-time-budget-registration requires setup --stage-time-budget")
     if args.stage_time_budget and args.action != "setup":
         parser.error("--stage-time-budget is only valid with setup")
     root = Path.cwd().resolve()
@@ -684,6 +706,11 @@ def main() -> int:
                     strategy_rnd=args.strategy_rnd,
                     **({"actionable_paper": True} if args.actionable_paper else {}),
                     **({"stage_time_budget": True} if args.stage_time_budget else {}),
+                    **(
+                        {"allow_stage_time_budget_registration": True}
+                        if args.allow_stage_time_budget_registration
+                        else {}
+                    ),
                     **({"inline_citations": True} if args.inline_citations else {}),
                     **({"structured_synthesis": True} if args.structured_synthesis else {}),
                     **(
