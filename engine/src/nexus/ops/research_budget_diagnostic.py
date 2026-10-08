@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import DEADLINE_BUDGET_CONFIG_VERSION
+from nexus.agents.committee import StageFailureDiagnostic, StageInvocationTiming
 from nexus.persistence.base import Base
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.portfolio import Account
@@ -34,6 +35,8 @@ _SAFE_ERRORS = frozenset(
         "DIAGNOSTIC_CONFIG_UNSAFE",
         "DIAGNOSTIC_SDK_REQUIRED",
         "DIAGNOSTIC_JOB_CHANGED",
+        "DIAGNOSTIC_SYNTHETIC_LOAD_INPUT_INVALID",
+        "DIAGNOSTIC_TIMING_INVALID",
     }
 )
 
@@ -121,6 +124,26 @@ def _receipt(path: Path, result: dict[str, object]) -> None:
         json.dump(result, stream, sort_keys=True)
 
 
+def timing_metadata(records: list[AgentResearchOutputRecord]) -> dict[str, object]:
+    """Return schema-checked timings only, never model content or raw exception text."""
+    timings: dict[str, object] = {}
+    diagnostic: dict[str, object] | None = None
+    try:
+        for record in records:
+            stages = record.payload.get("stage_timings", {})
+            if not isinstance(stages, dict) or set(stages) - {"research", "critique", "synthesis"}:
+                raise ValueError("invalid stages")
+            for stage, value in stages.items():
+                timings[stage] = StageInvocationTiming.model_validate(value).model_dump(mode="json")
+            if record.payload.get("diagnostic") is not None:
+                diagnostic = StageFailureDiagnostic.model_validate(
+                    record.payload["diagnostic"]
+                ).model_dump(mode="json", exclude={"response_hash"})
+    except ValueError:
+        raise ValueError("DIAGNOSTIC_TIMING_INVALID") from None
+    return {"stage_timings": timings, "failure_diagnostic": diagnostic}
+
+
 def usage_is_known(run: AgentResearchRunRecord) -> bool:
     """Only settled complete counters prove known usage; held counters can be lower bounds."""
     return (
@@ -131,7 +154,7 @@ def usage_is_known(run: AgentResearchRunRecord) -> bool:
 
 
 async def execute_diagnostic(
-    settings: EngineSettings, *, run_id: UUID, output: Path
+    settings: EngineSettings, *, run_id: UUID, output: Path, synthetic_paper_load: bool = False
 ) -> dict[str, object]:
     require_diagnostic_url(settings.database_url or "")
     if settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
@@ -153,15 +176,45 @@ async def execute_diagnostic(
         from nexus.worker import run_agent_worker_once
 
         started = time.monotonic()
-        claimed = await run_agent_worker_once(
-            settings, job_ids=(job_id,), preclaim_guard=preclaim_guard
-        )
+        if synthetic_paper_load:
+            from nexus.agents.database_tools import database_read_only_tools
+            from nexus.ops.synthetic_paper_load import SyntheticPaperLoadTools
+
+            async with factory() as source, source.begin():
+                await source.execute(text("SET TRANSACTION READ ONLY"))
+                source_run = await source.get(AgentResearchRunRecord, run_id)
+                assert source_run is not None
+                base = await database_read_only_tools(
+                    source,
+                    source_run,
+                    allow_fixture_evidence=False,
+                    allow_fixture_price_evidence=False,
+                )
+                tools = SyntheticPaperLoadTools(
+                    base,
+                    instrument_id=source_run.instrument_id,
+                    decision_time=source_run.decision_time,
+                )
+                claimed = await run_agent_worker_once(
+                    settings, tools=tools, job_ids=(job_id,), preclaim_guard=preclaim_guard
+                )
+        else:
+            claimed = await run_agent_worker_once(
+                settings, job_ids=(job_id,), preclaim_guard=preclaim_guard
+            )
         elapsed = time.monotonic() - started
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
             run = await session.get(AgentResearchRunRecord, run_id)
             job = await session.get(Job, job_id)
             assert run is not None and job is not None
+            records = list(
+                await session.scalars(
+                    select(AgentResearchOutputRecord)
+                    .where(AgentResearchOutputRecord.run_id == run_id)
+                    .order_by(AgentResearchOutputRecord.sequence)
+                )
+            )
             result: dict[str, object] = {
                 "status": "observed" if claimed else "not_claimed",
                 "run_id": str(run_id),
@@ -169,14 +222,12 @@ async def execute_diagnostic(
                 "job_status": job.status,
                 "attempt_count": job.attempt_count,
                 "worker_elapsed_seconds": round(elapsed, 3),
-                "output_count": await session.scalar(
-                    select(func.count())
-                    .select_from(AgentResearchOutputRecord)
-                    .where(AgentResearchOutputRecord.run_id == run_id)
-                ),
+                "output_count": len(records),
+                **timing_metadata(records),
                 "usage_known": usage_is_known(run),
                 "execution_locked": True,
                 "formal_acceptance": False,
+                "paper_context_kind": "synthetic_load_only" if synthetic_paper_load else "absent",
             }
         _receipt(output / "result.json", result)
         return result
@@ -190,6 +241,11 @@ def main() -> int:
     parser.add_argument("--database-url-file", type=Path, required=True)
     parser.add_argument("--run-id", type=UUID, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--synthetic-paper-load",
+        action="store_true",
+        help="诊断合成Paper输入负载；不创建Paper周期或权威，不代表正式验收",
+    )
     args = parser.parse_args()
     try:
         from nexus.ops.openai_local import local_settings
@@ -198,7 +254,12 @@ def main() -> int:
             update={"database_url": read_database_url(args.database_url_file)}
         )
         result = asyncio.run(
-            execute_diagnostic(settings, run_id=args.run_id, output=args.output_dir)
+            execute_diagnostic(
+                settings,
+                run_id=args.run_id,
+                output=args.output_dir,
+                synthetic_paper_load=args.synthetic_paper_load,
+            )
         )
     except Exception as error:
         # Never expose SQL URLs, source contents, account data or raw SDK exceptions.

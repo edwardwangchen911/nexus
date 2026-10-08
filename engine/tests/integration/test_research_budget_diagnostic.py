@@ -85,3 +85,32 @@ async def test_synthetic_account_does_not_substitute_for_fresh_case(diagnostic_d
                 await require_isolated_case(session, uuid4())
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synthetic", [False, True])
+async def test_normal_diagnostic_entry_rejects_real_accounts_before_marker_or_worker(
+    diagnostic_database_url, tmp_path, monkeypatch, synthetic
+):
+    from unittest.mock import AsyncMock
+
+    from nexus import worker
+    from nexus.ops.research_budget_diagnostic import execute_diagnostic
+
+    settings = EngineSettings(database_url=diagnostic_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    call = AsyncMock()
+    monkeypatch.setattr(worker, "run_agent_worker_once", call)
+    tmp_path.chmod(0o700)
+    output = tmp_path / "attempt"
+    try:
+        async with factory.begin() as session:
+            session.add(Account(provider="fosun", status="ACTIVE"))
+        with pytest.raises(ValueError, match="DIAGNOSTIC_SYNTHETIC_ACCOUNTS_REQUIRED"):
+            await execute_diagnostic(
+                settings, run_id=uuid4(), output=output, synthetic_paper_load=synthetic
+            )
+        assert not output.exists()
+        call.assert_not_awaited()
+    finally:
+        await factory.kw["bind"].dispose()

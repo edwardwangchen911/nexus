@@ -390,7 +390,20 @@ class StagedCodexCommittee(CodexCommittee):
             "units and unknown currency. A dollar sign alone does not establish USD; "
             "name a currency only when explicit frozen evidence supports it."
         )
-        if paper_context_present:
+        if (
+            isinstance(security, dict)
+            and isinstance(security.get("diagnostic_synthetic_paper_load"), dict)
+            and getattr(self._tools, "diagnostic_synthetic_paper_load", False) is True
+        ):
+            payload["instructions"] = cast(str, payload["instructions"]) + (
+                " This is a diagnostic synthetic Paper load, not formal Paper research. "
+                "security_snapshot.diagnostic_synthetic_paper_load contains invented "
+                "fixture prices and portfolio weights in agent_paper_context, "
+                "not a Schwab quote, trading-session authority or personal account facts. "
+                "Do not cite fixture values as verified evidence or infer execution permission. "
+                "Assess public evidence separately; all conclusions are diagnostic only."
+            )
+        elif paper_context_present:
             payload["instructions"] = cast(str, payload["instructions"]) + (
                 " In security_snapshot, agent_paper_context is the frozen current "
                 "decision-price context: decision_quote is the current Schwab quote and "
