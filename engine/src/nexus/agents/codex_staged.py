@@ -17,6 +17,7 @@ from nexus.agents.codex_sdk import (
     MAX_OUTPUT_TOKENS,
     CodexCommittee,
     CodexInvocationError,
+    InvocationPhase,
     _Claim,
     _Role,
     codex_input_allowance,
@@ -238,6 +239,7 @@ class _StageInvocationOptions(TypedDict, total=False):
     timeout_seconds: float
     deadline_at: float
     max_wire_bytes: int
+    phase_elapsed_ms: dict[InvocationPhase, int]
 
 
 class StagedCodexCommittee(CodexCommittee):
@@ -282,6 +284,7 @@ class StagedCodexCommittee(CodexCommittee):
         self._deadline = None if deadline is None else deadline - 5
         self.last_stage_input: StageInputIdentity | None = None
         self.failure_diagnostic: StageFailureDiagnostic | None = None
+        self.stage_timings: dict[str, StageInvocationTiming] = {}
 
     async def analyze(
         self,
@@ -499,6 +502,9 @@ class StagedCodexCommittee(CodexCommittee):
             invocation_options["deadline_at"] = allocated_deadline
         if self._max_wire_bytes != 55808:
             invocation_options["max_wire_bytes"] = self._max_wire_bytes
+        phase_elapsed_ms: dict[InvocationPhase, int] = {}
+        if self._stage_time_budget:
+            invocation_options["phase_elapsed_ms"] = phase_elapsed_ms
         invocation_started = perf_counter()
         try:
             async with asyncio.timeout_at(self._deadline):
@@ -529,6 +535,14 @@ class StagedCodexCommittee(CodexCommittee):
                 else None,
             )
             raise
+        if self._stage_time_budget:
+            self.stage_timings[stage] = StageInvocationTiming(
+                allocated_timeout_ms=(
+                    int(allocated_timeout * 1000) if allocated_timeout is not None else None
+                ),
+                elapsed_ms=max(0, int((perf_counter() - invocation_started) * 1000)),
+                phase_elapsed_ms=phase_elapsed_ms,
+            )
         self.usage = UsageSnapshot(
             input_tokens=self.usage.input_tokens + usage.input_tokens,
             output_tokens=self.usage.output_tokens + usage.output_tokens,

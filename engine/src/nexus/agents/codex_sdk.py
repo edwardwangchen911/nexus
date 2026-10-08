@@ -338,6 +338,7 @@ async def invoke_codex(
     max_wire_bytes: int = 55808,
     timeout_seconds: float | None = None,
     deadline_at: float | None = None,
+    phase_elapsed_ms: dict[InvocationPhase, int] | None = None,
 ) -> tuple[str, UsageSnapshot]:
     if timeout_seconds is not None and (
         type(timeout_seconds) not in {int, float}
@@ -357,7 +358,8 @@ async def invoke_codex(
         if deadline_at is not None
         else asyncio.get_running_loop().time() + timeout_seconds
         if timeout_seconds is not None
-        else None
+        else None,
+        phase_elapsed_ms={} if phase_elapsed_ms is None else phase_elapsed_ms,
     )
     with _invocation_boundary("preflight", state=state):
         return await _invoke_codex(

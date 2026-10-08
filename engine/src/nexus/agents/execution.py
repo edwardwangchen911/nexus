@@ -17,6 +17,7 @@ from nexus.agents.committee import (
     PromptAsset,
     StageFailureDiagnostic,
     StageInputIdentity,
+    StageInvocationTiming,
 )
 from nexus.agents.execution_authority import (
     load_frozen_evidence,
@@ -350,7 +351,11 @@ async def execute_research_run(
         status="synthesized",
         role=None,
         prompt_hash=None,
-        payload={"role_count": len(role_outputs), "evidence_count": len(evidence_refs)},
+        payload={
+            "role_count": len(role_outputs),
+            "evidence_count": len(evidence_refs),
+            **_committee_timing_payload(committee),
+        },
         intent=intent.model_dump(mode="json"),
     )
     output_sequence += 1
@@ -524,7 +529,21 @@ async def _terminal_after_committee(
             and diagnostic.stage == stage_input.stage
         )
         else None,
+        timing_payload=_committee_timing_payload(committee),
     )
+
+
+def _committee_timing_payload(committee: CommitteeModel) -> dict[str, object]:
+    timings = getattr(committee, "stage_timings", None)
+    if not isinstance(timings, dict):
+        return {}
+    serialized = {
+        stage: timing.model_dump(mode="json")
+        for stage, timing in timings.items()
+        if stage in {"research", "critique", "synthesis"}
+        and isinstance(timing, StageInvocationTiming)
+    }
+    return {"stage_timings": serialized} if serialized else {}
 
 
 def _committee_usage(
@@ -575,6 +594,7 @@ async def _persist_terminal(
     reason: str,
     stage_input: StageInputIdentity | None = None,
     diagnostic: StageFailureDiagnostic | None = None,
+    timing_payload: dict[str, object] | None = None,
 ) -> ResearchRunResult:
     await _append_output(
         session,
@@ -585,6 +605,7 @@ async def _persist_terminal(
         prompt_hash=None,
         payload={
             "reason": reason,
+            **(timing_payload or {}),
             **({"stage_input": stage_input.model_dump(mode="json")} if stage_input else {}),
             **({"diagnostic": diagnostic.model_dump(mode="json")} if diagnostic else {}),
         },

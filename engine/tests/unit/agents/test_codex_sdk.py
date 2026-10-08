@@ -1331,6 +1331,62 @@ def test_invocation_timing_rejects_unmeasured_or_invalid_durations(bad):
 
 
 @pytest.mark.asyncio
+async def test_successful_sdk_call_returns_phase_measurements_without_changing_usage(monkeypatch):
+    client, thread, result, _ = _sdk(monkeypatch)
+    clock = [100.0]
+    monkeypatch.setattr(codex_sdk, "perf_counter", lambda: clock[0])
+
+    async def turn_call(*args, **kwargs):
+        clock[0] += 12
+        return result
+
+    async def close_call():
+        clock[0] += 1
+
+    thread.run.side_effect = turn_call
+    client.close.side_effect = close_call
+    phases = {}
+    _, usage = await codex_sdk.invoke_codex({}, phase_elapsed_ms=phases)
+    assert phases["turn_run"] == 12000 and phases["client_close"] == 1000
+    assert usage == UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1)
+    thread.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_successful_v6_records_three_invocation_timings_separate_from_claims(monkeypatch):
+    from nexus.agents import codex_staged
+
+    client, thread, result, _ = _sdk(monkeypatch)
+    clock = [100.0]
+    monkeypatch.setattr(codex_sdk, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(codex_staged, "perf_counter", lambda: clock[0])
+
+    async def turn_call(wire, **kwargs):
+        clock[0] += 10
+        payload = json.loads(wire)
+        result.final_response = json.dumps(
+            _staged_batch(payload["stage"], payload["requested_roles"])
+        )
+        return result
+
+    thread.run.side_effect = turn_call
+    request, evidence, prompts = _authority()
+    model = codex_staged.StagedCodexCommittee(
+        prompts=prompts,
+        tools=_tools(),
+        stage_time_budget=True,
+        deadline=asyncio.get_running_loop().time() + 120,
+    )
+    outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
+    assert set(model.stage_timings) == {"research", "critique", "synthesis"}
+    assert all(t.elapsed_ms == 10000 for t in model.stage_timings.values())
+    assert all(t.phase_elapsed_ms["turn_run"] == 10000 for t in model.stage_timings.values())
+    assert all("stage_timings" not in output.model_dump() for output in outputs)
+    assert model.usage == UsageSnapshot(input_tokens=900, output_tokens=240, provider_calls=3)
+    assert thread.run.await_count == client.close.await_count == 3
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "kind",
     [
