@@ -8,8 +8,9 @@ from datetime import date, datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
 from nexus.agents.paper_context import SOURCE as PAPER_CONTEXT_SOURCE
@@ -340,22 +341,31 @@ class _BoundDatabaseExecutors:
             if set(verified) != set(amendment_ids):
                 return self._invalid_frozen_evidence_authority("get_financial_facts")
         fields = cast(tuple[str, ...], payload["fields"])
+        # Rank within each requested field before applying the shared output cap.
+        # Alphabetical truncation can hide all revenue while earlier fields fill it.
+        ranked = (
+            select(
+                FinancialFactRecord,
+                func.row_number()
+                .over(
+                    partition_by=FinancialFactRecord.canonical_fact,
+                    order_by=(FinancialFactRecord.period_end.desc(), FinancialFactRecord.id),
+                )
+                .label("field_rank"),
+            )
+            .where(
+                FinancialFactRecord.instrument_id == self._instrument_id,
+                FinancialFactRecord.evidence_ref_id.in_(self._evidence_ids),
+                FinancialFactRecord.accepted_at <= self._decision_time,
+                FinancialFactRecord.created_at <= self._decision_time,
+                FinancialFactRecord.canonical_fact.in_(fields),
+            )
+            .subquery()
+        )
+        fact = aliased(FinancialFactRecord, ranked)
         records = tuple(
             await self._session.scalars(
-                select(FinancialFactRecord)
-                .where(
-                    FinancialFactRecord.instrument_id == self._instrument_id,
-                    FinancialFactRecord.evidence_ref_id.in_(self._evidence_ids),
-                    FinancialFactRecord.accepted_at <= self._decision_time,
-                    FinancialFactRecord.created_at <= self._decision_time,
-                    FinancialFactRecord.canonical_fact.in_(fields),
-                )
-                .order_by(
-                    FinancialFactRecord.canonical_fact,
-                    FinancialFactRecord.period_end.desc(),
-                    FinancialFactRecord.id,
-                )
-                .limit(50)
+                select(fact).order_by(ranked.c.field_rank, fact.canonical_fact).limit(50)
             )
         )
         return self._result(

@@ -4848,3 +4848,57 @@ async def test_financial_raw_semantics_reach_sdk_wire_and_respect_old_cutoff(
             assert json.dumps(financial, sort_keys=True) == before
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_bounded_financial_tool_preserves_every_requested_field(migrated_database_url):
+    from nexus.agents.tools import _FINANCIAL_FIELDS
+
+    factory, run = await _prepared_price_run(migrated_database_url)
+    try:
+        async with factory() as session, session.begin():
+            original = await session.scalar(select(FinancialFactRecord))
+            assert original is not None
+            values = {
+                column.key: getattr(original, column.key)
+                for column in FinancialFactRecord.__table__.columns
+                if column.key not in {"id", "created_at"}
+            }
+            for field in _FINANCIAL_FIELDS:
+                for offset in range(1, 12):
+                    session.add(
+                        FinancialFactRecord(
+                            **{
+                                **values,
+                                "canonical_fact": field,
+                                "period_end": original.period_end - timedelta(days=offset),
+                            },
+                            created_at=_NOW,
+                        )
+                    )
+            await session.flush()
+            tools = await database_read_only_tools(
+                session, run, allow_fixture_evidence=True, allow_fixture_price_evidence=True
+            )
+            payload = {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": _NOW.isoformat(),
+                "fields": list(_FINANCIAL_FIELDS),
+            }
+            result = await tools.execute("get_financial_facts", payload)
+            assert len(result["items"]) == 50
+            assert {row["fact"] for row in result["items"]} == set(_FINANCIAL_FIELDS)
+            assert result == await tools.execute("get_financial_facts", payload)
+            for field in _FINANCIAL_FIELDS:
+                latest = (
+                    original.period_end
+                    if field == "revenue"
+                    else original.period_end - timedelta(days=1)
+                )
+                assert any(
+                    row["fact"] == field and row["period_end"] == latest.isoformat()
+                    for row in result["items"]
+                )
+    finally:
+        await factory.kw["bind"].dispose()
