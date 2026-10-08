@@ -17,6 +17,7 @@ from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.research.alpaca_actions_storage import read_action_observations
+from nexus.research.current_identity_storage import read_identity_bindings
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fosun_security_classification_storage import (
@@ -217,6 +218,17 @@ async def prepare_research_snapshot(
                     evidence.pop(oldest_sec)
             if len(evidence) < research_capacity:
                 evidence.append(classification_ref)
+    identities = await read_identity_bindings(session, instrument_id=instrument_id, as_of=as_of)
+    if identities:
+        identity_ref = await session.get(ResearchEvidenceRef, next(iter(identities)))
+        if identity_ref is not None:
+            capacity = MAX_FROZEN_EVIDENCE - 2
+            if len(evidence) >= capacity:
+                sec_indexes = [index for index, ref in enumerate(evidence) if ref.source == "sec"]
+                if len(sec_indexes) > 1:
+                    evidence.pop(sec_indexes[-1])
+            if len(evidence) < capacity:
+                evidence.append(identity_ref)
     context = await freeze_portfolio_context(
         session,
         instrument_id,

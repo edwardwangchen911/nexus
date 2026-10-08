@@ -13,6 +13,8 @@ from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.persistence.models.agents import AgentPromptVersionRecord, AgentResearchRunRecord
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.research.current_identity_storage import SOURCE as RESEARCH_IDENTITY_SOURCE
+from nexus.research.current_identity_storage import read_identity_bindings
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.news_evidence import read_news_evidence
 
@@ -78,6 +80,16 @@ async def load_frozen_evidence(
             evidence_ids=news_ids,
         )
     ) != set(news_ids):
+        return ()
+    identity_ids = tuple(ref.id for ref in ordered if ref.source == RESEARCH_IDENTITY_SOURCE)
+    if identity_ids and set(
+        await read_identity_bindings(
+            session,
+            instrument_id=run.instrument_id,
+            as_of=run.decision_time,
+            evidence_ids=identity_ids,
+        )
+    ) != set(identity_ids):
         return ()
     return ordered
 

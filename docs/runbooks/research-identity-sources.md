@@ -26,5 +26,30 @@ uv run --project engine python -m nexus.ops.research_identity_local \
 
 研究用途的 `research_current_identity_session_v1` 已经独立方案审阅：旧严格身份证明作为基础，
 两份 SEC 当前来源须在原 Run decision_time 所属纽约日期取得，且全部依赖及引用在决策前可用。
-Paper 另须核对正式 decision_session。该引用包装、冻结和 tool 接线尚未完成；本采集入口不会
-自行应用该政策，更不会将旧来源或本次接收时间倒填到历史 Run。
+Paper 另须核对正式 decision_session。本采集入口不会自行注册引用，更不会将旧来源或
+本次接收时间倒填到历史 Run。这里只证明当前研究规则下的证券—发行人对应；不证明 SEC
+当日更新、可交易性、财务修订已消除或任何执行许可。
+
+## 正常导入与冻结
+
+已应用 `0066_research_identity_binding` 的本地数据库可使用以下正常入口：
+
+```sh
+uv run --project engine python -m nexus.ops.research_identity_binding_local \
+  --repo-root "$PWD" --identity-snapshot-id '<strict-existing-identity-snapshot-uuid>' \
+  --collection-dir '/absolute/private/existing-collection-directory'
+```
+
+入口以数据库时钟验证旧严格身份证明和同纽约日期的两份 SEC 原件/回执，写入不可变对象、
+DataSnapshot 与 ResearchEvidenceRef；重复导入相同包装返回原引用，不更新原件时间。
+实际登记时间保留，不允许把决策后登记的引用用于更早决策。同日不同包装并存时，普通
+选择保留未知，不挑选最新或较有利的一份；已有 Run 只读其冻结的精确引用。
+
+`registered` 不等于研究或执行通过。仅未来新建的、已有基本研究材料的快照可增加此引用；
+身份引用本身不能创建研究快照。总冻结引用仍不超过 100，保留价格与组合上下文预留容量。
+工具和执行入口按原 Run decision_time 重读原件；过期、错配、损坏均拒绝，不回填旧 Run。
+入口不调用模型、不创建周期或订单，`execution_locked=true` 保持不变。
+
+迁移只扩展现有证据归属函数，不改历史表或记录。启用新版本前须在受控更新中先应用迁移；
+旧运行版本不应加载此代码。尚无冻结身份引用时可降回 `0065_portfolio_management`；一旦
+引用已被冻结，降级会明确拒绝，应保留迁移和审计记录，以代码回退处理。

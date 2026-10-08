@@ -55,6 +55,8 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_VERSION,
 )
 from nexus.research.alpaca_actions_storage import action_tool_payload, read_action_observations
+from nexus.research.current_identity_storage import SOURCE as RESEARCH_IDENTITY_SOURCE
+from nexus.research.current_identity_storage import read_identity_bindings
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fosun_security_classification import SOURCE as FOSUN_CLASSIFICATION_SOURCE
@@ -214,6 +216,16 @@ class _BoundDatabaseExecutors:
         }
         if frozen_classification_ids != classifications.keys():
             return self._invalid_frozen_evidence_authority("get_security_snapshot")
+        identities = await read_identity_bindings(
+            self._session,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+            evidence_ids=self._evidence_ids,
+        )
+        if {
+            ref.id for ref in self._evidence if ref.source == RESEARCH_IDENTITY_SOURCE
+        } != identities.keys():
+            return self._invalid_frozen_evidence_authority("get_security_snapshot")
         news = await read_news_evidence(
             self._session,
             instrument_id=self._instrument_id,
@@ -261,6 +273,11 @@ class _BoundDatabaseExecutors:
                     **(
                         {"company_profile": profiles[record.id].model_dump(mode="json")}
                         if record.id in profiles
+                        else {}
+                    ),
+                    **(
+                        {"research_identity_binding": identities[record.id].model_dump(mode="json")}
+                        if record.id in identities
                         else {}
                     ),
                     **(
