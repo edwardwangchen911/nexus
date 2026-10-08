@@ -1,6 +1,7 @@
 import importlib
 import json
 import stat
+from datetime import UTC, datetime
 from hashlib import sha256
 
 import httpx
@@ -40,6 +41,11 @@ async def test_collect_archives_exact_originals_and_receipts_without_authority(t
     assert result["authority_registered"] is False
     assert result["requests"] == 2
     assert seen == list(bodies)
+    archive = importlib.import_module("nexus.research.current_identity_archive")
+    verified = archive.load_identity_source_archive(
+        out, symbol="AAPL", cik="0000320193", exchange="XNAS", decision_time=datetime.now(UTC)
+    )
+    assert verified.symbol == "AAPL" and len(verified.originals) == 4
     assert stat.S_IMODE(out.stat().st_mode) == 0o700
     for name in ("directory", "AAPL-submissions"):
         raw = (out / f"{name}.json").read_bytes()
