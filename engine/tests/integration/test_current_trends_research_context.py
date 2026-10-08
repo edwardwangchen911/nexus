@@ -12,6 +12,7 @@ from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.ops.openai_local import prepare_database
 from nexus.persistence.models.data import DataSnapshot, PriceBarRecord, PriceBarSetAuthority
 from nexus.research.current_price_trends_storage import persist_current_price_trends
+from nexus.settings import AgentRuntimeMode
 from sqlalchemy import func, select
 
 from .test_current_price_trends import INSTRUMENT, setup_trends
@@ -26,7 +27,11 @@ async def test_normal_prepare_and_exact_price_tool_preserve_supplement_and_old_s
     settings, factory, store, _, archive = await setup_trends(
         migrated_database_url, tmp_path / "archive", monkeypatch
     )
-    await prepare_database(settings)
+    # This test covers source/Run provenance, not the expired dated API-price
+    # fixture. Register the normal valid SDK config; no model is invoked.
+    await prepare_database(
+        settings.model_copy(update={"agent_runtime_mode": AgentRuntimeMode.CODEX_SDK})
+    )
     async with factory.begin() as session:
         await seed_filing(session, instrument_id=INSTRUMENT, seed_instrument=False)
         old = await prepare_research_snapshot(session, INSTRUMENT, as_of=datetime.now(UTC))
@@ -108,7 +113,11 @@ async def test_same_run_raw_close_and_split_trends_are_distinct_and_corrupt_raw_
     settings, factory, store, _, archive = await setup_trends(
         migrated_database_url, tmp_path / "archive", monkeypatch
     )
-    await prepare_database(settings)
+    # This test covers source/Run provenance, not the expired dated API-price
+    # fixture. Register the normal valid SDK config; no model is invoked.
+    await prepare_database(
+        settings.model_copy(update={"agent_runtime_mode": AgentRuntimeMode.CODEX_SDK})
+    )
     source_clock = datetime.now(UTC) - timedelta(minutes=1)
     monkeypatch.setattr(fixture, "_INSTRUMENT_ID", INSTRUMENT)
     monkeypatch.setattr(fixture, "_NOW", source_clock)

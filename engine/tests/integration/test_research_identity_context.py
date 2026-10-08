@@ -709,3 +709,70 @@ async def test_full_capacity_identity_never_removes_unresolved_amendment(
                 assert valuation["reason"] == "sec_amendment_accounting_review_unverified"
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_normal_host_snapshot_binds_registered_identity_with_configured_store(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus.agents.persistence import select_authoritative_snapshot
+    from nexus.ops.agent_paper_loop import _prepare_current_trends_research_snapshot
+    from nexus.research import sec_exhibit_storage
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    configured_reads = []
+
+    def configured_transport(actual):
+        assert actual == settings
+        configured_reads.append(True)
+        return store
+
+    monkeypatch.setattr(sec_exhibit_storage, "S3ProviderEvidenceStore", configured_transport)
+    try:
+        instrument = await seed(factory)
+        fm, sc = archives(tmp_path / "base")
+        base = await importlib.import_module("nexus.ops.instrument_identity_local").revise_listing(
+            settings, symbol="AAPL", fmp_archive=fm, sec_archive=sc, store=store
+        )
+        async with factory() as session, session.begin():
+            await seed_filing(session, instrument_id=instrument, seed_instrument=False)
+        source_archive(tmp_path / "current")
+        registered = await register_identity(
+            settings,
+            identity_snapshot_id=base.snapshot_id,
+            collection_dir=tmp_path / "current",
+            store=store,
+        )
+        # Exercise the same snapshot producer used by the normal Mac host.
+        # No session.info override or mock of the identity reader is supplied.
+        await _prepare_current_trends_research_snapshot(
+            settings, instrument_id=instrument, now=datetime.now(UTC)
+        )
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            snapshot = await select_authoritative_snapshot(
+                session, instrument_id=instrument, as_of=datetime.now(UTC)
+            )
+            assert snapshot is not None
+            assert registered["evidence_id"] in snapshot.payload["evidence_ids"]
+            assert configured_reads
+            diagnostic = await importlib.import_module(
+                "nexus.research.current_identity_storage"
+            ).inspect_identity_binding_snapshot(
+                session,
+                instrument_id=instrument,
+                snapshot=snapshot,
+                as_of=datetime.now(UTC),
+                decision_session=datetime.now(UTC).astimezone(ZoneInfo("America/New_York")).date(),
+            )
+            assert diagnostic["snapshot_status"] == "ready"
+    finally:
+        await factory.kw["bind"].dispose()

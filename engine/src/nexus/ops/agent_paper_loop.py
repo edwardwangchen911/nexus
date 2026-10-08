@@ -1284,7 +1284,9 @@ async def _prepare_current_trends_research_snapshot(
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
     engine = create_async_engine(settings.database_url)
     try:
-        factory = async_sessionmaker(engine, expire_on_commit=False)
+        factory = async_sessionmaker(
+            engine, expire_on_commit=False, info={"engine_settings": settings}
+        )
         async with factory.begin() as session:
             database_now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(database_now, datetime):
