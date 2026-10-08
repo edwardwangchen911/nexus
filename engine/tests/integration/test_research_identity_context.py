@@ -248,32 +248,49 @@ async def test_exact_new_frozen_identity_and_old_run_unchanged(migrated_database
         config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
         with pytest.raises(RuntimeError, match="cannot remove ownership support"):
             await asyncio.to_thread(command.downgrade, config, "0065_portfolio_management")
-        key = next(k for k in client.objects if "/sec_research_identity_source_v1/" in k)
-        client.objects[key] += b" "
         async with factory() as session:
             session.info["sec_exhibit_store"] = store
-            assert (
-                await module.read_identity_bindings(
-                    session, instrument_id=instrument, as_of=decision, evidence_ids=(ref_id,)
+            verified = await module.read_identity_bindings(
+                session, instrument_id=instrument, as_of=decision, evidence_ids=(ref_id,)
+            )
+            document = verified[ref_id]
+            digests = {
+                artifact.sha256
+                for artifact in document.identity_artifacts + document.source_artifacts
+            } | {ref.content_hash}
+            assert len(digests) == 9
+            keys = [next(key for key in client.objects if digest in key) for digest in digests]
+            for key in keys:
+                original = client.objects[key]
+                try:
+                    client.objects[key] = original + b" "
+                    assert not await module.read_identity_bindings(
+                        session, instrument_id=instrument, as_of=decision, evidence_ids=(ref_id,)
+                    )
+                    assert not await load_frozen_evidence(
+                        session, admission.run, allow_fixture_evidence=False
+                    )
+                    tools = await database_read_only_tools(
+                        session, admission.run, allow_fixture_evidence=False
+                    )
+                    rejected = await tools.execute(
+                        "get_security_snapshot",
+                        {
+                            "instrument_id": str(instrument),
+                            "data_snapshot_id": str(frozen.id),
+                            "as_of": decision.isoformat(),
+                        },
+                    )
+                    assert rejected["status"] == "unavailable"
+                    assert rejected["reason"] == "invalid_frozen_evidence_authority"
+                finally:
+                    client.objects[key] = original
+                # Restoring only this dependency recovers the exact original ref;
+                # rejection must not be due to accumulated corruption or alias changes.
+                assert await load_frozen_evidence(
+                    session, admission.run, allow_fixture_evidence=False
                 )
-                == {}
-            )
-            assert not await load_frozen_evidence(
-                session, admission.run, allow_fixture_evidence=False
-            )
-            tools = await database_read_only_tools(
-                session, admission.run, allow_fixture_evidence=False
-            )
-            rejected = await tools.execute(
-                "get_security_snapshot",
-                {
-                    "instrument_id": str(instrument),
-                    "data_snapshot_id": str(frozen.id),
-                    "as_of": decision.isoformat(),
-                },
-            )
-            assert rejected["status"] == "unavailable"
-            assert rejected["reason"] == "invalid_frozen_evidence_authority"
+
     finally:
         await factory.kw["bind"].dispose()
 
