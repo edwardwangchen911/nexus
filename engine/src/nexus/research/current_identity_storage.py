@@ -20,6 +20,7 @@ from nexus.market.current_identity_storage import (
     CurrentIdentityProof,
     CustomMemberIdentityProof,
 )
+from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.research.current_identity_archive import (
@@ -417,3 +418,113 @@ async def read_identity_bindings(
         return {evidence.id: document}
     except Exception:
         return {}
+
+
+async def inspect_identity_binding_snapshot(
+    session: AsyncSession,
+    *,
+    instrument_id: UUID,
+    snapshot: DataSnapshot | None,
+    as_of: datetime,
+    decision_session: date,
+) -> dict[str, str | None]:
+    """Separate strict current evidence from immutable research-snapshot use."""
+    cutoff = require_utc(as_of)
+    bindings = await read_identity_bindings(
+        session,
+        instrument_id=instrument_id,
+        as_of=cutoff,
+        decision_session=decision_session,
+    )
+    result: dict[str, str | None] = {
+        "evidence_status": "ready" if bindings else "unknown",
+        "snapshot_status": "missing",
+        "reason": (
+            "RESEARCH_IDENTITY_SNAPSHOT_MISSING"
+            if bindings
+            else "RESEARCH_IDENTITY_EVIDENCE_MISSING_OR_INVALID"
+        ),
+    }
+    if not bindings or snapshot is None:
+        return result
+    if (
+        snapshot.source != "nexus_research"
+        or snapshot.schema_version != "research_filings_v1"
+        or snapshot.provider_object_id != str(instrument_id)
+        or max(
+            snapshot.created_at, snapshot.available_at, snapshot.received_at, snapshot.observed_at
+        )
+        > cutoff
+    ):
+        return result
+    frozen_cutoff_value = snapshot.payload.get("as_of")
+    if not isinstance(frozen_cutoff_value, str):
+        return result
+    try:
+        frozen_cutoff = require_utc(datetime.fromisoformat(frozen_cutoff_value))
+    except (KeyError, TypeError, ValueError):
+        return result
+    if frozen_cutoff > cutoff:
+        return result
+    if snapshot.payload.get("research_identity_diagnostic") == {
+        "status": "unknown",
+        "reason": CAPACITY_REASON,
+    }:
+        result["reason"] = CAPACITY_REASON
+        return result
+    rows = tuple(
+        await session.scalars(
+            select(AgentDataSnapshotEvidenceRecord).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
+                AgentDataSnapshotEvidenceRecord.authority_kind == "research",
+                AgentDataSnapshotEvidenceRecord.source == SOURCE,
+                AgentDataSnapshotEvidenceRecord.created_at <= frozen_cutoff,
+            )
+        )
+    )
+    bound_ids = {row.evidence_ref_id for row in rows}
+    payload_values = snapshot.payload.get("evidence_ids")
+    if not isinstance(payload_values, list) or any(
+        not isinstance(value, str) for value in payload_values
+    ):
+        return result
+    try:
+        payload_ids = {UUID(value) for value in payload_values}
+    except ValueError:
+        return result
+    if bound_ids != set(bindings) or not bound_ids.issubset(payload_ids):
+        return result
+    # Reuse the exact frozen reader at the original snapshot cutoff. Current
+    # availability cannot qualify a dependency registered after that cutoff.
+    frozen = await read_identity_bindings(
+        session,
+        instrument_id=instrument_id,
+        as_of=frozen_cutoff,
+        evidence_ids=tuple(bound_ids),
+        decision_session=decision_session,
+    )
+    if frozen != bindings:
+        return result
+    evidence = await session.get(ResearchEvidenceRef, next(iter(bound_ids)))
+    if evidence is None or any(
+        (
+            row.source,
+            row.provider_object_id,
+            row.revision,
+            row.available_at,
+            row.location,
+            row.content_hash,
+        )
+        != (
+            evidence.source,
+            evidence.provider_object_id,
+            evidence.revision,
+            evidence.available_at,
+            evidence.location,
+            evidence.content_hash,
+        )
+        for row in rows
+    ):
+        return result
+    return {"evidence_status": "ready", "snapshot_status": "ready", "reason": None}

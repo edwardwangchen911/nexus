@@ -717,6 +717,15 @@ async def test_static_readiness_reports_each_missing_candidate_input_without_wri
         assert result["execution_locked"] is True
         assert result["external_requests"] == 0
         assert result["synthesis_prompt_status"] == "missing_or_invalid"
+        assert result["research_inputs"]["current_identity_binding"] == [
+            {
+                "symbol": symbol,
+                "evidence_status": "unknown",
+                "snapshot_status": "missing",
+                "reason": "RESEARCH_IDENTITY_EVIDENCE_MISSING_OR_INVALID",
+            }
+            for symbol in ("AAPL", "NVDA")
+        ]
         assert result["research_inputs"]["current_trends"] == [
             {"symbol": "AAPL", "evidence_status": "missing", "snapshot_status": "missing"},
             {"symbol": "NVDA", "evidence_status": "missing", "snapshot_status": "missing"},

@@ -8,6 +8,7 @@ from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from alembic import command
@@ -27,7 +28,7 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from unit.market.test_object_store import FakeS3Client
 
@@ -172,6 +173,40 @@ async def test_exact_new_frozen_identity_and_old_run_unchanged(migrated_database
             old = await session.get(DataSnapshot, old_id)
             assert (old.payload, old.revision) == (old_payload, old_revision)
             assert str(ref_id) not in old.payload["evidence_ids"]
+            # Available current evidence and its immutable snapshot binding are
+            # different readiness facts. Old snapshots must not become ready.
+            for diagnostic_snapshot, expected_state in ((old, "missing"), (frozen, "ready")):
+                diagnostic = await module.inspect_identity_binding_snapshot(
+                    session,
+                    instrument_id=instrument,
+                    snapshot=diagnostic_snapshot,
+                    as_of=decision,
+                    decision_session=decision.astimezone(ZoneInfo("America/New_York")).date(),
+                )
+                assert diagnostic["evidence_status"] == "ready"
+                assert diagnostic["snapshot_status"] == expected_state
+            tomorrow = await module.inspect_identity_binding_snapshot(
+                session,
+                instrument_id=instrument,
+                snapshot=frozen,
+                as_of=decision + timedelta(days=1),
+                decision_session=(decision + timedelta(days=1))
+                .astimezone(ZoneInfo("America/New_York"))
+                .date(),
+            )
+            assert tomorrow["evidence_status"] == "unknown"
+            assert tomorrow["snapshot_status"] == "missing"
+            next_session = await module.inspect_identity_binding_snapshot(
+                session,
+                instrument_id=instrument,
+                snapshot=frozen,
+                as_of=decision,
+                decision_session=(decision + timedelta(days=1))
+                .astimezone(ZoneInfo("America/New_York"))
+                .date(),
+            )
+            assert next_session["evidence_status"] == "unknown"
+            assert next_session["snapshot_status"] == "missing"
             for snapshot, expected in ((old, 0), (frozen, 1)):
                 cutoff = datetime.fromisoformat(snapshot.payload["as_of"])
                 admission = await admit_research_run(
@@ -249,7 +284,17 @@ async def test_exact_new_frozen_identity_and_old_run_unchanged(migrated_database
         with pytest.raises(RuntimeError, match="cannot remove ownership support"):
             await asyncio.to_thread(command.downgrade, config, "0065_portfolio_management")
         async with factory() as session:
+            await session.execute(text("SET TRANSACTION READ ONLY"))
             session.info["sec_exhibit_store"] = store
+            assert (
+                await module.inspect_identity_binding_snapshot(
+                    session,
+                    instrument_id=instrument,
+                    snapshot=frozen,
+                    as_of=decision,
+                    decision_session=decision.astimezone(ZoneInfo("America/New_York")).date(),
+                )
+            )["snapshot_status"] == "ready"
             verified = await module.read_identity_bindings(
                 session, instrument_id=instrument, as_of=decision, evidence_ids=(ref_id,)
             )
@@ -264,6 +309,15 @@ async def test_exact_new_frozen_identity_and_old_run_unchanged(migrated_database
                 original = client.objects[key]
                 try:
                     client.objects[key] = original + b" "
+                    diagnostic = await module.inspect_identity_binding_snapshot(
+                        session,
+                        instrument_id=instrument,
+                        snapshot=frozen,
+                        as_of=decision,
+                        decision_session=decision.astimezone(ZoneInfo("America/New_York")).date(),
+                    )
+                    assert diagnostic["evidence_status"] == "unknown"
+                    assert diagnostic["snapshot_status"] == "missing"
                     assert not await module.read_identity_bindings(
                         session, instrument_id=instrument, as_of=decision, evidence_ids=(ref_id,)
                     )
@@ -631,6 +685,21 @@ async def test_full_capacity_identity_never_removes_unresolved_amendment(
                 assert facts["items"][0]["amendment_evidence_ref_ids"] == [str(amendment.id)]
                 security = await tools.execute("get_security_snapshot", payload)
                 if index == 1:
+                    readiness_module = importlib.import_module(
+                        "nexus.research.current_identity_storage"
+                    )
+                    diagnostic = await readiness_module.inspect_identity_binding_snapshot(
+                        session,
+                        instrument_id=instrument,
+                        snapshot=snapshot,
+                        as_of=cutoff,
+                        decision_session=cutoff.astimezone(ZoneInfo("America/New_York")).date(),
+                    )
+                    assert diagnostic == {
+                        "evidence_status": "ready",
+                        "snapshot_status": "missing",
+                        "reason": "research_identity_evidence_capacity_exhausted",
+                    }
                     assert security["research_identity_diagnostic"] == {
                         "status": "unknown",
                         "reason": "research_identity_evidence_capacity_exhausted",

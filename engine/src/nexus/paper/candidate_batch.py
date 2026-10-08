@@ -43,6 +43,7 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.portfolio import Account
 from nexus.persistence.models.runtime import IdempotencyRecord
+from nexus.research.current_identity_storage import inspect_identity_binding_snapshot
 from nexus.research.current_price_trends import SOURCE as CURRENT_TRENDS_SOURCE
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fred_storage import (
@@ -453,6 +454,7 @@ async def inspect_agent_paper_candidate_static_readiness(
         and selected_universe.id == batch.universe_snapshot_id
     )
     candidates: list[dict[str, object]] = []
+    current_identity_bindings: list[dict[str, object]] = []
     current_trends: list[dict[str, str]] = []
     macro_bindings: list[dict[str, str]] = []
     for identity in sorted(identities, key=lambda item: item.symbol):
@@ -466,6 +468,18 @@ async def inspect_agent_paper_candidate_static_readiness(
             or snapshot.schema_version != "research_filings_v1"
         ):
             missing.append("RESEARCH_SNAPSHOT_MISSING")
+        current_identity_bindings.append(
+            {
+                "symbol": identity.symbol,
+                **await inspect_identity_binding_snapshot(
+                    session,
+                    instrument_id=identity.instrument_id,
+                    snapshot=snapshot,
+                    as_of=as_of,
+                    decision_session=calendar.session,
+                ),
+            }
+        )
         reviewed_sectors = tuple(
             await session.scalars(
                 select(SectorExposure)
@@ -607,6 +621,7 @@ async def inspect_agent_paper_candidate_static_readiness(
         "synthesis_prompt_status": "ready" if synthesis_prompt_ready else "missing_or_invalid",
         "candidates": candidates,
         "research_inputs": {
+            "current_identity_binding": current_identity_bindings,
             "current_trends": current_trends,
             "macro_sources": {
                 "vintage": macro_vintage.isoformat(),

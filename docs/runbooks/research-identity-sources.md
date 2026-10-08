@@ -55,3 +55,18 @@ DataSnapshot 与 ResearchEvidenceRef；重复导入相同包装返回原引用�
 迁移只扩展现有证据归属函数，不改历史表或记录。启用新版本前须在受控更新中先应用迁移；
 旧运行版本不应加载此代码。尚无冻结身份引用时可降回 `0065_portfolio_management`；一旦
 引用已被冻结，降级会明确拒绝，应保留迁移和审计记录，以代码回退处理。
+
+
+## 提前只读检查
+
+使用正常入口 `uv run --project engine nexus-engine-agent-paper-readiness --repo-root "$PWD"`。
+`research_inputs.current_identity_binding` 分候选报告当前研究身份凭证的 `evidence_status`
+和研究快照的 `snapshot_status`。前者 ready 表示当前严格原件读回符合目标纽约交易日；后者
+ready 还要求在研究快照原 cutoff 严格重验其冻结引用、归属和元数据。旧快照不会因为新证据
+到达而变成 ready；次日会重新变成 unknown/missing，不沿用昨日凭证。
+
+缺失、错配、歧义或损坏统一报告 `RESEARCH_IDENTITY_EVIDENCE_MISSING_OR_INVALID`；
+证据已合格但未冻结到快照报告 `RESEARCH_IDENTITY_SNAPSHOT_MISSING`；引用容量耗尽报告
+`research_identity_evidence_capacity_exhausted`。检查只读已持久化原件，不采集新的 SEC 来源，
+不写数据库、不调用模型、不创建周期或订单。原 `ready_static` 保持原静态输入语义；身份、
+宏观和趋势分别判读，不将这些字段冒充全部研究内容、财务修订审查或交易许可通过。
