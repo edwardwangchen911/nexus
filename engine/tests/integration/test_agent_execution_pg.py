@@ -4460,8 +4460,9 @@ class _OversizedUsageCommittee(FixtureCommittee):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["research", "critique"])
 @pytest.mark.parametrize("timeout", [False, True])
+@pytest.mark.parametrize("stage_budget", [False, True])
 async def test_native_sdk_invocation_failure_keeps_safe_diagnostic_and_usage(
-    migrated_database_url, monkeypatch, failure_stage, timeout
+    migrated_database_url, monkeypatch, failure_stage, timeout, stage_budget
 ):
     """Only the SDK process is replaced; admission, adapter, worker, DB and API are real."""
     from types import SimpleNamespace
@@ -4476,11 +4477,30 @@ async def test_native_sdk_invocation_failure_keeps_safe_diagnostic_and_usage(
     await _seed_database_tool_authority(
         factory, link_price=False, bar_count=1, price_quality_flags=("missing",)
     )
-    await prepare_database(settings, structured_synthesis=True)
+    await prepare_database(
+        settings,
+        structured_synthesis=True,
+        **(
+            {
+                "aggregate_input_tokens": 96000,
+                "max_wire_bytes": 64000,
+                "inline_citations": True,
+                "actionable_paper": True,
+                "stage_time_budget": True,
+            }
+            if stage_budget
+            else {}
+        ),
+    )
     async with factory() as session, session.begin():
         model = await session.scalar(
             select(AgentModelConfigRecord).where(
-                AgentModelConfigRecord.version == "codex-sdk-chatgpt-v3"
+                AgentModelConfigRecord.version
+                == (
+                    "codex-sdk-chatgpt-v6-stage-time-budget"
+                    if stage_budget
+                    else "codex-sdk-chatgpt-v3"
+                )
             )
         )
         admission = await admit_research_run(
@@ -4561,7 +4581,16 @@ async def test_native_sdk_invocation_failure_keeps_safe_diagnostic_and_usage(
         assert all(output.intent is None for output in outputs)
         terminal = next(output for output in outputs if output.role is None)
         assert terminal.payload["reason"] == "model_usage_uncertain"
-        assert terminal.payload["diagnostic"] == {
+        diagnostic = dict(terminal.payload["diagnostic"])
+        if stage_budget:
+            timing = diagnostic.pop("timing")
+            assert 0 < timing["allocated_timeout_ms"] <= 108000
+            assert timing["elapsed_ms"] >= 0
+            assert {"account", "config_read", "thread_start", "turn_run", "client_close"} <= set(
+                timing["phase_elapsed_ms"]
+            )
+            assert all(value >= 0 for value in timing["phase_elapsed_ms"].values())
+        assert diagnostic == {
             "stage": failure_stage,
             "boundary": "invocation",
             "role": None,

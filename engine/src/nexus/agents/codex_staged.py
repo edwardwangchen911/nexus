@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from enum import Enum
+from time import perf_counter
 from types import GenericAlias
 from typing import Literal, TypedDict, cast
 
@@ -31,6 +32,7 @@ from nexus.agents.committee import (
     PromptAsset,
     StageFailureDiagnostic,
     StageInputIdentity,
+    StageInvocationTiming,
 )
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
@@ -497,6 +499,7 @@ class StagedCodexCommittee(CodexCommittee):
             invocation_options["deadline_at"] = allocated_deadline
         if self._max_wire_bytes != 55808:
             invocation_options["max_wire_bytes"] = self._max_wire_bytes
+        invocation_started = perf_counter()
         try:
             async with asyncio.timeout_at(self._deadline):
                 raw, usage = await invoke_codex(
@@ -513,6 +516,17 @@ class StagedCodexCommittee(CodexCommittee):
                 invocation_kind=error.kind
                 if isinstance(error, CodexInvocationError)
                 else ("timeout" if isinstance(error, TimeoutError) else "unexpected_exception"),
+                timing=StageInvocationTiming(
+                    allocated_timeout_ms=(
+                        int(allocated_timeout * 1000) if allocated_timeout is not None else None
+                    ),
+                    elapsed_ms=max(0, int((perf_counter() - invocation_started) * 1000)),
+                    phase_elapsed_ms=(
+                        error.phase_elapsed_ms if isinstance(error, CodexInvocationError) else {}
+                    ),
+                )
+                if self._stage_time_budget
+                else None,
             )
             raise
         self.usage = UsageSnapshot(

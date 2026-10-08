@@ -3,7 +3,7 @@
 import hashlib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Literal, Protocol, cast
+from typing import Annotated, Final, Literal, Protocol, cast
 
 from pydantic import (
     BaseModel,
@@ -81,6 +81,16 @@ type InvocationKind = Literal[
 ]
 
 
+class StageInvocationTiming(BaseModel):
+    """Local monotonic durations only, with no model text or account facts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    allocated_timeout_ms: int | None = Field(default=None, strict=True, ge=0, le=108000)
+    elapsed_ms: int = Field(strict=True, ge=0)
+    phase_elapsed_ms: dict[InvocationPhase, Annotated[int, Field(strict=True, ge=0)]]
+
+
 class StageFailureDiagnostic(BaseModel):
     """Safe local terminal metadata, never response text or exception context."""
 
@@ -91,6 +101,7 @@ class StageFailureDiagnostic(BaseModel):
     response_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")
     invocation_phase: InvocationPhase | None = None
     invocation_kind: InvocationKind | None = None
+    timing: StageInvocationTiming | None = None
     validation_kind: (
         Literal[
             "schema_validation",
@@ -119,6 +130,7 @@ class StageFailureDiagnostic(BaseModel):
             self.response_hash is None
             or self.invocation_phase is not None
             or self.invocation_kind is not None
+            or self.timing is not None
         ):
             raise ValueError("VALIDATION_DIAGNOSTIC_INVALID")
         return self
@@ -126,6 +138,8 @@ class StageFailureDiagnostic(BaseModel):
     @model_serializer(mode="wrap")
     def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
         payload = cast(dict[str, object], handler(self))
+        if self.timing is None:
+            payload.pop("timing", None)
         if self.boundary != "invocation":
             payload.pop("invocation_phase", None)
             payload.pop("invocation_kind", None)

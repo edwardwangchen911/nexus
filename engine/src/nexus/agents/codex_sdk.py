@@ -11,10 +11,11 @@ import math
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import perf_counter
 from typing import Literal, cast, get_args
 
 from codex_cli_bin import bundled_codex_path  # type: ignore[import-untyped]
@@ -119,12 +120,14 @@ class CodexInvocationError(ValueError):
         super().__init__(self.reason)
         self.usage = usage
         self.provider_call_started = provider_call_started
+        self.phase_elapsed_ms: dict[InvocationPhase, int] = {}
 
 
 @dataclass
 class _InvocationState:
     provider_call_started: bool = False
     stage_deadline: float | None = None
+    phase_elapsed_ms: dict[InvocationPhase, int] = field(default_factory=dict)
 
 
 class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
@@ -157,11 +160,13 @@ async def _close_sdk_client(client: AsyncCodex) -> None:
 def _invocation_boundary(
     phase: InvocationPhase, *, state: _InvocationState | None = None
 ) -> Iterator[None]:
+    started = perf_counter()
     try:
         yield
     except CodexInvocationError as error:
         if state is not None:
             error.provider_call_started = state.provider_call_started
+            error.phase_elapsed_ms = dict(state.phase_elapsed_ms)
         raise
     except TimeoutError:
         raise _CodexInvocationTimeout(
@@ -175,6 +180,9 @@ def _invocation_boundary(
             phase=phase,
             provider_call_started=None if state is None else state.provider_call_started,
         ) from None
+    finally:
+        if state is not None and phase != "preflight":
+            state.phase_elapsed_ms[phase] = max(0, int((perf_counter() - started) * 1000))
 
 
 class _Claim(BaseModel):
@@ -401,7 +409,7 @@ async def _invoke_codex(
         raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="preflight")
     with TemporaryDirectory(prefix="nexus-codex-") as temporary:
         directory = Path(temporary)
-        with _invocation_boundary("client_init"):
+        with _invocation_boundary("client_init", state=invocation_state):
             client = AsyncCodex(sdk_config(directory))
         run_task = None
         phase: InvocationPhase = "account"
@@ -411,7 +419,7 @@ async def _invoke_codex(
                 if stage_deadline is not None
                 else asyncio.timeout(timeout_seconds)
             ):
-                with _invocation_boundary("account"):
+                with _invocation_boundary("account", state=invocation_state):
                     if (
                         stage_deadline is not None
                         and asyncio.get_running_loop().time() >= stage_deadline
@@ -425,13 +433,13 @@ async def _invoke_codex(
                 # Config maps merge: an empty mcp_servers table does NOT clear
                 # user servers. Disable every resolved entry before thread start.
                 phase = "config_read"
-                with _invocation_boundary(phase):
+                with _invocation_boundary(phase, state=invocation_state):
                     resolved = await client._client.request(
                         "config/read", {"includeLayers": False}, response_model=ConfigReadResponse
                     )
                     servers = (resolved.config.model_extra or {}).get("mcp_servers", {})
                 phase = "thread_start"
-                with _invocation_boundary(phase):
+                with _invocation_boundary(phase, state=invocation_state):
                     thread = await client.thread_start(
                         config={"mcp_servers": {name: {"enabled": False} for name in servers}},
                         model=MODEL_ID,
@@ -444,7 +452,7 @@ async def _invoke_codex(
                         developer_instructions=DEVELOPER_INSTRUCTIONS,
                     )
                 phase = "turn_run"
-                with _invocation_boundary(phase):
+                with _invocation_boundary(phase, state=invocation_state):
                     # Mark before entering thread.run; any later cleanup/stream
                     # failure must retain uncertainty even without reported usage.
                     invocation_state.provider_call_started = True
@@ -464,7 +472,7 @@ async def _invoke_codex(
                 raise
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
         finally:
-            with _invocation_boundary("client_close"):
+            with _invocation_boundary("client_close", state=invocation_state):
                 await _close_sdk_client(client)
             if run_task is not None:
                 done, _ = await asyncio.wait((run_task,), timeout=1)
@@ -475,7 +483,7 @@ async def _invoke_codex(
                     # wait_for() may itself wait forever for a cancellation-resistant
                     # SDK stream. The child process is already closed or killed here.
                     run_task.cancel()
-    with _invocation_boundary("response_check"):
+    with _invocation_boundary("response_check", state=invocation_state):
         measured_usage = None
         if result.usage is not None:
             reported = result.usage.total

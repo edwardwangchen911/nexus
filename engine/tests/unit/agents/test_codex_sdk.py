@@ -1237,6 +1237,100 @@ def test_invocation_diagnostic_is_disjoint_from_legacy_validation():
 
 
 @pytest.mark.asyncio
+async def test_sdk_failure_measures_setup_turn_and_cleanup_separately(monkeypatch):
+    client, thread, _, _ = _sdk(monkeypatch)
+    clock = [100.0]
+    monkeypatch.setattr(codex_sdk, "perf_counter", lambda: clock[0], raising=False)
+    account = client.account.return_value
+
+    async def account_call(**kwargs):
+        clock[0] += 2
+        return account
+
+    async def turn_call(*args, **kwargs):
+        clock[0] += 12.5
+        raise TimeoutError("private-timing-canary")
+
+    async def close_call():
+        clock[0] += 1
+
+    client.account.side_effect = account_call
+    thread.run.side_effect = turn_call
+    client.close.side_effect = close_call
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await codex_sdk.invoke_codex({})
+    timing = caught.value.phase_elapsed_ms
+    assert timing["account"] == 2000
+    assert timing["turn_run"] == 12500
+    assert timing["client_close"] == 1000
+    assert caught.value.provider_call_started is True
+    assert "private-timing-canary" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_v6_failure_diagnostic_retains_allocation_and_sdk_timing_without_retry(monkeypatch):
+    from nexus.agents import codex_staged
+
+    client, thread, _, _ = _sdk(monkeypatch)
+    clock = [100.0]
+    monkeypatch.setattr(codex_sdk, "perf_counter", lambda: clock[0], raising=False)
+    monkeypatch.setattr(codex_staged, "perf_counter", lambda: clock[0], raising=False)
+
+    async def turn_call(*args, **kwargs):
+        clock[0] += 20
+        raise TimeoutError("private-timing-canary")
+
+    thread.run.side_effect = turn_call
+    request, evidence, prompts = _authority()
+    model = codex_staged.StagedCodexCommittee(
+        prompts=prompts,
+        tools=_tools(),
+        stage_time_budget=True,
+        deadline=asyncio.get_running_loop().time() + 120,
+    )
+    run = SimpleNamespace(retry_count=0)
+    assert (
+        await _analyze_with_one_retry(
+            AsyncMock(),
+            run,
+            committee=model,
+            role="orchestrator",
+            request=request,
+            evidence_refs=evidence,
+            prompt=prompts["orchestrator"],
+        )
+        is None
+    )
+    diagnostic = model.failure_diagnostic.model_dump(mode="json")
+    timing = diagnostic["timing"]
+    assert 0 < timing["allocated_timeout_ms"] <= 53000
+    assert timing["elapsed_ms"] == 20000
+    assert timing["phase_elapsed_ms"]["turn_run"] == 20000
+    assert "private-timing-canary" not in json.dumps(diagnostic)
+    assert model.failure_reason == "model_usage_uncertain"
+    assert run.retry_count == 0 and model.usage.provider_calls == 1
+    thread.run.assert_awaited_once()
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("bad", [True, "5", -1, 1.5])
+def test_invocation_timing_rejects_unmeasured_or_invalid_durations(bad):
+    from nexus.agents.committee import StageInvocationTiming
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        StageInvocationTiming(
+            allocated_timeout_ms=1000, elapsed_ms=1000, phase_elapsed_ms={"turn_run": bad}
+        )
+    with pytest.raises(ValidationError):
+        StageInvocationTiming(
+            allocated_timeout_ms=1000,
+            elapsed_ms=1000,
+            phase_elapsed_ms={"private-canary": 1000},
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "kind",
     [
@@ -2392,13 +2486,17 @@ async def test_worker_routes_paper_scope_only_for_new_frozen_model_version(
     run = SimpleNamespace(model_config_id=uuid4(), pricing_version=version, model_hash="d" * 64)
     monkeypatch.setattr(worker, "load_frozen_evidence", AsyncMock(return_value=(object(),)))
     monkeypatch.setattr(
-        worker, "revalidate_frozen_price_authority",
+        worker,
+        "revalidate_frozen_price_authority",
         AsyncMock(return_value=FrozenPriceAuthorityStatus.MISSING),
     )
     monkeypatch.setattr(worker, "load_frozen_prompts", AsyncMock(return_value=prompts))
     committee = await worker._committee(
-        session, EngineSettings(agent_runtime_mode="codex_sdk"), run,
-        responses_client=None, tools=_tools(),
+        session,
+        EngineSettings(agent_runtime_mode="codex_sdk"),
+        run,
+        responses_client=None,
+        tools=_tools(),
     )
     assert committee._paper_stage_scope is scope_enabled
     assert committee._stage_time_budget is (version == "codex-sdk-chatgpt-v6-stage-time-budget")
