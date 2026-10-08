@@ -1114,12 +1114,70 @@ async def test_known_shared_market_preparation_failure_closes_with_exact_reason(
         await engine.dispose()
 
 
+def _control_runner_database_clock(monkeypatch: pytest.MonkeyPatch, now: datetime) -> None:
+    # Keep the actual SELECT/session path; replace only this fixture's DB clock.
+    monkeypatch.setattr(
+        agent_version_runner,
+        "func",
+        type(
+            "RunnerFixtureFunctions",
+            (),
+            {
+                "count": staticmethod(func.count),
+                "max": staticmethod(func.max),
+                "clock_timestamp": staticmethod(lambda: literal(now)),
+            },
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_first_slot_initializes_equal_internal_accounts_without_work_replay(
-    migrated_database_url: str,
+async def test_database_clock_rejects_missed_slot_before_initialization(
+    migrated_database_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     factory, engine = await _factory(migrated_database_url)
     slot = _slots(TRAIN_DATES)[0]
+    _control_runner_database_clock(monkeypatch, slot + timedelta(seconds=61))
+    try:
+        async with factory.begin() as session:
+            prompt_id, model_id = await _seed_authority(session)
+            registration = await register_agent_version_evaluation(
+                session,
+                request=_request(prompt_id, model_id),
+                actor_id="late-clock-fixture",
+                idempotency_key="late-clock-fixture",
+                now=NOW,
+            )
+            before_funding = await session.scalar(
+                select(func.count()).select_from(PaperLedgerTransactionRecord)
+            )
+        with pytest.raises(ValueError, match="AGENT_VERSION_SLOT_MISSED"):
+            async with factory.begin() as session:
+                await advance_agent_version_slot(
+                    session,
+                    evaluation_id=registration.evaluation_id,
+                    decision_slot_at=slot,
+                    daily_limit_usd=Decimal("3"),
+                    now=slot,
+                )
+        async with factory.begin() as session:
+            assert (
+                await session.scalar(select(func.count()).select_from(PaperLedgerTransactionRecord))
+                == before_funding
+            )
+            for model in (AgentPaperCycleRecord, Job, PaperOrderRecord):
+                assert await session.scalar(select(func.count()).select_from(model)) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_first_slot_initializes_equal_internal_accounts_without_work_replay(
+    migrated_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    slot = _slots(TRAIN_DATES)[0]
+    _control_runner_database_clock(monkeypatch, slot)
     try:
         async with factory.begin() as session:
             prompt_id, model_id = await _seed_authority(session)
@@ -1256,8 +1314,7 @@ async def test_first_slot_initializes_equal_internal_accounts_without_work_repla
         async with factory.begin() as session:
             original_reference_hash = await session.scalar(
                 select(PaperLedgerTransactionRecord.reference_hash).where(
-                    PaperLedgerTransactionRecord.account_id
-                    == registration.incumbent_account_id,
+                    PaperLedgerTransactionRecord.account_id == registration.incumbent_account_id,
                     PaperLedgerTransactionRecord.transaction_type == "funding",
                     PaperLedgerTransactionRecord.reference_type == "initial_funding",
                 )
@@ -1357,6 +1414,7 @@ async def test_slot_runner_wires_both_frozen_lanes_to_same_authority(
     factory, engine = await _factory(migrated_database_url)
     slot = _slots(TRAIN_DATES)[0]
     prepared_at = slot + timedelta(seconds=30)
+    _control_runner_database_clock(monkeypatch, prepared_at)
     calls: list[dict[str, object]] = []
     incumbent_cycle_id = UUID("72000000-0000-0000-0000-000000000801")
     challenger_cycle_id = UUID("72000000-0000-0000-0000-000000000802")
