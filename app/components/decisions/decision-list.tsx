@@ -26,7 +26,7 @@ export function DecisionList({ cycles, session = "", onSessionChange = () => {} 
   const [decisionType, setDecisionType] = useState<"" | DecisionKey>("");
   const [status, setStatus] = useState<"" | DecisionCycle["status"]>("");
   const filtered = useMemo(() => cycles.filter((cycle) =>
-    (!decisionType || decisionKey(cycle) === decisionType)
+    (!decisionType || decisionKeys(cycle).includes(decisionType))
     && (!status || cycle.status === status)), [cycles, decisionType, status]);
 
   return <section className="decision-records" aria-label="决策记录列表">
@@ -35,6 +35,7 @@ export function DecisionList({ cycles, session = "", onSessionChange = () => {} 
       <label><span>决策类型</span><select value={decisionType} onChange={(event) => setDecisionType(event.target.value as "" | DecisionKey)}>{decisionOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label>
       <label><span>最终状态</span><select value={status} onChange={(event) => setStatus(event.target.value as "" | DecisionCycle["status"])}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label>
     </div>
+    {cycles.some((cycle) => cycle.candidates.length > 1) && <p>筛选匹配本周期任一候选的研究观点；组合取舍、目标与执行结果请查看详情。</p>}
     <p className="decision-records__count">当前筛选显示 <strong className="numeric-data">{filtered.length} / {cycles.length}</strong> 条已加载记录</p>
     {filtered.length ? <ul aria-label="决策记录">
       {filtered.map((cycle) => <DecisionRow key={cycle.cycle_id} cycle={cycle} />)}
@@ -50,17 +51,22 @@ function DecisionRow({ cycle }: { cycle: DecisionCycle }): React.ReactElement {
   return <li>
     <article className="decision-row" data-tone={final.tone}>
       <time className="numeric-data" dateTime={cycle.decision_time}>{formatDisplayTime(cycle.decision_time)}</time>
-      <div className="decision-row__decision"><small>决策</small><strong>{candidate?.label ?? decision.summary.label}</strong><span>{candidate?.symbol ?? "无候选标的"}</span></div>
+      <div className="decision-row__decision"><small>候选研究观点</small>
+        {decision.candidates.length > 1 ? <>
+          <strong>组合周期 · {decision.candidates.length} 个候选</strong>
+          {decision.candidates.map((item) => <span key={item.instrumentId}>{item.symbol} · {item.label}</span>)}
+        </> : <><strong>{candidate?.label ?? decision.summary.label}</strong><span>{candidate?.symbol ?? "无候选标的"}</span></>}
+      </div>
       <div className="decision-row__result"><small>结果</small><strong>{final.label}</strong><code>{cycle.result_code}</code></div>
       <a className="button button--quiet" href={`/decisions/${cycle.cycle_id}`} aria-label={`查看决策 ${cycle.cycle_id.slice(0, 8)}`}>查看决策<ArrowRight aria-hidden="true" size={16} /></a>
     </article>
   </li>;
 }
 
-function decisionKey(cycle: DecisionCycle): DecisionKey {
+function decisionKeys(cycle: DecisionCycle): DecisionKey[] {
   const summary = cycleDecisionPresentation(cycle);
-  if (summary.summary.key === "data_insufficient" || summary.summary.key === "model_failed") return summary.summary.key;
-  return summary.candidates[0]?.key ?? "other";
+  if (summary.summary.key === "data_insufficient" || summary.summary.key === "model_failed") return [summary.summary.key];
+  return summary.candidates.length ? summary.candidates.map((candidate) => candidate.key) : ["other"];
 }
 
 function finalPresentation(cycle: DecisionCycle, riskLabel: string): { label: string; tone: string } {
