@@ -36,6 +36,7 @@ from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
 from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
+from nexus.ops.agent_paper_identity import prepare_agent_paper_identity_once
 from nexus.ops.agent_paper_once import (
     AgentPaperCollectWindowRequest,
     AgentPaperMarketSettings,
@@ -1847,7 +1848,7 @@ def _normal_wait_until(
 
 
 _SAFE_PREPARATION_FAILURE_PHASES = frozenset(
-    {"configuration", "prior_daily", "macro", "current_trends", "prepare_pair"}
+    {"configuration", "prior_daily", "macro", "current_trends", "research_identity", "prepare_pair"}
 )
 
 
@@ -2577,6 +2578,20 @@ async def execute_agent_paper_loop_action(
                 raise
             if daily not in {"ready", "prepared", "unavailable"}:
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        try:
+            identity_status = await prepare_agent_paper_identity_once(
+                trigger_settings,
+                account_id=account_id,
+                batch_id=_candidate_batch_setting(environment),
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+                repo_root=repo_root,
+                contact=environment.get("SEC_CONTACT", ""),
+            )
+        except Exception as error:
+            _annotate_agent_paper_failure(error, phase="research_identity")
+            raise
+        if identity_status not in {"ready", "prepared", "unavailable"}:
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         for candidate in candidates:
             try:
                 macro = await prepare_macro_once(

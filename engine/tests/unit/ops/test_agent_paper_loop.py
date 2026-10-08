@@ -252,7 +252,10 @@ def test_multi_candidate_executor_prepares_exact_scope_before_trigger(monkeypatc
         ]
 
 
-def test_opening_preparation_binds_every_candidate_without_trigger(monkeypatch) -> None:
+@pytest.mark.parametrize("identity_status", ["prepared", "unavailable"])
+def test_opening_preparation_binds_every_candidate_without_trigger(
+    monkeypatch, identity_status
+) -> None:
     second = TEST_CANDIDATE.model_copy(update={"instrument_id": UUID(int=21), "symbol": "MSFT"})
     calls = []
 
@@ -272,6 +275,12 @@ def test_opening_preparation_binds_every_candidate_without_trigger(monkeypatch) 
         calls.append(f"trends:{candidate.symbol}")
         return "prepared"
 
+    async def identities(_settings, *, account_id, batch_id, **_kwargs):
+        assert account_id == UUID(int=1)
+        assert batch_id == UUID(int=30)
+        calls.append("identity-batch")
+        return identity_status
+
     async def forbidden(*_args, **_kwargs):
         pytest.fail("opening preparation must not create a cycle")
 
@@ -287,6 +296,7 @@ def test_opening_preparation_binds_every_candidate_without_trigger(monkeypatch) 
     monkeypatch.setattr(loop, "_load_loop_candidates", load)
     monkeypatch.setattr(loop, "prepare_prior_daily_once", daily)
     monkeypatch.setattr(loop, "prepare_macro_once", macro)
+    monkeypatch.setattr(loop, "prepare_agent_paper_identity_once", identities, raising=False)
     monkeypatch.setattr(loop, "prepare_current_trends_once", trends)
     monkeypatch.setattr(loop, "trigger_once", forbidden)
     market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
@@ -307,6 +317,7 @@ def test_opening_preparation_binds_every_candidate_without_trigger(monkeypatch) 
         "batch",
         "daily:AAPL",
         "daily:MSFT",
+        "identity-batch",
         "macro:AAPL",
         "macro:MSFT",
         "trends:AAPL",
