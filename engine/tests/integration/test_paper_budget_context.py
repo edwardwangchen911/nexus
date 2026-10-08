@@ -1,6 +1,7 @@
 """Synthetic Paper contexts traverse the real worker; no live model qualification."""
 
 import asyncio
+import json
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -20,13 +21,15 @@ from nexus.persistence.models.runtime import Job
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select, text
-from unit.agents.test_codex_sdk import _restore_view
+from unit.agents.test_codex_sdk import _assessment_payload, _restore_view, _staged_batch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage_time_budget", [False, True])
+@pytest.mark.parametrize(
+    "stage_time_budget,complete_model", [(False, False), (True, False), (True, True)]
+)
 async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not_replayed(
-    migrated_database_url, monkeypatch, stage_time_budget
+    migrated_database_url, monkeypatch, stage_time_budget, complete_model
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     # Isolated historical fixture only: registration validity precedes its cutoff.
@@ -62,12 +65,26 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
         finally:
             await session.execute(text("ALTER TABLE agent_model_configs ENABLE TRIGGER USER"))
     captured = {}
+    stages = []
 
     async def unknown_result(payload, **options):
-        captured["payload"] = payload
-        captured["options"] = options
-        captured["observed_at"] = asyncio.get_running_loop().time()
-        raise RuntimeError("synthetic-unknown-result")
+        captured.setdefault("payload", payload)
+        captured.setdefault("options", options)
+        captured.setdefault("observed_at", asyncio.get_running_loop().time())
+        stages.append((payload, options))
+        if not complete_model:
+            raise RuntimeError("synthetic-unknown-result")
+        from nexus.agents.responses_budget import UsageSnapshot
+
+        # Only the external SDK response is replaced. Context, stage compiler,
+        # validation, worker, guarded DB terminal and timing remain real.
+        body = (
+            _assessment_payload(payload["previous_claims"])
+            if payload["stage"] == "synthesis"
+            else _staged_batch(payload["stage"], payload["requested_roles"])
+        )
+        options["output_model"].model_validate(body)
+        return json.dumps(body), UsageSnapshot(input_tokens=300, output_tokens=80)
 
     sdk = AsyncMock(side_effect=unknown_result)
     monkeypatch.setattr(codex_staged, "invoke_codex", sdk)
@@ -114,7 +131,11 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
                     )
                 )
             )
-        assert sdk.await_count == 1, (observed_run.pricing_version, observed_run.status, reasons)
+        assert sdk.await_count == (3 if complete_model else 1), (
+            observed_run.pricing_version,
+            observed_run.status,
+            reasons,
+        )
         payload = captured["payload"]
         restored = _restore_view(payload["frozen_inputs"])
         contexts = [
@@ -147,11 +168,12 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
         async with sessions() as session:
             run = await session.get(AgentResearchRunRecord, result.research_run_ids[0])
             job = await session.get(Job, job_id)
-            assert run.status == "failed"
+            assert run.status == ("completed" if complete_model else "failed")
             assert run.pricing_version == (
                 DEADLINE_BUDGET_CONFIG_VERSION if stage_time_budget else ACTIONABLE_CONFIG_VERSION
             )
-            assert job.status == "failed" and job.attempt_count == 1
+            assert job.status == ("succeeded" if complete_model else "failed")
+            assert job.attempt_count == 1
             assert (
                 await session.scalar(select(func.count()).select_from(PaperOrderRecord))
                 == original_orders
@@ -159,6 +181,56 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
             other = await session.get(AgentResearchRunRecord, result.research_run_ids[1])
             assert other.status == "prepared"
         assert not await run_agent_worker_once(settings, job_ids=(job_id,))
-        assert sdk.await_count == 1
+        assert sdk.await_count == (3 if complete_model else 1)
+        if complete_model:
+            from nexus.agents.codex_sdk import codex_request_wire
+
+            assert [p["stage"] for p, _ in stages] == ["research", "critique", "synthesis"]
+            frozen_hashes = set()
+            for submitted, sdk_options in stages:
+                restored = _restore_view(submitted["frozen_inputs"])
+                bound = [
+                    item["agent_paper_context"]
+                    for item in restored["security_snapshot"]["items"]
+                    if "agent_paper_context" in item
+                ]
+                assert bound == [context]
+                assert "paper_portfolio supplies" in submitted["instructions"]
+                assert len(codex_request_wire(submitted).encode()) <= 64000
+                assert 0 < sdk_options["timeout_seconds"] <= 108
+            async with sessions() as session:
+                outputs = list(
+                    await session.scalars(
+                        select(AgentResearchOutputRecord).where(
+                            AgentResearchOutputRecord.run_id == run.id
+                        )
+                    )
+                )
+                roles = [output for output in outputs if output.role is not None]
+                assert len(roles) == 8
+                for output in roles:
+                    frozen_hashes.add(output.payload["frozen_inputs_hash"])
+                assert len(frozen_hashes) == 1
+                synthesized = [output for output in outputs if output.status == "synthesized"]
+                assert len(synthesized) == 1
+                timed = synthesized[0].payload["stage_timings"]
+                assert set(timed) == {"research", "critique", "synthesis"}
+                assert all(timing["allocated_timeout_ms"] > 0 for timing in timed.values())
+                assert all(timing["elapsed_ms"] >= 0 for timing in timed.values())
+                assert run.input_tokens == 900 and run.output_tokens == 240
+            import httpx
+            from helpers.portfolio_api import app, headers
+
+            path = f"/internal/v1/research-runs/{run.id}"
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app(migrated_database_url)),
+                base_url="http://testserver",
+            ) as client:
+                response = await client.get(path, headers=headers("GET", path))
+            assert response.status_code == 200
+            trace = response.json()["data"]["stage_trace"]
+            assert trace["status"] == "verified"
+            assert [stage["status"] for stage in trace["stages"]] == ["complete"] * 3
+            assert {stage["frozen_inputs_hash"] for stage in trace["stages"]} == frozen_hashes
     finally:
         await engine.dispose()

@@ -39,6 +39,7 @@ from nexus.agents.committee import (
     InvocationKind,
     InvocationPhase,
     PromptAsset,
+    TimeoutSource,
 )
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
@@ -121,6 +122,7 @@ class CodexInvocationError(ValueError):
         self.usage = usage
         self.provider_call_started = provider_call_started
         self.phase_elapsed_ms: dict[InvocationPhase, int] = {}
+        self.timeout_source: TimeoutSource | None = "unknown" if self.kind == "timeout" else None
 
 
 @dataclass
@@ -408,25 +410,30 @@ async def _invoke_codex(
         raise CodexInvocationError("CODEX_INPUT_TOO_LARGE", phase="preflight")
     stage_deadline = invocation_state.stage_deadline
     if stage_deadline is not None and asyncio.get_running_loop().time() >= stage_deadline:
-        raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="preflight")
+        error = _CodexInvocationTimeout("CODEX_TIMEOUT", phase="preflight")
+        error.timeout_source = "stage_deadline"
+        raise error
     with TemporaryDirectory(prefix="nexus-codex-") as temporary:
         directory = Path(temporary)
         with _invocation_boundary("client_init", state=invocation_state):
             client = AsyncCodex(sdk_config(directory))
         run_task = None
         phase: InvocationPhase = "account"
+        invocation_timer = (
+            asyncio.timeout_at(stage_deadline)
+            if stage_deadline is not None
+            else asyncio.timeout(timeout_seconds)
+        )
         try:
-            async with (
-                asyncio.timeout_at(stage_deadline)
-                if stage_deadline is not None
-                else asyncio.timeout(timeout_seconds)
-            ):
+            async with invocation_timer:
                 with _invocation_boundary("account", state=invocation_state):
                     if (
                         stage_deadline is not None
                         and asyncio.get_running_loop().time() >= stage_deadline
                     ):
-                        raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="account")
+                        error = _CodexInvocationTimeout("CODEX_TIMEOUT", phase="account")
+                        error.timeout_source = "stage_deadline"
+                        raise error
                     account = await client.account(refresh_token=False)
                     if account.account is None or not isinstance(
                         account.account.root, ChatgptAccount
@@ -470,6 +477,12 @@ async def _invoke_codex(
                     # until close wakes the reader; cancellation first would orphan the waiter.
                     result = await asyncio.shield(run_task)
         except TimeoutError as error:
+            if invocation_timer.expired():
+                failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
+                failure.timeout_source = (
+                    "stage_deadline" if stage_deadline is not None else "invocation_deadline"
+                )
+                raise failure from None
             if isinstance(error, CodexInvocationError):
                 raise
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None

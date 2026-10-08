@@ -4626,6 +4626,11 @@ async def test_native_sdk_invocation_failure_keeps_safe_diagnostic_and_usage(
         diagnostic = dict(terminal.payload["diagnostic"])
         if stage_budget:
             timing = diagnostic.pop("timing")
+            if timeout:
+                # SDK raised TimeoutError while the local timer still had time.
+                assert diagnostic.pop("timeout_source") == "unknown"
+            else:
+                assert "timeout_source" not in diagnostic
             assert 0 < timing["allocated_timeout_ms"] <= 108000
             assert timing["elapsed_ms"] >= 0
             assert {"account", "config_read", "thread_start", "turn_run", "client_close"} <= set(

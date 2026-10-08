@@ -286,48 +286,18 @@ class StagedCodexCommittee(CodexCommittee):
         self.failure_diagnostic: StageFailureDiagnostic | None = None
         self.stage_timings: dict[str, StageInvocationTiming] = {}
 
-    async def analyze(
+    def build_stage_request(
         self,
-        role: AgentRole,
+        *,
+        stage: Literal["research", "critique", "synthesis"],
         request: ResearchRequest,
         evidence_refs: tuple[EvidenceRef, ...],
-        prompt: PromptAsset,
-    ) -> CommitteeRoleOutput:
-        if prompt != self._prompts[role]:
-            raise ValueError("CODEX_PROMPT_AUTHORITY_CHANGED")
-        if self._attempted and (request != self._request or evidence_refs != self._evidence):
-            raise ValueError("CODEX_RUN_AUTHORITY_CHANGED")
-        if self.failure_reason is not None:
-            raise ValueError("CODEX_REQUEST_ALREADY_FAILED")
-        if role in self._outputs:
-            return self._outputs[role]
-        stage, roles = next((stage, roles) for stage, roles in STAGES if role in roles)
-        prior_roles = ROLE_ORDER[: ROLE_ORDER.index(roles[0])]
-        if role != roles[0] or tuple(self._outputs) != prior_roles:
-            raise ValueError("CODEX_STAGE_ORDER_INVALID")
-        if not self._attempted:
-            self._attempted = True
-            self._request, self._evidence = request, evidence_refs
-            if self._deadline is None:
-                self._deadline = asyncio.get_running_loop().time() + 115
-        # Mark a stage as attempted before any awaited work; a failure is terminal.
-        self.failure_reason = "model_execution_failed"
-        self.last_stage_input = None
-        self.failure_diagnostic = None
-        previous = [
-            {
-                "claim_id": f"{output.role}:{index}",
-                "role": output.role,
-                "vote": output.vote,
-                "text": claim.text,
-                "citations": [evidence_refs.index(ref) for ref in claim.evidence_refs],
-            }
-            for output in self._outputs.values()
-            for index, claim in enumerate(output.claims)
-        ]
-        if stage == "research":
-            self._frozen_inputs = await self._inputs(request)
-        security = self._frozen_inputs.get("security_snapshot")
+        frozen_inputs: dict[str, object],
+        previous: list[dict[str, object]],
+    ) -> tuple[dict[str, object], type[BaseModel]]:
+        """Compile the normal wire without invoking a model or changing Run state."""
+        roles = next(roles for name, roles in STAGES if name == stage)
+        security = frozen_inputs.get("security_snapshot")
         paper_context_present = isinstance(security, dict) and any(
             isinstance(item, dict) and isinstance(item.get("agent_paper_context"), dict)
             for item in security.get("items", [])
@@ -367,7 +337,7 @@ class StagedCodexCommittee(CodexCommittee):
                 {"index": index, **item.model_dump(mode="json")}
                 for index, item in enumerate(evidence_refs)
             ],
-            "frozen_inputs": self._frozen_inputs,
+            "frozen_inputs": frozen_inputs,
             "previous_claims": previous,
         }
         output_model = _stage_model_for_prior_claims(
@@ -448,6 +418,56 @@ class StagedCodexCommittee(CodexCommittee):
             if self._inline_citations
             else project_staged_payload(payload)
         )
+        return payload, output_model
+
+    async def analyze(
+        self,
+        role: AgentRole,
+        request: ResearchRequest,
+        evidence_refs: tuple[EvidenceRef, ...],
+        prompt: PromptAsset,
+    ) -> CommitteeRoleOutput:
+        if prompt != self._prompts[role]:
+            raise ValueError("CODEX_PROMPT_AUTHORITY_CHANGED")
+        if self._attempted and (request != self._request or evidence_refs != self._evidence):
+            raise ValueError("CODEX_RUN_AUTHORITY_CHANGED")
+        if self.failure_reason is not None:
+            raise ValueError("CODEX_REQUEST_ALREADY_FAILED")
+        if role in self._outputs:
+            return self._outputs[role]
+        stage, roles = next((stage, roles) for stage, roles in STAGES if role in roles)
+        prior_roles = ROLE_ORDER[: ROLE_ORDER.index(roles[0])]
+        if role != roles[0] or tuple(self._outputs) != prior_roles:
+            raise ValueError("CODEX_STAGE_ORDER_INVALID")
+        if not self._attempted:
+            self._attempted = True
+            self._request, self._evidence = request, evidence_refs
+            if self._deadline is None:
+                self._deadline = asyncio.get_running_loop().time() + 115
+        # Mark a stage as attempted before any awaited work; a failure is terminal.
+        self.failure_reason = "model_execution_failed"
+        self.last_stage_input = None
+        self.failure_diagnostic = None
+        previous: list[dict[str, object]] = [
+            {
+                "claim_id": f"{output.role}:{index}",
+                "role": output.role,
+                "vote": output.vote,
+                "text": claim.text,
+                "citations": [evidence_refs.index(ref) for ref in claim.evidence_refs],
+            }
+            for output in self._outputs.values()
+            for index, claim in enumerate(output.claims)
+        ]
+        if stage == "research":
+            self._frozen_inputs = await self._inputs(request)
+        payload, output_model = self.build_stage_request(
+            stage=stage,
+            request=request,
+            evidence_refs=evidence_refs,
+            frozen_inputs=self._frozen_inputs,
+            previous=previous,
+        )
         wire = codex_request_wire(payload)
         estimated_input = codex_input_allowance(wire, codex_output_schema(output_model))
         stage_input_hash = codex_request_hash(payload, output_model)
@@ -506,8 +526,9 @@ class StagedCodexCommittee(CodexCommittee):
         if self._stage_time_budget:
             invocation_options["phase_elapsed_ms"] = phase_elapsed_ms
         invocation_started = perf_counter()
+        committee_timer = asyncio.timeout_at(self._deadline)
         try:
-            async with asyncio.timeout_at(self._deadline):
+            async with committee_timer:
                 raw, usage = await invoke_codex(
                     payload, output_model=output_model, **invocation_options
                 )
@@ -522,6 +543,21 @@ class StagedCodexCommittee(CodexCommittee):
                 invocation_kind=error.kind
                 if isinstance(error, CodexInvocationError)
                 else ("timeout" if isinstance(error, TimeoutError) else "unexpected_exception"),
+                timeout_source=(
+                    "committee_deadline"
+                    if committee_timer.expired()
+                    else error.timeout_source
+                    if isinstance(error, CodexInvocationError)
+                    else "unknown"
+                    if isinstance(error, TimeoutError)
+                    else None
+                )
+                if self._stage_time_budget
+                and (
+                    isinstance(error, TimeoutError)
+                    or (isinstance(error, CodexInvocationError) and error.kind == "timeout")
+                )
+                else None,
                 timing=StageInvocationTiming(
                     allocated_timeout_ms=(
                         int(allocated_timeout * 1000) if allocated_timeout is not None else None

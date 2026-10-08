@@ -23,6 +23,126 @@ from openai_codex import ApprovalMode, Sandbox
 from openai_codex.generated.v2_all import ChatgptAccount, TurnStatus
 
 
+@pytest.mark.asyncio
+async def test_readonly_critique_inspection_requires_frozen_prior_outputs_and_recorded_hash():
+    from nexus.agents.codex_staged import StagedCodexCommittee
+    from nexus.agents.committee import CommitteeRoleOutput
+    from nexus.ops.research_workload_inspection import inspect_critique_request, summarize_inputs
+    from nexus.strategy.intents import ResearchClaim
+
+    request, evidence, prompts = _authority()
+    committee = StagedCodexCommittee(prompts=prompts, tools=_tools(), inline_citations=True)
+    inputs = await committee._inputs(request)
+    frozen_hash = summarize_inputs(inputs)["frozen_inputs_sha256"]
+    records = tuple(
+        SimpleNamespace(
+            role=role,
+            payload=CommitteeRoleOutput(
+                role=role,
+                vote="abstain",
+                claims=(
+                    ResearchClaim(
+                        text="可核验资料不足。",
+                        evidence_refs=(evidence[0],),
+                    ),
+                ),
+                prompt_hash=prompts[role].content_hash,
+                input_tokens=0,
+                output_tokens=0,
+                stage="research",
+                frozen_inputs_hash=frozen_hash,
+                stage_input_hash="a" * 64,
+            ).model_dump(mode="json"),
+        )
+        for role in ROLE_ORDER[:5]
+    )
+    run = SimpleNamespace(
+        id=uuid4(), evidence_hash="b" * 64, pricing_version="codex-sdk-chatgpt-v6-stage-time-budget"
+    )
+
+    def bind_record(record, sequence):
+        record.run_id = run.id
+        record.sequence = sequence
+        record.status = "running" if record.role is not None else "failed"
+        record.intent = None
+        record.prompt_hash = record.payload.get("prompt_hash")
+        record.content_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "status": record.status,
+                    "role": record.role,
+                    "payload": record.payload,
+                    "intent": record.intent,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return record
+
+    records = tuple(bind_record(record, i + 1) for i, record in enumerate(records))
+    args = dict(run=run, request=request, evidence_refs=evidence, inputs=inputs)
+    unknown = inspect_critique_request(committee, records=records, **args)
+    assert unknown["status"] == "current_code_readback_only"
+    assert unknown["original_request_hash_matched"] is False
+    receipt = SimpleNamespace(
+        role=None,
+        payload={
+            "stage_input": {
+                "stage": "critique",
+                "request_hash": unknown["request_hash"],
+                "frozen_inputs_hash": frozen_hash,
+            }
+        },
+    )
+    receipt = bind_record(receipt, 6)
+    verified = inspect_critique_request(committee, records=(*records, receipt), **args)
+    assert verified["status"] == "request_hash_verified"
+    assert verified["prior_roles"] == verified["prior_claims"] == 5
+    damaged = inspect_critique_request(committee, records=records[:-1], **args)
+    assert damaged["status"] == "unavailable"
+    changed = inspect_critique_request(
+        committee,
+        records=(*records, receipt),
+        **{**args, "inputs": {**inputs, "changed": "PRIVATE_SENTINEL"}},
+    )
+    assert changed["status"] == "unavailable"
+    assert "PRIVATE_SENTINEL" not in json.dumps(changed)
+    for mutation in (
+        "content_hash",
+        "prompt_hash",
+        "status",
+        "run_id",
+        "reviewed_claim_ids",
+        "receipt_hash",
+    ):
+        bad = deepcopy((*records, receipt))
+        if mutation == "receipt_hash":
+            bad[-1].content_hash = "0" * 64
+        elif mutation == "reviewed_claim_ids":
+            bad[0].payload["reviewed_claim_ids"] = ["bull:0"]
+            bind_record(bad[0], 1)
+        elif mutation == "status":
+            bad[0].status = "failed"
+            bad[0].content_hash = hashlib.sha256(
+                json.dumps(
+                    {
+                        "status": bad[0].status,
+                        "role": bad[0].role,
+                        "payload": bad[0].payload,
+                        "intent": bad[0].intent,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+        else:
+            setattr(bad[0], mutation, uuid4() if mutation == "run_id" else "0" * 64)
+        assert (
+            inspect_critique_request(committee, records=bad, **args)["status"] == "unavailable"
+        ), mutation
+
+
 def _restore_view(value, strings=()):
     """Test-only inverse of the documented model-facing JSON view."""
     if isinstance(value, list):
@@ -1234,6 +1354,20 @@ def test_invocation_diagnostic_is_disjoint_from_legacy_validation():
             StageFailureDiagnostic.model_validate({**new, **update})
     with pytest.raises(ValidationError):
         StageFailureDiagnostic.model_validate({**old, "response_hash": None})
+    assert (
+        StageFailureDiagnostic.model_validate(
+            {**new, "timeout_source": "stage_deadline"}
+        ).model_dump(mode="json")["timeout_source"]
+        == "stage_deadline"
+    )
+    for update in (
+        {"timeout_source": "private-canary"},
+        {"timeout_source": "stage_deadline", "invocation_kind": "unexpected_exception"},
+    ):
+        with pytest.raises(ValidationError):
+            StageFailureDiagnostic.model_validate({**new, **update})
+    with pytest.raises(ValidationError):
+        StageFailureDiagnostic.model_validate({**old, "timeout_source": "stage_deadline"})
 
 
 @pytest.mark.asyncio
@@ -1265,6 +1399,89 @@ async def test_sdk_failure_measures_setup_turn_and_cleanup_separately(monkeypatc
     assert timing["client_close"] == 1000
     assert caught.value.provider_call_started is True
     assert "private-timing-canary" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage_budget", [False, True])
+async def test_sdk_timeout_identifies_only_its_expired_local_timer(monkeypatch, stage_budget):
+    client, thread, result, _ = _sdk(monkeypatch)
+    stopped = asyncio.Event()
+    original_timeout_at = asyncio.timeout_at
+
+    # Expire on the next event-loop turn, without a real subsecond clock window.
+    monkeypatch.setattr(
+        asyncio,
+        "timeout_at",
+        lambda deadline: original_timeout_at(asyncio.get_running_loop().time()),
+    )
+    monkeypatch.setattr(
+        asyncio, "timeout", lambda delay: original_timeout_at(asyncio.get_running_loop().time())
+    )
+
+    async def turn_call(*args, **kwargs):
+        await stopped.wait()
+        return result
+
+    async def close_call():
+        stopped.set()
+
+    thread.run.side_effect = turn_call
+    client.close.side_effect = close_call
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await codex_sdk.invoke_codex({}, **({"timeout_seconds": 53} if stage_budget else {}))
+    assert caught.value.timeout_source == (
+        "stage_deadline" if stage_budget else "invocation_deadline"
+    )
+    assert caught.value.kind == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_sdk_upstream_timeout_does_not_claim_local_deadline(monkeypatch):
+    _, thread, _, _ = _sdk(monkeypatch)
+    thread.run.side_effect = TimeoutError("private-upstream-canary")
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await codex_sdk.invoke_codex({}, timeout_seconds=53)
+    assert caught.value.timeout_source == "unknown"
+    assert "private-upstream-canary" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_v6_committee_deadline_is_not_misattributed_to_sdk(monkeypatch):
+    from nexus.agents import codex_staged
+
+    async def pending_invocation(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", pending_invocation)
+    original_timeout_at = asyncio.timeout_at
+    monkeypatch.setattr(
+        asyncio,
+        "timeout_at",
+        lambda deadline: original_timeout_at(asyncio.get_running_loop().time()),
+    )
+    request, evidence, prompts = _authority()
+    model = codex_staged.StagedCodexCommittee(
+        prompts=prompts,
+        tools=_tools(),
+        stage_time_budget=True,
+        deadline=asyncio.get_running_loop().time() + 120,
+    )
+    run = SimpleNamespace(retry_count=0)
+    assert (
+        await _analyze_with_one_retry(
+            AsyncMock(),
+            run,
+            committee=model,
+            role="orchestrator",
+            request=request,
+            evidence_refs=evidence,
+            prompt=prompts["orchestrator"],
+        )
+        is None
+    )
+    assert model.failure_diagnostic.timeout_source == "committee_deadline"
+    assert model.failure_diagnostic.invocation_phase == "aggregate_wait"
+    assert run.retry_count == 0 and model.usage.provider_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1306,6 +1523,7 @@ async def test_v6_failure_diagnostic_retains_allocation_and_sdk_timing_without_r
     assert 0 < timing["allocated_timeout_ms"] <= 53000
     assert timing["elapsed_ms"] == 20000
     assert timing["phase_elapsed_ms"]["turn_run"] == 20000
+    assert diagnostic["timeout_source"] == "unknown"
     assert "private-timing-canary" not in json.dumps(diagnostic)
     assert model.failure_reason == "model_usage_uncertain"
     assert run.retry_count == 0 and model.usage.provider_calls == 1
@@ -2030,18 +2248,33 @@ async def test_timeout_force_stops_sdk_process_when_close_stalls(monkeypatch):
     process = Process()
     client._client._sync = SimpleNamespace(_proc=process)
 
+    original_timeout_at = asyncio.timeout_at
+    original_wait = asyncio.wait
+    waits = 0
+
+    async def stalled_close_wait(tasks, *, timeout):
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            # Model a close that consumed its bound without a real tiny window.
+            await asyncio.sleep(0)
+            return set(), set(tasks)
+        return await original_wait(tasks, timeout=timeout)
+
     async def stall(*args, **kwargs):
-        await asyncio.sleep(10)
+        await stopped.wait()
 
     async def close():
         await stopped.wait()
 
     thread.run.side_effect = stall
     client.close.side_effect = close
-    monkeypatch.setattr(codex_sdk, "TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(codex_sdk, "CLIENT_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        asyncio, "timeout", lambda delay: original_timeout_at(asyncio.get_running_loop().time())
+    )
+    monkeypatch.setattr(asyncio, "wait", stalled_close_wait)
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(codex_sdk.invoke_codex({}), timeout=0.2)
+        await codex_sdk.invoke_codex({})
     assert process.killed
     client.close.assert_awaited_once()
 
