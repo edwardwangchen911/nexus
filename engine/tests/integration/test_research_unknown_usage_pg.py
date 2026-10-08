@@ -73,6 +73,9 @@ async def test_priced_terminal_retains_full_reservation_only_when_usage_unknown(
             assert (run.input_tokens, run.output_tokens) == (
                 (300, 80) if prior_known else (None, None)
             )
+            from nexus.ops.research_budget_diagnostic import usage_is_known
+
+            assert usage_is_known(run) is (not uncertain)
             shared = await _shared_daily_budget_used(session, business_date=_NOW.date())
             if uncertain:
                 assert shared == Decimal("1.02")

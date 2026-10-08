@@ -191,6 +191,9 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
             )
             assert job.status == ("succeeded" if complete_model else "failed")
             assert job.attempt_count == 1
+            from nexus.ops.research_budget_diagnostic import usage_is_known
+
+            assert usage_is_known(run) is bool(complete_model)
             assert (
                 await session.scalar(select(func.count()).select_from(PaperOrderRecord))
                 == original_orders
