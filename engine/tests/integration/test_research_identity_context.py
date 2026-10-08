@@ -751,6 +751,13 @@ async def test_normal_host_snapshot_binds_registered_identity_with_configured_st
             collection_dir=tmp_path / "current",
             store=store,
         )
+        # Production binding metadata is written after the evidence cutoff.
+        # The generic PG fixture freezes defaults in the past, hiding this ordering.
+        async with factory() as session, session.begin():
+            await session.execute(text(
+                "ALTER TABLE agent_data_snapshot_evidence ALTER COLUMN created_at "
+                "SET DEFAULT clock_timestamp()"
+            ))
         # Exercise the same snapshot producer used by the normal Mac host.
         # No session.info override or mock of the identity reader is supplied.
         await _prepare_current_trends_research_snapshot(

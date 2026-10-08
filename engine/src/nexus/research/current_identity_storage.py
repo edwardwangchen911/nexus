@@ -479,7 +479,10 @@ async def inspect_identity_binding_snapshot(
                 AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
                 AgentDataSnapshotEvidenceRecord.authority_kind == "research",
                 AgentDataSnapshotEvidenceRecord.source == SOURCE,
-                AgentDataSnapshotEvidenceRecord.created_at <= frozen_cutoff,
+                # Snapshot ownership rows are created while freezing the snapshot,
+                # after its source-evidence cutoff. Require visible metadata here;
+                # the frozen reader below still verifies originals at frozen_cutoff.
+                AgentDataSnapshotEvidenceRecord.created_at <= cutoff,
             )
         )
     )
