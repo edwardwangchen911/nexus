@@ -381,7 +381,8 @@ async def test_identity_remains_supplemental_and_bounded(migrated_database_url, 
                 assert frozen is None
             elif case == "capacity":
                 assert len(frozen.payload["evidence_ids"]) == 98
-                assert result["evidence_id"] in frozen.payload["evidence_ids"]
+                assert result["evidence_id"] not in frozen.payload["evidence_ids"]
+                assert frozen.payload["research_identity_diagnostic"]["status"] == "unknown"
             else:
                 assert result["evidence_id"] not in frozen.payload["evidence_ids"]
                 assert str(second.id) not in frozen.payload["evidence_ids"]
@@ -392,5 +393,250 @@ async def test_identity_remains_supplemental_and_bounded(migrated_database_url, 
                     as_of=cutoff,
                     evidence_ids=(second.id,),
                 )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_import_refuses_old_identity_artifact_registered_in_the_future(
+    migrated_database_url, tmp_path
+):
+    from nexus.persistence.models.data import DataArtifact
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    try:
+        await seed(factory)
+        fm, sc = archives(tmp_path / "base")
+        # Construct a late-registration authority row via an ordinary INSERT;
+        # keep immutable triggers and the original source receipt unchanged.
+        raw = (fm / "profile.json").read_bytes()
+        digest = sha256(raw).hexdigest()
+        uri = await store.put_if_absent(key=f"raw/synthetic/{digest}.json", content=raw)
+        receipt = json.loads((fm / "receipt.json").read_text())
+        received = datetime.fromisoformat(receipt["received_at"])
+        async with factory() as session, session.begin():
+            session.add(
+                DataArtifact(
+                    uri=uri,
+                    sha256=digest,
+                    byte_size=len(raw),
+                    mime_type="application/json",
+                    source="fmp",
+                    schema_version="fmp_profile_raw_v1",
+                    observed_at=received,
+                    received_at=received,
+                    available_at=received,
+                    created_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+        ops = importlib.import_module("nexus.ops.instrument_identity_local")
+        base = await ops.revise_listing(
+            settings, symbol="AAPL", fmp_archive=fm, sec_archive=sc, store=store
+        )
+        source_archive(tmp_path / "current")
+        with pytest.raises(ValueError, match="RESEARCH_IDENTITY_ARTIFACT_INVALID"):
+            await register_identity(
+                settings,
+                identity_snapshot_id=base.snapshot_id,
+                collection_dir=tmp_path / "current",
+                store=store,
+            )
+        from nexus.persistence.models.research import ResearchEvidenceRef
+        from nexus.research.current_identity_storage import SOURCE
+
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    select(ResearchEvidenceRef).where(ResearchEvidenceRef.source == SOURCE)
+                )
+                is None
+            )
+            assert (
+                await session.scalar(select(DataSnapshot).where(DataSnapshot.source == SOURCE))
+                is None
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_full_capacity_identity_never_removes_unresolved_amendment(
+    migrated_database_url, tmp_path
+):
+    from nexus.agents.trailing_valuation import derive_trailing_valuation
+    from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
+    from nexus.research.sec_amendment_storage import persist_amendment
+    from nexus.research.sec_amendments import SecAmendmentDisclosure
+    from nexus.research.sec_disclosures import disclosure_excerpt
+
+    settings = EngineSettings(
+        database_url=migrated_database_url, agent_runtime_mode=AgentRuntimeMode.CODEX_SDK
+    ).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    try:
+        instrument = await seed(factory)
+        fm, sc = archives(tmp_path / "base")
+        ops = importlib.import_module("nexus.ops.instrument_identity_local")
+        base = await ops.revise_listing(
+            settings, symbol="AAPL", fmp_archive=fm, sec_archive=sc, store=store
+        )
+        await prepare_database(settings)
+        async with factory() as session, session.begin():
+            session.info["sec_exhibit_store"] = store
+            fact_ref = await seed_filing(session, instrument_id=instrument, seed_instrument=False)
+            filing = await session.scalar(
+                select(Filing).where(Filing.evidence_ref_id == fact_ref.id)
+            )
+            stamp = datetime.now(UTC) - timedelta(days=1)
+            for index in range(96):
+                digest = sha256(str(index).encode()).hexdigest()
+                ref = ResearchEvidenceRef(
+                    source="sec",
+                    provider_object_id=f"full:{index}",
+                    revision="v1",
+                    available_at=stamp,
+                    created_at=stamp,
+                    content_hash=digest,
+                    location="memory://sha256/" + digest,
+                    byte_length=10,
+                )
+                session.add(ref)
+                await session.flush()
+                session.add(
+                    Filing(
+                        instrument_id=instrument,
+                        evidence_ref_id=ref.id,
+                        source="sec",
+                        provider_object_id=ref.provider_object_id,
+                        revision=ref.revision,
+                        accession_number=f"0000000001-26-{index + 2:06d}",
+                        form="10-Q",
+                        filed_at=stamp,
+                        accepted_at=stamp,
+                        created_at=stamp,
+                    )
+                )
+            raw = b"<html><p>Synthetic unresolved amendment disclosure.</p></html>"
+            excerpt, truncated = disclosure_excerpt(raw)
+            accepted = datetime(2026, 9, 1, 20, tzinfo=UTC)
+            doc = SecAmendmentDisclosure(
+                instrument_id=instrument,
+                form="8-K/A",
+                issuer_cik="0000123456",
+                accession_number="0000123456-26-000099",
+                source_url="https://www.sec.gov/Archives/edgar/data/123456/000012345626000099/doc.htm",
+                filed_at=accepted.replace(hour=0),
+                accepted_at=accepted,
+                received_at=accepted,
+                raw_byte_length=len(raw),
+                http_status=200,
+                raw_content_hash=sha256(raw).hexdigest(),
+                excerpt=excerpt,
+                truncated=truncated,
+            )
+            assert await persist_amendment(session, store, doc, raw=raw)
+            amendment = await session.scalar(
+                select(ResearchEvidenceRef).where(
+                    ResearchEvidenceRef.provider_object_id == doc.accession_number,
+                )
+            )
+            session.add(
+                FinancialFactRecord(
+                    filing_id=filing.id,
+                    evidence_ref_id=fact_ref.id,
+                    instrument_id=instrument,
+                    canonical_fact="diluted_eps",
+                    raw_taxonomy="us-gaap",
+                    raw_tag="EarningsPerShareDiluted",
+                    unit="USD/shares",
+                    value=Decimal("2.02"),
+                    period_kind="duration",
+                    period_start=accepted.date() - timedelta(days=90),
+                    period_end=accepted.date(),
+                    fiscal_year=2026,
+                    fiscal_period="Q3",
+                    form=filing.form,
+                    filed_at=filing.filed_at,
+                    accepted_at=filing.accepted_at,
+                    accession_number=filing.accession_number,
+                    frame=None,
+                    revision=filing.revision,
+                    created_at=filing.created_at,
+                )
+            )
+            await session.flush()
+            old = await prepare_research_snapshot(session, instrument, as_of=datetime.now(UTC))
+            assert len(old.payload["evidence_ids"]) == 98
+            assert old.payload["evidence_ids"][-1] == str(amendment.id)
+            old_id, old_payload, old_revision = old.id, dict(old.payload), old.revision
+        source_archive(tmp_path / "current")
+        registered = await register_identity(
+            settings,
+            identity_snapshot_id=base.snapshot_id,
+            collection_dir=tmp_path / "current",
+            store=store,
+        )
+        async with factory() as session, session.begin():
+            session.info["sec_exhibit_store"] = store
+            frozen = await prepare_research_snapshot(session, instrument, as_of=datetime.now(UTC))
+            old = await session.get(DataSnapshot, old_id)
+            assert (old.payload, old.revision) == (old_payload, old_revision)
+            for index, snapshot in enumerate((old, frozen)):
+                assert str(amendment.id) in snapshot.payload["evidence_ids"]
+                assert len(snapshot.payload["evidence_ids"]) == 98
+                assert registered["evidence_id"] not in snapshot.payload["evidence_ids"]
+                cutoff = datetime.fromisoformat(snapshot.payload["as_of"])
+                admission = await admit_research_run(
+                    session,
+                    actor_id="test",
+                    route="/internal/v1/research-runs",
+                    idempotency_key=f"capacity-amendment-{index}",
+                    request_hash=str(index) * 64,
+                    request=ResearchRequest(
+                        instrument_id=instrument, data_snapshot_id=snapshot.id, decision_time=cutoff
+                    ),
+                    prompt_version_id=None,
+                    model_config_id=None,
+                    daily_limit_usd=Decimal("3"),
+                    now=cutoff,
+                )
+                tools = await database_read_only_tools(
+                    session, admission.run, allow_fixture_evidence=False
+                )
+                payload = {
+                    "instrument_id": str(instrument),
+                    "data_snapshot_id": str(snapshot.id),
+                    "as_of": cutoff.isoformat(),
+                }
+                facts = await tools.execute(
+                    "get_financial_facts", payload | {"fields": ["diluted_eps"]}
+                )
+                assert facts["status"] == "ok" and len(facts["items"]) == 1
+                assert facts["items"][0]["amendment_review_status"] == "unverified"
+                assert facts["items"][0]["amendment_evidence_ref_ids"] == [str(amendment.id)]
+                security = await tools.execute("get_security_snapshot", payload)
+                if index == 1:
+                    assert security["research_identity_diagnostic"] == {
+                        "status": "unknown",
+                        "reason": "research_identity_evidence_capacity_exhausted",
+                    }
+                valuation = derive_trailing_valuation(security, facts)
+                assert valuation["status"] == "unavailable"
+                assert valuation["reason"] == "sec_amendment_accounting_review_unverified"
     finally:
         await factory.kw["bind"].dispose()

@@ -15,7 +15,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
-from nexus.market.current_identity_storage import ArtifactBinding, CurrentIdentityProof
+from nexus.market.current_identity_storage import (
+    ArtifactBinding,
+    CurrentIdentityProof,
+    CustomMemberIdentityProof,
+)
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.research.current_identity_archive import (
@@ -30,6 +34,7 @@ from nexus.research.sec_exhibit_storage import (
 )
 
 SOURCE = "research_current_identity"
+CAPACITY_REASON = "research_identity_evidence_capacity_exhausted"
 SCHEMA: Literal["research_identity_binding_v1"] = "research_identity_binding_v1"
 
 
@@ -106,6 +111,31 @@ async def _base(
     proof = await _read_identity(session, store, snapshot_id=identifier, as_of=as_of)
     if proof.checked_at > as_of:
         raise ValueError("RESEARCH_IDENTITY_BASE_INVALID")
+    bindings = proof.artifacts + (
+        proof.taxonomy_artifacts if isinstance(proof, CustomMemberIdentityProof) else ()
+    )
+    artifacts = {
+        artifact.sha256: artifact
+        for artifact in await session.scalars(
+            select(DataArtifact).where(
+                DataArtifact.sha256.in_(binding.sha256 for binding in bindings)
+            )
+        )
+    }
+    for binding in bindings:
+        artifact = artifacts.get(binding.sha256)
+        if (
+            artifact is None
+            or _binding(artifact) != binding
+            or max(
+                artifact.created_at,
+                artifact.available_at,
+                artifact.received_at,
+                artifact.observed_at,
+            )
+            > as_of
+        ):
+            raise ValueError("RESEARCH_IDENTITY_ARTIFACT_INVALID")
     return snapshot, proof
 
 

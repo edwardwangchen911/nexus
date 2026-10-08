@@ -47,6 +47,8 @@ DataSnapshot 与 ResearchEvidenceRef；重复导入相同包装返回原引用�
 
 `registered` 不等于研究或执行通过。仅未来新建的、已有基本研究材料的快照可增加此引用；
 身份引用本身不能创建研究快照。总冻结引用仍不超过 100，保留价格与组合上下文预留容量。
+研究引用达到 98 时，不为身份补充移除任何已有研究引用（包括未决修订及其依赖）；
+新快照和 security tool 明示 `research_identity_evidence_capacity_exhausted`，身份保持 unknown。
 工具和执行入口按原 Run decision_time 重读原件；过期、错配、损坏均拒绝，不回填旧 Run。
 入口不调用模型、不创建周期或订单，`execution_locked=true` 保持不变。
 

@@ -55,8 +55,8 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_VERSION,
 )
 from nexus.research.alpaca_actions_storage import action_tool_payload, read_action_observations
+from nexus.research.current_identity_storage import CAPACITY_REASON, read_identity_bindings
 from nexus.research.current_identity_storage import SOURCE as RESEARCH_IDENTITY_SOURCE
-from nexus.research.current_identity_storage import read_identity_bindings
 from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fosun_security_classification import SOURCE as FOSUN_CLASSIFICATION_SOURCE
@@ -240,7 +240,7 @@ class _BoundDatabaseExecutors:
         )
         paper_context_value = paper_context[0] if paper_context is not None else None
         paper_context_id = paper_context[1].id if paper_context is not None else None
-        return self._result(
+        result = self._result(
             "get_security_snapshot",
             [
                 {
@@ -305,6 +305,15 @@ class _BoundDatabaseExecutors:
                 for record in self._evidence
             ],
         )
+        snapshot = await self._session.get(DataSnapshot, self._snapshot_id)
+        diagnostic = {"status": "unknown", "reason": CAPACITY_REASON}
+        if (
+            not identities
+            and snapshot is not None
+            and snapshot.payload.get("research_identity_diagnostic") == diagnostic
+        ):
+            return {**result, "research_identity_diagnostic": diagnostic}
+        return result
 
     async def financial_facts(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_snapshot_scope(payload)
