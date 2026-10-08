@@ -66,6 +66,8 @@ from nexus.api.schemas.paper import (
     PaperPositionResponse,
     PaperTargetAllocationResponse,
     PaperTargetSummaryResponse,
+    PortfolioEconomicEvidenceResponse,
+    PortfolioEconomicOrdinarySampleResponse,
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
@@ -225,6 +227,44 @@ def market_benchmark_row_from_closes(
 
 
 class PaperReadService:
+    async def portfolio_economic_evidence(self) -> PortfolioEconomicEvidenceResponse:
+        """Read bounded ordinary evidence without registering an economic protocol."""
+        from nexus.paper.agent_challenger import (
+            AgentChallengerError,
+            collect_portfolio_challenger_retrospective,
+        )
+
+        account, _ = await self.account()
+        try:
+            history = await collect_portfolio_challenger_retrospective(
+                self._session, account_id=account.id, as_of=self._request_time
+            )
+        except AgentChallengerError as error:
+            insufficient = error.reason_code == "PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT"
+            return PortfolioEconomicEvidenceResponse(
+                as_of=self._request_time,
+                source_status="insufficient" if insufficient else "unavailable",
+                source_reason=(
+                    "PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT"
+                    if insufficient
+                    else "PORTFOLIO_RETROSPECTIVE_UNAVAILABLE"
+                ),
+                ordinary_samples=(),
+            )
+        return PortfolioEconomicEvidenceResponse(
+            as_of=self._request_time,
+            source_status="ready",
+            ordinary_samples=tuple(
+                PortfolioEconomicOrdinarySampleResponse(
+                    cycle_id=sample.cycle_id,
+                    decision_slot_at=sample.decision_slot_at,
+                    execution_state=sample.execution_state,
+                    performance_state=sample.performance_state,
+                )
+                for sample in history.cycles
+            ),
+        )
+
     def __init__(
         self,
         session: AsyncSession,

@@ -14,6 +14,7 @@ import { AgentPaperCycle, AgentPaperSessionSummary, AgentPaperVersionHistory, ty
 import { AgentVersionEvaluation, type AgentVersionEvaluationFact } from "../../components/agent-version-evaluation";
 import { DecisionPath } from "../../components/decision-path";
 import { AdjustmentPlanLoader } from "../../components/paper/adjustment-plan";
+import { EconomicEvidenceLoader } from "../../components/paper/economic-evidence";
 import { CancelResultCheck, type CancelAttempt } from "../../components/paper/cancel-result-check";
 import { formatPaperDecimal, formatPaperTime, OrderTimeline, type PaperOrder } from "../../components/order-timeline";
 import type { components } from "../../lib/generated/schema";
@@ -345,6 +346,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         {cycleSummary ? <AgentPaperSessionSummary summary={cycleSummary} historical={selectedCycleSession !== null} /> : null}
         {versionObservation ? <AgentPaperVersionHistory history={versionHistory} /> : null}
         {versionEvaluation ? <AgentVersionEvaluation evaluation={versionEvaluation} /> : null}
+        <EconomicEvidenceLoader />
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} historical={selectedCycleSession !== null} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         <section id="paper-actual-facts" className="page-stack" aria-label="独立实际账户事实">

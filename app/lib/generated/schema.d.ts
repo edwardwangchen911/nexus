@@ -568,6 +568,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/economic-evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Portfolio Economic Evidence */
+        get: operations["getInternalPortfolioEconomicEvidence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/management/cycles/{cycle_id}": {
         parameters: {
             query?: never;
@@ -4783,6 +4800,76 @@ export interface components {
             snapshot_as_of: string;
             /** Trading Day */
             trading_day: string | null;
+        };
+        /** PortfolioEconomicEvidenceEnvelope */
+        PortfolioEconomicEvidenceEnvelope: {
+            data: components["schemas"]["PortfolioEconomicEvidenceResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /**
+         * PortfolioEconomicEvidenceResponse
+         * @description Current evidence capability; ordinary observations are never economic pairs.
+         */
+        PortfolioEconomicEvidenceResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Economic Pair Count */
+            economic_pair_count?: null;
+            /**
+             * Economic Status
+             * @default not_evaluated
+             * @constant
+             */
+            economic_status: "not_evaluated";
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /** Ordinary Samples */
+            ordinary_samples: components["schemas"]["PortfolioEconomicOrdinarySampleResponse"][];
+            /** Planned Slot Count */
+            planned_slot_count?: null;
+            /**
+             * Protocol Status
+             * @default not_implemented
+             * @constant
+             */
+            protocol_status: "not_implemented";
+            /** Source Reason */
+            source_reason?: ("PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT" | "PORTFOLIO_RETROSPECTIVE_UNAVAILABLE") | null;
+            /**
+             * Source Status
+             * @enum {string}
+             */
+            source_status: "ready" | "insufficient" | "unavailable";
+        };
+        /** PortfolioEconomicOrdinarySampleResponse */
+        PortfolioEconomicOrdinarySampleResponse: {
+            /**
+             * Cycle Id
+             * Format: uuid
+             */
+            cycle_id: string;
+            /**
+             * Decision Slot At
+             * Format: date-time
+             */
+            decision_slot_at: string;
+            /**
+             * Execution State
+             * @enum {string}
+             */
+            execution_state: "no_order" | "orders_terminal";
+            /**
+             * Performance State
+             * @enum {string}
+             */
+            performance_state: "missing" | "account_observed";
         };
         /** PortfolioEstimatedCostStatusInvalidationConditionV1 */
         PortfolioEstimatedCostStatusInvalidationConditionV1: {
@@ -9569,6 +9656,62 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentPaperCycleEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPortfolioEconomicEvidence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioEconomicEvidenceEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */

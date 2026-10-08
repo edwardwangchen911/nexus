@@ -464,6 +464,35 @@ class PaperManagementSummaryEnvelope(_StrictSchema):
     meta: SuccessMetaResponse
 
 
+class PortfolioEconomicOrdinarySampleResponse(_StrictSchema):
+    cycle_id: UUID
+    decision_slot_at: AwareDatetime
+    execution_state: Literal["no_order", "orders_terminal"]
+    performance_state: Literal["missing", "account_observed"]
+
+
+class PortfolioEconomicEvidenceResponse(_StrictSchema):
+    """Current evidence capability; ordinary observations are never economic pairs."""
+
+    as_of: AwareDatetime
+    execution_locked: Literal[True] = True
+    protocol_status: Literal["not_implemented"] = "not_implemented"
+    economic_status: Literal["not_evaluated"] = "not_evaluated"
+    planned_slot_count: None = None
+    economic_pair_count: None = None
+    source_status: Literal["ready", "insufficient", "unavailable"]
+    source_reason: (
+        Literal["PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT", "PORTFOLIO_RETROSPECTIVE_UNAVAILABLE"]
+        | None
+    ) = None
+    ordinary_samples: tuple[PortfolioEconomicOrdinarySampleResponse, ...] = Field(max_length=20)
+
+
+class PortfolioEconomicEvidenceEnvelope(_StrictSchema):
+    data: PortfolioEconomicEvidenceResponse
+    meta: SuccessMetaResponse
+
+
 class AgentPaperSessionSummaryResponse(_StrictSchema):
     decision_session: date | None
     status: Literal[

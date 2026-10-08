@@ -57,6 +57,9 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   await page.goto("/paper");
   await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "当前实际持仓与现金" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "组合经济对照 · 证据与缺口" })).toBeVisible();
+  await expect(page.getByText("经济结果尚未评估，不能证明策略有效或样本外通过。", { exact: true })).toBeVisible();
+  await expect(page.getByText("经济配对与计划槽位数量：尚未具备权威，无法统计", { exact: true })).toBeVisible();
   for (const orderId of expectedOrderIds) {
     await expect(page.locator("article.paper-order").filter({ hasText: orderId })).toBeVisible();
   }

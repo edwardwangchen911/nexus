@@ -8825,6 +8825,121 @@ export const runtimeContractSchemas = {
     "title": "PortfolioDiagnosticResponse",
     "type": "object"
   },
+  "PortfolioEconomicEvidenceResponse": {
+    "additionalProperties": false,
+    "description": "Current evidence capability; ordinary observations are never economic pairs.",
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "economic_pair_count": {
+        "title": "Economic Pair Count",
+        "type": "null"
+      },
+      "economic_status": {
+        "const": "not_evaluated",
+        "default": "not_evaluated",
+        "title": "Economic Status",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "ordinary_samples": {
+        "items": {
+          "$ref": "#/components/schemas/PortfolioEconomicOrdinarySampleResponse"
+        },
+        "maxItems": 20,
+        "title": "Ordinary Samples",
+        "type": "array"
+      },
+      "planned_slot_count": {
+        "title": "Planned Slot Count",
+        "type": "null"
+      },
+      "protocol_status": {
+        "const": "not_implemented",
+        "default": "not_implemented",
+        "title": "Protocol Status",
+        "type": "string"
+      },
+      "source_reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT",
+              "PORTFOLIO_RETROSPECTIVE_UNAVAILABLE"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Reason"
+      },
+      "source_status": {
+        "enum": [
+          "ready",
+          "insufficient",
+          "unavailable"
+        ],
+        "title": "Source Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "as_of",
+      "source_status",
+      "ordinary_samples"
+    ],
+    "title": "PortfolioEconomicEvidenceResponse",
+    "type": "object"
+  },
+  "PortfolioEconomicOrdinarySampleResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cycle_id": {
+        "format": "uuid",
+        "title": "Cycle Id",
+        "type": "string"
+      },
+      "decision_slot_at": {
+        "format": "date-time",
+        "title": "Decision Slot At",
+        "type": "string"
+      },
+      "execution_state": {
+        "enum": [
+          "no_order",
+          "orders_terminal"
+        ],
+        "title": "Execution State",
+        "type": "string"
+      },
+      "performance_state": {
+        "enum": [
+          "missing",
+          "account_observed"
+        ],
+        "title": "Performance State",
+        "type": "string"
+      }
+    },
+    "required": [
+      "cycle_id",
+      "decision_slot_at",
+      "execution_state",
+      "performance_state"
+    ],
+    "title": "PortfolioEconomicOrdinarySampleResponse",
+    "type": "object"
+  },
   "PortfolioEstimatedCostStatusInvalidationConditionV1": {
     "additionalProperties": false,
     "properties": {
@@ -16144,6 +16259,8 @@ export const evolutionActionRuntimeSchema = runtimeContractSchemas.EvolutionActi
 export const paperPortfolioRuntimeSchema = runtimeContractSchemas.PaperPortfolioResponse;
 
 export const paperActualRuntimeSchema = runtimeContractSchemas.PaperPlanActualResponse;
+
+export const portfolioEconomicEvidenceRuntimeSchema = runtimeContractSchemas.PortfolioEconomicEvidenceResponse;
 
 export const agentPaperCycleRuntimeSchema = runtimeContractSchemas.AgentPaperCycleResponse;
 

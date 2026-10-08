@@ -22,6 +22,7 @@ import {
   paperPlanRuntimeSchema,
   paperPortfolioRuntimeSchema,
   paperActualRuntimeSchema,
+  portfolioEconomicEvidenceRuntimeSchema,
   agentPaperCycleRuntimeSchema,
   agentPaperCycleDetailRuntimeSchema,
   agentPaperManagementCycleRuntimeSchema,
@@ -335,6 +336,11 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       && paperManagementSummarySemanticsValid(data)
       ? data
       : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/paper/economic-evidence") {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, portfolioEconomicEvidenceRuntimeSchema)
+      ? data : INVALID_DATA;
   }
   if (pathname === "/internal/v1/paper/actual") {
     return requestMethod?.toUpperCase() === "GET"
