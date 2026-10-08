@@ -88,3 +88,29 @@ def test_private_config_and_symlink_guard(tmp_path) -> None:
     link.symlink_to(config)
     with pytest.raises(OSError):
         read_database_url(link)
+
+
+@pytest.mark.parametrize(
+    "settled,input_tokens,output_tokens,expected",
+    [
+        (None, 300, 80, False),
+        (None, 0, 0, False),
+        ("0", 300, 80, True),
+        ("0.00046", 300, 80, True),
+        ("0", None, 80, False),
+        ("0", 300, None, False),
+    ],
+)
+def test_diagnostic_does_not_report_unsettled_lower_bound_as_known(
+    settled, input_tokens, output_tokens, expected
+):
+    from decimal import Decimal
+
+    from nexus.ops.research_budget_diagnostic import usage_is_known
+
+    run = SimpleNamespace(
+        settled_cost_usd=None if settled is None else Decimal(settled),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+    assert usage_is_known(run) is expected

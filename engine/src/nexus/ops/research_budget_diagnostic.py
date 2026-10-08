@@ -121,6 +121,15 @@ def _receipt(path: Path, result: dict[str, object]) -> None:
         json.dump(result, stream, sort_keys=True)
 
 
+def usage_is_known(run: AgentResearchRunRecord) -> bool:
+    """Only settled complete counters prove known usage; held counters can be lower bounds."""
+    return (
+        run.settled_cost_usd is not None
+        and run.input_tokens is not None
+        and run.output_tokens is not None
+    )
+
+
 async def execute_diagnostic(
     settings: EngineSettings, *, run_id: UUID, output: Path
 ) -> dict[str, object]:
@@ -165,7 +174,7 @@ async def execute_diagnostic(
                     .select_from(AgentResearchOutputRecord)
                     .where(AgentResearchOutputRecord.run_id == run_id)
                 ),
-                "usage_known": run.input_tokens is not None and run.output_tokens is not None,
+                "usage_known": usage_is_known(run),
                 "execution_locked": True,
                 "formal_acceptance": False,
             }
