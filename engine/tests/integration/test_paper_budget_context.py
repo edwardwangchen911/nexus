@@ -26,10 +26,18 @@ from unit.agents.test_codex_sdk import _assessment_payload, _restore_view, _stag
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "stage_time_budget,complete_model", [(False, False), (True, False), (True, True)]
+    "stage_time_budget,complete_model,critique_timeout",
+    [
+        (False, False, None),
+        (True, False, None),
+        (True, True, None),
+        (True, False, "stage_deadline"),
+        (True, False, "invocation_deadline"),
+        (True, False, "unknown"),
+    ],
 )
 async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not_replayed(
-    migrated_database_url, monkeypatch, stage_time_budget, complete_model
+    migrated_database_url, monkeypatch, stage_time_budget, complete_model, critique_timeout
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     # Isolated historical fixture only: registration validity precedes its cutoff.
@@ -72,7 +80,16 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
         captured.setdefault("options", options)
         captured.setdefault("observed_at", asyncio.get_running_loop().time())
         stages.append((payload, options))
-        if not complete_model:
+        if critique_timeout and payload["stage"] == "critique":
+            from nexus.agents.codex_sdk import CodexInvocationError
+
+            failure = CodexInvocationError(
+                "CODEX_TIMEOUT", phase="turn_run", provider_call_started=True
+            )
+            failure.timeout_source = critique_timeout
+            failure.phase_elapsed_ms = {"turn_run": 11}
+            raise failure
+        if not complete_model and not critique_timeout:
             raise RuntimeError("synthetic-unknown-result")
         from nexus.agents.responses_budget import UsageSnapshot
 
@@ -131,7 +148,7 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
                     )
                 )
             )
-        assert sdk.await_count == (3 if complete_model else 1), (
+        assert sdk.await_count == (3 if complete_model else 2 if critique_timeout else 1), (
             observed_run.pricing_version,
             observed_run.status,
             reasons,
@@ -181,7 +198,42 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
             other = await session.get(AgentResearchRunRecord, result.research_run_ids[1])
             assert other.status == "prepared"
         assert not await run_agent_worker_once(settings, job_ids=(job_id,))
-        assert sdk.await_count == (3 if complete_model else 1)
+        assert sdk.await_count == (3 if complete_model else 2 if critique_timeout else 1)
+        if critique_timeout:
+            from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
+
+            assert [p["stage"] for p, _ in stages] == ["research", "critique"]
+            async with sessions() as session:
+                terminal = await session.scalar(
+                    select(AgentResearchOutputRecord).where(
+                        AgentResearchOutputRecord.run_id == run.id,
+                        AgentResearchOutputRecord.status == "failed",
+                    )
+                )
+                diagnostic = terminal.payload["diagnostic"]
+                assert diagnostic["stage"] == "critique"
+                assert diagnostic["invocation_phase"] == "turn_run"
+                assert diagnostic["invocation_kind"] == "timeout"
+                assert diagnostic["timeout_source"] == critique_timeout
+                assert diagnostic["timing"]["phase_elapsed_ms"] == {"turn_run": 11}
+                assert 0 < diagnostic["timing"]["allocated_timeout_ms"] <= 78000
+                assert set(terminal.payload["stage_timings"]) == {"research"}
+                roles = tuple(
+                    await session.scalars(
+                        select(AgentResearchOutputRecord).where(
+                            AgentResearchOutputRecord.run_id == run.id,
+                            AgentResearchOutputRecord.role.is_not(None),
+                        )
+                    )
+                )
+                assert len(roles) == 5
+                reservation = await session.scalar(
+                    select(AgentDailyBudgetReservationRecord).where(
+                        AgentDailyBudgetReservationRecord.run_id == run.id
+                    )
+                )
+                assert reservation.state == "reserved"
+                assert reservation.settled_usd is None
         if complete_model:
             from nexus.agents.codex_sdk import codex_request_wire
 

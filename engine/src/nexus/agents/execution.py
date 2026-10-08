@@ -506,7 +506,14 @@ async def _terminal_after_committee(
     reason: str,
 ) -> ResearchRunResult:
     usage = _committee_usage(committee, role_outputs)
-    if usage.input_tokens or usage.output_tokens:
+    if reason == "model_usage_uncertain":
+        # Saved stages are a known lower bound. An invocation without complete
+        # usage cannot settle or release the whole native reservation.
+        if usage.input_tokens or usage.output_tokens:
+            run.input_tokens = usage.input_tokens
+            run.output_tokens = usage.output_tokens
+            await session.flush()
+    elif usage.input_tokens or usage.output_tokens:
         accounted = await _settle_or_hold_usage(session, run, model=model, usage=usage)
         if not accounted:
             reason = "usage_accounting_failed"
