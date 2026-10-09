@@ -48,6 +48,17 @@ def isolated_loop_candidates(monkeypatch):
 
     monkeypatch.setattr(loop, "load_agent_version_candidate", evaluation_candidate)
 
+    # These planner/executor unit cases replace database boundaries; actual
+    # frozen formal profile and Job binding are exercised in PostgreSQL tests.
+    async def legacy_profile(*args, **kwargs):
+        return False
+
+    async def trigger_profile(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(loop, "resolve_formal_host_cycle_profile", legacy_profile)
+    monkeypatch.setattr(loop, "require_formal_host_trigger_profile", trigger_profile)
+
 
 @pytest.mark.parametrize(
     "slot", [datetime(2026, 7, 6, 14, tzinfo=UTC), datetime(2026, 12, 1, 15, tzinfo=UTC)]
@@ -3925,7 +3936,10 @@ def test_executor_claims_only_persisted_job(
     assert received == [(job_id,)]
 
 
-def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("formal", [False, True])
+def test_executor_uses_slot_derived_trigger_key(
+    monkeypatch: pytest.MonkeyPatch, formal: bool
+) -> None:
     calendar_authority_id = UUID(int=9)
     requests: list[object] = []
     preparations: list[tuple[UUID, datetime]] = []
@@ -3937,6 +3951,8 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
         "ALPACA_API_KEY_ID": "key",
         "ALPACA_API_SECRET_KEY": "secret",
     }
+    if formal:
+        environment["NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID"] = str(UUID(int=3))
     monkeypatch.setattr(loop, "load_local_environment", lambda *_args: environment)
 
     async def prepare(
@@ -3990,7 +4006,7 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(loop, "trigger_once", trigger)
     asyncio.run(
         loop.execute_agent_paper_loop_action(
-            loop.EngineSettings(),
+            loop.EngineSettings.model_validate(environment) if formal else loop.EngineSettings(),
             account_id=UUID(int=1),
             repo_root=loop.Path("/repo"),
             action=loop.AgentPaperLoopAction.TRIGGER,
@@ -4010,6 +4026,9 @@ def test_executor_uses_slot_derived_trigger_key(monkeypatch: pytest.MonkeyPatch)
     assert trend_preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
     assert request.account_id == UUID(int=1)
     assert request.idempotency_key == "agent-paper-loop:2026-09-14T14:05:00+00:00"
+
+    assert request.formal_stage_capacity is formal
+    assert request.formal_model_config_id == (UUID(int=3) if formal else None)
 
 
 def test_executor_reinspects_after_preparing_missing_prior_daily(

@@ -174,19 +174,83 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 untouched = tuple(await session.scalars(select(Job)))
                 assert all(job.status == "queued" and job.attempt_count == 0 for job in untouched)
 
-        processed = []
-        for _ in jobs:
-            step = await run_research_once(
-                settings,
-                AgentPaperRunResearchRequest(
-                    action="run-research",
-                    cycle_id=result.cycle_id,
-                    formal_stage_capacity=True,
+        from nexus.ops.agent_paper_loop import AgentPaperLoopAction, execute_agent_paper_loop_action
+        from unit.ops.test_agent_paper_loop import snapshot
+
+        host_settings = EngineSettings(
+            database_url=migrated_database_url,
+            agent_runtime_mode="codex_sdk",
+            NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID=str(model.id),
+        )
+        from nexus.ops.agent_paper_formal import require_formal_host_trigger_profile
+
+        await require_formal_host_trigger_profile(host_settings, now=AT)
+        with pytest.raises(ValueError, match="CODEX_FORMAL_AUTHORITY_INVALID"):
+            await require_formal_host_trigger_profile(
+                host_settings.model_copy(
+                    update={"agent_paper_formal_model_config_id": UUID(int=999)}
                 ),
-                repo_root=Path.cwd(),
+                now=AT,
             )
-            processed.append(step.job_id)
-        assert set(processed) == {job.id for job in jobs}
+        assert calls == []
+        monkeypatch.setattr(
+            "nexus.ops.agent_paper_loop.local_settings", lambda *a, **kw: host_settings
+        )
+
+        async def controlled_sdk_ready():
+            return None
+
+        monkeypatch.setattr(
+            "nexus.ops.agent_paper_loop._codex_sdk_preflight_blocker_async", controlled_sdk_ready
+        )
+        if count == 3 and not trade:
+            for bad_settings, bad_account, bad_job in (
+                (settings, authority.account_id, jobs[0].id),
+                (
+                    host_settings.model_copy(
+                        update={"agent_paper_formal_model_config_id": UUID(int=999)}
+                    ),
+                    authority.account_id,
+                    jobs[0].id,
+                ),
+                (host_settings, UUID(int=999), jobs[0].id),
+                (host_settings, authority.account_id, UUID(int=999)),
+            ):
+                with pytest.raises(ValueError, match="CODEX_FORMAL"):
+                    await execute_agent_paper_loop_action(
+                        bad_settings,
+                        account_id=bad_account,
+                        repo_root=Path.cwd(),
+                        action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
+                        snapshot=snapshot(
+                            now=clock_at[0],
+                            cycle_id=result.cycle_id,
+                            research_job_id=bad_job,
+                            research_job_status="queued",
+                        ),
+                    )
+            assert calls == []
+            async with sessions() as session:
+                assert all(
+                    job.status == "queued" and job.attempt_count == 0
+                    for job in await session.scalars(select(Job))
+                )
+        for job in jobs:
+            assert (
+                await execute_agent_paper_loop_action(
+                    host_settings,
+                    account_id=authority.account_id,
+                    repo_root=Path.cwd(),
+                    action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
+                    snapshot=snapshot(
+                        now=clock_at[0],
+                        cycle_id=result.cycle_id,
+                        research_job_id=job.id,
+                        research_job_status="queued",
+                    ),
+                )
+                is None
+            )
         for job in jobs:
             assert not await run_agent_worker_once(
                 settings, job_ids=(job.id,), formal_stage_capacity=True
@@ -406,16 +470,21 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     )
                 assert synthesis_calls == []
                 await savepoint.rollback()
-        step = await run_research_once(
-            settings,
-            AgentPaperRunResearchRequest(
-                action="run-research",
-                cycle_id=result.cycle_id,
-                formal_stage_capacity=True,
-            ),
-            repo_root=Path.cwd(),
+        assert (
+            await execute_agent_paper_loop_action(
+                host_settings,
+                account_id=authority.account_id,
+                repo_root=Path.cwd(),
+                action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
+                snapshot=snapshot(
+                    now=clock_at[0],
+                    cycle_id=result.cycle_id,
+                    research_job_id=synthesis_job.id,
+                    research_job_status="queued",
+                ),
+            )
+            is None
         )
-        assert step.job_id == synthesis_job.id
         assert not await run_portfolio_synthesis_worker_once(
             settings, job_ids=(synthesis_job.id,), formal_stage_capacity=True
         )
@@ -477,6 +546,16 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
         ), finished
         assert bool(finished.order_ids) is trade
+        assert (
+            await execute_agent_paper_loop_action(
+                host_settings,
+                account_id=authority.account_id,
+                repo_root=Path.cwd(),
+                action=AgentPaperLoopAction.RESUME,
+                snapshot=snapshot(now=clock_at[0], cycle_id=result.cycle_id),
+            )
+            is None
+        )
         async with sessions.begin() as session:
             cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
             assert cycle.execution_locked is True

@@ -36,6 +36,11 @@ from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
 from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
+from nexus.ops.agent_paper_formal import (
+    require_formal_host_configuration_match,
+    require_formal_host_trigger_profile,
+    resolve_formal_host_cycle_profile,
+)
 from nexus.ops.agent_paper_identity import prepare_agent_paper_identity_once
 from nexus.ops.agent_paper_once import (
     AgentPaperCollectWindowRequest,
@@ -296,6 +301,7 @@ _SAFE_TRIGGER_FAILURE_CODES = frozenset(
         "SCHWAB_L1_FRESHNESS_UNPROVEN",
         "SCHWAB_L1_INCOMPLETE",
         "CODEX_CHATGPT_LOGIN_REQUIRED",
+        "CODEX_FORMAL_HOST_PROFILE_INVALID",
         "CANDIDATE_BATCH_REQUIRED",
         "CANDIDATE_BATCH_INVALID",
         "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
@@ -2530,6 +2536,26 @@ async def execute_agent_paper_loop_action(
     env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
+    formal_stage_capacity = False
+    if action in {
+        AgentPaperLoopAction.RUN_RESEARCH_JOB,
+        AgentPaperLoopAction.RESUME,
+        AgentPaperLoopAction.COLLECT_WINDOW,
+        AgentPaperLoopAction.ADVANCE_ORDER,
+    }:
+        if snapshot.cycle_id is None:
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        formal_stage_capacity = await resolve_formal_host_cycle_profile(
+            settings,
+            account_id=account_id,
+            cycle_id=snapshot.cycle_id,
+            research_job_id=(
+                snapshot.research_job_id
+                if action == AgentPaperLoopAction.RUN_RESEARCH_JOB
+                and isinstance(snapshot.research_job_id, UUID)
+                else None
+            ),
+        )
     if action == AgentPaperLoopAction.PREPARE_INPUTS:
         if (
             snapshot.calendar_authority_id is None
@@ -2549,6 +2575,8 @@ async def execute_agent_paper_loop_action(
             trigger_settings = (
                 _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
             ).model_validate(environment)
+            require_formal_host_configuration_match(settings, trigger_settings)
+            await require_formal_host_trigger_profile(trigger_settings, now=snapshot.now)
             if env_file is not None:
                 _require_explicit_schwab_config(environment)
             macro_settings = (
@@ -2824,6 +2852,8 @@ async def execute_agent_paper_loop_action(
         trigger_settings = (
             _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
         ).model_validate(environment)
+        require_formal_host_configuration_match(settings, trigger_settings)
+        await require_formal_host_trigger_profile(trigger_settings, now=snapshot.now)
         if env_file is not None:
             _require_explicit_schwab_config(environment)
         macro_settings = (
@@ -2888,6 +2918,9 @@ async def execute_agent_paper_loop_action(
                     action="trigger",
                     account_id=account_id,
                     candidate_batch_id=batch_id,
+                    formal_stage_capacity=trigger_settings.agent_paper_formal_model_config_id
+                    is not None,
+                    formal_model_config_id=trigger_settings.agent_paper_formal_model_config_id,
                     idempotency_key=(
                         f"agent-paper-loop:{floor_decision_slot(snapshot.now).isoformat()}"
                     ),
@@ -2925,7 +2958,13 @@ async def execute_agent_paper_loop_action(
             if env_file is not None
             else local_settings(repo_root, backend="codex_sdk")
         )
-        worked = await run_cycle_job_once(research_settings, job_id=snapshot.research_job_id)
+        if formal_stage_capacity or settings.agent_paper_formal_model_config_id is not None:
+            require_formal_host_configuration_match(settings, research_settings)
+        worked = await run_cycle_job_once(
+            research_settings,
+            job_id=snapshot.research_job_id,
+            **({"formal_stage_capacity": True} if formal_stage_capacity else {}),
+        )
         if not worked:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return None
@@ -2961,6 +3000,7 @@ async def execute_agent_paper_loop_action(
                 action="resume",
                 cycle_id=snapshot.cycle_id,
                 idempotency_key=f"agent-paper-loop-resume:{snapshot.cycle_id}",
+                formal_stage_capacity=formal_stage_capacity,
             ),
         )
         if (
@@ -2987,10 +3027,12 @@ async def execute_agent_paper_loop_action(
         )
         if env_file is not None:
             _require_explicit_schwab_config(environment)
+        market_settings = (
+            _FileMarketSettings if env_file is not None else AgentPaperMarketSettings
+        ).model_validate(environment)
+        require_formal_host_configuration_match(settings, market_settings)
         await collect_window_once(
-            (
-                _FileMarketSettings if env_file is not None else AgentPaperMarketSettings
-            ).model_validate(environment),
+            market_settings,
             AgentPaperCollectWindowRequest(
                 action="collect-window",
                 cycle_id=snapshot.cycle_id,

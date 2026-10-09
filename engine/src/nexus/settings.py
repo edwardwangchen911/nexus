@@ -3,6 +3,7 @@
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, Self
+from uuid import UUID
 
 from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -106,6 +107,9 @@ class EngineSettings(_SafeSettings):
     agent_paper_cycle_enabled: bool = Field(
         default=False,
         validation_alias="NEXUS_AGENT_PAPER_CYCLE_ENABLED",
+    )
+    agent_paper_formal_model_config_id: UUID | None = Field(
+        default=None, validation_alias="NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID"
     )
     candidate_stage_capacity_reads: bool = Field(
         default=False, validation_alias="NEXUS_CANDIDATE_STAGE_CAPACITY_READS"
