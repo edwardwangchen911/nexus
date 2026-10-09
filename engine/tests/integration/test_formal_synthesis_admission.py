@@ -441,6 +441,13 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 == count
             )
             orders = tuple(await session.scalars(select(PaperOrderRecord)))
+            assert len(orders) == (2 if trade else 0)
+            if trade:
+                assert {order.instrument_id for order in orders} == {
+                    choice.instrument_id for choice in portfolio_intent.choices[:2]
+                }
+                assert all(order.target_weight == Decimal("0.05") for order in orders)
+
             assert {order.id for order in orders} == set(finished.order_ids)
             assert all(
                 order.instrument_id in batch.instrument_ids
@@ -473,5 +480,38 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             assert [
                 await session.scalar(select(func.count()).select_from(t)) for t in tables
             ] == before
+        if trade:
+            from integration.test_candidate_multistock_path import _verify_internal_fills
+
+            await _verify_internal_fills(
+                settings,
+                sessions,
+                result.cycle_id,
+                authority.account_id,
+                orders,
+                count,
+                verify_reads=False,
+            )
+        else:
+            from nexus.paper.projection import load_paper_projection
+            from nexus.persistence.models.paper import PaperFillRecord, PaperLedgerTransactionRecord
+
+            async with sessions() as session:
+                assert await session.scalar(select(func.count()).select_from(PaperFillRecord)) == 0
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperLedgerTransactionRecord)
+                        .where(PaperLedgerTransactionRecord.transaction_type == "fill")
+                    )
+                    == 0
+                )
+                unchanged = await load_paper_projection(
+                    session, account_id=authority.account_id, as_of=AT + timedelta(seconds=5)
+                )
+                assert unchanged.positions == projection.positions
+                assert unchanged.available_cash == projection.available_cash
+                assert unchanged.reserved_cash == projection.reserved_cash
+                assert not unchanged.open_orders
     finally:
         await engine.dispose()

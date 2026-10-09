@@ -345,7 +345,9 @@ async def _set_test_insert_clock(sessions, at):
         )
 
 
-async def _verify_internal_fills(settings, sessions, cycle_id, account_id, orders, count):
+async def _verify_internal_fills(
+    settings, sessions, cycle_id, account_id, orders, count, *, verify_reads=True
+):
     from integration.test_agent_paper_cycle_pg import _ObjectStore, _SchwabPriceHistoryProvider
     from nexus.api.errors import NexusError
     from nexus.ops.paper_once import PaperAdvanceRequest, run_once
@@ -466,23 +468,6 @@ async def _verify_internal_fills(settings, sessions, cycle_id, account_id, order
                 final_quantities[order.instrument_id]
                 == initial_quantities.get(order.instrument_id, Decimal(0)) + order.quantity
             )
-        with pytest.raises(NexusError, match="order projection is incomplete"):
-            await PaperReadService(
-                session, projection.as_of, cursor_signing_secrets=("controlled-test-cursor",)
-            ).orders(status=None, cursor=None, limit=20)
-        page, page_at = await PaperReadService(
-            session,
-            projection.as_of,
-            cursor_signing_secrets=("controlled-test-cursor",),
-            candidate_stage_capacity=True,
-        ).orders(status=None, cursor=None, limit=20)
-        assert page_at == projection.as_of and page.next_cursor is None
-        assert {item.order_id for item in page.items} == {order.id for order in orders}
-        for item in page.items:
-            assert item.status == "filled" and not item.cancellable
-            assert Decimal(item.remaining_quantity) == 0
-            assert Decimal(item.filled_quantity) == Decimal(item.quantity)
-            assert len(item.fills) == 1
         assert (await session.get(AgentPaperCycleRecord, cycle_id)).execution_locked is True
         assert await session.scalar(
             select(func.count()).select_from(AgentPaperMarketWindowRecord)
@@ -495,6 +480,26 @@ async def _verify_internal_fills(settings, sessions, cycle_id, account_id, order
             .select_from(PaperLedgerTransactionRecord)
             .where(PaperLedgerTransactionRecord.transaction_type == "fill")
         ) == len(orders)
+        if verify_reads:
+            with pytest.raises(NexusError, match="order projection is incomplete"):
+                await PaperReadService(
+                    session, projection.as_of, cursor_signing_secrets=("controlled-test-cursor",)
+                ).orders(status=None, cursor=None, limit=20)
+            page, page_at = await PaperReadService(
+                session,
+                projection.as_of,
+                cursor_signing_secrets=("controlled-test-cursor",),
+                candidate_stage_capacity=True,
+            ).orders(status=None, cursor=None, limit=20)
+            assert page_at == projection.as_of and page.next_cursor is None
+            assert {item.order_id for item in page.items} == {order.id for order in orders}
+            for item in page.items:
+                assert item.status == "filled" and not item.cancellable
+                assert Decimal(item.remaining_quantity) == 0
+                assert Decimal(item.filled_quantity) == Decimal(item.quantity)
+                assert len(item.fills) == 1
+    if not verify_reads:
+        return
     from integration.test_portfolio_management_e2e import _business_facts
 
     async with sessions() as session:
