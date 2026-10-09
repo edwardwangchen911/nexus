@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from enum import Enum
+from math import isfinite
 from time import perf_counter
 from types import GenericAlias
 from typing import Literal, TypedDict, cast
@@ -259,6 +260,7 @@ class StagedCodexCommittee(CodexCommittee):
         inline_citations: bool = False,
         paper_stage_scope: bool = False,
         stage_time_budget: bool = False,
+        stage_budget_version: str | None = None,
     ) -> None:
         if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
@@ -278,6 +280,27 @@ class StagedCodexCommittee(CodexCommittee):
         if type(stage_time_budget) is not bool:
             raise ValueError("CODEX_STAGE_TIME_BUDGET_INVALID")
         self._stage_time_budget = stage_time_budget
+        from nexus.agents.codex_versions import (
+            CANDIDATE_BUDGET_CONFIG_VERSION,
+            DEADLINE_BUDGET_CONFIG_VERSION,
+        )
+
+        if stage_budget_version is not None and (
+            not stage_time_budget
+            or type(stage_budget_version) is not str
+            or stage_budget_version
+            not in {
+                DEADLINE_BUDGET_CONFIG_VERSION,
+                CANDIDATE_BUDGET_CONFIG_VERSION,
+            }
+        ):
+            raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
+        if stage_budget_version == CANDIDATE_BUDGET_CONFIG_VERSION:
+            if deadline is None:
+                raise ValueError("CODEX_STAGE_BUDGET_DEADLINE_REQUIRED")
+            if type(deadline) not in {int, float} or not isfinite(deadline):
+                raise ValueError("CODEX_STAGE_BUDGET_CLOCK_INVALID")
+        self._stage_budget_version = stage_budget_version or DEADLINE_BUDGET_CONFIG_VERSION
         self._max_wire_bytes = max_wire_bytes
         self._aggregate_input_tokens = aggregate_input_tokens
         # Reserve terminal writes inside the worker-owned aggregate deadline.
@@ -496,7 +519,10 @@ class StagedCodexCommittee(CodexCommittee):
         if self._stage_time_budget and self._deadline is not None:
             allocated_at = asyncio.get_running_loop().time()
             allocated_timeout = stage_timeout_seconds(
-                stage, deadline=self._deadline, now=allocated_at
+                stage,
+                deadline=self._deadline,
+                now=allocated_at,
+                version=self._stage_budget_version,
             )
             allocated_deadline = allocated_at + allocated_timeout
         allowance_reason: str | None = None

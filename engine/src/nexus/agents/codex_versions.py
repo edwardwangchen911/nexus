@@ -1,6 +1,7 @@
 """Exact SDK runtime versions; a budget revision does not upgrade research semantics."""
 
 from decimal import Decimal
+from math import isfinite
 
 CONFIG_VERSION = "codex-sdk-chatgpt-v1"
 STAGED_CONFIG_VERSION = "codex-sdk-chatgpt-v2"
@@ -13,6 +14,11 @@ ACTIONABLE_CONFIG_VERSION = "codex-sdk-chatgpt-v5-paper-scope"
 RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS = 135
 RESEARCH_STAGE_JOB_TIMEOUT_SECONDS = 120
 DEADLINE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v6-stage-time-budget"
+# Qualification candidate only. Keep it out of admission/runtime version sets
+# until its frozen identity, exact claim, and full-cycle routing are implemented.
+CANDIDATE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v7-stage-capacity-candidate"
+CANDIDATE_RESEARCH_JOB_TIMEOUT_SECONDS = 180
+CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS = 195
 PAPER_SCOPE_CONFIG_VERSIONS = frozenset({ACTIONABLE_CONFIG_VERSION, DEADLINE_BUDGET_CONFIG_VERSION})
 ACTIONABLE_CONFIG_VERSIONS = frozenset(
     {LEGACY_ACTIONABLE_CONFIG_VERSION, *PAPER_SCOPE_CONFIG_VERSIONS}
@@ -79,8 +85,30 @@ def wire_byte_limit(version: str) -> int:
     )
 
 
-def stage_timeout_seconds(stage: str, *, deadline: float, now: float) -> float:
-    """v6 only: protect later phases and SDK shutdown within the existing total cap."""
+def stage_timeout_seconds(
+    stage: str,
+    *,
+    deadline: float,
+    now: float,
+    version: str = DEADLINE_BUDGET_CONFIG_VERSION,
+) -> float:
+    """Allocate inside an already fixed committee deadline; never restart time."""
+    if version == CANDIDATE_BUDGET_CONFIG_VERSION:
+        if (
+            type(deadline) not in {int, float}
+            or type(now) not in {int, float}
+            or not isfinite(deadline)
+            or not isfinite(now)
+        ):
+            raise ValueError("CODEX_STAGE_BUDGET_CLOCK_INVALID")
+        cap = {"research": 60, "critique": 45, "synthesis": 45}[stage]
+        # Each future stage reserves both its provider cap and seven-second
+        # close bound. Terminal writes are already outside this deadline.
+        later_reserve = {"research": 104, "critique": 52, "synthesis": 0}[stage]
+        return max(0.0, min(cap, deadline - now - 7 - later_reserve))
+    if version != DEADLINE_BUDGET_CONFIG_VERSION:
+        raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
+    # Frozen v6: preserve its exact allocation for old Run identities.
     # Provisional allocation for isolated representative-load validation. Changes
     # to these reserves require another runtime version, never a silent v6 edit.
     later_reserve = {"research": 55, "critique": 30, "synthesis": 0}[stage]
