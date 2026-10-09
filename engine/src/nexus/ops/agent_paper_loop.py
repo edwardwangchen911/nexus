@@ -2911,7 +2911,7 @@ async def execute_agent_paper_loop_action(
                     "NEXUS_PROVIDER_JOBS_ENABLED": "false",
                 }
             )
-            if env_file is not None
+            if pinned_calendar is not None or env_file is not None
             else local_settings(repo_root, backend="codex_sdk")
         )
         worked = await run_agent_worker_once(
@@ -3048,7 +3048,7 @@ async def execute_agent_paper_loop_action(
                     "NEXUS_PROVIDER_JOBS_ENABLED": "false",
                 }
             )
-            if env_file is not None
+            if pinned_calendar is not None or env_file is not None
             else local_settings(repo_root, backend="codex_sdk")
         )
         if formal_stage_capacity or settings.agent_paper_formal_model_config_id is not None:

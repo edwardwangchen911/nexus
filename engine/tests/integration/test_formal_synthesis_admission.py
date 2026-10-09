@@ -257,7 +257,9 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             }
             monkeypatch.setattr(
                 "nexus.ops.agent_paper_loop.load_agent_paper_service_environment",
-                lambda *a, **kw: environment,
+                # Pending model must never replace the cycle's applied binding.
+                lambda *a, **kw: environment
+                | {"NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID": str(UUID(int=999))},
             )
             async with sessions() as session:
                 from nexus.persistence.models.paper import AgentPaperCycleRecord
@@ -276,7 +278,12 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             )
         assert calls == []
         monkeypatch.setattr(
-            "nexus.ops.agent_paper_loop.local_settings", lambda *a, **kw: host_settings
+            "nexus.ops.agent_paper_loop.local_settings",
+            lambda *a, **kw: host_settings.model_copy(
+                update={"agent_paper_formal_model_config_id": UUID(int=999)}
+            )
+            if protected
+            else host_settings,
         )
 
         async def controlled_sdk_ready():

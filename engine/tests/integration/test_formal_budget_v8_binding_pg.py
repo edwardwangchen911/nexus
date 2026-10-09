@@ -1,13 +1,17 @@
 """Protected-file apply must freeze the explicitly selected formal v8 authority."""
 
+import asyncio
 import subprocess
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
+from pathlib import Path
 from uuid import UUID
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from integration.test_candidate_multistock_path import AT, FIVE, _set_test_insert_clock
 from integration.test_portfolio_same_day_research_pg import seed_normal_path
 from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
@@ -361,5 +365,26 @@ async def test_protected_file_freezes_exact_v8_profile(
             assert binding.payload["pricing_version"] == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
             assert binding.payload["runtime_spec"]["research_job_timeout_seconds"] == 180
             assert binding.payload["runtime_spec"]["research_handler_timeout_seconds"] == 195
+        # Normal applied facts prohibit destructive branch rollback. Alembic
+        # must roll back the attempted unmerge too, retaining the merged head.
+        monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+        migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+        with pytest.raises(Exception, match="FORMAL_BUDGET_BINDING_ROLLBACK_REQUIRES_EMPTY"):
+            await asyncio.to_thread(
+                command.downgrade,
+                migration_config,
+                "0067_formal_budget_binding@0066_research_identity_binding",
+            )
+        from sqlalchemy import text
+
+        async with sessions() as session:
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "0069_formal_budget_output_merge"
+            )
+            retained = await session.get(FormalBudgetBindingRecord, binding.id)
+            assert retained is not None and retained.content_hash == result["binding_hash"]
+            assert (
+                await session.get(AgentPaperCycleRecord, cycle.id)
+            ).formal_budget_binding_id == (binding.id)
     finally:
         await engine.dispose()

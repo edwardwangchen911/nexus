@@ -61,6 +61,20 @@ def test_merge_and_unmerge_preserve_schema(
     assert after == before
 
 
+def test_empty_budget_branch_rollback_preserves_main_output_head(
+    temporary_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    command.upgrade(_config(), "head")
+    before = asyncio.run(_state(temporary_database_url))
+    command.downgrade(_config(), "0067_formal_budget_binding@0066_research_identity_binding")
+    after = asyncio.run(_state(temporary_database_url))
+    assert after["versions"] == ["0068_formal_output_binding"]
+    assert after["pins"] == []
+    assert "formal_budget_bindings" not in after["schema"]
+    assert after["output_guard"] == before["output_guard"]
+
+
 def _assert_guards(state: dict) -> None:
     assert "codex-sdk-chatgpt-v8-stage-capacity" in state["output_guard"]
     assert "FORMAL_BUDGET_BINDING_IMMUTABLE" in state["schema"]

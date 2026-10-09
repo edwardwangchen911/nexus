@@ -6042,3 +6042,54 @@ def test_executor_reinspects_persisted_slot_after_known_schwab_trigger_failure(
     )
 
     assert result is None
+
+
+@pytest.mark.parametrize("action", [A.RUN_RESEARCH_JOB, A.RUN_EVALUATION_RESEARCH_JOB])
+@pytest.mark.parametrize("explicit_file", [False, True])
+def test_research_executor_uses_frozen_binding_with_pending_default_configuration(
+    monkeypatch, tmp_path, codex_model_ready, action, explicit_file
+):
+    frozen_model = UUID(int=741)
+    environment = service_ready_environment() | {
+        "NEXUS_FORMAL_BUDGET_PROTECTION_ENABLED": "true",
+        "NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID": str(frozen_model),
+    }
+    settings = loop._FileEngineSettings.model_validate(environment)
+    observed = []
+
+    async def bound(*_args, **_kwargs):
+        return environment, str(CALENDAR_AUTHORITY_ID)
+
+    async def profile(*_args, **_kwargs):
+        return True
+
+    def pending(*_args, **_kwargs):
+        return loop._FileEngineSettings.model_validate(
+            environment | {"NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID": str(UUID(int=742))}
+        )
+
+    async def run(current, **kwargs):
+        loop.require_formal_host_configuration_match(settings, current)
+        assert current.agent_paper_formal_model_config_id == frozen_model
+        assert current.openai_api_key is None
+        assert not current.provider_jobs_enabled
+        observed.append(kwargs)
+        return True
+
+    monkeypatch.setattr(loop, "_load_bound_loop_environment", bound)
+    monkeypatch.setattr(loop, "resolve_formal_host_cycle_profile", profile)
+    monkeypatch.setattr(loop, "local_settings", pending)
+    monkeypatch.setattr(loop, "run_cycle_job_once", run)
+    monkeypatch.setattr(loop, "run_agent_worker_once", run)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            settings,
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=action,
+            snapshot=snapshot(cycle_id=UUID(int=2), research_job_id=UUID(int=3)),
+            env_file=tmp_path / "infra/.env.local" if explicit_file else None,
+        )
+    )
+    assert result is None
+    assert len(observed) == 1
