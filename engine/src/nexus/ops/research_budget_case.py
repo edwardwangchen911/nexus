@@ -11,14 +11,19 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from nexus.agents.codex_versions import DEADLINE_BUDGET_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    DEADLINE_BUDGET_CONFIG_VERSION,
+)
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run
 from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.diagnostics.calendar_policy import XNYS_CALENDAR_ADOPTION_ID
+from nexus.jobs.models import JobType
 from nexus.ops.openai_local import local_settings, prepare_database
 from nexus.ops.research_budget_diagnostic import read_database_url, require_diagnostic_url
 from nexus.persistence.base import Base
@@ -160,8 +165,14 @@ async def public_rows(
 
 
 async def prepare_case(
-    source: EngineSettings, target: EngineSettings, source_run_id: UUID
+    source: EngineSettings,
+    target: EngineSettings,
+    source_run_id: UUID,
+    *,
+    candidate_stage_capacity: bool = False,
 ) -> dict[str, str | int]:
+    if type(candidate_stage_capacity) is not bool:
+        raise ValueError("DIAGNOSTIC_CANDIDATE_ARGUMENT_INVALID")
     require_diagnostic_url(target.database_url or "")
     source_factory = session_factory(source)
     target_factory = session_factory(target)
@@ -171,7 +182,11 @@ async def prepare_case(
             instrument_id, rows = await public_rows(session, source_run_id)
         async with target_factory() as session, session.begin():
             database = await session.scalar(text("SELECT current_database()"))
-            if not isinstance(database, str) or not database.startswith("nexus_diag_"):
+            if (
+                not isinstance(database, str)
+                or not database.startswith("nexus_diag_")
+                or database != make_url(target.database_url or "").database
+            ):
                 raise ValueError("DIAGNOSTIC_DATABASE_REQUIRED")
             for name in (
                 *PUBLIC_TABLES,
@@ -209,11 +224,17 @@ async def prepare_case(
             inline_citations=True,
             actionable_paper=True,
             stage_time_budget=True,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
         async with target_factory() as session, session.begin():
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
-                    AgentModelConfigRecord.version == DEADLINE_BUDGET_CONFIG_VERSION
+                    AgentModelConfigRecord.version
+                    == (
+                        CANDIDATE_BUDGET_CONFIG_VERSION
+                        if candidate_stage_capacity
+                        else DEADLINE_BUDGET_CONFIG_VERSION
+                    )
                 )
             )
             assert model is not None
@@ -242,6 +263,9 @@ async def prepare_case(
                 model_config_id=model.id,
                 daily_limit_usd=target.agent_daily_budget_usd,
                 now=now,
+                job_type=JobType.AGENT_PAPER_RESEARCH
+                if candidate_stage_capacity
+                else JobType.AGENT_RESEARCH,
             )
             return {
                 "status": "DIAGNOSTIC_CASE_PREPARED",
@@ -250,6 +274,7 @@ async def prepare_case(
                 "model_requests": 0,
                 "portfolio_context": "absent",
                 "formal_acceptance": False,
+                "candidate_stage_capacity": candidate_stage_capacity,
             }
     finally:
         await source_factory.kw["bind"].dispose()
@@ -261,13 +286,21 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--database-url-file", type=Path, required=True)
     parser.add_argument("--source-run-id", type=UUID, required=True)
+    parser.add_argument("--candidate-stage-capacity", action="store_true")
     args = parser.parse_args()
     try:
         source = local_settings(args.repo_root, backend="codex_sdk")
         target = source.model_copy(
             update={"database_url": read_database_url(args.database_url_file)}
         )
-        result = asyncio.run(prepare_case(source, target, args.source_run_id))
+        result = asyncio.run(
+            prepare_case(
+                source,
+                target,
+                args.source_run_id,
+                candidate_stage_capacity=args.candidate_stage_capacity,
+            )
+        )
     except Exception as error:
         code = str(error) if isinstance(error, ValueError) else "UNKNOWN"
         safe = {
@@ -279,6 +312,7 @@ def main() -> int:
             "DIAGNOSTIC_EMPTY_DATABASE_REQUIRED",
             "DIAGNOSTIC_PUBLIC_SNAPSHOT_UNAVAILABLE",
             "DIAGNOSTIC_PUBLIC_SOURCE_READBACK_INCOMPLETE",
+            "DIAGNOSTIC_CANDIDATE_ARGUMENT_INVALID",
         }
         failure_result: dict[str, object] = {
             "status": "DIAGNOSTIC_PREPARATION_STOPPED",

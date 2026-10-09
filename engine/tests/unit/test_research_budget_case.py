@@ -46,3 +46,41 @@ def test_macro_calendar_must_be_preserved_in_exact_readback() -> None:
     require_public_readback({economic, calendar}, refs)
     with pytest.raises(ValueError, match="DIAGNOSTIC_PUBLIC_SOURCE_READBACK_INCOMPLETE"):
         require_public_readback({economic}, refs)
+
+
+def test_candidate_case_cli_dispatches_explicit_profile(monkeypatch, capsys):
+    from unittest.mock import AsyncMock
+
+    from nexus.ops import research_budget_case as module
+    from nexus.settings import EngineSettings
+
+    source = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus", agent_runtime_mode="codex_sdk"
+    )
+    target_url = "postgresql+asyncpg://localhost/nexus_diag_case"
+    run_id = uuid4()
+    prepare = AsyncMock(return_value={"status": "DIAGNOSTIC_CASE_PREPARED", "model_requests": 0})
+    monkeypatch.setattr(module, "local_settings", lambda *a, **kw: source)
+    monkeypatch.setattr(module, "read_database_url", lambda _: target_url)
+    monkeypatch.setattr(module, "prepare_case", prepare)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "case",
+            "--repo-root",
+            ".",
+            "--database-url-file",
+            "private",
+            "--source-run-id",
+            str(run_id),
+            "--candidate-stage-capacity",
+        ],
+    )
+    assert module.main() == 0
+    prepare.assert_awaited_once_with(
+        source,
+        source.model_copy(update={"database_url": target_url}),
+        run_id,
+        candidate_stage_capacity=True,
+    )
+    assert "DIAGNOSTIC_CASE_PREPARED" in capsys.readouterr().out

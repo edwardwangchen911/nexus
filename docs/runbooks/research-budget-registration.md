@@ -74,3 +74,11 @@ uv run --project engine nexus-engine-research-budget-diagnostic \
 合成 SDK 响应不证明实际模型时延，缺失行情的 partial 不成为合格组合决策。完整多股票
 组合链、真实调用和合法自然周期仍须单独验收。回退代码保留候选配置、Job/Run 和回执，
 默认 Worker 不领取或回收候选任务；不得把候选身份改写成正式版本。
+
+若需从已有正式 Run 创建公开证据负载，使用正常
+`nexus-engine-research-budget-case --repo-root REPO --database-url-file PRIVATE_0600_FILE
+--source-run-id SOURCE_RUN_UUID --candidate-stage-capacity`。目标须为全新的、已迁移且清理过
+迁移种子数据的专用诊断库；复制前验证实际目标完全匹配。只复制白名单公开来源及绑定，
+不复制账户、Paper 周期或正式上下文，严格读回后冻结新的规范候选 Run。该入口本身
+不调用模型；随后只对该新 Run 调用一次 diagnostic。`--synthetic-paper-load` 仅模拟
+Paper 输入负载，不能当作正式上下文、报价或执行权威。
