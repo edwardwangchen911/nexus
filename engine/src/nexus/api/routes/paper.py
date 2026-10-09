@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Header, Query, Request
+from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
@@ -36,7 +37,29 @@ from nexus.paper.read_service import PaperReadService
 from nexus.settings import EngineSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter()
+
+async def _candidate_read_policy(
+    request: Request,
+    session: AsyncSession = Depends(transactional_session),
+    settings: EngineSettings = Depends(get_settings),
+) -> None:
+    if not settings.candidate_stage_capacity_reads:
+        return
+    if request.method not in {"GET", "HEAD"}:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Candidate Paper API is read-only.", status_code=409
+        )
+    try:
+        await require_candidate_consumer_profile(session, candidate_stage_capacity=True)
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "Candidate Paper database isolation is unavailable.",
+            status_code=409,
+        ) from error
+
+
+router = APIRouter(dependencies=[Depends(_candidate_read_policy)])
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     status: {"model": NexusErrorEnvelope, "description": "Stable NEXUS error envelope."}
     for status in (401, 404, 409, 422)
@@ -58,6 +81,17 @@ def _cursor_secrets(settings: EngineSettings) -> tuple[str, ...]:
     )
 
 
+def _read_service(
+    session: AsyncSession, now: datetime, settings: EngineSettings
+) -> PaperReadService:
+    return PaperReadService(
+        session,
+        now,
+        cursor_signing_secrets=_cursor_secrets(settings),
+        candidate_stage_capacity=settings.candidate_stage_capacity_reads,
+    )
+
+
 @router.get(
     "/internal/v1/paper/cycles",
     operation_id="listInternalAgentPaperCycles",
@@ -70,8 +104,9 @@ async def list_agent_paper_cycles(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> AgentPaperCyclePageEnvelope:
-    data = await PaperReadService(session, now).agent_cycles(
+    data = await _read_service(session, now, settings).agent_cycles(
         decision_session=decision_session,
         limit=limit,
     )
@@ -91,8 +126,9 @@ async def get_paper_portfolio(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> PaperPortfolioEnvelope:
-    data = await PaperReadService(session, now).portfolio()
+    data = await _read_service(session, now, settings).portfolio()
     return PaperPortfolioEnvelope(
         data=data,
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
@@ -110,13 +146,14 @@ async def get_portfolio_economic_evidence(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> PortfolioEconomicEvidenceEnvelope:
     if request.url.query:
         raise NexusError(
             ErrorCode.VALIDATION_ERROR, "The evidence query is invalid.", status_code=422
         )
     return PortfolioEconomicEvidenceEnvelope(
-        data=await PaperReadService(session, now).portfolio_economic_evidence(),
+        data=await _read_service(session, now, settings).portfolio_economic_evidence(),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
 
@@ -132,6 +169,7 @@ async def get_paper_current_actual(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> PaperActualEnvelope:
     if request.url.query:
         raise NexusError(
@@ -140,7 +178,7 @@ async def get_paper_current_actual(
             status_code=422,
         )
     return PaperActualEnvelope(
-        data=await PaperReadService(session, now).current_actual(),
+        data=await _read_service(session, now, settings).current_actual(),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
 
@@ -155,8 +193,9 @@ async def get_latest_agent_paper_cycle(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> AgentPaperCycleEnvelope:
-    data = await PaperReadService(session, now).latest_agent_cycle()
+    data = await _read_service(session, now, settings).latest_agent_cycle()
     if data is None:
         raise NexusError(
             ErrorCode.NOT_FOUND,
@@ -181,6 +220,7 @@ async def get_agent_paper_cycle_detail(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> AgentPaperCycleDetailEnvelope:
     if request.url.query:
         raise NexusError(
@@ -188,7 +228,7 @@ async def get_agent_paper_cycle_detail(
             "The Agent paper cycle query is invalid.",
             status_code=422,
         )
-    data = await PaperReadService(session, now).agent_cycle_detail(cycle_id)
+    data = await _read_service(session, now, settings).agent_cycle_detail(cycle_id)
     if data is None:
         raise NexusError(
             ErrorCode.NOT_FOUND,
@@ -213,6 +253,7 @@ async def get_agent_paper_management_cycle(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> AgentPaperManagementCycleEnvelope:
     if request.url.query:
         raise NexusError(
@@ -220,7 +261,7 @@ async def get_agent_paper_management_cycle(
             "The Agent paper management cycle query is invalid.",
             status_code=422,
         )
-    data = await PaperReadService(session, now).management_cycle_detail(cycle_id)
+    data = await _read_service(session, now, settings).management_cycle_detail(cycle_id)
     if data is None:
         raise NexusError(
             ErrorCode.NOT_FOUND,
@@ -244,6 +285,7 @@ async def get_paper_management_summary(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> PaperManagementSummaryEnvelope:
     if request.url.query:
         raise NexusError(
@@ -252,7 +294,7 @@ async def get_paper_management_summary(
             status_code=422,
         )
     return PaperManagementSummaryEnvelope(
-        data=await PaperReadService(session, now).management_summary(),
+        data=await _read_service(session, now, settings).management_summary(),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
 
@@ -272,11 +314,9 @@ async def list_paper_orders(
     settings: EngineSettings = Depends(get_settings),
     now: datetime = Depends(_utc_now),
 ) -> PaperOrderPageEnvelope:
-    data, as_of = await PaperReadService(
-        session,
-        now,
-        cursor_signing_secrets=_cursor_secrets(settings),
-    ).orders(status=status, cursor=cursor, limit=limit)
+    data, as_of = await _read_service(session, now, settings).orders(
+        status=status, cursor=cursor, limit=limit
+    )
     return PaperOrderPageEnvelope(
         data=data,
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=as_of),
@@ -296,6 +336,7 @@ async def get_paper_order_cancel_result(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> PaperCancelResultEnvelope:
     if request.url.query:
         raise NexusError(
@@ -303,7 +344,7 @@ async def get_paper_order_cancel_result(
             "The paper cancellation result query is invalid.",
             status_code=422,
         )
-    data = await PaperReadService(session, now).cancel_result(order_id, idempotency_key)
+    data = await _read_service(session, now, settings).cancel_result(order_id, idempotency_key)
     if data is None:
         raise NexusError(
             ErrorCode.NOT_FOUND,
@@ -328,6 +369,7 @@ async def get_paper_plan(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> PaperPlanEnvelope:
     if request.url.query:
         raise NexusError(
@@ -335,7 +377,7 @@ async def get_paper_plan(
             "The paper plan query is invalid.",
             status_code=422,
         )
-    data = await PaperReadService(session, now).plan(batch_id)
+    data = await _read_service(session, now, settings).plan(batch_id)
     if data is None:
         raise NexusError(
             ErrorCode.NOT_FOUND,
@@ -361,8 +403,9 @@ async def cancel_paper_order(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
     now: datetime = Depends(_utc_now),
+    settings: EngineSettings = Depends(get_settings),
 ) -> PaperCancelEnvelope:
-    reader = PaperReadService(session, now)
+    reader = _read_service(session, now, settings)
     if not await reader.owns_order(order_id):
         raise NexusError(
             ErrorCode.NOT_FOUND,

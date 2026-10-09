@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+import { chmod } from "node:fs/promises";
+import { join } from "node:path";
 import type { components } from "../../app/lib/generated/schema";
 
 type OrderPage = components["schemas"]["PaperOrderPageResponse"];
@@ -9,6 +11,15 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   const cycleId = process.env.NEXUS_CONTROLLED_CYCLE_ID;
   const expectedOrderIds = process.env.NEXUS_CONTROLLED_ORDER_IDS?.split(",");
   const candidateCount = Number(process.env.NEXUS_CONTROLLED_CANDIDATE_COUNT);
+  const deferCount = Number(process.env.NEXUS_CONTROLLED_DEFER_COUNT ?? String(candidateCount - 2));
+  const capture = async (name: string) => {
+    const directory = process.env.NEXUS_CONTROLLED_SCREENSHOT_DIR;
+    if (!directory) return;
+    await page.waitForLoadState("networkidle");
+    const path = join(directory, `${name}.png`);
+    await page.screenshot({ path, fullPage: true });
+    await chmod(path, 0o600);
+  };
   test.skip(!cycleId || expectedOrderIds?.length !== 2, "isolated controlled PostgreSQL cycle required");
   if (!cycleId || !expectedOrderIds) return;
 
@@ -33,7 +44,7 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   expect(detail.cycle.execution_locked).toBe(true);
   expect(detail.cycle.candidates).toHaveLength(candidateCount);
   expect(detail.synthesis?.choices).toHaveLength(candidateCount);
-  expect(detail.synthesis?.choices.filter((choice) => choice.action === "defer")).toHaveLength(candidateCount - 2);
+  expect(detail.synthesis?.choices.filter((choice) => choice.action === "defer")).toHaveLength(deferCount);
   const targetId = detail.active_target?.target_version_id;
   expect(targetId).toBeTruthy();
 
@@ -44,15 +55,18 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
   await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
+  await capture("workspace");
 
   await page.goto("/decisions");
   await expect(page.getByRole("heading", { name: "决策记录", exact: true })).toBeVisible();
   await expect(page.locator(`a[href="/decisions/${cycleId}"]`)).toBeVisible();
+  await capture("decisions");
   await page.goto(`/decisions/${cycleId}`);
   await expect(page.getByRole("heading", { name: "组合决策详情" })).toBeVisible();
   await expect(page.locator("body")).toContainText(targetId!);
   await expect(page.locator(".pm-agent strong")).toHaveCount(candidateCount);
-  if (candidateCount === 3) await expect(page.locator(".pm-agent strong").filter({ hasText: "暂缓" })).toHaveCount(1);
+  await expect(page.locator(".pm-agent strong").filter({ hasText: "暂缓" })).toHaveCount(deferCount);
+  await capture("decision-detail");
 
   await page.goto("/paper");
   await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
@@ -64,9 +78,11 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
     await expect(page.locator("article.paper-order").filter({ hasText: orderId })).toBeVisible();
   }
   await expect(page.getByRole("table", { name: "当前实际模拟持仓" }).getByRole("row")).toHaveCount(3);
+  await capture("paper");
 
   await page.goto("/portfolio");
   await expect(page.getByRole("heading", { name: "组合事实" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "内部模拟目标与计划" })).toBeVisible();
+  await capture("portfolio");
   expect(writes).toEqual([]);
 });

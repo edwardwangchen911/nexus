@@ -323,7 +323,7 @@ export default function PaperPage(): React.ReactElement {
 }
 
 export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter, loadingMore, notice, cycles = [], cycleSummary = null, versionObservation = null, versionHistory = [], versionEvaluation = null, cycleUnavailable = false, currentCycleSession = null, selectedCycleSession = null, management, actual, onRefresh, onCycleSessionChange = () => {}, onStatusFilter, onLoadMore, onCancel }: PaperPanelProps): React.ReactElement {
-  const hasFacts = portfolio !== null && portfolio.performance !== null && ["ready", "partial", "stale"].includes(state);
+  const hasFacts = portfolio !== null && ["ready", "partial", "stale", "empty"].includes(state);
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
       <header className="page-heading">
@@ -349,12 +349,14 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         <EconomicEvidenceLoader />
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} historical={selectedCycleSession !== null} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
+        {portfolio.performance === null ? <DataState state="empty" title="内部模拟绩效" detail="尚无已发布的内部模拟绩效快照。" announce={false} /> : <>
         <section id="paper-actual-facts" className="page-stack" aria-label="独立实际账户事实">
         <PerformanceFacts portfolio={portfolio} />
         {portfolio.comparison ? <PaperComparison comparison={portfolio.comparison} /> : null}
         <Positions portfolio={portfolio} />
         </section>
         <Attributions portfolio={portfolio} />
+        </>}
         <section className="paper-orders" aria-labelledby="paper-orders-title">
           <header className="paper-orders__heading"><div><p className="eyebrow">已保存的订单记录</p><h2 id="paper-orders-title">订单与模拟成交</h2><p>订单状态与可取消性以已保存的最新记录为准。</p></div><label className="paper-orders__filter">订单状态筛选<select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as "" | OrderStatus)} disabled={loadingMore}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label></header>
           {orders.length === 0 ? <p className="paper-orders__empty">当前筛选下没有订单事实。</p> : <div className="paper-order-list">{orders.map((order) => <OrderTimeline key={order.order_id} order={order} allowCancel={state === "ready" && !loadingMore} onCancel={onCancel} />)}</div>}

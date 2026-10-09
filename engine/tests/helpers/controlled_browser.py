@@ -101,6 +101,8 @@ async def verify_controlled_browser(
     cycle_id: UUID,
     order_ids: tuple[UUID, UUID],
     candidate_count: int = 2,
+    candidate_stage_capacity_reads: bool = False,
+    expected_defer_count: int | None = None,
 ) -> None:
     root = Path(__file__).resolve().parents[3]
     if not (root / "node_modules/.bin/vinext").exists():
@@ -128,7 +130,12 @@ async def verify_controlled_browser(
     web_socket.close()
     server = uvicorn.Server(
         uvicorn.Config(
-            app(database_url, now=api_now, release_revision=revision),
+            app(
+                database_url,
+                now=api_now,
+                release_revision=revision,
+                candidate_stage_capacity_reads=candidate_stage_capacity_reads,
+            ),
             log_config=None,
             access_log=False,
         )
@@ -172,9 +179,27 @@ async def verify_controlled_browser(
             NEXUS_CONTROLLED_CYCLE_ID=str(cycle_id),
             NEXUS_CONTROLLED_ORDER_IDS=",".join(str(order_id) for order_id in order_ids),
             NEXUS_CONTROLLED_CANDIDATE_COUNT=str(candidate_count),
+            NEXUS_CONTROLLED_DEFER_COUNT=str(
+                candidate_count - 2 if expected_defer_count is None else expected_defer_count
+            ),
             NEXUS_LOCAL_PAPER_READONLY="1",
             WRANGLER_LOG_PATH=".wrangler/wrangler.log",
         )
+        if candidate_stage_capacity_reads:
+            import stat
+
+            screenshots = root / ".secrets"
+            for component in (
+                "candidate-page-readback-20261010",
+                revision,
+                f"count-{candidate_count}",
+            ):
+                screenshots = screenshots / component
+                screenshots.mkdir(mode=0o700, exist_ok=True)
+                info = screenshots.stat()
+                if stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid():
+                    raise AssertionError("CONTROLLED_SCREENSHOT_DIRECTORY_REJECTED")
+            environment["NEXUS_CONTROLLED_SCREENSHOT_DIR"] = str(screenshots)
         web_root = isolation.enter_context(_web_project_root(root))
         web_process = await asyncio.create_subprocess_exec(
             str(web_root / "node_modules/.bin/vinext"),

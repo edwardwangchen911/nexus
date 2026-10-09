@@ -15,7 +15,45 @@ from nexus.paper.target_service import (
     TargetActivationBlockedError,
     require_activation_projection_unoccupied,
 )
+from nexus.settings import EngineSettings
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"environment": "development"},
+        {"environment": "production"},
+        {"provider_jobs_enabled": True},
+        {"agent_paper_cycle_enabled": True},
+        {"database_url": "postgresql+asyncpg://localhost/nexus_main"},
+        {"database_url": "postgresql+asyncpg://remote/nexus_test_read"},
+        {"database_url": "postgresql+asyncpg://localhost/nexus_test_read?host=remote"},
+        {"database_url": "postgresql+asyncpg://localhost/nexus_test_read?dbname=nexus_main"},
+        {"database_url": "sqlite:///nexus_test_read"},
+        {"database_url": None},
+    ],
+)
+def test_candidate_paper_read_configuration_rejects_unsafe_runtime(override):
+    config = {
+        "environment": "test",
+        "database_url": "postgresql+asyncpg://localhost/nexus_test_read",
+        "candidate_stage_capacity_reads": True,
+    }
+    config.update(override)
+    with pytest.raises(ValueError, match="CODEX_CANDIDATE_READ_CONFIGURATION_REJECTED"):
+        EngineSettings(**config)
+
+
+def test_candidate_paper_read_configuration_is_explicit_and_test_only():
+    assert not EngineSettings().candidate_stage_capacity_reads
+    settings = EngineSettings(
+        environment="test",
+        database_url="postgresql+asyncpg://localhost/nexus_diag_read",
+        candidate_stage_capacity_reads=True,
+    )
+    assert settings.candidate_stage_capacity_reads
+    assert not settings.provider_jobs_enabled and not settings.agent_paper_cycle_enabled
 
 
 @pytest.mark.asyncio

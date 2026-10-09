@@ -107,6 +107,9 @@ class EngineSettings(_SafeSettings):
         default=False,
         validation_alias="NEXUS_AGENT_PAPER_CYCLE_ENABLED",
     )
+    candidate_stage_capacity_reads: bool = Field(
+        default=False, validation_alias="NEXUS_CANDIDATE_STAGE_CAPACITY_READS"
+    )
     provider_jobs_enabled: bool = Field(
         default=False,
         validation_alias="NEXUS_PROVIDER_JOBS_ENABLED",
@@ -118,6 +121,23 @@ class EngineSettings(_SafeSettings):
 
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
+        if self.candidate_stage_capacity_reads:
+            from sqlalchemy.engine import make_url
+
+            try:
+                url = make_url(self.database_url or "")
+            except Exception:
+                raise ValueError("CODEX_CANDIDATE_READ_CONFIGURATION_REJECTED") from None
+            if (
+                self.environment is not Environment.TEST
+                or self.provider_jobs_enabled
+                or self.agent_paper_cycle_enabled
+                or url.drivername != "postgresql+asyncpg"
+                or url.host not in {"127.0.0.1", "localhost", "::1"}
+                or not (url.database or "").startswith(("nexus_test_", "nexus_diag_"))
+                or bool(set(url.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+            ):
+                raise ValueError("CODEX_CANDIDATE_READ_CONFIGURATION_REJECTED")
         if self.environment is not Environment.PRODUCTION and self.agent_runtime_mode is None:
             self.agent_runtime_mode = AgentRuntimeMode.FIXTURE
         self._validate_agent_runtime()

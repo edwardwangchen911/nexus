@@ -96,6 +96,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     monkeypatch.setattr("nexus.worker.datetime", WorkerClock)
     monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
     try:
+        await _set_test_insert_clock(sessions, AT)
         async with sessions.begin() as session:
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
@@ -147,6 +148,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             assert all(
                 job.job_type == "agent.paper.research" and job.attempt_count == 0 for job in jobs
             )
+        await _set_test_insert_clock(sessions, clock_at[0])
         for job in jobs:
             assert await run_agent_worker_once(
                 settings, job_ids=(job.id,), candidate_stage_capacity=True
@@ -173,6 +175,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
         from nexus.worker import run_portfolio_synthesis_worker_once
 
+        await _set_test_insert_clock(sessions, AT + timedelta(seconds=2))
         async with sessions.begin() as session:
             pending = await resume_schwab_agent_paper_cycle(
                 session,
@@ -209,6 +212,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             "nexus.agents.portfolio_synthesis_worker.invoke_codex_portfolio", invoke_portfolio
         )
         clock_at[0] = AT + timedelta(seconds=3)
+        await _set_test_insert_clock(sessions, clock_at[0])
         assert await run_portfolio_synthesis_worker_once(
             settings, job_ids=(synth_job.id,), candidate_stage_capacity=True
         )
@@ -247,6 +251,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     row.model_hash == model.config_hash
                     for row in await session.scalars(select(AgentResearchRunRecord))
                 )
+        await _set_test_insert_clock(sessions, AT + timedelta(seconds=4))
         async with sessions.begin() as session:
             finished = await resume_schwab_agent_paper_cycle(
                 session,
@@ -315,13 +320,32 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             ] == counts_before
         if trade:
             await _verify_internal_fills(
-                settings, sessions, result.cycle_id, authority.account_id, orders
+                settings, sessions, result.cycle_id, authority.account_id, orders, count
             )
     finally:
         await engine.dispose()
 
 
-async def _verify_internal_fills(settings, sessions, cycle_id, account_id, orders):
+async def _set_test_insert_clock(sessions, at):
+    """Date fresh inserts before writes; never rewrite persisted synthetic facts."""
+    from nexus.agents.codex_candidate import require_candidate_database
+    from sqlalchemy import text
+
+    assert at.tzinfo == UTC
+    async with sessions.begin() as session:
+        await require_candidate_database(session)
+        await session.execute(
+            text(
+                "DO $$ DECLARE item record; BEGIN FOR item IN "
+                "SELECT table_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND column_name='created_at' "
+                "LOOP EXECUTE format('ALTER TABLE %I ALTER COLUMN created_at SET DEFAULT "
+                f"''{at.isoformat()}''::timestamptz', item.table_name); END LOOP; END $$"
+            )
+        )
+
+
+async def _verify_internal_fills(settings, sessions, cycle_id, account_id, orders, count):
     from integration.test_agent_paper_cycle_pg import _ObjectStore, _SchwabPriceHistoryProvider
     from nexus.api.errors import NexusError
     from nexus.ops.paper_once import PaperAdvanceRequest, run_once
@@ -355,6 +379,7 @@ async def _verify_internal_fills(settings, sessions, cycle_id, account_id, order
             )
             assert scope.window_start > AT + timedelta(seconds=4)
         evaluated_at = scope.window_end + timedelta(seconds=2)
+        await _set_test_insert_clock(sessions, evaluated_at)
         window = await collect_agent_paper_window(
             sessions,
             cycle_id=cycle_id,
@@ -470,3 +495,71 @@ async def _verify_internal_fills(settings, sessions, cycle_id, account_id, order
             .select_from(PaperLedgerTransactionRecord)
             .where(PaperLedgerTransactionRecord.transaction_type == "fill")
         ) == len(orders)
+    from integration.test_portfolio_management_e2e import _business_facts
+
+    async with sessions() as session:
+        before_reads = await _business_facts(session)
+    await _verify_http_reads(settings.database_url, cycle_id, orders, projection.as_of)
+    import os
+
+    if os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1":
+        from helpers.controlled_browser import verify_controlled_browser
+
+        await verify_controlled_browser(
+            settings.database_url,
+            api_now=projection.as_of,
+            cycle_id=cycle_id,
+            order_ids=tuple(order.id for order in orders),
+            candidate_count=count,
+            candidate_stage_capacity_reads=True,
+            expected_defer_count=0,
+        )
+    async with sessions() as session:
+        assert await _business_facts(session) == before_reads
+
+
+async def _verify_http_reads(database_url, cycle_id, orders, api_now):
+    import httpx
+    from helpers.paper_api import app, headers
+
+    paths = (
+        "/internal/v1/paper/orders?limit=50",
+        "/internal/v1/paper/actual",
+        f"/internal/v1/paper/management/cycles/{cycle_id}",
+        "/internal/v1/paper/management/portfolio",
+        "/internal/v1/paper/cycles?limit=20",
+    )
+    envelopes = []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(database_url, now=api_now)),
+        base_url="http://testserver",
+    ) as client:
+        path = paths[0] + "&candidate_stage_capacity=true"
+        rejected = await client.get(path, headers=headers("GET", path))
+        assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "DATA_PARTIAL"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=app(database_url, now=api_now, candidate_stage_capacity_reads=True)
+        ),
+        base_url="http://testserver",
+    ) as client:
+        for path in paths:
+            response = await client.get(path, headers=headers("GET", path))
+            assert response.status_code == 200, (path, response.json())
+            envelopes.append(response.json()["data"])
+        unauthenticated = await client.get(paths[0])
+        assert unauthenticated.status_code == 401
+        cancel_path = f"/internal/v1/paper/orders/{UUID(int=404)}/cancel"
+        body = b'{"expected_event_seq":1}'
+        signed = headers("POST", cancel_path, body)
+        signed["Idempotency-Key"] = "candidate-read-only-cancel"
+        rejected = await client.post(cancel_path, headers=signed, content=body)
+        assert rejected.status_code == 409
+        assert rejected.json()["error"]["message"] == "Candidate Paper API is read-only."
+    assert {item["order_id"] for item in envelopes[0]["items"]} == {
+        str(order.id) for order in orders
+    }
+    assert all(item["status"] == "filled" for item in envelopes[0]["items"])
+    assert envelopes[1]["data_state"] == "READY" and len(envelopes[1]["positions"]) == 2
+    assert envelopes[2]["cycle"]["cycle_id"] == str(cycle_id)
+    assert envelopes[2]["cycle"]["execution_locked"] is True

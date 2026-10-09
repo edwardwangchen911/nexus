@@ -87,6 +87,19 @@ describe("internal paper page", () => {
     expect(screen.queryByText("当前模拟账本持仓为 0。")).not.toBeInTheDocument();
     expect(fetcher).not.toHaveBeenCalledWith(expect.stringContaining("/cancel"), expect.anything());
   });
+  it("keeps cycles and saved fills visible before close performance without enabling cancellation", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
+    render(<PaperPanel state="empty" portfolio={{ ...paperPortfolio, data_state: "EMPTY", performance: null, comparison: null, positions: [], attributions: [] }}
+      orders={[cancellableOrder, filledOrder]} nextCursor={null} statusFilter="" loadingMore={false} notice={null}
+      cycles={[agentPaperCycle]} currentCycleSession={agentPaperCycle.decision_session}
+      onRefresh={vi.fn()} onStatusFilter={vi.fn()} onLoadMore={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByLabelText("决策会话日期")).toHaveValue(agentPaperCycle.decision_session);
+    expect(screen.getByRole("heading", { name: "订单与模拟成交" })).toBeVisible();
+    expect(screen.getByText(new RegExp(filledOrder.order_id))).toBeVisible();
+    expect(screen.getByText("尚无已发布的内部模拟绩效快照。")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /取消.*模拟订单/ })).not.toBeInTheDocument();
+    await screen.findByText("组合经济证据暂不可读；样本数量与评价状态未知。");
+  });
   it("keeps current target details reachable without inventing an occupying plan", async () => {
     const fetcher = vi.fn(async () => Response.json({ data: { ...managementSummary, occupying_plan: null }, meta: meta() }));
     vi.stubGlobal("fetch", fetcher);

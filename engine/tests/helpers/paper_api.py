@@ -28,9 +28,12 @@ def app(
     *,
     now: datetime = MARKET_CLOSE,
     release_revision: str | None = None,
+    candidate_stage_capacity_reads: bool = False,
 ):
-    runtime_settings = settings(database_url).model_copy(
-        update={"release_revision": release_revision}
+    runtime_settings = EngineSettings(
+        **settings(database_url).model_dump(),
+        NEXUS_RELEASE_REVISION=release_revision,
+        NEXUS_CANDIDATE_STAGE_CAPACITY_READS=candidate_stage_capacity_reads,
     )
     engine_app = create_engine_app(runtime_settings)
     engine_app.state.utc_clock = lambda: now
