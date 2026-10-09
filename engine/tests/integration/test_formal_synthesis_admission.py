@@ -513,5 +513,95 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 assert unchanged.available_cash == projection.available_cash
                 assert unchanged.reserved_cash == projection.reserved_cash
                 assert not unchanged.open_orders
+        import httpx
+        from helpers.paper_api import app, headers
+        from integration.test_portfolio_management_e2e import _business_facts
+        from nexus.persistence.models.paper import AgentPaperMarketWindowRecord
+
+        async with sessions() as session:
+            window_end = await session.scalar(
+                select(func.max(AgentPaperMarketWindowRecord.window_end_at))
+            )
+            api_now = (window_end or AT) + timedelta(seconds=5)
+            before_reads = await _business_facts(session)
+        if count == 3 and not trade:
+            from nexus.paper.management_read_authority import (
+                formal_proposal_read_profile,
+                load_synthesis_read_authority,
+            )
+            from sqlalchemy import text
+
+            async with sessions.begin() as session:
+                savepoint = await session.begin_nested()
+                await session.execute(
+                    text("ALTER TABLE agent_paper_cycle_events DISABLE TRIGGER USER")
+                )
+                damaged = await session.execute(
+                    text(
+                        "UPDATE agent_paper_cycle_events SET fact_ids = "
+                        "jsonb_set(fact_ids, '{formal_model_hash}', to_jsonb(CAST(:hash AS text))) "
+                        "WHERE cycle_id = :id AND sequence = 1"
+                    ),
+                    {"hash": "0" * 64, "id": result.cycle_id},
+                )
+                assert damaged.rowcount == 1
+                await session.execute(
+                    text("ALTER TABLE agent_paper_cycle_events ENABLE TRIGGER USER")
+                )
+                assert (
+                    await formal_proposal_read_profile(
+                        session,
+                        account_id=authority.account_id,
+                        decision_id=finished.strategy_decision_id,
+                        read_as_of=api_now,
+                    )
+                    is True
+                )
+                cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
+                before_bad_read = await _business_facts(session)
+                with pytest.raises(ValueError, match="CODEX_FORMAL_CYCLE_PROFILE_INVALID"):
+                    await load_synthesis_read_authority(session, cycle=cycle, read_as_of=api_now)
+                assert await _business_facts(session) == before_bad_read
+                await savepoint.rollback()
+        paths = (
+            "/internal/v1/paper/orders?limit=50",
+            "/internal/v1/paper/actual",
+            f"/internal/v1/paper/management/cycles/{result.cycle_id}",
+            "/internal/v1/paper/management/portfolio",
+            "/internal/v1/paper/cycles?limit=20",
+        )
+        envelopes = []
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(settings.database_url, now=api_now)),
+            base_url="http://testserver",
+        ) as client:
+            for path in paths:
+                response = await client.get(path, headers=headers("GET", path))
+                assert response.status_code == 200, (path, response.json())
+                envelopes.append(response.json()["data"])
+            assert (await client.get(paths[0])).status_code == 401
+        assert {row["order_id"] for row in envelopes[0]["items"]} == {
+            str(order.id) for order in orders
+        }
+        assert all(row["status"] == "filled" for row in envelopes[0]["items"])
+        assert envelopes[2]["cycle"]["cycle_id"] == str(result.cycle_id)
+        assert envelopes[2]["cycle"]["execution_locked"] is True
+        if trade:
+            import os
+
+            if os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1":
+                from helpers.controlled_browser import verify_controlled_browser
+
+                await verify_controlled_browser(
+                    settings.database_url,
+                    api_now=api_now,
+                    cycle_id=result.cycle_id,
+                    order_ids=tuple(order.id for order in orders),
+                    candidate_count=count,
+                    expected_defer_count=0,
+                    formal_readback=True,
+                )
+        async with sessions() as session:
+            assert await _business_facts(session) == before_reads
     finally:
         await engine.dispose()

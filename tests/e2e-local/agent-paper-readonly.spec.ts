@@ -85,13 +85,15 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
     await expect(page.locator("body")).not.toContainText("本周期已完成，确定性结果不需要创建订单。");
   }
 
-  await page.goto("/decisions");
-  await page.waitForLoadState("networkidle");
-  await page.getByLabel("决策日期").fill(cycle.decision_session);
-  await expect(page.locator(`a[href="/decisions/${cycle.cycle_id}"]`)).toBeVisible();
+  if (latest.cycle_id !== cycle.cycle_id) {
+    await page.goto("/decisions");
+    await page.waitForLoadState("networkidle");
+    await page.getByLabel("决策日期").fill(cycle.decision_session);
+    await expect(page.locator(`a[href="/decisions/${cycle.cycle_id}"]`)).toBeVisible();
 
-  await page.goto(`/decisions/${cycle.cycle_id}`);
-  await page.waitForLoadState("networkidle");
+    await page.goto(`/decisions/${cycle.cycle_id}`);
+    await page.waitForLoadState("networkidle");
+  }
   await expect(page.getByRole("heading", { name: "组合决策详情" })).toBeVisible();
   await expect(page.getByText("当前生效目标", { exact: true }).first()).toBeVisible();
 

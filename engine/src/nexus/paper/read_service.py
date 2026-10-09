@@ -86,6 +86,7 @@ from nexus.paper.execution_canonical import (
 )
 from nexus.paper.management_read_authority import (
     SynthesisReadAuthority,
+    formal_proposal_read_profile,
     load_candidate_batch_authority,
     load_proposal_read_authority,
     load_synthesis_read_authority,
@@ -3153,6 +3154,12 @@ class PaperReadService:
                 account_id=account.id,
                 strategy_decision_id=decision.id,
                 candidate_stage_capacity=self._candidate_stage_capacity,
+                formal_stage_capacity=await formal_proposal_read_profile(
+                    self._session,
+                    account_id=account.id,
+                    decision_id=decision.id,
+                    read_as_of=self._request_time,
+                ),
             )
         except (PaperBatchError, ValueError):
             canonical_batch = None
@@ -3719,6 +3726,12 @@ class PaperReadService:
                     account_id=order.account_id,
                     strategy_decision_id=authority[12],
                     candidate_stage_capacity=self._candidate_stage_capacity,
+                    formal_stage_capacity=await formal_proposal_read_profile(
+                        self._session,
+                        account_id=order.account_id,
+                        decision_id=authority[12],
+                        read_as_of=decision_time,
+                    ),
                 )
                 target_authority = await load_target_read_authority(
                     self._session,

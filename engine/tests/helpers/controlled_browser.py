@@ -103,6 +103,7 @@ async def verify_controlled_browser(
     candidate_count: int = 2,
     first_partial: bool = False,
     candidate_stage_capacity_reads: bool = False,
+    formal_readback: bool = False,
     expected_defer_count: int | None = None,
 ) -> None:
     root = Path(__file__).resolve().parents[3]
@@ -187,12 +188,14 @@ async def verify_controlled_browser(
             NEXUS_LOCAL_PAPER_READONLY="1",
             WRANGLER_LOG_PATH=".wrangler/wrangler.log",
         )
-        if candidate_stage_capacity_reads:
+        if candidate_stage_capacity_reads or formal_readback:
             import stat
 
             screenshots = root / ".secrets"
             for component in (
-                "candidate-page-readback-20261010",
+                "formal-page-readback-20261010"
+                if formal_readback
+                else "candidate-page-readback-20261010",
                 revision,
                 f"count-{candidate_count}",
             ):

@@ -10,6 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_candidate import require_candidate_consumer_profile
+from nexus.agents.codex_formal_stage import formal_stage_config_hash
+from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+from nexus.agents.persistence import load_actionable_research_output
 from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisInputV1,
     PortfolioSynthesisIntentV1,
@@ -27,6 +30,8 @@ from nexus.paper.target_service import canonical_target_activation_hash
 from nexus.persistence.models.agents import (
     AgentPortfolioSynthesisOutputRecord,
     AgentPortfolioSynthesisRunRecord,
+    AgentResearchOutputRecord,
+    AgentResearchRunRecord,
 )
 from nexus.persistence.models.paper import (
     AgentPaperCycleRecord,
@@ -54,6 +59,31 @@ class TargetReadAuthority:
     target: PaperTargetVersionRecord
     proposal: ProposalReadAuthority
     previous: PaperTargetVersionRecord | None
+
+
+async def formal_proposal_read_profile(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    decision_id: UUID,
+    read_as_of: datetime,
+) -> bool:
+    """Select a read verifier from persisted identity; this grants no execution authority."""
+    version = await session.scalar(
+        select(AgentPortfolioSynthesisRunRecord.pricing_version)
+        .join(
+            StrategyDecisionRecord,
+            StrategyDecisionRecord.agent_paper_cycle_id
+            == AgentPortfolioSynthesisRunRecord.cycle_id,
+        )
+        .where(
+            StrategyDecisionRecord.id == decision_id,
+            StrategyDecisionRecord.account_id == account_id,
+            StrategyDecisionRecord.created_at <= read_as_of,
+            AgentPortfolioSynthesisRunRecord.created_at <= read_as_of,
+        )
+    )
+    return version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
 
 
 async def load_candidate_batch_authority(
@@ -90,6 +120,47 @@ async def load_synthesis_read_authority(
     if run is None:
         return None
     frozen = _frozen_run(run)
+    if run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
+        from nexus.paper.agent_cycle import _require_cycle_candidate_profile
+
+        await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=False,
+            formal_stage_capacity=True,
+            expected_formal_model_id=run.model_config_id,
+            now=frozen.admitted_at,
+        )
+        if run.model_hash != formal_stage_config_hash() or frozen.admitted_at > read_as_of:
+            raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
+        for source in frozen.security_outputs:
+            source_output = await session.get(AgentResearchOutputRecord, source.research_output_id)
+            research = (
+                None
+                if source_output is None
+                else await session.get(AgentResearchRunRecord, source_output.run_id)
+            )
+            if (
+                research is None
+                or source_output is None
+                or source_output.content_hash != source.content_hash
+                or research.idempotency_key != f"agent-paper:{cycle.id}:{source.instrument_id}"
+                or research.model_config_id != run.model_config_id
+            ):
+                raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
+            action = await load_actionable_research_output(
+                session,
+                run_id=research.id,
+                decision_time=frozen.admitted_at,
+                allow_safe_no_trade=True,
+                formal_stage_capacity=True,
+            )
+            if (
+                action.output_id != source.research_output_id
+                or action.intent_hash != source.intent_hash
+                or action.evidence_ref_ids != source.evidence_ref_ids
+            ):
+                raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
     if (
         frozen.account_id != cycle.account_id
         or frozen.portfolio_id != cycle.portfolio_id
@@ -162,6 +233,9 @@ async def load_proposal_read_authority(
         account_id=account_id,
         decision_id=decision.id,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=await formal_proposal_read_profile(
+            session, account_id=account_id, decision_id=decision.id, read_as_of=read_as_of
+        ),
     )
     if persisted is None or persisted.cycle_id != decision.agent_paper_cycle_id:
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
