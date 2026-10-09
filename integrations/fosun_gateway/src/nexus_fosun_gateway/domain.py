@@ -158,6 +158,9 @@ class QuoteItem(GatewayModel):
     ) = None
     provider_classification: FosunSecurityClassification | None = None
     provider_reported_delay: StrictBool | None = None
+    # Opaque provider clock components; neither UTC nor Unix epoch evidence.
+    provider_quote_date: Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)] | None = None
+    provider_quote_time: Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)] | None = None
 
     @field_validator("as_of")
     @classmethod

@@ -314,6 +314,12 @@ def _quotes(
                 provider_reported_delay=(
                     cast("bool | None", quote.get("delay")) if quote is not None else None
                 ),
+                provider_quote_date=(
+                    cast("int | None", quote.get("qtDate")) if quote is not None else None
+                ),
+                provider_quote_time=(
+                    cast("int | None", quote.get("qtTime")) if quote is not None else None
+                ),
             )
         )
     return tuple(items)

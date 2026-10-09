@@ -13,11 +13,13 @@ from nexus.providers.market.fosun import (
     FosunMarketDataProvider,
     FosunSnapshotProvider,
     decode_fosun_snapshot_evidence,
+    encode_fosun_snapshot_evidence,
 )
 from nexus.providers.market.fosun_gateway import (
     FosunMarketGatewayClient,
     FosunMarketGatewayIdentity,
     FosunSecurityClassification,
+    RawGatewayResponse,
     classify_fosun_security_family,
     parse_quote_page,
 )
@@ -80,28 +82,37 @@ class _QuoteTransport:
     ) -> GatewayPage[QuoteItem]:
         self.calls.append((operation, payload))
         received_at = datetime.now(UTC)
-        return GatewayPage[QuoteItem](
-            items=(
-                QuoteItem(
-                    instrument_code="usAAPL",
-                    price=Decimal("227.1600"),
-                    as_of=received_at,
-                    provider_name="Apple Inc.",
-                    provider_classification={
-                        "level_1": 1,
-                        "level_2": 101,
-                        "level_3": 10105,
-                        "equity_profile_fields_complete": True,
-                        "net_asset_profile_fields_complete": False,
-                    },
-                    provider_reported_delay=True,
-                ),
-            ),
-            source_request_id="synthetic-provider-request",
-            has_more=False,
-            next_cursor=None,
-            as_of=received_at,
-            quality="PARTIAL",
+        return normalize_provider_response(
+            "fosun_get_quotes",
+            {
+                "code": 0,
+                "requestId": "synthetic-provider-request",
+                "data": [
+                    {
+                        "mkt": "us",
+                        "rawSymbol": "AAPL",
+                        "price": 2271600,
+                        "power": 4,
+                        "name": "Apple Inc.",
+                        "first": 1,
+                        "second": 101,
+                        "third": 10105,
+                        "mktCap": 1,
+                        "floatMktCap": 1,
+                        "pb": 1,
+                        "peStatic": 1,
+                        "peTTM": 1,
+                        "totalShares": 1,
+                        "floatShares": 1,
+                        "minTradeUnit": 1,
+                        "delay": True,
+                        "qtDate": 20261008,
+                        "qtTime": 160004506,
+                    }
+                ],
+            },
+            received_at=received_at,
+            context={"codes": tuple(payload["codes"])},
         )
 
 
@@ -237,6 +248,10 @@ async def test_engine_snapshot_round_trips_through_signed_gateway_without_socket
     assert batch.snapshots[0].trade is not None
     assert batch.snapshots[0].trade.price == Decimal("227.1600")
     assert batch.snapshots[0].quote is None
+    assert batch.snapshots[0].trade.quality_flags == (
+        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+        "INTRADAY_BID_ASK_UNAVAILABLE",
+    )
     assert batch.provenance.source == "fosun"
     responses = decode_fosun_snapshot_evidence(
         envelope.raw_payload,
@@ -247,7 +262,66 @@ async def test_engine_snapshot_round_trips_through_signed_gateway_without_socket
     quote_page = parse_quote_page(responses[0][1], expected_codes=("usAAPL",))
     assert quote_page.items[0].provider_name == "Apple Inc."
     assert quote_page.items[0].provider_reported_delay is True
+    assert quote_page.items[0].provider_quote_date == 20261008
+    assert quote_page.items[0].provider_quote_time == 160004506
     assert (
         classify_fosun_security_family(quote_page.items[0].provider_classification)
         == "company_equity_like"
     )
+
+
+@pytest.mark.parametrize(
+    "provider_date,provider_time", [(20261008, 160004506), (0, 0), (None, None)]
+)
+def test_quote_source_clock_survives_normalization_archive_and_engine(provider_date, provider_time):
+    received_at = datetime(2026, 10, 8, 20, tzinfo=UTC)
+    row = {"mkt": "us", "rawSymbol": "AAPL", "price": 12345, "power": 2}
+    if provider_date is not None:
+        row.update(qtDate=provider_date, qtTime=provider_time)
+    page = normalize_provider_response(
+        "fosun_get_quotes",
+        {"code": 0, "data": [row], "requestId": "synthetic-clock"},
+        received_at=received_at,
+        context={"codes": ("usAAPL",)},
+    )
+    document = page.model_dump(mode="json")
+    if provider_date is None:
+        document["items"][0].pop("provider_quote_date")
+        document["items"][0].pop("provider_quote_time")
+    response = RawGatewayResponse(
+        operation="fosun_get_quotes",
+        gateway_request_id=UUID("0198d400-3000-7000-8000-000000000012"),
+        request_body_sha256="a" * 64,
+        raw_payload=json.dumps(document).encode(),
+        sent_at=received_at,
+        received_at=received_at,
+    )
+    archive = encode_fosun_snapshot_evidence(((("usAAPL",), response),))
+    restored = decode_fosun_snapshot_evidence(archive)[0][1]
+    parsed = parse_quote_page(restored, expected_codes=("usAAPL",))
+    assert parsed.items[0].provider_quote_date == provider_date
+    assert parsed.items[0].provider_quote_time == provider_time
+    assert parsed.items[0].as_of == received_at
+    assert parsed.quality == "PARTIAL"
+    assert restored.raw_payload == response.raw_payload
+
+
+@pytest.mark.parametrize("field", ["qtDate", "qtTime"])
+@pytest.mark.parametrize("value", [True, "20261008", 1.5, -1, 2**63])
+def test_quote_source_clock_rejects_malformed_present_values(field, value):
+    from nexus_fosun_gateway.domain import GatewayError
+
+    with pytest.raises(GatewayError) as error:
+        normalize_provider_response(
+            "fosun_get_quotes",
+            {
+                "code": 0,
+                "data": [
+                    {"mkt": "us", "rawSymbol": "AAPL", "price": 12345, "power": 2, field: value}
+                ],
+                "requestId": "synthetic-clock",
+            },
+            received_at=datetime(2026, 10, 8, 20, tzinfo=UTC),
+            context={"codes": ("usAAPL",)},
+        )
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
