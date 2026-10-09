@@ -313,6 +313,7 @@ async def claim_next_job(
     locked_job_guard: LockedJobGuard | None = None,
     research_budget_profile: str | None = None,
     candidate_synthesis_profile: bool = False,
+    formal_synthesis_profile: bool = False,
 ) -> ClaimedJob | None:
     """Claim the highest-priority ready Job without blocking another worker."""
     now = _utc(now, field="now")
@@ -339,6 +340,21 @@ async def claim_next_job(
         )
     ):
         raise ValueError("CANDIDATE_SYNTHESIS_PROFILE_REQUIRES_LOCKED_SCOPE")
+    if type(formal_synthesis_profile) is not bool or (
+        formal_synthesis_profile
+        and (
+            candidate_synthesis_profile is not False
+            or research_budget_profile is not None
+            or locked_job_guard is None
+            or job_ids is None
+            or len(job_ids) != 1
+            or tuple(job_types or ()) != (JobType.AGENT_PORTFOLIO_SYNTHESIS.value,)
+            or queue is not QueueName.GENERAL
+            or type(lease_seconds) is not int
+            or lease_seconds != 120
+        )
+    ):
+        raise ValueError("FORMAL_SYNTHESIS_PROFILE_REQUIRES_LOCKED_SCOPE")
     if research_budget_profile is not None and (
         research_budget_profile
         not in {CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION}
@@ -374,7 +390,9 @@ async def claim_next_job(
         Job.attempt_count < Job.max_attempts + Job.manual_retry_count,
         ~nonterminal_dependency,
     ]
-    if research_budget_profile is None and not candidate_synthesis_profile:
+    if research_budget_profile is None and not (
+        candidate_synthesis_profile or formal_synthesis_profile
+    ):
         conditions.append(_not_candidate_agent_job())
     if job_types is not None:
         conditions.append(Job.job_type.in_(tuple(job_types)))
@@ -404,7 +422,7 @@ async def claim_next_job(
         or job.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
     ):
         return None
-    if candidate_synthesis_profile and (
+    if (candidate_synthesis_profile or formal_synthesis_profile) and (
         job.job_type != JobType.AGENT_PORTFOLIO_SYNTHESIS.value
         or job.schema_version != "portfolio_synthesis_job_v1"
         or job.max_attempts != 1

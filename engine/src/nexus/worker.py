@@ -110,6 +110,7 @@ async def run_portfolio_synthesis_worker_once(
     *,
     job_ids: tuple[UUID, ...] = (),
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> bool:
     """Explicit one-shot synthesis using frozen Codex authority and no retry."""
     from nexus.agents.portfolio_synthesis_worker import (
@@ -117,6 +118,23 @@ async def run_portfolio_synthesis_worker_once(
         run_synthesis_job_once,
     )
 
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity
+        and (
+            candidate_stage_capacity is not False
+            or not isinstance(job_ids, tuple)
+            or len(job_ids) != 1
+            or not isinstance(job_ids[0], UUID)
+            or settings.database_url is None
+            or _require_worker_runtime(settings) is not AgentRuntimeMode.CODEX_SDK
+            or make_url(settings.database_url).host not in {"127.0.0.1", "localhost", "::1"}
+            or bool(
+                set(make_url(settings.database_url).query)
+                & {"host", "hostaddr", "port", "dsn", "database", "dbname"}
+            )
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
     if (
         type(candidate_stage_capacity) is not bool
         or candidate_stage_capacity
@@ -133,15 +151,23 @@ async def run_portfolio_synthesis_worker_once(
             await require_candidate_database(
                 session, configured_database=make_url(cast(str, settings.database_url)).database
             )
+    if formal_stage_capacity:
+        async with factory() as session:
+            actual = await session.scalar(select(func.current_database()))
+            if actual != make_url(cast(str, settings.database_url)).database:
+                raise ValueError("CODEX_FORMAL_WORKER_DATABASE_INVALID")
     return await run_synthesis_job_once(
         factory,
-        transport=CodexSynthesisTransport(candidate_stage_capacity=True)
+        transport=CodexSynthesisTransport(formal_stage_capacity=True)
+        if formal_stage_capacity
+        else CodexSynthesisTransport(candidate_stage_capacity=True)
         if candidate_stage_capacity
         else CodexSynthesisTransport(),
         worker_id=f"portfolio-synthesis-{new_uuid7()}",
         clock=lambda: datetime.now(UTC),
         job_ids=job_ids,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
 
 

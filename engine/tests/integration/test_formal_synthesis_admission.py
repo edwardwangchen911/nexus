@@ -261,5 +261,110 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
         async with sessions() as session:
             unchanged = await session.get(Job, synthesis_job.id, populate_existing=True)
             assert unchanged.status == "queued" and unchanged.attempt_count == 0
+        from integration.test_portfolio_synthesis_persistence_pg import synthesis_intent
+        from nexus.persistence.models.agents import AgentPortfolioSynthesisOutputRecord
+        from nexus.persistence.models.runtime import JobAttempt
+
+        portfolio_intent = synthesis_intent(first.run)
+        if trade:
+            portfolio_intent = portfolio_intent.model_copy(
+                update={
+                    "choices": tuple(
+                        choice.model_copy(
+                            update={
+                                "action": "include",
+                                "role": "tactical",
+                                "rank": index,
+                            }
+                        )
+                        for index, choice in enumerate(portfolio_intent.choices, start=1)
+                    )
+                }
+            )
+        synthesis_calls = []
+
+        async def invoke_portfolio(payload, **kwargs):
+            synthesis_calls.append("portfolio")
+            return portfolio_intent.model_dump_json(), UsageSnapshot(
+                input_tokens=100, output_tokens=100, provider_calls=1
+            )
+
+        monkeypatch.setattr(
+            "nexus.agents.portfolio_synthesis_worker.invoke_codex_portfolio", invoke_portfolio
+        )
+        clock_at[0] = AT + timedelta(seconds=3)
+        await _set_test_insert_clock(sessions, clock_at[0])
+        # Fault injection is confined to a rolled-back savepoint in the owned test DB.
+        # A frozen identity mismatch must stop before lease/attempt/model I/O.
+        if count == 3 and not trade:
+            from nexus.agents.portfolio_synthesis_worker import formal_synthesis_job_qualified
+            from nexus.jobs.models import QueueName
+            from nexus.jobs.repository import claim_next_job
+            from nexus.persistence.models.runtime import JobLease
+            from sqlalchemy import text
+
+            async with sessions.begin() as session:
+                savepoint = await session.begin_nested()
+                await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER USER"))
+                await session.execute(
+                    text("UPDATE jobs SET input_hash = :hash WHERE id = :id"),
+                    {"hash": "0" * 64, "id": synthesis_job.id},
+                )
+                await session.execute(text("ALTER TABLE jobs ENABLE TRIGGER USER"))
+
+                async def guard(locked_session, job):
+                    return await formal_synthesis_job_qualified(
+                        locked_session, job, now=clock_at[0]
+                    )
+
+                assert (
+                    await claim_next_job(
+                        session,
+                        queue=QueueName.GENERAL,
+                        worker_id="formal-corruption-test",
+                        now=clock_at[0],
+                        lease_seconds=120,
+                        job_types=(JobType.AGENT_PORTFOLIO_SYNTHESIS.value,),
+                        job_ids=(synthesis_job.id,),
+                        locked_job_guard=guard,
+                        formal_synthesis_profile=True,
+                    )
+                    is None
+                )
+                for record in (JobAttempt, JobLease):
+                    assert (
+                        await session.scalar(
+                            select(func.count())
+                            .select_from(record)
+                            .where(record.job_id == synthesis_job.id)
+                        )
+                        == 0
+                    )
+                assert synthesis_calls == []
+                await savepoint.rollback()
+        assert await run_portfolio_synthesis_worker_once(
+            settings, job_ids=(synthesis_job.id,), formal_stage_capacity=True
+        )
+        assert not await run_portfolio_synthesis_worker_once(
+            settings, job_ids=(synthesis_job.id,), formal_stage_capacity=True
+        )
+        assert synthesis_calls == ["portfolio"]
+        async with sessions() as session:
+            completed = await session.get(AgentPortfolioSynthesisRunRecord, first.run_id)
+            assert completed.status == "completed"
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(AgentPortfolioSynthesisOutputRecord)
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(JobAttempt)
+                    .where(JobAttempt.job_id == synthesis_job.id)
+                )
+                == 1
+            )
     finally:
         await engine.dispose()

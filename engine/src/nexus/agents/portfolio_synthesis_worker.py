@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.agents.codex_candidate import candidate_model_matches, require_candidate_consumer_profile
+from nexus.agents.codex_formal_stage import formal_stage_model_matches
 from nexus.agents.codex_input_view import project_portfolio_payload
 from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
@@ -54,6 +55,7 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job
 
 
@@ -66,12 +68,21 @@ class SynthesisTransport(Protocol):
 class CodexSynthesisTransport:
     """The registered actionable SDK model, with the existing isolated one-turn adapter."""
 
-    def __init__(self, *, candidate_stage_capacity: bool = False) -> None:
+    def __init__(
+        self, *, candidate_stage_capacity: bool = False, formal_stage_capacity: bool = False
+    ) -> None:
         if type(candidate_stage_capacity) is not bool:
             raise ValueError("CODEX_CANDIDATE_ISOLATION_REQUIRED")
+        if type(formal_stage_capacity) is not bool or (
+            formal_stage_capacity and candidate_stage_capacity is not False
+        ):
+            raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
+        self._formal_stage_capacity = formal_stage_capacity
         self._candidate_stage_capacity = candidate_stage_capacity
 
     def supports(self, model: AgentModelConfigRecord) -> bool:
+        if self._formal_stage_capacity:
+            return formal_stage_model_matches(model)
         if self._candidate_stage_capacity:
             return candidate_model_matches(model)
         return (
@@ -197,6 +208,136 @@ async def candidate_synthesis_job_qualified(
     return True
 
 
+async def formal_synthesis_job_qualified(
+    session: AsyncSession, job: Job, *, now: datetime, claimed: bool = False
+) -> bool:
+    """Verify frozen formal synthesis authority under the selected Job lock."""
+    if (
+        type(claimed) is not bool
+        or job.job_type != JobType.AGENT_PORTFOLIO_SYNTHESIS.value
+        or job.queue != QueueName.GENERAL.value
+        or job.schema_version != "portfolio_synthesis_job_v1"
+        or job.priority != JOB_PRIORITIES[JobType.AGENT_PORTFOLIO_SYNTHESIS]
+        or job.retry_policy != "never"
+        or job.max_attempts != 1
+        or job.manual_retry_count != 0
+        or job.status != ("running" if claimed else "queued")
+        or job.attempt_count != (1 if claimed else 0)
+        or set(job.payload) != {"run_id"}
+        or type(job.payload.get("run_id")) is not str
+    ):
+        return False
+    try:
+        run_id = UUID(str(job.payload["run_id"]))
+    except (ValueError, TypeError):
+        return False
+    run = await session.scalar(
+        select(AgentPortfolioSynthesisRunRecord)
+        .where(AgentPortfolioSynthesisRunRecord.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if run is None or run.status != "prepared":
+        return False
+    model = await session.scalar(
+        select(AgentModelConfigRecord)
+        .where(AgentModelConfigRecord.id == run.model_config_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        model is None
+        or not formal_stage_model_matches(model)
+        or run.model_hash != model.config_hash
+        or run.pricing_version != model.version
+        or model.pricing_available_at > now
+        or model.pricing_expires_at <= now
+    ):
+        return False
+    bound_jobs = tuple(
+        await session.scalars(
+            select(Job.id).where(
+                Job.job_type == JobType.AGENT_PORTFOLIO_SYNTHESIS.value,
+                Job.payload["run_id"].as_string() == str(run.id),
+            )
+        )
+    )
+    if bound_jobs != (job.id,):
+        return False
+    try:
+        frozen = _frozen_run(run)
+        from nexus.paper.agent_cycle import _require_cycle_candidate_profile
+
+        cycle = await session.get(AgentPaperCycleRecord, frozen.cycle_id, populate_existing=True)
+        if (
+            cycle is None
+            or frozen.account_id != cycle.account_id
+            or frozen.portfolio_id != cycle.portfolio_id
+            or frozen.candidate_batch_id != cycle.candidate_batch_id
+            or frozen.decision_time != cycle.decision_time
+            or model.created_at > frozen.admitted_at
+        ):
+            return False
+        model_id = await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=False,
+            formal_stage_capacity=True,
+            now=now,
+        )
+        if model_id != model.id:
+            return False
+        if (
+            job.input_hash != run.input_hash
+            or job.scope_kind != "portfolio"
+            or job.scope_id != str(frozen.portfolio_id)
+            or job.effective_at != frozen.decision_time
+            or now >= frozen.expires_at
+        ):
+            return False
+        for source in frozen.security_outputs:
+            output = await session.get(
+                AgentResearchOutputRecord, source.research_output_id, populate_existing=True
+            )
+            research = (
+                None
+                if output is None
+                else await session.get(
+                    AgentResearchRunRecord, output.run_id, populate_existing=True
+                )
+            )
+            if (
+                output is None
+                or research is None
+                or output.content_hash != source.content_hash
+                or research.model_config_id != model.id
+                or research.model_hash != model.config_hash
+                or research.pricing_version != model.version
+                or research.actor_id != "local-agent-paper-cycle"
+                or research.instrument_id != source.instrument_id
+                or research.decision_time != frozen.decision_time
+                or research.idempotency_key
+                != f"agent-paper:{frozen.cycle_id}:{source.instrument_id}"
+            ):
+                return False
+            action = await load_actionable_research_output(
+                session,
+                run_id=research.id,
+                decision_time=now,
+                allow_safe_no_trade=True,
+                formal_stage_capacity=True,
+            )
+            if (
+                action.output_id != source.research_output_id
+                or action.intent_hash != source.intent_hash
+                or action.evidence_ref_ids != source.evidence_ref_ids
+            ):
+                return False
+    except ValueError:
+        return False
+    return True
+
+
 async def read_synthesis_job(session: AsyncSession, *, cycle_id: UUID) -> Job | None:
     """Resolve only the unique run belonging to this cycle, never the latest Job."""
     run = await session.scalar(
@@ -266,25 +407,40 @@ async def run_synthesis_job_once(
     clock: Callable[[], datetime],
     job_ids: tuple[UUID, ...] = (),
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> bool:
     """Dispatch only explicitly selected Jobs; persist running before any model I/O."""
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity
+        and (
+            candidate_stage_capacity is not False
+            or not isinstance(job_ids, tuple)
+            or len(job_ids) != 1
+            or not isinstance(job_ids[0], UUID)
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
     if (
         type(candidate_stage_capacity) is not bool
         or candidate_stage_capacity
         and (len(job_ids) != 1 or not isinstance(job_ids[0], UUID))
     ):
         raise ValueError("CODEX_CANDIDATE_WORKER_ARGUMENT_INVALID")
+    capacity_profile = candidate_stage_capacity or formal_stage_capacity
     if not job_ids:
         return False
 
     async def candidate_guard(session: AsyncSession, job: Job) -> bool:
         return await candidate_synthesis_job_qualified(session, job, now=clock())
 
+    async def formal_guard(session: AsyncSession, job: Job) -> bool:
+        return await formal_synthesis_job_qualified(session, job, now=clock())
+
     async with factory.begin() as session:
         await require_candidate_consumer_profile(
             session, candidate_stage_capacity=candidate_stage_capacity
         )
-        scope_conditions = [] if candidate_stage_capacity else [_not_candidate_agent_job()]
+        scope_conditions = [] if capacity_profile else [_not_candidate_agent_job()]
         job_ids = tuple(
             await session.scalars(
                 select(Job.id).where(
@@ -296,7 +452,7 @@ async def run_synthesis_job_once(
         )
         if not job_ids:
             return False
-        if not candidate_stage_capacity:
+        if not capacity_profile:
             await reclaim_expired_jobs(
                 session, queue=QueueName.GENERAL, now=clock(), job_ids=job_ids
             )
@@ -309,8 +465,15 @@ async def run_synthesis_job_once(
             lease_seconds=120,
             job_types=(JobType.AGENT_PORTFOLIO_SYNTHESIS.value,),
             job_ids=job_ids,
-            locked_job_guard=candidate_guard if candidate_stage_capacity else None,
+            locked_job_guard=(
+                formal_guard
+                if formal_stage_capacity
+                else candidate_guard
+                if candidate_stage_capacity
+                else None
+            ),
             candidate_synthesis_profile=candidate_stage_capacity,
+            formal_synthesis_profile=formal_stage_capacity,
         )
     if claim is None:
         return False
@@ -329,11 +492,16 @@ async def run_synthesis_job_once(
 
     async def start(session: AsyncSession) -> None:
         nonlocal payload, input_hash, limits, expires_at
-        if candidate_stage_capacity:
+        if capacity_profile:
             selected_job = await session.get(
                 Job, claim.job_id, with_for_update=True, populate_existing=True
             )
-            if selected_job is None or not await candidate_synthesis_job_qualified(
+            qualifier = (
+                formal_synthesis_job_qualified
+                if formal_stage_capacity
+                else candidate_synthesis_job_qualified
+            )
+            if selected_job is None or not await qualifier(
                 session, selected_job, now=clock(), claimed=True
             ):
                 raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_INVALID")
