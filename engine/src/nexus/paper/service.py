@@ -16,6 +16,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.paper.agent_decision import AgentPaperDecision
@@ -98,6 +99,7 @@ def meets_portfolio_minimum_notional(candidate: OrderCandidate) -> bool:
         candidate.desired_quantity * candidate.reference_close
         >= PORTFOLIO_ALLOCATION_V1.minimum_notional_usd
     )
+
 
 _ROUTE = "paper.order_batch.create"
 _ACTOR = "system:task18"
@@ -534,7 +536,11 @@ async def load_paper_order_batch_result(
     *,
     account_id: UUID,
     strategy_decision_id: UUID,
+    candidate_stage_capacity: bool = False,
 ) -> PaperOrderBatchResult | None:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     batch = await session.scalar(
         select(PaperOrderBatchRecord).where(
             PaperOrderBatchRecord.account_id == account_id,
@@ -572,6 +578,7 @@ async def load_paper_order_batch_result(
                 session,
                 account_id=account_id,
                 decision_id=strategy_decision_id,
+                candidate_stage_capacity=candidate_stage_capacity,
             )
             if proposal is None:
                 raise ValueError("portfolio proposal is missing")
@@ -1321,6 +1328,7 @@ async def _create_target_aware_paper_order_batch(
     request_time: datetime,
     target_version_id: UUID,
     hooks: PaperBatchHooks | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> PaperOrderBatchResult | None:
     """Private activation-only target batch entrypoint; caller owns the transaction."""
     return await _create_paper_order_batch_impl(
@@ -1332,6 +1340,7 @@ async def _create_target_aware_paper_order_batch(
         target_version_id=target_version_id,
         portfolio_activation=True,
         hooks=hooks,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
 
 
@@ -1345,8 +1354,14 @@ async def _create_paper_order_batch_impl(
     target_version_id: UUID | None,
     portfolio_activation: bool,
     hooks: PaperBatchHooks | None,
+    candidate_stage_capacity: bool = False,
 ) -> PaperOrderBatchResult | None:
     """Shared deterministic batch implementation behind the two permission boundaries."""
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
+    if candidate_stage_capacity and (not portfolio_activation or target_version_id is None):
+        raise ValueError("CODEX_CANDIDATE_ISOLATION_REQUIRED")
     if not idempotency_key or len(idempotency_key) > 255:
         raise PaperBatchError("IDEMPOTENCY_CONFLICT")
     request_hash = canonical_paper_batch_request_hash(
@@ -1364,6 +1379,7 @@ async def _create_paper_order_batch_impl(
         session,
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     if existing is not None:
         existing_target = await session.scalar(
@@ -1409,7 +1425,10 @@ async def _create_paper_order_batch_impl(
             if target_version_id is None:
                 raise ValueError("portfolio batch requires target")
             proposal = await load_portfolio_proposal(
-                session, account_id=account_id, decision_id=strategy_decision_id
+                session,
+                account_id=account_id,
+                decision_id=strategy_decision_id,
+                candidate_stage_capacity=candidate_stage_capacity,
             )
             if proposal is None:
                 raise ValueError("portfolio proposal missing")

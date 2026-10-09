@@ -106,9 +106,7 @@ async def test_target_batch_drops_subminimum_remainder_before_writing(
 
         async def remainder_coverage(*_args, **_kwargs):
             return {
-                (instrument_id, side): target_service.RiskRemainderCoverage(
-                    quantity=Decimal("1")
-                )
+                (instrument_id, side): target_service.RiskRemainderCoverage(quantity=Decimal("1"))
             }
 
         async def market_snapshot(*_args, required_instrument_ids, **_kwargs):
@@ -270,7 +268,8 @@ async def test_fresh_same_hash_decision_reuses_target_and_replay_never_creates_p
                 proposal=first_proposal.proposal.model_copy(update={"baseline": baseline}),
             )
 
-        async def load_fresh(session, *, account_id, decision_id):
+        async def load_fresh(session, *, account_id, decision_id, candidate_stage_capacity=False):
+            assert candidate_stage_capacity is False
             assert account_id == fresh.account_id
             return fresh if decision_id == fresh.decision_id else first_proposal
 
@@ -386,9 +385,7 @@ async def test_same_target_raw_drift_delegates_remainder_to_private_batch(
             calls.append(_kwargs)
             return SimpleNamespace(batch_id=uuid4()) if expects_plan else None
 
-        monkeypatch.setattr(
-            "nexus.paper.agent_decision_store.load_portfolio_proposal", load_fresh
-        )
+        monkeypatch.setattr("nexus.paper.agent_decision_store.load_portfolio_proposal", load_fresh)
         monkeypatch.setattr(target_service, "load_paper_projection", load_projection)
         monkeypatch.setattr(service, "_create_target_aware_paper_order_batch", create_batch)
         async with sessions.begin() as session:
@@ -427,10 +424,7 @@ async def test_expired_proposal_does_not_activate(migrated_database_url):
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_nonempty_first_target_creates_one_target_aware_plan(
-    migrated_database_url, monkeypatch
-):
+async def tradeable_proposal_source(migrated_database_url, monkeypatch):
     import integration.test_portfolio_synthesis_persistence_pg as seed_module
 
     original_intent = seed_module._safe_no_trade_intent
@@ -471,9 +465,16 @@ async def test_nonempty_first_target_creates_one_target_aware_plan(
     from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesis
 
     seeded = await _seed_normal_synthesis(migrated_database_url, monkeypatch)
-    engine, sessions, args = await proposal_source(
+    return await proposal_source(
         migrated_database_url, seeded=seeded, intent_factory=_include_first
     )
+
+
+@pytest.mark.asyncio
+async def test_nonempty_first_target_creates_one_target_aware_plan(
+    migrated_database_url, monkeypatch
+):
+    engine, sessions, args = await tradeable_proposal_source(migrated_database_url, monkeypatch)
     try:
         async with sessions.begin() as session:
             proposal = await persist_portfolio_proposal(session, **args)
@@ -836,6 +837,7 @@ async def test_blocked_candidate_cycle_never_activates_same_proposal_after_relea
                 "TARGET_ACTIVATION_PENDING",
                 {"strategy_decision_id": str(proposal.decision_id)},
             )
+
         async def block_with_exact_plan(*args, **kwargs):
             raise TargetActivationBlockedError(blocking_plan_id=blocking_plan_id)
 
@@ -980,8 +982,8 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
         assert result.status == "completed"
         return JobHandlerResult(outcome="succeeded", result_code="AGENT_COMPLETED")
 
-    engine, sessions, args, first_proposal, first_activation = (
-        await _seed_target_associated_plan(migrated_database_url, monkeypatch)
+    engine, sessions, args, first_proposal, first_activation = await _seed_target_associated_plan(
+        migrated_database_url, monkeypatch
     )
     assert first_activation.batch_id is not None
 
@@ -1167,9 +1169,7 @@ async def test_real_occupied_plan_blocks_new_cycle_and_history_keeps_exact_plan(
         assert blocked_data["active_target"]["target_version_id"] == str(
             first_activation.target_version_id
         )
-        assert blocked_data["proposal"]["strategy_decision_id"] != str(
-            first_proposal.decision_id
-        )
+        assert blocked_data["proposal"]["strategy_decision_id"] != str(first_proposal.decision_id)
         assert blocked_data["activation_result"]["result_code"] == "TARGET_ACTIVATION_BLOCKED"
         assert blocked_data["plan_summary"] is None
 

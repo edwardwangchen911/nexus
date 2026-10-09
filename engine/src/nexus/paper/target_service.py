@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.agents.portfolio_synthesis_contracts import canonical_portfolio_synthesis_hash
 from nexus.audit.canonical import Hash64
 from nexus.domain.ids import new_uuid7
@@ -124,10 +125,7 @@ async def load_risk_remainder_coverage(
         if remainder > 0:
             key = (order.instrument_id, order.side)
             quantities[key] = quantities.get(key, Decimal(0)) + remainder
-    return {
-        key: RiskRemainderCoverage(quantity=quantity)
-        for key, quantity in quantities.items()
-    }
+    return {key: RiskRemainderCoverage(quantity=quantity) for key, quantity in quantities.items()}
 
 
 def canonical_target_activation_hash(
@@ -374,9 +372,7 @@ async def approve_initial_target_projection(
         raise ValueError("INITIAL_APPROVAL_ACCOUNT_OR_TIME_INVALID")
     projection = await load_paper_projection(session, account_id=account_id, as_of=projection_as_of)
     current = await load_paper_projection(session, account_id=account_id, as_of=approved_at)
-    await require_no_unknown_cancel_requests(
-        session, account_id=account_id, as_of=projection_as_of
-    )
+    await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=projection_as_of)
     await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=approved_at)
     require_unoccupied_projection(projection)
     require_unoccupied_projection(current)
@@ -436,15 +432,28 @@ async def activate_portfolio_target(
     strategy_decision_id: UUID,
     request_time: datetime,
     idempotency_key: str,
+    candidate_stage_capacity: bool = False,
 ) -> TargetActivationResult:
     """Activate one immutable proposal, leaving execution locked and fail closed."""
     from nexus.paper.agent_decision_store import load_portfolio_proposal
     from nexus.paper.portfolio_proposal import canonical_portfolio_target_content_hash
 
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     request_time = require_utc(request_time)
     if not 1 <= len(idempotency_key) <= 255:
         raise ValueError("TARGET_ACTIVATION_IDEMPOTENCY_INVALID")
     await lock_portfolio_account(session, account_id)
+    persisted = await load_portfolio_proposal(
+        session,
+        account_id=account_id,
+        decision_id=strategy_decision_id,
+        candidate_stage_capacity=candidate_stage_capacity,
+    )
+    if persisted is None:
+        raise ValueError("PORTFOLIO_PROPOSAL_NOT_FOUND")
+
     request_hash = canonical_portfolio_synthesis_hash(
         {
             "schema_version": "paper_target_activation_request_v1",
@@ -534,11 +543,6 @@ async def activate_portfolio_target(
         await session.flush()
         return historical
 
-    persisted = await load_portfolio_proposal(
-        session, account_id=account_id, decision_id=strategy_decision_id
-    )
-    if persisted is None:
-        raise ValueError("PORTFOLIO_PROPOSAL_NOT_FOUND")
     proposal = persisted.proposal
     if request_time >= proposal.expires_at:
         raise ValueError("PORTFOLIO_PROPOSAL_EXPIRED")
@@ -626,6 +630,7 @@ async def activate_portfolio_target(
             target_version_id=target.id,
             idempotency_key=idempotency_key,
             request_time=request_time,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
         batch_id = None if batch is None else batch.batch_id
     result = TargetActivationResult(

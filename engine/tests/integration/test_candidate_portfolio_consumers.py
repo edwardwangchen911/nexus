@@ -245,3 +245,175 @@ async def test_candidate_synthesis_actual_database_rejected_before_reads(
             )
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [False, True])
+async def test_candidate_activation_revalidates_before_new_target_or_cached_return(
+    migrated_database_url, cached
+):
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.agents.actionable_research import ActionableResearchError
+    from nexus.paper.target_service import activate_portfolio_target
+    from nexus.persistence.models.paper import PaperOrderRecord, PaperTargetVersionRecord
+    from nexus.persistence.models.runtime import IdempotencyRecord
+    from sqlalchemy import func, select
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            proposal = await persist_portfolio_proposal(session, **args)
+            activation = dict(
+                account_id=proposal.account_id,
+                strategy_decision_id=proposal.decision_id,
+                request_time=args["now"],
+                idempotency_key="candidate-activation",
+            )
+            if cached:
+                await activate_portfolio_target(session, **activation)
+            before = tuple(
+                [
+                    await session.scalar(select(func.count()).select_from(table))
+                    for table in (PaperTargetVersionRecord, PaperOrderRecord, IdempotencyRecord)
+                ]
+            )
+            with pytest.raises(ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"):
+                await activate_portfolio_target(
+                    session, **activation, candidate_stage_capacity=True
+                )
+            assert (
+                tuple(
+                    [
+                        await session.scalar(select(func.count()).select_from(table))
+                        for table in (PaperTargetVersionRecord, PaperOrderRecord, IdempotencyRecord)
+                    ]
+                )
+                == before
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["activation", "batch", "read"])
+async def test_candidate_activation_batch_refuses_nonisolated_database(
+    temporary_database_factory, entry
+):
+    from nexus.paper.service import (
+        _create_target_aware_paper_order_batch,
+        load_paper_order_batch_result,
+    )
+    from nexus.paper.target_service import activate_portfolio_target
+
+    factory = session_factory(
+        EngineSettings(
+            database_url=temporary_database_factory.admin_url.render_as_string(hide_password=False)
+        )
+    )
+    try:
+        async with factory() as session:
+            args = dict(
+                account_id=uuid4(), strategy_decision_id=uuid4(), candidate_stage_capacity=True
+            )
+            with pytest.raises(ValueError, match="CODEX_CANDIDATE_ISOLATION_REQUIRED"):
+                if entry == "read":
+                    await load_paper_order_batch_result(session, **args)
+                elif entry == "activation":
+                    await activate_portfolio_target(
+                        session, **args, request_time=NOW, idempotency_key="isolated"
+                    )
+                else:
+                    await _create_target_aware_paper_order_batch(
+                        session,
+                        **args,
+                        target_version_id=uuid4(),
+                        request_time=NOW,
+                        idempotency_key="isolated",
+                    )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_batch", [False, True])
+async def test_candidate_target_batch_mode_cannot_relabel_formal_proposal(
+    migrated_database_url, existing_batch, monkeypatch
+):
+    from integration.test_paper_target_activation_pg import tradeable_proposal_source
+    from integration.test_portfolio_proposal_pg import proposal_source
+    from nexus.paper.service import (
+        PaperBatchError,
+        _create_target_aware_paper_order_batch,
+        load_paper_order_batch_result,
+    )
+    from nexus.paper.target_service import activate_portfolio_target
+    from nexus.persistence.models.paper import (
+        PaperOrderBatchRecord,
+        PaperOrderRecord,
+        PaperTargetVersionRecord,
+    )
+    from nexus.persistence.models.runtime import IdempotencyRecord
+    from sqlalchemy import func, select
+
+    engine, sessions, args = (
+        await tradeable_proposal_source(migrated_database_url, monkeypatch)
+        if existing_batch
+        else await proposal_source(migrated_database_url)
+    )
+    try:
+        async with sessions.begin() as session:
+            proposal = await persist_portfolio_proposal(session, **args)
+            target = await activate_portfolio_target(
+                session,
+                account_id=proposal.account_id,
+                strategy_decision_id=proposal.decision_id,
+                request_time=args["now"],
+                idempotency_key="formal-target",
+            )
+            assert (target.batch_id is not None) is existing_batch
+            tables = (
+                PaperTargetVersionRecord,
+                PaperOrderBatchRecord,
+                PaperOrderRecord,
+                IdempotencyRecord,
+            )
+            before = tuple(
+                [await session.scalar(select(func.count()).select_from(table)) for table in tables]
+            )
+            with pytest.raises(
+                PaperBatchError, match="PAPER_BATCH_CONFLICT|STRATEGY_DECISION_INVALID"
+            ):
+                await _create_target_aware_paper_order_batch(
+                    session,
+                    account_id=proposal.account_id,
+                    strategy_decision_id=proposal.decision_id,
+                    target_version_id=target.target_version_id,
+                    request_time=args["now"],
+                    idempotency_key="candidate-plan",
+                    candidate_stage_capacity=True,
+                )
+            if existing_batch:
+                with pytest.raises(PaperBatchError, match="PAPER_BATCH_CONFLICT"):
+                    await load_paper_order_batch_result(
+                        session,
+                        account_id=proposal.account_id,
+                        strategy_decision_id=proposal.decision_id,
+                        candidate_stage_capacity=True,
+                    )
+                read = await load_paper_order_batch_result(
+                    session,
+                    account_id=proposal.account_id,
+                    strategy_decision_id=proposal.decision_id,
+                )
+                assert read.batch_id == target.batch_id
+            assert (
+                tuple(
+                    [
+                        await session.scalar(select(func.count()).select_from(table))
+                        for table in tables
+                    ]
+                )
+                == before
+            )
+    finally:
+        await engine.dispose()
