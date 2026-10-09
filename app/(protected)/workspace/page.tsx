@@ -3,6 +3,7 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { CurrentCash } from "../../components/workbench/current-cash";
 import { AccountSummary } from "../../components/workbench/account-summary";
 import { ManagementSummaryCard } from "../../components/paper/management-summary";
 import { AttentionList } from "../../components/workbench/attention-list";
@@ -116,6 +117,7 @@ export function WorkbenchPanel({
           <AttentionList items={payload.data.attention} />
         </div>
         <OrderSummary orders={payload.data.active_orders} latestCycle={payload.data.latest_cycle} />
+        <CurrentCash readVersion={payload} />
         <AccountSummary account={payload.data.account} />
       </> : <DataState state={state} title={copy.title} detail={copy.detail} announce={false} />}
     </section>

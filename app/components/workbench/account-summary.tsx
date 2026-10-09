@@ -14,9 +14,10 @@ export function AccountSummary({ account }: { account: Account | null }): React.
   return (
     <section className="workbench-panel workbench-account" aria-label="账户概况（内部模拟）">
       <header className="workbench-panel__heading">
-        <div><p className="eyebrow">INTERNAL PAPER ACCOUNT</p><h2>账户概况（内部模拟）</h2></div>
+        <div><p className="eyebrow">INTERNAL PAPER ACCOUNT</p><h2>绩效快照概况（内部模拟）</h2></div>
         <WalletCards aria-hidden="true" size={22} />
       </header>
+      <p>净值、现金与盈亏来自同一份已发布绩效快照，当前账本现金另列展示。</p>
       {account ? <>
         <dl>
           <div className="workbench-account__primary"><dt>净值</dt><dd className="numeric-data">{money(account.nav, account.currency)}</dd></div>

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
+import { formatDisplayDecimal } from "../../app/lib/display-decimal";
 import type { components } from "../../app/lib/generated/schema";
 
 type OrderPage = components["schemas"]["PaperOrderPageResponse"];
@@ -58,6 +59,11 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   await expect(page.getByRole("region", { name: "最新决策" }).getByText("本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByText("本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByRole("link", { name: "查看全部订单" })).toHaveAttribute("href", "/paper");
+  const cash = page.getByRole("region", { name: "当前账本现金（内部模拟）" });
+  await expect(cash.getByText(`USD ${formatDisplayDecimal(actual.available_cash!, { group: true })}`, { exact: true })).toBeVisible();
+  await expect(cash.getByText(`USD ${formatDisplayDecimal(actual.reserved_cash!, { group: true })}`, { exact: true })).toBeVisible();
+  await expect(cash).toContainText("读取时点");
+  await expect(cash.getByRole("link", { name: "查看当前账本与持仓" })).toHaveAttribute("href", "/paper#paper-current-actual");
   await capture("workspace");
 
   await page.goto("/decisions");
