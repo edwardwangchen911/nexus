@@ -97,5 +97,15 @@ Paper 输入负载，不能当作正式上下文、报价或执行权威。
 切换回默认路径绕过版本门。提案的缓存、绑定和递归已有目标基线沿用同一参数。
 默认正式消费者仍使用 `False`，不开放 API 请求参数或新增正式版本。
 
-组合周期、综合 Worker 和目标激活尚需统一传递该隔离合同；以上消费者接线及拒绝/
-兼容回归不是候选 3/5 股票成功整链、实际成交或自然周期验收。
+综合 Worker 的内部正常入口
+`run_portfolio_synthesis_worker_once(settings, job_ids=(EXACT_JOB_UUID,), candidate_stage_capacity=True)`
+先核对实际隔离库与配置数据库一致；直接 dispatch 入口同样要求实际隔离库、严格布尔
+参数和精确一个 UUID。候选 transport 只接受规范候选模型。领取在精确 Job 锁内重新
+核对唯一 Job、冻结 synthesis Run/model/当前定价及各只候选研究原 reader 的内容与证据；
+checkpoint 在模型调用前再次复验。沿用综合单次调用与120秒 lease，不复用研究的
+210秒 lease。候选综合不自动回收或 orphan reconcile；通用 claim/reclaim/reconcile
+均排除由候选版本绑定的综合 Job。已终态不创建第二次调用。
+
+组合周期和目标激活尚需统一传递该隔离合同，日期一致的候选3/5股票fixture仍待建立；
+以上消费者/Worker接线及拒绝/旧正式路径兼容回归不是候选成功整链、实际成交或自然
+周期验收。

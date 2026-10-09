@@ -103,3 +103,78 @@ def test_synthesis_worker_exposes_explicit_once_entrypoint():
     from nexus.worker import run_portfolio_synthesis_worker_once
 
     assert callable(run_portfolio_synthesis_worker_once)
+
+
+def test_candidate_transport_requires_explicit_exact_canonical_model():
+    from datetime import datetime
+    from decimal import Decimal
+
+    from nexus.agents.codex_candidate import candidate_config, candidate_config_hash
+    from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+    from nexus.agents.portfolio_synthesis_worker import CodexSynthesisTransport
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+
+    config = candidate_config()
+    model = AgentModelConfigRecord(
+        version=CANDIDATE_BUDGET_CONFIG_VERSION,
+        config_hash=candidate_config_hash(),
+        model_id=config["model_id"],
+        max_input_tokens=96000,
+        max_output_tokens=8192,
+        max_tool_calls=0,
+        input_usd_per_million=Decimal(0),
+        output_usd_per_million=Decimal(0),
+        pricing_available_at=datetime.fromisoformat(config["pricing_available_at"]),
+        pricing_expires_at=datetime.fromisoformat(config["pricing_expires_at"]),
+    )
+    assert not CodexSynthesisTransport().supports(model)
+    assert CodexSynthesisTransport(candidate_stage_capacity=True).supports(model)
+    model.config_hash = "0" * 64
+    assert not CodexSynthesisTransport(candidate_stage_capacity=True).supports(model)
+
+
+@pytest.mark.parametrize("flag", [1, "true", None])
+def test_candidate_transport_profile_is_strict_boolean(flag):
+    from nexus.agents.portfolio_synthesis_worker import CodexSynthesisTransport
+
+    with pytest.raises(ValueError, match="CODEX_CANDIDATE_ISOLATION_REQUIRED"):
+        CodexSynthesisTransport(candidate_stage_capacity=flag)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"candidate_synthesis_profile": "true"},
+        {"lease_seconds": 119},
+        {"job_ids": ()},
+        {"locked_job_guard": None},
+        {"job_types": ("agent.paper.research",)},
+    ],
+)
+async def test_candidate_synthesis_claim_profile_requires_exact_locked_scope(changed):
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from nexus.jobs.models import QueueName
+    from nexus.jobs.repository import claim_next_job
+
+    async def guard(session, job):
+        raise AssertionError("invalid profile reached guard")
+
+    args = dict(
+        queue=QueueName.GENERAL,
+        worker_id="profile-test",
+        now=datetime(2026, 10, 10, tzinfo=UTC),
+        lease_seconds=120,
+        job_types=("agent.portfolio_synthesis",),
+        job_ids=(uuid4(),),
+        locked_job_guard=guard,
+        candidate_synthesis_profile=True,
+    )
+    # None deliberately has no SQL methods: invalid arguments must reject before SQL.
+    with pytest.raises(
+        ValueError,
+        match="CANDIDATE_SYNTHESIS_PROFILE_REQUIRES_LOCKED_SCOPE|LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE",
+    ):
+        await claim_next_job(None, **(args | changed))

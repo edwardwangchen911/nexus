@@ -161,3 +161,87 @@ async def test_cached_synthesis_default_mode_revalidates_each_source(
                 await admit_portfolio_synthesis(session, **args)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_candidate_synthesis_worker_does_not_claim_formal_job(migrated_database_url):
+    from integration.test_portfolio_synthesis_persistence_pg import seed_synthesis
+    from nexus.agents.portfolio_synthesis_worker import read_synthesis_job, run_synthesis_job_once
+    from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
+    from sqlalchemy import func, select
+
+    engine, sessions, args = await seed_synthesis(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            await admit_portfolio_synthesis(session, **args)
+            job = await read_synthesis_job(session, cycle_id=args["cycle_id"])
+            job_id = job.id
+
+        class NeverCall:
+            def supports(self, model):
+                raise AssertionError("unqualified model reached transport")
+
+            async def invoke(self, payload):
+                raise AssertionError("unqualified model invoked transport")
+
+        assert not await run_synthesis_job_once(
+            sessions,
+            transport=NeverCall(),
+            worker_id="candidate-test",
+            clock=lambda: args["now"],
+            job_ids=(job_id,),
+            candidate_stage_capacity=True,
+        )
+        async with sessions() as session:
+            job = await session.get(Job, job_id)
+            assert job.status == "queued" and job.attempt_count == 0
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(JobAttempt).where(JobAttempt.job_id == job_id)
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(JobLease).where(JobLease.job_id == job_id)
+                )
+                == 0
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["dispatch", "composition"])
+async def test_candidate_synthesis_actual_database_rejected_before_reads(
+    temporary_database_factory, entry
+):
+    from nexus.agents.portfolio_synthesis_worker import (
+        CodexSynthesisTransport,
+        run_synthesis_job_once,
+    )
+    from nexus.worker import run_portfolio_synthesis_worker_once
+
+    settings = EngineSettings(
+        database_url=temporary_database_factory.admin_url.render_as_string(hide_password=False),
+        agent_runtime_mode="codex_sdk",
+    )
+    if entry == "composition":
+        with pytest.raises(ValueError, match="CODEX_CANDIDATE_ISOLATION_REQUIRED"):
+            await run_portfolio_synthesis_worker_once(
+                settings, job_ids=(uuid4(),), candidate_stage_capacity=True
+            )
+        return
+    factory = session_factory(settings)
+    try:
+        with pytest.raises(ValueError, match="CODEX_CANDIDATE_ISOLATION_REQUIRED"):
+            await run_synthesis_job_once(
+                factory,
+                transport=CodexSynthesisTransport(candidate_stage_capacity=True),
+                worker_id="candidate-test",
+                clock=lambda: NOW,
+                job_ids=(uuid4(),),
+                candidate_stage_capacity=True,
+            )
+    finally:
+        await factory.kw["bind"].dispose()

@@ -28,7 +28,11 @@ from nexus.jobs.models import (
     RetryPolicy,
     canonical_job_key,
 )
-from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
+    AgentPortfolioSynthesisRunRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.runtime import (
     Job,
     JobAttempt,
@@ -38,13 +42,13 @@ from nexus.persistence.models.runtime import (
 )
 
 
-def _not_candidate_research() -> ColumnElement[bool]:
+def _not_candidate_agent_job() -> ColumnElement[bool]:
     from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
 
     # Compare UUID text to JSON text; never cast an untrusted payload to UUID.
     # The frozen binding is immutable, so generic claim/recovery cannot consume
     # the candidate even when its registration is newer than the default.
-    return ~exists(
+    research = exists(
         select(1)
         .select_from(AgentResearchRunRecord)
         .join(
@@ -61,6 +65,25 @@ def _not_candidate_research() -> ColumnElement[bool]:
         )
         .correlate(Job)
     )
+
+    synthesis = exists(
+        select(1)
+        .select_from(AgentPortfolioSynthesisRunRecord)
+        .join(
+            AgentModelConfigRecord,
+            AgentModelConfigRecord.id == AgentPortfolioSynthesisRunRecord.model_config_id,
+        )
+        .where(
+            Job.job_type == JobType.AGENT_PORTFOLIO_SYNTHESIS.value,
+            cast(AgentPortfolioSynthesisRunRecord.id, String) == Job.payload["run_id"].astext,
+            or_(
+                AgentPortfolioSynthesisRunRecord.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION,
+                AgentModelConfigRecord.version == CANDIDATE_BUDGET_CONFIG_VERSION,
+            ),
+        )
+        .correlate(Job)
+    )
+    return ~(research | synthesis)
 
 
 RequiredOutcome = Literal["succeeded", "succeeded_or_skipped"]
@@ -280,6 +303,7 @@ async def claim_next_job(
     job_ids: tuple[UUID, ...] | None = None,
     locked_job_guard: LockedJobGuard | None = None,
     research_budget_profile: str | None = None,
+    candidate_synthesis_profile: bool = False,
 ) -> ClaimedJob | None:
     """Claim the highest-priority ready Job without blocking another worker."""
     now = _utc(now, field="now")
@@ -288,6 +312,21 @@ async def claim_next_job(
         raise ValueError("LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE")
     from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
 
+    if (
+        type(candidate_synthesis_profile) is not bool
+        or candidate_synthesis_profile
+        and (
+            research_budget_profile is not None
+            or locked_job_guard is None
+            or job_ids is None
+            or len(job_ids) != 1
+            or tuple(job_types or ()) != (JobType.AGENT_PORTFOLIO_SYNTHESIS.value,)
+            or queue is not QueueName.GENERAL
+            or type(lease_seconds) is not int
+            or lease_seconds != 120
+        )
+    ):
+        raise ValueError("CANDIDATE_SYNTHESIS_PROFILE_REQUIRES_LOCKED_SCOPE")
     if research_budget_profile is not None and (
         research_budget_profile != CANDIDATE_BUDGET_CONFIG_VERSION
         or locked_job_guard is None
@@ -322,8 +361,8 @@ async def claim_next_job(
         Job.attempt_count < Job.max_attempts + Job.manual_retry_count,
         ~nonterminal_dependency,
     ]
-    if research_budget_profile is None:
-        conditions.append(_not_candidate_research())
+    if research_budget_profile is None and not candidate_synthesis_profile:
+        conditions.append(_not_candidate_agent_job())
     if job_types is not None:
         conditions.append(Job.job_type.in_(tuple(job_types)))
     if job_ids is not None:
@@ -350,6 +389,15 @@ async def claim_next_job(
         or job.attempt_count != 0
         or job.manual_retry_count != 0
         or job.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
+    ):
+        return None
+    if candidate_synthesis_profile and (
+        job.job_type != JobType.AGENT_PORTFOLIO_SYNTHESIS.value
+        or job.schema_version != "portfolio_synthesis_job_v1"
+        or job.max_attempts != 1
+        or job.attempt_count != 0
+        or job.manual_retry_count != 0
+        or job.retry_policy != RetryPolicy.NEVER.value
     ):
         return None
     if locked_job_guard is not None:
@@ -706,7 +754,7 @@ async def reclaim_expired_jobs(
         Job.queue == queue.value,
         Job.status == JobStatus.RUNNING.value,
         JobLease.expires_at <= now,
-        _not_candidate_research(),
+        _not_candidate_agent_job(),
     ]
     if job_ids is not None:
         conditions.append(Job.id.in_(job_ids))

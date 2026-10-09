@@ -105,6 +105,7 @@ async def run_portfolio_synthesis_worker_once(
     settings: EngineSettings,
     *,
     job_ids: tuple[UUID, ...] = (),
+    candidate_stage_capacity: bool = False,
 ) -> bool:
     """Explicit one-shot synthesis using frozen Codex authority and no retry."""
     from nexus.agents.portfolio_synthesis_worker import (
@@ -112,14 +113,31 @@ async def run_portfolio_synthesis_worker_once(
         run_synthesis_job_once,
     )
 
+    if (
+        type(candidate_stage_capacity) is not bool
+        or candidate_stage_capacity
+        and (len(job_ids) != 1 or not isinstance(job_ids[0], UUID) or settings.database_url is None)
+    ):
+        raise ValueError("CODEX_CANDIDATE_WORKER_ARGUMENT_INVALID")
     if _require_worker_runtime(settings) is not AgentRuntimeMode.CODEX_SDK:
         raise ValueError("PORTFOLIO_SYNTHESIS_TRANSPORT_UNSUPPORTED")
+    factory = session_factory(settings)
+    if candidate_stage_capacity:
+        from nexus.agents.codex_candidate import require_candidate_database
+
+        async with factory() as session:
+            await require_candidate_database(
+                session, configured_database=make_url(cast(str, settings.database_url)).database
+            )
     return await run_synthesis_job_once(
-        session_factory(settings),
-        transport=CodexSynthesisTransport(),
+        factory,
+        transport=CodexSynthesisTransport(candidate_stage_capacity=True)
+        if candidate_stage_capacity
+        else CodexSynthesisTransport(),
         worker_id=f"portfolio-synthesis-{new_uuid7()}",
         clock=lambda: datetime.now(UTC),
         job_ids=job_ids,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
 
 
