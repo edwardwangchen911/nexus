@@ -82,3 +82,11 @@ uv run --project engine nexus-engine-research-budget-diagnostic \
 不复制账户、Paper 周期或正式上下文，严格读回后冻结新的规范候选 Run。该入口本身
 不调用模型；随后只对该新 Run 调用一次 diagnostic。`--synthetic-paper-load` 仅模拟
 Paper 输入负载，不能当作正式上下文、报价或执行权威。
+
+隔离组合验证的研究读取边界为
+`load_actionable_research_output(..., candidate_stage_capacity=True)`。该参数仅供内部显式
+资格入口使用，不是正式 API 的请求开关；默认仍拒绝候选版本。先只读核对实际隔离库、
+规范模型和冻结哈希，以及唯一成功 Paper Job/attempt，再执行原有研究内容、证据、
+行情、上下文和有效期检查。原正式版本集合不变；Job 成功不使 partial 自动成为可执行
+结论。组合周期、提案和目标激活尚需统一传递该隔离合同，不能仅凭读取器验证宣称完整
+3/5 股票组合或自然周期通过。

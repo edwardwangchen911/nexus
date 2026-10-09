@@ -34,6 +34,26 @@ _RESEARCH_TIME = datetime(2026, 9, 12, 20, tzinfo=UTC)
 _DECISION_TIME = datetime(2026, 9, 13, 13, 35, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("verified", [False, True, 1, "true"])
+def test_candidate_direction_requires_verified_identity_and_preserves_content_guards(verified):
+    from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+
+    case = _case()
+    case["run"].pricing_version = CANDIDATE_BUDGET_CONFIG_VERSION
+    if verified is True:
+        admitted = admit_actionable_research_output(**case, candidate_identity_verified=True)
+        assert admitted.stance == "buy_candidate" and admitted.sizing_action == "increase"
+        case["price_authority_status"] = FrozenPriceAuthorityStatus.INVALID
+    with pytest.raises(ActionableResearchError):
+        admit_actionable_research_output(**case, candidate_identity_verified=verified)
+
+
+def test_candidate_identity_option_does_not_admit_legacy_research():
+    case = _case("legacy_version")
+    with pytest.raises(ActionableResearchError):
+        admit_actionable_research_output(**case, candidate_identity_verified=True)
+
+
 def _canonical_hash(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
@@ -311,10 +331,12 @@ def test_actionable_v4_fails_closed(mutation: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "version", [
-        "codex-sdk-chatgpt-v4-actionable", "codex-sdk-chatgpt-v5-paper-scope",
+    "version",
+    [
+        "codex-sdk-chatgpt-v4-actionable",
+        "codex-sdk-chatgpt-v5-paper-scope",
         "codex-sdk-chatgpt-v6-stage-time-budget",
-    ]
+    ],
 )
 def test_actionable_maps_direction_without_weight_or_quantity(version: str) -> None:
     case = _case()
@@ -347,9 +369,7 @@ def test_default_actionable_admission_still_rejects_partial_watch() -> None:
 @pytest.mark.parametrize("mutation", ["increase", "failed_audit"])
 def test_paper_no_trade_admission_cannot_grant_exposure_authority(mutation: str) -> None:
     with pytest.raises(ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"):
-        admit_actionable_research_output(
-            **_partial_watch_case(mutation), allow_safe_no_trade=True
-        )
+        admit_actionable_research_output(**_partial_watch_case(mutation), allow_safe_no_trade=True)
 
 
 def test_paper_no_trade_admission_rejects_corrupt_price_authority() -> None:

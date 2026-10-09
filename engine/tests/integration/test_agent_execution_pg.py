@@ -365,6 +365,48 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 assert timing["phase_elapsed_ms"]["turn_run"] == 10
             assert all("stage_timings" not in output.payload for output in outputs)
     assert await run_agent_worker_once(settings, **worker_options) is False
+    if staged == "candidate":
+        from nexus.agents.actionable_research import ActionableResearchError
+        from nexus.agents.codex_candidate import candidate_output_qualified
+
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            assert await candidate_output_qualified(session, admission.run_id) is (not model_fails)
+            # This deliberately incomplete fixture never becomes an actionable
+            # output, even after native Job/Run/Model qualification succeeds.
+            for qualified in (False, True):
+                with pytest.raises(ActionableResearchError):
+                    await load_actionable_research_output(
+                        session,
+                        run_id=admission.run_id,
+                        decision_time=datetime.now(UTC),
+                        allow_safe_no_trade=True,
+                        candidate_stage_capacity=qualified,
+                    )
+        if not model_fails:
+            from nexus.jobs.models import JobKeyV1, QueueName, RetryPolicy
+            from nexus.jobs.repository import enqueue_job
+
+            # Even a canonical completed Run cannot hide a second Job binding.
+            async with factory() as session, session.begin():
+                await enqueue_job(
+                    session,
+                    key=JobKeyV1(
+                        job_type=JobType.AGENT_PAPER_RESEARCH,
+                        scope_kind="instrument",
+                        scope_id=str(_INSTRUMENT_ID),
+                        effective_at=_NOW,
+                        input_hash="c" * 64,
+                    ),
+                    schema_version="agent_research_job_v1",
+                    payload={"run_id": str(admission.run_id)},
+                    queue=QueueName.GENERAL,
+                    retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+                    max_attempts=1,
+                    available_at=datetime.now(UTC),
+                )
+            async with factory() as session:
+                assert not await candidate_output_qualified(session, admission.run_id)
     path = f"/internal/v1/research-runs/{admission.run_id}"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"

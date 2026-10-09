@@ -16,6 +16,41 @@ from sqlalchemy import select
 
 
 @pytest.mark.asyncio
+async def test_output_qualification_refuses_nonisolated_actual_database(temporary_database_factory):
+    from uuid import uuid4
+
+    from nexus.agents.codex_candidate import candidate_output_qualified
+    from nexus.persistence.session import session_factory
+
+    # Owned test-container admin target; rejection must precede any business table read.
+    factory = session_factory(
+        EngineSettings(
+            database_url=temporary_database_factory.admin_url.render_as_string(hide_password=False)
+        )
+    )
+    try:
+        async with factory() as session:
+            with pytest.raises(ValueError, match="CODEX_CANDIDATE_ISOLATION_REQUIRED"):
+                await candidate_output_qualified(session, uuid4())
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_prepared_candidate_is_not_completed_output_authority(migrated_database_url):
+    from nexus.agents.codex_candidate import candidate_output_qualified
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory, model_id = await prepare(settings)
+    admission = await admit(factory, model_id)
+    try:
+        async with factory() as session:
+            assert not await candidate_output_qualified(session, admission.run_id)
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 async def test_generic_scoped_worker_never_consumes_candidate(migrated_database_url):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     factory, model_id = await prepare(settings)

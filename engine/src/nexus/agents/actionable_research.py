@@ -119,10 +119,20 @@ def admit_actionable_research_output(
     price_authority_status: FrozenPriceAuthorityStatus,
     allow_safe_no_trade: bool = False,
     paper_decision_context_valid: bool = False,
+    candidate_identity_verified: bool = False,
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
     try:
-        from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
+        from nexus.agents.codex_versions import (
+            ACTIONABLE_CONFIG_VERSIONS,
+            CANDIDATE_BUDGET_CONFIG_VERSION,
+        )
+
+        if type(candidate_identity_verified) is not bool:
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        version_admitted = run.pricing_version in ACTIONABLE_CONFIG_VERSIONS or (
+            candidate_identity_verified and run.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION
+        )
 
         terminals = tuple(terminal_outputs)
         bindings = tuple(bound_evidence)
@@ -137,12 +147,9 @@ def admit_actionable_research_output(
         binding_by_identity = {_binding_identity(binding): binding for binding in bindings}
         actionable_shape = actionable_intent_shape_valid(intent)
         safe_no_trade_shape = allow_safe_no_trade and safe_no_trade_intent_shape_valid(intent)
-        price_authority_admitted = (
-            price_authority_status is FrozenPriceAuthorityStatus.VALID
-            or (
-                price_authority_status is FrozenPriceAuthorityStatus.MISSING
-                and (paper_decision_context_valid or safe_no_trade_shape)
-            )
+        price_authority_admitted = price_authority_status is FrozenPriceAuthorityStatus.VALID or (
+            price_authority_status is FrozenPriceAuthorityStatus.MISSING
+            and (paper_decision_context_valid or safe_no_trade_shape)
         )
         if (
             decision_time.tzinfo != UTC
@@ -153,7 +160,7 @@ def admit_actionable_research_output(
             or len(terminals) != 1
             or terminals[0].id != output.id
             or terminals[0].status not in _TERMINAL
-            or run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS
+            or not version_admitted
             or output.intent != intent_document
             or output.content_hash != _hash(content)
             or intent.instrument_id != run.instrument_id

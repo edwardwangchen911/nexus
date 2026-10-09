@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
 from nexus.jobs.models import JobType, QueueName, RetryPolicy, job_input_hash
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import Job, JobAttempt
 
 
 def candidate_config() -> dict[str, str | int]:
@@ -139,7 +139,11 @@ async def candidate_job_qualified(
         or job.effective_at != run.decision_time
     ):
         return False
-    expected = job_input_hash(
+    return job.input_hash == _candidate_job_hash(run)
+
+
+def _candidate_job_hash(run: AgentResearchRunRecord) -> str:
+    return job_input_hash(
         {
             "instrument_id": str(run.instrument_id),
             "data_snapshot_id": str(run.data_snapshot_id),
@@ -153,4 +157,68 @@ async def candidate_job_qualified(
             "pricing_version": run.pricing_version,
         }
     )
-    return job.input_hash == expected
+
+
+async def candidate_output_qualified(session: AsyncSession, run_id: UUID) -> bool:
+    """Read-only proof for completed isolated candidate research, never formal activation."""
+    await require_candidate_database(session)
+    run = await session.get(AgentResearchRunRecord, run_id, populate_existing=True)
+    if (
+        run is None
+        or run.status != "completed"
+        or run.retry_count != 0
+        or run.pricing_version != CANDIDATE_BUDGET_CONFIG_VERSION
+    ):
+        return False
+    model = await session.get(AgentModelConfigRecord, run.model_config_id, populate_existing=True)
+    checked_at = await session.scalar(select(func.clock_timestamp()))
+    if (
+        model is None
+        or not isinstance(checked_at, datetime)
+        or not candidate_model_matches(model)
+        or not model.pricing_available_at <= checked_at < model.pricing_expires_at
+        or run.model_hash != model.config_hash
+    ):
+        return False
+    jobs = tuple(
+        await session.scalars(
+            select(Job)
+            .where(Job.payload["run_id"].astext == str(run.id))
+            .limit(2)
+            .execution_options(populate_existing=True)
+        )
+    )
+    if len(jobs) != 1:
+        return False
+    job = jobs[0]
+    if (
+        job.job_type != JobType.AGENT_PAPER_RESEARCH.value
+        or job.queue != QueueName.GENERAL.value
+        or job.schema_version != "agent_research_job_v1"
+        or job.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
+        or job.status != "succeeded"
+        or job.max_attempts != 1
+        or job.attempt_count != 1
+        or job.manual_retry_count != 0
+        or job.payload != {"run_id": str(run.id)}
+        or job.scope_kind != "instrument"
+        or job.scope_id != str(run.instrument_id)
+        or job.effective_at != run.decision_time
+        or job.input_hash != _candidate_job_hash(run)
+    ):
+        return False
+    attempts = tuple(
+        await session.scalars(
+            select(JobAttempt)
+            .where(JobAttempt.job_id == job.id)
+            .limit(2)
+            .execution_options(populate_existing=True)
+        )
+    )
+    return (
+        len(attempts) == 1
+        and attempts[0].attempt_no == 1
+        and attempts[0].outcome == "succeeded"
+        and attempts[0].finished_at is not None
+        and attempts[0].error_code is None
+    )
