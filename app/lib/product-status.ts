@@ -1,4 +1,5 @@
 import type { components } from "./generated/schema";
+import { researchExecutionFailureExplanation } from "./paper-research-status";
 
 type Cycle = components["schemas"]["AgentPaperCycleResponse"];
 type Session = components["schemas"]["AgentPaperSessionSummaryResponse"];
@@ -152,6 +153,10 @@ export function attentionPresentation(item: Attention): ActionableProductPresent
 }
 
 function decisionSummary(cycle: Cycle): ProductPresentation<DecisionSummaryKey> {
+  const executionFailure = researchExecutionFailureExplanation(cycle);
+  if (executionFailure) {
+    return presentation("model_failed", "研究任务运行失败", executionFailure, "critical", cycle.result_code);
+  }
   if (cycle.status === "unavailable" && cycle.result_code === "RESEARCH_OUTPUT_NOT_ACTIONABLE") {
     return presentation("research_not_actionable", "研究未通过交易准入", "研究未形成符合交易准入条件的结论；不等同于有充分证据的不调整。", "warning", cycle.result_code);
   }

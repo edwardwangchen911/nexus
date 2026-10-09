@@ -1,5 +1,5 @@
 import type { components } from "../lib/generated/schema";
-import { researchAdmissionLabel, researchJobLabel } from "../lib/paper-research-status";
+import { researchAdmissionLabel, researchJobLabel, researchExecutionFailureExplanation } from "../lib/paper-research-status";
 import { useState } from "react";
 import { formatPaperTime } from "./order-timeline";
 
@@ -131,7 +131,7 @@ export function AgentPaperCycle({ cycles, unavailable = false, historical = fals
     <p>{executionMarket} · 连续 {cycle.execution_market.window_minutes} 分钟 · {marketStatusLabels[cycle.execution_market.status]}</p>
     <aside className="inline-notice" role="note" aria-label="Agent 运行结论">
       <strong>运行结论</strong>
-      <p>{resultExplanations.get(cycle.result_code) ?? "系统已保存本周期结果；请结合周期状态和记录代码核对详细事实。"}</p>
+      <p>{researchExecutionFailureExplanation(cycle) ?? resultExplanations.get(cycle.result_code) ?? "系统已保存本周期结果；请结合周期状态和记录代码核对详细事实。"}</p>
       <p className="numeric-data">记录代码：{cycle.result_code}</p>
     </aside>
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- bounded table is keyboard-scrollable */}

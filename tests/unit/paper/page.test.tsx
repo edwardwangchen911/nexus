@@ -401,6 +401,8 @@ describe("internal paper page", () => {
     render(<AgentPaperCycle cycles={[cycle]} />);
 
     expect(screen.getByRole("region", { name: "当日 Agent 模拟周期" })).toHaveTextContent("已停止");
+    expect(screen.getByRole("note", { name: "Agent 运行结论" })).toHaveTextContent("研究任务运行失败，未形成可核验的研究结果");
+    expect(screen.getByRole("note", { name: "Agent 运行结论" })).not.toHaveTextContent("研究结果未通过可执行准入");
     const table = screen.getByRole("region", { name: "Agent 模拟候选，可横向滚动" });
     expect(within(table).getByRole("row", { name: /AAPL.*任务成功.*未纳入决策/ })).toBeVisible();
     expect(within(table).getByRole("row", { name: /AVGO.*任务失败.*未纳入决策/ })).toBeVisible();

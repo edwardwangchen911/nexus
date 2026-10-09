@@ -58,6 +58,17 @@ const summary: CyclePage["summary"] = {
 };
 
 describe("decision records", () => {
+  it("labels failed research execution separately from missing data in the result column", () => {
+    const failed = cycle("27", {
+      status: "unavailable", result_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+      decision: null, order_ids: [],
+      candidates: [{ ...agentPaperCycle.candidates[0], research_job_status: "failed" }],
+    });
+    render(<DecisionsPanel state="ready" page={{ items: [failed], summary, version_observation: null, version_history: [], version_evaluation: null }} onRefresh={vi.fn()} />);
+    const result = screen.getByRole("list", { name: "决策记录" }).querySelector(".decision-row__result");
+    expect(result).toHaveTextContent("研究任务运行失败");
+    expect(result).not.toHaveTextContent("数据不足");
+  });
   it.each([false, true])("keeps a legacy unassociated order batch in the ledger (account target: %s)", (hasCurrentTarget) => {
     const legacy = detail(agentPaperCycle);
     legacy.active_target = hasCurrentTarget ? managementDetail.active_target : null;

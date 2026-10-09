@@ -271,3 +271,12 @@ it("does not turn research admission failures into missing data", () => {
   expect(cycleDecisionPresentation(cycle({ status: "unavailable", result_code: "RESEARCH_ADMISSION_UNAVAILABLE" })).summary.label).toBe("阻断原因待核对");
   expect(cycleDecisionPresentation(cycle({ status: "failed", result_code: "AGENT_DECISION_CONFLICT" })).summary.label).toBe("运行失败");
 });
+
+it("distinguishes failed research execution from rejected completed content", () => {
+  const fact = cycle({ status: "unavailable", result_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE" });
+  fact.candidates = [{ ...fact.candidates[0], research_job_status: "failed", research_status: "pending" }];
+  expect(cycleDecisionPresentation(fact).summary.label).toBe("研究任务运行失败");
+  expect(cycleDecisionPresentation(fact).summary.detail).not.toContain("未通过交易准入");
+  fact.candidates[0].research_job_status = "queued";
+  expect(cycleDecisionPresentation(fact).summary.label).toBe("研究未通过交易准入");
+});

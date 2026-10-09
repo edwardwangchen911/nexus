@@ -22,3 +22,17 @@ export function researchAdmissionLabel(candidate: Candidate, cycle: Cycle): stri
   if (cycle.status === "failed" || cycle.status === "unavailable") return "未纳入决策";
   return "尚未决策";
 }
+
+export function hasFailedResearchJob(cycle: Cycle): boolean {
+  return cycle.candidates.some((candidate) =>
+    candidate.research_job_status === "failed" || candidate.research_job_status === "dead_letter",
+  );
+}
+
+export function researchExecutionFailureExplanation(cycle: Cycle): string | null {
+  return cycle.status === "unavailable"
+    && cycle.result_code === "RESEARCH_OUTPUT_NOT_ACTIONABLE"
+    && hasFailedResearchJob(cycle)
+    ? "研究任务运行失败，未形成可核验的研究结果；本周期未创建模拟订单。"
+    : null;
+}
