@@ -16,6 +16,8 @@ RESEARCH_STAGE_JOB_TIMEOUT_SECONDS = 120
 DEADLINE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v6-stage-time-budget"
 # Qualification candidate only. Keep it out of admission/runtime version sets
 # until its frozen identity, exact claim, and full-cycle routing are implemented.
+# Pending formal identity: registration alone never opens execution or selection.
+FORMAL_STAGE_CAPACITY_CONFIG_VERSION = "codex-sdk-chatgpt-v8-stage-capacity"
 CANDIDATE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v7-stage-capacity-candidate"
 CANDIDATE_RESEARCH_JOB_TIMEOUT_SECONDS = 180
 CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS = 195

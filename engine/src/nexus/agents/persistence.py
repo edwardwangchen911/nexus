@@ -23,6 +23,7 @@ from nexus.agents.actionable_research import (
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
@@ -608,6 +609,13 @@ async def _admit_research_run(
         candidate_preview = await session.get(AgentModelConfigRecord, model_config_id)
         if (
             candidate_preview is not None
+            and candidate_preview.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        ):
+            # Registration records an immutable pending identity, not activation.
+            # Refuse before claiming a key, including callers that catch errors.
+            raise ValueError("CODEX_FORMAL_STAGE_ACTIVATION_REQUIRED")
+        if (
+            candidate_preview is not None
             and candidate_preview.version == CANDIDATE_BUDGET_CONFIG_VERSION
         ):
             from nexus.agents.codex_candidate import (
@@ -689,6 +697,7 @@ async def _admit_research_run(
                     (
                         *STAGED_CONFIG_VERSIONS,
                         CANDIDATE_BUDGET_CONFIG_VERSION,
+                        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         "codex-sdk-strategy-rnd-v1",
                         PORTFOLIO_DECISION_CONFIG_VERSION,
                     )
@@ -697,6 +706,8 @@ async def _admit_research_run(
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)
         )
+    if model is not None and model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
+        raise ValueError("CODEX_FORMAL_STAGE_ACTIVATION_REQUIRED")
     if model is not None and model.version == CANDIDATE_BUDGET_CONFIG_VERSION:
         from nexus.agents.codex_candidate import candidate_model_matches, require_candidate_database
 

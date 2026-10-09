@@ -164,3 +164,26 @@ Paper 页面把收盘绩效缺失与当前周期/订单事实分开呈现：未�
 单头验证；以后集成经济分支时须串行整理迁移图，不得直接部署两个 sibling heads。
 若迁移已应用，不能改写其历史身份；未应用的后续迁移可按最终集成顺序调整。
 代码集成、隔离迁移通过与业务库迁移/服务更新是不同事实；业务迁移和更新仍须确认。
+
+### 待激活的正式容量身份 v8
+
+`codex-sdk-chatgpt-v8-stage-capacity` 是独立于冻结 v6 和隔离候选 v7 的待激活身份。
+规范配置哈希包含180秒研究、195秒 handler、210秒 lease 及逐阶段预算；注册不变更
+旧版本或历史 Run。以下正常入口仅注册模型和既有提示词，不创建研究 Job/Run，
+也不调用 SDK、行情或交易接口。业务库注册仍须用户确认；本轮仅验证隔离测试库。
+
+```sh
+uv run --project engine nexus-openai-local setup --backend codex_sdk \
+  --structured-synthesis --aggregate-input-tokens 96000 --max-wire-bytes 64000 \
+  --inline-citations --actionable-paper --stage-time-budget --formal-stage-capacity \
+  --allow-stage-time-budget-registration --skip-key
+```
+
+入口在写入前核对实际数据库名称与配置一致；待激活模式不能与候选模式混用。
+重复注册核对规范哈希和全部持久化模型字段，冲突拒绝，不覆盖旧行。默认研究选型
+排除待激活 v8；显式指定 v8 在幂等声明之前返回
+`CODEX_FORMAL_STAGE_ACTIVATION_REQUIRED`。此版本未加入 SDK/正式 Paper 版本集合，
+没有正式 Worker、调度或执行启用开关。注册成功不代表预算已经在正式进程生效。
+
+后续须独立完成正式消费者、Worker预算及数据库绑定接线和验收后才能设计激活。
+回滚代码时保留注册记录，不删除或重标历史；保持当前选型与执行锁。

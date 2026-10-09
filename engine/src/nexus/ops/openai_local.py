@@ -183,6 +183,7 @@ async def prepare_database(
     stage_time_budget: bool = False,
     allow_stage_time_budget_registration: bool = False,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -190,6 +191,18 @@ async def prepare_database(
     host = make_url(settings.database_url).host
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if (
+        type(formal_stage_capacity) is not bool
+        or formal_stage_capacity
+        and (
+            candidate_stage_capacity
+            or not stage_time_budget
+            or not allow_stage_time_budget_registration
+            or not actionable_paper
+            or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_STAGE_REGISTRATION_ARGUMENT_INVALID")
     if (
         type(candidate_stage_capacity) is not bool
         or candidate_stage_capacity
@@ -325,6 +338,10 @@ async def prepare_database(
         from nexus.agents.codex_candidate import candidate_config
 
         config = candidate_config()
+    if formal_stage_capacity:
+        from nexus.agents.codex_formal_stage import formal_stage_config
+
+        config = formal_stage_config()
     configs = [config]
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         configs.append(
@@ -461,6 +478,11 @@ async def prepare_database(
                 )
             elif existing_model.config_hash != config_hash:
                 raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
+            elif formal_stage_capacity and existing_model.version == config["version"]:
+                from nexus.agents.codex_formal_stage import formal_stage_model_matches
+
+                if not formal_stage_model_matches(existing_model):
+                    raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
 
 
 async def verify_connection(
@@ -583,6 +605,11 @@ def main() -> int:
         action="store_true",
         help="Isolated v7 candidate setup/admission; requires a protected diagnostic DB file",
     )
+    parser.add_argument(
+        "--formal-stage-capacity",
+        action="store_true",
+        help="Register pending v8 profile only; requires explicit stage registration opt-in",
+    )
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--news-evidence-id", type=UUID)
     parser.add_argument("--filing-id", type=UUID)
@@ -629,10 +656,17 @@ def main() -> int:
     parser.add_argument(
         "--allow-stage-time-budget-registration",
         action="store_true",
-        help="Explicitly allow v6 registration in the configured local business database; "
-        "may change future model selection, never starts research or trading",
+        help="Explicitly allow v6 or pending v8 registration in the configured local database; "
+        "v6 may change future selection, pending v8 remains inactive; never starts research",
     )
     args = parser.parse_args()
+    if args.formal_stage_capacity and (
+        args.action != "setup"
+        or not args.stage_time_budget
+        or not args.allow_stage_time_budget_registration
+        or args.candidate_stage_capacity
+    ):
+        parser.error("--formal-stage-capacity requires setup with explicit stage registration")
     if args.allow_stage_time_budget_registration and (
         args.action != "setup" or not args.stage_time_budget
     ):
@@ -761,6 +795,7 @@ def main() -> int:
                     strategy_rnd=args.strategy_rnd,
                     **({"actionable_paper": True} if args.actionable_paper else {}),
                     **({"stage_time_budget": True} if args.stage_time_budget else {}),
+                    **({"formal_stage_capacity": True} if args.formal_stage_capacity else {}),
                     **({"candidate_stage_capacity": True} if args.candidate_stage_capacity else {}),
                     **(
                         {"allow_stage_time_budget_registration": True}
