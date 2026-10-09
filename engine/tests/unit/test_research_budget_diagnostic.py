@@ -11,6 +11,34 @@ def test_business_database_is_rejected() -> None:
         require_diagnostic_url("postgresql+asyncpg://localhost/nexus")
 
 
+def test_candidate_identity_requires_explicit_profile_and_paper_job():
+    from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+
+    run_id = uuid4()
+    run = SimpleNamespace(
+        status="prepared",
+        pricing_version=CANDIDATE_BUDGET_CONFIG_VERSION,
+        actor_id="local-research-cli",
+        idempotency_key="budget-diagnostic:candidate",
+    )
+    job = SimpleNamespace(
+        job_type="agent.paper.research",
+        queue="general",
+        status="queued",
+        attempt_count=0,
+        manual_retry_count=0,
+        max_attempts=1,
+        retry_policy="automatic_safe",
+        payload={"run_id": str(run_id)},
+    )
+    with pytest.raises(ValueError, match="DIAGNOSTIC_FRESH_RUN_REQUIRED"):
+        require_fresh_identity(run, job, run_id)
+    require_fresh_identity(run, job, run_id, candidate_stage_capacity=True)
+    job.job_type = "agent.research"
+    with pytest.raises(ValueError, match="DIAGNOSTIC_FRESH_JOB_REQUIRED"):
+        require_fresh_identity(run, job, run_id, candidate_stage_capacity=True)
+
+
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1"])
 def test_only_explicit_local_diagnostic_database_is_allowed(host: str) -> None:
     host = f"[{host}]" if ":" in host else host

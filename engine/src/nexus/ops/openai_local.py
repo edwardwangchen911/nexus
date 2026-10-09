@@ -395,6 +395,12 @@ async def prepare_database(
                 session,
                 configured_database=make_url(settings.database_url).database,
             )
+            if (make_url(settings.database_url).database or "").startswith("nexus_diag_"):
+                from nexus.ops.research_budget_diagnostic import require_synthetic_database
+
+                await require_synthetic_database(
+                    session, configured_database=make_url(settings.database_url).database
+                )
         if stage_time_budget:
             database = await session.scalar(select(func.current_database()))
             if (
@@ -571,6 +577,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--research-request", type=Path)
+    parser.add_argument("--database-url-file", type=Path)
+    parser.add_argument(
+        "--candidate-stage-capacity",
+        action="store_true",
+        help="Isolated v7 candidate setup/admission; requires a protected diagnostic DB file",
+    )
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--news-evidence-id", type=UUID)
     parser.add_argument("--filing-id", type=UUID)
@@ -629,6 +641,20 @@ def main() -> int:
         parser.error("--stage-time-budget is only valid with setup")
     root = Path.cwd().resolve()
     try:
+        if (
+            args.candidate_stage_capacity
+            and (
+                args.action not in {"setup", "admit-research"}
+                or args.backend != "codex_sdk"
+                or args.database_url_file is None
+                or args.allow_stage_time_budget_registration
+                or args.action == "setup"
+                and not (args.stage_time_budget and args.actionable_paper)
+            )
+            or args.database_url_file is not None
+            and not args.candidate_stage_capacity
+        ):
+            raise ValueError("CODEX_CANDIDATE_CLI_ARGUMENT_INVALID")
         if args.actionable_paper and (
             args.action != "setup"
             or args.backend != "codex_sdk"
@@ -721,6 +747,12 @@ def main() -> int:
             },
             backend=args.backend,
         )
+        if args.candidate_stage_capacity:
+            from nexus.ops.research_budget_diagnostic import read_database_url
+
+            settings = settings.model_copy(
+                update={"database_url": read_database_url(args.database_url_file)}
+            )
         if args.action == "setup":
             asyncio.run(
                 prepare_database(
@@ -729,6 +761,7 @@ def main() -> int:
                     strategy_rnd=args.strategy_rnd,
                     **({"actionable_paper": True} if args.actionable_paper else {}),
                     **({"stage_time_budget": True} if args.stage_time_budget else {}),
+                    **({"candidate_stage_capacity": True} if args.candidate_stage_capacity else {}),
                     **(
                         {"allow_stage_time_budget_registration": True}
                         if args.allow_stage_time_budget_registration
@@ -811,7 +844,13 @@ def main() -> int:
                 )
             )
         elif args.action == "admit-research":
-            result = asyncio.run(admit_local_research(settings, args.research_request))
+            result = asyncio.run(
+                admit_local_research(
+                    settings,
+                    args.research_request,
+                    **({"candidate_stage_capacity": True} if args.candidate_stage_capacity else {}),
+                )
+            )
         elif args.action in {"run-once", "run-portfolio-once"}:
             if args.backend == "responses" and settings.openai_api_key is None:
                 raise ValueError("OPENAI_API_KEY_MISSING")

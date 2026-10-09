@@ -244,8 +244,13 @@ async def test_candidate_guard_refreshes_cached_run_after_other_connection_termi
 ):
     from nexus.agents.codex_candidate import candidate_job_qualified
     from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
-    from nexus.agents.committee import FixtureCommittee
     from nexus.agents.execution import execute_research_run
+
+    class FailedCommittee:
+        retry_on_error = False
+
+        async def analyze(self, *args, **kwargs):
+            raise RuntimeError("controlled terminal failure")
 
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     factory, model_id = await prepare(settings)
@@ -257,7 +262,7 @@ async def test_candidate_guard_refreshes_cached_run_after_other_connection_termi
             result = await execute_research_run(
                 other,
                 run_id=admission.run_id,
-                committee=FixtureCommittee(),
+                committee=FailedCommittee(),
                 allow_fixture_evidence=True,
                 allow_fixture_price_authority=True,
             )

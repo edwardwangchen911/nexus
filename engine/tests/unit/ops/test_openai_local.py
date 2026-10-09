@@ -8,6 +8,22 @@ import pytest
 from openai import RateLimitError
 
 
+@pytest.mark.parametrize("action", ["setup", "admit-research", "run-once"])
+def test_candidate_cli_requires_protected_database_file_before_settings(
+    monkeypatch,
+    capsys,
+    action,
+):
+    from nexus.ops import openai_local
+
+    settings = AsyncMock()
+    monkeypatch.setattr(openai_local, "local_settings", settings)
+    monkeypatch.setattr("sys.argv", ["nexus-openai-local", action, "--candidate-stage-capacity"])
+    assert openai_local.main() == 1
+    assert "CODEX_CANDIDATE_CLI_ARGUMENT_INVALID" in capsys.readouterr().out
+    settings.assert_not_called()
+
+
 @pytest.mark.parametrize("flag", ["--strategy-rnd", "--structured-synthesis"])
 def test_strategy_rnd_setup_dispatches_explicit_offline_registration(
     monkeypatch, capsys, flag

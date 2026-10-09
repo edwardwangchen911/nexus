@@ -38,3 +38,39 @@ uv run --project engine nexus-openai-local setup \
 修改历史。单纯重新运行默认 v5 setup 不保证恢复选择：既有 v5 不会因幂等注册变新。
 若当前没有合法的 v5 PASS 选择，不能凭空制造通过记录；先停止后续自动研究并诊断，
 再按已有版本选择机制和用户授权处理。禁止用删除 v6 或篡改 created_at 来回退。
+
+## v7 候选的隔离命令链
+
+`codex-sdk-chatgpt-v7-stage-capacity-candidate` 仅用于资格验证，尚未进入正式默认选型或
+执行准入集合。下列命令使用当前包含候选代码的仓库；不更新主线服务。需要已迁移的
+本机 `nexus_diag_` 诊断库，且其中没有真实账户、券商绑定、Paper 账户、周期或订单。
+URL 只存于属主为当前用户、0600 的普通文件，不在命令或输出中展开。代码在首次写入前
+核对实际数据库与配置名称一致；`--allow-stage-time-budget-registration` 与候选模式互斥。
+
+```sh
+uv run --project engine nexus-openai-local setup --backend codex_sdk \
+  --structured-synthesis --aggregate-input-tokens 96000 --max-wire-bytes 64000 \
+  --inline-citations --actionable-paper --stage-time-budget --skip-key \
+  --candidate-stage-capacity --database-url-file PRIVATE_0600_FILE
+
+uv run --project engine nexus-openai-local admit-research \
+  --research-request PRIVATE_REQUEST_JSON \
+  --candidate-stage-capacity --database-url-file PRIVATE_0600_FILE
+
+uv run --project engine nexus-engine-research-budget-diagnostic \
+  --repo-root REPO --database-url-file PRIVATE_0600_FILE --run-id RUN_UUID \
+  --output-dir NEW_PRIVATE_LEAF --candidate-stage-capacity
+```
+
+准入请求沿用 `LocalResearchAdmission`：`request` 包含诊断库中已有的 instrument、snapshot
+及 decision_time，`model_config_id` 明确选择该库规范候选模型，`idempotency_key` 必须以
+`budget-diagnostic:` 开头。注册和准入不调用模型；诊断执行会调用现有套餐的正常 SDK。
+诊断库只允许一个 prepared Run 和一个尚未尝试的 Paper 研究 Job。输出父目录须为当前
+用户所有的0700目录；叶子目录必须全新，先持久化 started 回执再进入正常 Worker。
+失败、未知或观察超时后只读回执和数据库状态，不通过改目录或换 Job 重放。
+
+候选使用180秒研究预算、195秒 handler 和210秒 lease，保留原始绝对起点；claim 与
+执行前均重新核对冻结身份。成功只证明该隔离研究运行，`formal_acceptance=false`；
+合成 SDK 响应不证明实际模型时延，缺失行情的 partial 不成为合格组合决策。完整多股票
+组合链、真实调用和合法自然周期仍须单独验收。回退代码保留候选配置、Job/Run 和回执，
+默认 Worker 不领取或回收候选任务；不得把候选身份改写成正式版本。

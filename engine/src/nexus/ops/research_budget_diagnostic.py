@@ -13,7 +13,10 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_versions import DEADLINE_BUDGET_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    DEADLINE_BUDGET_CONFIG_VERSION,
+)
 from nexus.agents.committee import StageFailureDiagnostic, StageInvocationTiming
 from nexus.persistence.base import Base
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
@@ -37,6 +40,7 @@ _SAFE_ERRORS = frozenset(
         "DIAGNOSTIC_JOB_CHANGED",
         "DIAGNOSTIC_SYNTHETIC_LOAD_INPUT_INVALID",
         "DIAGNOSTIC_TIMING_INVALID",
+        "DIAGNOSTIC_CANDIDATE_ARGUMENT_INVALID",
     }
 )
 
@@ -51,16 +55,25 @@ def require_diagnostic_url(url: str) -> None:
         raise ValueError("DIAGNOSTIC_DATABASE_REQUIRED")
 
 
-def require_fresh_identity(run: AgentResearchRunRecord, job: Job, run_id: UUID) -> None:
+def require_fresh_identity(
+    run: AgentResearchRunRecord, job: Job, run_id: UUID, *, candidate_stage_capacity: bool = False
+) -> None:
+    if type(candidate_stage_capacity) is not bool:
+        raise ValueError("DIAGNOSTIC_CANDIDATE_ARGUMENT_INVALID")
     if (
         run.status != "prepared"
-        or run.pricing_version != DEADLINE_BUDGET_CONFIG_VERSION
+        or run.pricing_version
+        != (
+            CANDIDATE_BUDGET_CONFIG_VERSION
+            if candidate_stage_capacity
+            else DEADLINE_BUDGET_CONFIG_VERSION
+        )
         or run.actor_id != "local-research-cli"
         or not run.idempotency_key.startswith("budget-diagnostic:")
     ):
         raise ValueError("DIAGNOSTIC_FRESH_RUN_REQUIRED")
     if (
-        job.job_type != "agent.research"
+        job.job_type != ("agent.paper.research" if candidate_stage_capacity else "agent.research")
         or job.queue != "general"
         or job.status != "queued"
         or job.attempt_count != 0
@@ -72,9 +85,17 @@ def require_fresh_identity(run: AgentResearchRunRecord, job: Job, run_id: UUID) 
         raise ValueError("DIAGNOSTIC_FRESH_JOB_REQUIRED")
 
 
-async def require_isolated_case(session: AsyncSession, run_id: UUID) -> UUID:
+async def require_synthetic_database(
+    session: AsyncSession, *, configured_database: str | None = None
+) -> None:
+    """Check the actual target and absence of private/business state before writes."""
     database = await session.scalar(text("SELECT current_database()"))
-    if not isinstance(database, str) or not database.startswith("nexus_diag_"):
+    if (
+        not isinstance(database, str)
+        or not database.startswith("nexus_diag_")
+        or configured_database is not None
+        and configured_database != database
+    ):
         raise ValueError("DIAGNOSTIC_DATABASE_REQUIRED")
     for name in (
         "account_external_id_envelopes",
@@ -89,11 +110,23 @@ async def require_isolated_case(session: AsyncSession, run_id: UUID) -> UUID:
         select(func.count()).select_from(Account).where(Account.provider != "diagnostic_synthetic")
     ):
         raise ValueError("DIAGNOSTIC_SYNTHETIC_ACCOUNTS_REQUIRED")
+
+
+async def require_isolated_case(
+    session: AsyncSession,
+    run_id: UUID,
+    *,
+    candidate_stage_capacity: bool = False,
+    configured_database: str | None = None,
+) -> UUID:
+    await require_synthetic_database(session, configured_database=configured_database)
     runs = list(await session.scalars(select(AgentResearchRunRecord)))
     jobs = list(await session.scalars(select(Job)))
     if len(runs) != 1 or runs[0].id != run_id or len(jobs) != 1:
         raise ValueError("DIAGNOSTIC_SINGLE_CASE_REQUIRED")
-    require_fresh_identity(runs[0], jobs[0], run_id)
+    require_fresh_identity(
+        runs[0], jobs[0], run_id, candidate_stage_capacity=candidate_stage_capacity
+    )
     if await session.scalar(select(func.count()).select_from(AgentResearchOutputRecord)):
         raise ValueError("DIAGNOSTIC_OUTPUT_ALREADY_EXISTS")
     return jobs[0].id
@@ -154,8 +187,15 @@ def usage_is_known(run: AgentResearchRunRecord) -> bool:
 
 
 async def execute_diagnostic(
-    settings: EngineSettings, *, run_id: UUID, output: Path, synthetic_paper_load: bool = False
+    settings: EngineSettings,
+    *,
+    run_id: UUID,
+    output: Path,
+    synthetic_paper_load: bool = False,
+    candidate_stage_capacity: bool = False,
 ) -> dict[str, object]:
+    if type(candidate_stage_capacity) is not bool:
+        raise ValueError("DIAGNOSTIC_CANDIDATE_ARGUMENT_INVALID")
     require_diagnostic_url(settings.database_url or "")
     if settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
         raise ValueError("DIAGNOSTIC_SDK_REQUIRED")
@@ -164,13 +204,26 @@ async def execute_diagnostic(
     try:
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
-            job_id = await require_isolated_case(session, run_id)
+            job_id = await require_isolated_case(
+                session,
+                run_id,
+                candidate_stage_capacity=candidate_stage_capacity,
+                configured_database=make_url(settings.database_url or "").database,
+            )
         # A persistent attempt marker makes observation timeout/unknown outcomes non-replayable.
         output.mkdir(mode=0o700, exist_ok=False)
         _receipt(output / "started.json", {"status": "started", "run_id": str(run_id)})
 
         async def preclaim_guard(session: AsyncSession) -> None:
-            if await require_isolated_case(session, run_id) != job_id:
+            if (
+                await require_isolated_case(
+                    session,
+                    run_id,
+                    candidate_stage_capacity=candidate_stage_capacity,
+                    configured_database=make_url(settings.database_url or "").database,
+                )
+                != job_id
+            ):
                 raise ValueError("DIAGNOSTIC_JOB_CHANGED")
 
         from nexus.worker import run_agent_worker_once
@@ -196,11 +249,18 @@ async def execute_diagnostic(
                     decision_time=source_run.decision_time,
                 )
                 claimed = await run_agent_worker_once(
-                    settings, tools=tools, job_ids=(job_id,), preclaim_guard=preclaim_guard
+                    settings,
+                    tools=tools,
+                    job_ids=(job_id,),
+                    preclaim_guard=preclaim_guard,
+                    candidate_stage_capacity=candidate_stage_capacity,
                 )
         else:
             claimed = await run_agent_worker_once(
-                settings, job_ids=(job_id,), preclaim_guard=preclaim_guard
+                settings,
+                job_ids=(job_id,),
+                preclaim_guard=preclaim_guard,
+                candidate_stage_capacity=candidate_stage_capacity,
             )
         elapsed = time.monotonic() - started
         async with factory() as session, session.begin():
@@ -227,6 +287,7 @@ async def execute_diagnostic(
                 "usage_known": usage_is_known(run),
                 "execution_locked": True,
                 "formal_acceptance": False,
+                "candidate_stage_capacity": candidate_stage_capacity,
                 "paper_context_kind": "synthetic_load_only" if synthetic_paper_load else "absent",
             }
         _receipt(output / "result.json", result)
@@ -241,6 +302,11 @@ def main() -> int:
     parser.add_argument("--database-url-file", type=Path, required=True)
     parser.add_argument("--run-id", type=UUID, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--candidate-stage-capacity",
+        action="store_true",
+        help="显式验证隔离 v7 候选 Paper 研究；不注册或激活正式配置",
+    )
     parser.add_argument(
         "--synthetic-paper-load",
         action="store_true",
@@ -259,6 +325,7 @@ def main() -> int:
                 run_id=args.run_id,
                 output=args.output_dir,
                 synthetic_paper_load=args.synthetic_paper_load,
+                candidate_stage_capacity=args.candidate_stage_capacity,
             )
         )
     except Exception as error:
