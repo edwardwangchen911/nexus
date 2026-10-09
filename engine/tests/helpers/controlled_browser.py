@@ -101,6 +101,7 @@ async def verify_controlled_browser(
     cycle_id: UUID,
     order_ids: tuple[UUID, UUID],
     candidate_count: int = 2,
+    first_partial: bool = False,
     candidate_stage_capacity_reads: bool = False,
     expected_defer_count: int | None = None,
 ) -> None:
@@ -179,6 +180,7 @@ async def verify_controlled_browser(
             NEXUS_CONTROLLED_CYCLE_ID=str(cycle_id),
             NEXUS_CONTROLLED_ORDER_IDS=",".join(str(order_id) for order_id in order_ids),
             NEXUS_CONTROLLED_CANDIDATE_COUNT=str(candidate_count),
+            NEXUS_CONTROLLED_FIRST_PARTIAL="1" if first_partial else "0",
             NEXUS_CONTROLLED_DEFER_COUNT=str(
                 candidate_count - 2 if expected_defer_count is None else expected_defer_count
             ),
@@ -219,6 +221,7 @@ async def verify_controlled_browser(
             "test",
             "--config",
             "playwright.controlled-paper.config.ts",
+            *(("portfolio-controlled.spec.ts",) if first_partial else ()),
             cwd=web_root,
             env=environment,
             stdout=asyncio.subprocess.PIPE,

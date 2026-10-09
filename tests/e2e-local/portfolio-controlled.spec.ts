@@ -6,11 +6,13 @@ import type { components } from "../../app/lib/generated/schema";
 
 type OrderPage = components["schemas"]["PaperOrderPageResponse"];
 type Actual = components["schemas"]["PaperPlanActualResponse"];
+type Summary = components["schemas"]["PaperManagementSummaryResponse"];
 type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 
 test("controlled multi-candidate two-fill cycle is readable through BFF and four pages", async ({ page, request }) => {
   const cycleId = process.env.NEXUS_CONTROLLED_CYCLE_ID;
   const expectedOrderIds = process.env.NEXUS_CONTROLLED_ORDER_IDS?.split(",");
+  const firstPartial = process.env.NEXUS_CONTROLLED_FIRST_PARTIAL === "1";
   const candidateCount = Number(process.env.NEXUS_CONTROLLED_CANDIDATE_COUNT);
   const deferCount = Number(process.env.NEXUS_CONTROLLED_DEFER_COUNT ?? String(candidateCount - 2));
   const capture = async (name: string) => {
@@ -24,21 +26,26 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   test.skip(!cycleId || expectedOrderIds?.length !== 2, "isolated controlled PostgreSQL cycle required");
   if (!cycleId || !expectedOrderIds) return;
 
-  const [ordersResponse, actualResponse, detailResponse] = await Promise.all([
+  const [ordersResponse, actualResponse, detailResponse, summaryResponse] = await Promise.all([
     request.get("/api/v1/paper/orders?limit=50"),
     request.get("/api/v1/paper/actual"),
     request.get(`/api/v1/paper/management/cycles/${cycleId}`),
+    request.get("/api/v1/paper/management/portfolio"),
   ]);
   const errorCode = async (response: typeof ordersResponse) =>
     response.ok() ? "" : (await response.json()).error?.code ?? "UNKNOWN_ERROR";
   expect(ordersResponse.status(), await errorCode(ordersResponse)).toBe(200);
   expect(actualResponse.status(), await errorCode(actualResponse)).toBe(200);
   expect(detailResponse.status(), await errorCode(detailResponse)).toBe(200);
+  expect(summaryResponse.status(), await errorCode(summaryResponse)).toBe(200);
+  const summary = (await summaryResponse.json()).data as Summary;
   const orders = (await ordersResponse.json()).data as OrderPage;
   const actual = (await actualResponse.json()).data as Actual;
   const detail = (await detailResponse.json()).data as Detail;
   expect(orders.items.map((order) => order.order_id).sort()).toEqual([...expectedOrderIds].sort());
-  expect(orders.items.every((order) => order.status === "filled" && order.fills.length > 0)).toBe(true);
+  expect(orders.items.every((order) => order.fills.length > 0)).toBe(true);
+  expect(orders.items.map((order) => order.status).sort()).toEqual(firstPartial ? ["filled", "partially_filled"] : ["filled", "filled"]);
+  if (firstPartial) expect(Number(actual.reserved_cash)).toBeGreaterThan(0);
   expect(actual.data_state).toBe("READY");
   expect(actual.positions).toHaveLength(2);
   expect(detail.cycle.cycle_id).toBe(cycleId);
@@ -48,6 +55,7 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   expect(detail.synthesis?.choices.filter((choice) => choice.action === "defer")).toHaveLength(deferCount);
   const targetId = detail.active_target?.target_version_id;
   expect(targetId).toBeTruthy();
+  expect(summary.current_target?.target_version_id).toBe(targetId);
 
   const writes: string[] = [];
   page.on("request", (networkRequest) => {
@@ -56,8 +64,8 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
   await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
-  await expect(page.getByRole("region", { name: "最新决策" }).getByText("本周期订单已终态")).toBeVisible();
-  await expect(page.getByRole("region", { name: "活动订单" }).getByText("本周期订单已终态")).toBeVisible();
+  await expect(page.getByRole("region", { name: "最新决策" }).getByText(firstPartial ? "部分成交" : "本周期订单已终态")).toBeVisible();
+  await expect(page.getByRole("region", { name: "活动订单" }).getByText(firstPartial ? "partially_filled" : "本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByRole("link", { name: "查看全部订单" })).toHaveAttribute("href", "/paper");
   const cash = page.getByRole("region", { name: "当前账本现金（内部模拟）" });
   await expect(cash.getByText(`USD ${formatDisplayDecimal(actual.available_cash!, { group: true })}`, { exact: true })).toBeVisible();
@@ -89,9 +97,19 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   await expect(page.getByRole("table", { name: "当前实际模拟持仓" }).getByRole("row")).toHaveCount(3);
   await capture("paper");
 
+  if (firstPartial) await expect(page.locator("article.paper-order").filter({ hasText: "部分成交" })).toHaveCount(1);
+
   await page.goto("/portfolio");
   await expect(page.getByRole("heading", { name: "组合事实" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "内部模拟目标与计划" })).toBeVisible();
+  const management = page.getByRole("region", { name: "内部模拟目标与计划摘要" });
+  await expect(management.getByRole("heading", { name: "内部模拟目标与计划" })).toBeVisible();
+  await expect(management).toContainText(`目标 V${summary.current_target?.version_seq} · 生效`);
+  if (firstPartial) {
+    await expect(management).toContainText("当前计划：资源仍占用");
+    await expect(management.getByRole("link", { name: "查看调整计划" })).toHaveAttribute("href", `/paper?plan=${summary.occupying_plan?.batch_id}`);
+  } else {
+    await expect(management.getByRole("link", { name: "查看目标/实际详情" })).toHaveAttribute("href", "/paper");
+  }
   await capture("portfolio");
   expect(writes).toEqual([]);
 });

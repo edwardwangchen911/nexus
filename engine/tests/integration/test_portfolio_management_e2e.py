@@ -18,6 +18,11 @@ from integration.test_agent_paper_cycle_pg import (
 from integration.test_portfolio_proposal_pg import proposal_source
 from integration.test_portfolio_synthesis_persistence_pg import synthesis_intent
 from integration.test_portfolio_synthesis_worker_pg import _seed_normal_synthesis
+from nexus.agents.portfolio_synthesis_contracts import (
+    PortfolioSynthesisInputV1,
+    PortfolioSynthesisIntentV1,
+    validate_portfolio_synthesis_intent,
+)
 from nexus.market.ingestion import ingest_price_page
 from nexus.ops import agent_paper_loop
 from nexus.ops import agent_paper_once as agent_paper_loop_once
@@ -30,7 +35,10 @@ from nexus.paper.agent_decision_store import load_portfolio_proposal
 from nexus.paper.agent_market import collect_agent_paper_window, resolve_agent_paper_market_scope
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
-from nexus.persistence.models.agents import AgentPortfolioSynthesisOutputRecord
+from nexus.persistence.models.agents import (
+    AgentPortfolioSynthesisOutputRecord,
+    AgentPortfolioSynthesisRunRecord,
+)
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.broker_simulation import (
     BrokerBatchApprovalRecord,
@@ -179,15 +187,21 @@ async def _publish_portfolio_close(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("first_partial", "candidate_count"),
-    [(True, 2), (False, 2), (False, 3)],
-    ids=["partial-then-second", "two-full-fills", "three-candidates-two-fills"],
+    ("first_partial", "candidate_count", "partial_watch_candidate"),
+    [(True, 2, False), (False, 2, False), (False, 3, False), (False, 3, True)],
+    ids=[
+        "partial-then-second",
+        "two-full-fills",
+        "three-candidates-two-fills",
+        "partial-watch-candidate-two-fills",
+    ],
 )
 async def test_normal_host_advances_second_schwab_order_after_first_partial_window(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     first_partial: bool,
     candidate_count: int,
+    partial_watch_candidate: bool,
 ) -> None:
     """A consumed partial Schwab order must not starve the next submitted order."""
     import integration.test_portfolio_synthesis_persistence_pg as seed_module
@@ -196,6 +210,9 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
 
     def complete_buy(**kwargs):
         source = original_intent(**kwargs)
+        if partial_watch_candidate and source.instrument_id == INSTRUMENTS[2][0]:
+            assert source.quality_status == "partial" and source.stance == "watch"
+            return source
         assessment = source.synthesis_assessment.model_copy(
             update={
                 "stance": "buy_candidate",
@@ -244,6 +261,38 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
                 args["synthesis_output_id"],
             )
             assert output is not None and output.status == "completed", output
+            if partial_watch_candidate:
+                synthesis = await session.get(AgentPortfolioSynthesisRunRecord, output.run_id)
+                assert synthesis is not None
+                frozen = PortfolioSynthesisInputV1.model_validate(synthesis.frozen_input)
+                intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
+                deferred_id = INSTRUMENTS[2][0]
+                partial_source = next(
+                    item for item in frozen.security_outputs if item.instrument_id == deferred_id
+                )
+                assert partial_source.intent.quality_status == "partial"
+                assert partial_source.intent.stance == "watch"
+                assert partial_source.intent.exposure_action == "none"
+                assert (
+                    next(
+                        choice.action
+                        for choice in intent.choices
+                        if choice.instrument_id == deferred_id
+                    )
+                    == "defer"
+                )
+                forbidden = intent.model_copy(
+                    update={
+                        "choices": tuple(
+                            choice.model_copy(update={"action": "include", "role": "tactical"})
+                            if choice.instrument_id == deferred_id
+                            else choice
+                            for choice in intent.choices
+                        )
+                    }
+                )
+                with pytest.raises(ValueError, match="exceeds admitted security research"):
+                    validate_portfolio_synthesis_intent(forbidden, frozen)
             # The shared isolated-DB template freezes server defaults at January 1.
             # This end-to-end read needs the synthetic output's actual event time.
             await session.execute(
@@ -293,6 +342,8 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
                 )
             )
             assert len(orders) == 2
+            if partial_watch_candidate:
+                assert all(order.instrument_id != INSTRUMENTS[2][0] for order in orders)
 
         with pytest.raises(AgentChallengerError, match="PORTFOLIO_CHALLENGER_SAMPLE_INCOMPLETE"):
             async with sessions() as session:
@@ -635,7 +686,7 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
         assert cycle_page["summary"]["next_eligible_reason"] != "NEXT_SLOT"
         async with sessions() as session:
             assert before_reads == await _business_facts(session)
-        if not first_partial and os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1":
+        if os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1":
             async with sessions.begin() as session:
                 await session.execute(
                     text("ALTER TABLE agent_paper_cycle_events DISABLE TRIGGER USER")
@@ -668,6 +719,7 @@ async def test_normal_host_advances_second_schwab_order_after_first_partial_wind
                 cycle_id=cycle.id,
                 order_ids=(first_order.id, second_order.id),
                 candidate_count=candidate_count,
+                first_partial=first_partial,
             )
 
     finally:
