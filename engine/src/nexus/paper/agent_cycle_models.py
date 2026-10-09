@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from typing import Annotated, Literal, overload
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, StrictBool, StringConstraints
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 PAPER_MACRO_SERIES = frozenset({"DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "VIXCLS"})
@@ -89,6 +89,9 @@ class AgentPaperTriggerReservation(BaseModel):
     decision_slot_at: datetime
     candidate_batch_id: UUID | None = None
     candidate_batch_hash: str | None = None
+    formal_stage_capacity: StrictBool = False
+    formal_model_config_id: UUID | None = None
+    formal_model_hash: Hash64 | None = None
     replay: AgentPaperCycleResult | None = None
 
 

@@ -536,6 +536,39 @@ def test_formal_step_parser_requires_explicit_opt_in(action: str) -> None:
             request_type.model_validate({**default.model_dump(), "formal_stage_capacity": bad})
 
 
+def test_formal_trigger_parser_requires_exact_model_and_scheduled_mode() -> None:
+    arguments = [
+        "trigger",
+        "--account-id",
+        str(UUID(int=1)),
+        "--candidate-batch-id",
+        str(UUID(int=2)),
+        "--idempotency-key",
+        "formal-trigger",
+    ]
+    plain = AgentPaperTriggerRequest.model_validate(vars(parser().parse_args(arguments)))
+    assert plain.formal_stage_capacity is False
+    assert plain.formal_model_config_id is None
+    explicit = AgentPaperTriggerRequest.model_validate(
+        vars(
+            parser().parse_args(
+                arguments
+                + ["--formal-stage-capacity", "--formal-model-config-id", str(UUID(int=3))]
+            )
+        )
+    )
+    assert explicit.formal_model_config_id == UUID(int=3)
+    for change in (
+        {"formal_model_config_id": None},
+        {"formal_stage_capacity": False},
+        {"formal_stage_capacity": 1},
+        {"trigger_mode": "manual_recovery"},
+        {"trigger_mode": "synthesis_recovery"},
+    ):
+        with pytest.raises(ValueError):
+            AgentPaperTriggerRequest.model_validate(explicit.model_dump() | change)
+
+
 def test_run_research_resolves_only_one_queued_cycle_bound_paper_job() -> None:
     run_id, job_id = UUID(int=10), UUID(int=11)
     events = (

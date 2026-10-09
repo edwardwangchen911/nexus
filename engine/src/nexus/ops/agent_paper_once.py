@@ -212,6 +212,18 @@ class AgentPaperTriggerRequest(BaseModel):
     account_id: UUID
     candidate_batch_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
+    formal_stage_capacity: StrictBool = False
+    formal_model_config_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _require_formal_identity(self) -> "AgentPaperTriggerRequest":
+        if (
+            self.formal_stage_capacity != (self.formal_model_config_id is not None)
+            or self.formal_stage_capacity
+            and self.trigger_mode != "scheduled"
+        ):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -334,6 +346,8 @@ def parser() -> argparse.ArgumentParser:
     trigger.add_argument("--account-id", required=True)
     trigger.add_argument("--idempotency-key", required=True)
     trigger.add_argument("--candidate-batch-id")
+    trigger.add_argument("--formal-stage-capacity", action="store_true")
+    trigger.add_argument("--formal-model-config-id")
     manual_recovery = commands.add_parser("trigger-manual-recovery")
     manual_recovery.add_argument("--account-id", required=True)
     manual_recovery.add_argument("--idempotency-key", required=True)
@@ -889,6 +903,20 @@ async def trigger_in_session(
     now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(now, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    if (
+        request.formal_stage_capacity != reservation.formal_stage_capacity
+        or request.formal_model_config_id != reservation.formal_model_config_id
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    if request.formal_stage_capacity:
+        from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+
+        assert request.formal_model_config_id is not None
+        model = await require_formal_stage_model_profile(
+            session, model_config_id=request.formal_model_config_id, now=now
+        )
+        if reservation.formal_model_hash != model.config_hash:
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     batch, identities = await validate_agent_paper_candidate_batch(
         session,
         batch_id=request.candidate_batch_id,
@@ -926,6 +954,8 @@ async def trigger_in_session(
         requested_instrument_ids=batch.instrument_ids,
         candidate_batch_id=batch.batch_id,
         execution_scope_max_symbols=settings.intraday_max_symbols,
+        formal_stage_capacity=request.formal_stage_capacity,
+        formal_model_config_id=request.formal_model_config_id,
     )
 
 
@@ -953,11 +983,9 @@ async def trigger_once(
                 now=now,
                 candidate_batch_id=request.candidate_batch_id,
                 require_synthesis_prompt=True,
-                **(
-                    {"trigger_mode": request.trigger_mode}
-                    if request.trigger_mode != "scheduled"
-                    else {}
-                ),
+                formal_stage_capacity=request.formal_stage_capacity,
+                formal_model_config_id=request.formal_model_config_id,
+                trigger_mode=request.trigger_mode,
             )
         if reservation.replay is not None:
             return reservation.replay

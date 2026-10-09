@@ -247,8 +247,17 @@ async def reserve_schwab_agent_paper_trigger(
     candidate_batch_id: UUID | None = None,
     trigger_mode: Literal["scheduled", "manual_recovery", "synthesis_recovery"] = "scheduled",
     require_synthesis_prompt: bool = False,
+    formal_stage_capacity: bool = False,
+    formal_model_config_id: UUID | None = None,
 ) -> AgentPaperTriggerReservation:
     """Reserve one database-derived decision slot before provider work begins."""
+    _validate_formal_cycle_arguments(
+        formal_stage_capacity=formal_stage_capacity,
+        candidate_stage_capacity=False,
+        formal_model_config_id=formal_model_config_id,
+    )
+    if formal_stage_capacity and trigger_mode != "scheduled":
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     if (
         now.tzinfo is None
         or now.utcoffset() is None
@@ -311,7 +320,13 @@ async def reserve_schwab_agent_paper_trigger(
     batch = await load_agent_paper_candidate_batch(session, batch_id=candidate_batch_id)
     if batch is None or batch.account_id != account_id:
         raise ValueError("CANDIDATE_BATCH_INVALID")
-    request_payload = {
+    formal_model = None
+    if formal_stage_capacity:
+        assert formal_model_config_id is not None
+        formal_model = await require_formal_stage_model_profile(
+            session, model_config_id=formal_model_config_id, now=now
+        )
+    request_payload: dict[str, object] = {
         "schema": route,
         "account_id": str(account_id),
         "decision_session": local_time.date().isoformat(),
@@ -323,6 +338,12 @@ async def reserve_schwab_agent_paper_trigger(
     }
     if trigger_mode != "scheduled":
         request_payload["trigger_mode"] = trigger_mode
+    if formal_model is not None:
+        request_payload.update(
+            formal_stage_capacity=True,
+            formal_model_config_id=str(formal_model.id),
+            formal_model_hash=formal_model.config_hash,
+        )
     request_hash = job_input_hash(request_payload)
     claim, inserted = await claim_or_lock(
         session,
@@ -341,6 +362,9 @@ async def reserve_schwab_agent_paper_trigger(
         decision_slot_at=decision_slot_at,
         candidate_batch_id=batch.batch_id,
         candidate_batch_hash=batch.batch_hash,
+        formal_stage_capacity=formal_stage_capacity,
+        formal_model_config_id=formal_model_config_id,
+        formal_model_hash=None if formal_model is None else formal_model.config_hash,
     )
     if inserted:
         if require_synthesis_prompt:
@@ -386,7 +410,45 @@ async def reserve_schwab_agent_paper_trigger(
         replay = AgentPaperCycleResult.model_validate(claim.response_payload["result"])
     except ValueError:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN") from None
+    if formal_stage_capacity:
+        await _require_formal_trigger_result(session, reservation=reservation, result=replay)
     return reservation.model_copy(update={"replay": replay.model_copy(update={"replayed": True})})
+
+
+async def _require_formal_trigger_result(
+    session: AsyncSession,
+    *,
+    reservation: AgentPaperTriggerReservation,
+    result: AgentPaperCycleResult,
+) -> None:
+    cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
+    claim = await session.get(IdempotencyRecord, reservation.claim_id)
+    if (
+        cycle is None
+        or claim is None
+        or reservation.formal_model_config_id is None
+        or reservation.trigger_mode != "scheduled"
+        or cycle.decision_slot_at != reservation.decision_slot_at
+        or cycle.decision_session != reservation.decision_session
+        or cycle.candidate_batch_id != reservation.candidate_batch_id
+        or claim.actor_id != f"local-agent-paper-schwab:{cycle.account_id}"
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    await _require_cycle_candidate_profile(
+        session,
+        cycle=cycle,
+        candidate_stage_capacity=False,
+        formal_stage_capacity=True,
+        expected_formal_model_id=reservation.formal_model_config_id,
+        now=cycle.decision_time,
+    )
+    model = await require_formal_stage_model_profile(
+        session,
+        model_config_id=reservation.formal_model_config_id,
+        now=cycle.decision_time,
+    )
+    if reservation.formal_model_hash != model.config_hash:
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
 
 
 async def finish_schwab_agent_paper_trigger(
@@ -427,6 +489,17 @@ async def finish_schwab_agent_paper_trigger(
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     payload: dict[str, object]
     if result is not None:
+        if reservation.formal_stage_capacity:
+            await _require_formal_trigger_result(session, reservation=reservation, result=result)
+        else:
+            # Persisted identity must not be downgraded by an internal reservation object.
+            events = await _events(session, result.cycle_id)
+            if events and {
+                "formal_stage_capacity",
+                "formal_model_config_id",
+                "formal_model_hash",
+            }.intersection(events[0].fact_ids):
+                raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
         payload = {"outcome": "completed", "result": result.model_dump(mode="json")}
     else:
         payload = {"outcome": "failed", "error_code": cast(str, error_code)}

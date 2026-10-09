@@ -1,5 +1,6 @@
 """Explicit formal cycles freeze native batch admission, without model or provider calls."""
 
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -10,6 +11,8 @@ from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
 from nexus.ops.openai_local import prepare_database
 from nexus.paper.agent_cycle import (
     advance_agent_paper_cycle,
+    finish_schwab_agent_paper_trigger,
+    reserve_schwab_agent_paper_trigger,
     resume_schwab_agent_paper_cycle,
     start_schwab_agent_paper_cycle,
 )
@@ -24,8 +27,9 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [3, 5])
+@pytest.mark.parametrize("formal_trigger", [False, True], ids=["native", "trigger"])
 async def test_formal_cycle_freezes_complete_native_batch_and_exact_replay(
-    migrated_database_url, monkeypatch, count
+    migrated_database_url, monkeypatch, count, formal_trigger
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
@@ -61,7 +65,76 @@ async def test_formal_cycle_freezes_complete_native_batch_and_exact_replay(
                 formal_stage_capacity=True,
                 formal_model_config_id=model.id,
             )
-            result = await start_schwab_agent_paper_cycle(session, **args)
+            if formal_trigger:
+                trigger_args = dict(
+                    account_id=authority.account_id,
+                    candidate_batch_id=batch.batch_id,
+                    client_idempotency_key=f"formal-trigger-{count}",
+                    now=AT,
+                    require_synthesis_prompt=True,
+                    formal_stage_capacity=True,
+                    formal_model_config_id=model.id,
+                )
+                reservation = await reserve_schwab_agent_paper_trigger(session, **trigger_args)
+                assert reservation.formal_stage_capacity is True
+                assert reservation.formal_model_config_id == model.id
+                assert reservation.formal_model_hash == model.config_hash
+            if formal_trigger:
+                from nexus.ops.agent_paper_once import (
+                    AgentPaperTriggerRequest,
+                    AgentPaperTriggerSettings,
+                    trigger_in_session,
+                )
+                from pydantic import SecretStr
+
+                original_scalar = session.scalar
+
+                async def controlled_clock(statement, *positional, **keywords):
+                    if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+                        return AT
+                    return await original_scalar(statement, *positional, **keywords)
+
+                monkeypatch.setattr(session, "scalar", controlled_clock)
+
+                async def frozen_provider_authority(*positional, **keywords):
+                    assert keywords["decision_slot_at"] == AT
+                    assert {item.instrument_id for item in keywords["identities"]} == set(
+                        batch.instrument_ids
+                    )
+                    return authority
+
+                monkeypatch.setattr(
+                    "nexus.ops.agent_paper_once.prepare_schwab_decision_authority",
+                    frozen_provider_authority,
+                )
+                result = await trigger_in_session(
+                    session,
+                    object(),
+                    AgentPaperTriggerSettings(
+                        database_url=migrated_database_url,
+                        agent_runtime_mode="codex_sdk",
+                        alpaca_key=SecretStr("controlled-key"),
+                        alpaca_secret=SecretStr("controlled-secret"),
+                    ),
+                    AgentPaperTriggerRequest(
+                        action="trigger",
+                        account_id=authority.account_id,
+                        candidate_batch_id=batch.batch_id,
+                        idempotency_key=args["idempotency_key"],
+                        formal_stage_capacity=True,
+                        formal_model_config_id=model.id,
+                    ),
+                    reservation=reservation,
+                    repo_root=Path.cwd(),
+                    client=object(),
+                )
+                await finish_schwab_agent_paper_trigger(
+                    session,
+                    reservation=reservation,
+                    result=result,
+                )
+            else:
+                result = await start_schwab_agent_paper_cycle(session, **args)
             assert result.result_code == "RESEARCH_JOBS_PREPARED"
             assert len(result.research_run_ids) == count
             cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
@@ -89,6 +162,62 @@ async def test_formal_cycle_freezes_complete_native_batch_and_exact_replay(
             assert replay.replayed and replay.cycle_id == result.cycle_id
             assert replay.research_run_ids == result.research_run_ids
             before = await session.scalar(select(func.count()).select_from(IdempotencyRecord))
+            if formal_trigger:
+                trigger_replay = await reserve_schwab_agent_paper_trigger(session, **trigger_args)
+                assert trigger_replay.replay.cycle_id == result.cycle_id
+                assert trigger_replay.replay.research_run_ids == result.research_run_ids
+                # Corrupt only the owned test DB within a rolled-back savepoint.
+                # A completed trigger receipt must not bypass frozen cycle proof.
+                from sqlalchemy import text
+
+                savepoint = await session.begin_nested()
+                await session.execute(
+                    text("ALTER TABLE agent_paper_cycle_events DISABLE TRIGGER USER")
+                )
+                damaged = await session.execute(
+                    text(
+                        "UPDATE agent_paper_cycle_events SET fact_ids = "
+                        "jsonb_set(fact_ids, '{formal_model_hash}', to_jsonb(CAST(:hash AS text))) "
+                        "WHERE cycle_id = :id AND sequence = 1"
+                    ),
+                    {"hash": "0" * 64, "id": result.cycle_id},
+                )
+                assert damaged.rowcount == 1
+                await session.execute(
+                    text("ALTER TABLE agent_paper_cycle_events ENABLE TRIGGER USER")
+                )
+                with pytest.raises(ValueError, match="CODEX_FORMAL_CYCLE_PROFILE_INVALID"):
+                    await reserve_schwab_agent_paper_trigger(session, **trigger_args)
+                await savepoint.rollback()
+                with pytest.raises(ValueError, match="CODEX_FORMAL_CYCLE_PROFILE_INVALID"):
+                    await finish_schwab_agent_paper_trigger(
+                        session,
+                        reservation=reservation.model_copy(update={"formal_model_hash": "0" * 64}),
+                        result=result,
+                    )
+                with pytest.raises(ValueError, match="CODEX_FORMAL_CYCLE_PROFILE_INVALID"):
+                    await finish_schwab_agent_paper_trigger(
+                        session,
+                        reservation=reservation.model_copy(
+                            update={
+                                "formal_stage_capacity": False,
+                                "formal_model_config_id": None,
+                                "formal_model_hash": None,
+                            }
+                        ),
+                        result=result,
+                    )
+                for change, code in (
+                    (
+                        {"formal_stage_capacity": False, "formal_model_config_id": None},
+                        "IDEMPOTENCY",
+                    ),
+                    ({"formal_model_config_id": UUID(int=999)}, "CODEX_FORMAL"),
+                    ({"trigger_mode": "manual_recovery"}, "CODEX_FORMAL"),
+                ):
+                    with pytest.raises(ValueError, match=code):
+                        await reserve_schwab_agent_paper_trigger(session, **(trigger_args | change))
+
             for change in (
                 {"formal_stage_capacity": False, "formal_model_config_id": None},
                 {"formal_model_config_id": UUID(int=999)},
