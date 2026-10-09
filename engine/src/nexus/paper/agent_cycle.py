@@ -367,6 +367,20 @@ async def reserve_schwab_agent_paper_trigger(
         formal_model_hash=None if formal_model is None else formal_model.config_hash,
     )
     if inserted:
+        from nexus.agents.persistence import _lock_budget_day
+        from nexus.paper.formal_budget_protection import _validate_binding, latest_binding
+
+        await _lock_budget_day(session, now.date().isoformat())
+        binding = await latest_binding(session, business_date=now.date())
+        if binding is not None:
+            await _validate_binding(session, binding)
+            if (trigger_mode != "scheduled" or not binding.payload["enabled"]
+                or binding.payload["account_id"] != str(account_id)
+                or binding.payload["batch_id"] != str(batch.batch_id)
+                or binding.payload["batch_hash"] != batch.batch_hash
+                or binding.payload["slot"] != reservation.decision_slot_at.isoformat()):
+                raise ValueError("FORMAL_BUDGET_TRIGGER_BINDING_INVALID")
+            claim.formal_budget_binding_id = binding.id
         if require_synthesis_prompt:
             if not await has_active_portfolio_synthesis_prompt(session, as_of=now):
                 raise ValueError("PORTFOLIO_SYNTHESIS_PROMPT_INVALID")
@@ -1165,8 +1179,22 @@ async def _start_cycle(
         )
     )
     same_session = authority.execution_session == authority.decision_session
+    from nexus.paper.formal_budget_protection import latest_binding
+
+    binding = await latest_binding(session, business_date=decision_slot_at.date())
+    binding_id = None
+    if binding is not None:
+        claim = await session.scalar(select(IdempotencyRecord).where(
+            IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{authority.account_id}",
+            IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+            IdempotencyRecord.idempotency_key == decision_slot_at.isoformat(),
+        ))
+        if claim is None or claim.formal_budget_binding_id != binding.id:
+            raise ValueError("FORMAL_BUDGET_TRIGGER_BINDING_INVALID")
+        binding_id = binding.id
     cycle = AgentPaperCycleRecord(
         id=new_uuid7(),
+        formal_budget_binding_id=binding_id,
         account_id=authority.account_id,
         portfolio_id=authority.portfolio_id,
         decision_session=authority.decision_session,

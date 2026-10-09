@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -63,6 +63,9 @@ from nexus.persistence.models.paper import (
 from nexus.persistence.models.runtime import Job
 from nexus.strategy.intents import ResearchIntent
 
+if TYPE_CHECKING:
+    from nexus.paper.economic_budget_hold import AllocationRequest
+
 
 @dataclass(frozen=True)
 class PortfolioSynthesisAdmission:
@@ -101,6 +104,60 @@ def _frozen_run(run: AgentPortfolioSynthesisRunRecord) -> PortfolioSynthesisInpu
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_INPUT_CONFLICT")
     return frozen
+
+
+async def reserve_portfolio_synthesis_budget(
+    session: AsyncSession,
+    *,
+    run_id: UUID,
+    now: datetime,
+    daily_limit_usd: Decimal,
+    worst_case_usd: Decimal,
+    pricing_version: str,
+    pricing_fresh: bool,
+    economic_allocation: AllocationRequest | None = None,
+) -> AgentPortfolioSynthesisBudgetReservationRecord:
+    """Reserve synthesis against the shared budget, without admitting or running a Job."""
+    _validate_budget_inputs(now, daily_limit_usd, worst_case_usd, pricing_version)
+    if not pricing_fresh:
+        raise BudgetExhausted("stale pricing cannot reserve research budget")
+    if economic_allocation is not None:
+        from nexus.paper.economic_budget_hold import reserve_from_hold
+
+        if economic_allocation.action != "synthesis":
+            raise ValueError("ECONOMIC_TRANSFER_RUN_INVALID")
+        return cast(
+            AgentPortfolioSynthesisBudgetReservationRecord,
+            await reserve_from_hold(
+                session,
+                allocation=economic_allocation,
+                run_id=run_id,
+                now=now,
+                daily_limit_usd=daily_limit_usd,
+                worst_case_usd=worst_case_usd,
+                pricing_version=pricing_version,
+            ),
+        )
+    await _lock_budget_day(session, now.date().isoformat())
+    from nexus.paper.formal_budget_protection import require_protected_admission
+
+    protected = await require_protected_admission(
+        session, kind="synthesis", run_id=run_id, now=now,
+        daily_limit_usd=daily_limit_usd, amount=worst_case_usd,
+    )
+    used = await _shared_daily_budget_used(session, business_date=now.date())
+    if not protected and used + worst_case_usd > daily_limit_usd:
+        raise BudgetExhausted("daily research budget exhausted")
+    reservation = AgentPortfolioSynthesisBudgetReservationRecord(
+        business_date=now.date(),
+        run_id=run_id,
+        pricing_version=pricing_version,
+        reserved_usd=worst_case_usd,
+        state="reserved",
+    )
+    session.add(reservation)
+    await session.flush()
+    return reservation
 
 
 async def admit_portfolio_synthesis(
@@ -348,6 +405,9 @@ async def admit_portfolio_synthesis(
         target_decision is None or target_decision.account_id != cycle.account_id
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_TARGET_INVALID")
+    from nexus.paper.formal_budget_protection import binding_for_cycle
+
+    protection = await binding_for_cycle(session, cycle.id)
     calendar_row = (
         await session.execute(
             select(ExchangeCalendarAuthorityRecord, ExchangeCalendarSessionRecord)
@@ -363,6 +423,8 @@ async def admit_portfolio_synthesis(
                 ExchangeCalendarAuthorityRecord.created_at <= cycle.decision_time,
                 ExchangeCalendarSessionRecord.session == cycle.decision_session,
                 ExchangeCalendarSessionRecord.created_at <= cycle.decision_time,
+                *([] if protection is None else [ExchangeCalendarAuthorityRecord.id ==
+                    UUID(str(protection.payload["calendar_id"]))]),
             )
             .order_by(
                 ExchangeCalendarAuthorityRecord.published_at.desc(),
@@ -378,6 +440,8 @@ async def admit_portfolio_synthesis(
             AgentPromptVersionRecord.role == "portfolio_decision",
             AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
             AgentPromptVersionRecord.release_channel == "active",
+            *([] if protection is None else [AgentPromptVersionRecord.id ==
+                UUID(str(cast(dict[str, str], protection.payload["synthesis_prompt"])["id"]))]),
         )
     )
     if (
@@ -441,11 +505,6 @@ async def admit_portfolio_synthesis(
         expires_at=calendar_row[1].market_close_at,
     )
     worst = model.worst_case_cost_usd
-    _validate_budget_inputs(now, daily_limit_usd, worst, model.version)
-    await _lock_budget_day(session, now.date().isoformat())
-    used = await _shared_daily_budget_used(session, business_date=now.date())
-    if used + worst > daily_limit_usd:
-        raise BudgetExhausted("daily research budget exhausted")
     async with session.begin_nested():
         run = AgentPortfolioSynthesisRunRecord(
             cycle_id=cycle.id,
@@ -466,14 +525,14 @@ async def admit_portfolio_synthesis(
         )
         session.add(run)
         await session.flush()
-        session.add(
-            AgentPortfolioSynthesisBudgetReservationRecord(
-                business_date=now.date(),
-                run_id=run.id,
-                pricing_version=model.version,
-                reserved_usd=worst,
-                state="reserved",
-            )
+        await reserve_portfolio_synthesis_budget(
+            session,
+            run_id=run.id,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+            worst_case_usd=worst,
+            pricing_version=model.version,
+            pricing_fresh=True,
         )
         await enqueue_job(
             session,

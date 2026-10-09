@@ -9,6 +9,37 @@ type Actual = components["schemas"]["PaperPlanActualResponse"];
 type Summary = components["schemas"]["PaperManagementSummaryResponse"];
 type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 
+test("registered economic protocol is read-only through real BFF and Paper", async ({ page, request }) => {
+  const hash = process.env.NEXUS_ECONOMIC_PROTOCOL_HASH;
+  test.skip(!hash, "isolated persisted economic protocol required");
+  const response = await request.get("/api/v1/paper/economic-evidence");
+  expect(response.status()).toBe(200);
+  const data = (await response.json()).data as components["schemas"]["PortfolioEconomicEvidenceResponse"];
+  expect(data.protocol_status).toBe("registered_not_activated");
+  expect(data.protocol?.protocol_hash).toBe(hash);
+  expect(data.protocol?.slots).toHaveLength(24);
+  expect(data.planned_slot_count).toBe(24);
+  expect(data.economic_pair_count).toBeNull();
+  expect(data.execution_locked).toBe(true);
+  const writes: string[] = [];
+  page.on("request", (networkRequest) => {
+    if (!["GET", "HEAD"].includes(networkRequest.method())) writes.push(networkRequest.method());
+  });
+  await page.goto("/paper");
+  await expect(page.getByText("评价协议已登记，尚未激活。", { exact: true })).toBeVisible();
+  await expect(page.getByText("计划槽位：24（训练 4 / 样本外 20）；经济配对数量仍未知。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table", { name: "经济评价计划槽位" }).getByRole("row")).toHaveCount(25);
+  await expect(page.getByText("固定策略基线尚未实现", { exact: true })).toBeVisible();
+  await expect(page.getByText("共同合法执行窗口尚未验证", { exact: true })).toBeVisible();
+  await expect(page.locator("code").filter({ hasText: hash! })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("评价协议已登记，尚未激活。", { exact: true })).toBeVisible();
+  expect(writes).toEqual([]);
+  const second = (await (await request.get("/api/v1/paper/economic-evidence")).json()).data;
+  expect(second.protocol).toEqual(data.protocol);
+  expect(second.economic_pair_count).toBeNull();
+});
+
 test("controlled multi-candidate two-fill cycle is readable through BFF and four pages", async ({ page, request }) => {
   const cycleId = process.env.NEXUS_CONTROLLED_CYCLE_ID;
   const expectedOrderIds = process.env.NEXUS_CONTROLLED_ORDER_IDS?.split(",");

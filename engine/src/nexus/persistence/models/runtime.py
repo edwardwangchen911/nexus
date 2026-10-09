@@ -328,6 +328,9 @@ class IdempotencyRecord(ImmutableCreatedAt, Base):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    formal_budget_binding_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("formal_budget_bindings.id"), nullable=True
+    )
     actor_id: Mapped[str] = mapped_column(String(255))
     route: Mapped[str] = mapped_column(String(255))
     idempotency_key: Mapped[str] = mapped_column(String(255))

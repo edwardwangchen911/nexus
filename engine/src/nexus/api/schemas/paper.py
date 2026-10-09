@@ -471,14 +471,49 @@ class PortfolioEconomicOrdinarySampleResponse(_StrictSchema):
     performance_state: Literal["missing", "account_observed"]
 
 
+EconomicActivationBlocker = Literal[
+    "MODEL_AND_CANDIDATE_AUTHORITIES_UNBOUND",
+    "CALENDAR_AUTHORITY_UNBOUND",
+    "DUAL_LANE_ENTRYPOINT_UNIMPLEMENTED",
+    "ATOMIC_GLOBAL_BUDGET_RESERVATION_UNIMPLEMENTED",
+    "COMMON_EXECUTION_WINDOW_UNVERIFIED",
+    "FIXED_STRATEGY_BASELINE_UNIMPLEMENTED",
+    "CLOSE_PRICE_AND_COST_AUTHORITIES_UNBOUND",
+    "REAL_EVALUATION_ACTIVATION_NOT_AUTHORIZED",
+    "DAILY_LIMIT_BELOW_EVALUATION_CEILING",
+]
+
+
+class PortfolioEconomicPlannedSlotResponse(_StrictSchema):
+    ordinal: int = Field(ge=1, le=24)
+    phase: Literal["training", "oos"]
+    decision_at: AwareDatetime
+
+
+class PortfolioEconomicProtocolResponse(_StrictSchema):
+    protocol_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    registered_at: AwareDatetime
+    daily_model_jobs: Literal[6]
+    daily_sdk_calls: Literal[14]
+    daily_model_input_cap: Literal[576000]
+    daily_wire_input_cap: Literal[512000]
+    daily_output_cap: Literal[49152]
+    serial_invocation_ceiling_seconds: Literal[570]
+    slots: tuple[PortfolioEconomicPlannedSlotResponse, ...] = Field(min_length=24, max_length=24)
+    activation_blockers: tuple[EconomicActivationBlocker, ...] = Field(min_length=1, max_length=9)
+
+
 class PortfolioEconomicEvidenceResponse(_StrictSchema):
     """Current evidence capability; ordinary observations are never economic pairs."""
 
     as_of: AwareDatetime
     execution_locked: Literal[True] = True
-    protocol_status: Literal["not_implemented"] = "not_implemented"
+    protocol_status: Literal["not_implemented", "registered_not_activated", "unavailable"] = (
+        "not_implemented"
+    )
+    protocol: PortfolioEconomicProtocolResponse | None = None
     economic_status: Literal["not_evaluated"] = "not_evaluated"
-    planned_slot_count: None = None
+    planned_slot_count: Literal[24] | None = None
     economic_pair_count: None = None
     source_status: Literal["ready", "insufficient", "unavailable"]
     source_reason: (
@@ -486,6 +521,15 @@ class PortfolioEconomicEvidenceResponse(_StrictSchema):
         | None
     ) = None
     ordinary_samples: tuple[PortfolioEconomicOrdinarySampleResponse, ...] = Field(max_length=20)
+
+    @model_validator(mode="after")
+    def protocol_consistency(self) -> PortfolioEconomicEvidenceResponse:
+        registered = self.protocol_status == "registered_not_activated"
+        if registered != (self.protocol is not None) or registered != (
+            self.planned_slot_count == 24
+        ):
+            raise ValueError("economic protocol evidence is inconsistent")
+        return self
 
 
 class PortfolioEconomicEvidenceEnvelope(_StrictSchema):

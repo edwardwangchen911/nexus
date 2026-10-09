@@ -25,6 +25,33 @@ from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 
 
+class FormalBudgetBindingRecord(ImmutableCreatedAt, Base):
+    """Applied immutable authority for one global Agent UTC budget day."""
+
+    __tablename__ = "formal_budget_bindings"
+    __table_args__ = (
+        UniqueConstraint("budget_domain", "business_date", "sequence"),
+        UniqueConstraint("idempotency_key"),
+        CheckConstraint("budget_domain = 'agent_global_v1'", name="domain_fixed"),
+        CheckConstraint("sequence > 0", name="sequence_positive"),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),
+        CheckConstraint("daily_limit_usd >= 0", name="limit_nonnegative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    budget_domain: Mapped[str] = mapped_column(String(32))
+    business_date: Mapped[date]
+    sequence: Mapped[int] = mapped_column(Integer)
+    previous_id: Mapped[UUID | None] = mapped_column(ForeignKey("formal_budget_bindings.id"))
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[str] = mapped_column(String(64))
+    daily_limit_usd: Mapped[Decimal]
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+    applied_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    audit_event_id: Mapped[UUID] = mapped_column(ForeignKey("audit_events.id"), unique=True)
+
+
 class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
     __tablename__ = "agent_prompt_versions"
     __table_args__ = (

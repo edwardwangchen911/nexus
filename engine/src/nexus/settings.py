@@ -108,6 +108,9 @@ class EngineSettings(_SafeSettings):
         default=False,
         validation_alias="NEXUS_AGENT_PAPER_CYCLE_ENABLED",
     )
+    formal_budget_protection_enabled: bool = Field(
+        default=False, validation_alias="NEXUS_FORMAL_BUDGET_PROTECTION_ENABLED"
+    )
     agent_paper_formal_model_config_id: UUID | None = Field(
         default=None, validation_alias="NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID"
     )

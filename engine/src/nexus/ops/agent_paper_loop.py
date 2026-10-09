@@ -2348,17 +2348,34 @@ async def run_local_agent_paper_loop(
                 raise
 
             async def inspect() -> AgentPaperLoopSnapshot:
+                nonlocal account_id, calendar_authority_id, settings
+                environment = load_agent_paper_service_environment(
+                    repo_root,
+                    {} if env_file is not None else os.environ,
+                    **({"env_file": env_file} if env_file is not None else {}),
+                )
+                if environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false").lower() in {
+                    "",
+                    "0",
+                    "false",
+                    "no",
+                    "off",
+                }:
+                    return AgentPaperLoopSnapshot(now=clock(), enabled=False)
+                from nexus.ops.formal_budget_protection import bind_runtime_environment
+
+                environment, pinned_calendar = await bind_runtime_environment(settings, environment)
+                if pinned_calendar is not None:
+                    account_id = UUID(environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"])
+                    calendar_authority_id = UUID(pinned_calendar)
                 current = (
-                    _FileEngineSettings.model_validate(
-                        load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
-                    )
+                    _FileEngineSettings.model_validate(environment)
                     if env_file is not None
-                    else EngineSettings.model_validate(
-                        load_agent_paper_service_environment(repo_root, os.environ)
-                    )
+                    else EngineSettings.model_validate(environment)
                 )
                 if not current.agent_paper_cycle_enabled:
                     return AgentPaperLoopSnapshot(now=clock(), enabled=False)
+                settings = current
                 evaluation = await inspect_agent_version_evaluation_loop(
                     current,
                     expected_calendar_authority_id=calendar_authority_id,
@@ -2436,6 +2453,29 @@ async def run_local_agent_paper_loop(
         finally:
             for installed_signal in installed_signals:
                 event_loop.remove_signal_handler(installed_signal)
+
+
+async def _load_bound_loop_environment(
+    settings: EngineSettings,
+    repo_root: Path,
+    process_environment: Mapping[str, str],
+    *,
+    env_file: Path | None = None,
+) -> tuple[dict[str, str], str | None]:
+    from nexus.ops.formal_budget_protection import bind_runtime_environment
+
+    environment = load_agent_paper_service_environment(
+        repo_root, process_environment, **({"env_file": env_file} if env_file is not None else {})
+    )
+    if environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false").lower() in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return environment, None
+    return await bind_runtime_environment(settings, environment)
 
 
 def _candidate_batch_setting(environment: Mapping[str, str]) -> UUID:
@@ -2536,6 +2576,27 @@ async def execute_agent_paper_loop_action(
     env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
+    bound_environment: dict[str, str] = {}
+    pinned_calendar = None
+    if settings.formal_budget_protection_enabled:
+        bound_environment, pinned_calendar = await _load_bound_loop_environment(
+            settings,
+            repo_root,
+            {} if env_file is not None else os.environ,
+            env_file=env_file,
+        )
+        if bound_environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "false").lower() in {
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            return AgentPaperLoopAction.STOP_DISABLED
+    if pinned_calendar is not None:
+        account_id = UUID(bound_environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"])
+        if str(snapshot.calendar_authority_id) != pinned_calendar:
+            return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
     formal_stage_capacity = False
     if action in {
         AgentPaperLoopAction.RUN_RESEARCH_JOB,
@@ -2568,9 +2629,17 @@ async def execute_agent_paper_loop_action(
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         try:
             environment = (
-                load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                (
+                    bound_environment
+                    if pinned_calendar is not None
+                    else load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                )
                 if env_file is not None
-                else load_agent_paper_service_environment(repo_root, os.environ)
+                else (
+                    bound_environment
+                    if pinned_calendar is not None
+                    else load_agent_paper_service_environment(repo_root, os.environ)
+                )
             )
             trigger_settings = (
                 _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
@@ -2661,9 +2730,17 @@ async def execute_agent_paper_loop_action(
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         try:
             environment = (
-                load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                (
+                    bound_environment
+                    if pinned_calendar is not None
+                    else load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                )
                 if env_file is not None
-                else load_agent_paper_service_environment(repo_root, os.environ)
+                else (
+                    bound_environment
+                    if pinned_calendar is not None
+                    else load_agent_paper_service_environment(repo_root, os.environ)
+                )
             )
             trigger_settings = (
                 _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
@@ -2825,7 +2902,11 @@ async def execute_agent_paper_loop_action(
         research_settings = (
             _FileEngineSettings.model_validate(
                 {
-                    **load_agent_paper_service_environment(repo_root, {}, env_file=env_file),
+                    **(
+                        bound_environment
+                        if pinned_calendar is not None
+                        else load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                    ),
                     "OPENAI_API_KEY": None,
                     "NEXUS_PROVIDER_JOBS_ENABLED": "false",
                 }
@@ -2845,9 +2926,17 @@ async def execute_agent_paper_loop_action(
             return AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
         expected_calendar_authority_id = snapshot.calendar_authority_id
         environment = (
-            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            (
+                bound_environment
+                if pinned_calendar is not None
+                else load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            )
             if env_file is not None
-            else load_agent_paper_service_environment(repo_root, os.environ)
+            else (
+                bound_environment
+                if pinned_calendar is not None
+                else load_agent_paper_service_environment(repo_root, os.environ)
+            )
         )
         trigger_settings = (
             _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
@@ -2950,7 +3039,11 @@ async def execute_agent_paper_loop_action(
         research_settings = (
             _FileEngineSettings.model_validate(
                 {
-                    **load_agent_paper_service_environment(repo_root, {}, env_file=env_file),
+                    **(
+                        bound_environment
+                        if pinned_calendar is not None
+                        else load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+                    ),
                     "OPENAI_API_KEY": None,
                     "NEXUS_PROVIDER_JOBS_ENABLED": "false",
                 }
@@ -3021,9 +3114,17 @@ async def execute_agent_paper_loop_action(
         if snapshot.instrument_id is None:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         environment = (
-            load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            (
+                bound_environment
+                if pinned_calendar is not None
+                else load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
+            )
             if env_file is not None
-            else load_agent_paper_service_environment(repo_root, os.environ)
+            else (
+                bound_environment
+                if pinned_calendar is not None
+                else load_agent_paper_service_environment(repo_root, os.environ)
+            )
         )
         if env_file is not None:
             _require_explicit_schwab_config(environment)

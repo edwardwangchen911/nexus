@@ -4833,13 +4833,14 @@ export interface components {
             /** Ordinary Samples */
             ordinary_samples: components["schemas"]["PortfolioEconomicOrdinarySampleResponse"][];
             /** Planned Slot Count */
-            planned_slot_count?: null;
+            planned_slot_count?: 24 | null;
+            protocol?: components["schemas"]["PortfolioEconomicProtocolResponse"] | null;
             /**
              * Protocol Status
              * @default not_implemented
-             * @constant
+             * @enum {string}
              */
-            protocol_status: "not_implemented";
+            protocol_status: "not_implemented" | "registered_not_activated" | "unavailable";
             /** Source Reason */
             source_reason?: ("PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT" | "PORTFOLIO_RETROSPECTIVE_UNAVAILABLE") | null;
             /**
@@ -4870,6 +4871,65 @@ export interface components {
              * @enum {string}
              */
             performance_state: "missing" | "account_observed";
+        };
+        /** PortfolioEconomicPlannedSlotResponse */
+        PortfolioEconomicPlannedSlotResponse: {
+            /**
+             * Decision At
+             * Format: date-time
+             */
+            decision_at: string;
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "training" | "oos";
+        };
+        /** PortfolioEconomicProtocolResponse */
+        PortfolioEconomicProtocolResponse: {
+            /** Activation Blockers */
+            activation_blockers: ("MODEL_AND_CANDIDATE_AUTHORITIES_UNBOUND" | "CALENDAR_AUTHORITY_UNBOUND" | "DUAL_LANE_ENTRYPOINT_UNIMPLEMENTED" | "ATOMIC_GLOBAL_BUDGET_RESERVATION_UNIMPLEMENTED" | "COMMON_EXECUTION_WINDOW_UNVERIFIED" | "FIXED_STRATEGY_BASELINE_UNIMPLEMENTED" | "CLOSE_PRICE_AND_COST_AUTHORITIES_UNBOUND" | "REAL_EVALUATION_ACTIVATION_NOT_AUTHORIZED" | "DAILY_LIMIT_BELOW_EVALUATION_CEILING")[];
+            /**
+             * Daily Model Input Cap
+             * @constant
+             */
+            daily_model_input_cap: 576000;
+            /**
+             * Daily Model Jobs
+             * @constant
+             */
+            daily_model_jobs: 6;
+            /**
+             * Daily Output Cap
+             * @constant
+             */
+            daily_output_cap: 49152;
+            /**
+             * Daily Sdk Calls
+             * @constant
+             */
+            daily_sdk_calls: 14;
+            /**
+             * Daily Wire Input Cap
+             * @constant
+             */
+            daily_wire_input_cap: 512000;
+            /** Protocol Hash */
+            protocol_hash: string;
+            /**
+             * Registered At
+             * Format: date-time
+             */
+            registered_at: string;
+            /**
+             * Serial Invocation Ceiling Seconds
+             * @constant
+             */
+            serial_invocation_ceiling_seconds: 570;
+            /** Slots */
+            slots: components["schemas"]["PortfolioEconomicPlannedSlotResponse"][];
         };
         /** PortfolioEstimatedCostStatusInvalidationConditionV1 */
         PortfolioEstimatedCostStatusInvalidationConditionV1: {

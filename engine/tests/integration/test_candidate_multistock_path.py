@@ -357,6 +357,9 @@ async def _verify_internal_fills(
     verify_reads=True,
     host_settings=None,
     monkeypatch=None,
+    protected_environment=None,
+    calendar_authority_id=None,
+    database_clock_at=None,
 ):
     from integration.test_agent_paper_cycle_pg import _ObjectStore, _SchwabPriceHistoryProvider
     from nexus.api.errors import NexusError
@@ -386,6 +389,9 @@ async def _verify_internal_fills(
         assert monkeypatch is not None
         market_clock = [AT]
         environment = host_settings.model_dump() | {"object_store_endpoint": "http://127.0.0.1:9"}
+        if protected_environment is not None:
+            environment |= protected_environment
+            environment["object_store_endpoint"] = "http://127.0.0.1:9"
         monkeypatch.setattr(
             "nexus.ops.agent_paper_loop.load_agent_paper_service_environment",
             lambda *a, **kw: environment,
@@ -409,10 +415,12 @@ async def _verify_internal_fills(
             )
             assert scope.window_start > AT + timedelta(seconds=4)
         evaluated_at = scope.window_end + timedelta(seconds=2)
+        if database_clock_at is not None:
+            database_clock_at[0] = evaluated_at
         await _set_test_insert_clock(sessions, evaluated_at)
         if host_settings is not None:
             market_clock[0] = evaluated_at
-            if not windows:
+            if not windows and protected_environment is None:
                 from integration.test_portfolio_management_e2e import _business_facts
 
                 async with sessions() as session:
@@ -425,6 +433,7 @@ async def _verify_internal_fills(
                         repo_root=Path.cwd(),
                         action=AgentPaperLoopAction.COLLECT_WINDOW,
                         snapshot=snapshot(
+                            calendar_authority_id=calendar_authority_id,
                             now=evaluated_at,
                             cycle_id=cycle_id,
                             instrument_id=order.instrument_id,
@@ -443,7 +452,10 @@ async def _verify_internal_fills(
                     repo_root=Path.cwd(),
                     action=AgentPaperLoopAction.COLLECT_WINDOW,
                     snapshot=snapshot(
-                        now=evaluated_at, cycle_id=cycle_id, instrument_id=order.instrument_id
+                        calendar_authority_id=calendar_authority_id,
+                        now=evaluated_at,
+                        cycle_id=cycle_id,
+                        instrument_id=order.instrument_id,
                     ),
                 )
                 is None
@@ -501,6 +513,7 @@ async def _verify_internal_fills(
                     repo_root=Path.cwd(),
                     action=AgentPaperLoopAction.ADVANCE_ORDER,
                     snapshot=snapshot(
+                        calendar_authority_id=calendar_authority_id,
                         now=evaluated_at,
                         cycle_id=cycle_id,
                         order_id=order.id,

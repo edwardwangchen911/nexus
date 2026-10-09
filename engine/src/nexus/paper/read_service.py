@@ -69,6 +69,7 @@ from nexus.api.schemas.paper import (
     PaperTargetSummaryResponse,
     PortfolioEconomicEvidenceResponse,
     PortfolioEconomicOrdinarySampleResponse,
+    PortfolioEconomicProtocolResponse,
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
@@ -235,6 +236,50 @@ class PaperReadService:
             AgentChallengerError,
             collect_portfolio_challenger_retrospective,
         )
+        from nexus.paper.portfolio_economic_protocol import read_protocol
+
+        status, event, plan = await read_protocol(self._session, as_of=self._request_time)
+        protocol = None
+        if event is not None and plan is not None:
+            try:
+                protocol = PortfolioEconomicProtocolResponse.model_validate(
+                    {
+                        "protocol_hash": plan.content_hash,
+                        "registered_at": event.occurred_at,
+                        "daily_model_jobs": plan.daily_model_jobs,
+                        "daily_sdk_calls": plan.daily_sdk_calls,
+                        "daily_model_input_cap": plan.daily_model_input_cap,
+                        "daily_wire_input_cap": plan.daily_wire_input_cap,
+                        "daily_output_cap": plan.daily_output_cap,
+                        "serial_invocation_ceiling_seconds": plan.serial_invocation_ceiling_seconds,
+                        "slots": [
+                            {
+                                "ordinal": slot.ordinal,
+                                "phase": slot.phase,
+                                "decision_at": slot.decision_at,
+                            }
+                            for slot in plan.slots
+                        ],
+                        "activation_blockers": [
+                            "CALENDAR_AUTHORITY_UNBOUND"
+                            if code == "CALENDAR_AND_PROTOCOL_NOT_REGISTERED"
+                            else code
+                            for code in plan.activation_blockers
+                        ],
+                    }
+                )
+            except ValueError:
+                status, protocol = "unavailable", None
+
+        def response(**values: object) -> PortfolioEconomicEvidenceResponse:
+            return PortfolioEconomicEvidenceResponse.model_validate(
+                values
+                | {
+                    "protocol_status": status,
+                    "protocol": protocol,
+                    "planned_slot_count": 24 if protocol is not None else None,
+                }
+            )
 
         account, _ = await self.account()
         try:
@@ -243,7 +288,7 @@ class PaperReadService:
             )
         except AgentChallengerError as error:
             insufficient = error.reason_code == "PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT"
-            return PortfolioEconomicEvidenceResponse(
+            return response(
                 as_of=self._request_time,
                 source_status="insufficient" if insufficient else "unavailable",
                 source_reason=(
@@ -253,7 +298,7 @@ class PaperReadService:
                 ),
                 ordinary_samples=(),
             )
-        return PortfolioEconomicEvidenceResponse(
+        return response(
             as_of=self._request_time,
             source_status="ready",
             ordinary_samples=tuple(

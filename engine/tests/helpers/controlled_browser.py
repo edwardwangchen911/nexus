@@ -98,9 +98,10 @@ async def verify_controlled_browser(
     database_url: str,
     *,
     api_now: datetime,
-    cycle_id: UUID,
-    order_ids: tuple[UUID, UUID],
+    cycle_id: UUID | None,
+    order_ids: tuple[UUID, ...],
     candidate_count: int = 2,
+    economic_protocol_hash: str | None = None,
     first_partial: bool = False,
     candidate_stage_capacity_reads: bool = False,
     formal_readback: bool = False,
@@ -155,7 +156,11 @@ async def verify_controlled_browser(
             await asyncio.sleep(0.1)
         else:
             raise AssertionError("controlled Engine API readiness timed out")
-        order_path = "/internal/v1/paper/orders?limit=50"
+        order_path = (
+            "/internal/v1/paper/economic-evidence"
+            if economic_protocol_hash is not None
+            else "/internal/v1/paper/orders?limit=50"
+        )
         async with httpx.AsyncClient(timeout=5) as client:
             direct = await client.get(
                 f"http://127.0.0.1:{api_port}{order_path}",
@@ -178,7 +183,7 @@ async def verify_controlled_browser(
             CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV="false",
             CLOUDFLARE_INCLUDE_PROCESS_ENV="false",
             NEXUS_CONTROLLED_WEB_URL=f"http://127.0.0.1:{web_port}",
-            NEXUS_CONTROLLED_CYCLE_ID=str(cycle_id),
+            NEXUS_CONTROLLED_CYCLE_ID="" if cycle_id is None else str(cycle_id),
             NEXUS_CONTROLLED_ORDER_IDS=",".join(str(order_id) for order_id in order_ids),
             NEXUS_CONTROLLED_CANDIDATE_COUNT=str(candidate_count),
             NEXUS_CONTROLLED_FIRST_PARTIAL="1" if first_partial else "0",
@@ -188,6 +193,8 @@ async def verify_controlled_browser(
             NEXUS_LOCAL_PAPER_READONLY="1",
             WRANGLER_LOG_PATH=".wrangler/wrangler.log",
         )
+        if economic_protocol_hash is not None:
+            environment["NEXUS_ECONOMIC_PROTOCOL_HASH"] = economic_protocol_hash
         if candidate_stage_capacity_reads or formal_readback:
             import stat
 
@@ -224,6 +231,11 @@ async def verify_controlled_browser(
             "test",
             "--config",
             "playwright.controlled-paper.config.ts",
+            *(
+                ("--grep", "registered economic protocol")
+                if economic_protocol_hash is not None
+                else ()
+            ),
             *(("portfolio-controlled.spec.ts",) if first_partial else ()),
             cwd=web_root,
             env=environment,

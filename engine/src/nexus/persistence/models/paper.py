@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -222,6 +223,9 @@ class AgentPaperCycleRecord(ImmutableCreatedAt, Base):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    formal_budget_binding_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("formal_budget_bindings.id"), nullable=True
+    )
     account_id: Mapped[UUID]
     portfolio_id: Mapped[UUID]
     decision_session: Mapped[date] = mapped_column(Date)

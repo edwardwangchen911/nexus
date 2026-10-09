@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { EconomicEvidenceLoader } from "../../../app/components/paper/economic-evidence";
 
@@ -36,4 +36,30 @@ it("rejects a response claiming economic PASS through this evidence-only interfa
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: { ...report, economic_status: "PASS" } })));
   render(<EconomicEvidenceLoader />);
   await waitFor(() => expect(screen.getByText("组合经济证据暂不可读；样本数量与评价状态未知。")).toBeVisible());
+});
+
+it("reads a registered blocked protocol without suggesting activation", async () => {
+  const slots = Array.from({ length: 24 }, (_, i) => ({ ordinal: i + 1, phase: i < 4 ? "training" : "oos", decision_at: new Date(Date.UTC(2027, 0, 4 + i, 15)).toISOString() }));
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: { ...report,
+    protocol_status: "registered_not_activated", planned_slot_count: 24,
+    protocol: { protocol_hash: "a".repeat(64), registered_at: report.as_of,
+      daily_model_jobs: 6, daily_sdk_calls: 14, slots,
+      daily_model_input_cap: 576000, daily_wire_input_cap: 512000,
+      daily_output_cap: 49152, serial_invocation_ceiling_seconds: 570,
+      activation_blockers: ["FIXED_STRATEGY_BASELINE_UNIMPLEMENTED", "COMMON_EXECUTION_WINDOW_UNVERIFIED"],
+    },
+  } })));
+  render(<EconomicEvidenceLoader />);
+  await screen.findByText("评价协议已登记，尚未激活。");
+  expect(screen.getByText("计划槽位：24（训练 4 / 样本外 20）；经济配对数量仍未知。")).toBeVisible();
+  expect(screen.getByText("固定策略基线尚未实现")).toBeVisible();
+  expect(within(screen.getByRole("table", { name: "经济评价计划槽位" })).getAllByRole("row")).toHaveLength(25);
+  expect(screen.queryByRole("button", { name: /激活|开始|运行/ })).not.toBeInTheDocument();
+});
+
+it("reports corrupted registration separately from absent registration", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: { ...report, protocol_status: "unavailable", protocol: null } })));
+  render(<EconomicEvidenceLoader />);
+  await screen.findByText("评价协议登记证据不可核实，计划数量未知。");
+  expect(screen.queryByText("多股票经济评价协议与双账户执行入口尚未实现。")).not.toBeInTheDocument();
 });

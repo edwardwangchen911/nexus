@@ -31,10 +31,11 @@ FIVE = INSTRUMENTS + (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("protected", [False, True], ids=["unprotected", "budget-protected"])
 @pytest.mark.parametrize("count", [3, 5])
 @pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
 async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
-    migrated_database_url, monkeypatch, count, trade
+    migrated_database_url, monkeypatch, count, trade, protected
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
@@ -47,6 +48,17 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
     calls = []
 
     clock_at = [AT + timedelta(seconds=1)]
+    if protected:
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_scalar = AsyncSession.scalar
+
+        async def database_clock(self, statement, *args, **kwargs):
+            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+                return clock_at[0]
+            return await original_scalar(self, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "scalar", database_clock)
 
     class WorkerClock(datetime):
         @classmethod
@@ -117,7 +129,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 universe_snapshot_id=authority.universe_snapshot_id,
                 instrument_ids=tuple(entry.instrument_id for entry in manifest),
                 idempotency_key=f"fresh-{count}",
-                created_at=AT,
+                created_at=AT - timedelta(hours=1) if protected else AT,
             )
             from nexus.paper.projection import load_paper_projection
             from nexus.paper.target_service import approve_initial_target_projection
@@ -134,6 +146,55 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 approved_at=AT,
                 idempotency_key="controlled-initial-baseline",
             )
+            if protected:
+                from hashlib import sha256
+
+                from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
+                from nexus.paper.agent_cycle import reserve_schwab_agent_paper_trigger
+                from nexus.paper.formal_budget_protection import apply_protection
+                from nexus.persistence.models.agents import AgentPromptVersionRecord
+
+                clock_at[0] = AT - timedelta(hours=1)
+                if (
+                    await session.scalar(
+                        select(AgentPromptVersionRecord).where(
+                            AgentPromptVersionRecord.role == "portfolio_decision",
+                            AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
+                        )
+                    )
+                    is None
+                ):
+                    content = "Synthetic protected portfolio prompt."
+                    session.add(
+                        AgentPromptVersionRecord(
+                            role="portfolio_decision",
+                            version=SYNTHESIS_PROMPT_VERSION,
+                            content=content,
+                            content_hash=sha256(content.encode()).hexdigest(),
+                            created_at=clock_at[0],
+                        )
+                    )
+                    await session.flush()
+                binding = await apply_protection(
+                    session,
+                    account_id=authority.account_id,
+                    batch_id=batch.batch_id,
+                    enabled=True,
+                    daily_limit_usd=Decimal("3"),
+                    configuration_hash="a" * 64,
+                    idempotency_key="protected-formal-chain",
+                    formal_model_config_id=model.id,
+                )
+                clock_at[0] = AT
+                await reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=authority.account_id,
+                    client_idempotency_key=f"candidate-{count}",
+                    now=AT,
+                    candidate_batch_id=batch.batch_id,
+                    formal_stage_capacity=True,
+                    formal_model_config_id=model.id,
+                )
             result = await start_schwab_agent_paper_cycle(
                 session,
                 authority=authority,
@@ -154,6 +215,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             assert all(
                 job.job_type == "agent.paper.research" and job.attempt_count == 0 for job in jobs
             )
+        clock_at[0] = AT + timedelta(seconds=1)
         await _set_test_insert_clock(sessions, clock_at[0])
         from nexus.ops.agent_paper_once import (
             AgentPaperResumeRequest,
@@ -181,7 +243,27 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             database_url=migrated_database_url,
             agent_runtime_mode="codex_sdk",
             NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID=str(model.id),
+            NEXUS_FORMAL_BUDGET_PROTECTION_ENABLED=protected,
         )
+        if protected:
+            environment = host_settings.model_dump() | {
+                "DATABASE_URL": migrated_database_url,
+                "NEXUS_FORMAL_BUDGET_PROTECTION_ENABLED": "true",
+                "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+                "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(authority.account_id),
+                "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(batch.batch_id),
+                "NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID": str(model.id),
+                "AGENT_DAILY_BUDGET_USD": "3",
+            }
+            monkeypatch.setattr(
+                "nexus.ops.agent_paper_loop.load_agent_paper_service_environment",
+                lambda *a, **kw: environment,
+            )
+            async with sessions() as session:
+                from nexus.persistence.models.paper import AgentPaperCycleRecord
+
+                cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
+                assert cycle.formal_budget_binding_id == binding.id
         from nexus.ops.agent_paper_formal import require_formal_host_trigger_profile
 
         await require_formal_host_trigger_profile(host_settings, now=AT)
@@ -203,7 +285,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
         monkeypatch.setattr(
             "nexus.ops.agent_paper_loop._codex_sdk_preflight_blocker_async", controlled_sdk_ready
         )
-        if count == 3 and not trade:
+        if count == 3 and not trade and not protected:
             for bad_settings, bad_account, bad_job in (
                 (settings, authority.account_id, jobs[0].id),
                 (
@@ -223,6 +305,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                         repo_root=Path.cwd(),
                         action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
                         snapshot=snapshot(
+                            calendar_authority_id=authority.calendar_authority_id,
                             now=clock_at[0],
                             cycle_id=result.cycle_id,
                             research_job_id=bad_job,
@@ -235,6 +318,29 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     job.status == "queued" and job.attempt_count == 0
                     for job in await session.scalars(select(Job))
                 )
+        if protected:
+            assert (
+                await execute_agent_paper_loop_action(
+                    host_settings,
+                    account_id=authority.account_id,
+                    repo_root=Path.cwd(),
+                    action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
+                    snapshot=snapshot(
+                        now=clock_at[0],
+                        cycle_id=result.cycle_id,
+                        calendar_authority_id=UUID(int=999),
+                        research_job_id=jobs[0].id,
+                    ),
+                )
+                == AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
+            )
+            assert calls == []
+            async with sessions() as session:
+                from nexus.persistence.models.paper import AgentPaperCycleRecord
+
+                cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
+                assert cycle.formal_budget_binding_id == binding.id
+                assert all(job.attempt_count == 0 for job in await session.scalars(select(Job)))
         for job in jobs:
             assert (
                 await execute_agent_paper_loop_action(
@@ -243,6 +349,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     repo_root=Path.cwd(),
                     action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
                     snapshot=snapshot(
+                        calendar_authority_id=authority.calendar_authority_id,
                         now=clock_at[0],
                         cycle_id=result.cycle_id,
                         research_job_id=job.id,
@@ -255,6 +362,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             assert not await run_agent_worker_once(
                 settings, job_ids=(job.id,), formal_stage_capacity=True
             )
+        clock_at[0] = AT + timedelta(seconds=2)
         assert calls == ["research", "critique", "synthesis"] * count
         async with sessions() as session:
             for run_id in result.research_run_ids:
@@ -477,6 +585,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 repo_root=Path.cwd(),
                 action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
                 snapshot=snapshot(
+                    calendar_authority_id=authority.calendar_authority_id,
                     now=clock_at[0],
                     cycle_id=result.cycle_id,
                     research_job_id=synthesis_job.id,
@@ -539,7 +648,11 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 account_id=authority.account_id,
                 repo_root=Path.cwd(),
                 action=AgentPaperLoopAction.RESUME,
-                snapshot=snapshot(now=clock_at[0], cycle_id=result.cycle_id),
+                snapshot=snapshot(
+                    calendar_authority_id=authority.calendar_authority_id,
+                    now=clock_at[0],
+                    cycle_id=result.cycle_id,
+                ),
             )
             is None
         )
@@ -665,6 +778,9 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 verify_reads=False,
                 host_settings=host_settings,
                 monkeypatch=monkeypatch,
+                protected_environment=environment if protected else None,
+                calendar_authority_id=authority.calendar_authority_id,
+                database_clock_at=clock_at if protected else None,
             )
         else:
             from nexus.paper.projection import load_paper_projection
@@ -687,6 +803,45 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 assert unchanged.available_cash == projection.available_cash
                 assert unchanged.reserved_cash == projection.reserved_cash
                 assert not unchanged.open_orders
+        if protected:
+            from nexus.persistence.models.agents import (
+                AgentDailyBudgetReservationRecord,
+                AgentPortfolioSynthesisBudgetReservationRecord,
+            )
+
+            async with sessions() as session:
+                claim = await session.scalar(
+                    select(IdempotencyRecord).where(
+                        IdempotencyRecord.actor_id
+                        == f"local-agent-paper-schwab:{authority.account_id}",
+                        IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                        IdempotencyRecord.idempotency_key == AT.isoformat(),
+                    )
+                )
+                assert claim is not None and claim.formal_budget_binding_id == binding.id
+                reservations = tuple(
+                    await session.scalars(
+                        select(AgentDailyBudgetReservationRecord).where(
+                            AgentDailyBudgetReservationRecord.run_id.in_(result.research_run_ids)
+                        )
+                    )
+                )
+                assert {row.run_id for row in reservations} == set(result.research_run_ids)
+                synth_reservations = tuple(
+                    await session.scalars(
+                        select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+                            AgentPortfolioSynthesisBudgetReservationRecord.run_id == first.run.id
+                        )
+                    )
+                )
+                assert len(synth_reservations) == 1
+                assert all(
+                    row.state == "settled"
+                    and row.business_date == AT.date()
+                    and row.pricing_version == model.version
+                    and row.settled_usd == 0
+                    for row in (*reservations, *synth_reservations)
+                )
         import httpx
         from helpers.paper_api import app, headers
         from integration.test_portfolio_management_e2e import _business_facts

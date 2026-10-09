@@ -33,6 +33,22 @@ function evaluationSlots(paired = 0): Array<Record<string, unknown>> {
 }
 
 describe("internal paper page", () => {
+  it("keeps protocol evidence readable without an account performance snapshot", async () => {
+    const fetcher = vi.fn(async () => Response.json({ data: {
+      as_of: "2026-10-08T16:00:00Z", execution_locked: true,
+      protocol_status: "not_implemented", economic_status: "not_evaluated",
+      planned_slot_count: null, economic_pair_count: null,
+      source_status: "insufficient", source_reason: "PORTFOLIO_CHALLENGER_HISTORY_INSUFFICIENT",
+      ordinary_samples: [],
+    } }));
+    vi.stubGlobal("fetch", fetcher);
+    render(<PaperPanel state="empty" portfolio={null} orders={[]} nextCursor={null} statusFilter="" loadingMore={false} notice={null} onRefresh={vi.fn()} onStatusFilter={vi.fn()} onLoadMore={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "组合经济对照 · 证据与缺口" })).toBeVisible();
+    await screen.findByText("尚无符合当前复盘合同的完整组合样本。");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/paper/economic-evidence", expect.objectContaining({ cache: "no-store" }));
+  });
+
   it("reads a selected historical cycle without changing the current account or orders", async () => {
     const historical = { ...agentPaperCycle, decision_session: "2026-08-25" };
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {

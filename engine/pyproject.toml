@@ -54,8 +54,17 @@ nexus-engine-worker = "nexus.worker:main"
 nexus-local-stack = "nexus.ops.local_stack:main"
 nexus-openai-local = "nexus.ops.openai_local:main"
 nexus-engine-research-budget-diagnostic = "nexus.ops.research_budget_diagnostic:main"
-nexus-engine-research-workload-inspection = "nexus.ops.research_workload_inspection:main"
 nexus-engine-research-budget-case = "nexus.ops.research_budget_case:main"
+nexus-engine-research-workload-inspection = "nexus.ops.research_workload_inspection:main"
+nexus-engine-portfolio-economic-preflight = "nexus.ops.portfolio_economic_preflight:main"
+nexus-engine-portfolio-economic-protocol = "nexus.ops.portfolio_economic_protocol:main"
+nexus-engine-economic-authorities = "nexus.ops.economic_authorities:main"
+nexus-engine-economic-version-binding = "nexus.ops.economic_version_binding:main"
+nexus-engine-economic-budget-preflight = "nexus.ops.economic_budget:main"
+nexus-engine-economic-budget-hold = "nexus.ops.economic_budget_hold:main"
+nexus-engine-economic-budget-transfer = "nexus.ops.economic_budget_transfer:main"
+nexus-engine-formal-budget-inventory = "nexus.ops.formal_budget_inventory:main"
+nexus-engine-formal-budget-protection = "nexus.ops.formal_budget_protection:main"
 
 [dependency-groups]
 dev = [

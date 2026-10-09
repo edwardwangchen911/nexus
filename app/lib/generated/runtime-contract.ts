@@ -8859,12 +8859,34 @@ export const runtimeContractSchemas = {
         "type": "array"
       },
       "planned_slot_count": {
-        "title": "Planned Slot Count",
-        "type": "null"
+        "anyOf": [
+          {
+            "const": 24,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Planned Slot Count"
+      },
+      "protocol": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioEconomicProtocolResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "protocol_status": {
-        "const": "not_implemented",
         "default": "not_implemented",
+        "enum": [
+          "not_implemented",
+          "registered_not_activated",
+          "unavailable"
+        ],
         "title": "Protocol Status",
         "type": "string"
       },
@@ -8938,6 +8960,125 @@ export const runtimeContractSchemas = {
       "performance_state"
     ],
     "title": "PortfolioEconomicOrdinarySampleResponse",
+    "type": "object"
+  },
+  "PortfolioEconomicPlannedSlotResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "decision_at": {
+        "format": "date-time",
+        "title": "Decision At",
+        "type": "string"
+      },
+      "ordinal": {
+        "maximum": 24,
+        "minimum": 1,
+        "title": "Ordinal",
+        "type": "integer"
+      },
+      "phase": {
+        "enum": [
+          "training",
+          "oos"
+        ],
+        "title": "Phase",
+        "type": "string"
+      }
+    },
+    "required": [
+      "ordinal",
+      "phase",
+      "decision_at"
+    ],
+    "title": "PortfolioEconomicPlannedSlotResponse",
+    "type": "object"
+  },
+  "PortfolioEconomicProtocolResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "activation_blockers": {
+        "items": {
+          "enum": [
+            "MODEL_AND_CANDIDATE_AUTHORITIES_UNBOUND",
+            "CALENDAR_AUTHORITY_UNBOUND",
+            "DUAL_LANE_ENTRYPOINT_UNIMPLEMENTED",
+            "ATOMIC_GLOBAL_BUDGET_RESERVATION_UNIMPLEMENTED",
+            "COMMON_EXECUTION_WINDOW_UNVERIFIED",
+            "FIXED_STRATEGY_BASELINE_UNIMPLEMENTED",
+            "CLOSE_PRICE_AND_COST_AUTHORITIES_UNBOUND",
+            "REAL_EVALUATION_ACTIVATION_NOT_AUTHORIZED",
+            "DAILY_LIMIT_BELOW_EVALUATION_CEILING"
+          ],
+          "type": "string"
+        },
+        "maxItems": 9,
+        "minItems": 1,
+        "title": "Activation Blockers",
+        "type": "array"
+      },
+      "daily_model_input_cap": {
+        "const": 576000,
+        "title": "Daily Model Input Cap",
+        "type": "integer"
+      },
+      "daily_model_jobs": {
+        "const": 6,
+        "title": "Daily Model Jobs",
+        "type": "integer"
+      },
+      "daily_output_cap": {
+        "const": 49152,
+        "title": "Daily Output Cap",
+        "type": "integer"
+      },
+      "daily_sdk_calls": {
+        "const": 14,
+        "title": "Daily Sdk Calls",
+        "type": "integer"
+      },
+      "daily_wire_input_cap": {
+        "const": 512000,
+        "title": "Daily Wire Input Cap",
+        "type": "integer"
+      },
+      "protocol_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Protocol Hash",
+        "type": "string"
+      },
+      "registered_at": {
+        "format": "date-time",
+        "title": "Registered At",
+        "type": "string"
+      },
+      "serial_invocation_ceiling_seconds": {
+        "const": 570,
+        "title": "Serial Invocation Ceiling Seconds",
+        "type": "integer"
+      },
+      "slots": {
+        "items": {
+          "$ref": "#/components/schemas/PortfolioEconomicPlannedSlotResponse"
+        },
+        "maxItems": 24,
+        "minItems": 24,
+        "title": "Slots",
+        "type": "array"
+      }
+    },
+    "required": [
+      "protocol_hash",
+      "registered_at",
+      "daily_model_jobs",
+      "daily_sdk_calls",
+      "daily_model_input_cap",
+      "daily_wire_input_cap",
+      "daily_output_cap",
+      "serial_invocation_ceiling_seconds",
+      "slots",
+      "activation_blockers"
+    ],
+    "title": "PortfolioEconomicProtocolResponse",
     "type": "object"
   },
   "PortfolioEstimatedCostStatusInvalidationConditionV1": {

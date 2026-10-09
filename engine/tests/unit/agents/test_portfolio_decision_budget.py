@@ -29,6 +29,10 @@ class _BudgetSession:
         self.queries.append(str(statement))
         return next(self._usage)
 
+    async def scalars(self, statement: object) -> tuple[object, ...]:
+        self.queries.append(str(statement))
+        return ()  # This legacy case has no economic pair holds.
+
     def add(self, value: object) -> None:
         self.added.append(value)
 
@@ -54,8 +58,7 @@ async def test_instrument_budget_counts_open_portfolio_decision_reservations() -
     assert any("agent_daily_budget_reservations" in query for query in session.queries)
     assert any("portfolio_decision_budget_reservations" in query for query in session.queries)
     assert any(
-        "agent_portfolio_synthesis_budget_reservations" in query
-        for query in session.queries
+        "agent_portfolio_synthesis_budget_reservations" in query for query in session.queries
     )
     assert session.added == []
 

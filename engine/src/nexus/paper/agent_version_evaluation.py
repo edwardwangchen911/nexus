@@ -117,6 +117,15 @@ async def register_agent_version_evaluation(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1417))"),
         {"scope": "agent-version-evaluation-registration"},
     )
+    from nexus.agents.persistence import _lock_budget_day
+    from nexus.paper.formal_budget_protection import latest_binding
+
+    for budget_day in sorted(
+        {slot.astimezone(UTC).date() for slot in (*request.train_slots, *request.oos_slots)}
+    ):
+        await _lock_budget_day(session, budget_day.isoformat())
+        if await latest_binding(session, business_date=budget_day) is not None:
+            raise ValueError("FORMAL_REGISTERED_EVALUATION_UNSUPPORTED")
     incumbent_run = await session.get(
         AgentResearchRunRecord,
         request.incumbent_version_source_run_id,
@@ -555,6 +564,14 @@ async def _persist_evaluation_decision(
     metric_report: dict[str, object],
     selected_run_id: UUID,
 ) -> AgentVersionEvaluationDecision:
+    from nexus.agents.persistence import _lock_budget_day
+
+    # All terminal writers already hold the evaluation lock. Serialize the
+    # active-to-terminal transition with registration and formal budget apply.
+    for budget_day in sorted(
+        {slot.astimezone(UTC).date() for slot in (*evaluation.train_slots, *evaluation.oos_slots)}
+    ):
+        await _lock_budget_day(session, budget_day.isoformat())
     metric_hash = hashlib.sha256(canonical_json(metric_report).encode()).hexdigest()
     decision_hash = hashlib.sha256(
         canonical_json(
@@ -801,12 +818,10 @@ async def _load_agent_version_metric_facts(
     drawdown_degradation = Decimal(0)
     if comparable_performance:
         incumbent_rows = [
-            snapshot_by_key[(evaluation.incumbent_account_id, close)]
-            for close in session_closes
+            snapshot_by_key[(evaluation.incumbent_account_id, close)] for close in session_closes
         ]
         challenger_rows = [
-            snapshot_by_key[(evaluation.challenger_account_id, close)]
-            for close in session_closes
+            snapshot_by_key[(evaluation.challenger_account_id, close)] for close in session_closes
         ]
         cumulative_excess_return = (
             challenger_rows[-1].nav / capital_by_account[evaluation.challenger_account_id]
@@ -814,9 +829,7 @@ async def _load_agent_version_metric_facts(
         )
         previous_incumbent = capital_by_account[evaluation.incumbent_account_id]
         previous_challenger = capital_by_account[evaluation.challenger_account_id]
-        for incumbent_row, challenger_row in zip(
-            incumbent_rows, challenger_rows, strict=True
-        ):
+        for incumbent_row, challenger_row in zip(incumbent_rows, challenger_rows, strict=True):
             incumbent_nav = incumbent_row.nav
             challenger_nav = challenger_row.nav
             positive_sessions += int(

@@ -745,6 +745,135 @@ async def test_read_projection_marks_terminal_lane_failure_for_attention(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["finalize", "invalidate", "incomplete", "unrecoverable"])
+async def test_terminal_evaluation_holds_every_frozen_budget_day_until_commit(
+    migrated_database_url: str, action: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory, engine = await _factory(migrated_database_url)
+    try:
+        async with factory.begin() as session:
+            if action == "invalidate":
+                evaluation_id = await _seed_legacy_invalid_evaluation(session)
+            else:
+                prompt_id, model_id = await _seed_authority(session)
+                registration = await register_agent_version_evaluation(
+                    session,
+                    request=_request(prompt_id, model_id),
+                    actor_id="terminal-budget-lock-test",
+                    idempotency_key="terminal-budget-lock-test",
+                    now=NOW,
+                )
+                evaluation_id = registration.evaluation_id
+            evaluation = await session.get(AgentVersionEvaluationRecord, evaluation_id)
+            days = sorted(
+                {
+                    slot.astimezone(UTC).date()
+                    for slot in (*evaluation.train_slots, *evaluation.oos_slots)
+                }
+            )
+            first_slot = evaluation.train_slots[0]
+
+        async def close(session):
+            if action == "finalize":
+                return await finalize_agent_version_evaluation(
+                    session,
+                    evaluation_id=evaluation_id,
+                    now=datetime.combine(OOS_DATES[-1], time(20, tzinfo=UTC))
+                    + timedelta(seconds=1),
+                )
+            if action == "invalidate":
+                return await agent_version_evaluation.invalidate_agent_version_evaluation(
+                    session,
+                    evaluation_id=evaluation_id,
+                    now=NOW,
+                )
+            if action == "incomplete":
+                return await close_incomplete_agent_version_evaluation(
+                    session,
+                    evaluation_id=evaluation_id,
+                    now=first_slot + timedelta(seconds=61),
+                )
+            return await close_unrecoverable_agent_version_evaluation(
+                session,
+                evaluation_id=evaluation_id,
+                decision_slot_at=first_slot,
+                reason_code="PAIR_SCHWAB_L1_INCOMPLETE",
+                now=first_slot + timedelta(seconds=1),
+            )
+
+        async def probe_days(expected):
+            # Use the same native lock key, probing from another actual PG transaction.
+            async with factory.begin() as probe:
+                for day in days:
+                    available = await probe.scalar(
+                        text("SELECT pg_try_advisory_xact_lock(hashtext(:scope))"),
+                        {"scope": f"agent-budget:{day.isoformat()}"},
+                    )
+                    assert available is expected
+
+        import nexus.agents.persistence as native
+
+        reached = asyncio.Event()
+        written = asyncio.Event()
+        release = asyncio.Event()
+        real_lock = native._lock_budget_day
+        locked_days = []
+
+        async def observed_lock(session, business_date):
+            locked_days.append(business_date)
+            reached.set()
+            await real_lock(session, business_date)
+
+        async def terminal_transaction():
+            async with factory.begin() as session:
+                result = await close(session)
+                written.set()
+                await release.wait()
+                return result
+
+        task = None
+        try:
+            async with factory.begin() as budget_transaction:
+                await real_lock(budget_transaction, days[0].isoformat())
+                monkeypatch.setattr(native, "_lock_budget_day", observed_lock)
+                task = asyncio.create_task(terminal_transaction())
+                await asyncio.wait_for(reached.wait(), timeout=10)
+                assert not task.done() and not written.is_set()
+                async with factory.begin() as observer:
+                    assert (
+                        await observer.scalar(
+                            select(func.count()).select_from(AgentVersionEvaluationDecisionRecord)
+                        )
+                        == 0
+                    )
+            await asyncio.wait_for(written.wait(), timeout=10)
+            await probe_days(False)
+            release.set()
+            closed = await asyncio.wait_for(task, timeout=10)
+            assert closed.execution_locked and not closed.replayed
+            assert locked_days == [day.isoformat() for day in days]
+        finally:
+            release.set()
+            if task is not None:
+                await asyncio.wait_for(task, timeout=10)
+            monkeypatch.setattr(native, "_lock_budget_day", real_lock)
+        await probe_days(True)
+        async with factory.begin() as session:
+            replay = await close(session)
+            assert replay.replayed
+            assert replay.model_copy(update={"replayed": False}) == closed
+            await probe_days(True)
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(AgentVersionEvaluationDecisionRecord)
+                )
+                == 1
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_finalization_is_fail_closed_and_idempotent_without_oos_pairs(
     migrated_database_url: str,
 ) -> None:

@@ -332,6 +332,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
       </header>
       {state !== "forbidden" ? management : null}
       {state !== "forbidden" ? actual : null}
+      {state !== "forbidden" ? <EconomicEvidenceLoader /> : null}
       <DecisionPath current="paper" />
       <div role="status" aria-label="模拟盘操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
@@ -346,7 +347,6 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         {cycleSummary ? <AgentPaperSessionSummary summary={cycleSummary} historical={selectedCycleSession !== null} /> : null}
         {versionObservation ? <AgentPaperVersionHistory history={versionHistory} /> : null}
         {versionEvaluation ? <AgentVersionEvaluation evaluation={versionEvaluation} /> : null}
-        <EconomicEvidenceLoader />
         <AgentPaperCycle cycles={cycles} unavailable={cycleUnavailable} historical={selectedCycleSession !== null} />
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
         {portfolio.performance === null ? <DataState state="empty" title="内部模拟绩效" detail="尚无已发布的内部模拟绩效快照。" announce={false} /> : <>

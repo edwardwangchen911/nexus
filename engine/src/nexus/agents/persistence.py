@@ -7,8 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from nexus.paper.economic_budget_hold import AllocationRequest
 
 from pydantic import ValidationError
 from sqlalchemy import case, func, select, text
@@ -352,15 +355,35 @@ async def reserve_daily_budget(
     worst_case_usd: Decimal,
     pricing_version: str,
     pricing_fresh: bool,
+    economic_allocation: "AllocationRequest | None" = None,
 ) -> AgentDailyBudgetReservationRecord:
     """Serialize one UTC day and count reservations plus settled actual usage."""
     _validate_budget_inputs(now, daily_limit_usd, worst_case_usd, pricing_version)
     if not pricing_fresh:
         raise BudgetExhausted("stale pricing cannot reserve research budget")
+    if economic_allocation is not None:
+        from nexus.paper.economic_budget_hold import reserve_from_hold
+
+        if economic_allocation.action == "synthesis":
+            raise ValueError("ECONOMIC_TRANSFER_RUN_INVALID")
+        return cast(
+            AgentDailyBudgetReservationRecord,
+            await reserve_from_hold(
+                session, allocation=economic_allocation, run_id=run_id, now=now,
+                daily_limit_usd=daily_limit_usd, worst_case_usd=worst_case_usd,
+                pricing_version=pricing_version,
+            ),
+        )
     business_date = now.date()
     await _lock_budget_day(session, business_date.isoformat())
+    from nexus.paper.formal_budget_protection import require_protected_admission
+
+    protected = await require_protected_admission(
+        session, kind="research", run_id=run_id, now=now,
+        daily_limit_usd=daily_limit_usd, amount=worst_case_usd,
+    )
     used = await _shared_daily_budget_used(session, business_date=business_date)
-    if used + worst_case_usd > daily_limit_usd:
+    if not protected and used + worst_case_usd > daily_limit_usd:
         raise BudgetExhausted("daily research budget exhausted")
     reservation = AgentDailyBudgetReservationRecord(
         business_date=business_date,
@@ -391,8 +414,14 @@ async def reserve_portfolio_decision_budget(
         raise BudgetExhausted("stale pricing cannot reserve research budget")
     business_date = now.date()
     await _lock_budget_day(session, business_date.isoformat())
+    from nexus.paper.formal_budget_protection import require_protected_admission
+
+    protected = await require_protected_admission(
+        session, kind="portfolio_decision", run_id=run_id, now=now,
+        daily_limit_usd=daily_limit_usd, amount=worst_case_usd,
+    )
     used = await _shared_daily_budget_used(session, business_date=business_date)
-    if used + worst_case_usd > daily_limit_usd:
+    if not protected and used + worst_case_usd > daily_limit_usd:
         raise BudgetExhausted("daily research budget exhausted")
     reservation = PortfolioDecisionBudgetReservationRecord(
         business_date=business_date,
@@ -753,10 +782,20 @@ async def _admit_research_run(
         )
     else:
         prior_run = None
+    from nexus.paper.formal_budget_protection import pinned_research_authorities
+
+    protected_authority = await pinned_research_authorities(
+        session, actor_id=actor_id, idempotency_key=idempotency_key,
+    )
+    if protected_authority is not None:
+        prior_run = None
+        model_config_id = protected_authority[1].id
     if prior_run is not None:
         prompts = await load_frozen_prompts(session, prior_run)
     else:
         prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
+    if protected_authority is not None:
+        prompts = cast(dict[AgentRole, AgentPromptVersionRecord], protected_authority[0])
     if prior_run is not None:
         model = await session.get(AgentModelConfigRecord, prior_run.model_config_id)
         if model is None or (
@@ -1090,7 +1129,11 @@ async def _shared_daily_budget_used(session: AsyncSession, *, business_date: dat
             ).where(model.business_date == business_date)
         )
         totals.append(Decimal(str(used)))
-    return sum(totals, Decimal("0"))
+    from nexus.paper.economic_budget_hold import held_pair_budget
+
+    return sum(totals, Decimal("0")) + await held_pair_budget(
+        session, business_date=business_date
+    )
 
 
 async def _lock_budget_day(session: AsyncSession, business_date: str) -> None:

@@ -24,3 +24,29 @@ it.each([
   const response = await sanitizeEngineResponse(Response.json({ data: { ...data, ...change }, meta }), undefined, path, "GET");
   expect(response.status).toBe(500);
 });
+
+
+it("preserves registered and unavailable protocol states through the normal BFF boundary", async () => {
+  const protocol = {
+    protocol_hash: "a".repeat(64), registered_at: data.as_of,
+    daily_model_jobs: 6, daily_sdk_calls: 14,
+    daily_model_input_cap: 576000, daily_wire_input_cap: 512000,
+    daily_output_cap: 49152, serial_invocation_ceiling_seconds: 570,
+    activation_blockers: ["COMMON_EXECUTION_WINDOW_UNVERIFIED"],
+    slots: Array.from({ length: 24 }, (_, index) => ({
+      ordinal: index + 1, phase: index < 4 ? "training" : "oos",
+      decision_at: new Date(Date.UTC(2027, 0, 4 + index, 15)).toISOString(),
+    })),
+  };
+  for (const change of [
+    { protocol_status: "registered_not_activated", planned_slot_count: 24, protocol },
+    { protocol_status: "unavailable", planned_slot_count: null, protocol: null },
+  ]) {
+    const expected = { ...data, ...change };
+    const response = await sanitizeEngineResponse(Response.json({ data: expected, meta }), undefined, path, "GET");
+    expect(response.status).toBe(200);
+    expect((await response.json()).data).toEqual(expected);
+    expect(expected.economic_pair_count).toBeNull();
+    expect(expected.economic_status).toBe("not_evaluated");
+  }
+});
