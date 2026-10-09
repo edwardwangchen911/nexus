@@ -533,6 +533,48 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 )
             async with sessions() as session:
                 assert await _business_facts(session) == before_default_resume
+        assert (
+            await execute_agent_paper_loop_action(
+                host_settings,
+                account_id=authority.account_id,
+                repo_root=Path.cwd(),
+                action=AgentPaperLoopAction.RESUME,
+                snapshot=snapshot(now=clock_at[0], cycle_id=result.cycle_id),
+            )
+            is None
+        )
+        from integration.test_portfolio_management_e2e import _business_facts
+
+        async with sessions() as session:
+            from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+            from nexus.persistence.models.runtime import IdempotencyRecord
+
+            latest_host_event = await session.scalar(
+                select(AgentPaperCycleEventRecord)
+                .where(AgentPaperCycleEventRecord.cycle_id == result.cycle_id)
+                .order_by(AgentPaperCycleEventRecord.sequence.desc())
+            )
+            assert latest_host_event.result_code == (
+                "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
+            )
+            assert latest_host_event.to_status == ("awaiting_market" if trade else "completed")
+            host_target = await session.scalar(select(PaperTargetVersionRecord))
+            assert (
+                str(host_target.strategy_decision_id)
+                == latest_host_event.fact_ids["strategy_decision_id"]
+            )
+            assert (
+                await session.scalar(
+                    select(IdempotencyRecord).where(
+                        IdempotencyRecord.actor_id
+                        == f"local-agent-paper-schwab-resume:{result.cycle_id}",
+                        IdempotencyRecord.idempotency_key
+                        == f"agent-paper-loop-resume:{result.cycle_id}",
+                    )
+                )
+                is not None
+            )
+            before_resume_readback = await _business_facts(session)
         finished = await resume_once(
             settings,
             AgentPaperResumeRequest(
@@ -546,16 +588,8 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
         ), finished
         assert bool(finished.order_ids) is trade
-        assert (
-            await execute_agent_paper_loop_action(
-                host_settings,
-                account_id=authority.account_id,
-                repo_root=Path.cwd(),
-                action=AgentPaperLoopAction.RESUME,
-                snapshot=snapshot(now=clock_at[0], cycle_id=result.cycle_id),
-            )
-            is None
-        )
+        async with sessions() as session:
+            assert await _business_facts(session) == before_resume_readback
         async with sessions.begin() as session:
             cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
             assert cycle.execution_locked is True
@@ -629,6 +663,8 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 orders,
                 count,
                 verify_reads=False,
+                host_settings=host_settings,
+                monkeypatch=monkeypatch,
             )
         else:
             from nexus.paper.projection import load_paper_projection

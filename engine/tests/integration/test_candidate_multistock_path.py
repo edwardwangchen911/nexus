@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -346,11 +347,20 @@ async def _set_test_insert_clock(sessions, at):
 
 
 async def _verify_internal_fills(
-    settings, sessions, cycle_id, account_id, orders, count, *, verify_reads=True
+    settings,
+    sessions,
+    cycle_id,
+    account_id,
+    orders,
+    count,
+    *,
+    verify_reads=True,
+    host_settings=None,
+    monkeypatch=None,
 ):
     from integration.test_agent_paper_cycle_pg import _ObjectStore, _SchwabPriceHistoryProvider
     from nexus.api.errors import NexusError
-    from nexus.ops.paper_once import PaperAdvanceRequest, run_once
+    from nexus.ops.paper_once import PaperAdvanceRequest, read_agent_window_advance_result, run_once
     from nexus.paper.agent_market import (
         collect_agent_paper_window,
         resolve_agent_paper_market_scope,
@@ -369,6 +379,24 @@ async def _verify_internal_fills(
     from sqlalchemy import func
 
     provider = _SchwabPriceHistoryProvider()
+    if host_settings is not None:
+        from nexus.ops.agent_paper_loop import AgentPaperLoopAction, execute_agent_paper_loop_action
+        from unit.ops.test_agent_paper_loop import snapshot
+
+        assert monkeypatch is not None
+        market_clock = [AT]
+        environment = host_settings.model_dump() | {"object_store_endpoint": "http://127.0.0.1:9"}
+        monkeypatch.setattr(
+            "nexus.ops.agent_paper_loop.load_agent_paper_service_environment",
+            lambda *a, **kw: environment,
+        )
+        monkeypatch.setattr(
+            "nexus.ops.agent_paper_once.SchwabPriceHistoryProvider", lambda *a, **kw: provider
+        )
+        monkeypatch.setattr(
+            "nexus.ops.agent_paper_once.S3ProviderEvidenceStore", lambda *a, **kw: _ObjectStore()
+        )
+        monkeypatch.setattr("nexus.paper.agent_market._utc_now", lambda: market_clock[0])
     windows = []
     async with sessions() as session:
         before = await load_paper_projection(
@@ -382,14 +410,62 @@ async def _verify_internal_fills(
             assert scope.window_start > AT + timedelta(seconds=4)
         evaluated_at = scope.window_end + timedelta(seconds=2)
         await _set_test_insert_clock(sessions, evaluated_at)
-        window = await collect_agent_paper_window(
-            sessions,
-            cycle_id=cycle_id,
-            instrument_id=order.instrument_id,
-            provider=provider,
-            object_store=_ObjectStore(),
-            evaluated_at=evaluated_at,
-        )
+        if host_settings is not None:
+            market_clock[0] = evaluated_at
+            if not windows:
+                from integration.test_portfolio_management_e2e import _business_facts
+
+                async with sessions() as session:
+                    before_bad_config = await _business_facts(session)
+                environment["agent_paper_formal_model_config_id"] = UUID(int=999)
+                with pytest.raises(ValueError, match="CODEX_FORMAL_HOST_PROFILE_INVALID"):
+                    await execute_agent_paper_loop_action(
+                        host_settings,
+                        account_id=account_id,
+                        repo_root=Path.cwd(),
+                        action=AgentPaperLoopAction.COLLECT_WINDOW,
+                        snapshot=snapshot(
+                            now=evaluated_at,
+                            cycle_id=cycle_id,
+                            instrument_id=order.instrument_id,
+                        ),
+                    )
+                environment["agent_paper_formal_model_config_id"] = (
+                    host_settings.agent_paper_formal_model_config_id
+                )
+                assert provider.calls == 0
+                async with sessions() as session:
+                    assert await _business_facts(session) == before_bad_config
+            assert (
+                await execute_agent_paper_loop_action(
+                    host_settings,
+                    account_id=account_id,
+                    repo_root=Path.cwd(),
+                    action=AgentPaperLoopAction.COLLECT_WINDOW,
+                    snapshot=snapshot(
+                        now=evaluated_at, cycle_id=cycle_id, instrument_id=order.instrument_id
+                    ),
+                )
+                is None
+            )
+            window = await collect_agent_paper_window(
+                sessions,
+                cycle_id=cycle_id,
+                instrument_id=order.instrument_id,
+                provider=provider,
+                object_store=_ObjectStore(),
+                evaluated_at=evaluated_at,
+            )
+            assert window.replayed
+        else:
+            window = await collect_agent_paper_window(
+                sessions,
+                cycle_id=cycle_id,
+                instrument_id=order.instrument_id,
+                provider=provider,
+                object_store=_ObjectStore(),
+                evaluated_at=evaluated_at,
+            )
         windows.append(window)
         assert window.source == "schwab" and window.purpose == "paper_fill"
         replay = await collect_agent_paper_window(
@@ -410,7 +486,63 @@ async def _verify_internal_fills(
             agent_market_window_id=window.authority_id,
             idempotency_key=f"candidate-window:{order.id}:{window.authority_id}",
         )
+        if host_settings is not None:
+            request = request.model_copy(
+                update={
+                    "idempotency_key": (
+                        f"agent-paper-loop-advance-v2:{order.id}:{window.authority_id}"
+                    )
+                }
+            )
+            assert (
+                await execute_agent_paper_loop_action(
+                    host_settings,
+                    account_id=account_id,
+                    repo_root=Path.cwd(),
+                    action=AgentPaperLoopAction.ADVANCE_ORDER,
+                    snapshot=snapshot(
+                        now=evaluated_at,
+                        cycle_id=cycle_id,
+                        order_id=order.id,
+                        instrument_id=order.instrument_id,
+                        market_window_id=window.authority_id,
+                    ),
+                )
+                is None
+            )
+        if host_settings is not None:
+            from integration.test_portfolio_management_e2e import _business_facts
+            from nexus.persistence.models.paper import PaperOrderEventRecord
+
+            async with sessions() as session:
+                stored_order_event = await session.scalar(
+                    select(PaperOrderEventRecord)
+                    .where(PaperOrderEventRecord.order_id == order.id)
+                    .order_by(PaperOrderEventRecord.event_seq.desc())
+                )
+                assert stored_order_event.to_status == "filled"
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PaperFillRecord)
+                        .where(PaperFillRecord.order_id == order.id)
+                    )
+                    == 1
+                )
+                host_fill_receipt = await read_agent_window_advance_result(
+                    session,
+                    account_id=account_id,
+                    cycle_id=cycle_id,
+                    order_id=order.id,
+                    market_window_id=window.authority_id,
+                )
+                assert host_fill_receipt is not None
+                assert host_fill_receipt.action == host_fill_receipt.status == "filled"
+                before_fill_readback = await _business_facts(session)
         filled = await run_once(settings, request)
+        if host_settings is not None:
+            async with sessions() as session:
+                assert await _business_facts(session) == before_fill_readback
         assert filled["status"] == filled["action"] == "filled", filled
         assert (
             await run_once(
