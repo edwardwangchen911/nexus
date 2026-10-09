@@ -15,6 +15,7 @@ from nexus.agents.codex_candidate import (
     require_candidate_consumer_profile,
     require_candidate_model_profile,
 )
+from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
 from nexus.agents.paper_context import (
     paper_contexts_match_projection,
     prepare_agent_paper_research_snapshot,
@@ -435,6 +436,24 @@ async def finish_schwab_agent_paper_trigger(
     await session.flush()
 
 
+def _validate_formal_cycle_arguments(
+    *,
+    formal_stage_capacity: bool,
+    candidate_stage_capacity: bool,
+    formal_model_config_id: UUID | None,
+) -> None:
+    if (
+        type(formal_stage_capacity) is not bool
+        or formal_stage_capacity
+        and candidate_stage_capacity is not False
+        or formal_stage_capacity
+        and not isinstance(formal_model_config_id, UUID)
+        or not formal_stage_capacity
+        and formal_model_config_id is not None
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+
+
 async def _require_cycle_candidate_profile(
     session: AsyncSession,
     *,
@@ -442,12 +461,48 @@ async def _require_cycle_candidate_profile(
     candidate_stage_capacity: bool,
     now: datetime | None = None,
     expected_model_id: UUID | None = None,
+    formal_stage_capacity: bool = False,
+    expected_formal_model_id: UUID | None = None,
 ) -> UUID | None:
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
     events = await _events(session, cycle.id)
     facts = {} if not events else events[0].fact_ids
+    formal_keys = {"formal_stage_capacity", "formal_model_config_id", "formal_model_hash"}
+    if not formal_stage_capacity:
+        if formal_keys.intersection(facts) or expected_formal_model_id is not None:
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    else:
+        if (
+            not events
+            or events[0].result_code != "CYCLE_PREPARED"
+            or facts.get("formal_stage_capacity") is not True
+            or any(key.startswith("candidate_") for key in facts)
+            or expected_model_id is not None
+            or cycle.candidate_batch_id is None
+            or cycle.execution_locked is not True
+        ):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        try:
+            formal_id = UUID(str(facts["formal_model_config_id"]))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID") from None
+        if expected_formal_model_id is not None and formal_id != expected_formal_model_id:
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        at = now if now is not None else await session.scalar(select(func.now()))
+        if not isinstance(at, datetime):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        formal_model = await require_formal_stage_model_profile(
+            session, model_config_id=formal_id, now=at
+        )
+        if facts.get("formal_model_hash") != formal_model.config_hash:
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        return formal_id
     if not candidate_stage_capacity:
         if "candidate_stage_capacity" in facts or expected_model_id is not None:
             raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
@@ -497,8 +552,30 @@ async def start_schwab_agent_paper_cycle(
     execution_scope_max_symbols: int | None = None,
     candidate_stage_capacity: bool = False,
     candidate_model_config_id: UUID | None = None,
+    formal_stage_capacity: bool = False,
+    formal_model_config_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
+    _validate_formal_cycle_arguments(
+        formal_stage_capacity=formal_stage_capacity,
+        candidate_stage_capacity=candidate_stage_capacity,
+        formal_model_config_id=formal_model_config_id,
+    )
+    if formal_stage_capacity:
+        if candidate_batch_id is None or any(
+            value is not None
+            for value in (
+                version_evaluation_id,
+                version_lane,
+                version_source_run_id,
+                version_prompt_id,
+                version_model_id,
+            )
+        ):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        await require_formal_stage_model_profile(
+            session, model_config_id=formal_model_config_id, now=authority.decision_time
+        )
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -558,6 +635,8 @@ async def start_schwab_agent_paper_cycle(
             candidate_stage_capacity=candidate_stage_capacity,
             now=authority.decision_time,
             expected_model_id=candidate_model_config_id,
+            formal_stage_capacity=formal_stage_capacity,
+            expected_formal_model_id=formal_model_config_id,
         )
         if (
             cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
@@ -589,6 +668,8 @@ async def start_schwab_agent_paper_cycle(
         execution_scope_max_symbols=execution_scope_max_symbols,
         candidate_stage_capacity=candidate_stage_capacity,
         candidate_model_config_id=candidate_model_config_id,
+        formal_stage_capacity=formal_stage_capacity,
+        formal_model_config_id=formal_model_config_id,
     )
 
 
@@ -910,7 +991,30 @@ async def _start_cycle(
     execution_scope_max_symbols: int | None = None,
     candidate_stage_capacity: bool = False,
     candidate_model_config_id: UUID | None = None,
+    formal_stage_capacity: bool = False,
+    formal_model_config_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
+    _validate_formal_cycle_arguments(
+        formal_stage_capacity=formal_stage_capacity,
+        candidate_stage_capacity=candidate_stage_capacity,
+        formal_model_config_id=formal_model_config_id,
+    )
+    formal_model = None
+    if formal_stage_capacity:
+        if candidate_batch_id is None or any(
+            value is not None
+            for value in (
+                version_evaluation_id,
+                version_lane,
+                version_source_run_id,
+                version_prompt_id,
+                version_model_id,
+            )
+        ):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        formal_model = await require_formal_stage_model_profile(
+            session, model_config_id=formal_model_config_id, now=authority.decision_time
+        )
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -1008,6 +1112,12 @@ async def _start_cycle(
             "candidate_model_hash": candidate_model.config_hash,
         }
     )
+    if formal_model is not None:
+        profile_facts = {
+            "formal_stage_capacity": True,
+            "formal_model_config_id": str(formal_model.id),
+            "formal_model_hash": formal_model.config_hash,
+        }
     await _append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", profile_facts)
     if has_open_order or not manifest:
         await _append_event(
@@ -1100,6 +1210,7 @@ async def _start_cycle(
         version_prompt_id=version_prompt_id,
         version_model_id=version_model_id,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
 
 
@@ -1116,12 +1227,25 @@ async def _admit_cycle_research(
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
-    candidate_model_id = await _require_cycle_candidate_profile(
+    if formal_stage_capacity and any(
+        value is not None
+        for value in (
+            version_evaluation_id,
+            version_lane,
+            version_source_run_id,
+            version_prompt_id,
+            version_model_id,
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    profile_model_id = await _require_cycle_candidate_profile(
         session,
         cycle=cycle,
         candidate_stage_capacity=candidate_stage_capacity,
         now=authority.decision_time,
+        formal_stage_capacity=formal_stage_capacity,
     )
     manifest = parse_candidate_manifest(
         cycle.candidate_manifest,
@@ -1153,8 +1277,9 @@ async def _admit_cycle_research(
                         research_as_of=authority.decision_time,
                         daily_limit_usd=daily_limit_usd,
                         now=authority.decision_time,
-                        model_config_id=candidate_model_id,
+                        model_config_id=profile_model_id,
                         candidate_stage_capacity=candidate_stage_capacity,
+                        formal_stage_capacity=formal_stage_capacity,
                     )
                 else:
                     admission = await admit_agent_paper_research(

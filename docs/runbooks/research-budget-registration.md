@@ -253,3 +253,21 @@ actor/route/key，不能与候选、评价、手动版本继承或 fixture 价�
 共5项 PostgreSQL测试通过（包含正常调用、成交/账本与只读页面核验），版本声明校验
 2项单测及 Ruff/格式检查通过。仍是隔离受控候选证据，不代表正式 v8 自然运行通过。
 应用时须协调业务库迁移与同版本代码/进程，不能只更新服务或只升级数据库。
+
+### 正式周期首入口（内部接线，未激活）
+
+`start_schwab_agent_paper_cycle(..., formal_stage_capacity=True,
+formal_model_config_id=EXACT_V8_MODEL_UUID)` 已接至正常整批研究准入。
+要求正式候选批次、严格布尔模式及精确规范模型；拒绝候选模式、评价 lane、
+旧版本继承及混入的 prompt/model/source-run 参数。模型创建及定价资格按原决策
+时点检查，`CYCLE_PREPARED` 首事件冻结正式模式、模型 ID 和配置 hash。
+每只标的沿正常 Paper actor/key 生成原生单尝试 Job，整批保存点行为保持。
+
+同槽返回前在账户锁内重验首事件模式、精确模型 ID/hash；默认 start、resume、advance
+遇到正式身份在新增 claim 前拒绝。当前切片不开放正式 resume/advance、组合消费者、
+HTTP/CLI 参数或调度。后续接线必须显式透传并重新核对已冻结身份，不能默认选择 v8。
+
+隔离 PostgreSQL 的3/5标的案例通过完整任务准入和同周期读回，核对首事件、每只
+Run/Job规范身份和拒绝路径无新增 claim/Job/周期。相关组合数据库回归27项、单测29项、
+Ruff/Mypy/格式检查通过。未调用模型或数据接口，未写业务库，不代表研究内容、
+组合目标、正式绑定写入、成交或自然周期验收已完成。
