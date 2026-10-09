@@ -468,7 +468,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             broker_refresh_settings = LocalFosunBrokerRefreshSettings.model_validate(
                 local_environment
             )
-            result = asyncio.run(refresh_local_fosun_broker(broker_refresh_settings))
+            result = asyncio.run(
+                refresh_local_fosun_broker(
+                    broker_refresh_settings,
+                    identity_gap_dir=Path.cwd() / ".secrets/nexus-fosun-local/identity-gaps",
+                )
+            )
         else:
             full_refresh_settings = LocalFosunRefreshSettings.model_validate(local_environment)
             archive_dir = (

@@ -141,7 +141,8 @@ def test_refresh_broker_command_uses_the_narrow_broker_only_entry(
 ) -> None:
     settings = object()
 
-    async def refresh(received: object) -> dict[str, object]:
+    async def refresh(received: object, *, identity_gap_dir: Path) -> dict[str, object]:
+        assert identity_gap_dir == Path.cwd() / ".secrets/nexus-fosun-local/identity-gaps"
         assert received is settings
         return {"status": "ok", "mode": "broker_only"}
 

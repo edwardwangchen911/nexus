@@ -70,3 +70,19 @@ uv run --project engine nexus-fosun-local status
 Gateway 生产者；不能只更新 Gateway。回退先停止新生产者并恢复旧 Gateway，
 再回退 Engine。保留所有新旧原件；新原件的后续读取仍须使用兼容新字段的
 消费者，不改写原件或为兼容放宽严格校验。
+
+## 独立账户同步的身份缺口诊断
+
+`nexus-fosun-local refresh-broker` 使用现有 broker 只读接口，不构造行情客户端，
+不受逐持仓行情采集预算替代。它仍须对所有非零持仓核对本地证券身份；身份缺失时
+返回 `LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED`，不继续现金/订单等对账阶段，
+也不生成新的完整账户快照。
+
+正常 CLI 尝试在 `.secrets/nexus-fosun-local/identity-gaps/` 留下不可覆盖的私有诊断 JSON。
+归档失败仍返回原身份拒绝码，不能据此认为诊断已保存；须核对文件实际存在。
+`.secrets`、父目录和专用目录须为当前用户所有的真实目录，权限 0700；文件为 0600。
+诊断只保存待核验 provider code、币种、持仓页观察时刻和归一化页摘要，
+不保存账户标识、数量、成本或资金。`identity_authority=false`：摘要不是原始响应归档，
+诊断不能导入证券身份、替代分类/官方身份来源，或作为研究和执行证据。
+后续须通过既有分类及官方身份来源补齐绑定；不能据代码名称臆测证券类型。
+本入口不自动重试，不删除既有诊断；失败后先读原回执，不重复调用来刷新状态。

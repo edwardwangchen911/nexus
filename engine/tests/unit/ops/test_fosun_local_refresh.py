@@ -824,3 +824,172 @@ def test_market_gateway_code_reaches_normal_cli_stderr(
     if entrypoint == "local":
         expected["category"] = "rate_limit"
     assert json.loads(output.err) == expected
+
+
+def test_broker_identity_gap_receipt_is_private_minimal_and_immutable(tmp_path) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    directory = parent / "identity-gaps"
+    observed = datetime(2026, 10, 10, tzinfo=UTC)
+    page = GatewayResponsePage(
+        items=(_position("usNEW").model_dump(mode="json"),),
+        source_request_id="synthetic-holdings-request",
+        has_more=False,
+        next_cursor=None,
+        as_of=observed,
+        quality="PASS",
+    )
+    path = refresh_module._archive_broker_identity_gap(
+        directory,
+        holdings=(_position("usNEW"),),
+        unresolved_codes=("usNEW",),
+        holdings_page=page,
+    )
+    document = json.loads(path.read_text())
+    assert document["unresolved"] == [{"provider_code": "usNEW", "currency": "USD"}]
+    assert document["identity_authority"] is False
+    assert (
+        document["source_page_sha256"]
+        == hashlib.sha256(page.model_dump_json().encode()).hexdigest()
+    )
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert "redacted-test-account" not in path.read_text()
+    assert "quantity" not in path.read_text()
+    second = refresh_module._archive_broker_identity_gap(
+        directory,
+        holdings=(_position("usNEW"),),
+        unresolved_codes=("usNEW",),
+        holdings_page=page,
+    )
+    assert second != path and path.exists()
+
+
+def test_broker_identity_gap_rejects_unprotected_parent(tmp_path) -> None:
+    parent = tmp_path / "unsafe"
+    parent.mkdir(mode=0o755)
+    page = GatewayResponsePage(
+        items=(),
+        source_request_id="synthetic",
+        has_more=False,
+        next_cursor=None,
+        as_of=datetime(2026, 10, 10, tzinfo=UTC),
+        quality="PASS",
+    )
+    with pytest.raises(ValueError, match="LOCAL_IDENTITY_GAP_ARCHIVE_UNSAFE"):
+        refresh_module._archive_broker_identity_gap(
+            parent / "identity-gaps",
+            holdings=(),
+            unresolved_codes=(),
+            holdings_page=page,
+        )
+
+
+@pytest.mark.parametrize("archive_failure", [False, True])
+@pytest.mark.asyncio
+async def test_broker_refresh_archives_gap_before_any_snapshot_or_follow_up(
+    tmp_path, monkeypatch, archive_failure
+) -> None:
+    observed = datetime(2026, 10, 10, tzinfo=UTC)
+    calls = []
+
+    class Broker:
+        async def read_accounts(self):
+            calls.append("accounts")
+            return GatewayResponsePage(
+                items=(
+                    {
+                        "kind": "account",
+                        "external_account_id": "redacted-test-account",
+                        "base_currency": "USD",
+                        "status": "active",
+                    },
+                ),
+                source_request_id="accounts",
+                has_more=False,
+                next_cursor=None,
+                as_of=observed,
+                quality="PASS",
+            )
+
+        async def read_holdings(self, account, **kwargs):
+            calls.append("holdings")
+            return GatewayResponsePage(
+                items=(_position("usNEW").model_dump(mode="json"),),
+                source_request_id="holdings",
+                has_more=False,
+                next_cursor=None,
+                as_of=observed,
+                quality="PASS",
+            )
+
+        async def aclose(self):
+            calls.append("closed")
+
+    class Engine:
+        async def dispose(self):
+            calls.append("disposed")
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    async def identity(session, *, holdings, allow_unresolved=False):
+        assert allow_unresolved
+        return SimpleNamespace(unresolved_codes=("usNEW",))
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("follow-up or business persistence after identity gap")
+
+    monkeypatch.setattr(refresh_module, "_broker_settings", lambda s: object())
+    monkeypatch.setattr(refresh_module, "FosunGatewayClient", lambda s: Broker())
+    monkeypatch.setattr(refresh_module, "create_async_engine", lambda *a, **k: Engine())
+    monkeypatch.setattr(refresh_module, "async_sessionmaker", lambda *a, **k: Session)
+    monkeypatch.setattr(refresh_module, "_load_local_broker_identity", identity)
+    monkeypatch.setattr(refresh_module, "_read_broker_facts", forbidden)
+    monkeypatch.setattr(refresh_module, "_persist_ready_broker_snapshot", forbidden)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    if archive_failure:
+
+        def broken_archive(*args, **kwargs):
+            raise OSError("synthetic-disk-full")
+
+        monkeypatch.setattr(refresh_module, "_archive_broker_identity_gap", broken_archive)
+    with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"):
+        await refresh_module.refresh_local_fosun_broker(
+            SimpleNamespace(database_url="synthetic"),
+            now=observed,
+            identity_gap_dir=parent / "gaps",
+        )
+    assert calls == ["accounts", "holdings", "closed", "disposed"]
+    assert len(list((parent / "gaps").glob("*.json"))) == (0 if archive_failure else 1)
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_broker_identity_gap_rejects_unsafe_secret_ancestor(tmp_path, symlink):
+    ancestor = tmp_path / ".secrets"
+    if symlink:
+        outside = tmp_path / "outside"
+        outside.mkdir(mode=0o700)
+        ancestor.symlink_to(outside, target_is_directory=True)
+    else:
+        ancestor.mkdir(mode=0o755)
+    parent = ancestor / "nexus-fosun-local"
+    parent.mkdir(mode=0o700)
+    page = GatewayResponsePage(
+        items=(),
+        source_request_id="synthetic",
+        has_more=False,
+        next_cursor=None,
+        as_of=datetime(2026, 10, 10, tzinfo=UTC),
+        quality="PASS",
+    )
+    with pytest.raises(ValueError, match="LOCAL_IDENTITY_GAP_ARCHIVE_UNSAFE"):
+        refresh_module._archive_broker_identity_gap(
+            parent / "identity-gaps", holdings=(), unresolved_codes=(), holdings_page=page
+        )
+    assert not (parent / "identity-gaps").exists()

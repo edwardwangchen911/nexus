@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -514,6 +516,7 @@ async def refresh_local_fosun_broker(
     settings: LocalFosunBrokerRefreshSettings,
     *,
     now: datetime | None = None,
+    identity_gap_dir: Path | None = None,
 ) -> dict[str, object]:
     """Persist one reconciled broker snapshot without constructing a market client."""
     checked_at = (now or datetime.now(UTC)).astimezone(UTC)
@@ -547,7 +550,22 @@ async def refresh_local_fosun_broker(
         engine = create_async_engine(settings.database_url, pool_pre_ping=True)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         async with sessions() as session:
-            identity = await _load_local_broker_identity(session, holdings=holdings)
+            identity = await _load_local_broker_identity(
+                session, holdings=holdings, allow_unresolved=True
+            )
+        if identity.unresolved_codes:
+            if identity_gap_dir is not None:
+                try:
+                    _archive_broker_identity_gap(
+                        identity_gap_dir,
+                        holdings=holdings,
+                        unresolved_codes=identity.unresolved_codes,
+                        holdings_page=holdings_page,
+                    )
+                except (OSError, ValueError):
+                    # Diagnostics must never replace the actual business refusal.
+                    pass
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED")
         frozen, cash_flow_result = await _read_broker_facts(
             broker,
             account_id=identity.account_id,
@@ -654,6 +672,48 @@ async def _diagnose_local_snapshot(
         }
     except Exception:
         return {"status": "failed", "code": "LOCAL_DIAGNOSTIC_FAILED"}
+
+
+def _archive_broker_identity_gap(
+    directory: Path,
+    *,
+    holdings: tuple[PositionItem, ...],
+    unresolved_codes: tuple[str, ...],
+    holdings_page: GatewayResponsePage,
+) -> Path:
+    """Private diagnostic only: never an instrument identity or a portfolio snapshot."""
+    for path in (directory.parent.parent, directory.parent, directory):
+        if path == directory and not path.exists() and not path.is_symlink():
+            path.mkdir(mode=0o700)
+        info = path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise ValueError("LOCAL_IDENTITY_GAP_ARCHIVE_UNSAFE")
+    unresolved = set(unresolved_codes)
+    items = sorted(
+        {
+            (item.instrument_code, item.currency)
+            for item in holdings
+            if item.instrument_code in unresolved
+        }
+    )
+    if {code for code, _ in items} != unresolved:
+        raise ValueError("LOCAL_IDENTITY_GAP_ARCHIVE_INVALID")
+    document = {
+        "schema": "fosun_broker_identity_gap_diagnostic_v1",
+        "identity_authority": False,
+        "observed_at": holdings_page.as_of.isoformat(),
+        "source_page_sha256": hashlib.sha256(holdings_page.model_dump_json().encode()).hexdigest(),
+        "unresolved": [{"provider_code": code, "currency": currency} for code, currency in items],
+    }
+    path = directory / f"{new_uuid7()}.json"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        json.dump(document, output, sort_keys=True, separators=(",", ":"))
+    return path
 
 
 def _us_holding_codes(holdings: Sequence[PositionItem]) -> tuple[str, ...]:
