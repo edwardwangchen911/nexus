@@ -8,10 +8,14 @@ from uuid import UUID
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS,
+    CANDIDATE_RESEARCH_JOB_TIMEOUT_SECONDS,
     DEADLINE_BUDGET_CONFIG_VERSION,
     INLINE_CITATION_CONFIG_VERSION,
     PAPER_SCOPE_CONFIG_VERSIONS,
@@ -67,6 +71,7 @@ from nexus.jobs.registry import (
     JobHandlerSpec,
     JobRegistry,
 )
+from nexus.jobs.repository import LockedJobGuard
 from nexus.jobs.worker import PreclaimGuard, UnsafeJobError, run_job_worker_once
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.optimizer.jobs import build_optimization_registry
@@ -78,6 +83,7 @@ from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
 
@@ -135,10 +141,34 @@ async def run_agent_worker_once(
     tools: ReadOnlyToolRegistry | None = None,
     job_ids: tuple[UUID, ...] | None = None,
     preclaim_guard: PreclaimGuard | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> bool:
     """Claim and terminalize at most one queued Agent job outside any HTTP request."""
-    _require_worker_runtime(settings)
+    runtime_mode = _require_worker_runtime(settings)
+    job_ids = None if job_ids is None else tuple(job_ids)
+    if (
+        type(candidate_stage_capacity) is not bool
+        or candidate_stage_capacity
+        and (
+            runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or job_ids is None
+            or len(job_ids) != 1
+            or not isinstance(job_ids[0], UUID)
+            or settings.database_url is None
+        )
+    ):
+        raise ValueError("CODEX_CANDIDATE_WORKER_ARGUMENT_INVALID")
     factory = session_factory(settings)
+    locked_guard: LockedJobGuard | None = None
+    if candidate_stage_capacity:
+        from nexus.agents.codex_candidate import candidate_job_qualified, require_candidate_database
+
+        async with factory() as session:
+            await require_candidate_database(
+                session,
+                configured_database=make_url(cast(str, settings.database_url)).database,
+            )
+        locked_guard = candidate_job_qualified
     return await run_job_worker_once(
         factory,
         registry=_agent_registry(
@@ -146,6 +176,7 @@ async def run_agent_worker_once(
             responses_client=responses_client,
             tools=tools,
             include_agent_paper=job_ids is not None,
+            candidate_stage_capacity=candidate_stage_capacity,
         ),
         queue=QueueName.GENERAL,
         worker_id=_ONCE_WORKER_ID,
@@ -156,6 +187,7 @@ async def run_agent_worker_once(
         claim_registered_only=True,
         job_ids=job_ids,
         preclaim_guard=preclaim_guard,
+        locked_job_guard=locked_guard,
     )
 
 
@@ -317,8 +349,15 @@ def _agent_registry(
     responses_client: object | None,
     tools: ReadOnlyToolRegistry | None,
     include_agent_paper: bool = False,
+    candidate_stage_capacity: bool = False,
 ) -> JobRegistry:
     runtime_mode = _require_worker_runtime(settings)
+    if (
+        type(candidate_stage_capacity) is not bool
+        or candidate_stage_capacity
+        and (runtime_mode is not AgentRuntimeMode.CODEX_SDK or not include_agent_paper)
+    ):
+        raise ValueError("CODEX_CANDIDATE_WORKER_ARGUMENT_INVALID")
     allow_fixture_evidence = (
         settings.environment is not Environment.PRODUCTION
         and runtime_mode is not AgentRuntimeMode.CODEX_SDK
@@ -334,6 +373,16 @@ def _agent_registry(
         )
         if run is None:
             raise UnsafeJobError("RUN_NOT_FOUND")
+        if candidate_stage_capacity:
+            from nexus.agents.codex_candidate import candidate_job_qualified
+
+            selected = await context.session.get(Job, context.claim.job_id, populate_existing=True)
+            if selected is None or not await candidate_job_qualified(
+                context.session,
+                selected,
+                claimed=True,
+            ):
+                raise UnsafeJobError("CODEX_CANDIDATE_AUTHORITY_INVALID")
         if run.status in TERMINAL:
             return _agent_result(run.status)
         if run.status != "prepared":
@@ -346,6 +395,7 @@ def _agent_registry(
                 responses_client=responses_client,
                 tools=tools,
                 deadline=context.monotonic_deadline(),
+                candidate_stage_capacity=candidate_stage_capacity,
             )
         except ToolInputError:
             committee = _UnavailableResponsesCommittee()
@@ -359,7 +409,9 @@ def _agent_registry(
         return _agent_result(result.status)
 
     job_types = (
-        (JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH)
+        (JobType.AGENT_PAPER_RESEARCH,)
+        if candidate_stage_capacity
+        else (JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH)
         if include_agent_paper
         else (JobType.AGENT_RESEARCH,)
     )
@@ -370,13 +422,18 @@ def _agent_registry(
                 schema_version=_JOB_SCHEMA,
                 payload_model=_AgentResearchJobPayload,
                 queue=QueueName.GENERAL,
-                timeout_seconds=RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS
+                timeout_seconds=CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS
+                if candidate_stage_capacity
+                else RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS
                 if runtime_mode is AgentRuntimeMode.CODEX_SDK
                 else 45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
                 max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
                 idempotency_namespace="agent.research",
                 handler=handle,
+                research_budget_profile=CANDIDATE_BUDGET_CONFIG_VERSION
+                if candidate_stage_capacity
+                else None,
             )
             for job_type in job_types
         )
@@ -406,8 +463,23 @@ async def _committee(
     responses_client: object | None,
     tools: ReadOnlyToolRegistry | None,
     deadline: float | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> CommitteeModel:
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    candidate_model = model is not None and model.version == CANDIDATE_BUDGET_CONFIG_VERSION
+    if candidate_model != candidate_stage_capacity:
+        return _UnavailableResponsesCommittee()
+    if candidate_stage_capacity:
+        from nexus.agents.codex_candidate import candidate_model_matches, require_candidate_database
+
+        await require_candidate_database(session)
+        if (
+            settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or model is None
+            or not candidate_model_matches(model)
+            or deadline is None
+        ):
+            return _UnavailableResponsesCommittee()
     if model is not None and model.version == "codex-sdk-strategy-rnd-v1":
         return _UnavailableResponsesCommittee()
     if (
@@ -449,10 +521,11 @@ async def _committee(
         if (
             model is None
             or model.model_id != MODEL_ID
-            or model.version not in SDK_CONFIG_VERSIONS
+            or (model.version not in SDK_CONFIG_VERSIONS and not candidate_stage_capacity)
             or model.version != run.pricing_version
             or model.config_hash != run.model_hash
-            or model.max_input_tokens != aggregate_input_limit(model.version)
+            or model.max_input_tokens
+            != (96000 if candidate_stage_capacity else aggregate_input_limit(model.version))
             or model.max_output_tokens != 8192
             or model.input_usd_per_million != 0
             or model.output_usd_per_million != 0
@@ -461,7 +534,7 @@ async def _committee(
             return _UnavailableResponsesCommittee()
         committee_type = (
             StructuredStagedCodexCommittee
-            if model.version in STRUCTURED_CONFIG_VERSIONS
+            if model.version in STRUCTURED_CONFIG_VERSIONS or candidate_stage_capacity
             else StagedCodexCommittee
             if model.version == STAGED_CONFIG_VERSION
             else CodexCommittee
@@ -470,6 +543,10 @@ async def _committee(
             # The worker deadline includes transaction/handler grace. Anchor v6
             # to the original worker start, never reset time after DB preparation.
             deadline -= RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS - RESEARCH_STAGE_JOB_TIMEOUT_SECONDS
+        if candidate_stage_capacity and deadline is not None:
+            deadline -= (
+                CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS - CANDIDATE_RESEARCH_JOB_TIMEOUT_SECONDS
+            )
         return committee_type(
             prompts={
                 role: PromptAsset(
@@ -488,23 +565,32 @@ async def _committee(
                 allow_fixture_price_evidence=False,
             ),
             **(
-                {"stage_time_budget": True}
+                {"stage_time_budget": True, "stage_budget_version": CANDIDATE_BUDGET_CONFIG_VERSION}
+                if candidate_stage_capacity
+                else {"stage_time_budget": True}
                 if model.version == DEADLINE_BUDGET_CONFIG_VERSION
                 else {}
             ),
-            **({"paper_stage_scope": True} if model.version in PAPER_SCOPE_CONFIG_VERSIONS else {}),
+            **(
+                {"paper_stage_scope": True}
+                if model.version in PAPER_SCOPE_CONFIG_VERSIONS or candidate_stage_capacity
+                else {}
+            ),
             **(
                 {"inline_citations": True}
                 if model.version in ({INLINE_CITATION_CONFIG_VERSION} | ACTIONABLE_CONFIG_VERSIONS)
+                or candidate_stage_capacity
                 else {}
             ),
             **(
                 {
                     "deadline": deadline,
                     "aggregate_input_tokens": model.max_input_tokens,
-                    "max_wire_bytes": wire_byte_limit(model.version),
+                    "max_wire_bytes": 64000
+                    if candidate_stage_capacity
+                    else wire_byte_limit(model.version),
                 }
-                if model.version in STAGED_CONFIG_VERSIONS
+                if model.version in STAGED_CONFIG_VERSIONS or candidate_stage_capacity
                 else {}
             ),
         )

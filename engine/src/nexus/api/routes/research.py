@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
@@ -113,6 +114,7 @@ async def get_research_admission(
                 AgentModelConfigRecord.version.not_in(
                     (
                         *STAGED_CONFIG_VERSIONS,
+                        CANDIDATE_BUDGET_CONFIG_VERSION,
                         "codex-sdk-strategy-rnd-v1",
                         PORTFOLIO_DECISION_CONFIG_VERSION,
                     )
@@ -310,13 +312,17 @@ async def _hydrate_response(
         session, run.data_snapshot_id, run.instrument_id, run.decision_time
     )
     response = _response(run, output, evidence_records, portfolio_context=context)
-    return response.model_copy(update={
-        "stage_trace": await read_stage_trace(session, run),
-        "inputs": await read_research_inputs(
-            session, snapshot_id=run.data_snapshot_id,
-            instrument_id=run.instrument_id, as_of=run.decision_time,
-        ),
-    })
+    return response.model_copy(
+        update={
+            "stage_trace": await read_stage_trace(session, run),
+            "inputs": await read_research_inputs(
+                session,
+                snapshot_id=run.data_snapshot_id,
+                instrument_id=run.instrument_id,
+                as_of=run.decision_time,
+            ),
+        }
+    )
 
 
 def _declares_current_trends(run: AgentResearchRunRecord) -> bool:
@@ -392,8 +398,7 @@ def _response(
         status=cast(AgentRunStatus, status),
         retry_count=run.retry_count,
         billing_mode="chatgpt_subscription"
-        if run.pricing_version
-        in SDK_CONFIG_VERSIONS
+        if run.pricing_version in (SDK_CONFIG_VERSIONS | {CANDIDATE_BUDGET_CONFIG_VERSION})
         else None,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,

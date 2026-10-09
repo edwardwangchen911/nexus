@@ -9,7 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_staged import STAGES
-from nexus.agents.codex_versions import STAGED_CONFIG_VERSIONS, STRUCTURED_CONFIG_VERSIONS
+from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    STAGED_CONFIG_VERSIONS,
+    STRUCTURED_CONFIG_VERSIONS,
+)
 from nexus.agents.committee import CommitteeRoleOutput
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.synthesis import citations_bound, domain_evidence
@@ -22,7 +26,7 @@ from nexus.strategy.intents import ResearchClaim
 async def read_stage_trace(
     session: AsyncSession, run: AgentResearchRunRecord
 ) -> ResearchStageTrace | None:
-    if run.pricing_version not in STAGED_CONFIG_VERSIONS:
+    if run.pricing_version not in (STAGED_CONFIG_VERSIONS | {CANDIDATE_BUDGET_CONFIG_VERSION}):
         return None
     records = tuple(
         await session.scalars(
@@ -101,7 +105,11 @@ def validate_stage_trace(
             ):
                 return invalid
             assessment = output.synthesis_assessment
-            if run.pricing_version in STRUCTURED_CONFIG_VERSIONS and stage == "synthesis":
+            if (
+                run.pricing_version
+                in (STRUCTURED_CONFIG_VERSIONS | {CANDIDATE_BUDGET_CONFIG_VERSION})
+                and stage == "synthesis"
+            ):
                 required = {
                     item for item in prior_ids if item.startswith(("bear:", "evidence_audit:"))
                 }

@@ -9,10 +9,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import and_, exists, select
+from sqlalchemy import String, and_, cast, exists, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
@@ -27,6 +28,7 @@ from nexus.jobs.models import (
     RetryPolicy,
     canonical_job_key,
 )
+from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import (
     Job,
     JobAttempt,
@@ -34,6 +36,32 @@ from nexus.persistence.models.runtime import (
     JobLease,
     WorkerHeartbeat,
 )
+
+
+def _not_candidate_research() -> ColumnElement[bool]:
+    from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+
+    # Compare UUID text to JSON text; never cast an untrusted payload to UUID.
+    # The frozen binding is immutable, so generic claim/recovery cannot consume
+    # the candidate even when its registration is newer than the default.
+    return ~exists(
+        select(1)
+        .select_from(AgentResearchRunRecord)
+        .join(
+            AgentModelConfigRecord,
+            AgentModelConfigRecord.id == AgentResearchRunRecord.model_config_id,
+        )
+        .where(
+            Job.job_type.in_((JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)),
+            cast(AgentResearchRunRecord.id, String) == Job.payload["run_id"].astext,
+            or_(
+                AgentResearchRunRecord.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION,
+                AgentModelConfigRecord.version == CANDIDATE_BUDGET_CONFIG_VERSION,
+            ),
+        )
+        .correlate(Job)
+    )
+
 
 RequiredOutcome = Literal["succeeded", "succeeded_or_skipped"]
 TerminalOutcome = Literal["succeeded", "skipped"]
@@ -294,6 +322,8 @@ async def claim_next_job(
         Job.attempt_count < Job.max_attempts + Job.manual_retry_count,
         ~nonterminal_dependency,
     ]
+    if research_budget_profile is None:
+        conditions.append(_not_candidate_research())
     if job_types is not None:
         conditions.append(Job.job_type.in_(tuple(job_types)))
     if job_ids is not None:
@@ -676,6 +706,7 @@ async def reclaim_expired_jobs(
         Job.queue == queue.value,
         Job.status == JobStatus.RUNNING.value,
         JobLease.expires_at <= now,
+        _not_candidate_research(),
     ]
     if job_ids is not None:
         conditions.append(Job.id.in_(job_ids))

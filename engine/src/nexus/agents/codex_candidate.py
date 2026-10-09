@@ -83,7 +83,12 @@ def candidate_model_matches(model: AgentModelConfigRecord) -> bool:
     )
 
 
-async def candidate_job_qualified(session: AsyncSession, job: Job) -> bool:
+async def candidate_job_qualified(
+    session: AsyncSession,
+    job: Job,
+    *,
+    claimed: bool = False,
+) -> bool:
     """Re-read frozen authority under the caller's selected Job lock, before writes."""
     await require_candidate_database(session)
     if (
@@ -92,8 +97,9 @@ async def candidate_job_qualified(session: AsyncSession, job: Job) -> bool:
         or job.schema_version != "agent_research_job_v1"
         or job.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
         or job.max_attempts != 1
-        or job.status != "queued"
-        or job.attempt_count != 0
+        or type(claimed) is not bool
+        or job.status != ("running" if claimed else "queued")
+        or job.attempt_count != (1 if claimed else 0)
         or job.manual_retry_count != 0
         or set(job.payload) != {"run_id"}
         or type(job.payload.get("run_id")) is not str

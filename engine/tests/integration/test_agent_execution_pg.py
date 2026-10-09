@@ -33,6 +33,7 @@ from nexus.agents.persistence import (
 )
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES, ToolInputError
 from nexus.domain.evidence import EvidenceRef
+from nexus.jobs.models import JobType
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -76,7 +77,9 @@ _DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_fails", [False, True, "invalid_citation"])
-@pytest.mark.parametrize("staged", [False, True, "v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6"])
+@pytest.mark.parametrize(
+    "staged", [False, True, "v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"]
+)
 async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries(
     migrated_database_url,
     monkeypatch,
@@ -97,30 +100,34 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     await prepare_database(
         settings,
         staged=staged is True,
-        structured_synthesis=staged in {"v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6"},
+        structured_synthesis=staged
+        in {"v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"},
         aggregate_input_tokens=96000
-        if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6"}
+        if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"}
         else 64000,
-        max_wire_bytes=64000 if staged in {"v3_wire64k", "v3_cite1", "v6"} else 55808,
-        inline_citations=staged in {"v3_cite1", "v6"},
-        actionable_paper=staged == "v6",
-        stage_time_budget=staged == "v6",
+        max_wire_bytes=64000 if staged in {"v3_wire64k", "v3_cite1", "v6", "candidate"} else 55808,
+        inline_citations=staged in {"v3_cite1", "v6", "candidate"},
+        actionable_paper=staged in {"v6", "candidate"},
+        stage_time_budget=staged in {"v6", "candidate"},
+        candidate_stage_capacity=staged == "candidate",
     )
     async with factory() as session, session.begin():
         model = await session.scalar(
             select(AgentModelConfigRecord).where(
                 AgentModelConfigRecord.version
                 == (
-                    "codex-sdk-chatgpt-v6-stage-time-budget"
-                    if staged == "v6"
+                    "codex-sdk-chatgpt-v7-stage-capacity-candidate"
+                    if staged == "candidate"
+                    else "codex-sdk-chatgpt-v6-stage-time-budget"
+                    if staged in {"v6", "candidate"}
                     else "codex-sdk-chatgpt-v3-input96k-wire64k-cite1"
                     if staged == "v3_cite1"
                     else "codex-sdk-chatgpt-v3-input96k-wire64k"
-                    if staged in {"v3_wire64k", "v3_cite1", "v6"}
+                    if staged in {"v3_wire64k", "v3_cite1", "v6", "candidate"}
                     else "codex-sdk-chatgpt-v3-input96k"
-                    if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6"}
+                    if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"}
                     else codex_sdk.STRUCTURED_CONFIG_VERSION
-                    if staged in {"v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6"}
+                    if staged in {"v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"}
                     else codex_sdk.STAGED_CONFIG_VERSION
                     if staged
                     else codex_sdk.CONFIG_VERSION
@@ -140,12 +147,22 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             model_config_id=model.id,
             daily_limit_usd=Decimal("3"),
             now=datetime(2026, 9, 2, tzinfo=UTC),
+            job_type=JobType.AGENT_PAPER_RESEARCH
+            if staged == "candidate"
+            else JobType.AGENT_RESEARCH,
         )
     async with factory() as session:
         index = await read_position_research(session, (_INSTRUMENT_ID,), read_at=datetime.now(UTC))
         assert index[_INSTRUMENT_ID].status == "prepared"
         assert index[_INSTRUMENT_ID].quality_status is None
         assert index[_INSTRUMENT_ID].run_id == admission.run_id
+    worker_options = {}
+    if staged == "candidate":
+        async with factory() as session:
+            job_id = await session.scalar(
+                select(Job.id).where(Job.payload["run_id"].astext == str(admission.run_id))
+            )
+        worker_options = {"candidate_stage_capacity": True, "job_ids": (job_id,)}
     batch = {
         "roles": [
             {
@@ -168,11 +185,11 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     if staged:
 
         async def staged_invoke(payload, *, output_model, max_wire_bytes=55808, **options):
-            if staged == "v6":
+            if staged in {"v6", "candidate"}:
                 assert options["timeout_seconds"] > 0
                 options["phase_elapsed_ms"]["turn_run"] = 10
             assert max_wire_bytes == (
-                64000 if staged in {"v3_wire64k", "v3_cite1", "v6"} else 55808
+                64000 if staged in {"v3_wire64k", "v3_cite1", "v6", "candidate"} else 55808
             )
             if model_fails is True and payload["stage"] == "critique":
                 raise TimeoutError("synthetic-secret-canary")
@@ -185,7 +202,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 for row in tool.get("items", []):
                     if "evidence_ref_id" not in row:
                         continue
-                    if staged in {"v3_cite1", "v6"}:
+                    if staged in {"v3_cite1", "v6", "candidate"}:
                         bound = _restore_view(payload["evidence"])[row["citation_index"]]
                         ref = refs[row["evidence_ref_id"]]
                         assert bound["object_id"] == ref["provider_object_id"]
@@ -227,7 +244,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 ]
             }
             if (
-                staged in {"v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6"}
+                staged in {"v3", "v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"}
                 and payload["stage"] == "synthesis"
             ):
                 response = {
@@ -256,7 +273,9 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             if model_fails == "invalid_citation" and payload["stage"] == "critique":
                 response["roles"][0]["claims"] = [{"text": "invalid", "citations": [999]}]
             return json.dumps(response), UsageSnapshot(
-                input_tokens=30000 if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6"} else 300,
+                input_tokens=30000
+                if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"}
+                else 300,
                 output_tokens=80,
             )
 
@@ -264,7 +283,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     elif model_fails:
         invoke.side_effect = RuntimeError("offline simulated model failure")
     monkeypatch.setattr(codex_staged if staged else codex_sdk, "invoke_codex", invoke)
-    assert await run_agent_worker_once(settings) is True
+    assert await run_agent_worker_once(settings, **worker_options) is True
     assert invoke.await_count == (2 if model_fails else 3) if staged else invoke.await_count == 1
     submitted = invoke.call_args.args[0]
     from unit.agents.test_codex_sdk import _restore_view
@@ -286,7 +305,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         assert research.quality_status == (None if model_fails else "partial")
         if model_fails:
             assert research.summary is None and not research.uncertainties
-        elif staged == "v6":
+        elif staged in {"v6", "candidate"}:
             # The intentionally incomplete fixture must not become actionable.
             from nexus.agents.synthesis import STAGED_SEMANTICS_UNCERTAINTY
 
@@ -298,7 +317,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         if not model_fails:
             assert (run.input_tokens, run.output_tokens) == (
                 (90000, 240)
-                if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6"}
+                if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"}
                 else (900, 240)
                 if staged
                 else (300, 80)
@@ -330,7 +349,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             if not model_fails:
                 assert outputs[-1].payload["stage"] == "synthesis"
                 assert outputs[-1].payload["reviewed_claim_ids"] == ["bear:0", "evidence_audit:0"]
-        if staged == "v6" and not model_fails:
+        if staged in {"v6", "candidate"} and not model_fails:
             synthesized = await session.scalar(
                 select(AgentResearchOutputRecord).where(
                     AgentResearchOutputRecord.run_id == run.id,
@@ -345,7 +364,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 assert timing["elapsed_ms"] >= 0
                 assert timing["phase_elapsed_ms"]["turn_run"] == 10
             assert all("stage_timings" not in output.payload for output in outputs)
-    assert await run_agent_worker_once(settings) is False
+    assert await run_agent_worker_once(settings, **worker_options) is False
     path = f"/internal/v1/research-runs/{admission.run_id}"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
@@ -362,7 +381,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             ["complete", "unavailable", "unavailable"] if model_fails else ["complete"] * 3
         )
         assert trace["stages"][0]["input_tokens"] == (
-            30000 if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6"} else 300
+            30000 if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"} else 300
         )
         assert trace["stages"][0]["input_hash"] is not None
         assert trace["stages"][0]["frozen_inputs_hash"] is not None
@@ -377,13 +396,13 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     if not model_fails:
         assert data["input_tokens"] == (
             90000
-            if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6"}
+            if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"}
             else 900
             if staged
             else 300
         )
         assert data["output_tokens"] == (240 if staged else 80)
-        if staged == "v6":
+        if staged in {"v6", "candidate"}:
             assert data["intent"] is None
             assert data["quality_status"] == "partial"
         else:
@@ -398,7 +417,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 data["stage_trace"]["stages"][2]["roles"][0]["synthesis_assessment"] == assessment
             )
             assert outputs[-1].payload["synthesis_assessment"] == assessment
-        elif staged != "v6":
+        elif staged not in {"v6", "candidate"}:
             assert "synthesis_assessment" not in data["intent"]
 
         from nexus.agents.snapshots import prepare_research_snapshot
@@ -441,7 +460,8 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         multiplier = 2 if model_fails == "invalid_citation" else 1
         assert (
             data["input_tokens"]
-            == (30000 if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6"} else 300) * multiplier
+            == (30000 if staged in {"v3_96k", "v3_wire64k", "v3_cite1", "v6", "candidate"} else 300)
+            * multiplier
         )
         assert data["output_tokens"] == 80 * multiplier
 
