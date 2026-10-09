@@ -66,6 +66,16 @@ async def require_candidate_database(
         raise ValueError("CODEX_CANDIDATE_ISOLATION_REQUIRED")
 
 
+async def require_candidate_consumer_profile(
+    session: AsyncSession, *, candidate_stage_capacity: bool
+) -> None:
+    """Validate explicit isolated consumer mode before reads, locks or mutations."""
+    if type(candidate_stage_capacity) is not bool:
+        raise ValueError("CODEX_CANDIDATE_ISOLATION_REQUIRED")
+    if candidate_stage_capacity:
+        await require_candidate_database(session)
+
+
 def candidate_model_matches(model: AgentModelConfigRecord) -> bool:
     config = candidate_config()
     return (

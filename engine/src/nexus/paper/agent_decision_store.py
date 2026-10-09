@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.agents.persistence import load_actionable_research_output
 from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisInputV1,
@@ -420,6 +421,7 @@ async def _portfolio_bindings(
     frozen: PortfolioSynthesisInputV1,
     decision_hash: str,
     at: datetime,
+    candidate_stage_capacity: bool = False,
 ) -> tuple[AgentPaperDecisionBinding, ...]:
     bindings = []
     for source in frozen.security_outputs:
@@ -437,7 +439,11 @@ async def _portfolio_bindings(
         ):
             raise ValueError("PORTFOLIO_PROPOSAL_RESEARCH_CONFLICT")
         admitted = await load_actionable_research_output(
-            session, run_id=research.id, decision_time=at, allow_safe_no_trade=True
+            session,
+            run_id=research.id,
+            decision_time=at,
+            allow_safe_no_trade=True,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
         if (
             admitted.output_id != source.research_output_id
@@ -470,6 +476,7 @@ async def _rebuild_portfolio_proposal(
     cycle: AgentPaperCycleRecord,
     output_id: UUID,
     now: datetime | None,
+    candidate_stage_capacity: bool = False,
 ) -> PortfolioProposalV1:
     output = await session.get(
         AgentPortfolioSynthesisOutputRecord, output_id, populate_existing=True
@@ -566,7 +573,10 @@ async def _rebuild_portfolio_proposal(
             None
             if target is None
             else await load_portfolio_proposal(
-                session, account_id=cycle.account_id, decision_id=target.strategy_decision_id
+                session,
+                account_id=cycle.account_id,
+                decision_id=target.strategy_decision_id,
+                candidate_stage_capacity=candidate_stage_capacity,
             )
         )
         if (
@@ -600,6 +610,7 @@ async def _rebuild_portfolio_proposal(
         frozen=frozen,
         decision_hash=proposal.decision_hash,
         at=frozen.admitted_at if now is None else now,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     return proposal
 
@@ -619,7 +630,11 @@ async def load_portfolio_proposal(
     *,
     account_id: UUID,
     decision_id: UUID,
+    candidate_stage_capacity: bool = False,
 ) -> PersistedPortfolioProposal | None:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     record = await session.get(StrategyDecisionRecord, decision_id, populate_existing=True)
     if record is None or record.account_id != account_id:
         return None
@@ -635,7 +650,11 @@ async def load_portfolio_proposal(
     ):
         raise ValueError("PORTFOLIO_PROPOSAL_RECORD_CONFLICT")
     proposal = await _rebuild_portfolio_proposal(
-        session, cycle=cycle, output_id=record.portfolio_synthesis_output_id, now=None
+        session,
+        cycle=cycle,
+        output_id=record.portfolio_synthesis_output_id,
+        now=None,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     rows = tuple(
         await session.scalars(
@@ -653,7 +672,11 @@ async def load_portfolio_proposal(
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
     frozen = _frozen_run(run)
     bindings = await _portfolio_bindings(
-        session, frozen=frozen, decision_hash=proposal.decision_hash, at=frozen.admitted_at
+        session,
+        frozen=frozen,
+        decision_hash=proposal.decision_hash,
+        at=frozen.admitted_at,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     bound_rows = tuple(
         await session.scalars(
@@ -703,7 +726,11 @@ async def persist_portfolio_proposal(
     synthesis_output_id: UUID,
     now: datetime,
     proposal: PortfolioProposalV1 | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> PersistedPortfolioProposal:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     cycle = await session.get(AgentPaperCycleRecord, cycle_id, populate_existing=True)
     if cycle is None:
         raise ValueError("PORTFOLIO_PROPOSAL_CYCLE_CONFLICT")
@@ -715,7 +742,10 @@ async def persist_portfolio_proposal(
     )
     if existing is not None:
         stored = await load_portfolio_proposal(
-            session, account_id=cycle.account_id, decision_id=existing.id
+            session,
+            account_id=cycle.account_id,
+            decision_id=existing.id,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
         if (
             stored is None
@@ -726,7 +756,11 @@ async def persist_portfolio_proposal(
             raise ValueError("PORTFOLIO_PROPOSAL_CONTENT_CONFLICT")
         return stored
     rebuilt = await _rebuild_portfolio_proposal(
-        session, cycle=cycle, output_id=synthesis_output_id, now=now
+        session,
+        cycle=cycle,
+        output_id=synthesis_output_id,
+        now=now,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     if proposal is not None and proposal != rebuilt:
         raise ValueError("PORTFOLIO_PROPOSAL_CONTENT_CONFLICT")
@@ -784,7 +818,11 @@ async def persist_portfolio_proposal(
         for key, weight in rebuilt.weights.items()
     )
     bindings = await _portfolio_bindings(
-        session, frozen=frozen, decision_hash=rebuilt.decision_hash, at=now
+        session,
+        frozen=frozen,
+        decision_hash=rebuilt.decision_hash,
+        at=now,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     session.add_all(
         StrategyDecisionAgentOutputRecord(

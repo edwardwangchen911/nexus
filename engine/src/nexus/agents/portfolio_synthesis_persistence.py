@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted
+from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.agents.paper_context import read_agent_paper_research_context
 from nexus.agents.persistence import (
     _lock_budget_day,
@@ -111,8 +112,12 @@ async def admit_portfolio_synthesis(
     projection_hash: str,
     daily_limit_usd: Decimal,
     now: datetime,
+    candidate_stage_capacity: bool = False,
 ) -> PortfolioSynthesisAdmission:
     """Freeze a complete research set and atomically reserve one non-retryable Job."""
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     require_utc(now)
     if not 1 <= len(research_output_ids) <= 5 or len(set(research_output_ids)) != len(
         research_output_ids
@@ -134,7 +139,24 @@ async def admit_portfolio_synthesis(
             or existing.projection_hash != projection_hash
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_INPUT_CONFLICT")
-        _frozen_run(existing)
+        frozen = _frozen_run(existing)
+        for source in frozen.security_outputs:
+            output = await session.get(AgentResearchOutputRecord, source.research_output_id)
+            if output is None or output.content_hash != source.content_hash:
+                raise ValueError("PORTFOLIO_SYNTHESIS_RESEARCH_INVALID")
+            action = await load_actionable_research_output(
+                session,
+                run_id=output.run_id,
+                decision_time=frozen.admitted_at,
+                allow_safe_no_trade=True,
+                candidate_stage_capacity=candidate_stage_capacity,
+            )
+            if (
+                action.output_id != source.research_output_id
+                or action.intent_hash != source.intent_hash
+                or action.evidence_ref_ids != source.evidence_ref_ids
+            ):
+                raise ValueError("PORTFOLIO_SYNTHESIS_RESEARCH_INVALID")
         return PortfolioSynthesisAdmission(existing, True)
 
     if (
@@ -219,7 +241,11 @@ async def admit_portfolio_synthesis(
     security = []
     for research_run in sorted(runs, key=lambda row: row.instrument_id.int):
         action = await load_actionable_research_output(
-            session, run_id=research_run.id, decision_time=now, allow_safe_no_trade=True
+            session,
+            run_id=research_run.id,
+            decision_time=now,
+            allow_safe_no_trade=True,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
         output = source_by_run[research_run.id]
         if action.output_id != output.id:
