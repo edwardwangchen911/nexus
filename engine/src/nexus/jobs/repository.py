@@ -40,8 +40,11 @@ TerminalOutcome = Literal["succeeded", "skipped"]
 ExecutionOutcome = Literal["succeeded", "skipped", "failed"]
 JobApply = Callable[[AsyncSession], Awaitable[None]]
 JobExecution = Callable[[AsyncSession], Awaitable["JobCompletion"]]
+LockedJobGuard = Callable[[AsyncSession, Job], Awaitable[bool]]
 
 _ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
+
+
 class JobConflictError(RuntimeError):
     """A canonical JobKey resolved to different immutable authority fields."""
 
@@ -136,8 +139,8 @@ async def enqueue_job(
         raise ValueError("schema_version is invalid")
     if not 1 <= max_attempts <= 3:
         raise ValueError("max_attempts must be between 1 and 3")
-    available = key.effective_at if available_at is None else _utc(
-        available_at, field="available_at"
+    available = (
+        key.effective_at if available_at is None else _utc(available_at, field="available_at")
     )
     job_key = canonical_job_key(key)
     priority = JOB_PRIORITIES[key.job_type]
@@ -209,8 +212,7 @@ async def enqueue_job(
     if actual != expected:
         raise JobConflictError("canonical Job authority conflicts with the existing row")
     expected_dependencies = {
-        (dependency.depends_on_job_id, dependency.required_outcome)
-        for dependency in dependencies
+        (dependency.depends_on_job_id, dependency.required_outcome) for dependency in dependencies
     }
     if created:
         for dependency in dependencies:
@@ -248,10 +250,13 @@ async def claim_next_job(
     lease_seconds: int = 30,
     job_types: Sequence[str] | None = None,
     job_ids: tuple[UUID, ...] | None = None,
+    locked_job_guard: LockedJobGuard | None = None,
 ) -> ClaimedJob | None:
     """Claim the highest-priority ready Job without blocking another worker."""
     now = _utc(now, field="now")
     worker_id = _worker_id(worker_id)
+    if locked_job_guard is not None and (job_ids is None or len(job_ids) != 1):
+        raise ValueError("LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE")
     if not 1 <= lease_seconds <= 150:
         raise ValueError("lease_seconds must be between 1 and 150")
     if job_types is not None and not job_types:
@@ -290,10 +295,20 @@ async def claim_next_job(
             Job.id,
         )
         .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=locked_job_guard is not None)
         .limit(1)
     )
     if job is None:
         return None
+    if locked_job_guard is not None:
+        # Authority preview outside this transaction cannot authorize an attempt.
+        # Recheck the selected row while its lock is held, before writing a lease,
+        # attempt, or Job transition. Unknown qualification leaves it untouched.
+        qualified = await locked_job_guard(session, job)
+        if type(qualified) is not bool:
+            raise ValueError("LOCKED_JOB_GUARD_RESULT_INVALID")
+        if not qualified:
+            return None
     dependency_rows = tuple(
         (
             await session.execute(
@@ -313,10 +328,7 @@ async def claim_next_job(
         for row in dependency_rows
         if not (
             row[1] == JobStatus.SUCCEEDED.value
-            or (
-                row[0] == "succeeded_or_skipped"
-                and row[1] == JobStatus.SKIPPED.value
-            )
+            or (row[0] == "succeeded_or_skipped" and row[1] == JobStatus.SKIPPED.value)
         )
     )
     dependency_result_code = (
@@ -530,9 +542,7 @@ async def execute_and_finalize_job(
 ) -> Job:
     """Run one fenced transactional handler and persist only its safe result."""
     checked_at = _utc(checked_at, field="checked_at")
-    job, lease, attempt = await _lock_active_claim(
-        session, claim=claim, now=checked_at
-    )
+    job, lease, attempt = await _lock_active_claim(session, claim=claim, now=checked_at)
     completion = await execute(session)
     finished_at = _utc(completion.finished_at, field="finished_at")
     if finished_at < checked_at:
