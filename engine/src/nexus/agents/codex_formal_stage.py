@@ -141,3 +141,24 @@ def _formal_stage_job_hash(run: AgentResearchRunRecord) -> str:
             "pricing_version": run.pricing_version,
         }
     )
+
+
+async def require_formal_stage_model_profile(
+    session: AsyncSession,
+    *,
+    model_config_id: UUID | None,
+    now: datetime,
+) -> AgentModelConfigRecord:
+    model = (
+        None
+        if not isinstance(model_config_id, UUID)
+        else await session.get(AgentModelConfigRecord, model_config_id, populate_existing=True)
+    )
+    if (
+        model is None
+        or not formal_stage_model_matches(model)
+        or model.created_at > now
+        or not model.pricing_available_at <= now < model.pricing_expires_at
+    ):
+        raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
+    return model

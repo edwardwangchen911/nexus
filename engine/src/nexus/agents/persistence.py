@@ -539,6 +539,7 @@ async def admit_research_run(
     reuse_latest_actor_agent_version: bool = False,
     reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
+    formal_stage_capacity: bool = False,
 ) -> ResearchAdmission:
     """Keep version-inheriting admission failures atomic inside caller transactions."""
 
@@ -560,15 +561,53 @@ async def admit_research_run(
             reuse_latest_actor_agent_version=reuse_latest_actor_agent_version,
             reuse_latest_actor_prompts_only=reuse_latest_actor_prompts_only,
             version_source_run_id=version_source_run_id,
+            formal_stage_capacity=formal_stage_capacity,
         )
 
-    if reuse_latest_actor_agent_version or version_source_run_id is not None:
+    if (
+        formal_stage_capacity
+        or reuse_latest_actor_agent_version
+        or version_source_run_id is not None
+    ):
         # Preserve existing idempotency -> actor-version lock ordering. The
         # model is only known after inheritance resolves under that authority;
         # a refusal must roll back its claim even if the caller catches it.
         async with session.begin_nested():
             return await admit()
     return await admit()
+
+
+async def _verify_formal_replay_binding(
+    session: AsyncSession,
+    *,
+    run: AgentResearchRunRecord,
+    formal_stage_capacity: bool,
+    model_config_id: UUID | None,
+    now: datetime,
+) -> None:
+    model = await session.get(AgentModelConfigRecord, run.model_config_id, populate_existing=True)
+    formal_run = (
+        run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        or model is not None
+        and model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    )
+    if not formal_stage_capacity:
+        if formal_run:
+            raise ValueError("CODEX_FORMAL_STAGE_ACTIVATION_REQUIRED")
+        return
+    from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+
+    selected = await require_formal_stage_model_profile(
+        session,
+        model_config_id=model_config_id,
+        now=now,
+    )
+    if (
+        run.model_config_id != selected.id
+        or run.model_hash != selected.config_hash
+        or run.pricing_version != selected.version
+    ):
+        raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
 
 
 async def _admit_research_run(
@@ -589,8 +628,22 @@ async def _admit_research_run(
     reuse_latest_actor_agent_version: bool = False,
     reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
+    formal_stage_capacity: bool = False,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
+    if (
+        type(formal_stage_capacity) is not bool
+        or formal_stage_capacity
+        and (
+            job_type is not JobType.AGENT_PAPER_RESEARCH
+            or not isinstance(model_config_id, UUID)
+            or reuse_latest_actor_agent_version
+            or reuse_latest_actor_prompts_only
+            or version_source_run_id is not None
+            or allow_fixture_price_authority
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_ADMISSION_ARGUMENT_INVALID")
     if now.tzinfo != UTC or request.decision_time > now:
         raise ValueError("point-in-time data authority is invalid")
     if reuse_latest_actor_prompts_only and (
@@ -605,11 +658,16 @@ async def _admit_research_run(
         or model_config_id is not None
     ):
         raise ValueError("Agent version authority is ambiguous")
+    if formal_stage_capacity:
+        from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+
+        await require_formal_stage_model_profile(session, model_config_id=model_config_id, now=now)
     if model_config_id is not None:
         candidate_preview = await session.get(AgentModelConfigRecord, model_config_id)
         if (
             candidate_preview is not None
             and candidate_preview.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+            and not formal_stage_capacity
         ):
             # Registration records an immutable pending identity, not activation.
             # Refuse before claiming a key, including callers that catch errors.
@@ -646,9 +704,16 @@ async def _admit_research_run(
         raw_run_id = claim.response_payload.get("run_id")
         if claim.schema_version != _ADMISSION_SCHEMA_VERSION or not isinstance(raw_run_id, str):
             raise RuntimeError("Agent idempotency response is incomplete")
-        run = await session.get(AgentResearchRunRecord, UUID(raw_run_id))
+        run = await session.get(AgentResearchRunRecord, UUID(raw_run_id), populate_existing=True)
         if run is None:
             raise RuntimeError("Agent idempotency run is missing")
+        await _verify_formal_replay_binding(
+            session,
+            run=run,
+            formal_stage_capacity=formal_stage_capacity,
+            model_config_id=model_config_id,
+            now=now,
+        )
         return ResearchAdmission(run=run, replayed=True)
     if reuse_latest_actor_agent_version:
         await session.execute(
@@ -706,7 +771,11 @@ async def _admit_research_run(
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)
         )
-    if model is not None and model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
+    if (
+        model is not None
+        and model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        and not formal_stage_capacity
+    ):
         raise ValueError("CODEX_FORMAL_STAGE_ACTIVATION_REQUIRED")
     if model is not None and model.version == CANDIDATE_BUDGET_CONFIG_VERSION:
         from nexus.agents.codex_candidate import candidate_model_matches, require_candidate_database
@@ -873,6 +942,13 @@ async def _admit_research_run(
         existing_run = await session.get(AgentResearchRunRecord, UUID(raw_run_id))
         if existing_run is None:
             raise RuntimeError("Agent durable Job run is missing")
+        await _verify_formal_replay_binding(
+            session,
+            run=existing_run,
+            formal_stage_capacity=formal_stage_capacity,
+            model_config_id=model_config_id,
+            now=now,
+        )
         claim.response_payload = {
             "run_id": str(existing_run.id),
             "status": existing_run.status,
@@ -919,7 +995,11 @@ async def _admit_research_run(
         queue=QueueName.GENERAL,
         retry_policy=RetryPolicy.AUTOMATIC_SAFE,
         max_attempts=1
-        if model.version in SDK_CONFIG_VERSIONS or model.version == CANDIDATE_BUDGET_CONFIG_VERSION
+        if (
+            model.version in SDK_CONFIG_VERSIONS
+            or model.version == CANDIDATE_BUDGET_CONFIG_VERSION
+            or formal_stage_capacity
+        )
         else 3,
         available_at=now,
     )

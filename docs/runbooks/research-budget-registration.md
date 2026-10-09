@@ -181,7 +181,7 @@ uv run --project engine nexus-openai-local setup --backend codex_sdk \
 
 入口在写入前核对实际数据库名称与配置一致；待激活模式不能与候选模式混用。
 重复注册核对规范哈希和全部持久化模型字段，冲突拒绝，不覆盖旧行。默认研究选型
-排除待激活 v8；显式指定 v8 在幂等声明之前返回
+排除待激活 v8；未指定内部正式模式时，显式指定 v8 在幂等声明之前返回
 `CODEX_FORMAL_STAGE_ACTIVATION_REQUIRED`。此版本未加入 SDK/正式 Paper 版本集合，
 没有调度或执行启用开关。注册成功不代表预算已经在正式进程生效。
 
@@ -206,3 +206,19 @@ uv run --project engine nexus-openai-local setup --backend codex_sdk \
 规范合成 Job 的锁内领取及拒绝不产生 attempt/lease；受控研究三阶段预算反例覆盖
 准备耗时0/10秒。测试不创建真实研究证据，不调用模型/券商，也不注册业务库或部署。
 后续仍需正常正式周期准入、消费者和数据库输出绑定接线及自然验收。
+
+
+内部正常 Paper 研究准入 `admit_agent_paper_research(..., formal_stage_capacity=True,
+model_config_id=EXACT_V8_MODEL_UUID)` 现在显式冻结独立 v8 模型。模式要求标准 Paper
+actor/route/key，不能与候选、评价、手动版本继承或 fixture 价格授权混用。
+在幂等声明前核对规范模型字段/哈希、创建时点与当前定价有效性；请求哈希包含模式
+及模型ID。沿原提示词、来源、行情和 Paper上下文校验，创建原生单尝试研究 Job。
+不根据最新注册记录默认选择，不开放 HTTP/CLI 参数，也未启用周期调度。
+
+低层 `admit_research_run` 同样要求显式模式、精确模型、Paper Job和严格布尔值。
+正式模式通过保存点保证调用者在事务内捕获后续准入拒绝时不残留 claim、Run或Job。
+幂等回执和已有 durableJob 两处缓存返回均重新核对模式及冻结模型ID/hash/版本；
+默认模式不能读回v8，新模式不能借同key/bodyhash返回旧版本。合法重复仍返回同一Run。
+本轮仅在隔离库通过正常产品函数完成 prepared Job/Run和拒绝读回，不调用模型，
+不是研究结果、组合决策、业务库注册或自然周期验收。正式周期首事件、后续恢复/消费者
+和数据库输出绑定仍待接通；先保持默认选择和调度关闭。
