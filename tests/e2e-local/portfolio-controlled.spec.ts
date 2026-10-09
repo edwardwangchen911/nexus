@@ -55,6 +55,9 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
   await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
+  await expect(page.getByRole("region", { name: "最新决策" }).getByText("本周期订单已终态")).toBeVisible();
+  await expect(page.getByRole("region", { name: "活动订单" }).getByText("本周期订单已终态")).toBeVisible();
+  await expect(page.getByRole("region", { name: "活动订单" }).getByRole("link", { name: "查看全部订单" })).toHaveAttribute("href", "/paper");
   await capture("workspace");
 
   await page.goto("/decisions");

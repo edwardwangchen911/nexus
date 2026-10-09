@@ -168,6 +168,23 @@ describe("central product-state vocabulary", () => {
     });
   });
 
+  it("shows terminal cycle orders when the active-order list is empty", () => {
+    expect(executionPresentation(cycle({
+      status: "completed", result_code: "PAPER_CYCLE_COMPLETED",
+      order_ids: [filledOrder.order_id],
+    }), [])).toMatchObject({ key: "completed", label: "本周期订单已终态", tone: "neutral" });
+  });
+
+  it.each(["prepared", "awaiting_market"] as const)("does not infer completion from a result code on %s", (status) => {
+    expect(executionPresentation(cycle({ status, result_code: "PAPER_CYCLE_COMPLETED" }), []).key).not.toBe("completed");
+  });
+
+  it("requires linked orders for the terminal-cycle result", () => {
+    expect(executionPresentation(cycle({
+      status: "completed", result_code: "PAPER_CYCLE_COMPLETED", order_ids: [],
+    }), []).key).toBe("unknown");
+  });
+
   it("preserves an unknown result code without treating it as success or failure", () => {
     const result = executionPresentation(cycle({ status: "completed", result_code: "NEW_RESULT_CODE", order_ids: [] }), []);
     expect(result).toMatchObject({

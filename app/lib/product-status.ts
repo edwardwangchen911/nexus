@@ -21,7 +21,7 @@ type CandidateKey = "buy" | "sell" | "hold" | "watch" | "data_insufficient";
 type DecisionSummaryKey = "research_not_actionable" | "unknown" | "in_progress" | "decision_recorded" | "data_insufficient" | "model_failed";
 type RiskKey = "not_evaluated" | "risk_no_change" | "risk_approved" | "risk_reduced" | "risk_rejected";
 type ExecutionKey = "no_order" | "waiting_market" | "submitted" | "partially_filled" | "filled"
-  | "cancelled" | "rejected" | "reconciling" | "result_unknown" | "unknown";
+  | "completed" | "cancelled" | "rejected" | "reconciling" | "result_unknown" | "unknown";
 type LoopKey = "online" | "offline" | "unknown";
 type AttentionKey = "data_insufficient" | "model_failed" | "risk_rejected" | "result_unknown"
   | "loop_offline" | "unknown";
@@ -93,6 +93,10 @@ export function executionPresentation(cycle: Cycle, orders: Order[]): Actionable
   }
   if (orders.length === 0 && cycle.result_code === "NO_ORDER_REQUIRED") {
     return actionable("no_order", "无需下单", "本周期已完成，确定性结果不需要创建订单。", "neutral", cycle.result_code);
+  }
+  if (orders.length === 0 && cycle.status === "completed"
+    && cycle.result_code === "PAPER_CYCLE_COMPLETED" && cycle.order_ids.length > 0) {
+    return actionable("completed", "本周期订单已终态", "关联订单已成交、取消或被拒绝；具体结果请查看全部订单。", "neutral", cycle.result_code);
   }
   if (orders.length === 0 && cycle.status === "awaiting_market") {
     return actionable("waiting_market", "等待执行行情", "周期正在等待符合约束的执行行情。", "warning", cycle.result_code);

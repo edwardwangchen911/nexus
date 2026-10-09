@@ -92,6 +92,20 @@ describe("decision-first trading workbench", () => {
     if (!hasFacts) expect(screen.queryByText("AAPL")).not.toBeInTheDocument();
   });
 
+  it("shows a completed cycle honestly after terminal orders leave the active list", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: managementSummary, meta: meta() })));
+    const payload = readyPayload();
+    payload.data.latest_cycle!.result_code = "PAPER_CYCLE_COMPLETED";
+    payload.data.latest_cycle!.order_ids = [cancellableOrder.order_id];
+    render(<WorkbenchPanel state="ready" payload={payload} refreshing={false} onRefresh={vi.fn()} />);
+    expect(within(screen.getByRole("region", { name: "最新决策" })).getByText("本周期订单已终态")).toBeVisible();
+    const orders = screen.getByRole("region", { name: "活动订单" });
+    expect(within(orders).getByText("本周期订单已终态")).toBeVisible();
+    expect(within(orders).getByRole("link", { name: "查看全部订单" })).toHaveAttribute("href", "/paper");
+    expect(screen.queryByText("已成交")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("region", { name: "内部模拟目标与计划摘要" })).toHaveTextContent("目标 V7"));
+  });
+
   it("leads with the decision and exposes no write controls", () => {
     render(<WorkbenchPanel state="ready" payload={readyPayload()} refreshing={false} onRefresh={vi.fn()} />);
 
