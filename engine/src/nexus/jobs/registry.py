@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
 from nexus.audit.canonical import canonical_json
 from nexus.jobs.models import (
     BROKER_JOB_TYPES,
@@ -81,14 +82,27 @@ class JobHandlerSpec:
     max_attempts: int
     idempotency_namespace: str
     handler: JobHandler
+    research_budget_profile: str | None = None
 
     def __post_init__(self) -> None:
+        if self.research_budget_profile is not None and (
+            self.research_budget_profile != CANDIDATE_BUDGET_CONFIG_VERSION
+            or self.job_type is not JobType.AGENT_PAPER_RESEARCH
+            or self.schema_version != "agent_research_job_v1"
+            or self.timeout_seconds != 195
+            or self.max_attempts != 1
+            or self.retry_policy is not RetryPolicy.AUTOMATIC_SAFE
+            or self.idempotency_namespace != "agent.research"
+        ):
+            raise ValueError("RESEARCH_BUDGET_PROFILE_INVALID")
         if not 1 <= len(self.schema_version) <= 32:
             raise ValueError("handler schema_version is invalid")
         if self.payload_model.model_config.get("extra") != "forbid":
             raise ValueError("handler payload model must set extra='forbid'")
         maximum_timeout = (
-            135
+            195
+            if self.research_budget_profile == CANDIDATE_BUDGET_CONFIG_VERSION
+            else 135
             if self.job_type in {JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH}
             and self.max_attempts == 1
             else 45
@@ -109,9 +123,7 @@ class JobHandlerSpec:
             else QueueName.GENERAL
         )
         if self.queue is not expected_queue:
-            raise ValueError(
-                f"{self.job_type.value} handler must use {expected_queue.value}"
-            )
+            raise ValueError(f"{self.job_type.value} handler must use {expected_queue.value}")
 
     @property
     def priority(self) -> int:
@@ -167,8 +179,7 @@ def job_payload_is_safe(payload: dict[str, object]) -> bool:
             return all(safe(item) for item in value)
         if isinstance(value, dict):
             return all(
-                not (_FORBIDDEN_KEY_TOKENS & set(key.lower().split("_")))
-                and safe(item)
+                not (_FORBIDDEN_KEY_TOKENS & set(key.lower().split("_"))) and safe(item)
                 for key, item in value.items()
             )
         return False

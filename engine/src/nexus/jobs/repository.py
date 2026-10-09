@@ -251,13 +251,26 @@ async def claim_next_job(
     job_types: Sequence[str] | None = None,
     job_ids: tuple[UUID, ...] | None = None,
     locked_job_guard: LockedJobGuard | None = None,
+    research_budget_profile: str | None = None,
 ) -> ClaimedJob | None:
     """Claim the highest-priority ready Job without blocking another worker."""
     now = _utc(now, field="now")
     worker_id = _worker_id(worker_id)
     if locked_job_guard is not None and (job_ids is None or len(job_ids) != 1):
         raise ValueError("LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE")
-    if not 1 <= lease_seconds <= 150:
+    from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+
+    if research_budget_profile is not None and (
+        research_budget_profile != CANDIDATE_BUDGET_CONFIG_VERSION
+        or locked_job_guard is None
+        or job_ids is None
+        or len(job_ids) != 1
+        or type(lease_seconds) is not int
+        or lease_seconds != 210
+        or queue is not QueueName.GENERAL
+    ):
+        raise ValueError("RESEARCH_BUDGET_PROFILE_REQUIRES_LOCKED_SCOPE")
+    if research_budget_profile is None and not 1 <= lease_seconds <= 150:
         raise ValueError("lease_seconds must be between 1 and 150")
     if job_types is not None and not job_types:
         return None
@@ -299,6 +312,15 @@ async def claim_next_job(
         .limit(1)
     )
     if job is None:
+        return None
+    if research_budget_profile is not None and (
+        job.job_type != JobType.AGENT_PAPER_RESEARCH.value
+        or job.schema_version != "agent_research_job_v1"
+        or job.max_attempts != 1
+        or job.attempt_count != 0
+        or job.manual_retry_count != 0
+        or job.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
+    ):
         return None
     if locked_job_guard is not None:
         # Authority preview outside this transaction cannot authorize an attempt.

@@ -107,6 +107,16 @@ async def run_job_worker_once(
     job_ids = None if job_ids is None else tuple(job_ids)
     if locked_job_guard is not None and (job_ids is None or len(job_ids) != 1):
         raise ValueError("LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE")
+    profiles = {spec.research_budget_profile for spec in registry.specs}
+    research_budget_profile = next(iter(profiles)) if len(profiles) == 1 else None
+    if any(profile is not None for profile in profiles) and (
+        len(registry.specs) != 1
+        or research_budget_profile is None
+        or locked_job_guard is None
+        or job_ids is None
+        or len(job_ids) != 1
+    ):
+        raise ValueError("RESEARCH_BUDGET_PROFILE_REQUIRES_LOCKED_SCOPE")
     claim_time = clock()
     # Preserve the normal 60s lease; a bounded research handler needs its full
     # runtime plus the same 15s margin before another worker may reclaim it.
@@ -146,6 +156,7 @@ async def run_job_worker_once(
             job_types=(tuple(sorted(registry.job_types)) if claim_registered_only else None),
             job_ids=job_ids,
             locked_job_guard=locked_job_guard,
+            research_budget_profile=research_budget_profile,
         )
     if claim is None:
         return False
