@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.paper import (
     AgentPaperActivationResultResponse,
@@ -271,12 +272,17 @@ class PaperReadService:
         request_time: datetime,
         *,
         cursor_signing_secrets: Sequence[str] = (),
+        candidate_stage_capacity: bool = False,
     ) -> None:
         self._session = session
         self._request_time = require_utc(request_time)
         self._cursor_secrets = tuple(cursor_signing_secrets)
+        self._candidate_stage_capacity = candidate_stage_capacity
 
     async def account(self) -> tuple[PaperAccountRecord, Portfolio]:
+        await require_candidate_consumer_profile(
+            self._session, candidate_stage_capacity=self._candidate_stage_capacity
+        )
         rows = (
             await self._session.execute(
                 select(PaperAccountRecord, Portfolio)
@@ -477,9 +483,7 @@ class PaperReadService:
             )
         return event
 
-    async def _cycle_activation_event(
-        self, cycle_id: UUID
-    ) -> AgentPaperCycleEventRecord | None:
+    async def _cycle_activation_event(self, cycle_id: UUID) -> AgentPaperCycleEventRecord | None:
         return cast(
             AgentPaperCycleEventRecord | None,
             await self._session.scalar(
@@ -498,7 +502,7 @@ class PaperReadService:
                 )
                 .order_by(AgentPaperCycleEventRecord.sequence.desc())
                 .limit(1)
-            )
+            ),
         )
 
     async def _portfolio_security_research(
@@ -594,6 +598,7 @@ class PaperReadService:
                 account_id=decision.account_id,
                 decision_id=decision.id,
                 read_as_of=self._request_time,
+                candidate_stage_capacity=self._candidate_stage_capacity,
             )
         except ValueError as error:
             raise NexusError(
@@ -628,9 +633,7 @@ class PaperReadService:
                         else proposal.roles.get(instrument_id, "none")
                     ),
                     reason_code=proposal.reasons[instrument_id],
-                    rank=(
-                        choices[instrument_id].rank if instrument_id in choices else None
-                    ),
+                    rank=(choices[instrument_id].rank if instrument_id in choices else None),
                     replaces_instrument_id=(
                         choices[instrument_id].replaces_instrument_id
                         if instrument_id in choices
@@ -681,6 +684,7 @@ class PaperReadService:
                 account_id=account_id,
                 target_id=row.id,
                 read_as_of=self._request_time,
+                candidate_stage_capacity=self._candidate_stage_capacity,
             )
         except ValueError as error:
             raise NexusError(
@@ -1804,17 +1808,18 @@ class PaperReadService:
             )
         scheduled_at = self._portfolio_decision_at(decision_session)
         window_end = scheduled_at + timedelta(minutes=5)
-        status: Literal[
-            "not_started", "ready", "in_progress", "completed", "stopped", "closed"
-        ]
+        status: Literal["not_started", "ready", "in_progress", "completed", "stopped", "closed"]
         next_at: datetime | None
-        next_reason: Literal[
-            "CURRENT_SLOT",
-            "SESSION_OPEN",
-            "NEXT_SESSION",
-            "CURRENT_CYCLE_IN_PROGRESS",
-            "CALENDAR_UNAVAILABLE",
-        ] | None
+        next_reason: (
+            Literal[
+                "CURRENT_SLOT",
+                "SESSION_OPEN",
+                "NEXT_SESSION",
+                "CURRENT_CYCLE_IN_PROGRESS",
+                "CALENDAR_UNAVAILABLE",
+            ]
+            | None
+        )
         active = latest is not None and latest.status not in {
             "completed",
             "unavailable",
@@ -1840,9 +1845,7 @@ class PaperReadService:
             else:
                 status = "stopped"
             next_session = await self._next_xnys_session(decision_session)
-            next_at = (
-                None if next_session is None else self._portfolio_decision_at(next_session)
-            )
+            next_at = None if next_session is None else self._portfolio_decision_at(next_session)
             next_reason = "CALENDAR_UNAVAILABLE" if next_session is None else "NEXT_SESSION"
         return AgentPaperSessionSummaryResponse(
             decision_session=decision_session,
@@ -3149,6 +3152,7 @@ class PaperReadService:
                 self._session,
                 account_id=account.id,
                 strategy_decision_id=decision.id,
+                candidate_stage_capacity=self._candidate_stage_capacity,
             )
         except (PaperBatchError, ValueError):
             canonical_batch = None
@@ -3166,12 +3170,14 @@ class PaperReadService:
                     account_id=account.id,
                     decision_id=decision.id,
                     read_as_of=self._request_time,
+                    candidate_stage_capacity=self._candidate_stage_capacity,
                 )
                 target_authority = await load_target_read_authority(
                     self._session,
                     account_id=account.id,
                     target_id=batch.target_version_id,
                     read_as_of=self._request_time,
+                    candidate_stage_capacity=self._candidate_stage_capacity,
                 )
             except ValueError as error:
                 raise NexusError(
@@ -3712,18 +3718,21 @@ class PaperReadService:
                     self._session,
                     account_id=order.account_id,
                     strategy_decision_id=authority[12],
+                    candidate_stage_capacity=self._candidate_stage_capacity,
                 )
                 target_authority = await load_target_read_authority(
                     self._session,
                     account_id=order.account_id,
                     target_id=authority[11],
                     read_as_of=decision_time,
+                    candidate_stage_capacity=self._candidate_stage_capacity,
                 )
                 batch_proposal = await load_proposal_read_authority(
                     self._session,
                     account_id=order.account_id,
                     decision_id=authority[12],
                     read_as_of=decision_time,
+                    candidate_stage_capacity=self._candidate_stage_capacity,
                 )
             except (PaperBatchError, ValueError):
                 canonical_batch = None
@@ -3758,8 +3767,10 @@ class PaperReadService:
                     target_content_hash=target_authority.target.target_content_hash,
                 )
             )
-        if authority is None or not events or not (
-            registered_authority or legacy_agent_authority or portfolio_agent_authority
+        if (
+            authority is None
+            or not events
+            or not (registered_authority or legacy_agent_authority or portfolio_agent_authority)
         ):
             raise NexusError(
                 ErrorCode.DATA_PARTIAL,

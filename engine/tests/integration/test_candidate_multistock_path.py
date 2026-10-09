@@ -313,5 +313,160 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             assert [
                 await session.scalar(select(func.count()).select_from(table)) for table in tables
             ] == counts_before
+        if trade:
+            await _verify_internal_fills(
+                settings, sessions, result.cycle_id, authority.account_id, orders
+            )
     finally:
         await engine.dispose()
+
+
+async def _verify_internal_fills(settings, sessions, cycle_id, account_id, orders):
+    from integration.test_agent_paper_cycle_pg import _ObjectStore, _SchwabPriceHistoryProvider
+    from nexus.api.errors import NexusError
+    from nexus.ops.paper_once import PaperAdvanceRequest, run_once
+    from nexus.paper.agent_market import (
+        collect_agent_paper_window,
+        resolve_agent_paper_market_scope,
+    )
+    from nexus.paper.projection import load_paper_projection
+    from nexus.paper.read_service import PaperReadService
+    from nexus.persistence.models.paper import (
+        AgentPaperCycleRecord,
+        AgentPaperMarketWindowRecord,
+        PaperExecutionWindowAuthorityRecord,
+        PaperFillRecord,
+        PaperLedgerEntryRecord,
+        PaperLedgerTransactionRecord,
+        PaperPositionAdjustmentEventRecord,
+    )
+    from sqlalchemy import func
+
+    provider = _SchwabPriceHistoryProvider()
+    windows = []
+    async with sessions() as session:
+        before = await load_paper_projection(
+            session, account_id=account_id, as_of=AT + timedelta(seconds=5)
+        )
+    for order in orders:
+        async with sessions() as session:
+            scope = await resolve_agent_paper_market_scope(
+                session, cycle_id=cycle_id, instrument_id=order.instrument_id
+            )
+            assert scope.window_start > AT + timedelta(seconds=4)
+        evaluated_at = scope.window_end + timedelta(seconds=2)
+        window = await collect_agent_paper_window(
+            sessions,
+            cycle_id=cycle_id,
+            instrument_id=order.instrument_id,
+            provider=provider,
+            object_store=_ObjectStore(),
+            evaluated_at=evaluated_at,
+        )
+        windows.append(window)
+        assert window.source == "schwab" and window.purpose == "paper_fill"
+        replay = await collect_agent_paper_window(
+            sessions,
+            cycle_id=cycle_id,
+            instrument_id=order.instrument_id,
+            provider=provider,
+            object_store=_ObjectStore(),
+            evaluated_at=evaluated_at + timedelta(seconds=1),
+        )
+        assert replay.authority_id == window.authority_id and replay.replayed
+        request = PaperAdvanceRequest(
+            action="advance",
+            account_id=account_id,
+            order_id=order.id,
+            evaluated_at=evaluated_at,
+            agent_cycle_id=cycle_id,
+            agent_market_window_id=window.authority_id,
+            idempotency_key=f"candidate-window:{order.id}:{window.authority_id}",
+        )
+        filled = await run_once(settings, request)
+        assert filled["status"] == filled["action"] == "filled", filled
+        assert (
+            await run_once(
+                settings,
+                request.model_copy(update={"evaluated_at": evaluated_at + timedelta(seconds=3)}),
+            )
+            == filled
+        )
+    assert provider.calls == len(orders)
+    async with sessions() as session:
+        fills = tuple(await session.scalars(select(PaperFillRecord)))
+        assert len(fills) == len(orders)
+        assert {fill.order_id for fill in fills} == {order.id for order in orders}
+        for fill in fills:
+            order = next(order for order in orders if order.id == fill.order_id)
+            assert fill.quantity == order.quantity and fill.notional == fill.quantity * fill.price
+            adjustments = tuple(
+                await session.scalars(
+                    select(PaperPositionAdjustmentEventRecord).where(
+                        PaperPositionAdjustmentEventRecord.source_fill_id == fill.id
+                    )
+                )
+            )
+            assert len(adjustments) == 1
+            assert adjustments[0].quantity_delta == fill.quantity
+            assert adjustments[0].cost_delta == fill.notional
+            entries = tuple(
+                await session.scalars(
+                    select(PaperLedgerEntryRecord).where(
+                        PaperLedgerEntryRecord.transaction_id == fill.ledger_transaction_id
+                    )
+                )
+            )
+            assert entries and sum(entry.debit_amount for entry in entries) == sum(
+                entry.credit_amount for entry in entries
+            )
+        projection = await load_paper_projection(
+            session,
+            account_id=account_id,
+            as_of=max(window.window_end for window in windows) + timedelta(seconds=5),
+        )
+        assert projection.reserved_cash == 0
+        assert projection.available_cash == before.available_cash + before.reserved_cash - sum(
+            (fill.notional + fill.fee for fill in fills), start=Decimal(0)
+        )
+        assert not projection.open_orders
+        initial_quantities = {
+            position.instrument_id: position.quantity for position in before.positions
+        }
+        final_quantities = {
+            position.instrument_id: position.quantity for position in projection.positions
+        }
+        for order in orders:
+            assert (
+                final_quantities[order.instrument_id]
+                == initial_quantities.get(order.instrument_id, Decimal(0)) + order.quantity
+            )
+        with pytest.raises(NexusError, match="order projection is incomplete"):
+            await PaperReadService(
+                session, projection.as_of, cursor_signing_secrets=("controlled-test-cursor",)
+            ).orders(status=None, cursor=None, limit=20)
+        page, page_at = await PaperReadService(
+            session,
+            projection.as_of,
+            cursor_signing_secrets=("controlled-test-cursor",),
+            candidate_stage_capacity=True,
+        ).orders(status=None, cursor=None, limit=20)
+        assert page_at == projection.as_of and page.next_cursor is None
+        assert {item.order_id for item in page.items} == {order.id for order in orders}
+        for item in page.items:
+            assert item.status == "filled" and not item.cancellable
+            assert Decimal(item.remaining_quantity) == 0
+            assert Decimal(item.filled_quantity) == Decimal(item.quantity)
+            assert len(item.fills) == 1
+        assert (await session.get(AgentPaperCycleRecord, cycle_id)).execution_locked is True
+        assert await session.scalar(
+            select(func.count()).select_from(AgentPaperMarketWindowRecord)
+        ) == len(orders)
+        assert await session.scalar(
+            select(func.count()).select_from(PaperExecutionWindowAuthorityRecord)
+        ) == len(orders)
+        assert await session.scalar(
+            select(func.count())
+            .select_from(PaperLedgerTransactionRecord)
+            .where(PaperLedgerTransactionRecord.transaction_type == "fill")
+        ) == len(orders)

@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisInputV1,
     PortfolioSynthesisIntentV1,
@@ -107,9 +108,7 @@ async def load_synthesis_read_authority(
             raise ValueError("PORTFOLIO_SYNTHESIS_TERMINAL_OUTPUT_MISSING")
         return None
     intent = (
-        None
-        if output.intent is None
-        else PortfolioSynthesisIntentV1.model_validate(output.intent)
+        None if output.intent is None else PortfolioSynthesisIntentV1.model_validate(output.intent)
     )
     content_hash = canonical_portfolio_synthesis_hash(
         {
@@ -144,7 +143,11 @@ async def load_proposal_read_authority(
     account_id: UUID,
     decision_id: UUID,
     read_as_of: datetime,
+    candidate_stage_capacity: bool = False,
 ) -> ProposalReadAuthority | None:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     decision = await session.scalar(
         select(StrategyDecisionRecord).where(
             StrategyDecisionRecord.id == decision_id,
@@ -158,6 +161,7 @@ async def load_proposal_read_authority(
         session,
         account_id=account_id,
         decision_id=decision.id,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     if persisted is None or persisted.cycle_id != decision.agent_paper_cycle_id:
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
@@ -170,7 +174,11 @@ async def load_target_read_authority(
     account_id: UUID,
     target_id: UUID,
     read_as_of: datetime,
+    candidate_stage_capacity: bool = False,
 ) -> TargetReadAuthority | None:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     target = await session.scalar(
         select(PaperTargetVersionRecord).where(
             PaperTargetVersionRecord.id == target_id,
@@ -186,6 +194,7 @@ async def load_target_read_authority(
         account_id=account_id,
         decision_id=target.strategy_decision_id,
         read_as_of=read_as_of,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
     previous = (
         None

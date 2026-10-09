@@ -6,12 +6,45 @@ from uuid import uuid4
 
 import pytest
 from nexus.api.errors import NexusError
+from nexus.paper.management_read_authority import (
+    load_proposal_read_authority,
+    load_target_read_authority,
+)
 from nexus.paper.read_service import PaperReadService, portfolio_target_matches_batch
 from nexus.paper.target_service import (
     TargetActivationBlockedError,
     require_activation_projection_unoccupied,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader", ["account", "proposal", "target"])
+async def test_candidate_readers_reject_actual_business_database_before_fact_reads(reader):
+    scalar = AsyncMock(return_value="nexus_business")
+    session = cast(AsyncSession, SimpleNamespace(scalar=scalar))
+    now = datetime(2026, 10, 9, tzinfo=UTC)
+    with pytest.raises(ValueError, match="CODEX_CANDIDATE_ISOLATION_REQUIRED"):
+        if reader == "account":
+            await PaperReadService(session, now, candidate_stage_capacity=True).account()
+        elif reader == "proposal":
+            await load_proposal_read_authority(
+                session,
+                account_id=uuid4(),
+                decision_id=uuid4(),
+                read_as_of=now,
+                candidate_stage_capacity=True,
+            )
+        else:
+            await load_target_read_authority(
+                session,
+                account_id=uuid4(),
+                target_id=uuid4(),
+                read_as_of=now,
+                candidate_stage_capacity=True,
+            )
+    scalar.assert_awaited_once()
+    assert "current_database" in str(scalar.call_args.args[0])
 
 
 def test_same_target_new_decision_remains_a_valid_batch_association() -> None:
@@ -165,9 +198,7 @@ async def test_ambiguous_occupation_never_becomes_a_planless_blocker(mode: str) 
         if mode == "missing"
         else [(first_order, first_batch), (second_order, second_batch)]
     )
-    session = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: rows))
-    )
+    session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: rows)))
     projection = SimpleNamespace(
         open_orders=(
             SimpleNamespace(order_id=first_order),
@@ -189,9 +220,7 @@ async def test_one_exact_occupying_batch_is_carried_by_the_typed_blocker() -> No
     order_id = uuid4()
     batch_id = uuid4()
     session = SimpleNamespace(
-        execute=AsyncMock(
-            return_value=SimpleNamespace(all=lambda: [(order_id, batch_id)])
-        )
+        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [(order_id, batch_id)]))
     )
     projection = SimpleNamespace(
         open_orders=(SimpleNamespace(order_id=order_id),),
@@ -267,18 +296,14 @@ def test_candidate_batch_activation_rejects_missing_authority_rows(missing: str)
         service._activation_result(
             event=cast(Any, event),
             decision=(
-                None
-                if missing == "decision"
-                else cast(Any, SimpleNamespace(id=decision_id))
+                None if missing == "decision" else cast(Any, SimpleNamespace(id=decision_id))
             ),
             target=(
                 None
                 if missing == "target"
                 else cast(Any, SimpleNamespace(target_version_id=target_id))
             ),
-            batch=(
-                None if missing == "batch" else cast(Any, SimpleNamespace(id=batch_id))
-            ),
+            batch=(None if missing == "batch" else cast(Any, SimpleNamespace(id=batch_id))),
             strict_identity=True,
         )
 
