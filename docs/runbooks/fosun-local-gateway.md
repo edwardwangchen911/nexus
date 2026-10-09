@@ -15,6 +15,15 @@ uv run --package nexus-fosun-gateway nexus-fosun-gateway-local check --repo-root
 uv run --package nexus-fosun-gateway nexus-fosun-gateway-service status --repo-root "$PWD"
 ```
 
+配置加载同时只读检查本机服务端、三套 CA 和两个客户端证书的有效期；
+必须为单个 PEM 证书，并满足 `notBefore <= 本机UTC时钟 < notAfter`。
+格式不合法、过期或尚未生效分别返回固定码
+`LOCAL_GATEWAY_TLS_CERTIFICATE_INVALID`、`LOCAL_GATEWAY_TLS_CERTIFICATE_EXPIRED`、
+`LOCAL_GATEWAY_TLS_CERTIFICATE_NOT_YET_VALID`，正常 `check` / `run` 均在网络和
+Gateway启动前拒绝。此项不证明证书链、私钥匹配或远端可用，仍须完成正常
+mTLS健康检查；也不自动续签或替换材料。证书续签须按认证材料变更取得授权，
+备份原件，保留三套角色信任域和只读权限。
+
 显式启动与停止使用同一个 launchd 标签 `com.nexus.fosun-local-gateway`：
 
 ```bash

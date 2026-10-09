@@ -7,8 +7,10 @@ import re
 import stat
 import subprocess
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
+from cryptography import x509
 from pydantic import ValidationError
 
 from nexus_fosun_gateway.settings import (
@@ -32,6 +34,42 @@ _RELEASE_PATHS = (
     "pyproject.toml",
     "uv.lock",
 )
+_LOCAL_CERTIFICATES = (
+    "server.pem",
+    "server-ca.pem",
+    "broker-ca.pem",
+    "market-ca.pem",
+    "broker-client.pem",
+    "market-client.pem",
+)
+_TLS_CERTIFICATE_CODES = frozenset(
+    {
+        "LOCAL_GATEWAY_TLS_CERTIFICATE_INVALID",
+        "LOCAL_GATEWAY_TLS_CERTIFICATE_EXPIRED",
+        "LOCAL_GATEWAY_TLS_CERTIFICATE_NOT_YET_VALID",
+    }
+)
+
+
+def _certificate_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _validate_local_certificate_times(local: Path) -> None:
+    now = _certificate_now()
+    for name in _LOCAL_CERTIFICATES:
+        raw = _private_file(local / name).encode("utf-8")
+        try:
+            certificates = x509.load_pem_x509_certificates(raw)
+            if len(certificates) != 1:
+                raise ValueError
+        except ValueError:
+            raise ValueError("LOCAL_GATEWAY_TLS_CERTIFICATE_INVALID") from None
+        certificate = certificates[0]
+        if now < certificate.not_valid_before_utc:
+            raise ValueError("LOCAL_GATEWAY_TLS_CERTIFICATE_NOT_YET_VALID")
+        if now >= certificate.not_valid_after_utc:
+            raise ValueError("LOCAL_GATEWAY_TLS_CERTIFICATE_EXPIRED")
 
 
 def _private_directory(path: Path) -> None:
@@ -128,6 +166,7 @@ def load_local_gateway_settings(repo_root: Path) -> GatewaySettings:
         "market-client.key",
     ):
         _private_existing_file(local / name)
+    _validate_local_certificate_times(local)
     manifest = root / "contracts" / "providers" / "fosun" / "manifest.json"
     if manifest.is_symlink() or not manifest.is_file():
         raise ValueError("LOCAL_GATEWAY_MATERIAL_UNSAFE")
@@ -223,7 +262,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = load_local_gateway_settings(arguments.repo_root)
     except ValueError as error:
         code = str(error)
-        if code not in {"LOCAL_GATEWAY_MATERIAL_UNSAFE", "LOCAL_GATEWAY_SETTINGS_INVALID"}:
+        if code not in {
+            "LOCAL_GATEWAY_MATERIAL_UNSAFE",
+            "LOCAL_GATEWAY_SETTINGS_INVALID",
+            *_TLS_CERTIFICATE_CODES,
+        }:
             code = "LOCAL_GATEWAY_SETTINGS_INVALID"
         print(json.dumps({"status": "blocked", "code": code}))
         return 1

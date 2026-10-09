@@ -3,15 +3,55 @@
 import json
 import os
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import NameOID
 from nexus_fosun_gateway.local_runtime import load_local_gateway_settings, main
+
+_NOW = datetime(2026, 1, 15, tzinfo=UTC)
+_CERTIFICATES = (
+    "server.pem",
+    "server-ca.pem",
+    "broker-ca.pem",
+    "market-ca.pem",
+    "broker-client.pem",
+    "market-client.pem",
+)
+
+
+@pytest.fixture(autouse=True)
+def fixed_certificate_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.local_runtime._certificate_now", lambda: _NOW, raising=False
+    )
+
+
+def _certificate(before: datetime, after: datetime) -> str:
+    key = Ed25519PrivateKey.generate()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "isolated-test")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(before)
+        .not_valid_after(after)
+        .sign(key, None)
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
 
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_local_run_binds_sdk_keys_and_restores_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     fails: bool,
 ) -> None:
     root = _root(tmp_path)
@@ -23,8 +63,12 @@ def test_local_run_binds_sdk_keys_and_restores_environment(
     observed = []
 
     def run_gateway(settings: object) -> None:
-        observed.append((os.environ.get("FSOPENAPI_CLIENT_PRIVATE_KEY"),
-                         os.environ.get("FSOPENAPI_SERVER_PUBLIC_KEY")))
+        observed.append(
+            (
+                os.environ.get("FSOPENAPI_CLIENT_PRIVATE_KEY"),
+                os.environ.get("FSOPENAPI_SERVER_PUBLIC_KEY"),
+            )
+        )
         if fails:
             raise RuntimeError("provider secret must not reach output")
 
@@ -72,11 +116,71 @@ def _root(tmp_path: Path) -> Path:
         "market-client.key",
     ):
         _private(local / name, "test-pem")
+    pem = _certificate(_NOW - timedelta(days=1), _NOW + timedelta(days=1))
+    for name in _CERTIFICATES:
+        _private(local / name, pem)
     _private(provider / "api-key", "test-api-key\n")
     _private(provider / "private.pem", "test-private-key\n")
     _private(provider / "server-public.pem", "test-server-key\n")
     _private(local / "replay.sqlite3", "test-existing-replay")
     return tmp_path
+
+
+@pytest.mark.parametrize("name", _CERTIFICATES)
+@pytest.mark.parametrize("state", ["expired", "boundary", "future"])
+def test_local_settings_reject_invalid_certificate_time(
+    tmp_path: Path, name: str, state: str
+) -> None:
+    root = _root(tmp_path)
+    before, after = _NOW - timedelta(days=2), _NOW - timedelta(days=1)
+    if state == "boundary":
+        after = _NOW
+    elif state == "future":
+        before, after = _NOW + timedelta(days=1), _NOW + timedelta(days=2)
+    _private(root / ".secrets/nexus-fosun-local" / name, _certificate(before, after))
+    code = "NOT_YET_VALID" if state == "future" else "EXPIRED"
+    with pytest.raises(ValueError, match=f"LOCAL_GATEWAY_TLS_CERTIFICATE_{code}"):
+        load_local_gateway_settings(root)
+
+
+@pytest.mark.parametrize("pem", ["sensitive-invalid-cert", "bundle"])
+def test_local_check_rejects_bad_certificate_without_start_or_secret_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], pem: str
+) -> None:
+    root = _root(tmp_path)
+    if pem == "bundle":
+        pem = _certificate(_NOW - timedelta(days=1), _NOW + timedelta(days=1)) * 2
+    _private(root / ".secrets/nexus-fosun-local/server.pem", pem)
+    monkeypatch.setattr("nexus_fosun_gateway.local_runtime._runtime_matches_repo", lambda _: True)
+    monkeypatch.setattr("nexus_fosun_gateway.main.run", lambda *_: pytest.fail("must not run"))
+    assert main(["check", "--repo-root", str(root)]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "code": "LOCAL_GATEWAY_TLS_CERTIFICATE_INVALID",
+    }
+
+
+@pytest.mark.parametrize("action", ["check", "run"])
+def test_normal_entry_rejects_expired_tls_before_gateway_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+) -> None:
+    root = _root(tmp_path)
+    _private(
+        root / ".secrets/nexus-fosun-local/market-client.pem",
+        _certificate(_NOW - timedelta(days=2), _NOW - timedelta(days=1)),
+    )
+    monkeypatch.setattr("nexus_fosun_gateway.local_runtime._runtime_matches_repo", lambda _: True)
+    monkeypatch.setattr("nexus_fosun_gateway.local_runtime.checkout_release", lambda _: "a" * 40)
+    monkeypatch.setenv("NEXUS_RELEASE_REVISION", "a" * 40)
+    monkeypatch.setattr("nexus_fosun_gateway.main.run", lambda *_: pytest.fail("must not run"))
+    assert main([action, "--repo-root", str(root)]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "code": "LOCAL_GATEWAY_TLS_CERTIFICATE_EXPIRED",
+    }
 
 
 def test_local_settings_keep_read_only_scope_and_existing_replay(tmp_path: Path) -> None:
