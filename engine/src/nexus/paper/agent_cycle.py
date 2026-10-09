@@ -11,6 +11,10 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.actionable_research import ActionableResearchError
+from nexus.agents.codex_candidate import (
+    require_candidate_consumer_profile,
+    require_candidate_model_profile,
+)
 from nexus.agents.paper_context import (
     paper_contexts_match_projection,
     prepare_agent_paper_research_snapshot,
@@ -431,6 +435,51 @@ async def finish_schwab_agent_paper_trigger(
     await session.flush()
 
 
+async def _require_cycle_candidate_profile(
+    session: AsyncSession,
+    *,
+    cycle: AgentPaperCycleRecord,
+    candidate_stage_capacity: bool,
+    now: datetime | None = None,
+    expected_model_id: UUID | None = None,
+) -> UUID | None:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
+    events = await _events(session, cycle.id)
+    facts = {} if not events else events[0].fact_ids
+    if not candidate_stage_capacity:
+        if "candidate_stage_capacity" in facts or expected_model_id is not None:
+            raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
+        return None
+    if (
+        not events
+        or events[0].result_code != "CYCLE_PREPARED"
+        or facts.get("candidate_stage_capacity") is not True
+        or cycle.candidate_batch_id is None
+        or cycle.execution_locked is not True
+    ):
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
+    try:
+        model_id = UUID(str(facts["candidate_model_config_id"]))
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID") from None
+    if expected_model_id is not None and model_id != expected_model_id:
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
+    at = now if now is not None else await session.scalar(select(func.now()))
+    if not isinstance(at, datetime):
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
+    model = await require_candidate_model_profile(
+        session,
+        candidate_stage_capacity=True,
+        model_config_id=model_id,
+        now=at,
+    )
+    if model is None or facts.get("candidate_model_hash") != model.config_hash:
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
+    return model_id
+
+
 async def start_schwab_agent_paper_cycle(
     session: AsyncSession,
     *,
@@ -446,8 +495,23 @@ async def start_schwab_agent_paper_cycle(
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
     execution_scope_max_symbols: int | None = None,
+    candidate_stage_capacity: bool = False,
+    candidate_model_config_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
+    await require_candidate_model_profile(
+        session,
+        candidate_stage_capacity=candidate_stage_capacity,
+        model_config_id=candidate_model_config_id,
+        now=authority.decision_time,
+    )
+    if candidate_stage_capacity and (
+        candidate_batch_id is None or version_evaluation_id is not None
+    ):
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
     if (
         authority.execution_session != authority.decision_session
         or not idempotency_key
@@ -488,6 +552,13 @@ async def start_schwab_agent_paper_cycle(
         )
     )
     if cycle is not None:
+        await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=candidate_stage_capacity,
+            now=authority.decision_time,
+            expected_model_id=candidate_model_config_id,
+        )
         if (
             cycle.decision_price_policy_id != PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID
             or cycle.execution_price_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
@@ -516,6 +587,8 @@ async def start_schwab_agent_paper_cycle(
         version_prompt_id=version_prompt_id,
         version_model_id=version_model_id,
         execution_scope_max_symbols=execution_scope_max_symbols,
+        candidate_stage_capacity=candidate_stage_capacity,
+        candidate_model_config_id=candidate_model_config_id,
     )
 
 
@@ -526,8 +599,12 @@ async def resume_schwab_agent_paper_cycle(
     idempotency_key: str,
     now: datetime | None = None,
     daily_limit_usd: Decimal | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
     """Resume only from the persisted Job/Run/Output state of a Schwab cycle."""
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
     if not idempotency_key or len(idempotency_key) > 255:
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
@@ -538,6 +615,9 @@ async def resume_schwab_agent_paper_cycle(
         or cycle.execution_session != cycle.decision_session
     ):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    await _require_cycle_candidate_profile(
+        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+    )
     request_hash = job_input_hash(
         {"schema": "agent-paper-schwab-resume-v1", "cycle_id": str(cycle_id)}
     )
@@ -590,8 +670,15 @@ async def resume_schwab_agent_paper_cycle(
             events=events,
             now=now,
             daily_limit_usd=daily_limit_usd,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
-    return await _resume_batch(session, cycle=cycle, events=events, now=now)
+    return await _resume_batch(
+        session,
+        cycle=cycle,
+        events=events,
+        now=now,
+        candidate_stage_capacity=candidate_stage_capacity,
+    )
 
 
 async def advance_agent_paper_cycle(
@@ -608,8 +695,23 @@ async def advance_agent_paper_cycle(
     version_source_run_id: UUID | None = None,
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
+    candidate_stage_capacity: bool = False,
+    candidate_model_config_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Advance one persisted cycle without polling or executing model work."""
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
+    candidate_model = await require_candidate_model_profile(
+        session,
+        candidate_stage_capacity=candidate_stage_capacity,
+        model_config_id=candidate_model_config_id,
+        now=now if now is not None else decision_time,
+    )
+    if candidate_stage_capacity and (
+        candidate_batch_id is None or version_evaluation_id is not None
+    ):
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
     if (
         decision_time.tzinfo is None
         or decision_time.utcoffset() != UTC.utcoffset(decision_time)
@@ -658,6 +760,31 @@ async def advance_agent_paper_cycle(
                 ),
             }
         )
+    if candidate_stage_capacity:
+        assert candidate_model is not None
+        request_payload.update(
+            candidate_stage_capacity=True,
+            candidate_model_config_id=str(candidate_model_config_id),
+            candidate_model_hash=candidate_model.config_hash,
+        )
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-paper-cycle:{account_id}"},
+    )
+    prior_cycle = await session.scalar(
+        select(AgentPaperCycleRecord).where(
+            AgentPaperCycleRecord.account_id == account_id,
+            AgentPaperCycleRecord.decision_slot_at == floor_decision_slot(decision_time),
+        )
+    )
+    if prior_cycle is not None:
+        await _require_cycle_candidate_profile(
+            session,
+            cycle=prior_cycle,
+            candidate_stage_capacity=candidate_stage_capacity,
+            now=now,
+            expected_model_id=candidate_model_config_id,
+        )
     request_hash = job_input_hash(request_payload)
     claim, _ = await claim_or_lock(
         session,
@@ -669,10 +796,6 @@ async def advance_agent_paper_cycle(
     )
     if claim.request_hash != request_hash:
         raise ValueError("AGENT_PAPER_IDEMPOTENCY_CONFLICT")
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
-        {"scope": f"nexus:agent-paper-cycle:{account_id}"},
-    )
     authority = await load_cycle_authority(
         session, account_id=account_id, decision_time=decision_time
     )
@@ -710,6 +833,8 @@ async def advance_agent_paper_cycle(
             version_source_run_id=version_source_run_id,
             version_prompt_id=version_prompt_id,
             version_model_id=version_model_id,
+            candidate_stage_capacity=candidate_stage_capacity,
+            candidate_model_config_id=candidate_model_config_id,
         )
     if cycle.decision_time != decision_time or (
         candidate_batch_id is not None and cycle.candidate_batch_id != candidate_batch_id
@@ -748,6 +873,7 @@ async def advance_agent_paper_cycle(
             version_source_run_id=version_source_run_id,
             version_prompt_id=version_prompt_id,
             version_model_id=version_model_id,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
     if events[-1].to_status == "researching":
         return await _resume_research(
@@ -757,8 +883,15 @@ async def advance_agent_paper_cycle(
             events=events,
             now=now,
             daily_limit_usd=daily_limit_usd,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
-    return await _resume_batch(session, cycle=cycle, events=events, now=now)
+    return await _resume_batch(
+        session,
+        cycle=cycle,
+        events=events,
+        now=now,
+        candidate_stage_capacity=candidate_stage_capacity,
+    )
 
 
 async def _start_cycle(
@@ -775,7 +908,22 @@ async def _start_cycle(
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
     execution_scope_max_symbols: int | None = None,
+    candidate_stage_capacity: bool = False,
+    candidate_model_config_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
+    candidate_model = await require_candidate_model_profile(
+        session,
+        candidate_stage_capacity=candidate_stage_capacity,
+        model_config_id=candidate_model_config_id,
+        now=authority.decision_time,
+    )
+    if candidate_stage_capacity and (
+        candidate_batch_id is None or version_evaluation_id is not None
+    ):
+        raise ValueError("CODEX_CANDIDATE_CYCLE_PROFILE_INVALID")
     if version_evaluation_id is None:
         batch, _ = await validate_agent_paper_candidate_batch(
             session,
@@ -851,7 +999,16 @@ async def _start_cycle(
     )
     session.add(cycle)
     await session.flush()
-    await _append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", {})
+    profile_facts = (
+        {}
+        if candidate_model is None
+        else {
+            "candidate_stage_capacity": True,
+            "candidate_model_config_id": str(candidate_model.id),
+            "candidate_model_hash": candidate_model.config_hash,
+        }
+    )
+    await _append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", profile_facts)
     if has_open_order or not manifest:
         await _append_event(
             session,
@@ -893,6 +1050,7 @@ async def _start_cycle(
                         session,
                         account_id=cycle.account_id,
                         decision_id=current_target.strategy_decision_id,
+                        candidate_stage_capacity=candidate_stage_capacity,
                     )
                     if current_proposal is None:
                         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
@@ -941,6 +1099,7 @@ async def _start_cycle(
         version_source_run_id=version_source_run_id,
         version_prompt_id=version_prompt_id,
         version_model_id=version_model_id,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
 
 
@@ -956,7 +1115,14 @@ async def _admit_cycle_research(
     version_source_run_id: UUID | None = None,
     version_prompt_id: UUID | None = None,
     version_model_id: UUID | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
+    candidate_model_id = await _require_cycle_candidate_profile(
+        session,
+        cycle=cycle,
+        candidate_stage_capacity=candidate_stage_capacity,
+        now=authority.decision_time,
+    )
     manifest = parse_candidate_manifest(
         cycle.candidate_manifest,
         allow_legacy=cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
@@ -987,6 +1153,8 @@ async def _admit_cycle_research(
                         research_as_of=authority.decision_time,
                         daily_limit_usd=daily_limit_usd,
                         now=authority.decision_time,
+                        model_config_id=candidate_model_id,
+                        candidate_stage_capacity=candidate_stage_capacity,
                     )
                 else:
                     admission = await admit_agent_paper_research(
@@ -1041,7 +1209,11 @@ async def _resume_research(
     events: tuple[AgentPaperCycleEventRecord, ...],
     now: datetime | None = None,
     daily_limit_usd: Decimal | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
+    await _require_cycle_candidate_profile(
+        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+    )
     run_ids = _fact_uuids(events, "research_run_ids")
     jobs = tuple(
         await session.scalars(
@@ -1069,6 +1241,7 @@ async def _resume_research(
             run_ids=run_ids,
             now=now,
             daily_limit_usd=daily_limit_usd,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
     output_available_at = max(
         cycle.decision_time,
@@ -1082,6 +1255,7 @@ async def _resume_research(
                     run_id=run_id,
                     decision_time=output_available_at,
                     allow_safe_no_trade=True,
+                    candidate_stage_capacity=candidate_stage_capacity,
                 )
                 for run_id in run_ids
             ]
@@ -1162,7 +1336,11 @@ async def _resume_research(
         },
     )
     return await _resume_batch(
-        session, cycle=cycle, events=await _events(session, cycle.id), now=now
+        session,
+        cycle=cycle,
+        events=await _events(session, cycle.id),
+        now=now,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
 
 
@@ -1172,7 +1350,11 @@ async def _resume_batch(
     cycle: AgentPaperCycleRecord,
     events: tuple[AgentPaperCycleEventRecord, ...],
     now: datetime | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
+    await _require_cycle_candidate_profile(
+        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+    )
     if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
         return _result(cycle.id, events, replayed=True)
     decision_id = _fact_uuid(events, "strategy_decision_id") or await session.scalar(
@@ -1200,6 +1382,7 @@ async def _resume_batch(
                 strategy_decision_id=decision_id,
                 request_time=now,
                 idempotency_key=f"portfolio-target:{cycle.id}",
+                candidate_stage_capacity=candidate_stage_capacity,
             )
         except TargetActivationBlockedError as error:
             facts: dict[str, object] = {
@@ -1307,7 +1490,11 @@ async def _resume_portfolio_synthesis(
     run_ids: tuple[UUID, ...],
     now: datetime | None,
     daily_limit_usd: Decimal | None,
+    candidate_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
+    await _require_cycle_candidate_profile(
+        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+    )
     if events[-1].to_status != "researching":
         return _result(cycle.id, events, replayed=True)
     from nexus.agents.portfolio_synthesis_contracts import (
@@ -1336,7 +1523,11 @@ async def _resume_portfolio_synthesis(
             actions = tuple(
                 [
                     await load_actionable_research_output(
-                        session, run_id=run_id, decision_time=now, allow_safe_no_trade=True
+                        session,
+                        run_id=run_id,
+                        decision_time=now,
+                        allow_safe_no_trade=True,
+                        candidate_stage_capacity=candidate_stage_capacity,
                     )
                     for run_id in run_ids
                 ]
@@ -1359,6 +1550,7 @@ async def _resume_portfolio_synthesis(
                     projection_hash=projection.projection_hash,
                     daily_limit_usd=daily_limit_usd,
                     now=now,
+                    candidate_stage_capacity=candidate_stage_capacity,
                 )
             ).run
         frozen = _frozen_run(run)
@@ -1416,7 +1608,11 @@ async def _resume_portfolio_synthesis(
         if now is None:
             raise ValueError("PORTFOLIO_PROPOSAL_TIME_REQUIRED")
         persisted = await persist_portfolio_proposal(
-            session, cycle_id=cycle.id, synthesis_output_id=output.id, now=now
+            session,
+            cycle_id=cycle.id,
+            synthesis_output_id=output.id,
+            now=now,
+            candidate_stage_capacity=candidate_stage_capacity,
         )
     except ValueError as error:
         if str(error) == "POLICY_UNCONFIRMED":
@@ -1457,6 +1653,7 @@ async def _resume_portfolio_synthesis(
         cycle=cycle,
         events=await _events(session, cycle.id),
         now=now,
+        candidate_stage_capacity=candidate_stage_capacity,
     )
 
 

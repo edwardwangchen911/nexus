@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_candidate import require_candidate_model_profile
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS, PAPER_SCOPE_CONFIG_VERSIONS
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import ResearchAdmission, admit_research_run
@@ -263,8 +264,22 @@ async def admit_agent_paper_research(
     version_source_run_id: UUID | None = None,
     prompt_version_id: UUID | None = None,
     model_config_id: UUID | None = None,
+    candidate_stage_capacity: bool = False,
 ) -> ResearchAdmission:
     """Admit one already-frozen candidate through the native research Job path."""
+    if type(candidate_stage_capacity) is not bool:
+        raise ValueError("CODEX_CANDIDATE_ISOLATION_REQUIRED")
+    if candidate_stage_capacity:
+        await require_candidate_model_profile(
+            session, candidate_stage_capacity=True, model_config_id=model_config_id, now=now
+        )
+        if (
+            actor_id != _AGENT_PAPER_ACTOR
+            or admission_idempotency_key is not None
+            or version_source_run_id is not None
+            or prompt_version_id is not None
+        ):
+            raise ValueError("CODEX_CANDIDATE_AUTHORITY_INVALID")
     evaluation_actor = actor_id in {
         AGENT_VERSION_INCUMBENT_ACTOR,
         AGENT_VERSION_CHALLENGER_ACTOR,
@@ -277,7 +292,7 @@ async def admit_agent_paper_research(
             or (version_source_run_id is None) == (not explicit_version)
         ):
             raise ValueError("Agent version authority is ambiguous")
-    elif (
+    elif not candidate_stage_capacity and (
         actor_id != _AGENT_PAPER_ACTOR
         or admission_idempotency_key is not None
         or version_source_run_id is not None
@@ -294,6 +309,8 @@ async def admit_agent_paper_research(
         "research_snapshot_id": str(research_snapshot_id),
         "research_as_of": research_as_of.isoformat(),
     }
+    if candidate_stage_capacity:
+        request_payload.update(candidate_stage_capacity=True, model_config_id=str(model_config_id))
     if evaluation_actor:
         request_payload.update(
             {
@@ -308,9 +325,9 @@ async def admit_agent_paper_research(
             }
         )
     request_hash = job_input_hash(request_payload)
-    reuse_latest_actor_agent_version = not evaluation_actor
+    reuse_latest_actor_agent_version = not evaluation_actor and not candidate_stage_capacity
     reuse_latest_actor_prompts_only = False
-    if not evaluation_actor:
+    if not evaluation_actor and not candidate_stage_capacity:
         from nexus.paper.agent_version_evaluation import (
             _model_is_agent_paper_compatible,
             load_selected_internal_agent_version,

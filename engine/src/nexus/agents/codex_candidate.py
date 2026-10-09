@@ -76,6 +76,36 @@ async def require_candidate_consumer_profile(
         await require_candidate_database(session)
 
 
+async def require_candidate_model_profile(
+    session: AsyncSession,
+    *,
+    candidate_stage_capacity: bool,
+    model_config_id: UUID | None,
+    now: datetime,
+) -> AgentModelConfigRecord | None:
+    await require_candidate_consumer_profile(
+        session, candidate_stage_capacity=candidate_stage_capacity
+    )
+    if not candidate_stage_capacity:
+        if model_config_id is not None:
+            raise ValueError("CODEX_CANDIDATE_AUTHORITY_INVALID")
+        return None
+    model = (
+        None
+        if not isinstance(model_config_id, UUID)
+        else await session.get(AgentModelConfigRecord, model_config_id, populate_existing=True)
+    )
+    if (
+        model is None
+        or not candidate_model_matches(model)
+        or model.created_at > now
+        or model.pricing_available_at > now
+        or model.pricing_expires_at <= now
+    ):
+        raise ValueError("CODEX_CANDIDATE_AUTHORITY_INVALID")
+    return model
+
+
 def candidate_model_matches(model: AgentModelConfigRecord) -> bool:
     config = candidate_config()
     return (

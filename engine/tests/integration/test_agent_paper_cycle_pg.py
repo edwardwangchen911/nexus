@@ -2401,6 +2401,7 @@ async def test_agent_paper_research_keeps_frozen_champion_when_newer_version_exi
     paper_scope_version: str,
 ) -> None:
     from nexus.agents.codex_sdk import MODEL_ID
+
     seed = await seed_paper_batch(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -3292,7 +3293,9 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
             run_id: UUID,
             decision_time: datetime,
             allow_safe_no_trade: bool,
+            candidate_stage_capacity: bool = False,
         ) -> ActionableResearchDecision:
+            assert candidate_stage_capacity is False
             assert decision_time in {train_slots[0], output_at}
             assert allow_safe_no_trade is True
             return admitted[run_id]
@@ -6267,7 +6270,9 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             run_id: UUID,
             decision_time: datetime,
             allow_safe_no_trade: bool,
+            candidate_stage_capacity: bool = False,
         ) -> ActionableResearchDecision:
+            assert candidate_stage_capacity is False
             assert decision_time == DECISION_TIME
             assert allow_safe_no_trade is True
             return admitted[run_id]
