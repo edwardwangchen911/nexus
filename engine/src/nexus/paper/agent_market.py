@@ -29,6 +29,7 @@ from nexus.persistence.models.paper import (
     AgentPaperCycleRecord,
     AgentPaperMarketWindowRecord,
     PaperExecutionWindowAuthorityRecord,
+    PaperOrderEventRecord,
     PaperOrderRecord,
     StrategyDecisionAgentOutputRecord,
     StrategyDecisionRecord,
@@ -591,6 +592,48 @@ async def resolve_agent_paper_market_scope(
         if job.finished_at is None:
             raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
         output_available_at = max(output.created_at, job.finished_at)
+        if cycle.candidate_batch_id is not None:
+            # A stock report can precede the other reports and portfolio
+            # synthesis. Never use prices from before the resulting order
+            # actually existed and was submitted.
+            orders = (
+                await session.execute(
+                    select(PaperOrderRecord, StrategyDecisionRecord)
+                    .join(
+                        StrategyDecisionRecord,
+                        StrategyDecisionRecord.id == PaperOrderRecord.strategy_decision_id,
+                    )
+                    .where(
+                        StrategyDecisionRecord.agent_paper_cycle_id == cycle.id,
+                        StrategyDecisionRecord.account_id == cycle.account_id,
+                        PaperOrderRecord.account_id == cycle.account_id,
+                        PaperOrderRecord.instrument_id == instrument_id,
+                    )
+                    .limit(2)
+                )
+            ).all()
+            if len(orders) != 1:
+                raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
+            order, decision = orders[0]
+            submitted = await session.scalar(
+                select(PaperOrderEventRecord)
+                .where(
+                    PaperOrderEventRecord.order_id == order.id,
+                    PaperOrderEventRecord.account_id == cycle.account_id,
+                    PaperOrderEventRecord.to_status == "submitted",
+                )
+                .order_by(PaperOrderEventRecord.event_seq)
+                .limit(1)
+            )
+            if submitted is None:
+                raise PaperMarketError("PAPER_MARKET_WINDOW_UNAVAILABLE")
+            output_available_at = max(
+                output_available_at,
+                decision.created_at,
+                order.created_at,
+                submitted.created_at,
+                submitted.occurred_at,
+            )
         start, _ = agent_paper_window_bounds(output_available_at, calendar.market_close_at)
         market_close_at = calendar.market_close_at
     consumed_end = await session.scalar(
