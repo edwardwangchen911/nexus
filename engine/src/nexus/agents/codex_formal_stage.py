@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
 from nexus.jobs.models import JobType, QueueName, RetryPolicy, job_input_hash
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import Job, JobAttempt
 
 
 def formal_stage_config() -> dict[str, str | int]:
@@ -162,3 +162,77 @@ async def require_formal_stage_model_profile(
     ):
         raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
     return model
+
+
+async def formal_stage_output_qualified(
+    session: AsyncSession, run_id: UUID, *, decision_time: datetime
+) -> bool:
+    """Read-only proof for completed frozen formal research, independent of content acceptance."""
+    if not isinstance(decision_time, datetime) or decision_time.tzinfo != UTC:
+        return False
+    run = await session.get(AgentResearchRunRecord, run_id, populate_existing=True)
+    if (
+        run is None
+        or run.status != "completed"
+        or run.retry_count != 0
+        or run.pricing_version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    ):
+        return False
+    model = await session.get(AgentModelConfigRecord, run.model_config_id, populate_existing=True)
+    checked_at = await session.scalar(select(func.clock_timestamp()))
+    if (
+        model is None
+        or not isinstance(checked_at, datetime)
+        or not formal_stage_model_matches(model)
+        or decision_time > checked_at
+        or model.created_at > decision_time
+        or not model.pricing_available_at <= decision_time < model.pricing_expires_at
+        or not model.pricing_available_at <= checked_at < model.pricing_expires_at
+        or run.model_hash != model.config_hash
+    ):
+        return False
+    jobs = tuple(
+        await session.scalars(
+            select(Job)
+            .where(Job.payload["run_id"].astext == str(run.id))
+            .limit(2)
+            .execution_options(populate_existing=True)
+        )
+    )
+    if len(jobs) != 1:
+        return False
+    job = jobs[0]
+    if (
+        job.job_type != JobType.AGENT_PAPER_RESEARCH.value
+        or job.queue != QueueName.GENERAL.value
+        or job.schema_version != "agent_research_job_v1"
+        or job.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
+        or job.status != "succeeded"
+        or job.finished_at is None
+        or job.finished_at > decision_time
+        or job.max_attempts != 1
+        or job.attempt_count != 1
+        or job.manual_retry_count != 0
+        or job.payload != {"run_id": str(run.id)}
+        or job.scope_kind != "instrument"
+        or job.scope_id != str(run.instrument_id)
+        or job.effective_at != run.decision_time
+        or job.input_hash != _formal_stage_job_hash(run)
+    ):
+        return False
+    attempts = tuple(
+        await session.scalars(
+            select(JobAttempt)
+            .where(JobAttempt.job_id == job.id)
+            .limit(2)
+            .execution_options(populate_existing=True)
+        )
+    )
+    return (
+        len(attempts) == 1
+        and attempts[0].attempt_no == 1
+        and attempts[0].outcome == "succeeded"
+        and attempts[0].finished_at is not None
+        and attempts[0].finished_at <= decision_time
+        and attempts[0].error_code is None
+    )

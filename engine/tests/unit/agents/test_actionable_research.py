@@ -404,3 +404,33 @@ def test_valid_paper_decision_context_can_grant_increase_without_daily_price_own
 
     assert result.stance == "buy_candidate"
     assert result.sizing_action == "increase"
+
+
+@pytest.mark.parametrize("verified", [False, True, 1, "true"])
+def test_formal_direction_requires_frozen_identity_and_preserves_price_guard(verified):
+    from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+
+    case = _case()
+    case["run"].pricing_version = FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    if verified is True:
+        admitted = admit_actionable_research_output(**case, formal_identity_verified=True)
+        assert admitted.stance == "buy_candidate"
+        case["price_authority_status"] = FrozenPriceAuthorityStatus.INVALID
+    with pytest.raises(ActionableResearchError):
+        admit_actionable_research_output(**case, formal_identity_verified=verified)
+
+
+def test_formal_identity_cannot_mix_with_candidate_proof():
+    from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+
+    case = _case()
+    case["run"].pricing_version = FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    with pytest.raises(ActionableResearchError):
+        admit_actionable_research_output(
+            **case, formal_identity_verified=True, candidate_identity_verified=True
+        )
+
+
+def test_formal_identity_flag_cannot_accept_a_different_runtime_version():
+    with pytest.raises(ActionableResearchError):
+        admit_actionable_research_output(**_case(), formal_identity_verified=True)

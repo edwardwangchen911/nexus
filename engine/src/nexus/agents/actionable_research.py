@@ -120,18 +120,35 @@ def admit_actionable_research_output(
     allow_safe_no_trade: bool = False,
     paper_decision_context_valid: bool = False,
     candidate_identity_verified: bool = False,
+    formal_identity_verified: bool = False,
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
     try:
         from nexus.agents.codex_versions import (
             ACTIONABLE_CONFIG_VERSIONS,
             CANDIDATE_BUDGET_CONFIG_VERSION,
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         )
 
-        if type(candidate_identity_verified) is not bool:
+        if (
+            type(candidate_identity_verified) is not bool
+            or type(formal_identity_verified) is not bool
+            or formal_identity_verified
+            and candidate_identity_verified
+            or formal_identity_verified
+            and run.pricing_version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        ):
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
-        version_admitted = run.pricing_version in ACTIONABLE_CONFIG_VERSIONS or (
-            candidate_identity_verified and run.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION
+        version_admitted = (
+            run.pricing_version in ACTIONABLE_CONFIG_VERSIONS
+            or (
+                candidate_identity_verified
+                and run.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION
+            )
+            or (
+                formal_identity_verified
+                and run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+            )
         )
 
         terminals = tuple(terminal_outputs)

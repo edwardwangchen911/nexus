@@ -95,10 +95,16 @@ async def load_actionable_research_output(
     decision_time: datetime,
     allow_safe_no_trade: bool = False,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> ActionableResearchDecision:
     """Load and revalidate the one complete v4 terminal without model I/O."""
     try:
-        if type(candidate_stage_capacity) is not bool:
+        if (
+            type(candidate_stage_capacity) is not bool
+            or type(formal_stage_capacity) is not bool
+            or formal_stage_capacity
+            and candidate_stage_capacity
+        ):
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         run = await session.get(AgentResearchRunRecord, run_id, populate_existing=True)
         if run is None:
@@ -109,6 +115,15 @@ async def load_actionable_research_output(
 
             candidate_verified = await candidate_output_qualified(session, run_id)
             if not candidate_verified:
+                raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        formal_verified = False
+        if formal_stage_capacity:
+            from nexus.agents.codex_formal_stage import formal_stage_output_qualified
+
+            formal_verified = await formal_stage_output_qualified(
+                session, run_id, decision_time=decision_time
+            )
+            if not formal_verified:
                 raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         terminals = tuple(
             await session.scalars(
@@ -203,6 +218,7 @@ async def load_actionable_research_output(
                 paper_context_status is FrozenAgentPaperContextStatus.VALID
             ),
             candidate_identity_verified=candidate_verified,
+            formal_identity_verified=formal_verified,
         )
     except ActionableResearchError:
         raise
