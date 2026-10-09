@@ -517,6 +517,25 @@ def test_run_research_parser_accepts_only_cycle_id() -> None:
         )
 
 
+@pytest.mark.parametrize("action", ["run-research", "resume"])
+def test_formal_step_parser_requires_explicit_opt_in(action: str) -> None:
+    from nexus.ops.agent_paper_once import AgentPaperResumeRequest, AgentPaperRunResearchRequest
+
+    arguments = [action, "--cycle-id", str(UUID(int=1))]
+    if action == "resume":
+        arguments += ["--idempotency-key", "formal-step"]
+    request_type = AgentPaperResumeRequest if action == "resume" else AgentPaperRunResearchRequest
+    default = request_type.model_validate(vars(parser().parse_args(arguments)))
+    explicit = request_type.model_validate(
+        vars(parser().parse_args(arguments + ["--formal-stage-capacity"]))
+    )
+    assert default.formal_stage_capacity is False
+    assert explicit.formal_stage_capacity is True
+    for bad in (1, "true", None):
+        with pytest.raises(ValueError):
+            request_type.model_validate({**default.model_dump(), "formal_stage_capacity": bad})
+
+
 def test_run_research_resolves_only_one_queued_cycle_bound_paper_job() -> None:
     run_id, job_id = UUID(int=10), UUID(int=11)
     events = (

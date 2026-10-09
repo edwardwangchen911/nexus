@@ -392,3 +392,31 @@ v8 正式校验器；版本标签仅选择校验路径，不代表证据通过�
 旧宿主部分成交/多候选兼容与候选3标的 API/浏览器5项通过（271.14秒）。相关
 读合同单测49项、两处生产文件 Mypy、Ruff/格式、增量浏览器 ESLint 及差异检查
 通过。集中审查和导航增量复核无确认问题；未运行全仓或远端 CI。
+
+### 正常 once 研究与恢复入口（显式 opt-in，未启用宿主）
+
+正常 `nexus-engine-agent-paper-once run-research --cycle-id EXACT_CYCLE_UUID
+--formal-stage-capacity` 与 `resume --cycle-id EXACT_CYCLE_UUID
+--idempotency-key ORIGINAL_STEP_KEY --formal-stage-capacity` 现可消费已冻结正式
+周期。参数只选择已有正式校验路径，不创建周期、替换模型或授予实盘许可。
+两种请求使用 StrictBool，默认 False，非布尔输入拒绝；未给 run/trigger 或行情
+采集入口增加参数。不得用这些命令重放失败、错过或结果未知的槽位。
+
+`run-research` 从指定周期首事件及全部研究 Job/Output，或唯一组合汇总 Job，
+解析一项原始 queued Job；保留单次 attempt、无输出、未启动等原有拒绝条件。
+配置按正常本地入口读取，Worker 数据库 URL 必须与入口一致；正式 Job 类型路由
+到已有完整正式 Worker 的精确单 Job 领取、实际数据库和冻结模型/周期校验。
+默认 Worker 调用参数保持原样，不按数据库版本自动切换执行模式。
+`resume` 沿原账户锁、冻结身份和目标/风险合同恢复，执行锁仍保持 True。
+
+隔离3/5标的买入/不交易矩阵已改为经正常 `run_research_once` 逐个消费研究与
+组合汇总，经 `resume_once` 生成目标、计划或不交易，再核对成交/账本/持仓及
+默认 API；买入案例保留 BFF/四页面验收。最后增量证明默认研究入口拒绝后
+所有 Job 仍 queued/attempt=0、SDK未调用；默认恢复入口拒绝且业务事实不增加。
+矩阵4项通过（160.04秒），最后负例单项重验通过（20.30秒）；once单测36项、
+宿主与正式参数回归311项、Ruff/格式、Mypy及差异检查通过。未运行全仓/远端 CI。
+
+测试配置来源使用显式隔离替身、时钟和模型/行情使用受控替换，不能称为真实
+本机 CLI 配置或自然周期验收。未调用真实数据/模型/券商接口，未写业务库，
+未变更受保护配置、合入 main、推送或部署。宿主自动 trigger 的正式注册与模型
+身份接线、同版本运行及真实输入验证仍未完成，本轮不自动启用正式调度。

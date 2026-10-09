@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -96,6 +97,10 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
 
     monkeypatch.setattr("nexus.worker._ONCE_STARTED_AT", AT)
     monkeypatch.setattr("nexus.worker.datetime", WorkerClock)
+    monkeypatch.setattr("nexus.ops.agent_paper_once.datetime", WorkerClock)
+    monkeypatch.setattr(
+        "nexus.ops.agent_paper_once.local_settings", lambda *args, **kwargs: settings
+    )
     monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
     try:
         await _set_test_insert_clock(sessions, AT)
@@ -150,10 +155,39 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 job.job_type == "agent.paper.research" and job.attempt_count == 0 for job in jobs
             )
         await _set_test_insert_clock(sessions, clock_at[0])
-        for job in jobs:
-            assert await run_agent_worker_once(
-                settings, job_ids=(job.id,), formal_stage_capacity=True
+        from nexus.ops.agent_paper_once import (
+            AgentPaperResumeRequest,
+            AgentPaperRunResearchRequest,
+            resume_once,
+            run_research_once,
+        )
+
+        if count == 3 and not trade:
+            with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
+                await run_research_once(
+                    settings,
+                    AgentPaperRunResearchRequest(action="run-research", cycle_id=result.cycle_id),
+                    repo_root=Path.cwd(),
+                )
+            assert calls == []
+            async with sessions() as session:
+                untouched = tuple(await session.scalars(select(Job)))
+                assert all(job.status == "queued" and job.attempt_count == 0 for job in untouched)
+
+        processed = []
+        for _ in jobs:
+            step = await run_research_once(
+                settings,
+                AgentPaperRunResearchRequest(
+                    action="run-research",
+                    cycle_id=result.cycle_id,
+                    formal_stage_capacity=True,
+                ),
+                repo_root=Path.cwd(),
             )
+            processed.append(step.job_id)
+        assert set(processed) == {job.id for job in jobs}
+        for job in jobs:
             assert not await run_agent_worker_once(
                 settings, job_ids=(job.id,), formal_stage_capacity=True
             )
@@ -372,9 +406,16 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     )
                 assert synthesis_calls == []
                 await savepoint.rollback()
-        assert await run_portfolio_synthesis_worker_once(
-            settings, job_ids=(synthesis_job.id,), formal_stage_capacity=True
+        step = await run_research_once(
+            settings,
+            AgentPaperRunResearchRequest(
+                action="run-research",
+                cycle_id=result.cycle_id,
+                formal_stage_capacity=True,
+            ),
+            repo_root=Path.cwd(),
         )
+        assert step.job_id == synthesis_job.id
         assert not await run_portfolio_synthesis_worker_once(
             settings, job_ids=(synthesis_job.id,), formal_stage_capacity=True
         )
@@ -406,18 +447,36 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
         )
 
         await _set_test_insert_clock(sessions, AT + timedelta(seconds=4))
-        async with sessions.begin() as session:
-            finished = await resume_schwab_agent_paper_cycle(
-                session,
+        clock_at[0] = AT + timedelta(seconds=4)
+        if count == 3 and not trade:
+            from integration.test_portfolio_management_e2e import _business_facts
+
+            async with sessions() as session:
+                before_default_resume = await _business_facts(session)
+            with pytest.raises(ValueError, match="CODEX_FORMAL_CYCLE_PROFILE_INVALID"):
+                await resume_once(
+                    settings,
+                    AgentPaperResumeRequest(
+                        action="resume",
+                        cycle_id=result.cycle_id,
+                        idempotency_key="default-must-not-consume-formal",
+                    ),
+                )
+            async with sessions() as session:
+                assert await _business_facts(session) == before_default_resume
+        finished = await resume_once(
+            settings,
+            AgentPaperResumeRequest(
+                action="resume",
                 cycle_id=result.cycle_id,
                 idempotency_key="formal-activate-target",
-                now=AT + timedelta(seconds=4),
                 formal_stage_capacity=True,
-            )
-            assert finished.result_code == (
-                "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
-            ), finished
-            assert bool(finished.order_ids) is trade
+            ),
+        )
+        assert finished.result_code == (
+            "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
+        ), finished
+        assert bool(finished.order_ids) is trade
         async with sessions.begin() as session:
             cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
             assert cycle.execution_locked is True

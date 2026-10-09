@@ -15,7 +15,15 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -219,6 +227,7 @@ class AgentPaperResumeRequest(BaseModel):
     action: Literal["resume"]
     cycle_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
+    formal_stage_capacity: StrictBool = False
 
 
 class AgentPaperCollectWindowRequest(BaseModel):
@@ -234,6 +243,7 @@ class AgentPaperRunResearchRequest(BaseModel):
 
     action: Literal["run-research"]
     cycle_id: UUID
+    formal_stage_capacity: StrictBool = False
 
 
 class AgentPaperPrepareCandidatesRequest(BaseModel):
@@ -335,8 +345,10 @@ def parser() -> argparse.ArgumentParser:
     resume = commands.add_parser("resume")
     resume.add_argument("--cycle-id", required=True)
     resume.add_argument("--idempotency-key", required=True)
+    resume.add_argument("--formal-stage-capacity", action="store_true")
     run_research = commands.add_parser("run-research")
     run_research.add_argument("--cycle-id", required=True)
+    run_research.add_argument("--formal-stage-capacity", action="store_true")
     prepare_candidates = commands.add_parser("prepare-candidates")
     prepare_candidates.add_argument("--account-id", required=True)
     prepare_candidates.add_argument("--universe-snapshot-id", required=True)
@@ -1271,6 +1283,7 @@ async def resume_once(
                 idempotency_key=request.idempotency_key,
                 now=datetime.now(UTC),
                 daily_limit_usd=settings.agent_daily_budget_usd,
+                formal_stage_capacity=request.formal_stage_capacity,
             )
     finally:
         await engine.dispose()
@@ -1411,22 +1424,40 @@ async def run_research_once(
     worker_settings = local_settings(repo_root, backend=backend)
     if worker_settings.database_url != settings.database_url:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
-    worked = await run_cycle_job_once(worker_settings, job_id=job_id)
+    worked = await run_cycle_job_once(
+        worker_settings,
+        job_id=job_id,
+        **({"formal_stage_capacity": True} if request.formal_stage_capacity else {}),
+    )
     if not worked:
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     return AgentPaperRunResearchResult(cycle_id=request.cycle_id, job_id=job_id)
 
 
-async def run_cycle_job_once(settings: EngineSettings, *, job_id: UUID) -> bool:
+async def run_cycle_job_once(
+    settings: EngineSettings, *, job_id: UUID, formal_stage_capacity: bool = False
+) -> bool:
     """Route only this persisted Job type through its dedicated fenced worker."""
     from nexus.persistence.session import session_factory
 
+    if type(formal_stage_capacity) is not bool or not isinstance(job_id, UUID):
+        raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
+    if formal_stage_capacity:
+        _validate_local_database(settings.database_url)
     async with session_factory(settings)() as session:
         job = await session.get(Job, job_id)
         kind = None if job is None else job.job_type
     if kind == JobType.AGENT_PORTFOLIO_SYNTHESIS.value:
+        if formal_stage_capacity:
+            return await run_portfolio_synthesis_worker_once(
+                settings, job_ids=(job_id,), formal_stage_capacity=True
+            )
         return await run_portfolio_synthesis_worker_once(settings, job_ids=(job_id,))
     if kind == JobType.AGENT_PAPER_RESEARCH.value:
+        if formal_stage_capacity:
+            return await run_agent_worker_once(
+                settings, job_ids=(job_id,), formal_stage_capacity=True
+            )
         return await run_agent_worker_once(settings, job_ids=(job_id,))
     raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
 
@@ -1609,6 +1640,9 @@ def main(argv: list[str] | None = None) -> int:
             "PAPER_MARKET_WINDOW_UNAVAILABLE",
             "CANDIDATE_BATCH_INVALID",
             "CANDIDATE_BATCH_REQUIRED",
+            "CODEX_FORMAL_CYCLE_PROFILE_INVALID",
+            "CODEX_FORMAL_WORKER_ARGUMENT_INVALID",
+            "CODEX_FORMAL_WORKER_DATABASE_INVALID",
             "IDEMPOTENCY_CONFLICT",
             "INITIAL_APPROVAL_ACCOUNT_OR_TIME_INVALID",
             "INITIAL_APPROVAL_ALREADY_EXISTS_CONFLICT",
