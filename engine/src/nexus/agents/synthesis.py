@@ -11,6 +11,7 @@ from nexus.agents.actionable_research import actionable_intent_shape_valid
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
     CANDIDATE_BUDGET_CONFIG_VERSION,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     STAGED_CONFIG_VERSIONS,
     STRUCTURED_CONFIG_VERSIONS,
 )
@@ -32,10 +33,10 @@ STAGED_SEMANTICS_UNCERTAINTY = "三阶段角色表态未明确投资方向或审
 
 def staged_intent_semantics_valid(intent: ResearchIntent, pricing_version: str) -> bool:
     """Legacy stage votes establish neither an investment action nor resolved objections."""
-    if (
-        pricing_version in ACTIONABLE_CONFIG_VERSIONS
-        or pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION
-    ):
+    if pricing_version in ACTIONABLE_CONFIG_VERSIONS or pricing_version in {
+        CANDIDATE_BUDGET_CONFIG_VERSION,
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    }:
         return actionable_intent_shape_valid(intent)
     return pricing_version not in STAGED_CONFIG_VERSIONS or (
         intent.stance == "watch"
@@ -132,12 +133,15 @@ def synthesize_intent(
     by_role = {output.role: output for output in role_outputs}
     theses = support_claims or by_role["orchestrator"].claims[:5]
     counter_theses = oppose_claims or by_role["bear"].claims[:5]
-    # Candidate v7 changes only time allocation, not the frozen v6 intent shape.
-    # Execution admission still excludes this qualification-only identity.
-    candidate = model.version == CANDIDATE_BUDGET_CONFIG_VERSION
-    structured = model.version in STRUCTURED_CONFIG_VERSIONS or candidate
-    staged = model.version in STAGED_CONFIG_VERSIONS or candidate
-    actionable = model.version in ACTIONABLE_CONFIG_VERSIONS or candidate
+    # Capacity identities preserve reviewed intent semantics; output consumption
+    # separately requires an explicit frozen identity proof.
+    capacity_profile = model.version in {
+        CANDIDATE_BUDGET_CONFIG_VERSION,
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    }
+    structured = model.version in STRUCTURED_CONFIG_VERSIONS or capacity_profile
+    staged = model.version in STAGED_CONFIG_VERSIONS or capacity_profile
+    actionable = model.version in ACTIONABLE_CONFIG_VERSIONS or capacity_profile
     assessment = by_role["portfolio"].synthesis_assessment if structured else None
     review_incomplete = staged and by_role["evidence_audit"].vote != "support"
     if staged:

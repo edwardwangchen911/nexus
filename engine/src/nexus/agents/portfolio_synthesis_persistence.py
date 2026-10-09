@@ -113,8 +113,13 @@ async def admit_portfolio_synthesis(
     daily_limit_usd: Decimal,
     now: datetime,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> PortfolioSynthesisAdmission:
     """Freeze a complete research set and atomically reserve one non-retryable Job."""
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -126,6 +131,23 @@ async def admit_portfolio_synthesis(
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
     if cycle is None or cycle.candidate_batch_id is None:
         raise ValueError("PORTFOLIO_SYNTHESIS_CYCLE_INVALID")
+    formal_model = None
+    if formal_stage_capacity:
+        from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+        from nexus.paper.agent_cycle import _require_cycle_candidate_profile
+
+        formal_id = await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=False,
+            formal_stage_capacity=True,
+            now=now,
+        )
+        formal_model = await require_formal_stage_model_profile(
+            session,
+            model_config_id=formal_id,
+            now=now,
+        )
     await _lock_account(session, cycle.account_id)
     existing = await session.scalar(
         select(AgentPortfolioSynthesisRunRecord)
@@ -140,6 +162,12 @@ async def admit_portfolio_synthesis(
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_INPUT_CONFLICT")
         frozen = _frozen_run(existing)
+        if formal_model is not None and (
+            frozen.model_config_id != formal_model.id
+            or frozen.model_hash != formal_model.config_hash
+            or frozen.pricing_version != formal_model.version
+        ):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
         for source in frozen.security_outputs:
             output = await session.get(AgentResearchOutputRecord, source.research_output_id)
             if output is None or output.content_hash != source.content_hash:
@@ -150,6 +178,7 @@ async def admit_portfolio_synthesis(
                 decision_time=frozen.admitted_at,
                 allow_safe_no_trade=True,
                 candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
             )
             if (
                 action.output_id != source.research_output_id
@@ -246,6 +275,7 @@ async def admit_portfolio_synthesis(
             decision_time=now,
             allow_safe_no_trade=True,
             candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
         )
         output = source_by_run[research_run.id]
         if action.output_id != output.id:
@@ -359,7 +389,9 @@ async def admit_portfolio_synthesis(
     model_ids = {row.model_config_id for row in runs}
     model = await session.get(AgentModelConfigRecord, next(iter(model_ids)))
     if (
-        len(model_ids) != 1
+        formal_model is not None
+        and (model is None or model.id != formal_model.id)
+        or len(model_ids) != 1
         or model is None
         or model.created_at > now
         or model.pricing_available_at > now
