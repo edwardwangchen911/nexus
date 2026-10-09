@@ -2,10 +2,17 @@
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import cast
+from uuid import UUID
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
-from nexus.persistence.models.agents import AgentModelConfigRecord
+from nexus.jobs.models import JobType, QueueName, RetryPolicy, job_input_hash
+from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.runtime import Job
 
 
 def formal_stage_config() -> dict[str, str | int]:
@@ -58,4 +65,79 @@ def formal_stage_model_matches(model: AgentModelConfigRecord) -> bool:
         and model.pricing_available_at
         == datetime.fromisoformat(str(config["pricing_available_at"]))
         and model.pricing_expires_at == datetime.fromisoformat(str(config["pricing_expires_at"]))
+    )
+
+
+async def formal_stage_job_qualified(
+    session: AsyncSession,
+    job: Job,
+    *,
+    claimed: bool = False,
+) -> bool:
+    """Re-read frozen authority under the caller's selected Job lock, before writes."""
+    if (
+        job.job_type != JobType.AGENT_PAPER_RESEARCH.value
+        or job.queue != QueueName.GENERAL.value
+        or job.schema_version != "agent_research_job_v1"
+        or job.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
+        or job.max_attempts != 1
+        or type(claimed) is not bool
+        or job.status != ("running" if claimed else "queued")
+        or job.attempt_count != (1 if claimed else 0)
+        or job.manual_retry_count != 0
+        or set(job.payload) != {"run_id"}
+        or type(job.payload.get("run_id")) is not str
+    ):
+        return False
+    try:
+        run_id = UUID(cast(str, job.payload["run_id"]))
+    except (ValueError, TypeError):
+        return False
+    run = await session.scalar(
+        select(AgentResearchRunRecord)
+        .where(
+            AgentResearchRunRecord.id == run_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if run is None or run.status != "prepared" or run.retry_count != 0:
+        return False
+    model = await session.scalar(
+        select(AgentModelConfigRecord)
+        .where(
+            AgentModelConfigRecord.id == run.model_config_id,
+        )
+        .execution_options(populate_existing=True)
+    )
+    checked_at = await session.scalar(select(func.clock_timestamp()))
+    if (
+        model is None
+        or not isinstance(checked_at, datetime)
+        or not model.pricing_available_at <= checked_at < model.pricing_expires_at
+        or not formal_stage_model_matches(model)
+        or run.model_hash != model.config_hash
+        or run.pricing_version != model.version
+        or job.scope_kind != "instrument"
+        or job.scope_id != str(run.instrument_id)
+        or job.effective_at != run.decision_time
+    ):
+        return False
+    return job.input_hash == _formal_stage_job_hash(run)
+
+
+def _formal_stage_job_hash(run: AgentResearchRunRecord) -> str:
+    return job_input_hash(
+        {
+            "instrument_id": str(run.instrument_id),
+            "data_snapshot_id": str(run.data_snapshot_id),
+            "decision_time": run.decision_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "request_hash": run.input_hash,
+            "schema_hash": run.schema_hash,
+            "model_hash": run.model_hash,
+            "prompt_hash": run.prompt_hash,
+            "evidence_hash": run.evidence_hash,
+            "tool_hash": run.tool_hash,
+            "pricing_version": run.pricing_version,
+        }
     )

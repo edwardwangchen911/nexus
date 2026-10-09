@@ -43,7 +43,10 @@ from nexus.persistence.models.runtime import (
 
 
 def _not_candidate_agent_job() -> ColumnElement[bool]:
-    from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+    from nexus.agents.codex_versions import (
+        CANDIDATE_BUDGET_CONFIG_VERSION,
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    )
 
     # Compare UUID text to JSON text; never cast an untrusted payload to UUID.
     # The frozen binding is immutable, so generic claim/recovery cannot consume
@@ -59,8 +62,12 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
             Job.job_type.in_((JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)),
             cast(AgentResearchRunRecord.id, String) == Job.payload["run_id"].astext,
             or_(
-                AgentResearchRunRecord.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION,
-                AgentModelConfigRecord.version == CANDIDATE_BUDGET_CONFIG_VERSION,
+                AgentResearchRunRecord.pricing_version.in_(
+                    (CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION)
+                ),
+                AgentModelConfigRecord.version.in_(
+                    (CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION)
+                ),
             ),
         )
         .correlate(Job)
@@ -78,7 +85,9 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
             cast(AgentPortfolioSynthesisRunRecord.id, String) == Job.payload["run_id"].astext,
             or_(
                 AgentPortfolioSynthesisRunRecord.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION,
-                AgentModelConfigRecord.version == CANDIDATE_BUDGET_CONFIG_VERSION,
+                AgentModelConfigRecord.version.in_(
+                    (CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION)
+                ),
             ),
         )
         .correlate(Job)
@@ -310,7 +319,10 @@ async def claim_next_job(
     worker_id = _worker_id(worker_id)
     if locked_job_guard is not None and (job_ids is None or len(job_ids) != 1):
         raise ValueError("LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE")
-    from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+    from nexus.agents.codex_versions import (
+        CANDIDATE_BUDGET_CONFIG_VERSION,
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    )
 
     if (
         type(candidate_synthesis_profile) is not bool
@@ -328,7 +340,8 @@ async def claim_next_job(
     ):
         raise ValueError("CANDIDATE_SYNTHESIS_PROFILE_REQUIRES_LOCKED_SCOPE")
     if research_budget_profile is not None and (
-        research_budget_profile != CANDIDATE_BUDGET_CONFIG_VERSION
+        research_budget_profile
+        not in {CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION}
         or locked_job_guard is None
         or job_ids is None
         or len(job_ids) != 1

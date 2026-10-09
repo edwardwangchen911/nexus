@@ -26,7 +26,10 @@ def test_candidate_reserves_complete_later_calls_and_cleanup():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("candidate, preparation_seconds", [(False, 0), (True, 0), (True, 10)])
+@pytest.mark.parametrize(
+    "candidate, preparation_seconds",
+    [(False, 0), (True, 0), (True, 10), ("formal", 0), ("formal", 10)],
+)
 async def test_complete_committee_allocation_counterexample_uses_no_real_sdk(
     monkeypatch,
     candidate,
@@ -69,7 +72,11 @@ async def test_complete_committee_allocation_counterexample_uses_no_real_sdk(
 
     monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
     options = (
-        {"stage_budget_version": codex_versions.CANDIDATE_BUDGET_CONFIG_VERSION}
+        {
+            "stage_budget_version": codex_versions.FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+            if candidate == "formal"
+            else codex_versions.CANDIDATE_BUDGET_CONFIG_VERSION
+        }
         if candidate
         else {}
     )

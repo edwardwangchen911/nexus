@@ -283,6 +283,7 @@ class StagedCodexCommittee(CodexCommittee):
         from nexus.agents.codex_versions import (
             CANDIDATE_BUDGET_CONFIG_VERSION,
             DEADLINE_BUDGET_CONFIG_VERSION,
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         )
 
         if stage_budget_version is not None and (
@@ -292,10 +293,14 @@ class StagedCodexCommittee(CodexCommittee):
             not in {
                 DEADLINE_BUDGET_CONFIG_VERSION,
                 CANDIDATE_BUDGET_CONFIG_VERSION,
+                FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             }
         ):
             raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
-        if stage_budget_version == CANDIDATE_BUDGET_CONFIG_VERSION:
+        if stage_budget_version in {
+            CANDIDATE_BUDGET_CONFIG_VERSION,
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        }:
             if deadline is None:
                 raise ValueError("CODEX_STAGE_BUDGET_DEADLINE_REQUIRED")
             if type(deadline) not in {int, float} or not isfinite(deadline):

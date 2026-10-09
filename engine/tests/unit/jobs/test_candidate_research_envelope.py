@@ -3,7 +3,10 @@
 from dataclasses import replace
 
 import pytest
-from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+)
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
 from nexus.jobs.registry import JobHandlerResult, JobHandlerSpec
 from pydantic import BaseModel, ConfigDict
@@ -18,7 +21,7 @@ async def handler(_context):
     return JobHandlerResult(outcome="succeeded", result_code="TEST")
 
 
-def candidate_spec():
+def candidate_spec(profile=CANDIDATE_BUDGET_CONFIG_VERSION):
     return JobHandlerSpec(
         job_type=JobType.AGENT_PAPER_RESEARCH,
         schema_version="agent_research_job_v1",
@@ -29,7 +32,7 @@ def candidate_spec():
         max_attempts=1,
         idempotency_namespace="agent.research",
         handler=handler,
-        research_budget_profile=CANDIDATE_BUDGET_CONFIG_VERSION,
+        research_budget_profile=profile,
     )
 
 
@@ -54,6 +57,9 @@ def test_candidate_envelope_is_exact_and_legacy_cap_remains():
         {"idempotency_namespace": "other"},
     ],
 )
-def test_candidate_envelope_rejects_other_contracts(change):
+@pytest.mark.parametrize(
+    "profile", [CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION]
+)
+def test_candidate_envelope_rejects_other_contracts(change, profile):
     with pytest.raises(ValueError, match="RESEARCH_BUDGET_PROFILE_INVALID"):
-        replace(candidate_spec(), **change)
+        replace(candidate_spec(profile), **change)

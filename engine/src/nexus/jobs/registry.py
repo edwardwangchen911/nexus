@@ -11,7 +11,10 @@ from typing import Literal
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+)
 from nexus.audit.canonical import canonical_json
 from nexus.jobs.models import (
     BROKER_JOB_TYPES,
@@ -86,7 +89,8 @@ class JobHandlerSpec:
 
     def __post_init__(self) -> None:
         if self.research_budget_profile is not None and (
-            self.research_budget_profile != CANDIDATE_BUDGET_CONFIG_VERSION
+            self.research_budget_profile
+            not in {CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION}
             or self.job_type is not JobType.AGENT_PAPER_RESEARCH
             or self.schema_version != "agent_research_job_v1"
             or self.timeout_seconds != 195
@@ -101,7 +105,8 @@ class JobHandlerSpec:
             raise ValueError("handler payload model must set extra='forbid'")
         maximum_timeout = (
             195
-            if self.research_budget_profile == CANDIDATE_BUDGET_CONFIG_VERSION
+            if self.research_budget_profile
+            in {CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION}
             else 135
             if self.job_type in {JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH}
             and self.max_attempts == 1
