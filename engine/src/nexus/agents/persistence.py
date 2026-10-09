@@ -22,6 +22,7 @@ from nexus.agents.actionable_research import (
 )
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
@@ -527,6 +528,56 @@ async def admit_research_run(
     reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
 ) -> ResearchAdmission:
+    """Keep version-inheriting admission failures atomic inside caller transactions."""
+
+    async def admit() -> ResearchAdmission:
+        return await _admit_research_run(
+            session,
+            actor_id=actor_id,
+            route=route,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            request=request,
+            prompt_version_id=prompt_version_id,
+            model_config_id=model_config_id,
+            daily_limit_usd=daily_limit_usd,
+            now=now,
+            allow_fixture_price_authority=allow_fixture_price_authority,
+            after_authority=after_authority,
+            job_type=job_type,
+            reuse_latest_actor_agent_version=reuse_latest_actor_agent_version,
+            reuse_latest_actor_prompts_only=reuse_latest_actor_prompts_only,
+            version_source_run_id=version_source_run_id,
+        )
+
+    if reuse_latest_actor_agent_version or version_source_run_id is not None:
+        # Preserve existing idempotency -> actor-version lock ordering. The
+        # model is only known after inheritance resolves under that authority;
+        # a refusal must roll back its claim even if the caller catches it.
+        async with session.begin_nested():
+            return await admit()
+    return await admit()
+
+
+async def _admit_research_run(
+    session: AsyncSession,
+    *,
+    actor_id: str,
+    route: str,
+    idempotency_key: str,
+    request_hash: str,
+    request: ResearchRequest,
+    prompt_version_id: UUID | None,
+    model_config_id: UUID | None,
+    daily_limit_usd: Decimal,
+    now: datetime,
+    allow_fixture_price_authority: bool = False,
+    after_authority: Callable[[], Awaitable[None]] | None = None,
+    job_type: JobType = JobType.AGENT_RESEARCH,
+    reuse_latest_actor_agent_version: bool = False,
+    reuse_latest_actor_prompts_only: bool = False,
+    version_source_run_id: UUID | None = None,
+) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
     if now.tzinfo != UTC or request.decision_time > now:
         raise ValueError("point-in-time data authority is invalid")
@@ -542,6 +593,24 @@ async def admit_research_run(
         or model_config_id is not None
     ):
         raise ValueError("Agent version authority is ambiguous")
+    if model_config_id is not None:
+        candidate_preview = await session.get(AgentModelConfigRecord, model_config_id)
+        if (
+            candidate_preview is not None
+            and candidate_preview.version == CANDIDATE_BUDGET_CONFIG_VERSION
+        ):
+            from nexus.agents.codex_candidate import (
+                candidate_model_matches,
+                require_candidate_database,
+            )
+
+            # A caller may catch a refusal inside its transaction. Reject this
+            # closed candidate before even creating an idempotency claim.
+            await require_candidate_database(session)
+            if job_type is not JobType.AGENT_PAPER_RESEARCH or not candidate_model_matches(
+                candidate_preview
+            ):
+                raise ValueError("CODEX_CANDIDATE_AUTHORITY_INVALID")
     if after_authority is not None:
         await after_authority()
     claim, owner = await claim_or_lock(
@@ -608,6 +677,7 @@ async def admit_research_run(
                 AgentModelConfigRecord.version.not_in(
                     (
                         *STAGED_CONFIG_VERSIONS,
+                        CANDIDATE_BUDGET_CONFIG_VERSION,
                         "codex-sdk-strategy-rnd-v1",
                         PORTFOLIO_DECISION_CONFIG_VERSION,
                     )
@@ -616,6 +686,16 @@ async def admit_research_run(
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)
         )
+    if model is not None and model.version == CANDIDATE_BUDGET_CONFIG_VERSION:
+        from nexus.agents.codex_candidate import candidate_model_matches, require_candidate_database
+
+        await require_candidate_database(session)
+        if (
+            model_config_id is None
+            or job_type is not JobType.AGENT_PAPER_RESEARCH
+            or not candidate_model_matches(model)
+        ):
+            raise ValueError("CODEX_CANDIDATE_AUTHORITY_INVALID")
     if instrument is not None and snapshot is not None:
         await freeze_price_authority(
             session,
@@ -816,7 +896,9 @@ async def admit_research_run(
         payload={"run_id": str(run.id)},
         queue=QueueName.GENERAL,
         retry_policy=RetryPolicy.AUTOMATIC_SAFE,
-        max_attempts=1 if model.version in SDK_CONFIG_VERSIONS else 3,
+        max_attempts=1
+        if model.version in SDK_CONFIG_VERSIONS or model.version == CANDIDATE_BUDGET_CONFIG_VERSION
+        else 3,
         available_at=now,
     )
     await session.flush()

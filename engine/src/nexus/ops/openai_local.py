@@ -182,6 +182,7 @@ async def prepare_database(
     actionable_paper: bool = False,
     stage_time_budget: bool = False,
     allow_stage_time_budget_registration: bool = False,
+    candidate_stage_capacity: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -189,6 +190,17 @@ async def prepare_database(
     host = make_url(settings.database_url).host
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if (
+        type(candidate_stage_capacity) is not bool
+        or candidate_stage_capacity
+        and (
+            not stage_time_budget
+            or not actionable_paper
+            or allow_stage_time_budget_registration
+            or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        )
+    ):
+        raise ValueError("CODEX_CANDIDATE_REGISTRATION_ARGUMENT_INVALID")
     if type(allow_stage_time_budget_registration) is not bool or (
         allow_stage_time_budget_registration and not stage_time_budget
     ):
@@ -309,6 +321,10 @@ async def prepare_database(
         config["max_wire_bytes"] = max_wire_bytes
     if inline_citations:
         config["inline_citations"] = True
+    if candidate_stage_capacity:
+        from nexus.agents.codex_candidate import candidate_config
+
+        config = candidate_config()
     configs = [config]
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         configs.append(
@@ -372,6 +388,13 @@ async def prepare_database(
         prompt = load_strategy_rnd_prompt()
         prompts.append((prompt.role, prompt.version, prompt.content, prompt.content_hash))
     async with session_factory(settings)() as session, session.begin():
+        if candidate_stage_capacity:
+            from nexus.agents.codex_candidate import require_candidate_database
+
+            await require_candidate_database(
+                session,
+                configured_database=make_url(settings.database_url).database,
+            )
         if stage_time_budget:
             database = await session.scalar(select(func.current_database()))
             if (
