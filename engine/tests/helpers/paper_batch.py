@@ -100,12 +100,21 @@ class PaperBatchSeed:
 async def seed_paper_batch(
     database_url: str,
     *,
+    decision_time: datetime = DECISION_TIME,
+    execution_session: date = EXECUTION_SESSION,
     omit_persisted_query_kind: str | None = None,
     include_no_change: bool = False,
     execution_market_close_at: datetime | None = None,
     expired_ticker_instrument_id: UUID | None = None,
     additional_instruments: tuple[tuple[UUID, Decimal, Decimal, str], ...] = (),
 ) -> PaperBatchSeed:
+    decision_session = decision_time.date()
+    available_at = decision_time - timedelta(hours=1)
+    request_time = decision_time + timedelta(seconds=1)
+    provider_authorized_at = decision_time - timedelta(minutes=30)
+    month_start = decision_session.replace(day=1)
+    month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    execution_decision_at = datetime.combine(execution_session, decision_time.timetz())
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
@@ -124,18 +133,18 @@ async def seed_paper_batch(
                             "market_scope": "US",
                             "delivery_mode": "real_time",
                         },
-                        created_at=AVAILABLE_AT - timedelta(hours=1),
+                        created_at=available_at - timedelta(hours=1),
                     ),
                     IntegrationStatus(
                         id=FOSUN_STATUS_ID,
                         provider="fosun",
                         status="read_only",
-                        last_success_at=PROVIDER_AUTHORIZED_AT,
+                        last_success_at=provider_authorized_at,
                         version=1,
-                        mode_changed_at=AVAILABLE_AT - timedelta(hours=1),
+                        mode_changed_at=available_at - timedelta(hours=1),
                         capability_invalidated_at=None,
                         admitted_contract_hash=FOSUN_CONTRACT_HASH,
-                        created_at=AVAILABLE_AT - timedelta(hours=1),
+                        created_at=available_at - timedelta(hours=1),
                     ),
                 )
             )
@@ -145,28 +154,28 @@ async def seed_paper_batch(
                     exchange="XNYS",
                     version="paper-batch-v1",
                     source="fixture",
-                    range_start=date(2026, 8, 1),
-                    range_end=date(2026, 8, 31),
+                    range_start=month_start,
+                    range_end=month_end,
                     query_parameters={},
                     completeness_status="complete",
                     content_hash="a" * 64,
-                    published_at=AVAILABLE_AT,
+                    published_at=available_at,
                 )
             )
             session.add_all(
                 (
                     ExchangeCalendarSessionRecord(
                         calendar_authority_id=CALENDAR_ID,
-                        session=DECISION_SESSION,
-                        decision_at=DECISION_TIME,
+                        session=decision_session,
+                        decision_at=decision_time,
                     ),
                     ExchangeCalendarSessionRecord(
                         calendar_authority_id=CALENDAR_ID,
-                        session=EXECUTION_SESSION,
-                        decision_at=datetime(2026, 8, 27, 21, tzinfo=UTC),
+                        session=execution_session,
+                        decision_at=execution_decision_at,
                         **(
                             {
-                                "market_open_at": datetime(2026, 8, 27, 13, 30, tzinfo=UTC),
+                                "market_open_at": execution_decision_at.replace(hour=13, minute=30),
                                 "market_close_at": execution_market_close_at,
                             }
                             if execution_market_close_at is not None
@@ -180,7 +189,7 @@ async def seed_paper_batch(
                     id=UNIVERSE_ID,
                     key="paper-batch",
                     version="v1",
-                    effective_from=date(2026, 8, 1),
+                    effective_from=month_start,
                     source="fixture",
                     content_hash="b" * 64,
                     published_at=None,
@@ -192,9 +201,9 @@ async def seed_paper_batch(
                     source="fixture",
                     provider_object_id="paper-batch-quality",
                     revision="v1",
-                    observed_at=AVAILABLE_AT,
-                    available_at=AVAILABLE_AT,
-                    received_at=AVAILABLE_AT,
+                    observed_at=available_at,
+                    available_at=available_at,
+                    received_at=available_at,
                     schema_version="v1",
                     payload={},
                 )
@@ -227,13 +236,13 @@ async def seed_paper_batch(
                         instrument_id=instrument_id,
                         symbol=f"TST{index}",
                         alias_type="ticker",
-                        valid_from=date(2026, 8, 1),
+                        valid_from=month_start,
                         valid_to=(
-                            date(2026, 8, 25)
+                            decision_session - timedelta(days=1)
                             if instrument_id == expired_ticker_instrument_id
                             else None
                         ),
-                        created_at=AVAILABLE_AT - timedelta(hours=1),
+                        created_at=available_at - timedelta(hours=1),
                     )
                 )
                 session.add(
@@ -253,19 +262,19 @@ async def seed_paper_batch(
                         mime_type="application/vnd.apache.parquet",
                         schema_version="price_bars_v1",
                         source="fosun",
-                        observed_at=AVAILABLE_AT,
-                        available_at=AVAILABLE_AT,
-                        received_at=AVAILABLE_AT,
+                        observed_at=available_at,
+                        available_at=available_at,
+                        received_at=available_at,
                     )
                 )
                 lineage = await seed_fosun_daily_lineage(
                     session,
                     manifest_id=manifest_id,
-                    provider_authorized_at=PROVIDER_AUTHORIZED_AT,
-                    sessions=(DECISION_SESSION,),
+                    provider_authorized_at=provider_authorized_at,
+                    sessions=(decision_session,),
                     raw_payload=f'{{"paper_batch":{index}}}'.encode(),
-                    received_at=AVAILABLE_AT,
-                    calendar_range_end=EXECUTION_SESSION,
+                    received_at=available_at,
+                    calendar_range_end=execution_session,
                 )
                 manifest = PriceSeriesManifest(
                     id=manifest_id,
@@ -277,14 +286,14 @@ async def seed_paper_batch(
                     delivery_mode="real_time",
                     adjustment="raw",
                     interval="1Day",
-                    start_at=AVAILABLE_AT,
-                    end_at=AVAILABLE_AT,
+                    start_at=available_at,
+                    end_at=available_at,
                     row_count=1,
                     provider_capability_id=FOSUN_CAPABILITY_ID,
                     provider_status_id=FOSUN_STATUS_ID,
                     provider_status_version=1,
                     provider_contract_hash=FOSUN_CONTRACT_HASH,
-                    provider_authorized_at=PROVIDER_AUTHORIZED_AT,
+                    provider_authorized_at=provider_authorized_at,
                     gateway_transport_artifact_id=lineage.raw_artifact.id,
                     daily_calendar_authority_id=lineage.calendar_authority_id,
                     gateway_request_start_at=lineage.request_start_at,
@@ -297,15 +306,15 @@ async def seed_paper_batch(
                         id=bar_id,
                         price_series_manifest_id=manifest_id,
                         instrument_id=instrument_id,
-                        session=DECISION_SESSION,
+                        session=decision_session,
                         open=close,
                         high=close,
                         low=close,
                         close=close,
                         volume=Decimal("1000000"),
-                        observed_at=AVAILABLE_AT,
-                        available_at=AVAILABLE_AT,
-                        received_at=AVAILABLE_AT,
+                        observed_at=available_at,
+                        available_at=available_at,
+                        received_at=available_at,
                         revision=lineage.raw_digest,
                         quality_flags=[],
                     )
@@ -316,7 +325,7 @@ async def seed_paper_batch(
                         instrument_id=instrument_id,
                         sector_code=sector,
                         weight=Decimal(1),
-                        as_of=DECISION_SESSION,
+                        as_of=decision_session,
                         source_url=f"memory://paper-batch/sector/{index}",
                         content_hash=f"{index + 3}" * 64,
                         synthetic=False,
@@ -337,7 +346,7 @@ async def seed_paper_batch(
                         close=close,
                         source="fosun",
                         delivery_mode="real_time",
-                        available_at=PROVIDER_AUTHORIZED_AT,
+                        available_at=provider_authorized_at,
                         content_hash=authority.content_hash,
                     )
                 )
@@ -353,7 +362,7 @@ async def seed_paper_batch(
 
             await session.execute(
                 text("UPDATE universe_snapshots SET published_at = :at WHERE id = :id"),
-                {"at": AVAILABLE_AT, "id": UNIVERSE_ID},
+                {"at": available_at, "id": UNIVERSE_ID},
             )
             required_ids = tuple(
                 sorted((item[0] for item in instruments), key=lambda value: value.int)
@@ -366,7 +375,7 @@ async def seed_paper_batch(
                     schema_version="v1",
                     payload={
                         "required_instrument_ids": [str(value) for value in required_ids],
-                        "decision_session": DECISION_SESSION.isoformat(),
+                        "decision_session": decision_session.isoformat(),
                     },
                 )
             )
@@ -382,13 +391,13 @@ async def seed_paper_batch(
                     content_hash = canonical_query_authority_hash(
                         source_policy_id=SOURCE_POLICY_V2_ID,
                         universe_snapshot_id=UNIVERSE_ID,
-                        decision_session=DECISION_SESSION,
+                        decision_session=decision_session,
                         kind=kind,
                         required_instrument_ids=(instrument_id,),
                         blocked_instrument_ids=(),
                         complete=True,
                         source_watermark_hash=source_watermark_hash,
-                        available_at=AVAILABLE_AT,
+                        available_at=available_at,
                     )
                     if kind != omit_persisted_query_kind:
                         session.add(
@@ -396,13 +405,13 @@ async def seed_paper_batch(
                                 id=authority_id,
                                 source_policy_id=SOURCE_POLICY_V2_ID,
                                 universe_snapshot_id=UNIVERSE_ID,
-                                decision_session=DECISION_SESSION,
+                                decision_session=decision_session,
                                 kind=kind,
                                 required_instrument_ids=[instrument_id],
                                 blocked_instrument_ids=[],
                                 complete=True,
                                 source_watermark_hash=source_watermark_hash,
-                                available_at=AVAILABLE_AT,
+                                available_at=available_at,
                                 content_hash=content_hash,
                             )
                         )
@@ -412,7 +421,7 @@ async def seed_paper_batch(
                             authority_id=authority_id,
                             complete=True,
                             blocked=False,
-                            available_at=AVAILABLE_AT,
+                            available_at=available_at,
                             content_hash=content_hash,
                             required_instrument_ids=(instrument_id,),
                         )
@@ -421,7 +430,7 @@ async def seed_paper_batch(
             projection = await load_paper_projection(
                 session,
                 account_id=PAPER_ACCOUNT_ID,
-                as_of=DECISION_TIME,
+                as_of=decision_time,
             )
             registry = await session.get(StrategyRegistryHeadRecord, "internal_paper")
             assert registry is not None
@@ -448,9 +457,9 @@ async def seed_paper_batch(
                 strategy_definition_id=registry.active_definition_id,
                 registry_event_id=registry.last_event_id,
                 champion_generation=registry.active_generation,
-                decision_session=DECISION_SESSION,
-                decision_time=DECISION_TIME,
-                execution_session=EXECUTION_SESSION,
+                decision_session=decision_session,
+                decision_time=decision_time,
+                execution_session=execution_session,
                 source_policy_id=SOURCE_POLICY_V2_ID,
                 calendar_authority_id=CALENDAR_ID,
                 universe_snapshot_id=UNIVERSE_ID,
@@ -484,8 +493,8 @@ async def seed_paper_batch(
             account_id=PAPER_ACCOUNT_ID,
             portfolio_id=PORTFOLIO_ID,
             decision_id=persisted.decision_id,
-            decision_time=DECISION_TIME,
-            request_time=REQUEST_TIME,
+            decision_time=decision_time,
+            request_time=request_time,
             expected_outcomes={
                 INSTRUMENTS[0][0]: "reduced",
                 INSTRUMENTS[1][0]: "approved",

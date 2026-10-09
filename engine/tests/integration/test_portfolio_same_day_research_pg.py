@@ -39,9 +39,15 @@ NOW = datetime(2026, 8, 27, 14, tzinfo=UTC)
 
 
 async def seed_normal_path(
-    url, monkeypatch, *, occupied=False, candidate_instruments=INSTRUMENTS[:2]
+    url, monkeypatch, *, occupied=False, candidate_instruments=INSTRUMENTS[:2], decision_time=NOW
 ):
-    seed = await seed_paper_batch(url)
+    additional = tuple(item for item in candidate_instruments if item not in INSTRUMENTS)
+    seed = await seed_paper_batch(
+        url,
+        decision_time=decision_time.replace(hour=21) - timedelta(days=1),
+        execution_session=decision_time.date(),
+        additional_instruments=additional,
+    )
     engine = create_async_engine(url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(
@@ -61,50 +67,56 @@ async def seed_normal_path(
             session,
             account_id=seed.account_id,
             strategy_version="baseline_v1",
-            decision_session=DECISION_TIME.date(),
+            decision_session=seed.decision_time.date(),
         )
         await _seed_two_candidate_authority(
             session,
             registered,
-            decision_time=NOW,
+            decision_time=decision_time,
             source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
             candidate_instruments=candidate_instruments,
+            authority_instruments=INSTRUMENTS + additional,
         )
-        # Persist synthetic authorities before the chosen historical cutoff. This
-        # never changes runtime facts; fixtures live in an isolated test database.
-        for table in (
-            "source_policies",
-            "instrument_aliases",
-            "price_series_manifests",
-            "price_bar_records",
-            "price_bar_set_authorities",
-            "research_evidence_refs",
-            "risk_query_authorities",
-            "sector_exposures",
-            "agent_data_snapshot_evidence",
-        ):
-            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
-            try:
-                await session.execute(
-                    text(f"UPDATE {table} SET created_at=:at WHERE created_at>:at"), {"at": NOW}
-                )
-            finally:
-                await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
-        for table in ("exchange_calendar_authorities", "universe_snapshots"):
-            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
-            try:
-                await session.execute(
-                    text(f"UPDATE {table} SET published_at=:at"), {"at": NOW - timedelta(days=2)}
-                )
-            finally:
-                await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+        # Historical fixtures retain their original compatibility setup. Fresh dated
+        # scenarios are constructed once and never rewrite immutable timestamps.
+        if decision_time == NOW:
+            # Persist synthetic authorities before the chosen historical cutoff. This
+            # never changes runtime facts; fixtures live in an isolated test database.
+            for table in (
+                "source_policies",
+                "instrument_aliases",
+                "price_series_manifests",
+                "price_bar_records",
+                "price_bar_set_authorities",
+                "research_evidence_refs",
+                "risk_query_authorities",
+                "sector_exposures",
+                "agent_data_snapshot_evidence",
+            ):
+                await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+                try:
+                    await session.execute(
+                        text(f"UPDATE {table} SET created_at=:at WHERE created_at>:at"),
+                        {"at": decision_time},
+                    )
+                finally:
+                    await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+            for table in ("exchange_calendar_authorities", "universe_snapshots"):
+                await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+                try:
+                    await session.execute(
+                        text(f"UPDATE {table} SET published_at=:at"),
+                        {"at": decision_time - timedelta(days=2)},
+                    )
+                finally:
+                    await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
         authority = await load_quasi_realtime_cycle_authority(
             session,
             account_id=seed.account_id,
-            now=NOW,
+            now=decision_time,
             expected_calendar_authority_id=CALENDAR_ID,
         )
-        assert authority.decision_session == authority.execution_session == NOW.date()
+        assert authority.decision_session == authority.execution_session == decision_time.date()
         manifest = await prepare_candidates(
             session,
             authority=authority,
