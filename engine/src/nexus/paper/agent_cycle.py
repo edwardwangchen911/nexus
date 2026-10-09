@@ -681,8 +681,13 @@ async def resume_schwab_agent_paper_cycle(
     now: datetime | None = None,
     daily_limit_usd: Decimal | None = None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
     """Resume only from the persisted Job/Run/Output state of a Schwab cycle."""
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -697,11 +702,30 @@ async def resume_schwab_agent_paper_cycle(
     ):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     await _require_cycle_candidate_profile(
-        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+        session,
+        cycle=cycle,
+        candidate_stage_capacity=candidate_stage_capacity,
+        now=now,
+        formal_stage_capacity=formal_stage_capacity,
     )
     request_hash = job_input_hash(
         {"schema": "agent-paper-schwab-resume-v1", "cycle_id": str(cycle_id)}
     )
+    if formal_stage_capacity:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+            {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
+        )
+        cycle = await session.get(AgentPaperCycleRecord, cycle_id, populate_existing=True)
+        if cycle is None:
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+        await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=False,
+            formal_stage_capacity=True,
+            now=now,
+        )
     claim, _ = await claim_or_lock(
         session,
         f"local-agent-paper-schwab-resume:{cycle_id}",
@@ -716,7 +740,7 @@ async def resume_schwab_agent_paper_cycle(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
         {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
     )
-    if cycle.candidate_batch_id is not None and now is not None:
+    if cycle.candidate_batch_id is not None and now is not None and not formal_stage_capacity:
         from nexus.agents.portfolio_synthesis_worker import (
             read_synthesis_job,
             reconcile_synthesis_orphans,
@@ -752,6 +776,7 @@ async def resume_schwab_agent_paper_cycle(
             now=now,
             daily_limit_usd=daily_limit_usd,
             candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
         )
     return await _resume_batch(
         session,
@@ -759,6 +784,7 @@ async def resume_schwab_agent_paper_cycle(
         events=events,
         now=now,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
 
 
@@ -1335,9 +1361,14 @@ async def _resume_research(
     now: datetime | None = None,
     daily_limit_usd: Decimal | None = None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
     await _require_cycle_candidate_profile(
-        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+        session,
+        cycle=cycle,
+        candidate_stage_capacity=candidate_stage_capacity,
+        now=now,
+        formal_stage_capacity=formal_stage_capacity,
     )
     run_ids = _fact_uuids(events, "research_run_ids")
     jobs = tuple(
@@ -1367,6 +1398,7 @@ async def _resume_research(
             now=now,
             daily_limit_usd=daily_limit_usd,
             candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
         )
     output_available_at = max(
         cycle.decision_time,
@@ -1381,6 +1413,7 @@ async def _resume_research(
                     decision_time=output_available_at,
                     allow_safe_no_trade=True,
                     candidate_stage_capacity=candidate_stage_capacity,
+                    formal_stage_capacity=formal_stage_capacity,
                 )
                 for run_id in run_ids
             ]
@@ -1466,6 +1499,7 @@ async def _resume_research(
         events=await _events(session, cycle.id),
         now=now,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
 
 
@@ -1476,9 +1510,14 @@ async def _resume_batch(
     events: tuple[AgentPaperCycleEventRecord, ...],
     now: datetime | None = None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
     await _require_cycle_candidate_profile(
-        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+        session,
+        cycle=cycle,
+        candidate_stage_capacity=candidate_stage_capacity,
+        now=now,
+        formal_stage_capacity=formal_stage_capacity,
     )
     if events[-1].to_status in {"completed", "unavailable", "failed", "awaiting_market"}:
         return _result(cycle.id, events, replayed=True)
@@ -1508,6 +1547,7 @@ async def _resume_batch(
                 request_time=now,
                 idempotency_key=f"portfolio-target:{cycle.id}",
                 candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
             )
         except TargetActivationBlockedError as error:
             facts: dict[str, object] = {
@@ -1616,9 +1656,14 @@ async def _resume_portfolio_synthesis(
     now: datetime | None,
     daily_limit_usd: Decimal | None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> AgentPaperCycleResult:
     await _require_cycle_candidate_profile(
-        session, cycle=cycle, candidate_stage_capacity=candidate_stage_capacity, now=now
+        session,
+        cycle=cycle,
+        candidate_stage_capacity=candidate_stage_capacity,
+        now=now,
+        formal_stage_capacity=formal_stage_capacity,
     )
     if events[-1].to_status != "researching":
         return _result(cycle.id, events, replayed=True)
@@ -1653,6 +1698,7 @@ async def _resume_portfolio_synthesis(
                         decision_time=now,
                         allow_safe_no_trade=True,
                         candidate_stage_capacity=candidate_stage_capacity,
+                        formal_stage_capacity=formal_stage_capacity,
                     )
                     for run_id in run_ids
                 ]
@@ -1676,6 +1722,7 @@ async def _resume_portfolio_synthesis(
                     daily_limit_usd=daily_limit_usd,
                     now=now,
                     candidate_stage_capacity=candidate_stage_capacity,
+                    formal_stage_capacity=formal_stage_capacity,
                 )
             ).run
         frozen = _frozen_run(run)
@@ -1738,6 +1785,7 @@ async def _resume_portfolio_synthesis(
             synthesis_output_id=output.id,
             now=now,
             candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
         )
     except ValueError as error:
         if str(error) == "POLICY_UNCONFIRMED":
@@ -1779,6 +1827,7 @@ async def _resume_portfolio_synthesis(
         events=await _events(session, cycle.id),
         now=now,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
 
 

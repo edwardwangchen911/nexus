@@ -221,6 +221,36 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 now=AT + timedelta(seconds=2),
                 formal_stage_capacity=True,
             )
+            from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
+            from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+
+            tracked = (IdempotencyRecord, AgentPaperCycleEventRecord, Job)
+            before = [await session.scalar(select(func.count()).select_from(t)) for t in tracked]
+            for changes in (
+                {},
+                {"formal_stage_capacity": 1},
+                {"formal_stage_capacity": True, "candidate_stage_capacity": True},
+            ):
+                with pytest.raises(ValueError, match="CODEX_FORMAL"):
+                    await resume_schwab_agent_paper_cycle(
+                        session,
+                        cycle_id=result.cycle_id,
+                        idempotency_key="reject-mode",
+                        now=AT + timedelta(seconds=2),
+                        **changes,
+                    )
+            assert [
+                await session.scalar(select(func.count()).select_from(t)) for t in tracked
+            ] == before
+            pending = await resume_schwab_agent_paper_cycle(
+                session,
+                cycle_id=result.cycle_id,
+                idempotency_key="formal-admit-synthesis",
+                now=AT + timedelta(seconds=2),
+                daily_limit_usd=Decimal("3"),
+                formal_stage_capacity=True,
+            )
+            assert pending.result_code == "PORTFOLIO_SYNTHESIS_PENDING"
             first = await admit_portfolio_synthesis(session, **options)
             assert first.run.model_config_id == model.id
             assert first.run.model_hash == model.config_hash
@@ -366,5 +396,82 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 )
                 == 1
             )
+        from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
+        from nexus.persistence.models.paper import (
+            AgentPaperCycleRecord,
+            PaperOrderRecord,
+            PaperTargetVersionRecord,
+            RiskEvaluationRecord,
+            StrategyDecisionAgentOutputRecord,
+        )
+
+        await _set_test_insert_clock(sessions, AT + timedelta(seconds=4))
+        async with sessions.begin() as session:
+            finished = await resume_schwab_agent_paper_cycle(
+                session,
+                cycle_id=result.cycle_id,
+                idempotency_key="formal-activate-target",
+                now=AT + timedelta(seconds=4),
+                formal_stage_capacity=True,
+            )
+            assert finished.result_code == (
+                "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
+            ), finished
+            assert bool(finished.order_ids) is trade
+        async with sessions.begin() as session:
+            cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
+            assert cycle.execution_locked is True
+            target = await session.scalar(select(PaperTargetVersionRecord))
+            assert target.strategy_decision_id == finished.strategy_decision_id
+            from nexus.paper.agent_decision_store import _load_portfolio_target_baseline
+
+            stored_formal = await _load_portfolio_target_baseline(
+                session,
+                target=target,
+                account_id=authority.account_id,
+                candidate_stage_capacity=False,
+                formal_stage_capacity=True,
+            )
+            assert stored_formal.decision_id == finished.strategy_decision_id
+
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(StrategyDecisionAgentOutputRecord)
+                )
+                == count
+            )
+            orders = tuple(await session.scalars(select(PaperOrderRecord)))
+            assert {order.id for order in orders} == set(finished.order_ids)
+            assert all(
+                order.instrument_id in batch.instrument_ids
+                and order.side == "buy"
+                and order.quantity > 0
+                and order.risk_outcome in {"approved", "reduced"}
+                for order in orders
+            )
+            assert await session.scalar(
+                select(func.count()).select_from(RiskEvaluationRecord)
+            ) == len(orders)
+            tables = (Job, PaperOrderRecord, PaperTargetVersionRecord, RiskEvaluationRecord)
+            before = [await session.scalar(select(func.count()).select_from(t)) for t in tables]
+            with pytest.raises(ValueError, match="CODEX_FORMAL"):
+                await resume_schwab_agent_paper_cycle(
+                    session,
+                    cycle_id=result.cycle_id,
+                    idempotency_key="default-terminal-replay",
+                    now=AT + timedelta(seconds=5),
+                )
+            replay = await resume_schwab_agent_paper_cycle(
+                session,
+                cycle_id=result.cycle_id,
+                idempotency_key="formal-activate-target",
+                now=AT + timedelta(seconds=5),
+                formal_stage_capacity=True,
+            )
+            assert replay.order_ids == finished.order_ids
+            assert replay.strategy_decision_id == finished.strategy_decision_id
+            assert [
+                await session.scalar(select(func.count()).select_from(t)) for t in tables
+            ] == before
     finally:
         await engine.dispose()

@@ -415,6 +415,44 @@ class PersistedPortfolioProposal:
     proposal: PortfolioProposalV1
 
 
+async def _load_portfolio_target_baseline(
+    session: AsyncSession,
+    *,
+    target: PaperTargetVersionRecord,
+    account_id: UUID,
+    candidate_stage_capacity: bool,
+    formal_stage_capacity: bool,
+) -> PersistedPortfolioProposal | None:
+    """Read the prior target using its own authority, without upgrading its identity."""
+    prior_formal = False
+    if formal_stage_capacity:
+        from nexus.agents.codex_versions import (
+            CANDIDATE_BUDGET_CONFIG_VERSION,
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        )
+
+        decision = await session.get(StrategyDecisionRecord, target.strategy_decision_id)
+        prior_run = (
+            None
+            if decision is None or decision.account_id != account_id
+            else await session.scalar(
+                select(AgentPortfolioSynthesisRunRecord).where(
+                    AgentPortfolioSynthesisRunRecord.cycle_id == decision.agent_paper_cycle_id
+                )
+            )
+        )
+        if prior_run is None or prior_run.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION:
+            raise ValueError("PORTFOLIO_PROPOSAL_TARGET_CONFLICT")
+        prior_formal = prior_run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    return await load_portfolio_proposal(
+        session,
+        account_id=account_id,
+        decision_id=target.strategy_decision_id,
+        candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=prior_formal,
+    )
+
+
 async def _portfolio_bindings(
     session: AsyncSession,
     *,
@@ -422,6 +460,7 @@ async def _portfolio_bindings(
     decision_hash: str,
     at: datetime,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> tuple[AgentPaperDecisionBinding, ...]:
     bindings = []
     for source in frozen.security_outputs:
@@ -444,6 +483,7 @@ async def _portfolio_bindings(
             decision_time=at,
             allow_safe_no_trade=True,
             candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
         )
         if (
             admitted.output_id != source.research_output_id
@@ -477,6 +517,7 @@ async def _rebuild_portfolio_proposal(
     output_id: UUID,
     now: datetime | None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> PortfolioProposalV1:
     output = await session.get(
         AgentPortfolioSynthesisOutputRecord, output_id, populate_existing=True
@@ -500,6 +541,24 @@ async def _rebuild_portfolio_proposal(
     ):
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
     frozen = _frozen_run(run)
+    if formal_stage_capacity:
+        from nexus.agents.codex_formal_stage import formal_stage_config_hash
+        from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        from nexus.paper.agent_cycle import _require_cycle_candidate_profile
+
+        formal_model_id = await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=False,
+            formal_stage_capacity=True,
+            now=frozen.admitted_at if now is None else now,
+        )
+        if (
+            run.model_config_id != formal_model_id
+            or run.model_hash != formal_stage_config_hash()
+            or run.pricing_version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        ):
+            raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
     job = await read_synthesis_job(session, cycle_id=cycle.id)
     if (
         job is None
@@ -572,11 +631,12 @@ async def _rebuild_portfolio_proposal(
         prior = (
             None
             if target is None
-            else await load_portfolio_proposal(
+            else await _load_portfolio_target_baseline(
                 session,
+                target=target,
                 account_id=cycle.account_id,
-                decision_id=target.strategy_decision_id,
                 candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
             )
         )
         if (
@@ -611,6 +671,7 @@ async def _rebuild_portfolio_proposal(
         decision_hash=proposal.decision_hash,
         at=frozen.admitted_at if now is None else now,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
     return proposal
 
@@ -631,7 +692,12 @@ async def load_portfolio_proposal(
     account_id: UUID,
     decision_id: UUID,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> PersistedPortfolioProposal | None:
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -655,6 +721,7 @@ async def load_portfolio_proposal(
         output_id=record.portfolio_synthesis_output_id,
         now=None,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
     rows = tuple(
         await session.scalars(
@@ -677,6 +744,7 @@ async def load_portfolio_proposal(
         decision_hash=proposal.decision_hash,
         at=frozen.admitted_at,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
     bound_rows = tuple(
         await session.scalars(
@@ -727,7 +795,12 @@ async def persist_portfolio_proposal(
     now: datetime,
     proposal: PortfolioProposalV1 | None = None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> PersistedPortfolioProposal:
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -746,6 +819,7 @@ async def persist_portfolio_proposal(
             account_id=cycle.account_id,
             decision_id=existing.id,
             candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
         )
         if (
             stored is None
@@ -761,6 +835,7 @@ async def persist_portfolio_proposal(
         output_id=synthesis_output_id,
         now=now,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
     if proposal is not None and proposal != rebuilt:
         raise ValueError("PORTFOLIO_PROPOSAL_CONTENT_CONFLICT")
@@ -823,6 +898,7 @@ async def persist_portfolio_proposal(
         decision_hash=rebuilt.decision_hash,
         at=now,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
     session.add_all(
         StrategyDecisionAgentOutputRecord(

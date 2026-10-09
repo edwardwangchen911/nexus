@@ -433,11 +433,16 @@ async def activate_portfolio_target(
     request_time: datetime,
     idempotency_key: str,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> TargetActivationResult:
     """Activate one immutable proposal, leaving execution locked and fail closed."""
     from nexus.paper.agent_decision_store import load_portfolio_proposal
     from nexus.paper.portfolio_proposal import canonical_portfolio_target_content_hash
 
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -450,6 +455,7 @@ async def activate_portfolio_target(
         account_id=account_id,
         decision_id=strategy_decision_id,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
     if persisted is None:
         raise ValueError("PORTFOLIO_PROPOSAL_NOT_FOUND")
@@ -631,6 +637,7 @@ async def activate_portfolio_target(
             idempotency_key=idempotency_key,
             request_time=request_time,
             candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
         )
         batch_id = None if batch is None else batch.batch_id
     result = TargetActivationResult(

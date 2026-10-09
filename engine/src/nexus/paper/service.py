@@ -537,7 +537,12 @@ async def load_paper_order_batch_result(
     account_id: UUID,
     strategy_decision_id: UUID,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> PaperOrderBatchResult | None:
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
@@ -579,6 +584,7 @@ async def load_paper_order_batch_result(
                 account_id=account_id,
                 decision_id=strategy_decision_id,
                 candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
             )
             if proposal is None:
                 raise ValueError("portfolio proposal is missing")
@@ -1329,6 +1335,7 @@ async def _create_target_aware_paper_order_batch(
     target_version_id: UUID,
     hooks: PaperBatchHooks | None = None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> PaperOrderBatchResult | None:
     """Private activation-only target batch entrypoint; caller owns the transaction."""
     return await _create_paper_order_batch_impl(
@@ -1341,6 +1348,7 @@ async def _create_target_aware_paper_order_batch(
         portfolio_activation=True,
         hooks=hooks,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
 
 
@@ -1355,11 +1363,18 @@ async def _create_paper_order_batch_impl(
     portfolio_activation: bool,
     hooks: PaperBatchHooks | None,
     candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> PaperOrderBatchResult | None:
     """Shared deterministic batch implementation behind the two permission boundaries."""
+    if type(formal_stage_capacity) is not bool or (
+        formal_stage_capacity and candidate_stage_capacity is not False
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     await require_candidate_consumer_profile(
         session, candidate_stage_capacity=candidate_stage_capacity
     )
+    if formal_stage_capacity and (not portfolio_activation or target_version_id is None):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     if candidate_stage_capacity and (not portfolio_activation or target_version_id is None):
         raise ValueError("CODEX_CANDIDATE_ISOLATION_REQUIRED")
     if not idempotency_key or len(idempotency_key) > 255:
@@ -1380,6 +1395,7 @@ async def _create_paper_order_batch_impl(
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
         candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
     )
     if existing is not None:
         existing_target = await session.scalar(
@@ -1429,6 +1445,7 @@ async def _create_paper_order_batch_impl(
                 account_id=account_id,
                 decision_id=strategy_decision_id,
                 candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
             )
             if proposal is None:
                 raise ValueError("portfolio proposal missing")

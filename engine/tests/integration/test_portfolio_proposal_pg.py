@@ -1120,3 +1120,37 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
                     assert await session.scalar(select(func.count()).select_from(model)) == 0
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_formal_consumer_reads_legacy_target_by_its_original_identity(migrated_database_url):
+    from nexus.paper import agent_decision_store as store
+    from nexus.paper.target_service import activate_portfolio_target
+
+    engine, sessions, args = await proposal_source(migrated_database_url)
+    try:
+        async with sessions.begin() as session:
+            original = await persist_portfolio_proposal(session, **args)
+            activated = await activate_portfolio_target(
+                session,
+                account_id=original.account_id,
+                strategy_decision_id=original.decision_id,
+                request_time=args["now"],
+                idempotency_key="legacy-target-baseline",
+            )
+            target = await session.get(PaperTargetVersionRecord, activated.target_version_id)
+            before = await session.scalar(select(func.count()).select_from(StrategyDecisionRecord))
+            inherited = await store._load_portfolio_target_baseline(
+                session,
+                target=target,
+                account_id=original.account_id,
+                candidate_stage_capacity=False,
+                formal_stage_capacity=True,
+            )
+            assert inherited == original
+            assert (
+                await session.scalar(select(func.count()).select_from(StrategyDecisionRecord))
+                == before
+            )
+    finally:
+        await engine.dispose()
