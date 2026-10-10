@@ -3201,23 +3201,28 @@ def test_explicit_action_missing_schwab_config_never_falls_back(monkeypatch, tmp
         )
 
 
+@pytest.mark.parametrize("explicit_file", [False, True])
 def test_local_loop_reinspection_uses_service_environment_loader(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    explicit_file: bool,
 ) -> None:
     environment = enabled_environment()
+    environment["NEXUS_RELEASE_REVISION"] = "b" * 40
     service_loads: list[object] = []
 
     @contextmanager
     def isolated_lock():
         yield
 
-    def load_service(repo_root, process_environment):
+    def load_service(repo_root, process_environment, **kwargs):
         assert repo_root == tmp_path
+        assert kwargs == ({"env_file": tmp_path / "service.env"} if explicit_file else {})
         service_loads.append(process_environment)
         return environment
 
     async def inspect(_settings, *, account_id, expected_calendar_authority_id, candidate=None):
+        assert _settings.release_revision == "a" * 40
         assert account_id == UUID(int=1)
         assert expected_calendar_authority_id == CALENDAR_AUTHORITY_ID
         return snapshot()
@@ -3228,9 +3233,14 @@ def test_local_loop_reinspection_uses_service_environment_loader(
     async def select_initial(_settings):
         return CALENDAR_AUTHORITY_ID
 
-    async def run_loop(*, inspect, **_kwargs):
+    async def run_loop(*, inspect, heartbeat, **_kwargs):
         await inspect()
+        await inspect()
+        await heartbeat(NOW)
         return A.STOP_SESSION_CLOSED
+
+    async def record_heartbeat(settings, **kwargs):
+        assert settings.release_revision == "a" * 40
 
     async def model_ready() -> None:
         return None
@@ -3249,17 +3259,21 @@ def test_local_loop_reinspection_uses_service_environment_loader(
     monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", model_ready)
     monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", select_initial)
     monkeypatch.setattr(loop, "run_foreground_loop", run_loop)
+    monkeypatch.setattr(loop, "heartbeat_agent_paper_loop", record_heartbeat)
 
     result = asyncio.run(
         loop.run_local_agent_paper_loop(
-            loop.EngineSettings(database_url=environment["DATABASE_URL"]),
+            loop.EngineSettings(
+                database_url=environment["DATABASE_URL"], release_revision="a" * 40
+            ),
             account_id=UUID(int=1),
             repo_root=tmp_path,
+            **({"env_file": tmp_path / "service.env"} if explicit_file else {}),
         )
     )
 
     assert result == A.STOP_SESSION_CLOSED
-    assert service_loads == [os.environ]
+    assert service_loads == ([{}, {}] if explicit_file else [os.environ, os.environ])
 
 
 def test_service_preflight_aggregates_safe_blockers_without_external_requests(

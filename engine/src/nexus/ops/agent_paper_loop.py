@@ -2375,6 +2375,9 @@ async def run_local_agent_paper_loop(
                 )
                 if not current.agent_paper_cycle_enabled:
                     return AgentPaperLoopSnapshot(now=clock(), enabled=False)
+                # Release identity belongs to the running process, not the reloaded
+                # business configuration or its frozen budget binding.
+                current = current.model_copy(update={"release_revision": settings.release_revision})
                 settings = current
                 evaluation = await inspect_agent_version_evaluation_loop(
                     current,
