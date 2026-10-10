@@ -105,6 +105,7 @@ function generateRuntimeContract(openapi) {
     "AgentPaperCycleDetailResponse",
     "AgentPaperManagementCycleResponse",
     "AgentPaperCyclePageResponse",
+    "ManualRequestView",
     "PaperOrderPageResponse",
     "PaperCancelResponse",
     "PaperCancelResultResponse",

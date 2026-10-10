@@ -859,11 +859,13 @@ def test_trigger_and_resume_requests_exclude_client_time_symbol_and_provider() -
     ("two_candidates", "max_symbols"),
     [(False, 12), (True, 12), (True, 2)],
 )
+@pytest.mark.parametrize("window_case", ["scheduled", "manual", "preopen", "close_during_collect"])
 def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     two_candidates: bool,
     max_symbols: int,
+    window_case: str,
 ) -> None:
     account_id = UUID(int=1)
     portfolio_id = UUID(int=2)
@@ -875,8 +877,38 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     artifact_id = UUID(int=5)
     quote_id = UUID(int=6)
     cycle_id = UUID(int=7)
-    initial = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
-    frozen = datetime(2026, 9, 14, 14, 0, 10, tzinfo=UTC)
+    manual = window_case != "scheduled"
+    initial = datetime(2026, 9, 14, 13 if manual else 14, 40 if manual else 0, tzinfo=UTC)
+    if window_case == "preopen":
+        initial = initial.replace(minute=29)
+    frozen = initial + cli.timedelta(seconds=10)
+    if window_case == "close_during_collect":
+        frozen = initial.replace(hour=20, minute=0)
+    request_scope = (
+        {}
+        if not manual
+        else {
+            "trigger_mode": "manual",
+            "manual_request_id": UUID(int=30),
+            "formal_stage_capacity": True,
+            "formal_model_config_id": UUID(int=31),
+        }
+    )
+
+    async def formal_profile(*_args, **kwargs):
+        assert kwargs["model_config_id"] == UUID(int=31)
+        return SimpleNamespace(config_hash="c" * 64)
+
+    async def manual_identity(*_args, **kwargs):
+        assert kwargs["request_id"] == UUID(int=30)
+        assert kwargs["batch_id"] == UUID(int=20)
+
+    monkeypatch.setattr(
+        "nexus.agents.codex_formal_stage.require_formal_stage_model_profile", formal_profile
+    )
+    monkeypatch.setattr(
+        "nexus.paper.manual_request.require_preparing_manual_request", manual_identity
+    )
     events: list[str] = []
 
     class Session:
@@ -925,6 +957,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         candidate_batch_hash="a" * 64,
         decision_session=authority.decision_session,
         decision_slot_at=initial,
+        **request_scope,
+        **({"formal_model_hash": "c" * 64} if manual else {}),
     )
 
     async def root(*_args, **_kwargs):
@@ -949,8 +983,8 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             local_date=authority.decision_session,
             session=authority.decision_session,
             decision_window_start_at=initial - cli.timedelta(hours=3),
-            market_open_at=initial - cli.timedelta(minutes=30),
-            market_close_at=initial + cli.timedelta(hours=6),
+            market_open_at=initial.replace(hour=13, minute=30),
+            market_close_at=initial.replace(hour=20, minute=0),
             next_session=authority.decision_session + cli.timedelta(days=1),
             next_decision_window_start_at=initial + cli.timedelta(hours=21),
             next_market_close_at=initial + cli.timedelta(days=1, hours=6),
@@ -1074,7 +1108,30 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         action="trigger",
         account_id=account_id,
         idempotency_key="trigger-1",
+        **request_scope,
     )
+    if window_case == "preopen" or (
+        window_case == "close_during_collect" and max_symbols >= len(execution_bindings)
+    ):
+        with pytest.raises(ValueError, match="^AGENT_PAPER_OUTSIDE_WINDOW$"):
+            asyncio.run(
+                trigger_in_session(
+                    Session(),
+                    object(),
+                    settings,
+                    request,
+                    reservation=reservation,
+                    repo_root=tmp_path,
+                    client=object(),
+                    process_environment={"NEXUS_SCHWAB_APP_KEY": "registered-key"},
+                )
+            )
+        assert "persist-risk" not in events and "cycle-job" not in events
+        if window_case == "preopen":
+            assert "risk-action-delisting-halt" not in events and "level-one" not in events
+        else:
+            assert "level-one" in events
+        return
     if max_symbols < len(execution_bindings):
         with pytest.raises(ValueError, match="^AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED$"):
             asyncio.run(
@@ -1147,6 +1204,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
         action="trigger",
         account_id=account_id,
         idempotency_key="trigger-failure",
+        **request_scope,
     )
     with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
         asyncio.run(
@@ -1196,6 +1254,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             action="trigger",
             account_id=account_id,
             idempotency_key=f"trigger-provider-failure-{index}",
+            **request_scope,
         )
         with pytest.raises(ValueError, match="SCHWAB_L1_INCOMPLETE"):
             asyncio.run(

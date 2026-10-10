@@ -480,6 +480,9 @@ async def activate_portfolio_target(
     )
     if persisted is None:
         raise ValueError("PORTFOLIO_PROPOSAL_NOT_FOUND")
+    from nexus.paper.manual_request import require_cycle_execution_mode
+
+    await require_cycle_execution_mode(session, cycle_id=persisted.cycle_id)
 
     request_hash = canonical_portfolio_synthesis_hash(
         {

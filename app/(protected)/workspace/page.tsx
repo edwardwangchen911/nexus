@@ -5,6 +5,7 @@ import { EconomicContextBoundary } from "../../components/paper/economic-context
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ManualPaperStart } from "../../components/workbench/manual-paper-start";
 import { CurrentCash } from "../../components/workbench/current-cash";
 import { AccountSummary } from "../../components/workbench/account-summary";
 import { ManagementSummaryCard } from "../../components/paper/management-summary";
@@ -113,6 +114,8 @@ export function WorkbenchPanel({
       <p className="workbench-announcement" role="status" aria-label="工作台状态" aria-live="polite" aria-atomic="true">
         <strong>{refreshing ? "正在刷新" : copy.label}</strong><span>{refreshing ? "保留当前事实，等待只读刷新结果。" : copy.detail}</span>
       </p>
+
+      {state !== "forbidden" && state !== "loading" && <ManualPaperStart />}
 
       {payload ? <>
         <ModeStrip workbench={payload.data} />

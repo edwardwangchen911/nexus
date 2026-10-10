@@ -1,3 +1,4 @@
+import { isManualReceipt, manualEntryErrors } from "../paper/manual-receipt";
 import "server-only";
 
 import { v7 as uuidv7, validate as validateUuid, version as uuidVersion } from "uuid";
@@ -150,7 +151,10 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
             ? DRAFT_FX_MESSAGE
             : SAFE_ENGINE_ERROR_MESSAGES[error.code],
           request_id: error.request_id,
-          details: {},
+          details: /^\/internal\/v1\/paper\/manual-requests(?:\/[^/]+)?$/.test(pathname)
+            && typeof error.details.reason_code === "string"
+            && Object.hasOwn(manualEntryErrors, error.details.reason_code)
+            ? { reason_code: error.details.reason_code } : {},
         },
       }, { status, headers: safeHeaders(upstreamHeaders, schemaPath ? undefined : requestUrl) });
     }
@@ -162,6 +166,14 @@ const INVALID_DATA = Symbol("invalid engine data");
 
 function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: string, requestMethod?: string): unknown | typeof INVALID_DATA {
   const pathname = enginePathname(requestUrl, schemaPath);
+  if (pathname === "/internal/v1/paper/manual-requests") {
+    return requestMethod?.toUpperCase() === "GET" && data === null
+      || ["GET", "POST"].includes(requestMethod?.toUpperCase() ?? "") && isManualReceipt(data)
+      ? data : INVALID_DATA;
+  }
+  const manualRequest = /^\/internal\/v1\/paper\/manual-requests\/([^/]+)$/.exec(pathname);
+  if (manualRequest) return requestMethod?.toUpperCase() === "GET" && validateUuid(manualRequest[1])
+    && isManualReceipt(data) && sameUuid(data.request_id, manualRequest[1]) ? data : INVALID_DATA;
   if (["/health/ready", "/internal/v1/readiness"].includes(pathname)) {
     return requestMethod?.toUpperCase() === "GET"
       && matchesRuntimeSchema(data, readinessRuntimeSchema) && isPlain(data)

@@ -121,3 +121,27 @@ async function installFixtures(page: Page, payload: WorkbenchPayload, methods: s
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
   });
 }
+
+test("manual start survives refresh as a readonly original-request lookup", async ({ page }) => {
+  await installFixtures(page, readyWorkbench(), []);
+  const calls: { method: string; key: string | undefined }[] = [];
+  const receipt = { request_id: "0198f7a0-1111-7777-8111-111111111111", mode: "research_only", requested_at: "2026-10-09T14:00:00Z", status: "queued", code: "MANUAL_REQUEST_QUEUED", cycle_id: null, execution_locked: true };
+  await page.route("**/api/v1/paper/manual-requests", async (route) => {
+    const request = route.request();
+    calls.push({ method: request.method(), key: request.headers()["idempotency-key"] });
+    if (request.method() === "POST") expect(request.postDataJSON()).toEqual({ mode: "research_only" });
+    await route.fulfill({ json: { data: receipt, meta: meta() } });
+  });
+  await page.goto("/workspace");
+  await expect(page.getByRole("button", { name: "仅研究", exact: true })).toBeEnabled();
+  expect(calls).toHaveLength(0);
+  await page.getByRole("button", { name: "仅研究", exact: true }).click();
+  await expect(page.getByText("已登记，等待宿主处理", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "研究并内部模拟", exact: true })).toBeDisabled();
+  await page.reload();
+  await expect(page.getByText("已登记，等待宿主处理", { exact: true })).toBeVisible();
+  expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  expect(calls.length).toBeGreaterThan(1);
+  expect(calls.slice(1).every((call) => call.method === "GET" && call.key === calls[0].key)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

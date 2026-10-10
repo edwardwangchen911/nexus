@@ -2853,6 +2853,12 @@ def test_due_evaluation_keeps_priority_over_normal_cycle(monkeypatch, tmp_path, 
 def test_waiting_evaluation_is_reinspected_before_normal_wait_deadline(
     monkeypatch, tmp_path, normal_wait
 ):
+    from nexus.ops import manual_paper_host
+
+    async def no_manual_close(_settings, *, snapshot, **_kwargs):
+        return snapshot
+
+    monkeypatch.setattr(manual_paper_host, "inspect_manual_close", no_manual_close)
     env_file = explicit_service_config(tmp_path)
     started_at = NOW + timedelta(minutes=6)
     current = [started_at]
@@ -3241,6 +3247,7 @@ def test_local_loop_reinspection_uses_service_environment_loader(
 
     async def record_heartbeat(settings, **kwargs):
         assert settings.release_revision == "a" * 40
+        assert kwargs["account_id"] == UUID(int=1)
 
     async def model_ready() -> None:
         return None

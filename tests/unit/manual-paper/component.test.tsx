@@ -1,0 +1,78 @@
+import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { ManualPaperStart } from "../../../app/components/workbench/manual-paper-start";
+const id = "0198f7a0-1111-7777-8111-111111111111";
+const receipt = { request_id: id, mode: "research_only", requested_at: "2026-10-09T14:00:00Z", status: "queued", code: "MANUAL_REQUEST_QUEUED", cycle_id: null, execution_locked: true };
+const fetchMock = vi.fn();
+beforeEach(() => { sessionStorage.clear(); fetchMock.mockReset(); vi.stubGlobal("fetch", fetchMock); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+it("mounts without writes, starts only the explicit mode, and prevents duplicate clicks", async () => {
+  fetchMock.mockResolvedValue(Response.json({ data: receipt }));
+  render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled());
+  expect(fetchMock).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "仅研究" }));
+  fireEvent.click(screen.getByRole("button", { name: "仅研究" }));
+  await screen.findByText("已登记，等待宿主处理");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST", body: '{"mode":"research_only"}' });
+  expect(screen.getByRole("button", { name: "研究并内部模拟" })).toBeDisabled();
+});
+it("keeps an uncertain key across refresh and only queries it, without retrying POST", async () => {
+  fetchMock.mockRejectedValueOnce(new Error("lost"));
+  const view = render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "仅研究" }));
+  await screen.findByText(/提交结果尚未确认/);
+  const key = fetchMock.mock.calls[0][1].headers["Idempotency-Key"];
+  view.unmount();
+  fetchMock.mockResolvedValue(Response.json({ data: receipt }));
+  render(<ManualPaperStart />);
+  await screen.findByText("已登记，等待宿主处理");
+  expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: "GET", headers: { "Idempotency-Key": key } });
+  expect(fetchMock.mock.calls.filter((c) => c[1].method === "POST")).toHaveLength(1);
+});
+it("does not unlock new starts when the original lookup is missing or malformed", async () => {
+  fetchMock.mockRejectedValueOnce(new Error("lost"));
+  render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "仅研究" }));
+  await screen.findByText(/提交结果尚未确认/);
+  fetchMock.mockResolvedValue(Response.json({ data: null }));
+  fireEvent.click(screen.getByRole("button", { name: "核对原请求" }));
+  await screen.findByText(/未读取到持久化回执/);
+  expect(screen.getByRole("button", { name: "仅研究" })).toBeDisabled();
+  expect(fetchMock.mock.calls.filter((c) => c[1].method === "POST")).toHaveLength(1);
+});
+it("rejects mismatched mode and ignores untrusted raw errors", async () => {
+  fetchMock.mockResolvedValue(Response.json({ data: { ...receipt, mode: "research_and_paper" } }));
+  render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "仅研究" }));
+  await waitFor(() => expect(screen.getByText(/提交结果尚未确认/)).toBeVisible());
+  expect(screen.queryByText("已登记，等待宿主处理")).not.toBeInTheDocument();
+});
+it("submits internal paper explicitly and allows a new request only after a confirmed terminal receipt", async () => {
+  const cycle = "0198f7a0-2222-7777-8111-111111111111";
+  fetchMock.mockResolvedValue(Response.json({ data: { ...receipt, mode: "research_and_paper", status: "completed", code: "MANUAL_PAPER_COMPLETED", cycle_id: cycle } }));
+  render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "研究并内部模拟" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "研究并内部模拟" }));
+  await screen.findByText("周期已完成");
+  expect(fetchMock.mock.calls[0][1].body).toBe('{"mode":"research_and_paper"}');
+  expect(screen.getByRole("link", { name: "查看周期决策" })).toHaveAttribute("href", `/decisions/${cycle}`);
+  fireEvent.click(screen.getByRole("button", { name: "开始新的请求" }));
+  expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+it("allows an explicit new selection after a known refusal but hides raw error material", async () => {
+  fetchMock.mockResolvedValue(Response.json({ error: { message: "private", details: { reason_code: "MANUAL_HOST_NOT_READY" } } }, { status: 409 }));
+  render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "仅研究" }));
+  await screen.findByText("同版本宿主尚未就绪。");
+  expect(screen.queryByText("private")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "开始新的请求" }));
+  expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});

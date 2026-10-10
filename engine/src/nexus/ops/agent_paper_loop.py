@@ -12,7 +12,7 @@ import stat
 import sys
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -159,19 +159,49 @@ def agent_paper_process_version(release_revision: str | None) -> str:
     return f"{AGENT_PAPER_LOOP_PROCESS_VERSION}+{release_revision}"
 
 
+def agent_paper_host_identity(
+    settings: EngineSettings, *, worker_id: str, account_id: UUID | None
+) -> tuple[str, str]:
+    """Advertise only the enabled scope consumed by this process, never a file revision."""
+    from nexus.paper.manual_entry import MANUAL_HOST_PROTOCOL, manual_host_scope
+    from nexus.settings import AgentRuntimeMode
+
+    if not _safe_agent_paper_worker_id(worker_id) or ":manual:" in worker_id:
+        raise ValueError("MANUAL_HOST_NOT_READY")
+    legacy = (worker_id, agent_paper_process_version(settings.release_revision))
+    if (
+        settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        or not settings.agent_paper_manual_enabled
+        or not settings.agent_paper_cycle_enabled
+        or settings.formal_budget_protection_enabled
+        or settings.release_revision is None
+        or account_id is None
+        or settings.agent_paper_account_id != account_id
+        or settings.agent_paper_candidate_batch_id is None
+        or settings.agent_paper_formal_model_config_id is None
+    ):
+        return legacy
+    return (
+        f"{worker_id}:manual:{manual_host_scope(settings)}",
+        f"{MANUAL_HOST_PROTOCOL}+{settings.release_revision}",
+    )
+
+
 def parse_agent_paper_process_version(value: object) -> tuple[str | None, str | None]:
     """Read current and legacy heartbeat versions without guessing malformed revisions."""
+    from nexus.paper.manual_entry import MANUAL_HOST_PROTOCOL
+
     if value == AGENT_PAPER_LOOP_PROCESS_VERSION:
         return AGENT_PAPER_LOOP_PROCESS_VERSION, None
     if not isinstance(value, str):
         return None, None
-    prefix = f"{AGENT_PAPER_LOOP_PROCESS_VERSION}+"
-    if not value.startswith(prefix):
-        return None, None
-    release_revision = value.removeprefix(prefix)
-    if _RELEASE_REVISION.fullmatch(release_revision) is None:
-        return None, None
-    return AGENT_PAPER_LOOP_PROCESS_VERSION, release_revision
+    for protocol in (AGENT_PAPER_LOOP_PROCESS_VERSION, MANUAL_HOST_PROTOCOL):
+        prefix = f"{protocol}+"
+        if value.startswith(prefix):
+            release_revision = value.removeprefix(prefix)
+            if _RELEASE_REVISION.fullmatch(release_revision) is not None:
+                return protocol, release_revision
+    return None, None
 
 
 class AgentPaperLoopAction(StrEnum):
@@ -183,6 +213,8 @@ class AgentPaperLoopAction(StrEnum):
     WAIT_FOR_EVALUATION = "wait_for_evaluation"
     WAIT_FOR_EVALUATION_JOB = "wait_for_evaluation_job"
     TRIGGER = "trigger"
+    FINISH_MANUAL = "finish_manual"
+    TRIGGER_MANUAL = "trigger_manual"
     PREPARE_INPUTS = "prepare_inputs"
     RUN_RESEARCH_JOB = "run_research_job"
     RESUME = "resume"
@@ -237,6 +269,9 @@ class AgentPaperLoopSnapshot:
     evaluation_slot_at: datetime | None = None
     action_account_id: UUID | None = None
     additional_market_windows_allowed: bool = False
+    manual_finish_request_id: UUID | None = None
+    manual_pending_request_id: UUID | None = None
+    manual_pending_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -728,6 +763,7 @@ async def heartbeat_agent_paper_loop(
     worker_id: str,
     started_at: datetime,
     seen_at: datetime,
+    account_id: UUID | None = None,
 ) -> None:
     """Persist one Agent paper-loop liveness fact without changing business state."""
     if not settings.database_url:
@@ -739,6 +775,9 @@ async def heartbeat_agent_paper_loop(
         or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+    worker_id, process_version = agent_paper_host_identity(
+        settings, worker_id=worker_id, account_id=account_id
+    )
     engine = create_async_engine(settings.database_url)
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -747,7 +786,7 @@ async def heartbeat_agent_paper_loop(
                 session,
                 queue=QueueName.AGENT_PAPER,
                 worker_id=worker_id,
-                process_version=agent_paper_process_version(settings.release_revision),
+                process_version=process_version,
                 migration_head=CURRENT_MIGRATION_HEAD,
                 started_at=started_at,
                 seen_at=seen_at,
@@ -1679,6 +1718,31 @@ def choose_loop_action(
     """Choose one safe next action without performing I/O or retrying unknown work."""
     if not snapshot.enabled:
         return AgentPaperLoopAction.STOP_DISABLED
+    if snapshot.manual_pending_status in {"preparing", "unknown"}:
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    if snapshot.manual_finish_request_id is not None:
+        if (
+            snapshot.evaluation_id is not None
+            or snapshot.cycle_status not in {"completed", "failed", "unavailable"}
+            or snapshot.cycle_id is None
+        ):
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        return AgentPaperLoopAction.FINISH_MANUAL
+    if snapshot.manual_pending_request_id is not None:
+        if snapshot.manual_pending_status != "queued":
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        ordinary = choose_loop_action(
+            replace(snapshot, manual_pending_request_id=None, manual_pending_status=None),
+            prepared_market_open_at=prepared_market_open_at,
+        )
+        if ordinary in {
+            AgentPaperLoopAction.WAIT_FOR_SESSION,
+            AgentPaperLoopAction.WAIT_FOR_SLOT,
+            AgentPaperLoopAction.PREPARE_INPUTS,
+            AgentPaperLoopAction.PUBLISH_PERFORMANCE,
+        }:
+            return AgentPaperLoopAction.TRIGGER_MANUAL
+        return ordinary
     if snapshot.evaluation_id is None and snapshot.cycle_result_code == "POLICY_UNCONFIRMED":
         if snapshot.cycle_id is None or snapshot.cycle_status not in {"researching", "unavailable"}:
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
@@ -1917,6 +1981,7 @@ async def run_foreground_loop(
     ],
     sleep: Callable[[float], Awaitable[None]],
     wait_sleep: Callable[[float], Awaitable[None]] | None = None,
+    wake_for_pending_work: Callable[[], Awaitable[bool]] | None = None,
     heartbeat: Callable[[datetime], Awaitable[None]],
     shutdown_requested: Callable[[], bool] = lambda: False,
     confirm_shutdown: Callable[
@@ -1972,6 +2037,13 @@ async def run_foreground_loop(
                 seen_at = await persist_heartbeat()
             except Exception as error:
                 return stop_unknown("heartbeat", error=error)
+            if wake_for_pending_work is not None:
+                try:
+                    async with asyncio.timeout(interval_seconds):
+                        if await wake_for_pending_work():
+                            break
+                except Exception as error:
+                    return stop_unknown("inspect", error=error)
             if (
                 wall_started_at is not None
                 and seen_at >= wall_started_at
@@ -2393,6 +2465,10 @@ async def run_local_agent_paper_loop(
                     account_id=account_id,
                     expected_calendar_authority_id=calendar_authority_id,
                 )
+                from nexus.ops.manual_paper_host import inspect_manual_close, inspect_manual_queue
+
+                normal = await inspect_manual_close(current, account_id=account_id, snapshot=normal)
+                normal = await inspect_manual_queue(current, account_id=account_id, snapshot=normal)
                 if evaluation is None:
                     return normal
                 assert evaluation_wait_at is not None
@@ -2417,9 +2493,15 @@ async def run_local_agent_paper_loop(
                 await heartbeat_agent_paper_loop(
                     settings,
                     worker_id=worker_id,
+                    account_id=account_id,
                     started_at=started_at,
                     seen_at=seen_at,
                 )
+
+            async def wake_for_pending_work() -> bool:
+                from nexus.ops.manual_paper_host import manual_work_pending
+
+                return await manual_work_pending(settings, account_id=account_id)
 
             async def confirm_shutdown(
                 action: AgentPaperLoopAction,
@@ -2446,6 +2528,9 @@ async def run_local_agent_paper_loop(
                     confirm_shutdown=confirm_shutdown,
                     clock=clock,
                     monotonic=monotonic,
+                    wake_for_pending_work=(
+                        wake_for_pending_work if settings.agent_paper_manual_enabled else None
+                    ),
                 )
             except ValueError as error:
                 if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
@@ -2579,6 +2664,60 @@ async def execute_agent_paper_loop_action(
     env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
+    if action == AgentPaperLoopAction.TRIGGER_MANUAL:
+        from nexus.ops.manual_paper_host import dispatch_manual_request
+
+        if (
+            choose_loop_action(snapshot) != action
+            or snapshot.manual_pending_request_id is None
+            or snapshot.calendar_authority_id is None
+            or account_id != settings.agent_paper_account_id
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        environment = load_agent_paper_service_environment(
+            repo_root,
+            {} if env_file is not None else os.environ,
+            **({"env_file": env_file} if env_file is not None else {}),
+        )
+        trigger_settings = (
+            _FileTriggerSettings if env_file is not None else AgentPaperTriggerSettings
+        ).model_validate(environment)
+        require_formal_host_configuration_match(settings, trigger_settings)
+        await require_formal_host_trigger_profile(trigger_settings, now=snapshot.now)
+        await dispatch_manual_request(
+            settings,
+            trigger_settings,
+            request_id=snapshot.manual_pending_request_id,
+            repo_root=repo_root,
+            calendar_authority_id=snapshot.calendar_authority_id,
+            process_environment=environment,
+        )
+        return None
+    if action == AgentPaperLoopAction.FINISH_MANUAL:
+        from nexus.ops.manual_paper_host import finish_configured_manual_request
+        from nexus.persistence.session import session_factory
+
+        if (
+            snapshot.manual_finish_request_id is None
+            or snapshot.cycle_id is None
+            or account_id != settings.agent_paper_account_id
+            or choose_loop_action(snapshot) != action
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        factory = session_factory(settings)
+        try:
+            async with factory.begin() as session:
+                view = await finish_configured_manual_request(
+                    session,
+                    settings,
+                    request_id=snapshot.manual_finish_request_id,
+                    cancel_unused=True,
+                )
+                if view.cycle_id != snapshot.cycle_id:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        finally:
+            await factory.kw["bind"].dispose()
+        return None
     bound_environment: dict[str, str] = {}
     pinned_calendar = None
     if settings.formal_budget_protection_enabled:
@@ -3905,6 +4044,17 @@ async def _inspect_portfolio_batch(
                 )
             )
             policy_block = approval is None
+            if policy_block:
+                from nexus.paper.manual_request import manual_request_for_cycle
+
+                try:
+                    manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
+                except ValueError as error:
+                    raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
+                # Research completion does not activate a target or authorize orders.
+                # Only the fully bound explicit mode bypasses this scheduling block.
+                if manual is not None and manual.mode == "research_only":
+                    policy_block = False
             if approval is not None:
                 try:
                     await load_initial_approval_projection(
@@ -4313,6 +4463,10 @@ def _safe_agent_paper_worker_id(value: object) -> bool:
     if not isinstance(value, str) or not value.startswith("agent-paper-loop-"):
         return False
     suffix = value.removeprefix("agent-paper-loop-")
+    if ":manual:" in suffix:
+        suffix, scope = suffix.split(":manual:", 1)
+        if re.fullmatch(r"[0-9a-f]{64}", scope) is None:
+            return False
     try:
         return str(UUID(suffix)) == suffix
     except (AttributeError, TypeError, ValueError):
@@ -4344,11 +4498,15 @@ def _classify_agent_paper_service_heartbeat(
         or seen_at < started_at
     ):
         return {"status": "unavailable"}
+    from nexus.paper.manual_entry import MANUAL_HOST_PROTOCOL
+
     process_version = getattr(heartbeat, "process_version", None)
     process_protocol, release_revision = parse_agent_paper_process_version(process_version)
     migration_head = getattr(heartbeat, "migration_head", None)
     if (
-        process_protocol != AGENT_PAPER_LOOP_PROCESS_VERSION
+        process_protocol not in {AGENT_PAPER_LOOP_PROCESS_VERSION, MANUAL_HOST_PROTOCOL}
+        or (process_protocol == MANUAL_HOST_PROTOCOL)
+        != (":manual:" in str(getattr(heartbeat, "worker_id", "")))
         or migration_head != CURRENT_MIGRATION_HEAD
     ):
         return {"status": "incompatible"}

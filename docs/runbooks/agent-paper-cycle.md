@@ -413,3 +413,44 @@ DATABASE_URL="$EMPTY_TEMP_DATABASE_URL" \
 必须以 `AGENT_PAPER_INTRADAY_FACTS_EXIST` 失败；存在任一 Schwab Agent cycle、decision、authority
 或 window 事实时，0058 downgrade 必须以 `SCHWAB_AGENT_PAPER_FACTS_EXIST` 失败。不得为降级删除
 事实，不得在当前业务库试跑，不删除 MinIO bucket、volume、数据库或迁移历史。
+
+## 11. 显式新手动请求（隔离候选，尚未启用）
+
+该入口是用户批准的独立新请求，支持 `research_only` / `research_and_paper`，不重放旧定时失败槽。
+目前已完成本地请求、原生周期、受保护 API/CLI，以及只读唤醒、一次领取和显式收尾的隔离验收。
+正常宿主已接通只读队列、首次领取 dispatcher 和显式收尾调度；未知启动不重复调用。
+正常 trigger 的受控来源和隔离数据库成功创建已验证，手动来源冻结要求盘内；已确认且无占用的
+失败终态可显式收尾；已证明完全未执行的研究可在宿主收尾中原生取消并释放预留，未知用量和
+其他有效租约继续阻止收尾。宿主协议与正常消费者已通过受控隔离验收；Workspace 显式动作、BFF 和浏览器回执流程已接通。真实来源整链与自然周期验收仍待完成。
+不在当前业务库执行下述 start，不据此启用服务。完成宿主与页面验收及获准更新服务后才可使用。
+
+正常入口只读受保护配置中的 `NEXUS_AGENT_PAPER_ACCOUNT_ID`、
+`NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID`、`NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID`，
+客户端不能提交账户、缩减候选池、切换模型或指定业务时刻。
+`NEXUS_AGENT_PAPER_MANUAL_ENABLED` 默认 false；它不解除 execution_locked。
+新请求还要求 cycle 开关开启、唯一宿主心跳 30 秒内新鲜、schema 和 release 一致，以及宿主的
+`nexus-manual-paper-v1` 领取协议与账户/批次/模型/预算保护/启用配置的 scope 哈希一致。
+当前定时宿主不声明该协议，因此即使只改开关也会明确拒绝，不会静默排队到次日。
+
+API：HMAC 验证的 `POST /internal/v1/paper/manual-requests`，必需 `Idempotency-Key`，
+body 仅含 `mode`；`GET /internal/v1/paper/manual-requests/{request_id}` 仅读持久化回执。
+所有业务时刻及 meta.as_of 使用数据库时钟。另有 `GET /internal/v1/paper/manual-requests`，以原 `Idempotency-Key` 仅查配置账户的持久化回执；查无记录返回 data=null，不能据此重放提交。Workspace 通过受认证 BFF 的同源写入校验、严格 mode body 和原请求键接线。页面先保存请求键，结果不明时只查询原键；刷新不提交。确认终态或固定安全拒绝后须显式选择新请求。
+
+CLI 使用同一服务，不采集来源、不调用模型、不创建周期或订单：
+
+```bash
+uv run --project engine nexus-engine-manual-paper --repo-root "$PWD" \
+  --env-file infra/.env.local start --mode research_only --idempotency-key "$NEW_REQUEST_KEY"
+uv run --project engine nexus-engine-manual-paper --repo-root "$PWD" \
+  --env-file infra/.env.local read --request-id "$MANUAL_REQUEST_ID"
+```
+
+同键先读原始回执：关闭入口、候选批次轮换、收盘或宿主停止后也不重做采集。
+同键改变模式拒绝；新键不绕过旧周期、订单/预留或未知结果。当前 reader 只支持盘内同日新请求，
+盘外明确返回 `MANUAL_SESSION_UNAVAILABLE`，不自动变成次日执行。
+正式定时预算保护开启时返回 `MANUAL_BUDGET_PROTECTED`，不动定时专用分配，不提高额度。
+GET、CLI read、刷新及重复 POST 均不能领取、恢复或重跑未知请求。
+
+0075 迁移增加不可变请求及回执、仅研究原生终态分支和数据库执行门禁；只在隔离库验证。
+有手动事实时不得直接降级删除，应用回退保留 head 与原始事实；尚无主库迁移或服务部署。
+旧应用对新 head 的兼容性须单独验证；不能把保留 schema 等同于旧镜像可直接启动。

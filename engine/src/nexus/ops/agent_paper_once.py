@@ -212,7 +212,10 @@ class AgentPaperTriggerRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     action: Literal["trigger"]
-    trigger_mode: Literal["scheduled", "manual_recovery", "synthesis_recovery"] = "scheduled"
+    trigger_mode: Literal["scheduled", "manual", "manual_recovery", "synthesis_recovery"] = (
+        "scheduled"
+    )
+    manual_request_id: UUID | None = None
     account_id: UUID
     candidate_batch_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
@@ -224,8 +227,12 @@ class AgentPaperTriggerRequest(BaseModel):
         if (
             self.formal_stage_capacity != (self.formal_model_config_id is not None)
             or self.formal_stage_capacity
-            and self.trigger_mode != "scheduled"
+            and self.trigger_mode not in {"scheduled", "manual"}
         ):
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        if (self.trigger_mode == "manual") != (self.manual_request_id is not None):
+            raise ValueError("MANUAL_REQUEST_INVALID")
+        if self.trigger_mode == "manual" and not self.formal_stage_capacity:
             raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
         return self
 
@@ -662,6 +669,7 @@ async def prepare_schwab_decision_authority(
     expected_calendar_authority_id: UUID | None = None,
     process_environment: Mapping[str, str] | None = None,
     expand_execution_scope: bool = False,
+    manual_market_window: bool = False,
 ) -> CycleAuthority:
     """Freeze one exact shared provider pass for portfolio or registered evaluation."""
     if initial_time is None:
@@ -685,7 +693,12 @@ async def prepare_schwab_decision_authority(
     )
     if (
         service_calendar.session != decision_session
-        or initial_time < service_calendar.decision_window_start_at
+        or initial_time
+        < (
+            service_calendar.market_open_at
+            if manual_market_window
+            else service_calendar.decision_window_start_at
+        )
         or initial_time >= service_calendar.market_close_at
     ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
@@ -848,7 +861,12 @@ async def prepare_schwab_decision_authority(
     if (
         final_calendar.calendar_authority_id != calendar_authority_id
         or final_calendar.session != decision_session
-        or decision_time < final_calendar.decision_window_start_at
+        or decision_time
+        < (
+            final_calendar.market_open_at
+            if manual_market_window
+            else final_calendar.decision_window_start_at
+        )
         or decision_time >= final_calendar.market_close_at
     ):
         raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
@@ -908,7 +926,9 @@ async def trigger_in_session(
     if not isinstance(now, datetime):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
     if (
-        request.formal_stage_capacity != reservation.formal_stage_capacity
+        request.trigger_mode != reservation.trigger_mode
+        or request.manual_request_id != reservation.manual_request_id
+        or request.formal_stage_capacity != reservation.formal_stage_capacity
         or request.formal_model_config_id != reservation.formal_model_config_id
     ):
         raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
@@ -921,6 +941,17 @@ async def trigger_in_session(
         )
         if reservation.formal_model_hash != model.config_hash:
             raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    if request.manual_request_id is not None:
+        from nexus.paper.manual_request import require_preparing_manual_request
+
+        await require_preparing_manual_request(
+            session,
+            request_id=request.manual_request_id,
+            account_id=request.account_id,
+            batch_id=request.candidate_batch_id,
+            model_config_id=request.formal_model_config_id,
+            now=now,
+        )
     batch, identities = await validate_agent_paper_candidate_batch(
         session,
         batch_id=request.candidate_batch_id,
@@ -948,6 +979,7 @@ async def trigger_in_session(
         expected_calendar_authority_id=expected_calendar_authority_id,
         process_environment=process_environment,
         expand_execution_scope=True,
+        manual_market_window=request.trigger_mode == "manual",
     )
     return await start_schwab_agent_paper_cycle(
         session,
@@ -960,6 +992,7 @@ async def trigger_in_session(
         execution_scope_max_symbols=settings.intraday_max_symbols,
         formal_stage_capacity=request.formal_stage_capacity,
         formal_model_config_id=request.formal_model_config_id,
+        manual_request_id=request.manual_request_id,
     )
 
 
@@ -990,6 +1023,7 @@ async def trigger_once(
                 formal_stage_capacity=request.formal_stage_capacity,
                 formal_model_config_id=request.formal_model_config_id,
                 trigger_mode=request.trigger_mode,
+                manual_request_id=request.manual_request_id,
             )
         if reservation.replay is not None:
             return reservation.replay

@@ -239,6 +239,13 @@ async def _require_synthesis_recovery_predecessor(
         raise ValueError(code)
 
 
+def manual_decision_slot(now: datetime) -> datetime:
+    """Independent manual request time, never a backdated scheduled slot."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    return now.astimezone(UTC)
+
+
 async def reserve_schwab_agent_paper_trigger(
     session: AsyncSession,
     *,
@@ -246,7 +253,10 @@ async def reserve_schwab_agent_paper_trigger(
     client_idempotency_key: str,
     now: datetime,
     candidate_batch_id: UUID | None = None,
-    trigger_mode: Literal["scheduled", "manual_recovery", "synthesis_recovery"] = "scheduled",
+    trigger_mode: Literal[
+        "scheduled", "manual", "manual_recovery", "synthesis_recovery"
+    ] = "scheduled",
+    manual_request_id: UUID | None = None,
     require_synthesis_prompt: bool = False,
     formal_stage_capacity: bool = False,
     formal_model_config_id: UUID | None = None,
@@ -257,7 +267,7 @@ async def reserve_schwab_agent_paper_trigger(
         candidate_stage_capacity=False,
         formal_model_config_id=formal_model_config_id,
     )
-    if formal_stage_capacity and trigger_mode != "scheduled":
+    if formal_stage_capacity and trigger_mode not in {"scheduled", "manual"}:
         raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     if (
         now.tzinfo is None
@@ -266,14 +276,57 @@ async def reserve_schwab_agent_paper_trigger(
         or len(client_idempotency_key) > 255
     ):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
-    local_time = now.astimezone(ZoneInfo("America/New_York"))
+    if (trigger_mode == "manual") != (manual_request_id is not None) or (
+        trigger_mode == "manual" and not formal_stage_capacity
+    ):
+        raise ValueError("MANUAL_REQUEST_INVALID")
+    manual_row = None
+    manual_slot = None
+    if manual_request_id is not None:
+        from nexus.paper.manual_request import read_manual_request
+        from nexus.paper.target_service import lock_portfolio_account
+        from nexus.persistence.models.manual_paper import (
+            ManualPaperRequest,
+            ManualPaperRequestEvent,
+        )
+
+        await lock_portfolio_account(session, account_id)
+        manual_row = await session.get(ManualPaperRequest, manual_request_id)
+        if client_idempotency_key != f"manual-entry:{manual_request_id}":
+            raise ValueError("MANUAL_REQUEST_INVALID")
+        if (
+            manual_row is None
+            or manual_row.account_id != account_id
+            or manual_row.candidate_batch_id != candidate_batch_id
+            or manual_row.model_config_id != formal_model_config_id
+        ):
+            raise ValueError("MANUAL_REQUEST_INVALID")
+        view = await read_manual_request(session, manual_row)
+        if view.status not in {"preparing", "active", "completed", "unavailable"}:
+            raise ValueError("MANUAL_REQUEST_TERMINAL_OR_UNKNOWN")
+        prepared = await session.scalar(
+            select(ManualPaperRequestEvent).where(
+                ManualPaperRequestEvent.request_id == manual_row.id,
+                ManualPaperRequestEvent.status == "preparing",
+            )
+        )
+        if prepared is None:
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
+        manual_slot = manual_decision_slot(prepared.occurred_at)
+    local_time = (manual_slot or now).astimezone(ZoneInfo("America/New_York"))
     scheduled_local = datetime.combine(
         local_time.date(),
         PORTFOLIO_ALLOCATION_V1.decision_local_time,
         tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
     )
     scheduled_slot = scheduled_local.astimezone(UTC)
-    if trigger_mode == "scheduled":
+    if trigger_mode == "manual":
+        assert manual_row is not None and manual_slot is not None
+        decision_slot_at = manual_slot
+        route = "agent-paper-explicit-manual-v1"
+        schema = "agent_paper_explicit_manual_v1"
+        claim_key = str(manual_request_id)
+    elif trigger_mode == "scheduled":
         if floor_decision_slot(now) != scheduled_slot:
             raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
         decision_slot_at = scheduled_slot
@@ -339,6 +392,14 @@ async def reserve_schwab_agent_paper_trigger(
     }
     if trigger_mode != "scheduled":
         request_payload["trigger_mode"] = trigger_mode
+    if manual_row is not None:
+        request_payload.update(manual_request_id=str(manual_row.id), manual_mode=manual_row.mode)
+        if (
+            manual_row.batch_hash != batch.batch_hash
+            or formal_model is None
+            or manual_row.model_hash != formal_model.config_hash
+        ):
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
     if formal_model is not None:
         request_payload.update(
             formal_stage_capacity=True,
@@ -359,6 +420,7 @@ async def reserve_schwab_agent_paper_trigger(
     reservation = AgentPaperTriggerReservation(
         claim_id=claim.id,
         trigger_mode=trigger_mode,
+        manual_request_id=manual_request_id,
         decision_session=local_time.date(),
         decision_slot_at=decision_slot_at,
         candidate_batch_id=batch.batch_id,
@@ -368,6 +430,24 @@ async def reserve_schwab_agent_paper_trigger(
         formal_model_hash=None if formal_model is None else formal_model.config_hash,
     )
     if inserted:
+        from nexus.paper.manual_request import (
+            require_no_running_manual_request,
+            require_preparing_manual_request,
+        )
+
+        if manual_request_id is not None:
+            if manual_slot is None or manual_slot.date() != now.astimezone(UTC).date():
+                raise ValueError("AGENT_PAPER_OUTSIDE_WINDOW")
+            await require_preparing_manual_request(
+                session,
+                request_id=manual_request_id,
+                account_id=account_id,
+                batch_id=candidate_batch_id,
+                model_config_id=formal_model_config_id,
+                now=now,
+            )
+        else:
+            await require_no_running_manual_request(session, account_id=account_id)
         from nexus.agents.persistence import _lock_budget_day
         from nexus.paper.formal_budget_protection import _validate_binding, latest_binding
 
@@ -445,13 +525,18 @@ async def _require_formal_trigger_result(
         cycle is None
         or claim is None
         or reservation.formal_model_config_id is None
-        or reservation.trigger_mode != "scheduled"
+        or reservation.trigger_mode not in {"scheduled", "manual"}
         or cycle.decision_slot_at != reservation.decision_slot_at
         or cycle.decision_session != reservation.decision_session
         or cycle.candidate_batch_id != reservation.candidate_batch_id
         or claim.actor_id != f"local-agent-paper-schwab:{cycle.account_id}"
     ):
         raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    from nexus.paper.manual_request import manual_request_for_cycle
+
+    manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
+    if (None if manual is None else manual.id) != reservation.manual_request_id:
+        raise ValueError("MANUAL_REQUEST_INVALID")
     await _require_cycle_candidate_profile(
         session,
         cycle=cycle,
@@ -486,7 +571,13 @@ async def finish_schwab_agent_paper_trigger(
         .where(IdempotencyRecord.id == reservation.claim_id)
         .with_for_update()
     )
-    if reservation.trigger_mode == "scheduled":
+    if reservation.trigger_mode == "manual":
+        if reservation.manual_request_id is None:
+            raise ValueError("MANUAL_REQUEST_INVALID")
+        route = "agent-paper-explicit-manual-v1"
+        schema = "agent_paper_explicit_manual_v1"
+        claim_key = str(reservation.manual_request_id)
+    elif reservation.trigger_mode == "scheduled":
         route = "agent-paper-schwab-trigger-v2"
         schema = "agent_paper_schwab_trigger_v2"
         claim_key = reservation.decision_slot_at.isoformat()
@@ -657,6 +748,7 @@ async def start_schwab_agent_paper_cycle(
     candidate_model_config_id: UUID | None = None,
     formal_stage_capacity: bool = False,
     formal_model_config_id: UUID | None = None,
+    manual_request_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
     _validate_formal_cycle_arguments(
@@ -721,6 +813,9 @@ async def start_schwab_agent_paper_cycle(
     account = await session.get(PaperAccountRecord, authority.account_id)
     if account is None or account.portfolio_id != authority.portfolio_id:
         raise AgentPaperCycleError("AGENT_PAPER_ACCOUNT_INVALID")
+    from nexus.paper.target_service import lock_portfolio_account
+
+    await lock_portfolio_account(session, authority.account_id)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
         {"scope": f"nexus:agent-paper-cycle:{authority.account_id}"},
@@ -752,6 +847,11 @@ async def start_schwab_agent_paper_cycle(
             )
         ):
             raise ValueError("AGENT_PAPER_CANDIDATE_CONFLICT")
+        from nexus.paper.manual_request import manual_request_for_cycle
+
+        manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
+        if (None if manual is None else manual.id) != manual_request_id:
+            raise ValueError("MANUAL_REQUEST_INVALID")
         events = await _events(session, cycle.id)
         if not events:
             raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
@@ -773,7 +873,74 @@ async def start_schwab_agent_paper_cycle(
         candidate_model_config_id=candidate_model_config_id,
         formal_stage_capacity=formal_stage_capacity,
         formal_model_config_id=formal_model_config_id,
+        manual_request_id=manual_request_id,
     )
+
+
+async def finish_manual_paper_cycle(
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    now: datetime,
+) -> AgentPaperCycleResult:
+    """Explicit native write after settled orders; never performed by page reads."""
+    from nexus.domain.time import require_utc
+    from nexus.paper.manual_request import _require_cycle_jobs_settled, manual_request_for_cycle
+    from nexus.paper.read_service import PaperReadService
+    from nexus.paper.target_service import (
+        lock_portfolio_account,
+        require_activation_projection_unoccupied,
+        require_no_unknown_cancel_requests,
+    )
+
+    now = require_utc(now)
+    from nexus.paper.manual_request import _database_now
+
+    database_now = await _database_now(session)
+    if now > database_now:
+        raise ValueError("MANUAL_RESULT_UNKNOWN")
+    now = database_now
+    cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+    if cycle is None:
+        raise ValueError("MANUAL_REQUEST_INVALID")
+    await lock_portfolio_account(session, cycle.account_id)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
+    )
+    manual = await manual_request_for_cycle(session, cycle_id=cycle_id)
+    if manual is None or manual.mode != "research_and_paper":
+        raise ValueError("MANUAL_REQUEST_INVALID")
+    events = await _events(session, cycle_id)
+    if events[-1].to_status == "completed":
+        return _result(cycle_id, events, replayed=True)
+    if events[-1].to_status != "awaiting_market":
+        raise ValueError("MANUAL_RESULT_UNKNOWN")
+    await _require_cycle_candidate_profile(
+        session,
+        cycle=cycle,
+        candidate_stage_capacity=False,
+        formal_stage_capacity=True,
+        now=now,
+        expected_formal_model_id=manual.model_config_id,
+    )
+    detail = await PaperReadService(session, now).agent_cycle_detail(cycle_id)
+    if (
+        detail is None
+        or detail.cycle.status != "completed"
+        or detail.cycle.result_code != "PAPER_CYCLE_COMPLETED"
+    ):
+        raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    await _require_cycle_jobs_settled(
+        session, cycle_id=cycle_id, now=now, require_no_live_lease=False
+    )
+    projection = await load_paper_projection(session, account_id=cycle.account_id, as_of=now)
+    await require_no_unknown_cancel_requests(session, account_id=cycle.account_id, as_of=now)
+    await require_activation_projection_unoccupied(
+        session, account_id=cycle.account_id, projection=projection
+    )
+    await _append_event(session, cycle, "awaiting_market", "completed", "PAPER_CYCLE_COMPLETED", {})
+    return _result(cycle_id, await _events(session, cycle_id), replayed=False)
 
 
 async def resume_schwab_agent_paper_cycle(
@@ -811,6 +978,9 @@ async def resume_schwab_agent_paper_cycle(
         now=now,
         formal_stage_capacity=formal_stage_capacity,
     )
+    from nexus.paper.target_service import lock_portfolio_account
+
+    await lock_portfolio_account(session, cycle.account_id)
     from nexus.paper.economic_cycle import read_economic_cycle
 
     economic = await read_economic_cycle(session, cycle_id=cycle.id)
@@ -1152,6 +1322,7 @@ async def _start_cycle(
     formal_stage_capacity: bool = False,
     formal_model_config_id: UUID | None = None,
     economic_lane_ref: EconomicLaneRef | None = None,
+    manual_request_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     _validate_formal_cycle_arguments(
         formal_stage_capacity=formal_stage_capacity,
@@ -1237,6 +1408,25 @@ async def _start_cycle(
             )
         ):
             raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
+    from nexus.paper.manual_request import (
+        require_no_running_manual_request,
+        require_preparing_manual_request,
+    )
+
+    manual = None
+    if manual_request_id is not None:
+        if not formal_stage_capacity or economic_lane_ref is not None:
+            raise ValueError("MANUAL_REQUEST_INVALID")
+        manual = await require_preparing_manual_request(
+            session,
+            request_id=manual_request_id,
+            account_id=authority.account_id,
+            batch_id=candidate_batch_id,
+            model_config_id=formal_model_config_id,
+            now=authority.decision_time,
+        )
+    else:
+        await require_no_running_manual_request(session, account_id=authority.account_id)
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time
     )
@@ -1336,7 +1526,15 @@ async def _start_cycle(
             "formal_model_config_id": str(formal_model.id),
             "formal_model_hash": formal_model.config_hash,
         }
+    if manual is not None:
+        profile_facts.update(manual_request_id=str(manual.id), manual_mode=manual.mode)
     await _append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", profile_facts)
+    if manual is not None:
+        from nexus.paper.manual_request import record_manual_request_event
+
+        await record_manual_request_event(
+            session, manual, status="active", code="MANUAL_CYCLE_CREATED", cycle_id=cycle.id
+        )
     if has_open_order or not manifest:
         await _append_event(
             session,
@@ -2006,6 +2204,19 @@ async def _resume_portfolio_synthesis(
             {"failure_phase": failure_phase, "failure_code": safe_code},
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    from nexus.paper.manual_request import manual_request_for_cycle
+
+    manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
+    if manual is not None and manual.mode == "research_only":
+        await _append_event(
+            session,
+            cycle,
+            "researching",
+            "completed",
+            "MANUAL_RESEARCH_COMPLETED",
+            {"portfolio_synthesis_output_id": str(output.id)},
+        )
+        return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     try:
         if now is None:
             raise ValueError("PORTFOLIO_PROPOSAL_TIME_REQUIRED")
@@ -2113,6 +2324,16 @@ async def _append_event(
         )
         + 1
     )
+    manual = None
+    event_at = cycle.decision_time
+    if to_status == "completed":
+        from nexus.paper.manual_request import _database_now, manual_request_for_cycle
+
+        manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
+        if manual is not None:
+            event_at = await _database_now(session)
+            if event_at < cycle.decision_time:
+                raise ValueError("MANUAL_RESULT_UNKNOWN")
     event = AgentPaperCycleEventRecord(
         cycle_id=cycle.id,
         sequence=sequence,
@@ -2127,12 +2348,25 @@ async def _append_event(
             to_status=to_status,
             result_code=result_code,
             fact_ids=fact_ids,
-            occurred_at=cycle.decision_time,
+            occurred_at=event_at,
         ),
-        occurred_at=cycle.decision_time,
+        occurred_at=event_at,
     )
     session.add(event)
     await session.flush()
+    if to_status == "completed":
+        from nexus.paper.manual_request import manual_request_for_cycle, record_manual_request_event
+
+        manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
+        if manual is not None:
+            await record_manual_request_event(
+                session,
+                manual,
+                status="completed",
+                code="MANUAL_RESEARCH_COMPLETED"
+                if manual.mode == "research_only"
+                else "MANUAL_PAPER_COMPLETED",
+            )
 
 
 async def _events(session: AsyncSession, cycle_id: UUID) -> tuple[AgentPaperCycleEventRecord, ...]:

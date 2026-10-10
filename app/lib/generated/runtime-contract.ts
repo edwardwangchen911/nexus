@@ -5746,6 +5746,73 @@ export const runtimeContractSchemas = {
     "title": "LiveEvaluationResponse",
     "type": "object"
   },
+  "ManualRequestView": {
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "title": "Code",
+        "type": "string"
+      },
+      "cycle_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cycle Id"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "mode": {
+        "enum": [
+          "research_only",
+          "research_and_paper"
+        ],
+        "title": "Mode",
+        "type": "string"
+      },
+      "request_id": {
+        "format": "uuid",
+        "title": "Request Id",
+        "type": "string"
+      },
+      "requested_at": {
+        "format": "date-time",
+        "title": "Requested At",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "queued",
+          "preparing",
+          "active",
+          "completed",
+          "unavailable",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "request_id",
+      "mode",
+      "requested_at",
+      "status",
+      "code",
+      "cycle_id"
+    ],
+    "title": "ManualRequestView",
+    "type": "object"
+  },
   "MarketBarResponse": {
     "additionalProperties": false,
     "description": "Exact selected-source OHLCV evidence for a semantic chart table.",

@@ -35,10 +35,26 @@ FIVE = INSTRUMENTS + (
 @pytest.mark.parametrize("count", [3, 5])
 @pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
 async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
-    migrated_database_url, monkeypatch, count, trade, protected
+    migrated_database_url,
+    monkeypatch,
+    count,
+    trade,
+    protected,
+    manual_mode=None,
+    manual_consumer=False,
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
+    if manual_mode is not None:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        seed_engine = create_async_engine(migrated_database_url)
+        try:
+            await _set_test_insert_clock(
+                async_sessionmaker(seed_engine, expire_on_commit=False), AT - timedelta(days=2)
+            )
+        finally:
+            await seed_engine.dispose()
     engine, sessions, authority, manifest = await seed_normal_path(
         migrated_database_url,
         monkeypatch,
@@ -48,7 +64,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
     calls = []
 
     clock_at = [AT + timedelta(seconds=1)]
-    if protected:
+    if protected or manual_mode is not None:
         from sqlalchemy.ext.asyncio import AsyncSession
 
         original_scalar = AsyncSession.scalar
@@ -137,15 +153,16 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             projection = await load_paper_projection(
                 session, account_id=authority.account_id, as_of=AT
             )
-            await approve_initial_target_projection(
-                session,
-                account_id=authority.account_id,
-                projection_as_of=AT,
-                expected_projection_hash=projection.projection_hash,
-                approved_by="controlled-fixture-user",
-                approved_at=AT,
-                idempotency_key="controlled-initial-baseline",
-            )
+            if manual_mode != "research_only":
+                await approve_initial_target_projection(
+                    session,
+                    account_id=authority.account_id,
+                    projection_as_of=AT,
+                    expected_projection_hash=projection.projection_hash,
+                    approved_by="controlled-fixture-user",
+                    approved_at=AT,
+                    idempotency_key="controlled-initial-baseline",
+                )
             if protected:
                 from hashlib import sha256
 
@@ -195,6 +212,43 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     formal_stage_capacity=True,
                     formal_model_config_id=model.id,
                 )
+            manual_id = None
+            if manual_mode is not None:
+                from nexus.paper.manual_request import admit_manual_request, claim_manual_request
+                from nexus.persistence.models.paper import (
+                    PaperLedgerTransactionRecord,
+                    PaperOrderRecord,
+                    PaperReservationRecord,
+                    PaperTargetVersionRecord,
+                    RiskEvaluationRecord,
+                    StrategyDecisionRecord,
+                )
+
+                execution_tables = (
+                    StrategyDecisionRecord,
+                    PaperOrderRecord,
+                    PaperTargetVersionRecord,
+                    PaperReservationRecord,
+                    PaperLedgerTransactionRecord,
+                    RiskEvaluationRecord,
+                )
+                from sqlalchemy import func
+
+                execution_before = [
+                    await session.scalar(select(func.count()).select_from(t))
+                    for t in execution_tables
+                ]
+                clock_at[0] = AT
+                manual = await admit_manual_request(
+                    session,
+                    account_id=authority.account_id,
+                    batch_id=batch.batch_id,
+                    model_config_id=model.id,
+                    mode=manual_mode,
+                    idempotency_key="formal-manual-controlled",
+                )
+                await claim_manual_request(session, request_id=manual.request_id)
+                manual_id = manual.request_id
             result = await start_schwab_agent_paper_cycle(
                 session,
                 authority=authority,
@@ -204,6 +258,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 candidate_batch_id=batch.batch_id,
                 formal_stage_capacity=True,
                 formal_model_config_id=model.id,
+                manual_request_id=manual_id,
             )
             assert result.result_code == "RESEARCH_JOBS_PREPARED", result
             assert len(result.research_run_ids) == count
@@ -245,6 +300,101 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID=str(model.id),
             NEXUS_FORMAL_BUDGET_PROTECTION_ENABLED=protected,
         )
+        if manual_consumer:
+            import asyncio
+            from dataclasses import replace
+
+            from nexus.ops import agent_paper_loop as loop
+            from nexus.ops.manual_paper_host import inspect_manual_close, inspect_manual_queue
+
+            host_settings = host_settings.model_copy(
+                update={
+                    "agent_paper_account_id": authority.account_id,
+                    "agent_paper_candidate_batch_id": batch.batch_id,
+                    "agent_paper_manual_enabled": True,
+                    "agent_paper_cycle_enabled": True,
+                    "release_revision": "a" * 40,
+                }
+            )
+
+            from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+
+            following = AT.date() + timedelta(days=1)
+            while following.weekday() >= 5:
+                following += timedelta(days=1)
+            async with sessions.begin() as session:
+                session.add(
+                    ExchangeCalendarSessionRecord(
+                        calendar_authority_id=authority.calendar_authority_id,
+                        session=following,
+                        decision_at=datetime.combine(following, AT.replace(hour=21).timetz()),
+                        market_open_at=datetime.combine(
+                            following, AT.replace(hour=13, minute=30).timetz()
+                        ),
+                        market_close_at=datetime.combine(following, AT.replace(hour=20).timetz()),
+                        created_at=AT,
+                    )
+                )
+
+            async def consume_normal(expected_actions, runtime=None):
+                runtime = host_settings if runtime is None else runtime
+                consumed = []
+
+                async def inspect():
+                    state = await loop.inspect_agent_paper_loop(
+                        runtime,
+                        account_id=authority.account_id,
+                        expected_calendar_authority_id=authority.calendar_authority_id,
+                    )
+                    state = await inspect_manual_close(
+                        runtime, account_id=authority.account_id, snapshot=state
+                    )
+                    state = await inspect_manual_queue(
+                        runtime, account_id=authority.account_id, snapshot=state
+                    )
+                    if len(consumed) == len(expected_actions):
+                        return replace(state, enabled=False)
+                    assert loop.choose_loop_action(state) == expected_actions[len(consumed)]
+                    assert state.cycle_id == result.cycle_id
+                    return state
+
+                async def execute(action, state):
+                    consumed.append(action)
+                    assert (
+                        await loop.execute_agent_paper_loop_action(
+                            runtime,
+                            account_id=authority.account_id,
+                            repo_root=Path.cwd(),
+                            action=action,
+                            snapshot=state,
+                        )
+                        is None
+                    )
+
+                async def heartbeat(at):
+                    await loop.heartbeat_agent_paper_loop(
+                        runtime,
+                        account_id=authority.account_id,
+                        worker_id=f"agent-paper-loop-{UUID(int=456)}",
+                        started_at=AT,
+                        seen_at=at,
+                    )
+
+                async def watchdog_wait(_seconds):
+                    await asyncio.Future()
+
+                assert (
+                    await loop.run_foreground_loop(
+                        inspect=inspect,
+                        execute=execute,
+                        heartbeat=heartbeat,
+                        sleep=watchdog_wait,
+                        clock=lambda: clock_at[0],
+                    )
+                    == loop.AgentPaperLoopAction.STOP_DISABLED
+                )
+                assert consumed == expected_actions
+
         if protected:
             environment = host_settings.model_dump() | {
                 "DATABASE_URL": migrated_database_url,
@@ -348,23 +498,26 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
                 assert cycle.formal_budget_binding_id == binding.id
                 assert all(job.attempt_count == 0 for job in await session.scalars(select(Job)))
-        for job in jobs:
-            assert (
-                await execute_agent_paper_loop_action(
-                    host_settings,
-                    account_id=authority.account_id,
-                    repo_root=Path.cwd(),
-                    action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
-                    snapshot=snapshot(
-                        calendar_authority_id=authority.calendar_authority_id,
-                        now=clock_at[0],
-                        cycle_id=result.cycle_id,
-                        research_job_id=job.id,
-                        research_job_status="queued",
-                    ),
+        if manual_consumer:
+            await consume_normal([AgentPaperLoopAction.RUN_RESEARCH_JOB] * count)
+        else:
+            for job in jobs:
+                assert (
+                    await execute_agent_paper_loop_action(
+                        host_settings,
+                        account_id=authority.account_id,
+                        repo_root=Path.cwd(),
+                        action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
+                        snapshot=snapshot(
+                            calendar_authority_id=authority.calendar_authority_id,
+                            now=clock_at[0],
+                            cycle_id=result.cycle_id,
+                            research_job_id=job.id,
+                            research_job_status="queued",
+                        ),
+                    )
+                    is None
                 )
-                is None
-            )
         for job in jobs:
             assert not await run_agent_worker_once(
                 settings, job_ids=(job.id,), formal_stage_capacity=True
@@ -409,6 +562,50 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
         from nexus.persistence.models.runtime import IdempotencyRecord
         from sqlalchemy import func
 
+        async def assert_research_only_result():
+            from nexus.paper.manual_request import read_manual_request, require_cycle_execution_mode
+            from nexus.persistence.models.manual_paper import ManualPaperRequest
+            from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+
+            async with sessions() as session:
+                last = await session.scalar(
+                    select(AgentPaperCycleEventRecord)
+                    .where(AgentPaperCycleEventRecord.cycle_id == result.cycle_id)
+                    .order_by(AgentPaperCycleEventRecord.sequence.desc())
+                    .limit(1)
+                )
+                assert (
+                    last.to_status == "completed"
+                    and last.result_code == "MANUAL_RESEARCH_COMPLETED"
+                )
+                row = await session.get(ManualPaperRequest, manual_id)
+                view = await read_manual_request(session, row)
+                assert view.status == "completed" and view.mode == "research_only"
+                assert [
+                    await session.scalar(select(func.count()).select_from(t))
+                    for t in execution_tables
+                ] == execution_before
+                with pytest.raises(ValueError, match="MANUAL_RESEARCH_ONLY_EXECUTION_FORBIDDEN"):
+                    await require_cycle_execution_mode(session, cycle_id=result.cycle_id)
+            from uuid import uuid4
+
+            from nexus.persistence.models.paper import StrategyDecisionRecord
+
+            async with sessions.begin() as session:
+                baseline = await session.scalar(select(StrategyDecisionRecord))
+                values = {
+                    column.name: getattr(baseline, column.name)
+                    for column in StrategyDecisionRecord.__table__.columns
+                    if column.name != "created_at"
+                }
+                values.update(id=uuid4(), agent_paper_cycle_id=result.cycle_id)
+                with pytest.raises(Exception, match="MANUAL_RESEARCH_ONLY_EXECUTION_FORBIDDEN"):
+                    async with session.begin_nested():
+                        session.add(StrategyDecisionRecord(**values))
+                        await session.flush()
+
+        if manual_consumer:
+            await consume_normal([AgentPaperLoopAction.RESUME])
         async with sessions.begin() as session:
             projection = await load_paper_projection(
                 session, account_id=authority.account_id, as_of=AT
@@ -585,22 +782,25 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     )
                 assert synthesis_calls == []
                 await savepoint.rollback()
-        assert (
-            await execute_agent_paper_loop_action(
-                host_settings,
-                account_id=authority.account_id,
-                repo_root=Path.cwd(),
-                action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
-                snapshot=snapshot(
-                    calendar_authority_id=authority.calendar_authority_id,
-                    now=clock_at[0],
-                    cycle_id=result.cycle_id,
-                    research_job_id=synthesis_job.id,
-                    research_job_status="queued",
-                ),
+        if manual_consumer:
+            await consume_normal([AgentPaperLoopAction.RUN_RESEARCH_JOB])
+        else:
+            assert (
+                await execute_agent_paper_loop_action(
+                    host_settings,
+                    account_id=authority.account_id,
+                    repo_root=Path.cwd(),
+                    action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
+                    snapshot=snapshot(
+                        calendar_authority_id=authority.calendar_authority_id,
+                        now=clock_at[0],
+                        cycle_id=result.cycle_id,
+                        research_job_id=synthesis_job.id,
+                        research_job_status="queued",
+                    ),
+                )
+                is None
             )
-            is None
-        )
         assert not await run_portfolio_synthesis_worker_once(
             settings, job_ids=(synthesis_job.id,), formal_stage_capacity=True
         )
@@ -649,20 +849,26 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 )
             async with sessions() as session:
                 assert await _business_facts(session) == before_default_resume
-        assert (
-            await execute_agent_paper_loop_action(
-                host_settings,
-                account_id=authority.account_id,
-                repo_root=Path.cwd(),
-                action=AgentPaperLoopAction.RESUME,
-                snapshot=snapshot(
-                    calendar_authority_id=authority.calendar_authority_id,
-                    now=clock_at[0],
-                    cycle_id=result.cycle_id,
-                ),
+        if manual_consumer:
+            await consume_normal([AgentPaperLoopAction.RESUME])
+        else:
+            assert (
+                await execute_agent_paper_loop_action(
+                    host_settings,
+                    account_id=authority.account_id,
+                    repo_root=Path.cwd(),
+                    action=AgentPaperLoopAction.RESUME,
+                    snapshot=snapshot(
+                        calendar_authority_id=authority.calendar_authority_id,
+                        now=clock_at[0],
+                        cycle_id=result.cycle_id,
+                    ),
+                )
+                is None
             )
-            is None
-        )
+        if manual_mode == "research_only":
+            await assert_research_only_result()
+            return
         from integration.test_portfolio_management_e2e import _business_facts
 
         async with sessions() as session:
@@ -859,6 +1065,92 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 select(func.max(AgentPaperMarketWindowRecord.window_end_at))
             )
             api_now = (window_end or AT) + timedelta(seconds=5)
+        if manual_mode == "research_and_paper":
+            from nexus.ops.manual_paper_host import (
+                finish_configured_manual_request,
+                inspect_manual_close,
+            )
+
+            assert manual_id is not None
+            clock_at[0] = api_now
+            close_settings = settings.model_copy(
+                update={"agent_paper_account_id": authority.account_id}
+            )
+            from nexus.ops.agent_paper_loop import inspect_agent_paper_loop
+            from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+
+            # The normal host needs a following session even after execution day.
+            # This fixture previously supplied only decision and execution days.
+            following = api_now.date() + timedelta(days=1)
+            while following.weekday() >= 5:
+                following += timedelta(days=1)
+            if not manual_consumer:
+                async with sessions.begin() as session:
+                    session.add(
+                        ExchangeCalendarSessionRecord(
+                            calendar_authority_id=authority.calendar_authority_id,
+                            session=following,
+                            decision_at=datetime.combine(following, AT.replace(hour=21).timetz()),
+                            market_open_at=datetime.combine(
+                                following, AT.replace(hour=13, minute=30).timetz()
+                            ),
+                            market_close_at=datetime.combine(
+                                following, AT.replace(hour=20).timetz()
+                            ),
+                            created_at=AT,
+                        )
+                    )
+
+            persisted_snapshot = await inspect_agent_paper_loop(
+                close_settings,
+                account_id=authority.account_id,
+                expected_calendar_authority_id=authority.calendar_authority_id,
+            )
+            assert persisted_snapshot.cycle_status == "completed"
+            assert persisted_snapshot.cycle_id == result.cycle_id
+            close_snapshot = await inspect_manual_close(
+                close_settings,
+                account_id=authority.account_id,
+                snapshot=persisted_snapshot,
+            )
+            assert close_snapshot.manual_finish_request_id == manual_id
+            if manual_consumer:
+                await consume_normal([AgentPaperLoopAction.FINISH_MANUAL], runtime=close_settings)
+            else:
+                assert (
+                    await execute_agent_paper_loop_action(
+                        close_settings,
+                        account_id=authority.account_id,
+                        repo_root=Path.cwd(),
+                        action=AgentPaperLoopAction.FINISH_MANUAL,
+                        snapshot=close_snapshot,
+                    )
+                    is None
+                )
+            async with sessions.begin() as session:
+                terminal_request = await finish_configured_manual_request(
+                    session,
+                    settings.model_copy(update={"agent_paper_account_id": authority.account_id}),
+                    request_id=manual_id,
+                )
+                assert (
+                    terminal_request.status == "completed"
+                    and terminal_request.cycle_id == result.cycle_id
+                )
+                last_event = await session.scalar(
+                    select(AgentPaperCycleEventRecord)
+                    .where(AgentPaperCycleEventRecord.cycle_id == result.cycle_id)
+                    .order_by(AgentPaperCycleEventRecord.sequence.desc())
+                    .limit(1)
+                )
+                assert last_event.occurred_at == api_now
+                repeated = await finish_configured_manual_request(
+                    session,
+                    settings.model_copy(update={"agent_paper_account_id": authority.account_id}),
+                    request_id=manual_id,
+                )
+                assert repeated == terminal_request
+        async with sessions() as session:
             before_reads = await _business_facts(session)
         if count == 3 and not trade:
             from nexus.paper.management_read_authority import (
@@ -939,5 +1231,13 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 )
         async with sessions() as session:
             assert await _business_facts(session) == before_reads
+        if manual_mode == "research_and_paper":
+            from nexus.paper.manual_request import read_manual_request
+            from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+            async with sessions() as session:
+                row = await session.get(ManualPaperRequest, manual_id)
+                view = await read_manual_request(session, row)
+                assert view.status == "completed" and view.code == "MANUAL_PAPER_COMPLETED"
     finally:
         await engine.dispose()
