@@ -6,7 +6,8 @@ from nexus.paper.economic_budget_hold import AllocationRequest
 from nexus.paper.economic_receiver import require_economic_receiver
 from nexus.paper.economic_version_binding import VersionBinding
 from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord, AgentResearchRunRecord
-from test_economic_slot_budget import facts
+
+from engine.tests.unit.paper.test_economic_slot_budget import facts
 
 
 def binding(plan):
@@ -78,6 +79,20 @@ def test_first_candidate_cannot_receive_second_candidate_allocation():
     allocation = allocation.model_copy(update={"action": "research_2"})
     with pytest.raises(ValueError, match="ECONOMIC_TRANSFER_RECEIVER_INVALID"):
         require_economic_receiver(plan, bound, allocation, run)
+
+
+@pytest.mark.parametrize("action", ["research_1", "research_2"])
+def test_research_allocation_preserves_frozen_protocol_order(action):
+    plan, bound, allocation, run = receiver(action)
+    plan = plan.model_copy(
+        update={
+            "request": plan.request.model_copy(
+                update={"instruments": tuple(reversed(plan.request.instruments))}
+            )
+        }
+    )
+    run.instrument_id = plan.request.instruments[int(action[-1]) - 1].instrument_id
+    require_economic_receiver(plan, bound, allocation, run)
 
 
 def test_other_lane_synthesis_prompt_cannot_receive_challenger_allocation():

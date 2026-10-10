@@ -25,8 +25,10 @@ class _BudgetSession:
     async def execute(self, statement: object, parameters: object = None) -> None:
         return None
 
-    async def scalar(self, statement: object) -> Decimal:
+    async def scalar(self, statement: object) -> Decimal | None:
         self.queries.append(str(statement))
+        if "formal_budget_bindings" in str(statement):
+            return None  # This legacy budget case has no protected formal binding.
         return next(self._usage)
 
     async def scalars(self, statement: object) -> tuple[object, ...]:

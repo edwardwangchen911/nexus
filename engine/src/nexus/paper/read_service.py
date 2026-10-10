@@ -479,6 +479,7 @@ class PaperReadService:
                     PaperOrderBatchRecord.account_id == cycle.account_id,
                     PaperOrderBatchRecord.strategy_decision_id == decision.id,
                     PaperOrderBatchRecord.created_at <= self._request_time,
+                    PaperOrderBatchRecord.previous_batch_id.is_(None),
                 )
             )
         )
@@ -3198,6 +3199,7 @@ class PaperReadService:
                 self._session,
                 account_id=account.id,
                 strategy_decision_id=decision.id,
+                batch_id=batch.id,
                 candidate_stage_capacity=self._candidate_stage_capacity,
                 formal_stage_capacity=await formal_proposal_read_profile(
                     self._session,
@@ -3770,6 +3772,7 @@ class PaperReadService:
                     self._session,
                     account_id=order.account_id,
                     strategy_decision_id=authority[12],
+                    batch_id=order.batch_id,
                     candidate_stage_capacity=self._candidate_stage_capacity,
                     formal_stage_capacity=await formal_proposal_read_profile(
                         self._session,

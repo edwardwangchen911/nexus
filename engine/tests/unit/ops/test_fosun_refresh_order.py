@@ -470,6 +470,7 @@ async def test_broker_only_refresh_never_constructs_or_calls_market_gateway(
             instrument_ids={"usAAPL": instrument_id},
             identity_date=now.date(),
             previous_cash_flow_watermark=None,
+            unresolved_codes=(),
         )
 
     async def broker_reads(*_args, **_kwargs):

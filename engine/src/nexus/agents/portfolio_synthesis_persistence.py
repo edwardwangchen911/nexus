@@ -84,8 +84,12 @@ async def _lock_account(session: AsyncSession, account_id: UUID) -> None:
     )
 
 
-def _frozen_run(run: AgentPortfolioSynthesisRunRecord) -> PortfolioSynthesisInputV1:
+def _frozen_run(
+    run: AgentPortfolioSynthesisRunRecord, *, economic_authority: bool = False
+) -> PortfolioSynthesisInputV1:
     frozen = PortfolioSynthesisInputV1.model_validate(run.frozen_input)
+    if not economic_authority and frozen.prompt_version != SYNTHESIS_PROMPT_VERSION:
+        raise ValueError("PORTFOLIO_SYNTHESIS_PROMPT_INVALID")
     if (
         canonical_portfolio_synthesis_hash(frozen) != run.input_hash
         or frozen.cycle_id != run.cycle_id
@@ -103,6 +107,47 @@ def _frozen_run(run: AgentPortfolioSynthesisRunRecord) -> PortfolioSynthesisInpu
         or run.idempotency_key != f"portfolio-synthesis:{run.cycle_id}"
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_INPUT_CONFLICT")
+    return frozen
+
+
+async def load_frozen_synthesis_authority(
+    session: AsyncSession, run: AgentPortfolioSynthesisRunRecord
+) -> PortfolioSynthesisInputV1:
+    """One profile gate for history, Worker, terminal and downstream consumers."""
+    from nexus.paper.economic_cycle import read_economic_cycle
+
+    economic = await read_economic_cycle(session, cycle_id=run.cycle_id)
+    frozen = _frozen_run(run, economic_authority=economic is not None)
+    if economic is not None:
+        ref, authority = economic
+        prompt_id = (
+            authority.binding.incumbent_prompt_id
+            if ref.lane == "incumbent"
+            else authority.binding.challenger_prompt_id
+        )
+        prompt_hash = (
+            authority.binding.incumbent_prompt_hash
+            if ref.lane == "incumbent"
+            else authority.binding.challenger_prompt_hash
+        )
+        if (
+            frozen.prompt_version_id != prompt_id
+            or frozen.prompt_hash != prompt_hash
+            or frozen.model_config_id != authority.binding.shared_model_id
+            or frozen.model_hash != authority.binding.shared_model_hash
+            or frozen.pricing_version != authority.binding.shared_model_version
+        ):
+            raise ValueError("ECONOMIC_PAIR_SYNTHESIS_AUTHORITY_INVALID")
+    prompt = await session.get(AgentPromptVersionRecord, frozen.prompt_version_id)
+    if (
+        prompt is None
+        or prompt.role != "portfolio_decision"
+        or prompt.version != frozen.prompt_version
+        or prompt.content_hash != frozen.prompt_hash
+        or sha256(prompt.content.encode()).hexdigest() != frozen.prompt_hash
+        or prompt.created_at > frozen.admitted_at
+    ):
+        raise ValueError("PORTFOLIO_SYNTHESIS_PROMPT_INVALID")
     return frozen
 
 
@@ -142,8 +187,12 @@ async def reserve_portfolio_synthesis_budget(
     from nexus.paper.formal_budget_protection import require_protected_admission
 
     protected = await require_protected_admission(
-        session, kind="synthesis", run_id=run_id, now=now,
-        daily_limit_usd=daily_limit_usd, amount=worst_case_usd,
+        session,
+        kind="synthesis",
+        run_id=run_id,
+        now=now,
+        daily_limit_usd=daily_limit_usd,
+        amount=worst_case_usd,
     )
     used = await _shared_daily_budget_used(session, business_date=now.date())
     if not protected and used + worst_case_usd > daily_limit_usd:
@@ -188,6 +237,15 @@ async def admit_portfolio_synthesis(
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
     if cycle is None or cycle.candidate_batch_id is None:
         raise ValueError("PORTFOLIO_SYNTHESIS_CYCLE_INVALID")
+    from nexus.paper.economic_cycle import read_economic_cycle, synthesis_allocation
+
+    economic = await read_economic_cycle(session, cycle_id=cycle.id)
+    if economic is not None and (
+        candidate_stage_capacity
+        or formal_stage_capacity
+        or daily_limit_usd != economic[1].protocol.request.global_daily_limit_usd
+    ):
+        raise ValueError("ECONOMIC_PAIR_SYNTHESIS_ARGUMENT_INVALID")
     formal_model = None
     if formal_stage_capacity:
         from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
@@ -218,7 +276,7 @@ async def admit_portfolio_synthesis(
             or existing.projection_hash != projection_hash
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_INPUT_CONFLICT")
-        frozen = _frozen_run(existing)
+        frozen = await load_frozen_synthesis_authority(session, existing)
         if formal_model is not None and (
             frozen.model_config_id != formal_model.id
             or frozen.model_hash != formal_model.config_hash
@@ -423,8 +481,14 @@ async def admit_portfolio_synthesis(
                 ExchangeCalendarAuthorityRecord.created_at <= cycle.decision_time,
                 ExchangeCalendarSessionRecord.session == cycle.decision_session,
                 ExchangeCalendarSessionRecord.created_at <= cycle.decision_time,
-                *([] if protection is None else [ExchangeCalendarAuthorityRecord.id ==
-                    UUID(str(protection.payload["calendar_id"]))]),
+                *(
+                    []
+                    if protection is None
+                    else [
+                        ExchangeCalendarAuthorityRecord.id
+                        == UUID(str(protection.payload["calendar_id"]))
+                    ]
+                ),
             )
             .order_by(
                 ExchangeCalendarAuthorityRecord.published_at.desc(),
@@ -435,17 +499,44 @@ async def admit_portfolio_synthesis(
     ).one_or_none()
     if calendar_row is None or now >= calendar_row[1].market_close_at:
         raise ValueError("PORTFOLIO_SYNTHESIS_SESSION_EXPIRED")
-    prompt = await session.scalar(
-        select(AgentPromptVersionRecord).where(
-            AgentPromptVersionRecord.role == "portfolio_decision",
-            AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
-            AgentPromptVersionRecord.release_channel == "active",
-            *([] if protection is None else [AgentPromptVersionRecord.id ==
-                UUID(str(cast(dict[str, str], protection.payload["synthesis_prompt"])["id"]))]),
+    allocation = None
+    selected_prompt_hash: str | None = None
+    if economic is not None:
+        ref, authority = economic
+        allocation = await synthesis_allocation(session, ref=ref, authority=authority)
+        prompt_id = (
+            authority.binding.incumbent_prompt_id
+            if ref.lane == "incumbent"
+            else authority.binding.challenger_prompt_id
         )
-    )
+        selected_prompt_hash = (
+            authority.binding.incumbent_prompt_hash
+            if ref.lane == "incumbent"
+            else authority.binding.challenger_prompt_hash
+        )
+        prompt = await session.get(AgentPromptVersionRecord, prompt_id)
+    else:
+        prompt = await session.scalar(
+            select(AgentPromptVersionRecord).where(
+                AgentPromptVersionRecord.role == "portfolio_decision",
+                AgentPromptVersionRecord.version == SYNTHESIS_PROMPT_VERSION,
+                AgentPromptVersionRecord.release_channel == "active",
+                *(
+                    []
+                    if protection is None
+                    else [
+                        AgentPromptVersionRecord.id
+                        == UUID(
+                            str(cast(dict[str, str], protection.payload["synthesis_prompt"])["id"])
+                        )
+                    ]
+                ),
+            )
+        )
     if (
         prompt is None
+        or prompt.role != "portfolio_decision"
+        or (selected_prompt_hash is not None and prompt.content_hash != selected_prompt_hash)
         or prompt.created_at > now
         or sha256(prompt.content.encode()).hexdigest() != prompt.content_hash
     ):
@@ -455,6 +546,13 @@ async def admit_portfolio_synthesis(
     if (
         formal_model is not None
         and (model is None or model.id != formal_model.id)
+        or economic is not None
+        and (
+            model is None
+            or model.id != economic[1].binding.shared_model_id
+            or model.config_hash != economic[1].binding.shared_model_hash
+            or model.version != economic[1].binding.shared_model_version
+        )
         or len(model_ids) != 1
         or model is None
         or model.created_at > now
@@ -490,7 +588,7 @@ async def admit_portfolio_synthesis(
         policy_version=PORTFOLIO_ALLOCATION_V1.version,
         policy_hash=PORTFOLIO_ALLOCATION_POLICY_HASH,
         prompt_version_id=prompt.id,
-        prompt_version=SYNTHESIS_PROMPT_VERSION,
+        prompt_version=prompt.version,
         prompt_hash=prompt.content_hash,
         model_config_id=model.id,
         model_hash=model.config_hash,
@@ -533,6 +631,7 @@ async def admit_portfolio_synthesis(
             worst_case_usd=worst,
             pricing_version=model.version,
             pricing_fresh=True,
+            **({"economic_allocation": allocation} if allocation is not None else {}),
         )
         await enqueue_job(
             session,
@@ -582,7 +681,7 @@ async def persist_portfolio_synthesis_terminal(
         raise ValueError("PORTFOLIO_SYNTHESIS_RUN_INVALID")
     await _lock_account(session, cycle.account_id)
     await session.refresh(run)
-    frozen = _frozen_run(run)
+    frozen = await load_frozen_synthesis_authority(session, run)
     if input_hash != run.input_hash:
         raise ValueError("PORTFOLIO_SYNTHESIS_INPUT_CONFLICT")
     if status not in {"completed", "failed", "abstained"} or (status == "completed") != (

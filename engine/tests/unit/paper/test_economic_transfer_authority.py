@@ -8,7 +8,8 @@ import pytest
 from nexus.paper.economic_budget_hold import HoldRequest, PairHold, _require_new_transfer_authority
 from nexus.paper.portfolio_economic_preflight import compile_plan
 from nexus.persistence.models.agents import AgentModelConfigRecord
-from test_economic_receiver import receiver
+
+from engine.tests.unit.paper.test_economic_receiver import receiver
 
 
 @pytest.mark.asyncio
@@ -30,6 +31,7 @@ from test_economic_receiver import receiver
     ],
 )
 async def test_new_transfer_resolves_frozen_authorities_before_budget_write(monkeypatch, fault):
+    from nexus.agents import paper_context
     from nexus.paper import economic_version_binding, portfolio_economic_protocol
 
     plan, binding, allocation, run = receiver()
@@ -91,6 +93,9 @@ async def test_new_transfer_resolves_frozen_authorities_before_budget_write(monk
     )
     monkeypatch.setattr(portfolio_economic_protocol, "read_protocol", protocol_reader)
     monkeypatch.setattr(economic_version_binding, "read_binding", binding_reader)
+    # This legacy receiver has no Paper context; bound-cycle authority is covered by PG tests.
+    context_reader = AsyncMock(return_value=None)
+    monkeypatch.setattr(paper_context, "read_agent_paper_research_context", context_reader)
     if fault is None:
         await _require_new_transfer_authority(
             session, hold=hold, allocation=allocation, run=run, now=observed
@@ -98,6 +103,12 @@ async def test_new_transfer_resolves_frozen_authorities_before_budget_write(monk
         protocol_reader.assert_awaited_once_with(session, as_of=now)
         binding_reader.assert_awaited_once_with(session, as_of=now)
         session.get.assert_awaited_once_with(AgentModelConfigRecord, run.model_config_id)
+        context_reader.assert_awaited_once_with(
+            session,
+            snapshot_id=run.data_snapshot_id,
+            instrument_id=run.instrument_id,
+            as_of=run.decision_time,
+        )
     else:
         with pytest.raises(ValueError, match="ECONOMIC_TRANSFER_"):
             await _require_new_transfer_authority(

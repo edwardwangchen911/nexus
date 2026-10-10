@@ -197,7 +197,7 @@ class PortfolioSynthesisInputV1(_Frozen):
     policy_version: Literal["portfolio_allocation_v1"]
     policy_hash: Hash64
     prompt_version_id: UUID
-    prompt_version: Literal["portfolio-management-synthesis-v1"]
+    prompt_version: str = Field(min_length=1, max_length=100)
     prompt_hash: Hash64
     model_config_id: UUID
     model_hash: Hash64

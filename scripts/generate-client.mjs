@@ -108,6 +108,8 @@ function generateRuntimeContract(openapi) {
     "PaperOrderPageResponse",
     "PaperCancelResponse",
     "PaperCancelResultResponse",
+    "EconomicPairResponse",
+    "EconomicLaneResponse",
     "PaperPlanResponse",
     "PaperManagementSummaryResponse",
     "WorkbenchResponse",

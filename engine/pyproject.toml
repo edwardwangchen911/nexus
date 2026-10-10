@@ -60,6 +60,7 @@ nexus-engine-portfolio-economic-preflight = "nexus.ops.portfolio_economic_prefli
 nexus-engine-portfolio-economic-protocol = "nexus.ops.portfolio_economic_protocol:main"
 nexus-engine-economic-authorities = "nexus.ops.economic_authorities:main"
 nexus-engine-economic-version-binding = "nexus.ops.economic_version_binding:main"
+nexus-engine-economic-cycle = "nexus.ops.economic_cycle:main"
 nexus-engine-economic-budget-preflight = "nexus.ops.economic_budget:main"
 nexus-engine-economic-budget-hold = "nexus.ops.economic_budget_hold:main"
 nexus-engine-economic-budget-transfer = "nexus.ops.economic_budget_transfer:main"

@@ -22,10 +22,14 @@ _ISOLATED_DATABASE = re.compile(
 )
 
 
-async def require_isolated_database(session: AsyncSession, *, expected: str) -> None:
+async def require_economic_database_target(session: AsyncSession, *, expected: str) -> None:
     actual = await session.scalar(text("SELECT current_database()"))
     if actual != expected or not _ISOLATED_DATABASE.fullmatch(expected):
         raise ValueError("ECONOMIC_PROTOCOL_DATABASE_MISMATCH")
+
+
+async def require_isolated_database(session: AsyncSession, *, expected: str) -> None:
+    await require_economic_database_target(session, expected=expected)
     for name in (
         "agent_paper_cycles",
         "agent_research_runs",

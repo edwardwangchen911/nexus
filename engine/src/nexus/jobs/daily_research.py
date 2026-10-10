@@ -268,6 +268,38 @@ async def admit_agent_paper_research(
     formal_stage_capacity: bool = False,
 ) -> ResearchAdmission:
     """Admit one already-frozen candidate through the native research Job path."""
+    from nexus.paper.economic_cycle import read_economic_cycle, research_allocation
+
+    economic = await read_economic_cycle(session, cycle_id=cycle_id)
+    allocation = None
+    if economic is not None:
+        ref, frozen = economic
+        if (
+            candidate_stage_capacity
+            or formal_stage_capacity
+            or actor_id != _AGENT_PAPER_ACTOR
+            or admission_idempotency_key is not None
+            or version_source_run_id is not None
+            or prompt_version_id is not None
+            or (model_config_id is not None and model_config_id != frozen.binding.shared_model_id)
+            or research_as_of != frozen.slot.decision_at
+            or daily_limit_usd != frozen.protocol.request.global_daily_limit_usd
+        ):
+            raise ValueError("ECONOMIC_PAIR_RESEARCH_ARGUMENT_INVALID")
+        from nexus.agents.paper_context import read_agent_paper_research_context
+
+        context = await read_agent_paper_research_context(
+            session,
+            snapshot_id=research_snapshot_id,
+            instrument_id=instrument_id,
+            as_of=research_as_of,
+        )
+        if context is None or context[0].cycle_id != cycle_id:
+            raise ValueError("ECONOMIC_PAIR_RESEARCH_SNAPSHOT_INVALID")
+        model_config_id = frozen.binding.shared_model_id
+        allocation = await research_allocation(
+            session, ref=ref, authority=frozen, instrument_id=instrument_id
+        )
     if (
         type(formal_stage_capacity) is not bool
         or formal_stage_capacity
@@ -313,6 +345,7 @@ async def admit_agent_paper_research(
     elif (
         not candidate_stage_capacity
         and not formal_stage_capacity
+        and economic is None
         and (
             actor_id != _AGENT_PAPER_ACTOR
             or admission_idempotency_key is not None
@@ -335,6 +368,12 @@ async def admit_agent_paper_research(
         request_payload.update(candidate_stage_capacity=True, model_config_id=str(model_config_id))
     if formal_stage_capacity:
         request_payload.update(formal_stage_capacity=True, model_config_id=str(model_config_id))
+    if economic is not None:
+        assert allocation is not None
+        request_payload.update(
+            economic_allocation=allocation.model_dump(mode="json"),
+            model_config_id=str(model_config_id),
+        )
     if evaluation_actor:
         request_payload.update(
             {
@@ -350,10 +389,18 @@ async def admit_agent_paper_research(
         )
     request_hash = job_input_hash(request_payload)
     reuse_latest_actor_agent_version = (
-        not evaluation_actor and not candidate_stage_capacity and not formal_stage_capacity
+        not evaluation_actor
+        and not candidate_stage_capacity
+        and not formal_stage_capacity
+        and economic is None
     )
     reuse_latest_actor_prompts_only = False
-    if not evaluation_actor and not candidate_stage_capacity and not formal_stage_capacity:
+    if (
+        not evaluation_actor
+        and not candidate_stage_capacity
+        and not formal_stage_capacity
+        and economic is None
+    ):
         from nexus.paper.agent_version_evaluation import (
             _model_is_agent_paper_compatible,
             load_selected_internal_agent_version,
@@ -409,4 +456,5 @@ async def admit_agent_paper_research(
         reuse_latest_actor_prompts_only=reuse_latest_actor_prompts_only,
         version_source_run_id=version_source_run_id,
         formal_stage_capacity=formal_stage_capacity,
+        economic_allocation=allocation,
     )

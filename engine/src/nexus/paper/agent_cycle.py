@@ -62,6 +62,7 @@ from nexus.paper.candidate_batch import (
     load_agent_paper_candidate_batch,
     validate_agent_paper_candidate_batch,
 )
+from nexus.paper.economic_cycle import EconomicLaneRef
 from nexus.paper.errors import PaperBatchError
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_POLICY_HASH, PORTFOLIO_ALLOCATION_V1
 from nexus.paper.portfolio_proposal import KNOWN_PORTFOLIO_PROPOSAL_REJECTIONS
@@ -374,11 +375,14 @@ async def reserve_schwab_agent_paper_trigger(
         binding = await latest_binding(session, business_date=now.date())
         if binding is not None:
             await _validate_binding(session, binding)
-            if (trigger_mode != "scheduled" or not binding.payload["enabled"]
+            if (
+                trigger_mode != "scheduled"
+                or not binding.payload["enabled"]
                 or binding.payload["account_id"] != str(account_id)
                 or binding.payload["batch_id"] != str(batch.batch_id)
                 or binding.payload["batch_hash"] != batch.batch_hash
-                or binding.payload["slot"] != reservation.decision_slot_at.isoformat()):
+                or binding.payload["slot"] != reservation.decision_slot_at.isoformat()
+            ):
                 raise ValueError("FORMAL_BUDGET_TRIGGER_BINDING_INVALID")
             claim.formal_budget_binding_id = binding.id
         if require_synthesis_prompt:
@@ -551,6 +555,18 @@ async def _require_cycle_candidate_profile(
     formal_stage_capacity: bool = False,
     expected_formal_model_id: UUID | None = None,
 ) -> UUID | None:
+    from nexus.paper.economic_cycle import read_economic_cycle
+
+    economic = await read_economic_cycle(session, cycle_id=cycle.id)
+    if economic is not None:
+        if (
+            candidate_stage_capacity
+            or formal_stage_capacity
+            or expected_model_id is not None
+            or expected_formal_model_id is not None
+        ):
+            raise ValueError("ECONOMIC_PAIR_PROFILE_INVALID")
+        return economic[1].binding.shared_model_id
     if type(formal_stage_capacity) is not bool or (
         formal_stage_capacity and candidate_stage_capacity is not False
     ):
@@ -795,10 +811,39 @@ async def resume_schwab_agent_paper_cycle(
         now=now,
         formal_stage_capacity=formal_stage_capacity,
     )
+    from nexus.paper.economic_cycle import read_economic_cycle
+
+    economic = await read_economic_cycle(session, cycle_id=cycle.id)
+    if economic is not None:
+        from nexus.paper.economic_isolation import require_running_isolation
+
+        economic_events = await _events(session, cycle.id)
+        if not economic_events:
+            raise ValueError("AGENT_PAPER_EVENT_CHAIN_INVALID")
+        if economic_events[-1].to_status in {
+            "completed",
+            "unavailable",
+            "failed",
+            "awaiting_market",
+        }:
+            return _result(cycle.id, economic_events, replayed=True)
+        await require_running_isolation(session, authority=economic[1])
+        # Legacy local consumers supply ordinary settings and a process clock.
+        # Economic authority is frozen and uses the actual database clock instead.
+        daily_limit_usd = economic[1].protocol.request.global_daily_limit_usd
+        now = await session.scalar(select(func.clock_timestamp()))
+        if not isinstance(now, datetime):
+            raise ValueError("ECONOMIC_PAIR_RESULT_UNKNOWN")
+        # Match pair coordination and deterministic target/execution producers:
+        # account lock before the cycle lock, and both before the resume claim.
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1818))"),
+            {"scope": f"internal-paper:{cycle.account_id}"},
+        )
     request_hash = job_input_hash(
         {"schema": "agent-paper-schwab-resume-v1", "cycle_id": str(cycle_id)}
     )
-    if formal_stage_capacity:
+    if formal_stage_capacity or economic is not None:
         await session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
             {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
@@ -810,7 +855,7 @@ async def resume_schwab_agent_paper_cycle(
             session,
             cycle=cycle,
             candidate_stage_capacity=False,
-            formal_stage_capacity=True,
+            formal_stage_capacity=formal_stage_capacity,
             now=now,
         )
     claim, _ = await claim_or_lock(
@@ -1106,15 +1151,16 @@ async def _start_cycle(
     candidate_model_config_id: UUID | None = None,
     formal_stage_capacity: bool = False,
     formal_model_config_id: UUID | None = None,
+    economic_lane_ref: EconomicLaneRef | None = None,
 ) -> AgentPaperCycleResult:
     _validate_formal_cycle_arguments(
         formal_stage_capacity=formal_stage_capacity,
         candidate_stage_capacity=candidate_stage_capacity,
         formal_model_config_id=formal_model_config_id,
     )
-    formal_model = None
-    if formal_stage_capacity:
-        if candidate_batch_id is None or any(
+    if formal_stage_capacity and (
+        candidate_batch_id is None
+        or any(
             value is not None
             for value in (
                 version_evaluation_id,
@@ -1123,8 +1169,34 @@ async def _start_cycle(
                 version_prompt_id,
                 version_model_id,
             )
-        ):
-            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    from nexus.paper.economic_cycle import require_economic_creation
+
+    economic = await require_economic_creation(
+        session, ref=economic_lane_ref, authority=authority, decision_slot_at=decision_slot_at
+    )
+    if economic is not None and (
+        candidate_stage_capacity
+        or formal_stage_capacity
+        or any(
+            value is not None
+            for value in (
+                version_evaluation_id,
+                version_lane,
+                version_source_run_id,
+                version_prompt_id,
+                version_model_id,
+                execution_scope_max_symbols,
+                candidate_model_config_id,
+                formal_model_config_id,
+            )
+        )
+    ):
+        raise ValueError("ECONOMIC_PAIR_PROFILE_INVALID")
+    formal_model = None
+    if formal_stage_capacity:
         formal_model = await require_formal_stage_model_profile(
             session, model_config_id=formal_model_config_id, now=authority.decision_time
         )
@@ -1178,17 +1250,23 @@ async def _start_cycle(
             requested_instrument_ids=requested_instrument_ids,
         )
     )
+    if economic is not None and not manifest:
+        # The economic lane link requires the exact frozen candidate manifest.
+        # Reject missing evidence before creating facts instead of leaking a SQL error.
+        raise ValueError("ECONOMIC_PAIR_RESEARCH_UNAVAILABLE")
     same_session = authority.execution_session == authority.decision_session
     from nexus.paper.formal_budget_protection import latest_binding
 
     binding = await latest_binding(session, business_date=decision_slot_at.date())
     binding_id = None
-    if binding is not None:
-        claim = await session.scalar(select(IdempotencyRecord).where(
-            IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{authority.account_id}",
-            IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
-            IdempotencyRecord.idempotency_key == decision_slot_at.isoformat(),
-        ))
+    if binding is not None and economic is None:
+        claim = await session.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{authority.account_id}",
+                IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                IdempotencyRecord.idempotency_key == decision_slot_at.isoformat(),
+            )
+        )
         if claim is None or claim.formal_budget_binding_id != binding.id:
             raise ValueError("FORMAL_BUDGET_TRIGGER_BINDING_INVALID")
         binding_id = binding.id
@@ -1230,6 +1308,19 @@ async def _start_cycle(
     )
     session.add(cycle)
     await session.flush()
+    if economic_lane_ref is not None:
+        from nexus.persistence.models.economic import EconomicLaneCycleRecord
+
+        session.add(
+            EconomicLaneCycleRecord(
+                pair_slot_id=economic_lane_ref.pair_slot_id,
+                lane=economic_lane_ref.lane,
+                account_id=cycle.account_id,
+                portfolio_id=cycle.portfolio_id,
+                cycle_id=cycle.id,
+            )
+        )
+        await session.flush()
     profile_facts = (
         {}
         if candidate_model is None
@@ -1773,7 +1864,10 @@ async def _resume_portfolio_synthesis(
         canonical_portfolio_synthesis_hash,
         validate_portfolio_synthesis_intent,
     )
-    from nexus.agents.portfolio_synthesis_persistence import _frozen_run, admit_portfolio_synthesis
+    from nexus.agents.portfolio_synthesis_persistence import (
+        admit_portfolio_synthesis,
+        load_frozen_synthesis_authority,
+    )
     from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
     from nexus.persistence.models.agents import (
         AgentPortfolioSynthesisOutputRecord,
@@ -1826,7 +1920,7 @@ async def _resume_portfolio_synthesis(
                     formal_stage_capacity=formal_stage_capacity,
                 )
             ).run
-        frozen = _frozen_run(run)
+        frozen = await load_frozen_synthesis_authority(session, run)
         job = await read_synthesis_job(session, cycle_id=cycle.id)
         output = await session.scalar(
             select(AgentPortfolioSynthesisOutputRecord).where(

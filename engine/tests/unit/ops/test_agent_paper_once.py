@@ -388,6 +388,11 @@ def test_non_internal_account_emits_stable_boundary_code(
         "AGENT_PAPER_MARKET_WINDOW_CLOSED",
         "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED",
         "AGENT_PAPER_PROVIDER_CAPACITY_INVALID",
+        "ECONOMIC_PROTOCOL_DATABASE_MISMATCH",
+        "ECONOMIC_PROTOCOL_BUSINESS_STATE_FORBIDDEN",
+        "ECONOMIC_WINDOW_COLLECTION_TOO_EARLY",
+        "ECONOMIC_WINDOW_COLLECTION_UNKNOWN",
+        "ECONOMIC_WINDOW_COLLECTION_FAILED",
     ],
 )
 def test_trigger_command_exposes_safe_failure_codes(
@@ -745,7 +750,12 @@ def test_collect_window_forwards_database_scope_and_explicit_provider_config(
 
     class Factory:
         def __call__(self) -> AsyncContext:
-            return AsyncContext(object())
+            class Session:
+                async def scalar(self, statement: object) -> bool:
+                    assert "to_regclass('economic_lane_cycles')" in str(statement)
+                    return False
+
+            return AsyncContext(Session())
 
     async def resolve(*_args: object, **kwargs: object) -> AgentPaperMarketScope:
         assert kwargs["instrument_id"] == instrument_id

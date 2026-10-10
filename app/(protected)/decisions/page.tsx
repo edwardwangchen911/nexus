@@ -1,5 +1,7 @@
 "use client";
 
+import { EconomicContextBoundary } from "../../components/paper/economic-context";
+
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -10,6 +12,10 @@ import type { components } from "../../lib/generated/schema";
 type CyclePage = components["schemas"]["AgentPaperCyclePageResponse"];
 
 export default function DecisionsPage(): React.ReactElement {
+  return <EconomicContextBoundary view="decisions"><DefaultDecisionsPage /></EconomicContextBoundary>;
+}
+
+function DefaultDecisionsPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [page, setPage] = useState<CyclePage | null>(null);
   const [selectedSession, setSelectedSession] = useState("");

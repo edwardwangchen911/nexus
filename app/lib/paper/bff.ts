@@ -135,3 +135,17 @@ function invalid(message: string): NexusBffError {
 function isPlain(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+export function economicPairId(request: Request): string {
+  const match = /^\/api\/v1\/paper\/economic-pairs\/([^/]+)$/.exec(new URL(request.url).pathname);
+  const value = match?.[1];
+  if (!value || !validateUuid(value)) throw invalid("The economic pair is invalid.");
+  return value;
+}
+
+
+export function economicLaneRef(request: Request): { pairId: string; lane: "incumbent" | "challenger" } {
+  const match = /^\/api\/v1\/paper\/economic-pairs\/([^/]+)\/lanes\/(incumbent|challenger)$/.exec(new URL(request.url).pathname);
+  if (!match || !validateUuid(match[1])) throw invalid("The economic lane is invalid.");
+  return { pairId: match[1], lane: match[2] as "incumbent" | "challenger" };
+}

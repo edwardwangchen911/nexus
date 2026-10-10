@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Header, Query, Request
 from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.api.auth import VerifiedServiceActor
-from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
+from nexus.api.dependencies import (
+    get_session_factory,
+    get_settings,
+    require_service_actor,
+    transactional_session,
+)
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.portfolios import _utc_now
+from nexus.api.schemas.economic_pair import EconomicLaneEnvelope, EconomicPairEnvelope
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.api.schemas.paper import (
     AgentPaperCycleDetailEnvelope,
@@ -30,12 +36,15 @@ from nexus.api.schemas.paper import (
     PortfolioEconomicEvidenceEnvelope,
 )
 from nexus.domain.decimal import decimal_to_string
+from nexus.paper.economic_read import read_economic_lane, read_economic_pair
 from nexus.paper.errors import PaperExecutionError
 from nexus.paper.execution_service import cancel_internal_paper_order
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.read_service import PaperReadService
 from nexus.settings import EngineSettings
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 async def _candidate_read_policy(
@@ -442,4 +451,81 @@ async def cancel_paper_order(
             replayed=result.replayed,
         ),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+    )
+
+
+@router.get(
+    "/internal/v1/paper/economic-pairs/{pair_slot_id}",
+    operation_id="getInternalEconomicPair",
+    response_model=EconomicPairEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_economic_pair(
+    pair_slot_id: UUID,
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+    settings: EngineSettings = Depends(get_settings),
+    now: datetime = Depends(_utc_now),
+) -> EconomicPairEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "The economic pair query is invalid.", status_code=422
+        )
+    try:
+        expected = make_url(settings.database_url or "").database
+        if expected is None:
+            raise ValueError("ECONOMIC_PROTOCOL_DATABASE_MISMATCH")
+        async with factory.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            data = await read_economic_pair(
+                session, pair_slot_id=pair_slot_id, expected_database=expected, now=now
+            )
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL, "The economic pair authority is unavailable.", status_code=409
+        ) from error
+    if data is None:
+        raise NexusError(ErrorCode.NOT_FOUND, "The economic pair is unavailable.", status_code=404)
+    return EconomicPairEnvelope(
+        data=data, meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now)
+    )
+
+
+@router.get(
+    "/internal/v1/paper/economic-pairs/{pair_slot_id}/lanes/{lane}",
+    operation_id="getInternalEconomicLane",
+    response_model=EconomicLaneEnvelope,
+    responses=_ERROR_RESPONSES,
+)
+async def get_economic_lane(
+    pair_slot_id: UUID,
+    lane: Literal["incumbent", "challenger"],
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+    settings: EngineSettings = Depends(get_settings),
+    now: datetime = Depends(_utc_now),
+) -> EconomicLaneEnvelope:
+    if request.url.query:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "The economic lane query is invalid.", status_code=422
+        )
+    try:
+        expected = make_url(settings.database_url or "").database
+        if expected is None:
+            raise ValueError("ECONOMIC_PROTOCOL_DATABASE_MISMATCH")
+        async with factory.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            data = await read_economic_lane(
+                session, pair_slot_id=pair_slot_id, lane=lane, expected_database=expected, now=now
+            )
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL, "The economic lane authority is unavailable.", status_code=409
+        ) from error
+    if data is None:
+        raise NexusError(ErrorCode.NOT_FOUND, "The economic lane is unavailable.", status_code=404)
+    return EconomicLaneEnvelope(
+        data=data, meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now)
     )

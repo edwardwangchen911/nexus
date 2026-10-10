@@ -1,5 +1,7 @@
 "use client";
 
+import { EconomicContextBoundary } from "../../components/paper/economic-context";
+
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -29,6 +31,10 @@ const stateCopy: Record<WorkbenchPageState, { label: string; title: string; deta
 };
 
 export default function WorkspacePage(): React.ReactElement {
+  return <EconomicContextBoundary view="workspace"><DefaultWorkspacePage /></EconomicContextBoundary>;
+}
+
+function DefaultWorkspacePage(): React.ReactElement {
   const [state, setState] = useState<WorkbenchPageState>("loading");
   const [payload, setPayload] = useState<WorkbenchPayload | null>(null);
   const [refreshing, setRefreshing] = useState(false);

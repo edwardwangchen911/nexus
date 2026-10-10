@@ -246,6 +246,38 @@ async def _require_new_transfer_authority(
         run, AgentResearchRunRecord | AgentPortfolioSynthesisRunRecord
     ):
         raise ValueError("ECONOMIC_TRANSFER_RUN_INVALID")
+    from nexus.agents.paper_context import read_agent_paper_research_context
+    from nexus.paper.economic_cycle import read_economic_cycle
+
+    if isinstance(run, AgentResearchRunRecord):
+        context = await read_agent_paper_research_context(
+            session,
+            snapshot_id=run.data_snapshot_id,
+            instrument_id=run.instrument_id,
+            as_of=run.decision_time,
+        )
+        economic = (
+            None
+            if context is None
+            else await read_economic_cycle(session, cycle_id=context[0].cycle_id)
+        )
+    else:
+        from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
+
+        try:
+            await load_frozen_synthesis_authority(session, run)
+        except ValueError as error:
+            raise ValueError("ECONOMIC_TRANSFER_RECEIVER_INVALID") from error
+        economic = await read_economic_cycle(session, cycle_id=run.cycle_id)
+    if economic is not None:
+        ref, authority = economic
+        if (
+            allocation.lane != ref.lane
+            or hold.request.protocol_hash != authority.identity.protocol_hash
+            or hold.request.slot_ordinal != authority.slot.ordinal
+            or binding.content_hash != authority.identity.binding_hash
+        ):
+            raise ValueError("ECONOMIC_TRANSFER_LANE_AUTHORITY_INVALID")
     require_economic_receiver(protocol, binding, allocation, run)
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
     expected = (
@@ -364,8 +396,13 @@ async def reserve_from_hold(
     from nexus.paper.formal_budget_protection import require_protected_admission
 
     await require_protected_admission(
-        session, kind="synthesis" if synthesis else "research", run_id=run_id,
-        now=observed, daily_limit_usd=daily_limit_usd, amount=expected, allocation=allocation,
+        session,
+        kind="synthesis" if synthesis else "research",
+        run_id=run_id,
+        now=observed,
+        daily_limit_usd=daily_limit_usd,
+        amount=expected,
+        allocation=allocation,
     )
     # Native reservation and immutable credit receipt commit or roll back together.
     async with session.begin_nested():
@@ -421,10 +458,8 @@ async def hold_pair_budget(
     from sqlalchemy import func, text
 
     from nexus.agents.persistence import _lock_budget_day, _shared_daily_budget_used
-    from nexus.paper.portfolio_economic_protocol import (
-        _ISOLATED_DATABASE,
-        require_isolated_database,
-    )
+    from nexus.paper.economic_isolation import require_hold_isolation
+    from nexus.paper.portfolio_economic_protocol import _ISOLATED_DATABASE
 
     actual = await session.scalar(text("SELECT current_database()"))
     if actual != expected_database or not _ISOLATED_DATABASE.fullmatch(expected_database):
@@ -451,7 +486,9 @@ async def hold_pair_budget(
             raise ValueError("ECONOMIC_HOLD_CONFLICT")
         return events[0]
     now = await _require_budget_day(session, expected=now.date(), code="ECONOMIC_HOLD_DAY_MISMATCH")
-    await require_isolated_database(session, expected=expected_database)
+    await require_hold_isolation(
+        session, request=request, expected_database=expected_database, now=now
+    )
     used = await _shared_daily_budget_used(session, business_date=now.date())
     from nexus.paper.formal_budget_protection import protected_demand
 

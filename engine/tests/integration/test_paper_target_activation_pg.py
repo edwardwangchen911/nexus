@@ -268,8 +268,15 @@ async def test_fresh_same_hash_decision_reuses_target_and_replay_never_creates_p
                 proposal=first_proposal.proposal.model_copy(update={"baseline": baseline}),
             )
 
-        async def load_fresh(session, *, account_id, decision_id, candidate_stage_capacity=False):
-            assert candidate_stage_capacity is False
+        async def load_fresh(
+            session,
+            *,
+            account_id,
+            decision_id,
+            candidate_stage_capacity=False,
+            formal_stage_capacity=False,
+        ):
+            assert candidate_stage_capacity is False and formal_stage_capacity is False
             assert account_id == fresh.account_id
             return fresh if decision_id == fresh.decision_id else first_proposal
 

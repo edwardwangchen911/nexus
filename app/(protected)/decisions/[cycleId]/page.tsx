@@ -1,5 +1,7 @@
 "use client";
 
+import { EconomicContextBoundary } from "../../../components/paper/economic-context";
+
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -15,6 +17,11 @@ import type { components } from "../../../lib/generated/schema";
 type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 
 export default function DecisionDetailPage(): React.ReactElement {
+  const params = useParams<{ cycleId: string }>();
+  return <EconomicContextBoundary view="detail" cycleId={params?.cycleId}><DefaultDecisionDetailPage /></EconomicContextBoundary>;
+}
+
+function DefaultDecisionDetailPage(): React.ReactElement {
   const params = useParams<{ cycleId: string }>();
   const cycleId = params?.cycleId ?? "";
   const [state, setState] = useState<DataStateKind>(cycleId ? "loading" : "empty");

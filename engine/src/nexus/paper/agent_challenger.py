@@ -605,11 +605,18 @@ async def collect_portfolio_challenger_cycle_sample(
                 ),
             )
         )
-    order_batch = await session.scalar(
-        select(PaperOrderBatchRecord).where(
-            PaperOrderBatchRecord.strategy_decision_id == decision.id
+    order_batches = tuple(
+        await session.scalars(
+            select(PaperOrderBatchRecord)
+            .where(PaperOrderBatchRecord.strategy_decision_id == decision.id)
+            .limit(2)
         )
     )
+    # V1 samples cannot represent multiple plan stages. Preserve unknown until
+    # every stage is explicitly included by the retrospective contract.
+    if len(order_batches) > 1:
+        raise AgentChallengerError(code)
+    order_batch = order_batches[0] if order_batches else None
     orders: tuple[PaperOrderRecord, ...] = ()
     if order_batch is not None:
         if order_batch.account_id != cycle.account_id:

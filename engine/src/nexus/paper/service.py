@@ -262,6 +262,7 @@ def canonical_paper_batch_request_hash(
     strategy_decision_id: UUID,
     request_time: datetime,
     target_version_id: UUID | None = None,
+    previous_batch_id: UUID | None = None,
 ) -> str:
     payload = {
         "schema": "paper_order_batch_request_sha256_v1",
@@ -271,6 +272,8 @@ def canonical_paper_batch_request_hash(
     }
     if target_version_id is not None:
         payload["target_version_id"] = str(target_version_id).lower()
+    if previous_batch_id is not None:
+        payload["previous_batch_id"] = str(previous_batch_id).lower()
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -538,6 +541,7 @@ async def load_paper_order_batch_result(
     strategy_decision_id: UUID,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    batch_id: UUID | None = None,
 ) -> PaperOrderBatchResult | None:
     if type(formal_stage_capacity) is not bool or (
         formal_stage_capacity and candidate_stage_capacity is not False
@@ -550,10 +554,29 @@ async def load_paper_order_batch_result(
         select(PaperOrderBatchRecord).where(
             PaperOrderBatchRecord.account_id == account_id,
             PaperOrderBatchRecord.strategy_decision_id == strategy_decision_id,
+            PaperOrderBatchRecord.id == batch_id
+            if batch_id is not None
+            else PaperOrderBatchRecord.previous_batch_id.is_(None),
         )
     )
     if batch is None:
         return None
+    if batch.previous_batch_id is not None:
+        parent = await load_paper_order_batch_result(
+            session,
+            account_id=account_id,
+            strategy_decision_id=strategy_decision_id,
+            batch_id=batch.previous_batch_id,
+            candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
+        )
+        parent_row = await session.get(PaperOrderBatchRecord, batch.previous_batch_id)
+        if (
+            parent is None
+            or parent_row is None
+            or parent_row.target_version_id != batch.target_version_id
+        ):
+            raise PaperBatchError("PAPER_BATCH_CONFLICT")
     idempotency = await session.get(IdempotencyRecord, batch.idempotency_record_id)
     decision = await session.get(StrategyDecisionRecord, strategy_decision_id)
     if (
@@ -571,6 +594,7 @@ async def load_paper_order_batch_result(
             strategy_decision_id=strategy_decision_id,
             request_time=batch.evaluated_at,
             target_version_id=batch.target_version_id,
+            previous_batch_id=batch.previous_batch_id,
         )
     ):
         raise PaperBatchError("PAPER_BATCH_CONFLICT")
@@ -910,6 +934,7 @@ async def _persist_new_batch(
     ledger_accounts: Sequence[PaperLedgerAccountRecord],
     idempotency_key: str,
     hooks: PaperBatchHooks | None,
+    previous_batch_id: UUID | None = None,
 ) -> PaperOrderBatchResult:
     batch_id = new_uuid7()
     batch = PaperOrderBatchRecord(
@@ -917,6 +942,7 @@ async def _persist_new_batch(
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
         target_version_id=target_version_id,
+        previous_batch_id=previous_batch_id,
         risk_policy_id=policy_id,
         idempotency_record_id=idempotency_record.id,
         request_hash=request_hash,
@@ -971,7 +997,11 @@ async def _persist_new_batch(
             batch_id=batch_id,
             account_id=account_id,
             strategy_decision_id=strategy_decision_id,
-            client_order_id=(f"paper-v1-{decision_hash[:12]}-{evaluation.instrument_id.hex}"),
+            client_order_id=(
+                f"paper-v1-{decision_hash[:12]}-{evaluation.instrument_id.hex}"
+                if previous_batch_id is None
+                else f"paper-plan-v1-{previous_batch_id.hex}-{evaluation.instrument_id.hex}"
+            ),
             instrument_id=evaluation.instrument_id,
             side=evaluation.side,
             quantity=quantity,
@@ -1336,6 +1366,7 @@ async def _create_target_aware_paper_order_batch(
     hooks: PaperBatchHooks | None = None,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    previous_batch_id: UUID | None = None,
 ) -> PaperOrderBatchResult | None:
     """Private activation-only target batch entrypoint; caller owns the transaction."""
     return await _create_paper_order_batch_impl(
@@ -1349,6 +1380,7 @@ async def _create_target_aware_paper_order_batch(
         hooks=hooks,
         candidate_stage_capacity=candidate_stage_capacity,
         formal_stage_capacity=formal_stage_capacity,
+        previous_batch_id=previous_batch_id,
     )
 
 
@@ -1364,6 +1396,7 @@ async def _create_paper_order_batch_impl(
     hooks: PaperBatchHooks | None,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    previous_batch_id: UUID | None = None,
 ) -> PaperOrderBatchResult | None:
     """Shared deterministic batch implementation behind the two permission boundaries."""
     if type(formal_stage_capacity) is not bool or (
@@ -1384,18 +1417,33 @@ async def _create_paper_order_batch_impl(
         strategy_decision_id=strategy_decision_id,
         request_time=request_time,
         target_version_id=target_version_id,
+        previous_batch_id=previous_batch_id,
     )
     account, ledger_accounts = await _lock_account_graph(
         session,
         account_id=account_id,
         hooks=hooks,
     )
-    existing = await load_paper_order_batch_result(
-        session,
-        account_id=account_id,
-        strategy_decision_id=strategy_decision_id,
-        candidate_stage_capacity=candidate_stage_capacity,
-        formal_stage_capacity=formal_stage_capacity,
+    child_id = None
+    if previous_batch_id is not None:
+        if not portfolio_activation or target_version_id is None:
+            raise PaperBatchError("PORTFOLIO_ACTIVATION_REQUIRED")
+        child_id = await session.scalar(
+            select(PaperOrderBatchRecord.id).where(
+                PaperOrderBatchRecord.previous_batch_id == previous_batch_id
+            )
+        )
+    existing = (
+        await load_paper_order_batch_result(
+            session,
+            account_id=account_id,
+            strategy_decision_id=strategy_decision_id,
+            candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
+            batch_id=child_id,
+        )
+        if previous_batch_id is None or child_id is not None
+        else None
     )
     if existing is not None:
         existing_target = await session.scalar(
@@ -1419,6 +1467,17 @@ async def _create_paper_order_batch_impl(
             await session.flush()
         return existing
 
+    if previous_batch_id is not None:
+        from nexus.paper.target_service import require_plan_continuation_parent
+
+        parent = await require_plan_continuation_parent(
+            session, account_id=account_id, previous_batch_id=previous_batch_id, now=request_time
+        )
+        if (
+            parent.strategy_decision_id != strategy_decision_id
+            or parent.target_version_id != target_version_id
+        ):
+            raise PaperBatchError("PAPER_BATCH_CONFLICT")
     decision_record = await session.get(StrategyDecisionRecord, strategy_decision_id)
     if decision_record is None or decision_record.account_id != account_id:
         raise PaperBatchError("STRATEGY_DECISION_INVALID")
@@ -1620,12 +1679,15 @@ async def _create_paper_order_batch_impl(
                 session,
                 account_id=account_id,
                 target_version_id=target_version_id,
+                reconsider_cash=previous_batch_id is not None,
             )
             candidates = _subtract_portfolio_risk_remainders(
                 candidates,
                 {key: value.quantity for key, value in remainder_coverage.items()},
             )
             candidates = tuple(filter(meets_portfolio_minimum_notional, candidates))
+        if previous_batch_id is not None:
+            candidates = tuple(c for c in candidates if c.side == "buy")
         if portfolio and not candidates:
             await session.delete(idempotency)
             await session.flush()
@@ -1671,4 +1733,5 @@ async def _create_paper_order_batch_impl(
         ledger_accounts=ledger_accounts,
         idempotency_key=idempotency_key,
         hooks=hooks,
+        previous_batch_id=previous_batch_id,
     )

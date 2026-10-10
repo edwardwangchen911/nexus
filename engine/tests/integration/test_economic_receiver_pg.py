@@ -12,7 +12,8 @@ from nexus.paper.portfolio_economic_preflight import EconomicPlanRequest, compil
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.runtime import Job
 from sqlalchemy import func, select
-from test_portfolio_synthesis_persistence_pg import seed_synthesis
+
+from engine.tests.integration.test_portfolio_synthesis_persistence_pg import seed_synthesis
 
 
 @pytest.mark.asyncio
@@ -81,8 +82,24 @@ async def test_normal_synthesis_frozen_receiver_and_lane_prompt_are_bound(migrat
                     )
                 }
             )
+            # Protocol input order does not override the native canonical UUID order.
+            require_economic_receiver(different, binding, allocation, run)
+            wrong_identity = plan.model_copy(
+                update={
+                    "request": plan.request.model_copy(
+                        update={
+                            "instruments": (
+                                plan.request.instruments[0],
+                                plan.request.instruments[1].model_copy(
+                                    update={"instrument_id": UUID(int=9999)}
+                                ),
+                            ),
+                        }
+                    )
+                }
+            )
             with pytest.raises(ValueError, match="ECONOMIC_TRANSFER_RECEIVER_INVALID"):
-                require_economic_receiver(different, binding, allocation, run)
+                require_economic_receiver(wrong_identity, binding, allocation, run)
             require_economic_receiver(plan, binding, allocation, run)
             assert await session.scalar(select(func.count()).select_from(Job)) == before
     finally:

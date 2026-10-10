@@ -31,6 +31,7 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 markers = [
     "performance: wall-clock performance checks that run in the manual full regression",
 ]

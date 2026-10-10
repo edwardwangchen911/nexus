@@ -400,6 +400,22 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       ? data
       : INVALID_DATA;
   }
+  const economicLane = /^\/internal\/v1\/paper\/economic-pairs\/([^/]+)\/lanes\/(incumbent|challenger)$/.exec(pathname);
+  if (economicLane && validateUuid(economicLane[1])) {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, runtimeContractSchemas.EconomicLaneResponse)
+      && isPlain(data) && data.lane === economicLane[2] && isPlain(data.pair)
+      && sameUuid(data.pair.pair_slot_id, economicLane[1]) && economicPairSemanticsValid(data.pair)
+      && economicLaneSemanticsValid(data) ? data : INVALID_DATA;
+  }
+  const economicPair = /^\/internal\/v1\/paper\/economic-pairs\/([^/]+)$/.exec(pathname);
+  if (economicPair && validateUuid(economicPair[1])) {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, runtimeContractSchemas.EconomicPairResponse)
+      && isPlain(data) && sameUuid(data.pair_slot_id, economicPair[1])
+      && economicPairSemanticsValid(data)
+      ? data : INVALID_DATA;
+  }
   const paperPlan = /^\/internal\/v1\/paper\/plans\/([^/]+)$/.exec(pathname);
   if (paperPlan && validateUuid(paperPlan[1])) {
     return requestMethod?.toUpperCase() === "GET"
@@ -906,8 +922,13 @@ function managementCycleSemanticsValid(value: Record<string, unknown>): boolean 
   if (!sameUuid(synthesis.candidate_batch_id, candidate.candidate_batch_id)
     || researchIds.length !== candidateIds.length
     || !candidateIds.every((id) => researchIds.includes(id))
-    || research.some((item) => !orderedTimes((item as Record<string, unknown>).as_of, synthesis.as_of))
-    || !synthesisChoicesValid(synthesis, candidateIds)) return false;
+    || research.some((item) => !orderedTimes((item as Record<string, unknown>).as_of, synthesis.as_of))) return false;
+  if (synthesis.status !== "completed") {
+    return ["failed", "abstained"].includes(String(synthesis.status))
+      && Array.isArray(synthesis.choices) && synthesis.choices.length === 0 && synthesis.cash_rationale === null
+      && proposal === null && activation === null && blocker === null && blockingPlan === null && plan === null;
+  }
+  if (!synthesisChoicesValid(synthesis, candidateIds)) return false;
 
   if (blocker?.code === "POLICY_UNCONFIRMED") {
     return synthesis.status === "completed" && proposal === null
@@ -1853,3 +1874,53 @@ function allowsStatus(code: unknown, status: number): boolean { return isStableC
 function safeHeaders(upstream: Headers, requestUrl?: string): Headers { const headers = new Headers(); for (const name of ["retry-after", "etag"]) { const value = upstream.get(name); if (value) headers.set(name, value); } const location = upstream.get("location"); if (location && requestUrl) try { const target = new URL(location, requestUrl); const origin = new URL(requestUrl).origin; if (target.origin === origin && !target.username && !target.password) headers.set("location", `${target.pathname}${target.search}${target.hash}`); } catch { return headers; } return headers; }
 function isObject(value: unknown, keys: string[]): value is Record<string, unknown> { return isPlain(value) && Object.keys(value).length === keys.length && keys.every((key) => key in value); }
 function isPlain(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+
+function economicPairSemanticsValid(data: Record<string, unknown>): boolean {
+  const refs = data.lanes;
+  if (!Array.isArray(refs) || !refs.every(isPlain)
+    || new Set(refs.map((ref) => ref.lane)).size !== 2) return false;
+  const cycles = refs.filter((ref) => ref.cycle_id !== null).map((ref) => ref.cycle_id);
+  if (cycles.length !== 0 && (cycles.length !== 2 || new Set(cycles.map((id) => String(id).toLowerCase())).size !== 2)) return false;
+  if (data.execution === null) return data.gap_code === "ECONOMIC_WINDOW_REQUIRED";
+  if (cycles.length !== 2 || data.gap_code !== null || !isPlain(data.execution)) return false;
+  const execution = data.execution;
+  const lanes = execution.lanes; const orders = execution.orders;
+  if (!Array.isArray(lanes) || !lanes.every(isPlain)
+    || !Array.isArray(orders) || !orders.every(isPlain)
+    || new Set(lanes.map((lane) => lane.lane)).size !== 2
+    || new Set(orders.map((order) => String(order.order_id).toLowerCase())).size !== orders.length) return false;
+  if (lanes.some((lane) => lane.order_count !== orders.filter((order) => order.lane === lane.lane).length)) return false;
+  if (lanes.some((lane) => ["no_trade", "not_required", "risk_rejected"].includes(String(lane.status))
+    && lane.order_count !== 0)) return false;
+  if (lanes.some((lane) => lane.status === "no_trade"
+    && refs.find((ref) => ref.lane === lane.lane)?.cycle_status !== "completed")) return false;
+  if (execution.window_id === null) return execution.status === "completed"
+    && execution.comparison_status === "not_evaluated" && orders.length === 0
+    && lanes.every((lane) => lane.status === "no_trade");
+  return !lanes.every((lane) => lane.status === "no_trade");
+}
+
+
+function economicLaneSemanticsValid(data: Record<string, unknown>): boolean {
+  const actual = data.actual; const portfolio = data.portfolio;
+  if (!isPlain(actual) || !isPlain(portfolio) || !paperPortfolioValid(portfolio)
+    || !Array.isArray(portfolio.positions) || portfolio.positions.length > 500
+    || !Array.isArray(portfolio.attributions) || portfolio.attributions.length > 500) return false;
+  if (actual.data_state === "UNKNOWN") {
+    if (actual.as_of !== null || actual.available_cash !== null || actual.reserved_cash !== null
+      || actual.nav !== null || actual.positions !== null) return false;
+  } else if (actual.data_state !== "READY" || actual.as_of === null || actual.available_cash === null
+    || actual.reserved_cash === null || actual.nav === null || !Array.isArray(actual.positions)
+    || actual.positions.length > 500) return false;
+  if (!isPlain(data.pair) || !Array.isArray(data.pair.lanes)) return false;
+  const ref = data.pair.lanes.find((item: unknown) => isPlain(item) && item.lane === data.lane);
+  if (!isPlain(ref)) return false;
+  if (ref.cycle_id === null) return data.detail === null;
+  const detail = data.detail;
+  return isPlain(detail) && isPlain(detail.cycle)
+    && sameUuid(detail.cycle.cycle_id, ref.cycle_id) && detail.cycle.status === ref.cycle_status
+    && agentPaperCycleValid(detail.cycle) && Array.isArray(detail.orders)
+    && detail.orders.length <= 50 && detail.orders.every(paperOrderValid)
+    && cycleOrderIdsMatch(detail.cycle.order_ids, detail.orders)
+    && managementCycleSemanticsValid(detail);
+}

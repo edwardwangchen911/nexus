@@ -1,5 +1,7 @@
 "use client";
 
+import { EconomicContextBoundary } from "../../components/paper/economic-context";
+
 import { statusLabel } from "../../lib/display-labels";
 import { formatDisplayTime, snapshotTimeLabel } from "../../lib/display-format";
 
@@ -35,6 +37,10 @@ const MAX_PORTFOLIOS_PER_PAGE = 50;
 const MAX_PORTFOLIOS = MAX_PORTFOLIO_PAGES * MAX_PORTFOLIOS_PER_PAGE;
 
 export default function PortfolioPage(): React.ReactElement {
+  return <EconomicContextBoundary view="portfolio"><DefaultPortfolioPage /></EconomicContextBoundary>;
+}
+
+function DefaultPortfolioPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [portfolios, setPortfolios] = useState<PortfolioItem[]>([]);
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);

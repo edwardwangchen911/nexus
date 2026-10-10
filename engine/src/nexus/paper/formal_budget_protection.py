@@ -680,7 +680,7 @@ async def _require_exact_run(
     task: FrozenTask,
 ) -> None:
     from nexus.agents.paper_context import read_agent_paper_research_context
-    from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+    from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
     from nexus.paper.agent_cycle_models import candidate_manifest_hash, parse_candidate_manifest
 
     p = binding.payload
@@ -738,7 +738,7 @@ async def _require_exact_run(
         if frozen_evidence not in run.evidence_manifest:
             raise ValueError("FORMAL_BUDGET_COVERAGE_UNKNOWN")
     else:
-        frozen = _frozen_run(run)
+        frozen = await load_frozen_synthesis_authority(session, run)
         identity = cast(dict[str, str], p["synthesis_prompt"])
         if (
             run.idempotency_key != f"portfolio-synthesis:{cycle.id}"

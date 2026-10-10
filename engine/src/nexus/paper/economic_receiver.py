@@ -40,8 +40,8 @@ def require_economic_receiver(
     if run.prompt_version_id != prompt_id or run.prompt_hash != prompt_hash:
         raise ValueError(invalid)
     try:
-        frozen = _frozen_run(run)
+        frozen = _frozen_run(run, economic_authority=True)
     except (ValueError, TypeError, KeyError) as error:
         raise ValueError(invalid) from error
-    if frozen.candidate_instrument_ids != candidates:
+    if frozen.candidate_instrument_ids != tuple(sorted(candidates, key=lambda item: item.int)):
         raise ValueError(invalid)

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
 from nexus.agents.paper_context import read_agent_paper_research_context
-from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
 from nexus.jobs.daily_research import AGENT_VERSION_CHALLENGER_ACTOR, AGENT_VERSION_INCUMBENT_ACTOR
 from nexus.paper.agent_cycle_models import (
     CandidateManifestEntry,
@@ -315,7 +315,7 @@ async def inspect_inventory(
                 )
                 if isinstance(run, AgentPortfolioSynthesisRunRecord):
                     try:
-                        frozen = _frozen_run(run)
+                        frozen = await load_frozen_synthesis_authority(session, run)
                         exact = exact and (
                             run.idempotency_key == f"portfolio-synthesis:{cycle.id}"
                             and frozen.cycle_id == cycle.id

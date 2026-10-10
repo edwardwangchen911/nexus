@@ -585,6 +585,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/economic-pairs/{pair_slot_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Economic Pair */
+        get: operations["getInternalEconomicPair"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/paper/economic-pairs/{pair_slot_id}/lanes/{lane}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Economic Lane */
+        get: operations["getInternalEconomicLane"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/paper/management/cycles/{cycle_id}": {
         parameters: {
             query?: never;
@@ -2477,6 +2511,8 @@ export interface components {
             unknown_reason: string | null;
         };
         CurrencyCode: string;
+        /** @enum {string} */
+        CycleStatus: "prepared" | "researching" | "decision_recorded" | "risk_evaluated" | "awaiting_market" | "partially_filled" | "completed" | "unavailable" | "failed";
         /** DailyBriefEnvelope */
         DailyBriefEnvelope: {
             data: components["schemas"]["DailyBriefResponse"];
@@ -2629,6 +2665,140 @@ export interface components {
              * @enum {string}
              */
             status: "incomparable" | "policy_required" | "compared";
+        };
+        /** EconomicCycleRefResponse */
+        EconomicCycleRefResponse: {
+            /** Cycle Id */
+            cycle_id: string | null;
+            cycle_status: components["schemas"]["CycleStatus"] | null;
+            /**
+             * Lane
+             * @enum {string}
+             */
+            lane: "incumbent" | "challenger";
+        };
+        /** EconomicExecutionLaneResponse */
+        EconomicExecutionLaneResponse: {
+            /**
+             * Lane
+             * @enum {string}
+             */
+            lane: "incumbent" | "challenger";
+            /** Order Count */
+            order_count: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "unknown" | "unavailable" | "partial" | "risk_rejected" | "filled" | "not_required" | "no_trade";
+        };
+        /** EconomicExecutionOrderResponse */
+        EconomicExecutionOrderResponse: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "filled" | "partially_filled" | "unknown" | "unavailable" | "not_attempted";
+            /** Code */
+            code: string;
+            /**
+             * Lane
+             * @enum {string}
+             */
+            lane: "incumbent" | "challenger";
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /** Status */
+            status: string;
+        };
+        /** EconomicExecutionResponse */
+        EconomicExecutionResponse: {
+            /**
+             * Comparison Status
+             * @enum {string}
+             */
+            comparison_status: "not_evaluated" | "incomplete" | "incomparable";
+            /** Lanes */
+            lanes: components["schemas"]["EconomicExecutionLaneResponse"][];
+            /** Orders */
+            orders: components["schemas"]["EconomicExecutionOrderResponse"][];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_started" | "unknown" | "unavailable" | "partial" | "completed";
+            /** Window Id */
+            window_id: string | null;
+        };
+        /** EconomicLaneEnvelope */
+        EconomicLaneEnvelope: {
+            data: components["schemas"]["EconomicLaneResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** EconomicLaneResponse */
+        EconomicLaneResponse: {
+            actual: components["schemas"]["PaperPlanActualResponse"];
+            detail: components["schemas"]["AgentPaperManagementCycleResponse"] | null;
+            /**
+             * Lane
+             * @enum {string}
+             */
+            lane: "incumbent" | "challenger";
+            pair: components["schemas"]["EconomicPairResponse"];
+            portfolio: components["schemas"]["PaperPortfolioResponse"];
+        };
+        /** EconomicPairEnvelope */
+        EconomicPairEnvelope: {
+            data: components["schemas"]["EconomicPairResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** EconomicPairResponse */
+        EconomicPairResponse: {
+            /**
+             * Decision At
+             * Format: date-time
+             */
+            decision_at: string;
+            /**
+             * Decision Session
+             * Format: date
+             */
+            decision_session: string;
+            /**
+             * Economic Status
+             * @constant
+             */
+            economic_status: "not_evaluated";
+            /**
+             * Evaluation Id
+             * Format: uuid
+             */
+            evaluation_id: string;
+            execution: components["schemas"]["EconomicExecutionResponse"] | null;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /** Gap Code */
+            gap_code: "ECONOMIC_WINDOW_REQUIRED" | null;
+            /** Lanes */
+            lanes: components["schemas"]["EconomicCycleRefResponse"][];
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Pair Slot Id
+             * Format: uuid
+             */
+            pair_slot_id: string;
+            /**
+             * Planned Slots
+             * @constant
+             */
+            planned_slots: 24;
         };
         /**
          * EmptyActionRequest
@@ -9772,6 +9942,123 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PortfolioEconomicEvidenceEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalEconomicPair: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pair_slot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EconomicPairEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalEconomicLane: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lane: "incumbent" | "challenger";
+                pair_slot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EconomicLaneEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */

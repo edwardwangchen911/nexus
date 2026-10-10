@@ -89,6 +89,20 @@ describe("internal-paper BFF routes", () => {
     expect(response.status).toBe(400);
     expect(engineFetch).not.toHaveBeenCalled();
   });
+  it("forwards only a valid query-free economic pair GET", async () => {
+    const { GET } = await import("../../../app/api/v1/paper/economic-pairs/[pairSlotId]/route");
+    await GET(new Request(`https://nexus.test/api/v1/paper/economic-pairs/${cycleId}`));
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/paper/economic-pairs/{pair_slot_id}",
+      path: `/internal/v1/paper/economic-pairs/${cycleId}`,
+    }, { method: "GET", actor });
+    engineFetch.mockClear();
+    for (const path of ["bad", `${cycleId}?account_id=foreign`, `${cycleId}?lane=challenger`]) {
+      expect((await GET(new Request(`https://nexus.test/api/v1/paper/economic-pairs/${path}`))).status).toBe(400);
+    }
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     engineFetch.mockReset();
     engineFetch.mockResolvedValue(Response.json({
@@ -268,4 +282,19 @@ describe("internal-paper BFF routes", () => {
     expect(response.status).toBe(400);
     expect(engineFetch).not.toHaveBeenCalled();
   });
+});
+
+it("forwards only a registered economic pair lane, without account overrides", async () => {
+  const { GET } = await import("../../../app/api/v1/paper/economic-pairs/[pairSlotId]/lanes/[lane]/route");
+  const path = `/api/v1/paper/economic-pairs/${cycleId}/lanes/challenger`;
+  await GET(new Request(`https://nexus.test${path}`));
+  expect(engineFetch).toHaveBeenCalledWith({
+    template: "/internal/v1/paper/economic-pairs/{pair_slot_id}/lanes/{lane}",
+    path: `/internal/v1/paper/economic-pairs/${cycleId}/lanes/challenger`,
+  }, { method: "GET", actor });
+  engineFetch.mockClear();
+  for (const invalid of [path + "?account_id=foreign", path.replace("challenger", "other"), path.replace(cycleId, "invalid")]) {
+    expect((await GET(new Request(`https://nexus.test${invalid}`))).status).toBe(400);
+  }
+  expect(engineFetch).not.toHaveBeenCalled();
 });

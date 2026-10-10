@@ -24,7 +24,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -95,10 +95,14 @@ from nexus.persistence.models.paper import (
     PaperTargetVersionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
-from nexus.providers.base import MarketDataProvider
+from nexus.providers.base import InstrumentId, MarketDataProvider
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.providers.market.alpaca import AlpacaMarketDataProvider
-from nexus.providers.market.alpaca_http import AlpacaHttpTransport, SqlInstrumentSymbolResolver
+from nexus.providers.market.alpaca_http import (
+    AlpacaHttpTransport,
+    InstrumentSymbolResolver,
+    SqlInstrumentSymbolResolver,
+)
 from nexus.providers.market.schwab_oauth import SchwabOAuthError, schwab_http_client
 from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
 from nexus.providers.market.schwab_stream import SchwabStreamError
@@ -1490,6 +1494,19 @@ async def run_cycle_job_once(
     raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
 
 
+class _FrozenMarketSymbols:
+    """An exact already-resolved identity date; no database access during transport."""
+
+    def __init__(self, symbols: Mapping[UUID, str], as_of: date) -> None:
+        self._symbols = dict(symbols)
+        self._as_of = as_of
+
+    async def resolve(self, instrument_id: UUID, as_of: date) -> str:
+        if as_of != self._as_of or instrument_id not in self._symbols:
+            raise ValueError("INSTRUMENT_SYMBOL_AUTHORITY_INVALID")
+        return self._symbols[instrument_id]
+
+
 async def collect_window_once(
     settings: AgentPaperMarketSettings,
     request: AgentPaperCollectWindowRequest,
@@ -1527,7 +1544,39 @@ async def collect_window_once(
                 cycle_id=request.cycle_id,
                 instrument_id=request.instrument_id,
             )
-            resolver = SqlInstrumentSymbolResolver(resolver_session)
+            resolver: InstrumentSymbolResolver = SqlInstrumentSymbolResolver(resolver_session)
+            if await resolver_session.scalar(
+                text("SELECT to_regclass('economic_lane_cycles') IS NOT NULL")
+            ):
+                from nexus.paper.economic_cycle import read_economic_cycle
+                from nexus.persistence.models.economic import (
+                    EconomicCommonWindowRecord,
+                    EconomicWindowOrderRecord,
+                )
+
+                owner = await read_economic_cycle(resolver_session, cycle_id=request.cycle_id)
+                if owner is not None:
+                    ids = tuple(
+                        await resolver_session.scalars(
+                            select(EconomicWindowOrderRecord.instrument_id)
+                            .join(
+                                EconomicCommonWindowRecord,
+                                EconomicCommonWindowRecord.id
+                                == EconomicWindowOrderRecord.window_id,
+                            )
+                            .where(
+                                EconomicCommonWindowRecord.pair_slot_id == owner[0].pair_slot_id,
+                                EconomicCommonWindowRecord.window_start == scope.window_start,
+                            )
+                            .distinct()
+                        )
+                    )
+                    symbols = {
+                        iid: await resolver.resolve(InstrumentId(iid), scope.window_start.date())
+                        for iid in ids
+                    }
+                    resolver = _FrozenMarketSymbols(symbols, scope.window_start.date())
+                    await resolver_session.close()
             provider: MarketDataProvider
             if scope.execution_source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID:
                 provider = SchwabPriceHistoryProvider(
@@ -1647,6 +1696,20 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as error:
         code = str(error)
         if code not in {
+            "ECONOMIC_PAIR_CYCLE_NOT_BOUND",
+            "ECONOMIC_PROTOCOL_DATABASE_MISMATCH",
+            "ECONOMIC_PROTOCOL_BUSINESS_STATE_FORBIDDEN",
+            "ECONOMIC_WINDOW_REQUIRED",
+            "ECONOMIC_WINDOW_INVALID",
+            "ECONOMIC_WINDOW_MISSED",
+            "ECONOMIC_WINDOW_ORDER_REQUIRED",
+            "ECONOMIC_WINDOW_ARCHIVES_REQUIRED",
+            "ECONOMIC_WINDOW_ARCHIVE_CONFLICT",
+            "ECONOMIC_WINDOW_BINDING_REQUIRED",
+            "ECONOMIC_WINDOW_CONSUMPTION_UNAVAILABLE",
+            "ECONOMIC_WINDOW_COLLECTION_TOO_EARLY",
+            "ECONOMIC_WINDOW_COLLECTION_UNKNOWN",
+            "ECONOMIC_WINDOW_COLLECTION_FAILED",
             "AGENT_PAPER_ACCOUNT_INVALID",
             "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
             "AGENT_PAPER_CALENDAR_UNAVAILABLE",

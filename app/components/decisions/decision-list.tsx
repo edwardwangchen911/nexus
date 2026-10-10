@@ -18,8 +18,9 @@ const statusOptions: Array<["" | DecisionCycle["status"], string]> = [
   ["completed", "已完成"], ["unavailable", "数据不足"], ["failed", "模型失败"],
 ];
 
-export function DecisionList({ cycles, session = "", onSessionChange = () => {} }: {
+export function DecisionList({ cycles, session = "", onSessionChange = () => {}, detailQuery = "" }: {
   cycles: DecisionCycle[];
+  detailQuery?: string;
   session?: string;
   onSessionChange?: (session: string) => void;
 }): React.ReactElement {
@@ -38,12 +39,12 @@ export function DecisionList({ cycles, session = "", onSessionChange = () => {} 
     {cycles.some((cycle) => cycle.candidates.length > 1) && <p>筛选匹配本周期任一候选的研究观点；组合取舍、目标与执行结果请查看详情。</p>}
     <p className="decision-records__count">当前筛选显示 <strong className="numeric-data">{filtered.length} / {cycles.length}</strong> 条已加载记录</p>
     {filtered.length ? <ul aria-label="决策记录">
-      {filtered.map((cycle) => <DecisionRow key={cycle.cycle_id} cycle={cycle} />)}
+      {filtered.map((cycle) => <DecisionRow key={cycle.cycle_id} cycle={cycle} detailQuery={detailQuery} />)}
     </ul> : <div className="decision-records__empty"><CalendarDays aria-hidden="true" size={22} /><p>当前筛选下没有已加载的决策记录。</p></div>}
   </section>;
 }
 
-function DecisionRow({ cycle }: { cycle: DecisionCycle }): React.ReactElement {
+function DecisionRow({ cycle, detailQuery }: { cycle: DecisionCycle; detailQuery: string }): React.ReactElement {
   const decision = cycleDecisionPresentation(cycle);
   const risk = riskPresentation(cycle);
   const candidate = decision.candidates[0] ?? null;
@@ -58,7 +59,7 @@ function DecisionRow({ cycle }: { cycle: DecisionCycle }): React.ReactElement {
         </> : <><strong>{candidate?.label ?? decision.summary.label}</strong><span>{candidate?.symbol ?? "无候选标的"}</span></>}
       </div>
       <div className="decision-row__result"><small>结果</small><strong>{final.label}</strong><code>{cycle.result_code}</code></div>
-      <a className="button button--quiet" href={`/decisions/${cycle.cycle_id}`} aria-label={`查看决策 ${cycle.cycle_id.slice(0, 8)}`}>查看决策<ArrowRight aria-hidden="true" size={16} /></a>
+      <a className="button button--quiet" href={`/decisions/${cycle.cycle_id}${detailQuery}`} aria-label={`查看决策 ${cycle.cycle_id.slice(0, 8)}`}>查看决策<ArrowRight aria-hidden="true" size={16} /></a>
     </article>
   </li>;
 }

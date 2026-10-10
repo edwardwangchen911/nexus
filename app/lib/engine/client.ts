@@ -255,6 +255,14 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   if (paperCancelResult && validateUuid(paperCancelResult[1])) {
     return template === "/internal/v1/paper/orders/{order_id}/cancel-result";
   }
+  const economicLane = /^\/internal\/v1\/paper\/economic-pairs\/([^/]+)\/lanes\/(incumbent|challenger)$/.exec(path);
+  if (economicLane && validateUuid(economicLane[1])) {
+    return template === "/internal/v1/paper/economic-pairs/{pair_slot_id}/lanes/{lane}";
+  }
+  const economicPair = /^\/internal\/v1\/paper\/economic-pairs\/([^/]+)$/.exec(path);
+  if (economicPair && validateUuid(economicPair[1])) {
+    return template === "/internal/v1/paper/economic-pairs/{pair_slot_id}";
+  }
   const paperPlan = /^\/internal\/v1\/paper\/plans\/([^/]+)$/.exec(path);
   if (paperPlan && validateUuid(paperPlan[1])) {
     return template === "/internal/v1/paper/plans/{batch_id}";

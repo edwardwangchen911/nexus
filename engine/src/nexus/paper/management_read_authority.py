@@ -19,7 +19,7 @@ from nexus.agents.portfolio_synthesis_contracts import (
     canonical_portfolio_synthesis_hash,
     validate_portfolio_synthesis_intent,
 )
-from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
 from nexus.paper.agent_decision_store import (
     PersistedPortfolioProposal,
     load_portfolio_proposal,
@@ -119,7 +119,7 @@ async def load_synthesis_read_authority(
     )
     if run is None:
         return None
-    frozen = _frozen_run(run)
+    frozen = await load_frozen_synthesis_authority(session, run)
     if run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
         from nexus.paper.agent_cycle import _require_cycle_candidate_profile
 

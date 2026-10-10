@@ -15,7 +15,7 @@ from nexus.agents.portfolio_synthesis_contracts import (
     canonical_portfolio_synthesis_hash,
     validate_portfolio_synthesis_intent,
 )
-from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
 from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
 from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
@@ -540,7 +540,7 @@ async def _rebuild_portfolio_proposal(
         or cycle.sizing_policy_hash != PORTFOLIO_ALLOCATION_POLICY_HASH
     ):
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
-    frozen = _frozen_run(run)
+    frozen = await load_frozen_synthesis_authority(session, run)
     if formal_stage_capacity:
         from nexus.agents.codex_formal_stage import formal_stage_config_hash
         from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
@@ -737,7 +737,7 @@ async def load_portfolio_proposal(
     )
     if run is None:
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
-    frozen = _frozen_run(run)
+    frozen = await load_frozen_synthesis_authority(session, run)
     bindings = await _portfolio_bindings(
         session,
         frozen=frozen,
@@ -846,7 +846,7 @@ async def persist_portfolio_proposal(
     )
     if run is None:
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
-    frozen = _frozen_run(run)
+    frozen = await load_frozen_synthesis_authority(session, run)
     decision_id = new_uuid7()
     session.add(
         StrategyDecisionRecord(

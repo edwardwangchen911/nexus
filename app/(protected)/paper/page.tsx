@@ -1,5 +1,7 @@
 "use client";
 
+import { EconomicContextBoundary } from "../../components/paper/economic-context";
+
 import { marketDeliveryModeLabel } from "../../lib/market-evidence-labels";
 
 import { statusLabel } from "../../lib/display-labels";
@@ -62,6 +64,10 @@ const statusOptions: Array<["" | OrderStatus, string]> = [
 ];
 
 export default function PaperPage(): React.ReactElement {
+  return <EconomicContextBoundary view="paper"><DefaultPaperPage /></EconomicContextBoundary>;
+}
+
+function DefaultPaperPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [portfolio, setPortfolio] = useState<PaperPortfolio | null>(null);
   const [orders, setOrders] = useState<PaperOrder[]>([]);

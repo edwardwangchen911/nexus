@@ -19,7 +19,7 @@ from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisIntentV1,
     validate_portfolio_synthesis_intent,
 )
-from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
 from nexus.agents.portfolio_synthesis_worker import CodexSynthesisTransport, SynthesisTransport
 from nexus.audit.service import append_audit_event
 from nexus.jobs.models import JobKeyV1, JobStatus, JobType, QueueName, RetryPolicy, job_input_hash
@@ -218,7 +218,7 @@ async def inspect_compare(settings: EngineSettings, request: CompareRequest) -> 
             )
             if incumbent_prompt is None or challenger_prompt is None:
                 raise AgentChallengerError("PORTFOLIO_CHALLENGER_RESULT_UNKNOWN")
-            incumbent_input = _frozen_run(run)
+            incumbent_input = await load_frozen_synthesis_authority(session, run)
             case = freeze_prospective_portfolio_challenger_case(
                 run=run,
                 incumbent_prompt=incumbent_prompt,

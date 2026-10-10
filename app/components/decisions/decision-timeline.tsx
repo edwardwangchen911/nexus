@@ -11,7 +11,7 @@ type Order = components["schemas"]["PaperOrderResponse"];
 
 const stages = ["运行窗口", "市场与研究证据", "Agent 决策", "确定性仓位计算", "确定性风控", "订单结论", "执行结果", "后续表现"] as const;
 
-export function DecisionTimeline({ detail }: { detail: Detail }): React.ReactElement {
+export function DecisionTimeline({ detail, paperHref = "/paper" }: { detail: Detail; paperHref?: string }): React.ReactElement {
   const { cycle, orders } = detail;
   const decision = cycleDecisionPresentation(cycle);
   const risk = riskPresentation(cycle);
@@ -50,7 +50,7 @@ export function DecisionTimeline({ detail }: { detail: Detail }): React.ReactEle
     </Stage>
     <Stage title={stages[6]} state={executionState} summary={resultUnknown ? "结果未知：现有周期与订单事实不能证明最终结果。" : `${execution.label}：${execution.detail}`}>
       {orders.length ? <ExecutionDetails orders={orders} /> : null}
-      {resultUnknown ? <a className="button button--danger" href="/paper"><ShieldAlert aria-hidden="true" size={17} />核对原操作结果</a> : null}
+      {resultUnknown ? <a className="button button--danger" href={paperHref}><ShieldAlert aria-hidden="true" size={17} />核对原操作结果</a> : null}
     </Stage>
     <Stage title={stages[7]} state="unknown" summary="未知：接口尚未提供该周期之后的统一表现归因。" />
   </ol>;

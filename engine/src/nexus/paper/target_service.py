@@ -1,8 +1,14 @@
 """One explicit immutable initial-baseline approval; no execution side effects."""
 
+from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from nexus.paper.service import PaperOrderBatchResult
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
@@ -93,6 +99,7 @@ async def load_risk_remainder_coverage(
     *,
     account_id: UUID,
     target_version_id: UUID,
+    reconsider_cash: bool = False,
 ) -> dict[tuple[UUID, str], RiskRemainderCoverage]:
     """Return only still-unapproved same-side quantities for one target."""
     rows = tuple(
@@ -118,6 +125,20 @@ async def load_risk_remainder_coverage(
     )
     quantities: dict[tuple[UUID, str], Decimal] = {}
     for order, evaluation in rows:
+        if reconsider_cash and order.side == "buy":
+            from nexus.persistence.models.paper import RiskEvaluationRuleRecord
+
+            cash_failure = await session.scalar(
+                select(RiskEvaluationRuleRecord.id).where(
+                    RiskEvaluationRuleRecord.risk_evaluation_id == evaluation.id,
+                    RiskEvaluationRuleRecord.rule_code == "CASH_FLOOR",
+                    RiskEvaluationRuleRecord.passed.is_(False),
+                )
+            )
+            if cash_failure is not None:
+                # The original rejection stays immutable. This explicit continuation
+                # runs every original risk rule against actual post-sale projection.
+                continue
         remainder = max(
             Decimal(0),
             evaluation.desired_quantity - evaluation.approved_quantity,
@@ -524,6 +545,7 @@ async def activate_portfolio_target(
                 PaperOrderBatchRecord.account_id == account_id,
                 PaperOrderBatchRecord.strategy_decision_id == strategy_decision_id,
                 PaperOrderBatchRecord.target_version_id == activated.id,
+                PaperOrderBatchRecord.previous_batch_id.is_(None),
             )
         )
         historical = TargetActivationResult(
@@ -662,3 +684,133 @@ async def activate_portfolio_target(
     )
     await session.flush()
     return result
+
+
+async def require_plan_continuation_parent(
+    session: AsyncSession, *, account_id: UUID, previous_batch_id: UUID, now: datetime
+) -> PaperOrderBatchRecord:
+    """No expected proceeds: every approved parent order must have real complete fills."""
+    from sqlalchemy import func
+
+    from nexus.persistence.models.paper import (
+        PaperFillRecord,
+        PaperOrderEventRecord,
+    )
+
+    parent = await session.get(PaperOrderBatchRecord, previous_batch_id)
+    if parent is None or parent.account_id != account_id or parent.target_version_id is None:
+        raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+    current_target = await session.scalar(
+        select(PaperTargetVersionRecord.id)
+        .where(PaperTargetVersionRecord.account_id == account_id)
+        .order_by(PaperTargetVersionRecord.version_seq.desc())
+        .limit(1)
+    )
+    if current_target != parent.target_version_id or now < parent.evaluated_at:
+        raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+    orders = tuple(
+        await session.scalars(
+            select(PaperOrderRecord).where(PaperOrderRecord.batch_id == parent.id)
+        )
+    )
+    has_sale = False
+    for order in orders:
+        event = await session.scalar(
+            select(PaperOrderEventRecord)
+            .where(PaperOrderEventRecord.order_id == order.id)
+            .order_by(PaperOrderEventRecord.event_seq.desc())
+            .limit(1)
+        )
+        if event is None or max(event.occurred_at, event.created_at) > now:
+            raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+        if order.risk_outcome == "rejected":
+            if event.to_status != "risk_rejected":
+                raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+            continue
+        fill = (
+            await session.get(PaperFillRecord, event.source_fill_id)
+            if event.source_fill_id
+            else None
+        )
+        total = await session.scalar(
+            select(func.sum(PaperFillRecord.quantity)).where(PaperFillRecord.order_id == order.id)
+        )
+        if (
+            event.to_status != "filled"
+            or fill is None
+            or fill.order_id != order.id
+            or fill.account_id != account_id
+            or total != order.quantity
+            or max(fill.evaluated_at, fill.created_at) > now
+        ):
+            raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+        has_sale |= order.side == "sell"
+    if not orders or not has_sale:
+        raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+    projection = await load_paper_projection(session, account_id=account_id, as_of=now)
+    require_unoccupied_projection(projection)
+    await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
+    return parent
+
+
+async def continue_portfolio_plan(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    previous_batch_id: UUID,
+    candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
+) -> PaperOrderBatchResult | None:
+    """Normal continuation; DB clock, exact parent key, own cash, unchanged deterministic risk."""
+    from sqlalchemy import func
+
+    from nexus.paper.agent_decision_store import load_portfolio_proposal
+    from nexus.paper.service import (
+        _create_target_aware_paper_order_batch,
+        load_paper_order_batch_result,
+    )
+
+    await lock_portfolio_account(session, account_id)
+    parent = await session.get(PaperOrderBatchRecord, previous_batch_id)
+    if parent is None or parent.account_id != account_id or parent.target_version_id is None:
+        raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+    child = await session.scalar(
+        select(PaperOrderBatchRecord.id).where(
+            PaperOrderBatchRecord.previous_batch_id == previous_batch_id
+        )
+    )
+    if child is not None:
+        return await load_paper_order_batch_result(
+            session,
+            account_id=account_id,
+            strategy_decision_id=parent.strategy_decision_id,
+            batch_id=child,
+            candidate_stage_capacity=candidate_stage_capacity,
+            formal_stage_capacity=formal_stage_capacity,
+        )
+    now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(now, datetime):
+        raise ValueError("PORTFOLIO_PLAN_NOT_READY")
+    await require_plan_continuation_parent(
+        session, account_id=account_id, previous_batch_id=previous_batch_id, now=now
+    )
+    proposal = await load_portfolio_proposal(
+        session,
+        account_id=account_id,
+        decision_id=parent.strategy_decision_id,
+        candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
+    )
+    if proposal is None or now >= proposal.proposal.expires_at:
+        raise ValueError("PORTFOLIO_PROPOSAL_EXPIRED")
+    return await _create_target_aware_paper_order_batch(
+        session,
+        account_id=account_id,
+        strategy_decision_id=parent.strategy_decision_id,
+        target_version_id=parent.target_version_id,
+        previous_batch_id=parent.id,
+        request_time=now,
+        idempotency_key=f"portfolio-plan-continue:{parent.id}",
+        candidate_stage_capacity=candidate_stage_capacity,
+        formal_stage_capacity=formal_stage_capacity,
+    )

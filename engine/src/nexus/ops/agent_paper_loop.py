@@ -3735,7 +3735,7 @@ async def _inspect_portfolio_batch(
     performance_due_at: datetime | None,
 ) -> AgentPaperLoopSnapshot | None:
     """Read internal scheduling authority, not the legacy single-security display DTO."""
-    from nexus.agents.portfolio_synthesis_persistence import _frozen_run
+    from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
     from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
     from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
 
@@ -3802,7 +3802,7 @@ async def _inspect_portfolio_batch(
     run = await session.get(AgentPortfolioSynthesisRunRecord, UUID(str(job.payload["run_id"])))
     assert run is not None
     try:
-        frozen = _frozen_run(run)
+        frozen = await load_frozen_synthesis_authority(session, run)
     except ValueError as error:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
     if (

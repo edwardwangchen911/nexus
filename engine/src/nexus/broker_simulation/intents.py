@@ -166,14 +166,21 @@ async def load_agent_paper_intent_source(
     )
     if decision is None:
         raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
-    batch = await session.scalar(
-        select(PaperOrderBatchRecord).where(
-            PaperOrderBatchRecord.account_id == cycle.account_id,
-            PaperOrderBatchRecord.strategy_decision_id == decision.id,
+    batches = tuple(
+        await session.scalars(
+            select(PaperOrderBatchRecord)
+            .where(
+                PaperOrderBatchRecord.account_id == cycle.account_id,
+                PaperOrderBatchRecord.strategy_decision_id == decision.id,
+            )
+            .limit(2)
         )
     )
-    if batch is None:
+    # The frozen broker intent contract represents exactly one native batch.
+    # Never silently export an arbitrary part of a multi-stage paper plan.
+    if len(batches) != 1:
         raise BrokerIntentError("AGENT_PAPER_SOURCE_NOT_READY")
+    batch = batches[0]
     policy = await session.get(RiskPolicyRecord, batch.risk_policy_id)
     execution_model = await session.scalar(
         select(PaperExecutionModelRecord).where(
@@ -487,9 +494,7 @@ async def prepare_agent_paper_execution_intent(
             orders=tuple(orders),
             risk_context=risk_context,
             prepared_at=now,
-            quote_expires_at=min(
-                quote.available_at + timedelta(minutes=15) for quote in quotes
-            ),
+            quote_expires_at=min(quote.available_at + timedelta(minutes=15) for quote in quotes),
             session_close_at=source.session_close_at,
         ),
     )
@@ -634,10 +639,7 @@ async def approve_execution_intent(
         )
     )
     if existing is not None:
-        if (
-            existing.request_body_hash != request_body_hash
-            or existing.intent_body_hash != if_match
-        ):
+        if existing.request_body_hash != request_body_hash or existing.intent_body_hash != if_match:
             raise BrokerIntentError("IDEMPOTENCY_CONFLICT")
         return _approved_result(intent, existing, replayed=True)
     if intent.status != IntentStatus.PREPARED.value:

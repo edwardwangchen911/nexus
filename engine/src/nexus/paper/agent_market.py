@@ -220,7 +220,56 @@ async def collect_agent_paper_window(
     object_store: MarketObjectStore,
     evaluated_at: datetime | None = None,
 ) -> PaperMarketWindowResult:
-    """Fetch, archive, qualify and bind one derived window with no retry or fallback."""
+    """Archive the native scope, using one whole-pair attempt for economic cycles."""
+    from nexus.paper.economic_cycle import read_economic_cycle
+
+    async with session_factory() as ownership_session:
+        has_economic = await ownership_session.scalar(
+            text("SELECT to_regclass('economic_lane_cycles') IS NOT NULL")
+        )
+        owner = (
+            await read_economic_cycle(ownership_session, cycle_id=cycle_id)
+            if has_economic
+            else None
+        )
+        if owner is not None:
+            economic_scope = await resolve_agent_paper_market_scope(
+                ownership_session, cycle_id=cycle_id, instrument_id=instrument_id
+            )
+            from nexus.persistence.models.economic import EconomicCommonWindowRecord
+
+            economic_sequence = await ownership_session.scalar(
+                select(EconomicCommonWindowRecord.window_seq).where(
+                    EconomicCommonWindowRecord.pair_slot_id == owner[0].pair_slot_id,
+                    EconomicCommonWindowRecord.window_start == economic_scope.window_start,
+                )
+            )
+            if economic_sequence is None:
+                raise PaperMarketError("PAPER_MARKET_AUTHORITY_UNAVAILABLE")
+            if evaluated_at is not None or window_start not in {None, economic_scope.window_start}:
+                raise PaperMarketError("PAPER_MARKET_CYCLE_REJECTED")
+    if owner is not None:
+        assert economic_sequence is not None
+        from nexus.paper.economic_collection import collect_economic_window
+
+        receipt = await collect_economic_window(
+            session_factory,
+            pair_slot_id=owner[0].pair_slot_id,
+            window_seq=economic_sequence,
+            provider=provider,
+            object_store=object_store,
+        )
+        async with session_factory() as result_session:
+            binding = await result_session.scalar(
+                select(AgentPaperMarketWindowRecord).where(
+                    AgentPaperMarketWindowRecord.cycle_id == cycle_id,
+                    AgentPaperMarketWindowRecord.instrument_id == economic_scope.instrument_id,
+                    AgentPaperMarketWindowRecord.window_start_at == economic_scope.window_start,
+                )
+            )
+            if binding is None:
+                raise PaperMarketError("PAPER_MARKET_AUTHORITY_UNAVAILABLE")
+            return _market_result(binding, replayed=receipt.replayed)
     async with session_factory() as session, session.begin():
         cycle = await session.get(AgentPaperCycleRecord, cycle_id)
         if cycle is None:
@@ -513,6 +562,13 @@ async def resolve_agent_paper_market_scope(
         instrument_id = candidate_ids[0]
     elif instrument_id not in candidate_ids:
         raise PaperMarketError("PAPER_MARKET_INSTRUMENT_REJECTED")
+    from nexus.paper.economic_window import economic_market_scope
+
+    economic_scope = await economic_market_scope(
+        session, cycle_id=cycle.id, instrument_id=instrument_id
+    )
+    if economic_scope is not None:
+        return economic_scope
     if cycle.execution_price_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID:
         calendars = tuple(
             await session.scalars(

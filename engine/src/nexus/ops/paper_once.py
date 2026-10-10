@@ -59,6 +59,15 @@ _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _AGENT_WINDOW_ROUTE = "agent-paper-order-window-advance"
 _AGENT_WINDOW_SCHEMA = "agent_paper_window_advance_v2"
 _SAFE_CODES = {
+    "ECONOMIC_PAIR_CYCLE_NOT_BOUND",
+    "ECONOMIC_WINDOW_REQUIRED",
+    "ECONOMIC_WINDOW_INVALID",
+    "ECONOMIC_WINDOW_MISSED",
+    "ECONOMIC_WINDOW_ORDER_REQUIRED",
+    "ECONOMIC_WINDOW_ARCHIVES_REQUIRED",
+    "ECONOMIC_WINDOW_ARCHIVE_CONFLICT",
+    "ECONOMIC_WINDOW_BINDING_REQUIRED",
+    "ECONOMIC_WINDOW_CONSUMPTION_UNAVAILABLE",
     "PAPER_ONCE_REQUEST_INVALID",
     "PAPER_ONCE_DATABASE_UNCONFIGURED",
     "PAPER_ONCE_DATABASE_NOT_LOCAL",
@@ -412,8 +421,7 @@ async def _coordinator_agent_window_result(
                     PaperRequestIdempotencyRecord.operation == "advance",
                     PaperRequestIdempotencyRecord.request_hash
                     == (paper_request.request_hash if paper_request is not None else ""),
-                    PaperRequestIdempotencyRecord.result_event_seq
-                    == result.result_event_seq,
+                    PaperRequestIdempotencyRecord.result_event_seq == result.result_event_seq,
                     PaperRequestIdempotencyRecord.result_hash == result.result_hash,
                 )
             )
@@ -777,6 +785,18 @@ async def run_once(
                     if order is None or order.account_id != request.account_id:
                         raise PaperOnceError("PAPER_ONCE_ACCOUNT_MISMATCH")
                     if request.agent_cycle_id is not None:
+                        from nexus.paper.economic_cycle import read_economic_cycle
+
+                        if (
+                            await read_economic_cycle(session, cycle_id=request.agent_cycle_id)
+                            is not None
+                        ):
+                            # Economic first consumption is timed by the actual DB,
+                            # never by a caller's backdated or replacement clock.
+                            database_now = await session.scalar(select(func.clock_timestamp()))
+                            if not isinstance(database_now, datetime):
+                                raise PaperOnceError("PAPER_ONCE_RESULT_UNKNOWN")
+                            request = request.model_copy(update={"evaluated_at": database_now})
                         output = await _advance_agent_market_window(
                             session,
                             request=request,

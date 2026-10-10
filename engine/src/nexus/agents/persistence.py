@@ -369,8 +369,12 @@ async def reserve_daily_budget(
         return cast(
             AgentDailyBudgetReservationRecord,
             await reserve_from_hold(
-                session, allocation=economic_allocation, run_id=run_id, now=now,
-                daily_limit_usd=daily_limit_usd, worst_case_usd=worst_case_usd,
+                session,
+                allocation=economic_allocation,
+                run_id=run_id,
+                now=now,
+                daily_limit_usd=daily_limit_usd,
+                worst_case_usd=worst_case_usd,
                 pricing_version=pricing_version,
             ),
         )
@@ -379,8 +383,12 @@ async def reserve_daily_budget(
     from nexus.paper.formal_budget_protection import require_protected_admission
 
     protected = await require_protected_admission(
-        session, kind="research", run_id=run_id, now=now,
-        daily_limit_usd=daily_limit_usd, amount=worst_case_usd,
+        session,
+        kind="research",
+        run_id=run_id,
+        now=now,
+        daily_limit_usd=daily_limit_usd,
+        amount=worst_case_usd,
     )
     used = await _shared_daily_budget_used(session, business_date=business_date)
     if not protected and used + worst_case_usd > daily_limit_usd:
@@ -417,8 +425,12 @@ async def reserve_portfolio_decision_budget(
     from nexus.paper.formal_budget_protection import require_protected_admission
 
     protected = await require_protected_admission(
-        session, kind="portfolio_decision", run_id=run_id, now=now,
-        daily_limit_usd=daily_limit_usd, amount=worst_case_usd,
+        session,
+        kind="portfolio_decision",
+        run_id=run_id,
+        now=now,
+        daily_limit_usd=daily_limit_usd,
+        amount=worst_case_usd,
     )
     used = await _shared_daily_budget_used(session, business_date=business_date)
     if not protected and used + worst_case_usd > daily_limit_usd:
@@ -585,6 +597,7 @@ async def admit_research_run(
     reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
     formal_stage_capacity: bool = False,
+    economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Keep version-inheriting admission failures atomic inside caller transactions."""
 
@@ -607,10 +620,12 @@ async def admit_research_run(
             reuse_latest_actor_prompts_only=reuse_latest_actor_prompts_only,
             version_source_run_id=version_source_run_id,
             formal_stage_capacity=formal_stage_capacity,
+            economic_allocation=economic_allocation,
         )
 
     if (
         formal_stage_capacity
+        or economic_allocation is not None
         or reuse_latest_actor_agent_version
         or version_source_run_id is not None
     ):
@@ -674,8 +689,18 @@ async def _admit_research_run(
     reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
     formal_stage_capacity: bool = False,
+    economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
+    if economic_allocation is not None and (
+        job_type is not JobType.AGENT_PAPER_RESEARCH
+        or economic_allocation.action == "synthesis"
+        or model_config_id is None
+        or formal_stage_capacity
+        or reuse_latest_actor_agent_version
+        or version_source_run_id is not None
+    ):
+        raise ValueError("ECONOMIC_PAIR_RESEARCH_ARGUMENT_INVALID")
     if (
         type(formal_stage_capacity) is not bool
         or formal_stage_capacity
@@ -785,7 +810,9 @@ async def _admit_research_run(
     from nexus.paper.formal_budget_protection import pinned_research_authorities
 
     protected_authority = await pinned_research_authorities(
-        session, actor_id=actor_id, idempotency_key=idempotency_key,
+        session,
+        actor_id=actor_id,
+        idempotency_key=idempotency_key,
     )
     if protected_authority is not None:
         prior_run = None
@@ -1067,6 +1094,7 @@ async def _admit_research_run(
         worst_case_usd=worst_case,
         pricing_version=model.version,
         pricing_fresh=True,
+        economic_allocation=economic_allocation,
     )
     claim.response_payload = {"run_id": str(run.id), "status": "prepared"}
     await session.flush()
@@ -1131,9 +1159,7 @@ async def _shared_daily_budget_used(session: AsyncSession, *, business_date: dat
         totals.append(Decimal(str(used)))
     from nexus.paper.economic_budget_hold import held_pair_budget
 
-    return sum(totals, Decimal("0")) + await held_pair_budget(
-        session, business_date=business_date
-    )
+    return sum(totals, Decimal("0")) + await held_pair_budget(session, business_date=business_date)
 
 
 async def _lock_budget_day(session: AsyncSession, business_date: str) -> None:

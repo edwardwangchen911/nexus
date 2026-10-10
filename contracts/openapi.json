@@ -3568,6 +3568,20 @@
         "pattern": "^[A-Z]{3}$",
         "type": "string"
       },
+      "CycleStatus": {
+        "enum": [
+          "prepared",
+          "researching",
+          "decision_recorded",
+          "risk_evaluated",
+          "awaiting_market",
+          "partially_filled",
+          "completed",
+          "unavailable",
+          "failed"
+        ],
+        "type": "string"
+      },
       "DailyBriefEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -4025,6 +4039,367 @@
           "reasons"
         ],
         "title": "EconomicComparisonResponse",
+        "type": "object"
+      },
+      "EconomicCycleRefResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Id"
+          },
+          "cycle_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CycleStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lane": {
+            "enum": [
+              "incumbent",
+              "challenger"
+            ],
+            "title": "Lane",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lane",
+          "cycle_id",
+          "cycle_status"
+        ],
+        "title": "EconomicCycleRefResponse",
+        "type": "object"
+      },
+      "EconomicExecutionLaneResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "lane": {
+            "enum": [
+              "incumbent",
+              "challenger"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
+          "order_count": {
+            "minimum": 0,
+            "title": "Order Count",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "unknown",
+              "unavailable",
+              "partial",
+              "risk_rejected",
+              "filled",
+              "not_required",
+              "no_trade"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lane",
+          "status",
+          "order_count"
+        ],
+        "title": "EconomicExecutionLaneResponse",
+        "type": "object"
+      },
+      "EconomicExecutionOrderResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "filled",
+              "partially_filled",
+              "unknown",
+              "unavailable",
+              "not_attempted"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "code": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[A-Z0-9_]+$",
+            "title": "Code",
+            "type": "string"
+          },
+          "lane": {
+            "enum": [
+              "incumbent",
+              "challenger"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
+          "order_id": {
+            "format": "uuid",
+            "title": "Order Id",
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z_]+$",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lane",
+          "order_id",
+          "status",
+          "action",
+          "code"
+        ],
+        "title": "EconomicExecutionOrderResponse",
+        "type": "object"
+      },
+      "EconomicExecutionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "comparison_status": {
+            "enum": [
+              "not_evaluated",
+              "incomplete",
+              "incomparable"
+            ],
+            "title": "Comparison Status",
+            "type": "string"
+          },
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/EconomicExecutionLaneResponse"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Lanes",
+            "type": "array"
+          },
+          "orders": {
+            "items": {
+              "$ref": "#/components/schemas/EconomicExecutionOrderResponse"
+            },
+            "title": "Orders",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "not_started",
+              "unknown",
+              "unavailable",
+              "partial",
+              "completed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "window_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Id"
+          }
+        },
+        "required": [
+          "status",
+          "window_id",
+          "lanes",
+          "orders",
+          "comparison_status"
+        ],
+        "title": "EconomicExecutionResponse",
+        "type": "object"
+      },
+      "EconomicLaneEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/EconomicLaneResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "EconomicLaneEnvelope",
+        "type": "object"
+      },
+      "EconomicLaneResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "actual": {
+            "$ref": "#/components/schemas/PaperPlanActualResponse"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPaperManagementCycleResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lane": {
+            "enum": [
+              "incumbent",
+              "challenger"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
+          "pair": {
+            "$ref": "#/components/schemas/EconomicPairResponse"
+          },
+          "portfolio": {
+            "$ref": "#/components/schemas/PaperPortfolioResponse"
+          }
+        },
+        "required": [
+          "pair",
+          "lane",
+          "detail",
+          "actual",
+          "portfolio"
+        ],
+        "title": "EconomicLaneResponse",
+        "type": "object"
+      },
+      "EconomicPairEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/EconomicPairResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "EconomicPairEnvelope",
+        "type": "object"
+      },
+      "EconomicPairResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "decision_at": {
+            "format": "date-time",
+            "title": "Decision At",
+            "type": "string"
+          },
+          "decision_session": {
+            "format": "date",
+            "title": "Decision Session",
+            "type": "string"
+          },
+          "economic_status": {
+            "const": "not_evaluated",
+            "title": "Economic Status",
+            "type": "string"
+          },
+          "evaluation_id": {
+            "format": "uuid",
+            "title": "Evaluation Id",
+            "type": "string"
+          },
+          "execution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EconomicExecutionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_locked": {
+            "const": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "gap_code": {
+            "anyOf": [
+              {
+                "const": "ECONOMIC_WINDOW_REQUIRED",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gap Code"
+          },
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/EconomicCycleRefResponse"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Lanes",
+            "type": "array"
+          },
+          "ordinal": {
+            "maximum": 24,
+            "minimum": 1,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "pair_slot_id": {
+            "format": "uuid",
+            "title": "Pair Slot Id",
+            "type": "string"
+          },
+          "planned_slots": {
+            "const": 24,
+            "title": "Planned Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pair_slot_id",
+          "evaluation_id",
+          "ordinal",
+          "planned_slots",
+          "decision_session",
+          "decision_at",
+          "execution_locked",
+          "economic_status",
+          "lanes",
+          "execution",
+          "gap_code"
+        ],
+        "title": "EconomicPairResponse",
         "type": "object"
       },
       "EmptyActionRequest": {
@@ -20405,6 +20780,159 @@
           }
         },
         "summary": "Get Portfolio Economic Evidence"
+      }
+    },
+    "/internal/v1/paper/economic-pairs/{pair_slot_id}": {
+      "get": {
+        "operationId": "getInternalEconomicPair",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pair_slot_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pair Slot Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EconomicPairEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Economic Pair"
+      }
+    },
+    "/internal/v1/paper/economic-pairs/{pair_slot_id}/lanes/{lane}": {
+      "get": {
+        "operationId": "getInternalEconomicLane",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pair_slot_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pair Slot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "lane",
+            "required": true,
+            "schema": {
+              "enum": [
+                "incumbent",
+                "challenger"
+              ],
+              "title": "Lane",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EconomicLaneEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Economic Lane"
       }
     },
     "/internal/v1/paper/management/cycles/{cycle_id}": {

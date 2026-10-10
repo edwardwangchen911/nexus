@@ -19,7 +19,7 @@ from nexus.persistence.session import session_factory
 from sqlalchemy import func, select, text
 
 
-async def seed_pair(session, historical):
+async def seed_pair(session, historical, *, pricing_days=1):
     now = await session.scalar(select(func.clock_timestamp()))
     model = AgentModelConfigRecord(
         id=UUID(int=1),
@@ -32,7 +32,7 @@ async def seed_pair(session, historical):
         input_usd_per_million=Decimal(0),
         output_usd_per_million=Decimal(0),
         pricing_available_at=now - timedelta(days=1),
-        pricing_expires_at=now + timedelta(days=1),
+        pricing_expires_at=now + timedelta(days=pricing_days),
     )
     incumbent = AgentPromptVersionRecord(
         id=UUID(int=2),

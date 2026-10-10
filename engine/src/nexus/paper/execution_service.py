@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -107,6 +107,9 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.runtime import OutboxEvent
 from nexus.quality.source_policy import paper_execution_price_authorized
+
+if TYPE_CHECKING:
+    from nexus.paper.agent_market import AgentPaperMarketScope
 
 # Compatibility for the existing rank-continuity writer; both names share one canonical function.
 _fact_hash = canonical_paper_fact_hash
@@ -681,6 +684,7 @@ async def _qualified_window(
     evaluated_at: datetime,
     prior_window: PaperExecutionWindowAuthorityRecord | None,
     expected_agent_market_window_id: UUID | None,
+    economic_scope: AgentPaperMarketScope | None = None,
 ) -> tuple[QualifiedExecutionWindow, PriceBarSetAuthority] | None:
     agent_paper = source_policy_id == PAPER_EXECUTION_SOURCE_POLICY_ID
     schwab_agent_paper = source_policy_id == PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
@@ -697,8 +701,14 @@ async def _qualified_window(
     if expected_agent_market_window_id is not None and not (agent_paper or schwab_agent_paper):
         raise PaperExecutionError("PAPER_EXECUTION_INVALID")
     schwab_binding: AgentPaperMarketWindowRecord | None = None
-    if schwab_agent_paper:
-        if prior_window is not None or window_seq != 1:
+    if schwab_agent_paper or economic_scope is not None:
+        if economic_scope is None and (prior_window is not None or window_seq != 1):
+            return None
+        if (
+            economic_scope is not None
+            and prior_window is not None
+            and prior_window.window_end_at > economic_scope.window_start
+        ):
             return None
         schwab_binding = await session.scalar(
             select(AgentPaperMarketWindowRecord).where(
@@ -714,6 +724,14 @@ async def _qualified_window(
             )
         )
         if schwab_binding is None:
+            return None
+        if economic_scope is not None and (
+            economic_scope.cycle_id != schwab_binding.cycle_id
+            or economic_scope.instrument_id != order.instrument_id
+            or economic_scope.execution_source_policy_id != source_policy_id
+            or economic_scope.window_start != schwab_binding.window_start_at
+            or economic_scope.window_end != schwab_binding.window_end_at
+        ):
             return None
         window_start = schwab_binding.window_start_at
         window_end = schwab_binding.window_end_at
@@ -1476,31 +1494,46 @@ async def advance_internal_paper_order(
             calendar=calendar,
             execution_source_policy_id=execution_source_policy_id,
         )
-    if expected_agent_market_window_id is None:
-        v2_window_request = await session.scalar(
-            select(PaperRequestIdempotencyRecord.id)
-            .where(
-                PaperRequestIdempotencyRecord.account_id == account.id,
-                PaperRequestIdempotencyRecord.order_id == order.id,
-                PaperRequestIdempotencyRecord.operation == "advance",
-                PaperRequestIdempotencyRecord.idempotency_key.startswith(
-                    f"agent-paper-loop-advance-v2:{order.id}:"
-                ),
-            )
-            .limit(1)
-        )
-        if v2_window_request is not None:
-            raise PaperExecutionError("PAPER_EXECUTION_INVALID")
-    if expected_agent_market_window_id is not None:
-        await _validate_expected_agent_market_window(
+    from nexus.paper.economic_cycle import read_economic_cycle
+    from nexus.paper.economic_window import require_economic_consumption
+
+    economic_owner = (
+        await read_economic_cycle(session, cycle_id=decision.agent_paper_cycle_id)
+        if decision.agent_paper_cycle_id is not None
+        else None
+    )
+    if economic_owner is None:
+        await require_economic_consumption(
             session,
-            order=order,
-            source_policy_id=execution_source_policy_id,
-            calendar=calendar,
-            model=model,
+            order_id=order.id,
             evaluated_at=evaluated_at,
-            expected_agent_market_window_id=expected_agent_market_window_id,
+            market_window_id=expected_agent_market_window_id,
         )
+        if expected_agent_market_window_id is None:
+            v2_window_request = await session.scalar(
+                select(PaperRequestIdempotencyRecord.id)
+                .where(
+                    PaperRequestIdempotencyRecord.account_id == account.id,
+                    PaperRequestIdempotencyRecord.order_id == order.id,
+                    PaperRequestIdempotencyRecord.operation == "advance",
+                    PaperRequestIdempotencyRecord.idempotency_key.startswith(
+                        f"agent-paper-loop-advance-v2:{order.id}:"
+                    ),
+                )
+                .limit(1)
+            )
+            if v2_window_request is not None:
+                raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+        if expected_agent_market_window_id is not None:
+            await _validate_expected_agent_market_window(
+                session,
+                order=order,
+                source_policy_id=execution_source_policy_id,
+                calendar=calendar,
+                model=model,
+                evaluated_at=evaluated_at,
+                expected_agent_market_window_id=expected_agent_market_window_id,
+            )
     if events and evaluated_at < events[-1].occurred_at:
         raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
 
@@ -1589,32 +1622,11 @@ async def advance_internal_paper_order(
     )
     if prior_window is not None and evaluated_at < prior_window.evaluated_at:
         raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
-    if (
-        execution_source_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
-        and evaluated_at < first_evaluation_at
-    ):
-        result = _result(
-            order_id=order.id,
-            account_id=order.account_id,
-            action="not_due",
-            status=status,
-            filled_quantity=filled_before,
-            total_quantity=order.quantity,
-            result_event_seq=None,
-            fill_id=None,
-        )
-        await _insert_idempotency(
-            session,
-            account_id=account.id,
-            order_id=order.id,
-            idempotency_key=idempotency_key,
-            request_hash=request_hash,
-            result=result,
-            occurred_at=evaluated_at,
-        )
-        return result
-
     if evaluated_at >= calendar.market_close_at:
+        if economic_owner is not None:
+            from nexus.paper.economic_window import lock_economic_order_window
+
+            await lock_economic_order_window(session, order=order)
         reason = (
             "paper_execution_price_authority_unavailable"
             if not price_authority_available
@@ -1658,22 +1670,60 @@ async def advance_internal_paper_order(
         )
         return result
 
-    window_seq = 1 if prior_window is None else prior_window.window_seq + 1
-    qualified = (
-        await _qualified_window(
+    economic_qualified = (
+        await require_economic_consumption(
             session,
-            order=order,
-            source_policy_id=execution_source_policy_id,
-            calendar=calendar,
-            model=model,
-            window_seq=window_seq,
+            order_id=order.id,
             evaluated_at=evaluated_at,
-            prior_window=prior_window,
-            expected_agent_market_window_id=expected_agent_market_window_id,
+            market_window_id=expected_agent_market_window_id,
         )
-        if price_authority_available
+        if economic_owner is not None
         else None
     )
+    if (
+        economic_qualified is None
+        and execution_source_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
+        and evaluated_at < first_evaluation_at
+    ):
+        result = _result(
+            order_id=order.id,
+            account_id=order.account_id,
+            action="not_due",
+            status=status,
+            filled_quantity=filled_before,
+            total_quantity=order.quantity,
+            result_event_seq=None,
+            fill_id=None,
+        )
+        await _insert_idempotency(
+            session,
+            account_id=account.id,
+            order_id=order.id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            result=result,
+            occurred_at=evaluated_at,
+        )
+        return result
+
+    window_seq = 1 if prior_window is None else prior_window.window_seq + 1
+    qualified = economic_qualified if price_authority_available else None
+    if economic_qualified is None:
+        qualified = (
+            await _qualified_window(
+                session,
+                order=order,
+                source_policy_id=execution_source_policy_id,
+                calendar=calendar,
+                model=model,
+                window_seq=window_seq,
+                evaluated_at=evaluated_at,
+                prior_window=prior_window,
+                expected_agent_market_window_id=expected_agent_market_window_id,
+            )
+            if price_authority_available
+            else None
+        )
     if qualified is None:
         if (
             execution_source_policy_id != PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID
@@ -2163,6 +2213,9 @@ async def cancel_internal_paper_order(
             raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
         return replay
 
+    from nexus.paper.economic_window import lock_economic_order_window
+
+    await lock_economic_order_window(session, order=order)
     events = tuple(
         (
             await session.scalars(

@@ -9,6 +9,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from helpers.migration_assertions import created_at_trigger_exists
 from helpers.migration_schema_expectations import (
+    ECONOMIC_IMMUTABLE_TRIGGERS,
     EXPECTED_FOREIGN_KEYS,
     EXPECTED_TABLES,
     NO_CREATED_AT_TRIGGER_TABLES,
@@ -281,15 +282,14 @@ def _assert_reflected_schema(connection: Connection) -> None:
     }
     nonce_constraints = inspector.get_unique_constraints("used_nonces")
     assert {constraint["name"] for constraint in nonce_constraints} == {"uq_used_nonces_key_nonce"}
+    foreign_key_differences = {}
     for table_name, foreign_key_names in EXPECTED_FOREIGN_KEYS.items():
         if table_name not in actual_tables:
             continue
         expected_names = (
             foreign_key_names if isinstance(foreign_key_names, set) else {foreign_key_names}
         )
-        column_names = {
-            column["name"] for column in inspector.get_columns(table_name)
-        }
+        column_names = {column["name"] for column in inspector.get_columns(table_name)}
         if table_name == "price_series_manifests" and "price_bar_records" not in actual_tables:
             expected_names = expected_names - {"fk_price_series_evidence_ref"}
         if table_name == "price_series_manifests" and "provider_capability_id" not in column_names:
@@ -305,6 +305,8 @@ def _assert_reflected_schema(connection: Connection) -> None:
                 "fk_price_series_manifests_gateway_transport_artifact",
                 "fk_price_series_manifests_daily_calendar_authority",
             }
+        if table_name == "agent_paper_cycles" and "formal_budget_binding_id" not in column_names:
+            expected_names = expected_names - {"fk_agent_paper_cycles_formal_budget_binding"}
         if table_name == "latest_quotes" and "intraday_bar_set_authorities" not in actual_tables:
             expected_names = expected_names - {"fk_latest_quotes_data_artifact"}
         if table_name == "latest_quotes" and "provider_capability_id" not in column_names:
@@ -312,9 +314,15 @@ def _assert_reflected_schema(connection: Connection) -> None:
                 "fk_latest_quotes_provider_capability",
                 "fk_latest_quotes_provider_status",
             }
-        assert {
+        actual_names = {
             foreign_key["name"] for foreign_key in inspector.get_foreign_keys(table_name)
-        } == expected_names
+        }
+        if actual_names != expected_names:
+            foreign_key_differences[table_name] = {
+                "unexpected": sorted(actual_names - expected_names),
+                "missing": sorted(expected_names - actual_names),
+            }
+    assert not foreign_key_differences, foreign_key_differences
 
     artifacts = {column["name"]: column for column in inspector.get_columns("data_artifacts")}
     assert isinstance(artifacts["id"]["type"], postgresql.UUID)
@@ -343,15 +351,34 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert macro_value["type"].scale == 12
     for table_name in expected_tables - NO_CREATED_AT_TRIGGER_TABLES:
         assert created_at_trigger_exists(connection, table_name)
+    for table_name, (trigger_name, function_name) in ECONOMIC_IMMUTABLE_TRIGGERS.items():
+        if table_name not in expected_tables:
+            continue
+        assert connection.scalar(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid "
+                "WHERE t.tgrelid=to_regclass(:table_name) AND t.tgname=:trigger_name "
+                "AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') "
+                "AND t.tgtype=27 AND t.tgattr=''::int2vector AND t.tgqual IS NULL "
+                "AND p.proname=:function_name)"
+            ),
+            {
+                "table_name": table_name,
+                "trigger_name": trigger_name,
+                "function_name": function_name,
+            },
+        )
     if "strategy_rank_checkpoints" in expected_tables:
-        assert connection.scalar(text(
-            "SELECT EXISTS (SELECT 1 FROM pg_trigger t "
-            "JOIN pg_proc p ON p.oid = t.tgfoid "
-            "WHERE t.tgrelid = 'strategy_rank_checkpoints'::regclass "
-            "AND t.tgname = 'trg_strategy_rank_checkpoints_immutable' "
-            "AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') "
-            "AND t.tgtype = 27 AND p.proname = 'nexus_reject_paper_fact_mutation')"
-        ))
+        assert connection.scalar(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_trigger t "
+                "JOIN pg_proc p ON p.oid = t.tgfoid "
+                "WHERE t.tgrelid = 'strategy_rank_checkpoints'::regclass "
+                "AND t.tgname = 'trg_strategy_rank_checkpoints_immutable' "
+                "AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') "
+                "AND t.tgtype = 27 AND p.proname = 'nexus_reject_paper_fact_mutation')"
+            )
+        )
     if diagnostic_tables <= actual_tables:
         evidence_columns = {
             column["name"]: column

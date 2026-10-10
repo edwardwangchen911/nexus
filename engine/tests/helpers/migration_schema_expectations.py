@@ -311,6 +311,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
 EXPECTED_FOREIGN_KEYS = {
     "agent_paper_cycles": {
         "fk_agent_paper_cycles_candidate_batch",
+        "fk_agent_paper_cycles_formal_budget_binding",
         "fk_agent_paper_cycles_paper_account",
         "fk_agent_paper_cycles_universe",
         "fk_agent_paper_cycles_quality",
@@ -582,4 +583,25 @@ EXPECTED_FOREIGN_KEYS.update(
         },
         "shadow_seals": "fk_shadow_seals_group",
     }
+)
+
+
+# These authorities seal all columns, rather than only created_at.
+ECONOMIC_IMMUTABLE_TRIGGERS = {
+    "formal_budget_bindings": (
+        "formal_budget_binding_immutable",
+        "reject_formal_budget_binding_mutation",
+    ),
+    "economic_evaluations": ("economic_pair_immutable", "nexus_reject_economic_pair_mutation"),
+    "economic_pair_slots": ("economic_pair_immutable", "nexus_reject_economic_pair_mutation"),
+    "economic_lane_cycles": ("economic_pair_immutable", "nexus_reject_economic_pair_mutation"),
+    "economic_common_windows": ("economic_window_immutable", "nexus_reject_economic_pair_mutation"),
+    "economic_window_orders": ("economic_window_immutable", "nexus_reject_economic_pair_mutation"),
+}
+EXPECTED_TABLES |= ECONOMIC_IMMUTABLE_TRIGGERS.keys()
+NO_CREATED_AT_TRIGGER_TABLES |= ECONOMIC_IMMUTABLE_TRIGGERS.keys()
+OPTIONAL_MIGRATION_TABLE_GROUPS += (
+    frozenset({"formal_budget_bindings"}),
+    frozenset({"economic_evaluations", "economic_pair_slots", "economic_lane_cycles"}),
+    frozenset({"economic_common_windows", "economic_window_orders"}),
 )

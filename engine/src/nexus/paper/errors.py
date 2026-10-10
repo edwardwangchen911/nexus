@@ -35,6 +35,15 @@ class PaperBatchError(ValueError):
 
 
 PaperExecutionErrorCode = Literal[
+    "ECONOMIC_PAIR_CYCLE_NOT_BOUND",
+    "ECONOMIC_WINDOW_REQUIRED",
+    "ECONOMIC_WINDOW_INVALID",
+    "ECONOMIC_WINDOW_MISSED",
+    "ECONOMIC_WINDOW_ORDER_REQUIRED",
+    "ECONOMIC_WINDOW_ARCHIVES_REQUIRED",
+    "ECONOMIC_WINDOW_ARCHIVE_CONFLICT",
+    "ECONOMIC_WINDOW_BINDING_REQUIRED",
+    "ECONOMIC_WINDOW_CONSUMPTION_UNAVAILABLE",
     "PAPER_EXECUTION_INVALID",
     "PAPER_EXECUTION_CONFLICT",
     "PAPER_EXECUTION_AUTHORITY_INCOMPLETE",
@@ -43,6 +52,15 @@ PaperExecutionErrorCode = Literal[
 ]
 
 _EXECUTION_SAFE_MESSAGES: dict[PaperExecutionErrorCode, str] = {
+    "ECONOMIC_PAIR_CYCLE_NOT_BOUND": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_REQUIRED": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_INVALID": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_MISSED": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_ORDER_REQUIRED": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_ARCHIVES_REQUIRED": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_ARCHIVE_CONFLICT": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_BINDING_REQUIRED": "Economic common-window execution is unavailable.",
+    "ECONOMIC_WINDOW_CONSUMPTION_UNAVAILABLE": "Economic common-window execution is unavailable.",
     "PAPER_EXECUTION_INVALID": "The internal paper order cannot be executed.",
     "PAPER_EXECUTION_CONFLICT": "The internal paper execution conflicts with existing facts.",
     "PAPER_EXECUTION_AUTHORITY_INCOMPLETE": "The paper execution authority is incomplete.",

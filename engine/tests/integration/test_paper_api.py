@@ -262,9 +262,7 @@ async def test_management_cycle_rejects_activation_with_missing_authority_row(
                 "TARGET_ACTIVATION_PENDING",
                 {
                     "strategy_decision_id": str(proposal.decision_id),
-                    "portfolio_synthesis_output_id": str(
-                        proposal.proposal.synthesis_output_id
-                    ),
+                    "portfolio_synthesis_output_id": str(proposal.proposal.synthesis_output_id),
                 },
             )
             await _resume_batch(
@@ -314,10 +312,10 @@ async def test_management_summary_ignores_more_than_fifty_unoccupied_historical_
     )
     try:
         async with sessions.begin() as session:
+            await session.execute(text("DROP INDEX uq_paper_order_batches_root"))
             await session.execute(
                 text(
                     "ALTER TABLE paper_order_batches "
-                    "DROP CONSTRAINT uq_paper_order_batches_account_decision, "
                     "DROP CONSTRAINT uq_paper_order_batches_idempotency"
                 )
             )
@@ -351,9 +349,7 @@ async def test_management_summary_ignores_more_than_fifty_unoccupied_historical_
             response = await client.get(path, headers=headers("GET", path))
 
         assert response.status_code == 200, response.text
-        assert response.json()["data"]["occupying_plan"]["batch_id"] == str(
-            activated.batch_id
-        )
+        assert response.json()["data"]["occupying_plan"]["batch_id"] == str(activated.batch_id)
     finally:
         await engine.dispose()
 
@@ -390,9 +386,7 @@ async def test_policy_unconfirmed_exposes_synthesis_without_invented_proposal_we
             ),
             base_url="http://testserver",
         ) as client:
-            summary = await client.get(
-                summary_path, headers=headers("GET", summary_path)
-            )
+            summary = await client.get(summary_path, headers=headers("GET", summary_path))
         assert summary.status_code == 200, summary.text
         assert summary.json()["data"]["occupying_plan"] is None
     finally:
@@ -421,18 +415,14 @@ async def test_management_summary_rejects_two_persisted_occupying_batch_identiti
             request_time=seed.request_time,
         )
     async with factory() as session, session.begin():
+        await session.execute(text("DROP INDEX uq_paper_order_batches_root"))
         await session.execute(
             text(
-                "ALTER TABLE paper_order_batches "
-                "DROP CONSTRAINT uq_paper_order_batches_account_decision, "
-                "DROP CONSTRAINT uq_paper_order_batches_idempotency"
+                "ALTER TABLE paper_order_batches DROP CONSTRAINT uq_paper_order_batches_idempotency"
             )
         )
         await session.execute(
-            text(
-                "ALTER TABLE risk_evaluations "
-                "DROP CONSTRAINT fk_risk_evaluations_order"
-            )
+            text("ALTER TABLE risk_evaluations DROP CONSTRAINT fk_risk_evaluations_order")
         )
         second_batch_id = await session.scalar(
             text(
@@ -464,9 +454,7 @@ async def test_management_summary_rejects_two_persisted_occupying_batch_identiti
 
     path = "/internal/v1/paper/management/portfolio"
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(
-            app=app(migrated_database_url, now=seed.request_time)
-        ),
+        transport=httpx.ASGITransport(app=app(migrated_database_url, now=seed.request_time)),
         base_url="http://testserver",
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
