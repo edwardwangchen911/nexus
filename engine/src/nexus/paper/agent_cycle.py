@@ -1839,6 +1839,29 @@ async def _resume_batch(
     return _result(cycle.id, events, replayed=False)
 
 
+_SYNTHESIS_FAILURE_CODES = frozenset(
+    {
+        "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+        "PORTFOLIO_SYNTHESIS_INPUT_CONFLICT",
+        "PORTFOLIO_SYNTHESIS_CYCLE_INVALID",
+        "PORTFOLIO_SYNTHESIS_RESEARCH_INVALID",
+        "PORTFOLIO_SYNTHESIS_POLICY_INVALID",
+        "PORTFOLIO_SYNTHESIS_CANDIDATES_INVALID",
+        "PORTFOLIO_SYNTHESIS_PROJECTION_INVALID",
+        "PORTFOLIO_SYNTHESIS_TARGET_INVALID",
+        "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED",
+        "PORTFOLIO_SYNTHESIS_PROMPT_INVALID",
+        "PORTFOLIO_SYNTHESIS_MODEL_INVALID",
+        "PORTFOLIO_SYNTHESIS_JOB_INVALID",
+        "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
+        "PORTFOLIO_SYNTHESIS_OUTPUT_INVALID",
+        "PORTFOLIO_SYNTHESIS_RUN_INVALID",
+        "PORTFOLIO_SYNTHESIS_BUDGET_INVALID",
+        "CODEX_FORMAL_CYCLE_PROFILE_INVALID",
+    }
+)
+
+
 async def _resume_portfolio_synthesis(
     session: AsyncSession,
     *,
@@ -1882,6 +1905,7 @@ async def _resume_portfolio_synthesis(
     )
     if run is None and (now is None or daily_limit_usd is None):
         raise ValueError("PORTFOLIO_SYNTHESIS_ADMISSION_CONTEXT_REQUIRED")
+    failure_phase = "research_admission" if run is None else "synthesis_readback"
     try:
         if run is None:
             assert now is not None and daily_limit_usd is not None
@@ -1898,6 +1922,7 @@ async def _resume_portfolio_synthesis(
                     for run_id in run_ids
                 ]
             )
+            failure_phase = "projection"
             projection = await load_paper_projection(
                 session, account_id=cycle.account_id, as_of=cycle.decision_time
             )
@@ -1907,6 +1932,7 @@ async def _resume_portfolio_synthesis(
                 .order_by(PaperTargetVersionRecord.version_seq.desc())
                 .limit(1)
             )
+            failure_phase = "synthesis_admission"
             run = (
                 await admit_portfolio_synthesis(
                     session,
@@ -1920,6 +1946,7 @@ async def _resume_portfolio_synthesis(
                     formal_stage_capacity=formal_stage_capacity,
                 )
             ).run
+        failure_phase = "synthesis_readback"
         frozen = await load_frozen_synthesis_authority(session, run)
         job = await read_synthesis_job(session, cycle_id=cycle.id)
         output = await session.scalar(
@@ -1944,6 +1971,7 @@ async def _resume_portfolio_synthesis(
             or job.status != "succeeded"
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_UNAVAILABLE")
+        failure_phase = "output_validation"
         intent = PortfolioSynthesisIntentV1.model_validate(output.intent)
         validate_portfolio_synthesis_intent(intent, frozen)
         content_hash = canonical_portfolio_synthesis_hash(
@@ -1966,9 +1994,16 @@ async def _resume_portfolio_synthesis(
             )
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_OUTPUT_INVALID")
-    except ValueError:
+    except ValueError as error:
+        code = error.args[0] if len(error.args) == 1 else None
+        safe_code = code if type(code) is str and code in _SYNTHESIS_FAILURE_CODES else "UNKNOWN"
         await _append_event(
-            session, cycle, "researching", "unavailable", "PORTFOLIO_SYNTHESIS_UNAVAILABLE", {}
+            session,
+            cycle,
+            "researching",
+            "unavailable",
+            "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
+            {"failure_phase": failure_phase, "failure_code": safe_code},
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     try:

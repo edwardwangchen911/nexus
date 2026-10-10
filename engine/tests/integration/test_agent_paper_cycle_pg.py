@@ -7325,3 +7325,86 @@ async def test_shutdown_confirmation_rejects_newer_performance_close_when_origin
         )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_rejection_diagnostic_persists_and_hashes_without_reopening(
+    migrated_database_url, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from nexus.paper import agent_cycle
+    from nexus.paper.agent_cycle_models import canonical_cycle_event_hash
+    from nexus.strategy.forward import load_forward_strategy_decision
+
+    seed = await seed_paper_batch(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            registered = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=DECISION_TIME.date(),
+            )
+            authority = await _seed_two_candidate_authority(session, registered)
+            cycle = await _seed_legacy_prepared_cycle(
+                session,
+                authority=authority,
+                decision_slot_at=floor_decision_slot(DECISION_TIME),
+            )
+            await agent_cycle._append_event(
+                session,
+                cycle,
+                "prepared",
+                "researching",
+                "RESEARCH_JOBS_PREPARED",
+                {},
+            )
+            monkeypatch.setattr(agent_cycle, "_require_cycle_candidate_profile", AsyncMock())
+            research = AsyncMock(side_effect=ValueError("RESEARCH_OUTPUT_NOT_ACTIONABLE"))
+            monkeypatch.setattr(agent_cycle, "load_actionable_research_output", research)
+            result = await agent_cycle._resume_portfolio_synthesis(
+                session,
+                cycle=cycle,
+                events=await agent_cycle._events(session, cycle.id),
+                run_ids=(UUID(int=900),),
+                now=DECISION_TIME,
+                daily_limit_usd=Decimal("10"),
+            )
+            assert result.status == "unavailable"
+            assert result.order_ids == ()
+            cycle_id = cycle.id
+        async with sessions() as session:
+            cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+            events = await agent_cycle._events(session, cycle_id)
+            terminal = events[-1]
+            assert len(events) == 3
+            assert terminal.fact_ids == {
+                "failure_phase": "research_admission",
+                "failure_code": "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+            }
+            assert terminal.event_hash == canonical_cycle_event_hash(
+                cycle_id=cycle_id,
+                sequence=terminal.sequence,
+                from_status=terminal.from_status,
+                to_status=terminal.to_status,
+                result_code=terminal.result_code,
+                fact_ids=terminal.fact_ids,
+                occurred_at=terminal.occurred_at,
+            )
+            replay = await agent_cycle._resume_portfolio_synthesis(
+                session,
+                cycle=cycle,
+                events=events,
+                run_ids=(UUID(int=900),),
+                now=DECISION_TIME,
+                daily_limit_usd=Decimal("10"),
+            )
+            assert replay.status == "unavailable"
+            assert replay.replayed is True
+            assert len(await agent_cycle._events(session, cycle_id)) == 3
+            assert research.await_count == 1
+    finally:
+        await engine.dispose()
