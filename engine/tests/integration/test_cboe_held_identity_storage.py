@@ -256,3 +256,103 @@ async def test_concurrent_same_request_registers_exactly_once(migrated_database_
             assert await s.scalar(select(func.count()).select_from(InstrumentAlias)) == 1
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_normal_held_ingress_reads_once_then_registers_and_resolves(
+    migrated_database_url, sources, tmp_path
+):
+    from nexus.ops.cboe_identity_local import import_held_identity
+
+    contents, dirs, pages = sources
+    a, h = fresh_pages(pages)
+    store = MemoryStore()
+    settings = EngineSettings(
+        database_url=migrated_database_url, object_store_endpoint="http://127.0.0.1:9000"
+    )
+    factory = session_factory(settings)
+    tmp_path.chmod(0o700)
+    locations = {}
+    names = [
+        ("fmp", ("profile.json", "receipt.json")),
+        ("sec", ("submission.txt", "receipt.json")),
+        (
+            "mic",
+            (
+                "publication.html",
+                "publication.html.receipt.json",
+                "ISO10383_MIC.csv",
+                "ISO10383_MIC.csv.receipt.json",
+            ),
+        ),
+        (
+            "listing",
+            (
+                "listed.html",
+                "listed.html.receipt.json",
+                "listed.csv",
+                "listed.csv.receipt.json",
+                "product.html",
+                "product.html.receipt.json",
+            ),
+        ),
+    ]
+    n = 0
+    for folder, files in names:
+        directory = tmp_path / folder
+        directory.mkdir(mode=0o700)
+        locations[folder] = directory
+        for name in files:
+            path = directory / name
+            path.write_bytes(contents[n])
+            path.chmod(0o600)
+            n += 1
+    directory = tmp_path / "directories"
+    directory.mkdir(mode=0o700)
+    for name, raw in zip(
+        ("company.json", "company.receipt.json", "fund.json", "fund.receipt.json"),
+        dirs,
+        strict=True,
+    ):
+        path = directory / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+
+    class Broker:
+        accounts = 0
+        holdings = 0
+
+        async def read_accounts(self):
+            self.accounts += 1
+            return a
+
+        async def read_holdings(self, account_id, *, cursor, limit):
+            self.holdings += 1
+            assert cursor is None and limit == 100
+            return h
+
+    broker = Broker()
+    try:
+        async with factory() as s:
+            assert (await s.scalar(text("SELECT current_database()"))).startswith("nexus_test_")
+        result = await import_held_identity(
+            settings,
+            None,
+            symbol="TEST",
+            fmp_archive=locations["fmp"],
+            submission_file=locations["sec"] / "submission.txt",
+            mic_archive=locations["mic"],
+            listing_archive=locations["listing"],
+            company_directory_file=directory / "company.json",
+            company_receipt_file=directory / "company.receipt.json",
+            fund_directory_file=directory / "fund.json",
+            fund_receipt_file=directory / "fund.receipt.json",
+            store=store,
+            broker=broker,
+        )
+        assert (broker.accounts, broker.holdings) == (1, 1)
+        async with factory() as s:
+            assert await s.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
+            assert await s.scalar(select(func.count()).select_from(DataSnapshot)) == 1
+    finally:
+        await factory.kw["bind"].dispose()

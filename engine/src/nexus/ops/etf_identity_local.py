@@ -236,11 +236,7 @@ async def import_held_identity(
         accounts_page = await gateway.read_accounts()
         try:
             accounts = tuple(AccountItem.model_validate(item) for item in accounts_page.items)
-            if (
-                len(accounts) != 1
-                or accounts_page.quality != "PASS"
-                or accounts_page.has_more
-            ):
+            if len(accounts) != 1 or accounts_page.quality != "PASS" or accounts_page.has_more:
                 raise ValueError
         except (ValueError, TypeError, KeyError):
             raise ValueError("CURRENT_HELD_ETF_HOLDING_INVALID") from None
@@ -320,6 +316,21 @@ def main() -> None:
     for name in ("fmp-archive", "sec-archive", "mapping-file", "output"):
         held_importer.add_argument("--" + name, type=Path, required=True)
     held_importer.add_argument("--symbol", required=True)
+    cboe_importer = commands.add_parser("import-held-cboe")
+    for name in (
+        "fmp-archive",
+        "submission-file",
+        "mic-archive",
+        "listing-archive",
+        "company-directory-file",
+        "company-receipt-file",
+        "fund-directory-file",
+        "fund-receipt-file",
+        "output",
+    ):
+        cboe_importer.add_argument("--" + name, type=Path, required=True)
+    cboe_importer.add_argument("--previous-mic-archive", type=Path)
+    cboe_importer.add_argument("--symbol", required=True)
     uit = commands.add_parser("import-uit")
     for name in ("fmp-archive", "sec-archive", "output"):
         uit.add_argument("--" + name, type=Path, required=True)
@@ -338,6 +349,8 @@ def main() -> None:
     reader.add_argument("--snapshot-id", type=UUID, required=True)
     held_reader = commands.add_parser("read-held")
     held_reader.add_argument("--snapshot-id", type=UUID, required=True)
+    cboe_reader = commands.add_parser("read-held-cboe")
+    cboe_reader.add_argument("--snapshot-id", type=UUID, required=True)
     try:
         args = parser.parse_args()
         environment = load_local_environment(args.repo_root, os.environ)
@@ -362,10 +375,30 @@ def main() -> None:
             "import-uit",
             "import-treasury",
             "import-gold",
+            "import-held-cboe",
         }:
             if args.output.exists() or args.output.is_symlink():
                 raise ValueError("CURRENT_ETF_NEW_OUTPUT_REQUIRED")
-            if args.action == "import-held":
+            if args.action == "import-held-cboe":
+                from nexus.ops.cboe_identity_local import import_held_identity as import_cboe
+
+                result = asyncio.run(
+                    import_cboe(
+                        settings,
+                        BrokerWorkerSettings.model_validate(environment),
+                        symbol=args.symbol,
+                        fmp_archive=args.fmp_archive,
+                        submission_file=args.submission_file,
+                        mic_archive=args.mic_archive,
+                        listing_archive=args.listing_archive,
+                        company_directory_file=args.company_directory_file,
+                        company_receipt_file=args.company_receipt_file,
+                        fund_directory_file=args.fund_directory_file,
+                        fund_receipt_file=args.fund_receipt_file,
+                        previous_mic_archive=args.previous_mic_archive,
+                    )
+                )
+            elif args.action == "import-held":
                 result = asyncio.run(
                     import_held_identity(
                         settings,
@@ -392,6 +425,11 @@ def main() -> None:
                 args.output, json.dumps(asdict(result), default=str, sort_keys=True).encode()
             )
             status = result.status
+        elif args.action == "read-held-cboe":
+            from nexus.ops.cboe_identity_local import read_identity as read_cboe
+
+            asyncio.run(read_cboe(settings, snapshot_id=args.snapshot_id))
+            status = "verified"
         elif args.action == "read":
             asyncio.run(read_identity(settings, snapshot_id=args.snapshot_id))
             status = "verified"
@@ -411,7 +449,8 @@ def main() -> None:
     except Exception as error:
         code = (
             str(error)
-            if isinstance(error, ValueError) and re.fullmatch(r"CURRENT_ETF_[A-Z_]+", str(error))
+            if isinstance(error, ValueError)
+            and re.fullmatch(r"(?:CURRENT_ETF|CBOE)_[A-Z_]+", str(error))
             else "CURRENT_ETF_FAILED"
         )
         print(json.dumps(dict(status="failed", code=code)))
