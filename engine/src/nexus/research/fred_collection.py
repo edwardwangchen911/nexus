@@ -142,6 +142,13 @@ async def collect_fred_vintage(
                         "offset": offset,
                         "code": _safe_failure_code(error),
                         "capture_count": len(captures),
+                        **(
+                            {"http_status": error.http_status}
+                            if isinstance(error, HttpPolicyError)
+                            and type(error.http_status) is int
+                            and 100 <= error.http_status <= 599
+                            else {}
+                        ),
                     }
                 ),
             )

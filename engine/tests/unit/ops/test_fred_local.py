@@ -170,3 +170,59 @@ def test_main_real_loader_honors_process_key_and_local_database_override(
     assert called == ["collect", "import"]
     output = capsys.readouterr()
     assert "synthetic-env-key" not in output.out + output.err
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 503])
+def test_normal_collection_preserves_only_http_status_in_private_failure(
+    monkeypatch, tmp_path, capsys, status
+):
+    from nexus.ops import fred_local
+
+    actual_client = httpx.AsyncClient
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(status, content=b"private response canary-secret")
+
+    monkeypatch.setattr(
+        fred_local.httpx,
+        "AsyncClient",
+        lambda **kwargs: actual_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    monkeypatch.setattr(
+        fred_local, "load_local_environment", lambda *args: {"FRED_API_KEY": "canary-key"}
+    )
+    directory = tmp_path / "capture"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fred_local",
+            "collect",
+            "--series",
+            "DGS10",
+            "--start",
+            "2026-08-24",
+            "--end",
+            "2026-08-28",
+            "--vintage",
+            "2026-08-28",
+            "--output-dir",
+            str(directory),
+        ],
+    )
+    with pytest.raises(SystemExit) as exited:
+        fred_local.main()
+    assert exited.value.code == 1
+    failure = json.loads((directory / "failure.json").read_bytes())
+    assert failure["http_status"] == status
+    assert failure["stage"] == "metadata_fetch"
+    assert failure["code"] == (
+        "RETRY_BUDGET_EXHAUSTED" if status in {429, 503} else "STATUS_REJECTED"
+    )
+    assert len(calls) == 1
+    output = capsys.readouterr()
+    assert "canary" not in output.out + output.err
+    assert "canary" not in (directory / "failure.json").read_text()
+    assert not (directory / "complete.json").exists()

@@ -263,3 +263,10 @@ async def test_out_of_policy_retry_after_uses_local_bounded_backoff() -> None:
     assert await client.get_bytes(("v1",), (), ()) == b"ok"
     assert sleeps == [0.25]
     await client.aclose()
+
+
+@pytest.mark.parametrize("status", [True, "private", 99, 600, 400.0])
+def test_http_error_status_metadata_rejects_non_http_values(status) -> None:
+    error = HttpPolicyError("STATUS_REJECTED", http_status=status)
+    assert error.http_status is None
+    assert str(error) == "STATUS_REJECTED"

@@ -44,8 +44,12 @@ class HttpPolicyError(RuntimeError):
         *,
         content_length: int | None = None,
         bytes_read_boundary: int | None = None,
+        http_status: int | None = None,
     ) -> None:
         super().__init__(code)
+        self.http_status = (
+            http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        )
         self.content_length = (
             content_length if type(content_length) is int and content_length >= 0 else None
         )
@@ -151,16 +155,16 @@ class FixedOriginHttpClient:
                         status = response.status_code
                         if 300 <= status <= 399:
                             self._log(attempt, status, "redirect_rejected", started_at)
-                            raise HttpPolicyError("REDIRECT_REJECTED")
+                            raise HttpPolicyError("REDIRECT_REJECTED", http_status=status)
                         if status in self._policy.retry_statuses:
                             self._log(attempt, status, "retryable_status", started_at)
                             if attempt == self._policy.max_attempts:
-                                raise HttpPolicyError("RETRY_BUDGET_EXHAUSTED")
+                                raise HttpPolicyError("RETRY_BUDGET_EXHAUSTED", http_status=status)
                             await self._wait_before_retry(response, attempt, deadline)
                             continue
                         if not 200 <= status <= 299:
                             self._log(attempt, status, "status_rejected", started_at)
-                            raise HttpPolicyError("STATUS_REJECTED")
+                            raise HttpPolicyError("STATUS_REJECTED", http_status=status)
                         payload = await self._read_bounded(response)
                         self._log(attempt, status, "ok", started_at)
                         return payload
