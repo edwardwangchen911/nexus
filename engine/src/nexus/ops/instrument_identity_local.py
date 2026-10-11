@@ -40,13 +40,41 @@ from nexus.providers.broker.settings import BrokerWorkerSettings
 from nexus.providers.http import HttpPolicyError
 from nexus.settings import EngineSettings
 
+SEC_SUBMISSION_URL = re.compile(
+    r"https://www\.sec\.gov/Archives/edgar/data/([1-9][0-9]{0,9})/"
+    r"([0-9]{18})/([0-9]{10}-[0-9]{2}-[0-9]{6}\.txt)"
+)
+SEC_DIRECTORY_FILES = {
+    "company": "company_tickers_exchange.json",
+    "fund": "company_tickers_mf.json",
+}
+
 
 async def collect_sec(
-    *, source_url: str, contact: str, output_dir: Path, client: httpx.AsyncClient | None = None
+    *,
+    source_url: str,
+    contact: str,
+    output_dir: Path,
+    client: httpx.AsyncClient | None = None,
+    submission: bool = False,
+    directory_kind: str | None = None,
 ) -> None:
-    match = SEC_URL.fullmatch(source_url)
+    if directory_kind is None:
+        match = (SEC_SUBMISSION_URL if submission else SEC_URL).fullmatch(source_url)
+        filename = match[3] if match else None
+        valid_source = bool(match) and (
+            not submission or (match is not None and match[3][:-4].replace("-", "") == match[2])
+        )
+    else:
+        filename = SEC_DIRECTORY_FILES.get(directory_kind)
+        valid_source = (
+            not submission
+            and filename is not None
+            and source_url == "https://www.sec.gov/files/" + filename
+        )
     if (
-        not match
+        not valid_source
+        or filename is None
         or not contact
         or contact != contact.strip()
         or "@" not in contact
@@ -85,7 +113,7 @@ async def collect_sec(
             raise ValueError("CURRENT_IDENTITY_CONTACT_REFLECTION")
         bytes_read_boundary = len(raw)
         stage = "archive_write"
-        write_private(output_dir / match[3], raw)
+        write_private(output_dir / filename, raw)
         receipt = dict(
             source_url=source_url,
             received_at=received.isoformat(),
@@ -331,6 +359,12 @@ def main() -> None:
     collect = commands.add_parser("collect-sec")
     collect.add_argument("--source-url", required=True)
     collect.add_argument("--output-dir", type=Path, required=True)
+    submission = commands.add_parser("collect-submission")
+    submission.add_argument("--source-url", required=True)
+    submission.add_argument("--output-dir", type=Path, required=True)
+    directory = commands.add_parser("collect-sec-directory")
+    directory.add_argument("--kind", choices=("company", "fund"), required=True)
+    directory.add_argument("--output-dir", type=Path, required=True)
     taxonomy = commands.add_parser("archive-taxonomy")
     taxonomy.add_argument("--symbol", required=True)
     taxonomy.add_argument("--fmp-archive", type=Path, required=True)
@@ -379,12 +413,23 @@ def main() -> None:
                 ),
             )
             status = "archived"
-        elif args.action == "collect-sec":
+        elif args.action == "collect-sec-directory":
+            asyncio.run(
+                collect_sec(
+                    source_url="https://www.sec.gov/files/" + SEC_DIRECTORY_FILES[args.kind],
+                    contact=environment.get("SEC_CONTACT", ""),
+                    output_dir=args.output_dir,
+                    directory_kind=args.kind,
+                )
+            )
+            status = "collected"
+        elif args.action in {"collect-sec", "collect-submission"}:
             asyncio.run(
                 collect_sec(
                     source_url=args.source_url,
                     contact=environment.get("SEC_CONTACT", ""),
                     output_dir=args.output_dir,
+                    submission=args.action == "collect-submission",
                 )
             )
             status = "collected"
