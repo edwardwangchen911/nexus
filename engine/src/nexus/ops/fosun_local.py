@@ -28,6 +28,7 @@ from nexus.api.schemas.portfolio import derive_snapshot_readiness, snapshot_time
 from nexus.market.fosun_instrument_discovery_storage import (
     read_pending_instrument_discoveries,
 )
+from nexus.ops.fosun_identity_discovery_local import discover_identity_gaps
 from nexus.ops.fosun_local_refresh import (
     LocalFosunBrokerRefreshSettings,
     LocalFosunRefreshSettings,
@@ -448,14 +449,23 @@ def safe_failure(error: Exception) -> dict[str, str]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexus-fosun-local")
     parser.add_argument(
-        "command", choices=("init", "doctor", "status", "refresh", "refresh-broker")
+        "command",
+        choices=("init", "doctor", "status", "refresh", "refresh-broker", "discover-identity-gaps"),
     )
+    parser.add_argument("--identity-gap-file", type=Path)
+    parser.add_argument("--gap-item-index", type=int, action="append")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    command = _parser().parse_args(argv).command
+    arguments = _parser().parse_args(argv)
+    command = arguments.command
     try:
+        if command == "discover-identity-gaps":
+            if arguments.identity_gap_file is None or not arguments.gap_item_index:
+                raise ValueError("LOCAL_IDENTITY_DISCOVERY_REQUEST_INVALID")
+        elif arguments.identity_gap_file is not None or arguments.gap_item_index is not None:
+            raise ValueError("LOCAL_IDENTITY_DISCOVERY_REQUEST_INVALID")
         local_environment = load_local_environment(Path.cwd(), os.environ)
         if command == "init":
             result = initialize_local_hmac(Path.cwd())
@@ -464,6 +474,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         elif command == "status":
             status_settings = _LocalStatusSettings.model_validate(local_environment)
             result = asyncio.run(read_local_status_safely(status_settings.database_url))
+        elif command == "discover-identity-gaps":
+            assert arguments.identity_gap_file is not None and arguments.gap_item_index is not None
+            discovery_settings = LocalFosunRefreshSettings.model_validate(local_environment)
+            result = asyncio.run(
+                discover_identity_gaps(
+                    discovery_settings,
+                    repo_root=Path.cwd(),
+                    gap_file=arguments.identity_gap_file,
+                    item_indices=tuple(arguments.gap_item_index),
+                )
+            )
         elif command == "refresh-broker":
             broker_refresh_settings = LocalFosunBrokerRefreshSettings.model_validate(
                 local_environment

@@ -453,3 +453,51 @@ def test_pending_latest_attempt_blocks_ready_snapshot_decisions() -> None:
         )
         == "DECISION_READY"
     )
+
+
+def test_identity_discovery_cli_uses_normal_settings_and_bounded_selector(
+    monkeypatch, tmp_path, capsys
+):
+    captured = {}
+    fake_settings = object()
+    monkeypatch.setattr(
+        fosun_local, "load_local_environment", lambda *args: {"synthetic": "config"}
+    )
+    monkeypatch.setattr(
+        fosun_local,
+        "LocalFosunRefreshSettings",
+        SimpleNamespace(model_validate=lambda _: fake_settings),
+    )
+
+    async def discover(settings, **kwargs):
+        assert settings is fake_settings
+        captured.update(kwargs)
+        return {"status": "classification_saved", "discovered": 2}
+
+    monkeypatch.setattr(fosun_local, "discover_identity_gaps", discover)
+    gap = tmp_path / "gap.json"
+    fosun_local.main(
+        [
+            "discover-identity-gaps",
+            "--identity-gap-file",
+            str(gap),
+            "--gap-item-index",
+            "0",
+            "--gap-item-index",
+            "1",
+        ]
+    )
+    assert captured == {"repo_root": Path.cwd(), "gap_file": gap, "item_indices": (0, 1)}
+    assert "classification_saved" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "arguments", [["discover-identity-gaps"], ["refresh-broker", "--gap-item-index", "0"]]
+)
+def test_discovery_cli_invalid_combination_stops_before_config(monkeypatch, capsys, arguments):
+    monkeypatch.setattr(
+        fosun_local, "load_local_environment", lambda *args: pytest.fail("config must not load")
+    )
+    with pytest.raises(SystemExit, match="1"):
+        fosun_local.main(arguments)
+    assert "LOCAL_IDENTITY_DISCOVERY_REQUEST_INVALID" in capsys.readouterr().err

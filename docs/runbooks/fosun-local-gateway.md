@@ -110,3 +110,31 @@ uv run --project engine nexus-pending-identity-local --repo-root "$PWD" \
 
 此扩展不改 schema、凭据、来源预算或身份准入。回退代码不会删除已经保存的证据及身份事实；
 上线后须独立核对真实来源、导入读回和账户快照，隔离测试不代表实际缺口已经补齐。
+
+
+## 从私有缺口采集分类证据
+
+正常入口 `discover-identity-gaps` 读取已有 `identity-gaps/<UUID>.json` 私有诊断，
+仅将其中代码作为候选选择器。文件及父目录须为当前用户所有、0600/0700，拒绝软链接、
+重复 JSON 键、额外字段或宣称身份权威的文档。`--gap-item-index` 是诊断中 `unresolved`
+数组从 0 开始的索引，可重复但不得重复同一索引，每次最多 3 项；仅支持 USD 美股。
+
+```sh
+uv run --project engine nexus-fosun-local discover-identity-gaps \
+  --identity-gap-file '.secrets/nexus-fosun-local/identity-gaps/<UUID>.json' \
+  --gap-item-index 0 --gap-item-index 1
+```
+
+入口通过现有受保护配置读取一次账户和一次完整持仓页，并重新检查本地身份。
+所选代码须仍为该账户的非零 USD 持仓且身份尚未解决；账户不唯一、分页未完成、
+币种/账户不匹配或已解决时，在报价分类采集前拒绝。即使账户持仓超过 20 项，
+分类请求也只包含显式选择的最多 3 项；原完整行情同步的 20 项上限不变。
+
+随后只请求一次现有报价分类接口，将原始响应及请求绑定存为不可变归档，逐字节读回，
+在单一事务内保存分类发现及读回核验。只保存 discovery，不创建 canonical Instrument、
+账户快照、LatestQuote、研究、周期或订单，也不自动补身份或同步账户。
+`remaining_identity_gaps` 是采集时全账户未解决身份的数量，分类成功不会减少它。
+
+成功后再用 `nexus-pending-identity-local --list-pending` 查询新增的记录 ID，
+通过既有官方身份证据流程显式分批处理。失败停止，不追加另一批或放宽身份准入。
+无 schema 变更；回退代码保留已归档的原件和发现记录。真实来源与账户刷新仍须独立验收。
