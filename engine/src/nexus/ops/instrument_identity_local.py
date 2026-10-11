@@ -33,6 +33,7 @@ from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.cboe_listing_local import collect_listing
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
+from nexus.ops.mic_local import collect_mic
 from nexus.ops.sec_local import _BoundedBytes, _Budget
 from nexus.persistence.session import session_factory
 from nexus.providers.broker.fosun_contracts import AccountItem
@@ -366,6 +367,8 @@ def main() -> None:
     directory = commands.add_parser("collect-sec-directory")
     directory.add_argument("--kind", choices=("company", "fund"), required=True)
     directory.add_argument("--output-dir", type=Path, required=True)
+    mic = commands.add_parser("collect-mic")
+    mic.add_argument("--output-dir", type=Path, required=True)
     listing = commands.add_parser("collect-cboe-listing")
     listing.add_argument("--symbol", required=True)
     listing.add_argument("--output-dir", type=Path, required=True)
@@ -429,6 +432,9 @@ def main() -> None:
             status = "collected"
         elif args.action == "collect-cboe-listing":
             asyncio.run(collect_listing(symbol=args.symbol, output_dir=args.output_dir))
+            status = "collected"
+        elif args.action == "collect-mic":
+            asyncio.run(collect_mic(output_dir=args.output_dir))
             status = "collected"
         elif args.action in {"collect-sec", "collect-submission"}:
             asyncio.run(
@@ -515,7 +521,7 @@ def main() -> None:
             str(error)
             if isinstance(error, ValueError)
             and re.fullmatch(
-                r"(?:CURRENT_IDENTITY|CURRENT_LISTING|BACKTEST_UNIVERSE|CBOE_LISTING)_[A-Z_]+",
+                r"(?:CURRENT_IDENTITY|CURRENT_LISTING|BACKTEST_UNIVERSE|MIC_COLLECTION|CBOE_LISTING)_[A-Z_]+",
                 str(error),
             )
             else "CURRENT_IDENTITY_FAILED"
