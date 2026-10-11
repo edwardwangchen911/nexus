@@ -73,6 +73,72 @@ Gateway 生产者；不能只更新 Gateway。回退先停止新生产者并恢�
 
 ## 独立账户同步的身份缺口诊断
 
+SEC 完整提交包可通过现有身份工具的独立归档入口取得：
+
+```bash
+uv run --project engine python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" collect-submission \
+  --source-url 'https://www.sec.gov/Archives/edgar/data/CIK/ACCESSION_WITHOUT_DASHES/ACCESSION.txt' \
+  --output-dir /absolute/private/new-submission-archive
+```
+
+示例中的 CIK 和 accession 必须替换为已定位的官方申报值；目录中的十八位 accession
+必须与文件名移除连字符后的值完全一致。此入口只接受 SEC 官方 HTTPS 完整提交包，
+复用单请求、不重试、字节上限、私有目录和摘要回执；不导入身份、不访问券商或业务库。
+旧 `collect-sec` 仍只接受原 HTML 文件范围。归档成功不代表份额、当前上市状态或账户
+对账通过；后续须严格核验完整提交结构、唯一正式组件及其实际内容。
+
+`parse_single_class_submission` 仅核验单申报人、单基金份额与唯一 `497K` 正式组件的
+结构绑定，直接读取完整提交包内的组件；不得混用另一次下载的组件原件。它拒绝多份额、
+字段冲突、未来接受时间、截断与封面代码或法定名称不一致。这一解析结果尚未接入身份
+登记或账户同步，不能替代当前有效的官方 MIC、上市状态及持仓来源核验，也不扩大候选
+池、研究或执行许可。
+
+官方 MIC 原件通过同一工具的独立入口归档：
+
+```bash
+uv run --project engine python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" collect-mic --output-dir /absolute/private/new-mic-archive
+```
+
+来源固定为 ISO 20022 的 MIC 公布页与 ISO 10383 CSV，每个来源单次请求，不跟随
+重定向、不重试；目录必须全新，保存原字节、来源 URL、实际接收时刻、摘要及长度。
+第二项失败保留首项归档和安全失败回执，不产生完整成功回执。归档不写业务库，不
+登记证券、不构造券商客户端；还须独立校验版本的公布及生效日期、下次公布日期、
+唯一 MIC 行、市场分段与运营市场归属及有效状态。新的公布日到来后不能沿用旧归档
+宣称当前证据齐备。MIC 本身不证明某只基金仍上市，也不扩大研究或交易准入。
+
+当前 Cboe 上市观察通过固定来源独立归档，不能改用“Symbols Traded”统计：
+
+```bash
+uv run --project engine python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" collect-cboe-listing --symbol SYMBOL \
+  --output-dir /absolute/private/new-cboe-listing-archive
+```
+
+每个固定来源仅请求一次：官方上市名单 HTML、同入口 CSV 和该代码的产品页。
+失败保留原件及安全回执，不自动重试；完整归档不写业务库。目录地址通过显式末尾
+斜杠发出，通用 HTTP 客户端默认路径行为、固定来源、路径段校验和禁止重定向不变。
+`parse_cboe_listing` 核对 HTML/CSV 的完整成员集合及唯一代码、产品页标题和上市日期，
+保留交易所实际更新时间，并拒绝未来时间、夏令时冲突及超过 24 小时的观察。页面中
+Book Viewer 的标题不作为基金标题。产品页名称原样保留，SEC 法定份额名称仍须独立
+核验；该观察尚未接入身份登记或账户同步，不能单独充当完整持仓身份权威。
+
+`validate_cboe_source_chain` 离线核对 FMP、完整 SEC 提交包、ISO 公布页/CSV 和 Cboe
+上市名单/CSV/产品页，共 14 项原件及回执；逐项严格校验固定来源、字节摘要、长度、
+HTTP 状态和实际接收时刻。FMP/MIC/上市采集不得超过 24 小时，同一 MIC 或上市批次
+的接收时刻差不得超过两分钟，上市数据更新时间不得晚于采集时刻。历史 SEC 原件
+保留原时点，不被重标为今天；招募书修订日期允许晚于最初上市日期。
+
+ISO 新版本已经发布而修改尚未生效时，须显式附加前一生效版本公布页/CSV及其回执，
+共 18 项。前一版本须在新公布日期前已经采集、当时有效；新旧 BATS 与 XCBO 整行
+必须一致，且两版本公布日期相接。旧版本只作历史佐证，不能当作当前版本或跳过
+新增变更生效时间；仅凭较早的行更新时间不通过。新版本已生效时不附加历史版本。
+
+此链仍明确返回 `identity_registration_ready=false`：当前 SEC 目录冲突检查、SEC
+策略分类、新鲜券商持仓来源，以及身份登记、严格读回和账户解析接线尚须完成。
+不得将来源链通过当作 canonical 身份、账户对账、候选池或执行许可。
+
 `nexus-fosun-local refresh-broker` 使用现有 broker 只读接口，不构造行情客户端，
 不受逐持仓行情采集预算替代。它仍须对所有非零持仓核对本地证券身份；身份缺失时
 返回 `LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED`，不继续现金/订单等对账阶段，
@@ -138,3 +204,44 @@ uv run --project engine nexus-fosun-local discover-identity-gaps \
 成功后再用 `nexus-pending-identity-local --list-pending` 查询新增的记录 ID，
 通过既有官方身份证据流程显式分批处理。失败停止，不追加另一批或放宽身份准入。
 无 schema 变更；回退代码保留已归档的原件和发现记录。真实来源与账户刷新仍须独立验收。
+
+### Cboe 基金来源候选核验（尚未上线）
+
+`instrument_identity_local collect-sec-directory --kind company|fund` 使用正常受保护配置，
+每次仅归档一份固定 SEC 官方目录，不导入业务库。已有归档可供纯只读核验，不能重标来源时间。
+候选来源核验将公司目录冲突、基金目录绑定、完整 SEC 申报、ISO MIC 和 Cboe 上市原件一起检查。
+基金目录缺失目标行不视为普通股票；当前支持的独立 SEC 招募书分支保留每日两倍做多单股 ETF
+分类，并要求独立段落标题分隔投资目标与费用、策略与风险，正文的费用措辞不能截断目标。
+
+来源分类通过仍返回 `identity_registration_ready=false`、`new_position_eligible=false`。
+来源分类本身不提供新鲜券商持仓绑定、canonical 身份登记或完整账户快照。
+真实账户验收尚待完成，不扩展选股池、回测或交易权限。
+
+候选 `cboe_held_fund_evidence_v1` 已定义脱敏持仓绑定与原件读回格式：登记时必须有五分钟内、
+分页完整且账户唯一的正常券商持仓页，代码、USD 币种和非零持仓均须匹配。证据只记录来源请求
+绑定及原件哈希，不包含账户编号、持仓数量或资金。历史读回按原登记时刻复核来源与持仓绑定，
+不能将旧证据重新视为当前账户对账或当前行情。
+纯合同测试成功不代表真实账户身份已补齐。
+
+候选数据库登记与严格读回已完成隔离 PostgreSQL 验证：复用现有表，无迁移；同一来源和
+同一持仓请求重复或并发登记只产生一条身份事实，新持仓请求追加独立事实。已有主档须有
+本分支可读回的原件证据，兼容的字段和别名本身不构成权威；不接管无证据主档。
+归档保留原回执的来源时刻，原件损坏、伪造快照或身份不一致时拒绝。
+候选两处账户解析入口已接严格读回，普通证券不增加原件读取；该类基金无原件读取器、
+无证明或最新证明损坏时拒绝，不回退旧证明。正常完整/仅账户刷新、最终入库及分类发现
+均传递延迟创建的原件读取器。隔离数据库验证覆盖登记到两处解析，正常 CLI 的独立进程
+启动检查与刷新顺序回归通过。真实账户同步与页面验收仍待完成，
+也未合入或部署；本段不宣称页面持仓已刷新。
+
+候选正常入口已加入现有 `nexus.ops.etf_identity_local`：`import-held-cboe` 登记，
+`read-held-cboe --snapshot-id <UUID>` 只读复核。登记显式指定 `--symbol`、`--output`、
+`--fmp-archive`、`--submission-file`、`--mic-archive`、`--listing-archive`、
+`--company-directory-file`、`--company-receipt-file`、`--fund-directory-file` 和
+`--fund-receipt-file`；需要前一有效 MIC 版本时指定 `--previous-mic-archive`。
+完整 SEC 申报的回执固定为同目录 `receipt.json`，其余目录遵循对应采集入口文件名。
+所有输入文件须属于当前用户、0600，直接父目录须为0700；拒绝文件及目录软链接。
+
+正常配置仍由 `--repo-root` 解析；来源先校验后仅读取一次账户及一次完整持仓页，
+再用数据库时钟登记并在新只读事务严格回读。不获取现金、订单、行情或完整账户快照，
+不自动补采集或重试。输出路径必须全新，回执只保存登记结果 ID，不输出账户资料。
+隔离正常入口到数据库和账户解析已验证；失败或结果不明先查持久化状态，不重放。

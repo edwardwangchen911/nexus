@@ -231,7 +231,10 @@ async def discover_identity_gaps(
         async with sessions() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
             identity = await _load_local_broker_identity(
-                session, holdings=holdings, allow_unresolved=True
+                session,
+                holdings=holdings,
+                allow_unresolved=True,
+                identity_store_factory=lambda: S3ProviderEvidenceStore(settings),
             )
         if any(code not in identity.unresolved_codes for code in codes):
             raise ValueError("LOCAL_IDENTITY_DISCOVERY_SELECTION_UNAVAILABLE")

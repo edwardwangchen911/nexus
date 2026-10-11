@@ -98,9 +98,52 @@ async def test_register_repeat_readback_and_keep_universe_closed(migrated_databa
             assert proof.evidence.identity.exchange == "BATS"
             assert proof.evidence.identity.strategy_kind == "daily_2x_long_single_stock"
             assert proof.evidence.execution_locked and not proof.evidence.new_position_eligible
+            from nexus.ops.fosun_local_refresh import (
+                _load_local_broker_identity,
+                _resolve_local_instrument,
+            )
+            from nexus.providers.broker.fosun_contracts import PositionItem
+
+            def reader():
+                return store
+
+            assert (
+                await _resolve_local_instrument(
+                    s,
+                    "usTEST",
+                    currency="USD",
+                    identity_date=datetime.now(UTC).date(),
+                    expected_id=result.instrument_id,
+                    identity_store_factory=reader,
+                )
+                == result.instrument_id
+            )
+            broker_identity = await _load_local_broker_identity(
+                s,
+                holdings=(PositionItem.model_validate(h.items[0]),),
+                identity_store_factory=reader,
+            )
+            assert broker_identity.instrument_ids["usTEST"] == result.instrument_id
             from nexus.market.scope import US_EQUITY_EXCHANGES
 
             assert "BATS" not in US_EQUITY_EXCHANGES
+            from nexus.ops.fosun_local_refresh import _ensure_instrument
+
+            assert (
+                await _ensure_instrument(
+                    s,
+                    "usTEST",
+                    currency="USD",
+                    valid_from=datetime.now(UTC).date(),
+                    expected_id=result.instrument_id,
+                    identity_store_factory=reader,
+                )
+                == result.instrument_id
+            )
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+                await _resolve_local_instrument(
+                    s, "usTEST", currency="USD", identity_date=datetime.now(UTC).date()
+                )
             assert await s.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
             assert await s.scalar(select(func.count()).select_from(Instrument)) == 1
             assert await s.scalar(select(func.count()).select_from(InstrumentAlias)) == 1
@@ -131,6 +174,20 @@ async def test_register_repeat_readback_and_keep_universe_closed(migrated_databa
         async with factory() as s:
             with pytest.raises(ValueError, match="CBOE_HELD_IDENTITY_READBACK_INVALID"):
                 await api().read_cboe_held_identity(s, store, snapshot_id=result.snapshot_id)
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+                await _resolve_local_instrument(
+                    s,
+                    "usTEST",
+                    currency="USD",
+                    identity_date=datetime.now(UTC).date(),
+                    identity_store_factory=lambda: store,
+                )
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+                await _load_local_broker_identity(
+                    s,
+                    holdings=(PositionItem.model_validate(h.items[0]),),
+                    identity_store_factory=lambda: store,
+                )
     finally:
         await factory.kw["bind"].dispose()
 
@@ -177,6 +234,16 @@ async def test_unproven_existing_master_is_not_adopted(migrated_database_url, so
                     holdings_page=h,
                 )
             assert await s.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+            from nexus.ops.fosun_local_refresh import _resolve_local_instrument
+
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+                await _resolve_local_instrument(
+                    s,
+                    "usTEST",
+                    currency="USD",
+                    identity_date=datetime.now(UTC).date(),
+                    identity_store_factory=lambda: store,
+                )
     finally:
         await factory.kw["bind"].dispose()
 
@@ -222,6 +289,17 @@ async def test_tampered_snapshot_and_master_are_rejected(migrated_database_url, 
             await s.flush()
             with pytest.raises(ValueError, match="CBOE_HELD_IDENTITY_READBACK_INVALID"):
                 await api().read_cboe_held_identity(s, store, snapshot_id=forged.id)
+            from nexus.ops.fosun_local_refresh import _resolve_local_instrument
+
+            # Latest corrupt evidence cannot fall back to an older valid proof.
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+                await _resolve_local_instrument(
+                    s,
+                    "usTEST",
+                    currency="USD",
+                    identity_date=datetime.now(UTC).date(),
+                    identity_store_factory=lambda: store,
+                )
     finally:
         await factory.kw["bind"].dispose()
 
@@ -263,6 +341,8 @@ async def test_normal_held_ingress_reads_once_then_registers_and_resolves(
     migrated_database_url, sources, tmp_path
 ):
     from nexus.ops.cboe_identity_local import import_held_identity
+    from nexus.ops.fosun_local_refresh import _load_local_broker_identity
+    from nexus.providers.broker.fosun_contracts import PositionItem
 
     contents, dirs, pages = sources
     a, h = fresh_pages(pages)
@@ -352,7 +432,149 @@ async def test_normal_held_ingress_reads_once_then_registers_and_resolves(
         )
         assert (broker.accounts, broker.holdings) == (1, 1)
         async with factory() as s:
+            identity = await _load_local_broker_identity(
+                s,
+                holdings=(PositionItem.model_validate(h.items[0]),),
+                identity_store_factory=lambda: store,
+            )
+            assert identity.instrument_ids["usTEST"] == result.instrument_id
             assert await s.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
             assert await s.scalar(select(func.count()).select_from(DataSnapshot)) == 1
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.parametrize("corrupt_proof", [False, True])
+@pytest.mark.asyncio
+async def test_broker_refresh_persists_bats_holding_and_api_readback(
+    migrated_database_url, sources, monkeypatch, corrupt_proof
+):
+    """Normal refresh wiring with synthetic gateway pages and a real isolated DB."""
+    from types import SimpleNamespace
+
+    import httpx
+    from helpers.portfolio_api import app, headers
+    from nexus.ops import fosun_local_refresh as refresh
+    from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+    from nexus.providers.broker.gateway_contracts import GatewayResponsePage
+
+    contents, dirs, pages = sources
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+
+    class SnapshotStore(MemoryStore):
+        async def read_normalized(self, *args, **kwargs):
+            return await self.read_raw(*args, **kwargs)
+
+    store = SnapshotStore()
+    a, h = fresh_pages(pages)
+    observed = datetime.now(UTC) - timedelta(seconds=2)
+    account = a.items[0]["external_account_id"]
+    h = h.model_copy(
+        update={
+            "as_of": observed,
+            "items": (
+                {
+                    **h.items[0],
+                    "average_cost": "10",
+                    "current_price": "12",
+                    "provider_as_of": observed.isoformat(),
+                },
+            ),
+        }
+    )
+    calls = []
+
+    def page(kind, items):
+        calls.append(kind)
+        return GatewayResponsePage(
+            items=tuple(items),
+            source_request_id=f"synthetic-{kind}-{len(calls)}",
+            has_more=False,
+            next_cursor=None,
+            as_of=observed,
+            quality="PASS",
+        )
+
+    class Broker:
+        async def read_accounts(self):
+            return page("accounts", a.items)
+
+        async def read_holdings(self, account_id, *, cursor, limit):
+            assert account_id == account and cursor is None and limit == 100
+            return page("holdings", h.items)
+
+        async def read_cash(self, account_id):
+            assert account_id == account
+            return page(
+                "cash",
+                [
+                    {
+                        "kind": "cash",
+                        "external_account_id": account,
+                        "currency": "USD",
+                        "cash_balance": "1000",
+                        "available_cash": "1000",
+                        "provider_as_of": observed.isoformat(),
+                    }
+                ],
+            )
+
+        async def read_orders(self, account_id, *, cursor, limit):
+            return page("orders", [])
+
+        async def read_cash_flows(self, account_id, **kwargs):
+            return page("cash_flows", [])
+
+        async def aclose(self):
+            calls.append("closed")
+
+    try:
+        async with factory() as s, s.begin():
+            assert (await s.scalar(text("SELECT current_database()"))).startswith("nexus_test_")
+            await api().import_cboe_held_identity(
+                s,
+                store,
+                symbol="TEST",
+                contents=contents,
+                directory_contents=dirs,
+                accounts_page=a,
+                holdings_page=h,
+            )
+        if corrupt_proof:
+            store.objects[next(iter(store.objects))] = b"invalid"
+        monkeypatch.setattr(refresh, "_broker_settings", lambda settings: object())
+        monkeypatch.setattr(refresh, "FosunGatewayClient", lambda settings: Broker())
+        monkeypatch.setattr(refresh, "S3ProviderEvidenceStore", lambda settings: store)
+        if corrupt_proof:
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+                await refresh.refresh_local_fosun_broker(
+                    SimpleNamespace(database_url=migrated_database_url), now=observed
+                )
+            assert calls == ["accounts", "holdings", "closed"]
+            async with factory() as s:
+                assert (
+                    await s.scalar(select(func.count()).select_from(PortfolioSnapshotRecord)) == 0
+                )
+            return
+        result = await refresh.refresh_local_fosun_broker(
+            SimpleNamespace(database_url=migrated_database_url), now=observed
+        )
+        assert result["snapshot_status"] == "READY"
+        assert result["provider_requests"]["quotes"] == result["provider_requests"]["bars"] == 0
+        async with factory() as s:
+            portfolio_id = await s.scalar(select(PortfolioSnapshotRecord.portfolio_id))
+            assert await s.scalar(select(func.count()).select_from(PortfolioSnapshotRecord)) == 1
+            assert await s.scalar(select(func.count()).select_from(UniverseSnapshot)) == 0
+        path = f"/internal/v1/portfolios/{portfolio_id}/snapshots/latest"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app(migrated_database_url, now=datetime.now(UTC))),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["positions"][0]["symbol"] == "TEST"
+        assert data["positions"][0]["read_only"] is True
+        assert data["execution_locked"] is True
     finally:
         await factory.kw["bind"].dispose()

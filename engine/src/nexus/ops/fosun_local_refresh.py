@@ -9,12 +9,12 @@ import os
 import re
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Protocol, Self
+from typing import TYPE_CHECKING, Literal, Protocol, Self
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo
 
@@ -45,7 +45,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
-from nexus.persistence.models.data import DataArtifact, ProviderCapability
+from nexus.persistence.models.data import DataArtifact, DataSnapshot, ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
@@ -95,6 +95,9 @@ from nexus.research.fosun_security_classification_storage import (
     read_security_classifications,
     save_classification_artifact,
 )
+
+if TYPE_CHECKING:
+    from nexus.market.current_identity_storage import IdentityStore
 
 _LOCAL_CONTRACT_HASH = hashlib.sha256(b"nexus.mac-local-fosun-read-only.v2").hexdigest()
 _INSTRUMENT_NAMESPACE = UUID("639bd8e1-d250-4f58-a88c-370b6bbc621b")
@@ -377,7 +380,10 @@ async def refresh_local_fosun(
         quote_raw = await _read_quote_snapshot(market, codes=holding_codes)
         async with sessions() as session:
             identity = await _load_local_broker_identity(
-                session, holdings=holdings, allow_unresolved=True
+                session,
+                holdings=holdings,
+                allow_unresolved=True,
+                identity_store_factory=lambda: S3ProviderEvidenceStore(settings),
             )
         resolved_codes = tuple(code for code in holding_codes if code in identity.instrument_ids)
         market_reads = await _read_market_snapshot(
@@ -466,6 +472,7 @@ async def refresh_local_fosun(
                     valid_from=identity.identity_date,
                     completed_at=datetime.now(UTC),
                     cash_flow_result=cash_flow_result,
+                    identity_store_factory=lambda: S3ProviderEvidenceStore(settings),
                 )
         except Exception as error:
             if isinstance(error, GatewayClientError) or (
@@ -551,7 +558,10 @@ async def refresh_local_fosun_broker(
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         async with sessions() as session:
             identity = await _load_local_broker_identity(
-                session, holdings=holdings, allow_unresolved=True
+                session,
+                holdings=holdings,
+                allow_unresolved=True,
+                identity_store_factory=lambda: S3ProviderEvidenceStore(settings),
             )
         if identity.unresolved_codes:
             if identity_gap_dir is not None:
@@ -588,6 +598,7 @@ async def refresh_local_fosun_broker(
                     valid_from=identity.identity_date,
                     completed_at=datetime.now(UTC),
                     cash_flow_result=cash_flow_result,
+                    identity_store_factory=lambda: S3ProviderEvidenceStore(settings),
                     route="local-fosun-broker-refresh",
                 )
         except Exception as error:
@@ -817,6 +828,7 @@ async def _load_local_broker_identity(
     *,
     holdings: tuple[PositionItem, ...],
     allow_unresolved: bool = False,
+    identity_store_factory: Callable[[], IdentityStore] | None = None,
 ) -> _LocalBrokerIdentity:
     """Resolve stable local IDs without writing before broker reconciliation succeeds."""
     accounts = tuple(
@@ -851,17 +863,24 @@ async def _load_local_broker_identity(
     )
     for symbol, instrument_id, exchange, currency in aliases:
         code = f"us{symbol}"
-        if exchange not in US_EQUITY_EXCHANGES or currency != "USD":
+        if exchange not in (*US_EQUITY_EXCHANGES, "BATS") or currency != "USD":
             continue
         if _US_PROVIDER_CODE.fullmatch(code) is None:
             continue
+        # Preload mappings for order normalization. Strict Cboe proof checks
+        # happen only for actual holdings below and consumed orders at persistence;
+        # unrelated catalog entries must not block this account's reconciliation.
         if code in instrument_ids and instrument_ids[code] != instrument_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_AMBIGUOUS")
         instrument_ids[code] = instrument_id
     unresolved_codes: list[str] = []
     for item in holdings:
         existing_id = await _resolve_local_instrument(
-            session, item.instrument_code, currency=item.currency, identity_date=identity_date
+            session,
+            item.instrument_code,
+            currency=item.currency,
+            identity_date=identity_date,
+            identity_store_factory=identity_store_factory,
         )
         if existing_id is None and _symbol_and_market(item.instrument_code)[1] == "US":
             if not allow_unresolved:
@@ -900,6 +919,7 @@ async def _persist_ready_broker_snapshot(
     completed_at: datetime,
     cash_flow_result: CashFlowSyncResult,
     route: Literal["local-fosun-refresh", "local-fosun-broker-refresh"] = "local-fosun-refresh",
+    identity_store_factory: Callable[[], IdentityStore] | None = None,
 ) -> PortfolioSnapshotRecord:
     """Persist one already-frozen local broker snapshot in a single transaction."""
     if frozen.status != "READY" or frozen.portfolio_snapshot.portfolio_id != portfolio_id:
@@ -932,6 +952,7 @@ async def _persist_ready_broker_snapshot(
             currency=item.currency,
             valid_from=valid_from,
             expected_id=expected_id,
+            identity_store_factory=identity_store_factory,
         )
         if actual_id != expected_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
@@ -946,6 +967,7 @@ async def _persist_ready_broker_snapshot(
                 currency=instrument.currency,
                 identity_date=valid_from,
                 expected_id=order.instrument_id,
+                identity_store_factory=identity_store_factory,
             )
         else:
             if _US_PROVIDER_CODE.fullmatch(code) is None:
@@ -956,6 +978,7 @@ async def _persist_ready_broker_snapshot(
                 currency="USD",
                 valid_from=valid_from,
                 expected_id=order.instrument_id,
+                identity_store_factory=identity_store_factory,
             )
         if order_actual_id != order.instrument_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
@@ -1288,6 +1311,7 @@ async def _persist_market_snapshot(
             currency=item.currency,
             valid_from=identity.identity_date,
             expected_id=expected_id,
+            identity_store_factory=lambda: store,
         )
         if actual_id != expected_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
@@ -1483,6 +1507,7 @@ async def _resolve_local_instrument(
     currency: str,
     identity_date: date,
     expected_id: UUID | None = None,
+    identity_store_factory: Callable[[], IdentityStore] | None = None,
 ) -> UUID | None:
     """Resolve current identity, never substitute a historical or future ticker."""
     symbol, market = _symbol_and_market(code)
@@ -1515,15 +1540,47 @@ async def _resolve_local_instrument(
         return None
     alias = current[0]
     instrument = await session.get(Instrument, alias.instrument_id)
+    held_cboe = market == "US" and instrument is not None and instrument.exchange == "BATS"
     if (
         alias.symbol != symbol
         or instrument is None
-        or instrument.exchange not in allowed_exchanges
+        or (instrument.exchange not in allowed_exchanges and not held_cboe)
         or instrument.currency != currency
     ):
         raise ValueError("LOCAL_BROKER_INSTRUMENT_INVALID")
     if expected_id is not None and alias.instrument_id != expected_id:
         raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
+    if held_cboe:
+        if identity_store_factory is None:
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_INVALID")
+        try:
+            # The existing identity-storage module imports normal local ops.
+            # Load this branch only after those entrypoints have initialized.
+            from nexus.market.cboe_held_identity_storage import SOURCE as CBOE_HELD_SOURCE
+            from nexus.market.cboe_held_identity_storage import read_cboe_held_identity
+
+            latest = await session.scalar(
+                select(DataSnapshot)
+                .where(
+                    DataSnapshot.source == CBOE_HELD_SOURCE,
+                    DataSnapshot.provider_object_id == f"identity:{symbol}",
+                )
+                .order_by(
+                    DataSnapshot.observed_at.desc(),
+                    DataSnapshot.created_at.desc(),
+                    DataSnapshot.id.desc(),
+                )
+                .limit(1)
+            )
+            if latest is None:
+                raise ValueError
+            proof = await read_cboe_held_identity(
+                session, identity_store_factory(), snapshot_id=latest.id
+            )
+            if proof.instrument_id != alias.instrument_id or proof.alias_id != alias.id:
+                raise ValueError
+        except Exception:
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_INVALID") from None
     return alias.instrument_id
 
 
@@ -1534,10 +1591,16 @@ async def _ensure_instrument(
     currency: str,
     valid_from: date,
     expected_id: UUID | None = None,
+    identity_store_factory: Callable[[], IdentityStore] | None = None,
 ) -> UUID:
     symbol, market = _symbol_and_market(code)
     existing_id = await _resolve_local_instrument(
-        session, code, currency=currency, identity_date=valid_from, expected_id=expected_id
+        session,
+        code,
+        currency=currency,
+        identity_date=valid_from,
+        expected_id=expected_id,
+        identity_store_factory=identity_store_factory,
     )
     if existing_id is not None:
         return existing_id

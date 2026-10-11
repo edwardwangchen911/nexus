@@ -1,5 +1,7 @@
 import hashlib
 import json
+import subprocess
+import sys
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -937,8 +939,9 @@ async def test_broker_refresh_archives_gap_before_any_snapshot_or_follow_up(
         async def __aexit__(self, *args):
             pass
 
-    async def identity(session, *, holdings, allow_unresolved=False):
+    async def identity(session, *, holdings, allow_unresolved=False, identity_store_factory=None):
         assert allow_unresolved
+        assert callable(identity_store_factory)
         return SimpleNamespace(unresolved_codes=("usNEW",))
 
     async def forbidden(*args, **kwargs):
@@ -993,3 +996,128 @@ def test_broker_identity_gap_rejects_unsafe_secret_ancestor(tmp_path, symlink):
             parent / "identity-gaps", holdings=(), unresolved_codes=(), holdings_page=page
         )
     assert not (parent / "identity-gaps").exists()
+
+
+def test_normal_fosun_cli_cold_import_has_no_identity_storage_cycle():
+    result = subprocess.run(
+        [sys.executable, "-m", "nexus.ops.fosun_local", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("usage: nexus-fosun-local")
+
+
+class _IdentityCatalogSession:
+    """Replace database reads only; keep identity resolution and its gates real."""
+
+    def __init__(self):
+        from nexus.persistence.models.market import Instrument, InstrumentAlias
+        from nexus.persistence.models.portfolio import Account, Portfolio
+
+        self.account = Account(id=uuid4(), provider="fosun", status="ACTIVE")
+        self.portfolio = Portfolio(id=uuid4(), account_id=self.account.id, name="synthetic")
+        self.instruments = {
+            symbol: Instrument(
+                id=uuid4(),
+                asset_type="equity_etf" if exchange == "BATS" else "common_stock",
+                exchange=exchange,
+                currency="USD",
+                risk_bucket="EQUITY",
+            )
+            for symbol, exchange in (("ORPHAN", "BATS"), ("AAPL", "XNAS"))
+        }
+        self.aliases = {
+            symbol: InstrumentAlias(
+                id=uuid4(),
+                instrument_id=instrument.id,
+                symbol=symbol,
+                alias_type="ticker",
+                valid_from=date(2026, 1, 1),
+            )
+            for symbol, instrument in self.instruments.items()
+        }
+
+    async def scalars(self, statement):
+        from nexus.persistence.models.market import InstrumentAlias
+        from nexus.persistence.models.portfolio import Account, Portfolio
+
+        entity = statement.column_descriptions[0]["entity"]
+        if entity is Account:
+            return [self.account]
+        if entity is Portfolio:
+            return [self.portfolio]
+        if entity is InstrumentAlias:
+            return [self.aliases[statement.compile().params["symbol_1"]]]
+        raise AssertionError("unexpected catalog query")
+
+    async def execute(self, statement):
+        return [
+            (symbol, instrument.id, instrument.exchange, instrument.currency)
+            for symbol, instrument in self.instruments.items()
+        ]
+
+    async def scalar(self, statement):
+        # No Cboe proof or previous cash-flow watermark has been stored.
+        return None
+
+    async def get(self, model, key):
+        from nexus.persistence.models.portfolio import Account, Portfolio
+
+        if model is Account:
+            return self.account
+        if model is Portfolio:
+            return self.portfolio
+        return next((item for item in self.instruments.values() if item.id == key), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("holdings", [(), (_position("usAAPL"),)])
+async def test_unrelated_unproven_bats_catalog_does_not_block_account_identity(holdings):
+    session = _IdentityCatalogSession()
+    identity = await refresh_module._load_local_broker_identity(
+        session, holdings=holdings, identity_store_factory=lambda: object()
+    )
+    assert identity.account_id == session.account.id
+    assert identity.portfolio_id == session.portfolio.id
+    assert identity.unresolved_codes == ()
+    if holdings:
+        assert identity.instrument_ids["usAAPL"] == session.instruments["AAPL"].id
+
+
+@pytest.mark.asyncio
+async def test_actual_bats_holding_still_requires_strict_identity_proof():
+    with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+        await refresh_module._load_local_broker_identity(
+            _IdentityCatalogSession(),
+            holdings=(_position("usORPHAN"),),
+            identity_store_factory=lambda: object(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_actual_bats_open_order_still_requires_strict_identity_proof():
+    session = _IdentityCatalogSession()
+    instrument_id = session.instruments["ORPHAN"].id
+    frozen = SimpleNamespace(
+        status="READY",
+        portfolio_snapshot=SimpleNamespace(
+            portfolio_id=session.portfolio.id,
+            open_orders=(SimpleNamespace(instrument_id=instrument_id),),
+        ),
+    )
+    with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_INVALID"):
+        await refresh_module._persist_ready_broker_snapshot(
+            session,
+            account_id=session.account.id,
+            portfolio_id=session.portfolio.id,
+            frozen=frozen,
+            holdings=(),
+            instrument_ids={"usORPHAN": instrument_id},
+            valid_from=datetime.now(UTC).date(),
+            completed_at=datetime.now(UTC),
+            cash_flow_result=SimpleNamespace(),
+            identity_store_factory=lambda: object(),
+        )
