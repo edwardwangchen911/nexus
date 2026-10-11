@@ -30,6 +30,7 @@ from nexus.market.current_identity_storage import (
 from nexus.market.current_listing_revision import import_listing_revision, read_listing_revision
 from nexus.market.custom_identity import archive_member_taxonomy
 from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.ops.cboe_listing_local import collect_listing
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.ops.sec_local import _BoundedBytes, _Budget
@@ -365,6 +366,9 @@ def main() -> None:
     directory = commands.add_parser("collect-sec-directory")
     directory.add_argument("--kind", choices=("company", "fund"), required=True)
     directory.add_argument("--output-dir", type=Path, required=True)
+    listing = commands.add_parser("collect-cboe-listing")
+    listing.add_argument("--symbol", required=True)
+    listing.add_argument("--output-dir", type=Path, required=True)
     taxonomy = commands.add_parser("archive-taxonomy")
     taxonomy.add_argument("--symbol", required=True)
     taxonomy.add_argument("--fmp-archive", type=Path, required=True)
@@ -422,6 +426,9 @@ def main() -> None:
                     directory_kind=args.kind,
                 )
             )
+            status = "collected"
+        elif args.action == "collect-cboe-listing":
+            asyncio.run(collect_listing(symbol=args.symbol, output_dir=args.output_dir))
             status = "collected"
         elif args.action in {"collect-sec", "collect-submission"}:
             asyncio.run(
@@ -508,7 +515,8 @@ def main() -> None:
             str(error)
             if isinstance(error, ValueError)
             and re.fullmatch(
-                r"(?:CURRENT_IDENTITY|CURRENT_LISTING|BACKTEST_UNIVERSE)_[A-Z_]+", str(error)
+                r"(?:CURRENT_IDENTITY|CURRENT_LISTING|BACKTEST_UNIVERSE|CBOE_LISTING)_[A-Z_]+",
+                str(error),
             )
             else "CURRENT_IDENTITY_FAILED"
         )

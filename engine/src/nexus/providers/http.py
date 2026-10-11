@@ -125,6 +125,8 @@ class FixedOriginHttpClient:
         path_segments: tuple[str, ...],
         query: tuple[tuple[str, str], ...],
         headers: tuple[tuple[str, str], ...],
+        *,
+        trailing_slash: bool = False,
     ) -> bytes:
         """Return bounded bytes or raise one sanitized policy code."""
         # Common root/httpx DEBUG configuration must never expose a provider
@@ -132,6 +134,10 @@ class FixedOriginHttpClient:
         # case logging was reconfigured after client construction.
         _enforce_http_dependency_log_boundary()
         path = _canonical_path(path_segments)
+        if type(trailing_slash) is not bool:
+            raise HttpPolicyError("PATH_SEGMENT_INVALID")
+        if trailing_slash:
+            path += "/"
         url = httpx.URL(
             scheme=self._origin.scheme,
             host=self._origin.host,
