@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from nexus.domain.ids import new_uuid7
@@ -12,8 +13,10 @@ from nexus.persistence.models.market import Instrument, InstrumentAlias, LatestQ
 from nexus.persistence.models.portfolio import BrokerSyncRun, PortfolioSnapshotRecord
 from nexus.persistence.session import session_factory
 from nexus.providers.broker.fosun_contracts import PositionItem
+from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 from nexus.providers.market.fosun_gateway import RawGatewayResponse
 from nexus.settings import EngineSettings
+from nexus_fosun_gateway.adapter.normalization import normalize_holdings_response
 from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
@@ -22,8 +25,9 @@ from unit.market.test_object_store import FakeS3Client
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("corrupt", [False, True])
+@pytest.mark.parametrize("normal_entry", [False, True])
 async def test_discovery_raw_readback_replay_and_no_identity_or_account_facts(
-    migrated_database_url, monkeypatch, corrupt
+    migrated_database_url, monkeypatch, tmp_path, corrupt, normal_entry
 ):
     url = make_url(migrated_database_url)
     assert url.database.startswith("nexus_test_") and url.port == 55448
@@ -92,6 +96,114 @@ async def test_discovery_raw_readback_replay_and_no_identity_or_account_facts(
         )
         for code in codes
     )
+    if normal_entry:
+        from nexus.ops import fosun_identity_discovery_local as module
+
+        directory = tmp_path / ".secrets/nexus-fosun-local/identity-gaps"
+        for path in (tmp_path / ".secrets", directory.parent, directory):
+            path.mkdir(mode=0o700)
+        gap_file = directory / f"{new_uuid7()}.json"
+        gap_file.write_text(
+            json.dumps(
+                {
+                    "schema": "fosun_broker_identity_gap_diagnostic_v1",
+                    "identity_authority": False,
+                    "observed_at": now.isoformat(),
+                    "source_page_sha256": "a" * 64,
+                    "unresolved": [{"provider_code": code, "currency": "USD"} for code in codes],
+                }
+            )
+        )
+        gap_file.chmod(0o600)
+        requests = []
+
+        class Broker:
+            async def read_accounts(self):
+                requests.append("accounts")
+                return GatewayResponsePage(
+                    items=(
+                        {
+                            "kind": "account",
+                            "external_account_id": "synthetic",
+                            "base_currency": None,
+                            "status": "active",
+                        },
+                    ),
+                    source_request_id="synthetic",
+                    has_more=False,
+                    next_cursor=None,
+                    as_of=now,
+                    quality="PASS",
+                )
+
+            async def read_holdings(self, account, *, cursor, limit):
+                assert account == "synthetic" and cursor is None and limit == 100
+                requests.append("holdings")
+                page = normalize_holdings_response(
+                    {
+                        "code": 0,
+                        "requestId": "synthetic",
+                        "data": {
+                            "start": 0,
+                            "count": 2,
+                            "total": 2,
+                            "list": [
+                                {
+                                    "marketCode": "us",
+                                    "stockCode": code[2:],
+                                    "currency": "USD",
+                                    "quantity": "1",
+                                    "quantityAvail": "1",
+                                    "qtyOnHold": "0",
+                                }
+                                for code in codes
+                            ],
+                        },
+                    },
+                    account_id=account,
+                    received_at=now,
+                    context={"cursor": cursor, "limit": limit},
+                )
+                return GatewayResponsePage.model_validate(page.model_dump(mode="json"))
+
+            async def aclose(self):
+                pass
+
+        async def read_quotes(market, *, codes):
+            assert codes == ("usAAA", "usBBB")
+            requests.append("quotes")
+            return raw
+
+        monkeypatch.setattr(module, "_broker_settings", lambda _: object())
+        monkeypatch.setattr(module, "_market_identity", lambda _: object())
+        monkeypatch.setattr(module, "FosunGatewayClient", lambda _: Broker())
+        monkeypatch.setattr(module, "FosunMarketGatewayClient", lambda _: Broker())
+        monkeypatch.setattr(module, "_read_quote_snapshot", read_quotes)
+        monkeypatch.setattr(module, "S3ProviderEvidenceStore", lambda _: store)
+
+    async def run():
+        if normal_entry:
+            result = await module.discover_identity_gaps(
+                SimpleNamespace(database_url=migrated_database_url),
+                repo_root=tmp_path,
+                gap_file=gap_file,
+                item_indices=(0, 1),
+            )
+            assert result["provider_requests"]["total"] == 3
+            assert (
+                result["canonical_identities_created"] == result["account_snapshots_created"] == 0
+            )
+            return result["identity_route_counts"]
+        async with factory() as session, session.begin():
+            return await _persist_discovery_batch(
+                session,
+                store,
+                codes=codes,
+                holdings=holdings,
+                holdings_observed_at=now,
+                quote_raw=raw,
+            )
+
     if corrupt:
 
         async def broken_read(*args, **kwargs):
@@ -101,31 +213,17 @@ async def test_discovery_raw_readback_replay_and_no_identity_or_account_facts(
     try:
         if corrupt:
             with pytest.raises(ValueError, match="^LOCAL_IDENTITY_DISCOVERY_RAW_READBACK_FAILED$"):
-                async with factory() as session, session.begin():
-                    await _persist_discovery_batch(
-                        session,
-                        store,
-                        codes=codes,
-                        holdings=holdings,
-                        holdings_observed_at=now,
-                        quote_raw=raw,
-                    )
+                await run()
         else:
             for _ in range(2):
-                async with factory() as session, session.begin():
-                    counts = await _persist_discovery_batch(
-                        session,
-                        store,
-                        codes=codes,
-                        holdings=holdings,
-                        holdings_observed_at=now,
-                        quote_raw=raw,
-                    )
-                    assert counts == {
-                        "current_held_common_stock": 2,
-                        "current_held_fund_or_structured": 0,
-                        "manual_review": 0,
-                    }
+                counts = await run()
+                assert counts == {
+                    "current_held_common_stock": 2,
+                    "current_held_fund_or_structured": 0,
+                    "manual_review": 0,
+                }
+        if normal_entry:
+            assert requests == ["accounts", "holdings", "quotes"] * (1 if corrupt else 2)
         async with factory() as session:
             pending = await read_pending_instrument_discoveries(session, as_of=datetime.now(UTC))
             assert len(pending) == (0 if corrupt else 2)

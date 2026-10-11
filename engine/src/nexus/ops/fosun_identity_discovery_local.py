@@ -210,7 +210,10 @@ async def discover_identity_gaps(
             account.external_account_id, cursor=None, limit=100
         )
         if (
-            holdings_page.quality != "PASS"
+            # Normalized holdings deliberately retain PARTIAL: the provider clock
+            # is unknown. Complete pagination and strict facts suffice only for
+            # held-identity discovery, never account reconciliation or execution.
+            holdings_page.quality != "PARTIAL"
             or holdings_page.has_more
             or len(holdings_page.items) > 100
         ):

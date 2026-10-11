@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 from nexus.providers.broker.fosun_contracts import PositionItem
 from nexus.providers.broker.gateway_contracts import GatewayResponsePage
+from nexus_fosun_gateway.adapter.normalization import normalize_holdings_response
 
 NOW = datetime(2026, 10, 11, 12, tzinfo=UTC)
 
@@ -93,7 +94,10 @@ def test_gap_reader_rejects_unsafe_or_forged_diagnostic(tmp_path, unsafe):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reject", [None, "not_held", "already_resolved", "currency", "pagination"])
+@pytest.mark.parametrize(
+    "reject",
+    [None, "not_held", "already_resolved", "currency", "pagination", "quality", "schema"],
+)
 async def test_discovery_checks_live_holdings_before_one_bounded_quote(
     tmp_path, monkeypatch, reject
 ):
@@ -141,14 +145,42 @@ async def test_discovery_checks_live_holdings_before_one_bounded_quote(
         async def read_holdings(self, account, *, cursor, limit):
             assert account == "synthetic-account" and cursor is None and limit == 100
             calls.append("holdings")
-            return GatewayResponsePage(
-                items=tuple(p.model_dump(mode="json") for p in positions),
-                source_request_id="synthetic",
-                has_more=reject == "pagination",
-                next_cursor="1" if reject == "pagination" else None,
-                as_of=NOW,
-                quality="PASS",
+            # Exercise the producer's actual contract, including its PARTIAL quality
+            # and unknown provider clock, instead of inventing a PASS holdings page.
+            normalized = normalize_holdings_response(
+                {
+                    "code": 0,
+                    "requestId": "synthetic",
+                    "data": {
+                        "start": 0,
+                        "count": len(positions),
+                        "total": len(positions) + (1 if reject == "pagination" else 0),
+                        "list": [
+                            {
+                                "marketCode": "us",
+                                "stockCode": p.instrument_code[2:],
+                                "currency": p.currency,
+                                "quantity": str(p.quantity),
+                                "quantityAvail": str(p.available_quantity),
+                                "qtyOnHold": str(p.frozen_quantity),
+                                "avgCost": "1",
+                            }
+                            for p in positions
+                        ],
+                    },
+                },
+                account_id=account,
+                received_at=NOW,
+                context={"cursor": None, "limit": limit},
             )
+            page = GatewayResponsePage.model_validate(normalized.model_dump(mode="json"))
+            if reject == "quality":
+                page = page.model_copy(update={"quality": "PASS"})
+            elif reject == "schema":
+                items = list(page.items)
+                items[0] = {**items[0], "quantity": "financial-fact-canary"}
+                page = page.model_copy(update={"items": tuple(items)})
+            return page
 
         async def aclose(self):
             calls.append("broker_closed")
@@ -207,11 +239,13 @@ async def test_discovery_checks_live_holdings_before_one_bounded_quote(
     monkeypatch.setattr(module, "_persist_discovery_batch", persist)
     settings = SimpleNamespace(database_url="synthetic")
     if reject:
-        with pytest.raises(ValueError, match="^LOCAL_IDENTITY_DISCOVERY_"):
+        with pytest.raises(ValueError, match="^LOCAL_IDENTITY_DISCOVERY_") as failure:
             await module.discover_identity_gaps(
                 settings, repo_root=tmp_path, gap_file=path, item_indices=(0, 1)
             )
         assert not any(isinstance(c, tuple) for c in calls)
+        assert "canary" not in str(failure.value)
+        assert calls.count("accounts") == calls.count("holdings") == 1
     else:
         result = await module.discover_identity_gaps(
             settings, repo_root=tmp_path, gap_file=path, item_indices=(0, 1)
