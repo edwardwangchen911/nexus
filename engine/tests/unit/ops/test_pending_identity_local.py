@@ -544,8 +544,9 @@ def test_pending_archive_reuses_only_the_same_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("selected", [False, True])
 async def test_resolver_processes_persisted_batch_with_one_broker_read(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, selected
 ) -> None:
     pending_reads = 0
 
@@ -553,7 +554,7 @@ async def test_resolver_processes_persisted_batch_with_one_broker_read(
         nonlocal pending_reads
         pending_reads += 1
         if pending_reads == 1:
-            return {
+            documents = {
                 UUID(int=1): SimpleNamespace(
                     provider_code="usAAA",
                     recommended_identity_route="current_held_common_stock",
@@ -563,7 +564,19 @@ async def test_resolver_processes_persisted_batch_with_one_broker_read(
                     recommended_identity_route="current_held_fund_or_structured",
                 ),
             }
-        return {}
+            if selected:
+                documents.update(
+                    {
+                        UUID(int=3): SimpleNamespace(
+                            provider_code="usCCC", recommended_identity_route="manual_review"
+                        ),
+                        UUID(int=4): SimpleNamespace(
+                            provider_code="usDDD", recommended_identity_route="manual_review"
+                        ),
+                    }
+                )
+            return documents
+        return {UUID(int=3): object(), UUID(int=4): object()} if selected else {}
 
     async def collect_common(**kwargs):
         item_dir = kwargs["output_dir"]
@@ -612,13 +625,14 @@ async def test_resolver_processes_persisted_batch_with_one_broker_read(
             client=client,
             store=object(),
             broker=broker,
+            **({"discovery_ids": (UUID(int=2), UUID(int=1))} if selected else {}),
         )
 
     assert result == {
-        "status": "resolved",
-        "pending_before": 2,
+        "status": "partial" if selected else "resolved",
+        "pending_before": 4 if selected else 2,
         "resolved": 2,
-        "remaining": 0,
+        "remaining": 2 if selected else 0,
         "manual_review_required": 0,
         "resolution_counts": {"common_stock": 1, "equity_etf": 1},
         "portfolio_refresh_required": True,
@@ -628,3 +642,173 @@ async def test_resolver_processes_persisted_batch_with_one_broker_read(
     }
     assert broker.accounts_calls == 1
     assert broker.holdings_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ids", "code"),
+    [
+        ((), "PENDING_IDENTITY_SELECTION_INVALID"),
+        ((UUID(int=1), UUID(int=1)), "PENDING_IDENTITY_SELECTION_INVALID"),
+        (tuple(UUID(int=i) for i in range(1, 5)), "PENDING_IDENTITY_BATCH_LIMIT"),
+        ((UUID(int=99),), "PENDING_IDENTITY_SELECTION_UNAVAILABLE"),
+        (None, "PENDING_IDENTITY_BATCH_LIMIT"),
+    ],
+)
+async def test_resolver_invalid_selection_stops_before_sources(tmp_path, monkeypatch, ids, code):
+    async def read_pending(session, *, as_of):
+        return {UUID(int=i): SimpleNamespace(provider_code=f"usTEST{i}") for i in range(1, 5)}
+
+    async def forbidden(**kwargs):
+        pytest.fail("invalid selection must not collect sources")
+
+    monkeypatch.setattr(resolver_module, "session_factory", lambda settings: _FakeFactory())
+    monkeypatch.setattr(resolver_module, "read_pending_instrument_discoveries", read_pending)
+    monkeypatch.setattr(resolver_module, "collect_common_stock_evidence", forbidden)
+    monkeypatch.setattr(resolver_module, "collect_fund_evidence", forbidden)
+    broker = _FakeBroker()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: pytest.fail("network forbidden"))
+    ) as client:
+        with pytest.raises(ValueError, match=f"^{code}$"):
+            await resolve_pending_identities(
+                object(),
+                object(),
+                fmp_key=SecretStr("synthetic"),
+                sec_contact="nexus@example.com",
+                output_dir=tmp_path / "out",
+                client=client,
+                store=object(),
+                broker=broker,
+                discovery_ids=ids,
+            )
+    assert not (tmp_path / "out").exists()
+    assert broker.accounts_calls == broker.holdings_calls == 0
+
+
+@pytest.mark.parametrize(
+    "arguments", [[], ["--discovery-id", str(UUID(int=1)), "--discovery-id", str(UUID(int=2))]]
+)
+def test_pending_cli_passes_persisted_id_selection(tmp_path, monkeypatch, capsys, arguments):
+    import nexus.ops.fosun_local as local_module
+
+    captured = {}
+
+    async def resolve(*args, **kwargs):
+        captured.update(kwargs)
+        return {"status": "synthetic"}
+
+    fake_settings = SimpleNamespace(model_validate=lambda _: object())
+    monkeypatch.setattr(local_module, "load_local_environment", lambda *args: {})
+    monkeypatch.setattr(resolver_module, "EngineSettings", fake_settings)
+    monkeypatch.setattr(resolver_module, "BrokerWorkerSettings", fake_settings)
+    monkeypatch.setattr(resolver_module, "resolve_pending_identities", resolve)
+    monkeypatch.setattr(
+        resolver_module.sys, "argv", ["resolver", "--output-dir", str(tmp_path / "out"), *arguments]
+    )
+    resolver_module.main()
+    assert captured["discovery_ids"] == ((UUID(int=1), UUID(int=2)) if arguments else None)
+    assert json.loads(capsys.readouterr().out) == {"status": "synthetic"}
+
+
+def test_pending_cli_rejects_symbol_instead_of_id_before_config(monkeypatch, capsys):
+    import nexus.ops.fosun_local as local_module
+
+    monkeypatch.setattr(
+        local_module, "load_local_environment", lambda *args: pytest.fail("must not load config")
+    )
+    monkeypatch.setattr(
+        resolver_module.sys, "argv", ["resolver", "--output-dir", "unused", "--discovery-id", "AAA"]
+    )
+    with pytest.raises(SystemExit, match="1"):
+        resolver_module.main()
+    assert json.loads(capsys.readouterr().err) == {
+        "status": "failed",
+        "code": "PENDING_IDENTITY_REQUEST_INVALID",
+    }
+
+
+@pytest.mark.asyncio
+async def test_selected_manual_item_keeps_unselected_pending_count(tmp_path, monkeypatch):
+    async def read_pending(session, *, as_of):
+        return {
+            UUID(int=i): SimpleNamespace(
+                provider_code=f"usTEST{i}", recommended_identity_route="manual_review"
+            )
+            for i in range(1, 5)
+        }
+
+    monkeypatch.setattr(resolver_module, "session_factory", lambda settings: _FakeFactory())
+    monkeypatch.setattr(resolver_module, "read_pending_instrument_discoveries", read_pending)
+    broker = _FakeBroker()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: pytest.fail("network forbidden"))
+    ) as client:
+        result = await resolve_pending_identities(
+            object(),
+            object(),
+            fmp_key=SecretStr("synthetic"),
+            sec_contact="nexus@example.com",
+            output_dir=tmp_path / "out",
+            client=client,
+            store=object(),
+            broker=broker,
+            discovery_ids=(UUID(int=1),),
+        )
+    assert result["status"] == "manual_review_required"
+    assert result["pending_before"] == result["remaining"] == 4
+    assert result["resolved"] == result["public_requests"] == result["broker_requests"] == 0
+    assert result["manual_review_required"] == 1
+    assert broker.accounts_calls == broker.holdings_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_list_pending_has_no_provider_or_broker_access(monkeypatch):
+    async def read_pending(session, *, as_of):
+        return {
+            UUID(int=7): SimpleNamespace(
+                provider_code="usPRIVATE",
+                recommended_identity_route="manual_review",
+                available_at=NOW,
+            )
+        }
+
+    monkeypatch.setattr(resolver_module, "session_factory", lambda settings: _FakeFactory())
+    monkeypatch.setattr(resolver_module, "read_pending_instrument_discoveries", read_pending)
+    result = await resolver_module.list_pending_identities(object())
+    assert result == {
+        "status": "pending_list",
+        "pending_count": 1,
+        "items": [
+            {
+                "discovery_id": str(UUID(int=7)),
+                "identity_route": "manual_review",
+                "available_at": NOW.isoformat(),
+            }
+        ],
+        "public_requests": 0,
+        "broker_requests": 0,
+        "execution_locked": True,
+    }
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_list_cli_does_not_require_broker_config_or_output(tmp_path, monkeypatch, capsys):
+    import nexus.ops.fosun_local as local_module
+
+    async def list_pending(settings):
+        return {"status": "pending_list", "items": []}
+
+    monkeypatch.setattr(local_module, "load_local_environment", lambda *args: {})
+    monkeypatch.setattr(
+        resolver_module, "EngineSettings", SimpleNamespace(model_validate=lambda _: object())
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "BrokerWorkerSettings",
+        SimpleNamespace(model_validate=lambda _: pytest.fail("broker config forbidden")),
+    )
+    monkeypatch.setattr(resolver_module, "list_pending_identities", list_pending, raising=False)
+    monkeypatch.setattr(resolver_module.sys, "argv", ["resolver", "--list-pending"])
+    resolver_module.main()
+    assert json.loads(capsys.readouterr().out) == {"status": "pending_list", "items": []}

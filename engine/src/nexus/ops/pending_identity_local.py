@@ -13,6 +13,7 @@ from hashlib import sha256
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, cast
+from uuid import UUID
 
 import httpx
 from pydantic import SecretStr
@@ -464,6 +465,32 @@ async def bind_fund_mapping(
 MAX_PENDING_PER_RUN = 3
 
 
+async def list_pending_identities(settings: EngineSettings) -> dict[str, object]:
+    """List validated persisted record IDs without exposing holding codes or calling providers."""
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            pending = await read_pending_instrument_discoveries(session, as_of=datetime.now(UTC))
+        return {
+            "status": "pending_list",
+            "pending_count": len(pending),
+            "items": [
+                {
+                    "discovery_id": str(snapshot_id),
+                    "identity_route": document.recommended_identity_route,
+                    "available_at": document.available_at.isoformat(),
+                }
+                for snapshot_id, document in sorted(pending.items(), key=lambda item: str(item[0]))
+            ],
+            "public_requests": 0,
+            "broker_requests": 0,
+            "execution_locked": True,
+        }
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 def _pending_identity_item_output(output_dir: Path, provider_code: str) -> tuple[Path, bool]:
     """Keep resumable evidence bound to one opaque provider identity."""
     digest = sha256(provider_code.encode("ascii")).hexdigest()[:16]
@@ -481,6 +508,7 @@ async def resolve_pending_identities(
     client: httpx.AsyncClient | None = None,
     store: _ResolverStore | None = None,
     broker: FosunGatewayClient | None = None,
+    discovery_ids: tuple[UUID, ...] | None = None,
 ) -> dict[str, object]:
     """Resolve a bounded persisted batch; never accepts a symbol from the caller."""
 
@@ -497,7 +525,20 @@ async def resolve_pending_identities(
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
             pending = await read_pending_instrument_discoveries(session, as_of=datetime.now(UTC))
-        documents = sorted(pending.values(), key=lambda item: item.provider_code)
+        pending_count = len(pending)
+        if discovery_ids is not None:
+            if not discovery_ids or len(set(discovery_ids)) != len(discovery_ids):
+                raise ValueError("PENDING_IDENTITY_SELECTION_INVALID")
+            if len(discovery_ids) > MAX_PENDING_PER_RUN:
+                raise ValueError("PENDING_IDENTITY_BATCH_LIMIT")
+            if any(discovery_id not in pending for discovery_id in discovery_ids):
+                raise ValueError("PENDING_IDENTITY_SELECTION_UNAVAILABLE")
+            documents = sorted(
+                (pending[discovery_id] for discovery_id in discovery_ids),
+                key=lambda item: item.provider_code,
+            )
+        else:
+            documents = sorted(pending.values(), key=lambda item: item.provider_code)
         if len(documents) > MAX_PENDING_PER_RUN:
             raise ValueError("PENDING_IDENTITY_BATCH_LIMIT")
         if not documents:
@@ -571,9 +612,9 @@ async def resolve_pending_identities(
         if not collected:
             return {
                 "status": "manual_review_required",
-                "pending_before": len(documents),
+                "pending_before": pending_count,
                 "resolved": 0,
-                "remaining": len(documents),
+                "remaining": pending_count,
                 "manual_review_required": manual_required,
                 "resolution_counts": {"common_stock": 0, "equity_etf": 0},
                 "portfolio_refresh_required": False,
@@ -651,7 +692,7 @@ async def resolve_pending_identities(
             )
         return {
             "status": "resolved" if remaining == 0 else "partial",
-            "pending_before": len(documents),
+            "pending_before": pending_count,
             "resolved": resolved,
             "remaining": remaining,
             "manual_review_required": manual_required,
@@ -678,19 +719,39 @@ def main() -> None:
 
     parser = _Parser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--list-pending", action="store_true")
+    parser.add_argument(
+        "--discovery-id",
+        type=UUID,
+        action="append",
+        help="Select an existing pending discovery ID; repeat up to three times.",
+    )
     try:
         arguments = parser.parse_args()
+        if arguments.list_pending:
+            if arguments.discovery_id or arguments.output_dir is not None:
+                raise ValueError("PENDING_IDENTITY_REQUEST_INVALID")
+        elif arguments.output_dir is None:
+            raise ValueError("PENDING_IDENTITY_REQUEST_INVALID")
         environment = load_local_environment(arguments.repo_root, os.environ)
-        result = asyncio.run(
-            resolve_pending_identities(
-                EngineSettings.model_validate(environment),
-                BrokerWorkerSettings.model_validate(environment),
-                fmp_key=SecretStr(environment.get("FMP_API_KEY", "")),
-                sec_contact=environment.get("SEC_CONTACT", ""),
-                output_dir=arguments.output_dir,
+        settings = EngineSettings.model_validate(environment)
+        if arguments.list_pending:
+            result = asyncio.run(list_pending_identities(settings))
+        else:
+            assert arguments.output_dir is not None
+            result = asyncio.run(
+                resolve_pending_identities(
+                    settings,
+                    BrokerWorkerSettings.model_validate(environment),
+                    fmp_key=SecretStr(environment.get("FMP_API_KEY", "")),
+                    sec_contact=environment.get("SEC_CONTACT", ""),
+                    output_dir=arguments.output_dir,
+                    discovery_ids=(
+                        tuple(arguments.discovery_id) if arguments.discovery_id else None
+                    ),
+                )
             )
-        )
     except Exception as error:
         code = (
             str(error)
