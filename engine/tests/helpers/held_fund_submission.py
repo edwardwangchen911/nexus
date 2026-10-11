@@ -1,0 +1,58 @@
+"""Handwritten synthetic fixtures; no captured source or account data."""
+
+from datetime import UTC, datetime
+
+URL = "https://www.sec.gov/Archives/edgar/data/123456/000123456726000001/0001234567-26-000001.txt"
+
+NOW = datetime(2026, 10, 11, tzinfo=UTC)
+
+BODY = b"""<html><body><p>Synthetic Daily 2X ETF</p>
+<p>Trading Symbol: TEST</p><p>Listed on Cboe BZX Exchange, Inc.</p>
+<p>Summary Prospectus</p><p>April 22, 2026</p>
+<p>Investment Objective</p><p>Exposure to shares of BASE.</p></body></html>"""
+
+
+def submission(body=BODY):
+    return (
+        b"""<SEC-DOCUMENT>0001234567-26-000001.txt : 20260422
+<SEC-HEADER>0001234567-26-000001.hdr.sgml : 20260422
+<ACCEPTANCE-DATETIME>20260422170815
+ACCESSION NUMBER: 0001234567-26-000001
+CONFORMED SUBMISSION TYPE: 497K
+PUBLIC DOCUMENT COUNT: 2
+FILED AS OF DATE: 20260422
+FILER:
+COMPANY DATA:
+COMPANY CONFORMED NAME: Synthetic Trust
+CENTRAL INDEX KEY: 0000123456
+<SERIES-AND-CLASSES-CONTRACTS-DATA>
+<EXISTING-SERIES-AND-CLASSES-CONTRACTS>
+<SERIES>
+<OWNER-CIK>0000123456
+<SERIES-ID>S000123456
+<SERIES-NAME>Synthetic Daily 2X ETF
+<CLASS-CONTRACT>
+<CLASS-CONTRACT-ID>C000123456
+<CLASS-CONTRACT-NAME>Synthetic Daily 2X ETF
+</CLASS-CONTRACT>
+</SERIES>
+</EXISTING-SERIES-AND-CLASSES-CONTRACTS>
+</SERIES-AND-CLASSES-CONTRACTS-DATA>
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>497K
+<SEQUENCE>1
+<FILENAME>fund.htm
+<DESCRIPTION>SUMMARY PROSPECTUS
+<TEXT>\n"""
+        + body
+        + b"""\n</TEXT>
+</DOCUMENT>
+<DOCUMENT>
+<TYPE>GRAPHIC
+<SEQUENCE>2
+<FILENAME>image.jpg
+<TEXT>binary graphics</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>"""
+    )
