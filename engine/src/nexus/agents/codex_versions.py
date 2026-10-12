@@ -18,6 +18,9 @@ DEADLINE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v6-stage-time-budget"
 # until its frozen identity, exact claim, and full-cycle routing are implemented.
 # Pending formal identity: registration alone never opens execution or selection.
 FORMAL_STAGE_CAPACITY_CONFIG_VERSION = "codex-sdk-chatgpt-v8-stage-capacity"
+# Local qualification profile only; deliberately excluded from admission sets.
+FULL_INPUT_CAPACITY_CONFIG_VERSION = "codex-sdk-chatgpt-v9-full-input-capacity"
+FULL_INPUT_CAPACITY_MAX_WIRE_BYTES = 100_479
 CANDIDATE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v7-stage-capacity-candidate"
 FORMAL_RESEARCH_JOB_TIMEOUT_SECONDS = 180
 FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS = 195
@@ -97,7 +100,11 @@ def stage_timeout_seconds(
     version: str = DEADLINE_BUDGET_CONFIG_VERSION,
 ) -> float:
     """Allocate inside an already fixed committee deadline; never restart time."""
-    if version in {CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION}:
+    if version in {
+        CANDIDATE_BUDGET_CONFIG_VERSION,
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    }:
         if (
             type(deadline) not in {int, float}
             or type(now) not in {int, float}

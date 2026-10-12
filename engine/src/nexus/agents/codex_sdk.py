@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nexus.agents.codex_token_budget import input_preflight_units
 from nexus.agents.codex_versions import CONFIG_VERSION as CONFIG_VERSION
+from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_MAX_WIRE_BYTES
 from nexus.agents.codex_versions import (
     PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS as PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS,
 )
@@ -400,7 +401,11 @@ async def _invoke_codex(
     invocation_state: _InvocationState,
 ) -> tuple[str, UsageSnapshot]:
     wire = codex_request_wire(payload)
-    if type(max_wire_bytes) is not int or max_wire_bytes not in {55808, 64000}:
+    if type(max_wire_bytes) is not int or max_wire_bytes not in {
+        55808,
+        64000,
+        FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
+    }:
         raise CodexInvocationError("CODEX_WIRE_LIMIT_INVALID", phase="preflight")
     # Bound submitted context; CLI harness usage is checked after the SDK reports it.
     if len(wire.encode()) > max_wire_bytes:

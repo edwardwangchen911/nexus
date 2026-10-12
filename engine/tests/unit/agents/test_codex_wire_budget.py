@@ -8,7 +8,14 @@ from unit.agents.test_codex_sdk import _authority, _sdk, _staged_batch, _tools
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "limit,size,allowed", [(55808, 55809, False), (64000, 64000, True), (64000, 64001, False)]
+    "limit,size,allowed",
+    [
+        (55808, 55809, False),
+        (64000, 64000, True),
+        (64000, 64001, False),
+        (100479, 100479, True),
+        (100479, 100480, False),
+    ],
 )
 async def test_actual_invocation_enforces_selected_wire_bytes(monkeypatch, limit, size, allowed):
     from nexus.agents import codex_sdk
@@ -27,13 +34,14 @@ async def test_actual_invocation_enforces_selected_wire_bytes(monkeypatch, limit
 
 
 @pytest.mark.asyncio
-async def test_wider_wire_keeps_single_request_token_preflight(monkeypatch):
+@pytest.mark.parametrize("limit", [64000, 100479])
+async def test_wider_wire_keeps_single_request_token_preflight(monkeypatch, limit):
     from nexus.agents import codex_sdk
 
     _, thread, _, configs = _sdk(monkeypatch)
     monkeypatch.setattr(codex_sdk, "codex_input_allowance", lambda *args: 64001)
     with pytest.raises(ValueError, match="CODEX_INPUT_TOO_LARGE"):
-        await codex_sdk.invoke_codex({}, max_wire_bytes=64000)
+        await codex_sdk.invoke_codex({}, max_wire_bytes=limit)
     assert not configs
     thread.run.assert_not_awaited()
 

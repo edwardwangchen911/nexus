@@ -27,6 +27,10 @@ from nexus.agents.codex_sdk import (
     codex_request_wire,
     invoke_codex,
 )
+from nexus.agents.codex_versions import (
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
+)
 from nexus.agents.committee import (
     ROLE_ORDER,
     AgentRole,
@@ -265,9 +269,20 @@ class StagedCodexCommittee(CodexCommittee):
         if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
         super().__init__(prompts=prompts, tools=tools)
+        full_capacity = stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+        if full_capacity and (
+            not self.structured_synthesis
+            or aggregate_input_tokens != 96000
+            or max_wire_bytes != FULL_INPUT_CAPACITY_MAX_WIRE_BYTES
+            or inline_citations is not True
+            or paper_stage_scope is not True
+            or stage_time_budget is not True
+        ):
+            raise ValueError("CODEX_FULL_CAPACITY_PROFILE_INVALID")
         if (
             type(max_wire_bytes) is not int
-            or max_wire_bytes not in {55808, 64000}
+            or max_wire_bytes
+            not in ({FULL_INPUT_CAPACITY_MAX_WIRE_BYTES} if full_capacity else {55808, 64000})
             or (max_wire_bytes == 64000 and aggregate_input_tokens != 96000)
         ):
             raise ValueError("CODEX_WIRE_LIMIT_INVALID")
@@ -294,12 +309,14 @@ class StagedCodexCommittee(CodexCommittee):
                 DEADLINE_BUDGET_CONFIG_VERSION,
                 CANDIDATE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                FULL_INPUT_CAPACITY_CONFIG_VERSION,
             }
         ):
             raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
         if stage_budget_version in {
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
         }:
             if deadline is None:
                 raise ValueError("CODEX_STAGE_BUDGET_DEADLINE_REQUIRED")
@@ -308,6 +325,10 @@ class StagedCodexCommittee(CodexCommittee):
         self._stage_budget_version = stage_budget_version or DEADLINE_BUDGET_CONFIG_VERSION
         self._max_wire_bytes = max_wire_bytes
         self._aggregate_input_tokens = aggregate_input_tokens
+        self._capacity_pool_manifest: str | None = None
+        self._capacity_pool_request: ResearchRequest | None = None
+        self._capacity_pool_evidence: tuple[EvidenceRef, ...] | None = None
+        self._capacity_research_hash: str | None = None
         # Reserve terminal writes inside the worker-owned aggregate deadline.
         self._deadline = None if deadline is None else deadline - 5
         self.last_stage_input: StageInputIdentity | None = None
@@ -325,6 +346,10 @@ class StagedCodexCommittee(CodexCommittee):
         financial_table_candidate: bool = False,
     ) -> tuple[dict[str, object], type[BaseModel]]:
         """Compile the normal wire without invoking a model or changing Run state."""
+        if type(financial_table_candidate) is not bool:
+            raise ValueError("MODEL_FINANCIAL_TABLE_CANDIDATE_INVALID")
+        if self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+            financial_table_candidate = True
         roles = next(roles for name, roles in STAGES if name == stage)
         security = frozen_inputs.get("security_snapshot")
         paper_context_present = isinstance(security, dict) and any(
@@ -456,6 +481,23 @@ class StagedCodexCommittee(CodexCommittee):
                     "Do not infer missing portfolio facts, assign weights or grant execution."
                 )
         if financial_table_candidate:
+            # Audit identity stays in the frozen authority/output manifests. The
+            # diagnostic candidate sends unchanged role text, not audit hashes.
+            payload["prompts"] = [
+                {"role": item, "content": self._prompts[item].content} for item in roles
+            ]
+            if stage != "synthesis":
+                instructions = cast(str, payload["instructions"])
+                common, research = instructions.split("Research: identify", 1)
+                research, critique = research.split("Critique: assess", 1)
+                critique, synthesis = critique.split("Synthesis: use two claims", 1)
+                _, safety = synthesis.split("Execution remains locked;", 1)
+                current = (
+                    "Research: identify" + research
+                    if stage == "research"
+                    else "Critique: assess" + critique
+                )
+                payload["instructions"] = common + current + "Execution remains locked;" + safety
             payload = project_staged_payload(
                 payload,
                 inline_citations=self._inline_citations,
@@ -476,6 +518,15 @@ class StagedCodexCommittee(CodexCommittee):
         evidence_refs: tuple[EvidenceRef, ...],
         prompt: PromptAsset,
     ) -> CommitteeRoleOutput:
+        if (
+            self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+            and self._capacity_pool_manifest is None
+        ):
+            raise ValueError("CODEX_CAPACITY_POOL_REQUIRED")
+        if self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION and (
+            request != self._capacity_pool_request or evidence_refs != self._capacity_pool_evidence
+        ):
+            raise ValueError("CODEX_CAPACITY_POOL_BINDING_INVALID")
         if prompt != self._prompts[role]:
             raise ValueError("CODEX_PROMPT_AUTHORITY_CHANGED")
         if self._attempted and (request != self._request or evidence_refs != self._evidence):
@@ -520,6 +571,12 @@ class StagedCodexCommittee(CodexCommittee):
         wire = codex_request_wire(payload)
         estimated_input = codex_input_allowance(wire, codex_output_schema(output_model))
         stage_input_hash = codex_request_hash(payload, output_model)
+        if (
+            stage == "research"
+            and self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+            and stage_input_hash != self._capacity_research_hash
+        ):
+            raise ValueError("CODEX_CAPACITY_POOL_BINDING_INVALID")
         frozen_inputs_hash = hashlib.sha256(
             json.dumps(
                 self._frozen_inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")
