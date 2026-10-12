@@ -46,6 +46,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
     from nexus.agents.codex_versions import (
         CANDIDATE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
     )
 
     # Compare UUID text to JSON text; never cast an untrusted payload to UUID.
@@ -63,10 +64,18 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
             cast(AgentResearchRunRecord.id, String) == Job.payload["run_id"].astext,
             or_(
                 AgentResearchRunRecord.pricing_version.in_(
-                    (CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION)
+                    (
+                        CANDIDATE_BUDGET_CONFIG_VERSION,
+                        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    )
                 ),
                 AgentModelConfigRecord.version.in_(
-                    (CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION)
+                    (
+                        CANDIDATE_BUDGET_CONFIG_VERSION,
+                        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    )
                 ),
             ),
         )
@@ -86,7 +95,11 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
             or_(
                 AgentPortfolioSynthesisRunRecord.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION,
                 AgentModelConfigRecord.version.in_(
-                    (CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION)
+                    (
+                        CANDIDATE_BUDGET_CONFIG_VERSION,
+                        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    )
                 ),
             ),
         )
@@ -323,6 +336,7 @@ async def claim_next_job(
     from nexus.agents.codex_versions import (
         CANDIDATE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
     )
 
     if (
@@ -357,7 +371,11 @@ async def claim_next_job(
         raise ValueError("FORMAL_SYNTHESIS_PROFILE_REQUIRES_LOCKED_SCOPE")
     if research_budget_profile is not None and (
         research_budget_profile
-        not in {CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION}
+        not in {
+            CANDIDATE_BUDGET_CONFIG_VERSION,
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        }
         or locked_job_guard is None
         or job_ids is None
         or len(job_ids) != 1

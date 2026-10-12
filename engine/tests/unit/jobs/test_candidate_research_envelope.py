@@ -6,6 +6,7 @@ import pytest
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
 from nexus.jobs.registry import JobHandlerResult, JobHandlerSpec
@@ -58,7 +59,12 @@ def test_candidate_envelope_is_exact_and_legacy_cap_remains():
     ],
 )
 @pytest.mark.parametrize(
-    "profile", [CANDIDATE_BUDGET_CONFIG_VERSION, FORMAL_STAGE_CAPACITY_CONFIG_VERSION]
+    "profile",
+    [
+        CANDIDATE_BUDGET_CONFIG_VERSION,
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    ],
 )
 def test_candidate_envelope_rejects_other_contracts(change, profile):
     with pytest.raises(ValueError, match="RESEARCH_BUDGET_PROFILE_INVALID"):
