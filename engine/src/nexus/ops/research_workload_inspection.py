@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -118,6 +118,8 @@ def inspect_critique_request(
     evidence_refs: tuple[EvidenceRef, ...],
     inputs: dict[str, object],
     records: tuple[AgentResearchOutputRecord, ...],
+    stage: Literal["critique", "synthesis"] = "critique",
+    financial_table_candidate: bool = False,
 ) -> dict[str, object]:
     unavailable: dict[str, object] = {"status": "unavailable", "code": "PRIOR_RESEARCH_UNVERIFIED"}
     try:
@@ -139,7 +141,8 @@ def inspect_critique_request(
                 return unavailable
         # Reconstruct critique from its five preceding research roles. A later
         # synthesis assessment is not an input to that original request.
-        role_records = tuple(record for record in records if record.role in ROLE_ORDER[:5])
+        prior_roles = ROLE_ORDER[:5] if stage == "critique" else ROLE_ORDER[:7]
+        role_records = tuple(record for record in records if record.role in prior_roles)
         if (
             any(record.status != "running" or record.intent is not None for record in role_records)
             or validate_stage_trace(
@@ -151,14 +154,15 @@ def inspect_critique_request(
             != "verified"
         ):
             return unavailable
-        research = tuple(record for record in records if record.role in ROLE_ORDER[:5])
+        research = tuple(record for record in records if record.role in prior_roles)
         outputs = tuple(CommitteeRoleOutput.model_validate(record.payload) for record in research)
         frozen_hash = summarize_inputs(inputs)["frozen_inputs_sha256"]
         if (
-            tuple(output.role for output in outputs) != ROLE_ORDER[:5]
+            tuple(output.role for output in outputs) != prior_roles
             or any(record.role != output.role for record, output in zip(research, outputs))
             or any(
-                output.stage != "research" or output.frozen_inputs_hash != frozen_hash
+                output.stage != ("research" if output.role in ROLE_ORDER[:5] else "critique")
+                or output.frozen_inputs_hash != frozen_hash
                 for output in outputs
             )
             or any(
@@ -180,26 +184,27 @@ def inspect_critique_request(
             for index, claim in enumerate(output.claims)
         ]
         payload, output_model = committee.build_stage_request(
-            stage="critique",
+            stage=cast(Literal["critique", "synthesis"], stage),
             request=request,
             evidence_refs=evidence_refs,
             frozen_inputs=inputs,
             previous=previous,
+            financial_table_candidate=financial_table_candidate,
         )
         recorded_hashes = set()
         for record in records:
             value = record.payload
-            if value.get("stage") == "critique" and value.get("stage_input_hash"):
+            if value.get("stage") == stage and value.get("stage_input_hash"):
                 recorded_hashes.add(value["stage_input_hash"])
             identity = value.get("stage_input")
-            if isinstance(identity, dict) and identity.get("stage") == "critique":
+            if isinstance(identity, dict) and identity.get("stage") == stage:
                 if identity.get("frozen_inputs_hash") != frozen_hash:
                     return unavailable
                 recorded_hashes.add(cast(str, identity.get("request_hash")))
         summary = summarize_stage_request(
             payload, output_model, max_wire_bytes=committee._max_wire_bytes
         )
-        matches = recorded_hashes == {summary["request_hash"]}
+        matches = not financial_table_candidate and recorded_hashes == {summary["request_hash"]}
         return {
             "status": "request_hash_verified" if matches else "current_code_readback_only",
             "prior_roles": len(outputs),
@@ -208,6 +213,8 @@ def inspect_critique_request(
             "original_request_hash_matched": matches,
             "provenance": "persisted_request_hash_match"
             if matches
+            else "readonly_candidate_presentation"
+            if financial_table_candidate
             else "current_code_reconstruction",
             **summary,
         }
@@ -238,7 +245,9 @@ async def _inspection_committee(
     )
 
 
-async def inspect_run(settings: EngineSettings, *, run_id: UUID) -> dict[str, object]:
+async def inspect_run(
+    settings: EngineSettings, *, run_id: UUID, financial_table_candidate: bool = False
+) -> dict[str, object]:
     factory = session_factory(settings)
     try:
         async with factory() as session, session.begin():
@@ -333,6 +342,46 @@ async def inspect_run(settings: EngineSettings, *, run_id: UUID) -> dict[str, ob
                 inputs=inputs,
                 records=records,
             )
+            candidate: dict[str, object] = {}
+            if financial_table_candidate:
+                request = ResearchRequest(
+                    instrument_id=run.instrument_id,
+                    data_snapshot_id=run.data_snapshot_id,
+                    decision_time=run.decision_time,
+                )
+                candidate_payload, candidate_model = committee.build_stage_request(
+                    stage="research",
+                    request=request,
+                    evidence_refs=refs,
+                    frozen_inputs=inputs,
+                    previous=[],
+                    financial_table_candidate=True,
+                )
+                candidate = {
+                    "candidate_presentation": {
+                        "activated": False,
+                        "provenance": "readonly_candidate_presentation",
+                        "future_claims_capacity_proven": False,
+                        "research": summarize_stage_request(
+                            candidate_payload,
+                            candidate_model,
+                            max_wire_bytes=committee._max_wire_bytes,
+                        ),
+                        **{
+                            stage: inspect_critique_request(
+                                committee,
+                                run=run,
+                                request=request,
+                                evidence_refs=refs,
+                                inputs=inputs,
+                                records=records,
+                                stage=cast(Literal["critique", "synthesis"], stage),
+                                financial_table_candidate=True,
+                            )
+                            for stage in ("critique", "synthesis")
+                        },
+                    }
+                }
             return {
                 "status": "workload_observed",
                 "observed_at": now.isoformat(),
@@ -341,6 +390,7 @@ async def inspect_run(settings: EngineSettings, *, run_id: UUID) -> dict[str, ob
                 **input_summary,
                 "research": research,
                 "critique": critique,
+                **candidate,
             }
     finally:
         await factory.kw["bind"].dispose()
@@ -351,6 +401,11 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--run-id", type=UUID, required=True)
     parser.add_argument("--database-url-file", type=Path)
+    parser.add_argument(
+        "--financial-table-candidate",
+        action="store_true",
+        help="Compare a readonly presentation candidate; never invoke or activate it.",
+    )
     args = parser.parse_args()
     try:
         settings = local_settings(args.repo_root.resolve(), backend="codex_sdk")
@@ -358,7 +413,13 @@ def main() -> int:
             settings = settings.model_copy(
                 update={"database_url": read_database_url(args.database_url_file)}
             )
-        result = asyncio.run(inspect_run(settings, run_id=args.run_id))
+        result = asyncio.run(
+            inspect_run(
+                settings,
+                run_id=args.run_id,
+                financial_table_candidate=args.financial_table_candidate,
+            )
+        )
     except Exception as error:
         code = str(error)
         if code != "WORKLOAD_RUN_AUTHORITY_INVALID":

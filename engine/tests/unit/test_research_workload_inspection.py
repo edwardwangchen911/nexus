@@ -222,3 +222,33 @@ def test_critique_readback_checks_prior_research_not_later_stage(monkeypatch):
         )["status"]
         == "unavailable"
     )
+
+
+def test_readonly_cli_candidate_is_explicit_and_does_not_enable_runtime(monkeypatch, capsys):
+    import sys
+
+    from nexus.ops import research_workload_inspection as inspection
+
+    observed = {}
+
+    async def read(_settings, *, run_id, financial_table_candidate=False):
+        observed.update(candidate=financial_table_candidate, run_id=run_id)
+        return {"status": "workload_observed", "model_calls": 0, "business_writes": 0}
+
+    monkeypatch.setattr(inspection, "local_settings", lambda *_a, **_k: object())
+    monkeypatch.setattr(inspection, "inspect_run", read)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "inspection",
+            "--repo-root",
+            ".",
+            "--run-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--financial-table-candidate",
+        ],
+    )
+    assert inspection.main() == 0
+    assert observed["candidate"] is True
+    assert json.loads(capsys.readouterr().out)["model_calls"] == 0

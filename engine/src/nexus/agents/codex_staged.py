@@ -322,6 +322,7 @@ class StagedCodexCommittee(CodexCommittee):
         evidence_refs: tuple[EvidenceRef, ...],
         frozen_inputs: dict[str, object],
         previous: list[dict[str, object]],
+        financial_table_candidate: bool = False,
     ) -> tuple[dict[str, object], type[BaseModel]]:
         """Compile the normal wire without invoking a model or changing Run state."""
         roles = next(roles for name, roles in STAGES if name == stage)
@@ -454,6 +455,13 @@ class StagedCodexCommittee(CodexCommittee):
                     "conflict; name exactly which conclusion each unresolved issue prevents. "
                     "Do not infer missing portfolio facts, assign weights or grant execution."
                 )
+        if financial_table_candidate:
+            payload = project_staged_payload(
+                payload,
+                inline_citations=self._inline_citations,
+                financial_table_candidate=True,
+            )
+            return payload, output_model
         payload = (
             project_staged_payload(payload, inline_citations=True)
             if self._inline_citations
