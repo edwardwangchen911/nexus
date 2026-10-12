@@ -14,7 +14,7 @@ from nexus.agents.codex_versions import (
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
 )
 from nexus.agents.execution import _terminal_without_usage
-from nexus.agents.persistence import require_reserved_daily_budget
+from nexus.agents.persistence import require_reserved_daily_budget, try_lock_budget_day
 from nexus.jobs.models import QueueName, job_input_hash
 from nexus.jobs.repository import claim_next_job, finalize_job
 from nexus.paper.agent_cycle_models import CycleStatus, canonical_cycle_event_hash
@@ -24,6 +24,7 @@ from nexus.paper.target_service import (
     require_activation_projection_unoccupied,
 )
 from nexus.persistence.models.agents import (
+    AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
     AgentResearchEventRecord,
     AgentResearchOutputRecord,
@@ -48,6 +49,7 @@ async def cancel_unused_manual_research(
     events: tuple[AgentPaperCycleEventRecord, ...],
     now: datetime,
     allow_legacy: bool = False,
+    nonblocking: bool = False,
 ) -> int:
     # Caller holds account/cycle locks and validated this manual terminal event chain.
     run_ids: set[UUID] = set()
@@ -61,25 +63,47 @@ async def cancel_unused_manual_research(
         raise ValueError("MANUAL_RESULT_UNKNOWN") from None
     if len(run_ids) > 5:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
-    jobs = tuple(
-        await session.scalars(
-            select(Job)
-            .where(
-                Job.job_type == "agent.paper.research",
-                Job.payload["run_id"].as_string().in_([str(item) for item in run_ids]),
-            )
-            .order_by(Job.id)
-            .with_for_update()
+    query = (
+        select(Job)
+        .where(
+            Job.job_type == "agent.paper.research",
+            Job.payload["run_id"].as_string().in_([str(item) for item in run_ids]),
         )
+        .order_by(Job.id)
     )
+    jobs = tuple(await session.scalars(query if nonblocking else query.with_for_update()))
     if len(jobs) != len(run_ids):
         raise ValueError("MANUAL_RESULT_UNKNOWN")
+    if nonblocking:
+        queued_ids = [UUID(str(job.payload["run_id"])) for job in jobs if job.status == "queued"]
+        if not queued_ids:
+            return 0
+        days = tuple(
+            await session.scalars(
+                select(AgentDailyBudgetReservationRecord.business_date)
+                .where(AgentDailyBudgetReservationRecord.run_id.in_(queued_ids))
+                .distinct()
+                .order_by(AgentDailyBudgetReservationRecord.business_date)
+            )
+        )
+        for day in days:
+            if not await try_lock_budget_day(session, day.isoformat()):
+                return 0
+        # Worker ownership wins: never wait for its Job lock or cancel its claim.
+        jobs = tuple(
+            await session.scalars(
+                query.with_for_update(skip_locked=True).execution_options(populate_existing=True)
+            )
+        )
     cancelled = 0
     for job in jobs:
         if job.status != "queued":
             continue
         run = await session.get(
-            AgentResearchRunRecord, UUID(str(job.payload["run_id"])), with_for_update=True
+            AgentResearchRunRecord,
+            UUID(str(job.payload["run_id"])),
+            with_for_update=True,
+            populate_existing=True,
         )
         if run is None or (
             run.status != "prepared"

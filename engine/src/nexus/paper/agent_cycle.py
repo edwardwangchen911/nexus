@@ -1774,7 +1774,9 @@ async def _resume_research(
     if len(jobs) != len(run_ids) or any(
         job.status not in {"queued", "running", "succeeded"} for job in jobs
     ):
-        return await _stop_unavailable(session, cycle, events)
+        return await _stop_unavailable(
+            session, cycle, events, cleanup_at=now if formal_stage_capacity else None
+        )
     if any(job.status in {"queued", "running"} for job in jobs):
         return _result(cycle.id, events, replayed=True)
     if any(job.finished_at is None for job in jobs):
@@ -2276,14 +2278,53 @@ async def _stop_unavailable(
     session: AsyncSession,
     cycle: AgentPaperCycleRecord,
     events: tuple[AgentPaperCycleEventRecord, ...],
+    *,
+    cleanup_at: datetime | None = None,
 ) -> AgentPaperCycleResult:
+    facts: dict[str, object] = {}
+    if cleanup_at is not None and events[-1].to_status == "researching":
+        from nexus.paper.manual_cancel import cancel_unused_manual_research
+        from nexus.persistence.models.economic import EconomicLaneCycleRecord
+        from nexus.persistence.models.manual_paper import ManualPaperRequestEvent
+
+        ordinary = (
+            not any("manual_request_id" in event.fact_ids for event in events)
+            and await session.scalar(
+                select(ManualPaperRequestEvent.id)
+                .where(ManualPaperRequestEvent.cycle_id == cycle.id)
+                .limit(1)
+            )
+            is None
+            and await session.scalar(
+                select(EconomicLaneCycleRecord.id)
+                .where(EconomicLaneCycleRecord.cycle_id == cycle.id)
+                .limit(1)
+            )
+            is None
+        )
+        if ordinary:
+            try:
+                async with session.begin_nested():
+                    cancelled = await cancel_unused_manual_research(
+                        session, cycle=cycle, events=events, now=cleanup_at, nonblocking=True
+                    )
+                facts = {
+                    "unused_research_cancelled": cancelled,
+                    "unused_research_cleanup_code": "UNUSED_RESEARCH_CLEANUP_CHECKED",
+                }
+            except ValueError:
+                # Preserve the original failure even when cleanup proof is incomplete.
+                facts = {
+                    "unused_research_cancelled": 0,
+                    "unused_research_cleanup_code": "UNUSED_RESEARCH_CLEANUP_REJECTED",
+                }
     await _append_event(
         session,
         cycle,
         cast(CycleStatus, events[-1].to_status),
         "unavailable",
         "RESEARCH_OUTPUT_NOT_ACTIONABLE",
-        {},
+        facts,
     )
     return _result(cycle.id, await _events(session, cycle.id), replayed=False)
 

@@ -1162,6 +1162,16 @@ async def _shared_daily_budget_used(session: AsyncSession, *, business_date: dat
     return sum(totals, Decimal("0")) + await held_pair_budget(session, business_date=business_date)
 
 
+async def try_lock_budget_day(session: AsyncSession, business_date: str) -> bool:
+    """Use the native budget lock without delaying terminal failure reporting."""
+    return bool(
+        await session.scalar(
+            text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"agent-budget:{business_date}"},
+        )
+    )
+
+
 async def _lock_budget_day(session: AsyncSession, business_date: str) -> None:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
