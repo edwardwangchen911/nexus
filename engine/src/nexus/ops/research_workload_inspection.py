@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_capacity import candidate_capacity_envelope as candidate_capacity_envelope
 from nexus.agents.codex_sdk import (
     codex_input_allowance,
     codex_output_schema,
@@ -362,6 +363,9 @@ async def inspect_run(
                         "activated": False,
                         "provenance": "readonly_candidate_presentation",
                         "future_claims_capacity_proven": False,
+                        "capacity_envelope": candidate_capacity_envelope(
+                            committee, request=request, evidence_refs=refs, inputs=inputs
+                        ),
                         "research": summarize_stage_request(
                             candidate_payload,
                             candidate_model,
@@ -396,10 +400,18 @@ async def inspect_run(
         await factory.kw["bind"].dispose()
 
 
+async def inspect_capacity_cycle(settings: EngineSettings, *, cycle_id: UUID) -> dict[str, object]:
+    from nexus.ops.research_capacity_pool import inspect_cycle
+
+    return await inspect_cycle(settings, cycle_id=cycle_id)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
-    parser.add_argument("--run-id", type=UUID, required=True)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--run-id", type=UUID)
+    target.add_argument("--capacity-cycle-id", type=UUID)
     parser.add_argument("--database-url-file", type=Path)
     parser.add_argument(
         "--financial-table-candidate",
@@ -407,6 +419,8 @@ def main() -> int:
         help="Compare a readonly presentation candidate; never invoke or activate it.",
     )
     args = parser.parse_args()
+    if args.capacity_cycle_id is not None and args.financial_table_candidate:
+        parser.error("cycle qualification already selects the fixed v9 profile")
     try:
         settings = local_settings(args.repo_root.resolve(), backend="codex_sdk")
         if args.database_url_file is not None:
@@ -414,7 +428,9 @@ def main() -> int:
                 update={"database_url": read_database_url(args.database_url_file)}
             )
         result = asyncio.run(
-            inspect_run(
+            inspect_capacity_cycle(settings, cycle_id=args.capacity_cycle_id)
+            if args.capacity_cycle_id is not None
+            else inspect_run(
                 settings,
                 run_id=args.run_id,
                 financial_table_candidate=args.financial_table_candidate,
@@ -422,7 +438,12 @@ def main() -> int:
         )
     except Exception as error:
         code = str(error)
-        if code != "WORKLOAD_RUN_AUTHORITY_INVALID":
+        if code not in {
+            "WORKLOAD_RUN_AUTHORITY_INVALID",
+            "CODEX_CAPACITY_POOL_BINDING_INVALID",
+            "CODEX_CAPACITY_POOL_WIRE_EXCEEDED",
+            "CODEX_CAPACITY_POOL_INPUT_EXCEEDED",
+        }:
             code = "WORKLOAD_READBACK_UNAVAILABLE"
         print(json.dumps({"status": "unavailable", "code": code}))
         return 1

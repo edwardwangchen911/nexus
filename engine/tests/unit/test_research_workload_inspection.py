@@ -252,3 +252,210 @@ def test_readonly_cli_candidate_is_explicit_and_does_not_enable_runtime(monkeypa
     assert inspection.main() == 0
     assert observed["candidate"] is True
     assert json.loads(capsys.readouterr().out)["model_calls"] == 0
+
+
+def test_candidate_capacity_envelope_preserves_inputs_and_covers_long_unicode_shapes():
+    from copy import deepcopy
+
+    from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+    from nexus.ops.research_workload_inspection import candidate_capacity_envelope
+    from unit.agents.test_codex_sdk import _authority, _tools
+
+    request, evidence, prompts = _authority()
+    committee = StructuredStagedCodexCommittee(
+        prompts=prompts, tools=_tools(), inline_citations=True
+    )
+    inputs = {"security_snapshot": {"items": []}, "financial_facts": {"items": []}}
+    before = deepcopy(inputs)
+    result = candidate_capacity_envelope(
+        committee, request=request, evidence_refs=evidence, inputs=inputs
+    )
+    assert inputs == before
+    assert result["activated"] is False
+    assert result["model_calls"] == 0
+    assert result["joint_output_admissibility_proven"] is False
+    assert result["aggregate_sdk_input_completion_proven"] is False
+    assert result["scope"] == "current_frozen_inputs"
+    rows = result["stages"]
+    assert [row["stage"] for row in rows] == ["research", "critique", "synthesis"]
+    assert [row["prior_claims_max"] for row in rows] == [0, 10, 14]
+    from nexus.agents.codex_sdk import codex_request_wire
+    from nexus.agents.committee import ROLE_ORDER
+
+    for row, count in zip(rows, (0, 5, 7), strict=True):
+        for chars in ("证" * 400, "𠀀" * 400, "\x00" * 400, '"\\' * 200):
+            previous = [
+                dict(
+                    claim_id=f"{role}:{index}",
+                    role=role,
+                    vote="oppose",
+                    text=chars,
+                    citations=[0] * 3,
+                )
+                for role in ROLE_ORDER[:count]
+                for index in range(2)
+            ]
+            payload, _ = committee.build_stage_request(
+                stage=row["stage"],
+                request=request,
+                evidence_refs=evidence,
+                frozen_inputs=inputs,
+                previous=previous,
+                financial_table_candidate=True,
+            )
+            assert len(codex_request_wire(payload).encode()) <= row["wire_upper_bytes"]
+    assert "\x00" not in json.dumps(result)
+    assert "研究问题" not in json.dumps(result)
+
+
+def test_envelope_cannot_silently_use_old_claim_bound_after_schema_change(monkeypatch):
+    from nexus.agents.codex_sdk import _Claim
+    from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+    from nexus.ops.research_workload_inspection import candidate_capacity_envelope
+    from unit.agents.test_codex_sdk import _authority, _tools
+
+    schema = _Claim.model_json_schema()
+    schema["properties"]["text"]["maxLength"] = 401
+    monkeypatch.setattr(_Claim, "model_json_schema", lambda: schema)
+    request, evidence, prompts = _authority()
+    committee = StructuredStagedCodexCommittee(
+        prompts=prompts, tools=_tools(), inline_citations=True
+    )
+    with pytest.raises(ValueError, match="^WORKLOAD_RUN_AUTHORITY_INVALID$"):
+        candidate_capacity_envelope(
+            committee,
+            request=request,
+            evidence_refs=evidence,
+            inputs={"security_snapshot": {"items": []}, "financial_facts": {"items": []}},
+        )
+
+
+def test_envelope_cannot_report_zero_usage_as_sufficient_for_oversized_token_bound():
+    from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+    from nexus.ops.research_workload_inspection import candidate_capacity_envelope
+    from unit.agents.test_codex_sdk import _authority, _tools
+
+    request, evidence, prompts = _authority()
+    committee = StructuredStagedCodexCommittee(
+        prompts=prompts, tools=_tools(), inline_citations=True
+    )
+    result = candidate_capacity_envelope(
+        committee,
+        request=request,
+        evidence_refs=evidence,
+        inputs={
+            "security_snapshot": {"items": []},
+            "financial_facts": {"items": []},
+            "filing_disclosures": {"items": [], "content": "PRIVATE_SENTINEL" * 8000},
+        },
+    )
+    for stage in result["stages"]:
+        assert stage["conservative_preflight_status"] == "not_proven_within_limit"
+        assert stage["previous_actual_input_threshold_for_conservative_envelope"] is None
+    assert "PRIVATE_SENTINEL" not in json.dumps(result)
+
+
+def test_envelope_rejects_same_character_length_but_larger_json_vote(monkeypatch):
+    from nexus.agents.codex_sdk import _Role
+    from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+    from nexus.ops.research_workload_inspection import candidate_capacity_envelope
+    from unit.agents.test_codex_sdk import _authority, _tools
+
+    schema = _Role.model_json_schema()
+    schema["properties"]["vote"]["enum"] = ["support", "oppose", "\x00" * 7]
+    monkeypatch.setattr(_Role, "model_json_schema", lambda: schema)
+    request, evidence, prompts = _authority()
+    committee = StructuredStagedCodexCommittee(
+        prompts=prompts, tools=_tools(), inline_citations=True
+    )
+    with pytest.raises(ValueError, match="^WORKLOAD_RUN_AUTHORITY_INVALID$"):
+        candidate_capacity_envelope(
+            committee,
+            request=request,
+            evidence_refs=evidence,
+            inputs={"security_snapshot": {"items": []}, "financial_facts": {"items": []}},
+        )
+
+
+def test_envelope_rejects_concrete_stage_claim_limit_override(monkeypatch):
+    from nexus.agents.codex_sdk import _Claim
+    from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+    from nexus.ops.research_workload_inspection import candidate_capacity_envelope
+    from pydantic import BaseModel, Field
+    from unit.agents.test_codex_sdk import _authority, _tools
+
+    class ExpandedStage(BaseModel):
+        claims: tuple[_Claim, ...] = Field(min_length=1, max_length=3)
+
+    request, evidence, prompts = _authority()
+    committee = StructuredStagedCodexCommittee(
+        prompts=prompts, tools=_tools(), inline_citations=True
+    )
+    build = committee.build_stage_request
+
+    def override(**kwargs):
+        payload, model = build(**kwargs)
+        return payload, ExpandedStage if kwargs["stage"] == "research" else model
+
+    monkeypatch.setattr(committee, "build_stage_request", override)
+    with pytest.raises(ValueError, match="^WORKLOAD_RUN_AUTHORITY_INVALID$"):
+        candidate_capacity_envelope(
+            committee,
+            request=request,
+            evidence_refs=evidence,
+            inputs={"security_snapshot": {"items": []}, "financial_facts": {"items": []}},
+        )
+
+
+@pytest.mark.parametrize("rich_financials", [False, True])
+def test_envelope_covers_mixed_claim_counts_and_citation_width_branches(rich_financials):
+    from nexus.agents.codex_sdk import codex_request_wire
+    from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+    from nexus.agents.committee import ROLE_ORDER
+    from nexus.domain.evidence import EvidenceRef
+    from nexus.ops.research_workload_inspection import candidate_capacity_envelope
+    from unit.agents.test_codex_sdk import _authority, _tools
+    from unit.agents.test_financial_input_view import bound_payload
+
+    request, evidence, prompts = _authority()
+    if rich_financials:
+        raw = bound_payload()
+        inputs = raw["frozen_inputs"]
+        reference = {key: value for key, value in raw["evidence"][0].items() if key != "index"}
+        first = EvidenceRef.model_validate(reference)
+    else:
+        inputs = {"security_snapshot": {"items": []}, "financial_facts": {"items": []}}
+        first = evidence[0]
+    refs = tuple(
+        first.model_copy(update={"object_id": first.object_id if i == 0 else f"extra-{i}"})
+        for i in range(11)
+    )
+    committee = StructuredStagedCodexCommittee(
+        prompts=prompts, tools=_tools(), inline_citations=True
+    )
+    result = candidate_capacity_envelope(
+        committee, request=request, evidence_refs=refs, inputs=inputs
+    )
+    for row, count in zip(result["stages"], (0, 5, 7), strict=True):
+        for uniform in (True, False):
+            previous = [
+                dict(
+                    claim_id=f"{role}:{index}",
+                    role=role,
+                    vote="support",
+                    text="证" * (1 if index == 0 else 400),
+                    citations=[9, 10],
+                )
+                for position, role in enumerate(ROLE_ORDER[:count])
+                for index in range(1 if uniform or position % 2 else 2)
+            ]
+            payload, _ = committee.build_stage_request(
+                stage=row["stage"],
+                request=request,
+                evidence_refs=refs,
+                frozen_inputs=inputs,
+                previous=previous,
+                financial_table_candidate=True,
+            )
+            assert len(codex_request_wire(payload).encode()) <= row["wire_upper_bytes"]
+    assert result["aggregate_sdk_input_completion_proven"] is False
