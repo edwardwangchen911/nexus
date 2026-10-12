@@ -22,8 +22,7 @@ from pydantic import SecretStr
 NOW = datetime(2026, 9, 12, 6, tzinfo=UTC)
 
 
-def test_load_existing_evidence_reuses_complete_protected_archive(tmp_path) -> None:
-    item = tmp_path / "item-01"
+def _saved_fund_archive(item: Path, *, bound: bool) -> Path:
     for directory in (item, item / "fmp", item / "sec", item / "selectors"):
         directory.mkdir(mode=0o700)
     files = {
@@ -33,7 +32,6 @@ def test_load_existing_evidence_reuses_complete_protected_archive(tmp_path) -> N
         "sec/filing-index.raw": b"index",
         "sec/disclosure.raw": b"disclosure",
         "sec/receipts.json": b"receipts",
-        "sec/mapping-binding.json": b"binding",
         "selectors/company_tickers_mf.json": b"mapping",
         "selectors/submissions.json": b"submissions",
         "selectors/class-search.html": b"search",
@@ -41,15 +39,38 @@ def test_load_existing_evidence_reuses_complete_protected_archive(tmp_path) -> N
             {"schema": "pending_fund_selection_v1", "symbol": "FUND"}
         ).encode(),
     }
+    if bound:
+        files["sec/mapping-binding.json"] = b"binding"
     for relative, content in files.items():
         path = item / relative
         path.write_bytes(content)
         path.chmod(0o600)
+    return item
+
+
+@pytest.mark.parametrize("bound", [True, False], ids=["bound", "collected-before-binding"])
+def test_load_existing_evidence_reuses_complete_protected_archive(tmp_path, bound) -> None:
+    item = _saved_fund_archive(tmp_path / "item-01", bound=bound)
 
     result = _load_existing_evidence(item, symbol="FUND", kind="equity_etf")
 
     assert result.request_count == 0
     assert result.mapping_file == item / "selectors/company_tickers_mf.json"
+
+
+@pytest.mark.parametrize("binding_state", ["public", "empty", "dangling-symlink"])
+def test_existing_optional_mapping_binding_still_requires_private_regular_file(
+    tmp_path, binding_state
+) -> None:
+    item = _saved_fund_archive(tmp_path / "item-01", bound=False)
+    binding = item / "sec/mapping-binding.json"
+    if binding_state == "dangling-symlink":
+        binding.symlink_to(tmp_path / "missing")
+    else:
+        binding.write_bytes(b"binding" if binding_state == "public" else b"")
+        binding.chmod(0o644 if binding_state == "public" else 0o600)
+    with pytest.raises(ValueError, match="^PENDING_IDENTITY_RESUME_INVALID$"):
+        _load_existing_evidence(item, symbol="FUND", kind="equity_etf")
 
 
 def _submissions(cik: int, *rows: tuple[str, str, str, str, str]) -> bytes:
@@ -523,6 +544,85 @@ class _FakeBroker:
         assert limit == 100
         self.holdings_calls += 1
         return SimpleNamespace()
+
+
+@pytest.mark.asyncio
+async def test_resolver_resumes_collected_fund_then_binds_before_import_without_recollecting(
+    tmp_path, monkeypatch
+) -> None:
+    output = tmp_path / "resolver"
+    output.mkdir(mode=0o700)
+    item, _ = resolver_module._pending_identity_item_output(output, "usFUND")
+    _saved_fund_archive(item, bound=False)
+    stages = []
+
+    async def read_pending(session, *, as_of):
+        return (
+            {}
+            if "import" in stages
+            else {
+                UUID(int=1): SimpleNamespace(
+                    provider_code="usFUND",
+                    recommended_identity_route="current_held_fund_or_structured",
+                )
+            }
+        )
+
+    async def forbidden(**kwargs):
+        pytest.fail("completed originals must not be collected again")
+
+    async def bind(store, *, mapping_file, sec_archive, session_date):
+        assert mapping_file == item / "selectors/company_tickers_mf.json"
+        assert sec_archive == item / "sec"
+        assert not (sec_archive / "mapping-binding.json").exists()
+        binding = sec_archive / "mapping-binding.json"
+        binding.write_bytes(b"new-private-binding")
+        binding.chmod(0o600)
+        stages.append("bind")
+
+    async def import_identity(*args, **kwargs):
+        assert stages == ["bind"]
+        assert (kwargs["sec_archive"] / "mapping-binding.json").is_file()
+        stages.append("import")
+        return SimpleNamespace(snapshot_id=UUID(int=2))
+
+    async def read_identity(*args, **kwargs):
+        assert stages == ["bind", "import"]
+        stages.append("readback")
+
+    class FakeAccountItem:
+        @staticmethod
+        def model_validate(item):
+            return SimpleNamespace(external_account_id="opaque-account")
+
+    monkeypatch.setattr(resolver_module, "session_factory", lambda settings: _FakeFactory())
+    monkeypatch.setattr(resolver_module, "read_pending_instrument_discoveries", read_pending)
+    monkeypatch.setattr(resolver_module, "collect_fund_evidence", forbidden)
+    monkeypatch.setattr(resolver_module, "bind_fund_mapping", bind)
+    monkeypatch.setattr(resolver_module, "import_current_held_etf", import_identity)
+    monkeypatch.setattr(resolver_module, "read_current_held_etf", read_identity)
+    monkeypatch.setattr(resolver_module, "AccountItem", FakeAccountItem)
+    broker = _FakeBroker()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: pytest.fail("public requests forbidden"))
+    ) as client:
+        result = await resolve_pending_identities(
+            object(),
+            object(),
+            fmp_key=SecretStr("synthetic-secret"),
+            sec_contact="nexus@example.com",
+            output_dir=output,
+            client=client,
+            store=object(),
+            broker=broker,
+            discovery_ids=(UUID(int=1),),
+        )
+    assert stages == ["bind", "import", "readback"]
+    assert result["resolved"] == 1
+    assert result["remaining"] == 0
+    assert result["public_requests"] == 0
+    assert result["execution_locked"] is True
+    assert broker.accounts_calls == broker.holdings_calls == 1
 
 
 def test_pending_archive_reuses_only_the_same_identity(tmp_path: Path) -> None:

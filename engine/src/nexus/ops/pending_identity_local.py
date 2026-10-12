@@ -136,8 +136,13 @@ def _load_existing_evidence(item_dir: Path, *, symbol: str, kind: str) -> Collec
             item_dir / "sec/filing-index.raw",
             item_dir / "sec/disclosure.raw",
             item_dir / "sec/receipts.json",
-            item_dir / "sec/mapping-binding.json",
         )
+        # Collection can finish before a later batch item fails. The resolver
+        # binds these originals before import; that binding is not a collection
+        # prerequisite. An existing binding must still pass the private-file guard.
+        binding_file = item_dir / "sec/mapping-binding.json"
+        if binding_file.exists() or binding_file.is_symlink():
+            required += (binding_file,)
         mapping_file = item_dir / "selectors/company_tickers_mf.json"
     else:
         raise ValueError("PENDING_IDENTITY_RESUME_INVALID")
