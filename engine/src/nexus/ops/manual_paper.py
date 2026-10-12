@@ -3,18 +3,28 @@
 import argparse
 import asyncio
 import json
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
+
+from sqlalchemy import func, select
 
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _checkout_revision, _validate_local_env
+from nexus.paper.manual_cancel import (
+    TerminalCycleCancelReceipt,
+    close_terminal_cycle_unused_research,
+)
 from nexus.paper.manual_entry import (
     SAFE_ENTRY_CODES,
+    manual_host_scope,
     read_configured_manual_request,
+    require_manual_host,
     start_configured_manual_request,
 )
 from nexus.paper.manual_request import ManualRequestView
+from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 
@@ -29,14 +39,44 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--idempotency-key", required=True)
     read = commands.add_parser("read")
     read.add_argument("--request-id", type=UUID, required=True)
+    cancel = commands.add_parser("cancel-unused-research")
+    cancel.add_argument("--cycle-id", type=UUID, required=True)
     return result
 
 
-async def run(settings: EngineSettings, args: argparse.Namespace) -> ManualRequestView:
+async def run(
+    settings: EngineSettings, args: argparse.Namespace
+) -> ManualRequestView | TerminalCycleCancelReceipt:
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     try:
         async with factory.begin() as session:
+            if args.action == "cancel-unused-research":
+                if settings.agent_paper_account_id is None:
+                    raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                now = await session.scalar(select(func.clock_timestamp()))
+                if now is None:
+                    raise ValueError("MANUAL_RESULT_UNKNOWN")
+                rows = (
+                    await session.scalars(
+                        select(WorkerHeartbeat).where(
+                            WorkerHeartbeat.queue == "agent_paper",
+                            WorkerHeartbeat.seen_at >= now - timedelta(seconds=30),
+                        )
+                    )
+                ).all()
+                require_manual_host(
+                    rows,
+                    now=now,
+                    release_revision=settings.release_revision,
+                    scope_hash=manual_host_scope(settings),
+                )
+                return await close_terminal_cycle_unused_research(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    cycle_id=args.cycle_id,
+                    now=now,
+                )
             if args.action == "start":
                 return await start_configured_manual_request(
                     session, settings, mode=args.mode, idempotency_key=args.idempotency_key

@@ -79,3 +79,52 @@ def test_missing_checkout_revision_does_not_trust_file_but_keeps_receipt_read(
         == 0
     )
     assert observed == [None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["missing", "wrong-version"])
+async def test_cancel_entry_rejects_bad_host_before_recovery(monkeypatch, host):
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import AsyncMock
+    from uuid import UUID
+
+    from nexus.paper.manual_entry import MANUAL_HOST_PROTOCOL, manual_host_scope
+    from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+    from nexus.settings import EngineSettings
+
+    now = datetime(2026, 10, 12, 14, tzinfo=UTC)
+    settings = EngineSettings.for_test().model_copy(
+        update={
+            "agent_paper_account_id": UUID(int=1),
+            "release_revision": "a" * 40,
+        }
+    )
+    row = SimpleNamespace(
+        worker_id=f"agent-paper-loop-{UUID(int=2)}:manual:{manual_host_scope(settings)}",
+        seen_at=now,
+        started_at=now - timedelta(minutes=1),
+        process_version=f"{MANUAL_HOST_PROTOCOL}+{'b' * 40}",
+        migration_head=CURRENT_MIGRATION_HEAD,
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=now),
+        scalars=AsyncMock(
+            return_value=SimpleNamespace(all=lambda: [] if host == "missing" else [row])
+        ),
+    )
+
+    @asynccontextmanager
+    async def begin():
+        yield session
+
+    factory = SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=AsyncMock())})
+    monkeypatch.setattr(manual_paper, "_validate_local_database", lambda url: None)
+    monkeypatch.setattr(manual_paper, "session_factory", lambda config: factory)
+    recover = AsyncMock()
+    monkeypatch.setattr(manual_paper, "close_terminal_cycle_unused_research", recover)
+    with pytest.raises(ValueError, match="MANUAL_HOST_NOT_READY"):
+        await manual_paper.run(
+            settings, SimpleNamespace(action="cancel-unused-research", cycle_id=UUID(int=3))
+        )
+    recover.assert_not_awaited()
