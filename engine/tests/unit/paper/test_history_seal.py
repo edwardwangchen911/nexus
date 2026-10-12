@@ -7,6 +7,83 @@ from uuid import UUID
 import pytest
 from nexus.paper.history_seal import require_research_processes_quiescent
 
+_DESKTOP = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+)
+_APP = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+_BIRTH = "Mon Oct 12 10:00:00 2026"
+
+
+def test_docker_top_uses_pid_column_required_by_docker_daemon(monkeypatch):
+    def execute(command, **kwargs):
+        if command[0] == "/bin/ps":
+            return subprocess.CompletedProcess(command, 0, f"1 0 {_BIRTH} /usr/bin/python\n")
+        if command[1] == "ps":
+            return subprocess.CompletedProcess(command, 0, "abc123\n")
+        if command[-1] == "comm":
+            return subprocess.CompletedProcess(command, 1, "")
+        assert command[-1] == "pid,comm"
+        return subprocess.CompletedProcess(command, 0, "PID COMMAND\n1 python\n")
+
+    monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
+    require_research_processes_quiescent()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "child-map",
+        "parent-map",
+        "missing-cwd",
+        "research-cwd",
+        "parent-path",
+        "child-path",
+        "restarted",
+        "reparented",
+        "new-sdk",
+        "lsof-failed",
+    ],
+)
+def test_desktop_exclusion_requires_independent_stable_process_identity(monkeypatch, fault):
+    scans = 0
+
+    def execute(command, **kwargs):
+        nonlocal scans
+        if command[0] == "/bin/ps":
+            scans += 1
+            child = "/opt/homebrew/bin/codex" if fault == "child-path" else _DESKTOP
+            parent = "/other/ChatGPT" if fault == "parent-path" else _APP
+            birth = "Mon Oct 12 10:01:00 2026" if fault == "restarted" and scans > 1 else _BIRTH
+            ppid = 1 if fault == "reparented" and scans > 1 else 100
+            output = f"100 1 {_BIRTH} {parent}\n200 {ppid} {birth} {child}\n"
+            if fault == "new-sdk" and scans > 1:
+                output += f"300 1 {_BIRTH} /test/codex_cli_bin/codex\n"
+        elif command[0] == "/usr/sbin/lsof":
+            if fault == "lsof-failed":
+                return subprocess.CompletedProcess(command, 1, "")
+            pid = command[command.index("-p") + 1]
+            executable = _DESKTOP if pid == "200" else _APP
+            if fault == ("child-map" if pid == "200" else "parent-map"):
+                executable = "/other/executable"
+            output = f"p{pid}\nftxt\nn{executable}\n"
+            if fault != "missing-cwd":
+                cwd = "/private/tmp/nexus-codex-controlled" if fault == "research-cwd" else "/"
+                output += f"fcwd\nn{cwd}\n"
+        elif command[1] == "ps":
+            output = "abc123\n"
+        else:
+            output = "PID COMMAND\n1 python\n"
+        return subprocess.CompletedProcess(command, 0, output)
+
+    monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
+    if fault is None:
+        require_research_processes_quiescent()
+        assert scans == 2
+    else:
+        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+            require_research_processes_quiescent()
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -155,15 +232,17 @@ def test_process_boundary_is_fail_closed(monkeypatch, boundary):
         if command[0] == "/bin/ps":
             if boundary == "scan-failed":
                 raise subprocess.TimeoutExpired(command, 5)
-            output = "/usr/bin/python\n"
+            output = f"1 0 {_BIRTH} /usr/bin/python\n"
             if boundary == "host-live":
-                output += "/test/.venv/lib/codex_cli_bin/vendor/codex\n"
+                output += f"2 1 {_BIRTH} /test/.venv/lib/codex_cli_bin/vendor/codex\n"
             if boundary == "host-full-path":
-                output += "/opt/homebrew/bin/codex\n"
+                output += f"2 1 {_BIRTH} /opt/homebrew/bin/codex\n"
         elif command[1] == "ps":
             output = "" if boundary == "no-container" else "abc123\n"
         else:
-            output = "COMMAND\npython\n" + ("codex\n" if boundary == "container-live" else "")
+            output = "PID COMMAND\n1 python\n" + (
+                "2 codex\n" if boundary == "container-live" else ""
+            )
         return subprocess.CompletedProcess(command, 0, output)
 
     monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
@@ -174,17 +253,17 @@ def test_process_boundary_is_fail_closed(monkeypatch, boundary):
 def test_quiescence_checks_host_and_existing_project_containers_without_arguments(monkeypatch):
     execute = Mock(
         side_effect=[
-            subprocess.CompletedProcess([], 0, "/usr/bin/python\n"),
+            subprocess.CompletedProcess([], 0, f"1 0 {_BIRTH} /usr/bin/python\n"),
             subprocess.CompletedProcess([], 0, "abc123\ndef456\n"),
-            subprocess.CompletedProcess([], 0, "COMMAND\npython\n"),
-            subprocess.CompletedProcess([], 0, "COMMAND\nuv\n"),
+            subprocess.CompletedProcess([], 0, "PID COMMAND\n1 python\n"),
+            subprocess.CompletedProcess([], 0, "PID COMMAND\n1 uv\n"),
         ]
     )
     monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
     require_research_processes_quiescent()
     commands = [call.args[0] for call in execute.call_args_list]
-    assert commands[0] == ["/bin/ps", "-axo", "comm="]
+    assert commands[0] == ["/bin/ps", "-axo", "pid=,ppid=,lstart=,comm="]
     assert "label=com.docker.compose.project=nexus-fosun-live" in commands[1]
     assert commands[2:] == [
-        ["docker", "top", identity, "-eo", "comm"] for identity in ("abc123", "def456")
+        ["docker", "top", identity, "-eo", "pid,comm"] for identity in ("abc123", "def456")
     ]

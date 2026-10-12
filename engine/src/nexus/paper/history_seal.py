@@ -39,6 +39,10 @@ _ACTION = "paper.legacy_research.sealed"
 _SCHEMA = "paper_legacy_seal_v1"
 _ACTOR = "local-manual-history-seal"
 _BLOCKED = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+_DESKTOP_CHILD = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+)
+_DESKTOP_PARENT = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 
 
 class HistorySealReceipt(BaseModel):
@@ -50,7 +54,7 @@ class HistorySealReceipt(BaseModel):
 
 
 def require_research_processes_quiescent() -> None:
-    """Inspect executable names only; never read argv, environment or auth files."""
+    """Inspect process identity and executable mappings; never argv or credentials."""
 
     def output(command: list[str]) -> str:
         try:
@@ -61,11 +65,67 @@ def require_research_processes_quiescent() -> None:
             raise ValueError(_BLOCKED)
         return result.stdout
 
-    host = output(["/bin/ps", "-axo", "comm="])
-    if not host.strip() or any(
-        "codex_cli_bin" in line or Path(line.strip()).name == "codex" for line in host.splitlines()
-    ):
-        raise ValueError(_BLOCKED)
+    def snapshot() -> dict[int, tuple[int, str, str]]:
+        rows: dict[int, tuple[int, str, str]] = {}
+        raw = output(["/bin/ps", "-axo", "pid=,ppid=,lstart=,comm="])
+        for line in raw.splitlines():
+            parts = line.strip().split(None, 7)
+            if len(parts) != 8 or not parts[0].isdigit() or not parts[1].isdigit():
+                raise ValueError(_BLOCKED)
+            pid = int(parts[0])
+            if pid in rows:
+                raise ValueError(_BLOCKED)
+            rows[pid] = (int(parts[1]), " ".join(parts[2:7]), parts[7])
+        if not rows:
+            raise ValueError(_BLOCKED)
+        return rows
+
+    def candidates(rows: dict[int, tuple[int, str, str]]) -> set[int]:
+        return {
+            pid
+            for pid, (_, _, executable) in rows.items()
+            if Path(executable).name == "codex" or "codex_cli_bin" in executable
+        }
+
+    def mappings(pid: int) -> dict[str, list[str]]:
+        raw = output(["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt,cwd", "-Fpfn"])
+        fields: dict[str, list[str]] = {"txt": [], "cwd": []}
+        descriptor = ""
+        identities = []
+        for line in raw.splitlines():
+            if line.startswith("p"):
+                identities.append(line[1:])
+            elif line.startswith("f"):
+                descriptor = line[1:]
+            elif line.startswith("n") and descriptor in fields:
+                fields[descriptor].append(line[1:])
+        if identities != [str(pid)]:
+            raise ValueError(_BLOCKED)
+        return fields
+
+    host = snapshot()
+    desktop = candidates(host)
+    for pid in desktop:
+        parent_id, _, executable = host[pid]
+        parent = host.get(parent_id)
+        if executable != _DESKTOP_CHILD or parent is None or parent[2] != _DESKTOP_PARENT:
+            raise ValueError(_BLOCKED)
+        child_files, parent_files = mappings(pid), mappings(parent_id)
+        if (
+            executable not in child_files["txt"]
+            or _DESKTOP_PARENT not in parent_files["txt"]
+            or len(child_files["cwd"]) != 1
+            or not Path(child_files["cwd"][0]).is_absolute()
+            or any(part.startswith("nexus-codex-") for part in Path(child_files["cwd"][0]).parts)
+        ):
+            raise ValueError(_BLOCKED)
+    if desktop:
+        after = snapshot()
+        if candidates(after) != desktop or any(
+            after.get(pid) != host[pid] or after.get(host[pid][0]) != host[host[pid][0]]
+            for pid in desktop
+        ):
+            raise ValueError(_BLOCKED)
     containers = output(
         [
             "docker",
@@ -79,15 +139,18 @@ def require_research_processes_quiescent() -> None:
     if not containers or any(re.fullmatch(r"[0-9a-f]{6,64}", row) is None for row in containers):
         raise ValueError(_BLOCKED)
     for identity in containers:
-        names = output(["docker", "top", identity, "-eo", "comm"]).splitlines()
-        if (
-            not names
-            or names[0].strip() != "COMMAND"
-            or any(
-                Path(name.strip()).name == "codex" or "codex_cli_bin" in name for name in names[1:]
-            )
-        ):
+        names = output(["docker", "top", identity, "-eo", "pid,comm"]).splitlines()
+        if len(names) < 2 or names[0].split() != ["PID", "COMMAND"]:
             raise ValueError(_BLOCKED)
+        for line in names[1:]:
+            parts = line.strip().split(None, 1)
+            if (
+                len(parts) != 2
+                or not parts[0].isdigit()
+                or Path(parts[1]).name == "codex"
+                or "codex_cli_bin" in parts[1]
+            ):
+                raise ValueError(_BLOCKED)
 
 
 def _row_hash(row: Base) -> str:
