@@ -9,7 +9,10 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_versions import CANDIDATE_BUDGET_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+)
 from nexus.jobs.models import JobType, QueueName, RetryPolicy, job_input_hash
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job, JobAttempt
@@ -95,9 +98,17 @@ async def require_candidate_model_profile(
         if not isinstance(model_config_id, UUID)
         else await session.get(AgentModelConfigRecord, model_config_id, populate_existing=True)
     )
+    # Explicit isolated candidate selection may bind the independent v9
+    # identity; this does not change v7's config/hash or output consumers.
+    if model is not None and model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        from nexus.agents.codex_capacity import capacity_model_matches
+
+        matches = capacity_model_matches(model)
+    else:
+        matches = model is not None and candidate_model_matches(model)
     if (
         model is None
-        or not candidate_model_matches(model)
+        or not matches
         or model.created_at > now
         or model.pricing_available_at > now
         or model.pricing_expires_at <= now
@@ -121,6 +132,15 @@ def candidate_model_matches(model: AgentModelConfigRecord) -> bool:
         == datetime.fromisoformat(str(config["pricing_available_at"]))
         and model.pricing_expires_at == datetime.fromisoformat(str(config["pricing_expires_at"]))
     )
+
+
+def isolated_candidate_model_matches(model: AgentModelConfigRecord) -> bool:
+    """Consumers with an independently checked isolated mode may bind v7 or v9."""
+    if model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        from nexus.agents.codex_capacity import capacity_model_matches
+
+        return capacity_model_matches(model)
+    return candidate_model_matches(model)
 
 
 async def candidate_job_qualified(
@@ -207,17 +227,24 @@ async def candidate_output_qualified(session: AsyncSession, run_id: UUID) -> boo
         run is None
         or run.status != "completed"
         or run.retry_count != 0
-        or run.pricing_version != CANDIDATE_BUDGET_CONFIG_VERSION
+        or run.pricing_version
+        not in {CANDIDATE_BUDGET_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
     ):
         return False
+    if run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        from nexus.agents.capacity_cycle import capacity_output_mode_qualified
+
+        if not await capacity_output_mode_qualified(session, run, formal=False):
+            return False
     model = await session.get(AgentModelConfigRecord, run.model_config_id, populate_existing=True)
     checked_at = await session.scalar(select(func.clock_timestamp()))
     if (
         model is None
         or not isinstance(checked_at, datetime)
-        or not candidate_model_matches(model)
+        or not isolated_candidate_model_matches(model)
         or not model.pricing_available_at <= checked_at < model.pricing_expires_at
         or run.model_hash != model.config_hash
+        or run.pricing_version != model.version
     ):
         return False
     jobs = tuple(

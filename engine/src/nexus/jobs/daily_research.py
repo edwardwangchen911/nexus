@@ -8,7 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_candidate import require_candidate_model_profile
-from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS, PAPER_SCOPE_CONFIG_VERSIONS
+from nexus.agents.codex_versions import (
+    ACTIONABLE_CONFIG_VERSIONS,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    PAPER_SCOPE_CONFIG_VERSIONS,
+)
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import ResearchAdmission, admit_research_run
 from nexus.agents.portfolio_context import read_portfolio_context
@@ -319,8 +323,9 @@ async def admit_agent_paper_research(
         await require_formal_stage_model_profile(session, model_config_id=model_config_id, now=now)
     if type(candidate_stage_capacity) is not bool:
         raise ValueError("CODEX_CANDIDATE_ISOLATION_REQUIRED")
+    capacity_model = None
     if candidate_stage_capacity:
-        await require_candidate_model_profile(
+        capacity_model = await require_candidate_model_profile(
             session, candidate_stage_capacity=True, model_config_id=model_config_id, now=now
         )
         if (
@@ -456,5 +461,7 @@ async def admit_agent_paper_research(
         reuse_latest_actor_prompts_only=reuse_latest_actor_prompts_only,
         version_source_run_id=version_source_run_id,
         formal_stage_capacity=formal_stage_capacity,
+        full_input_capacity=capacity_model is not None
+        and capacity_model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION,
         economic_allocation=allocation,
     )

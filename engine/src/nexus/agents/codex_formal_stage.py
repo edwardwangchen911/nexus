@@ -9,7 +9,10 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+)
 from nexus.jobs.models import JobType, QueueName, RetryPolicy, job_input_hash
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job, JobAttempt
@@ -115,7 +118,7 @@ async def formal_stage_job_qualified(
         model is None
         or not isinstance(checked_at, datetime)
         or not model.pricing_available_at <= checked_at < model.pricing_expires_at
-        or not formal_stage_model_matches(model)
+        or not formal_preparation_model_matches(model)
         or run.model_hash != model.config_hash
         or run.pricing_version != model.version
         or job.scope_kind != "instrument"
@@ -156,7 +159,36 @@ async def require_formal_stage_model_profile(
     )
     if (
         model is None
-        or not formal_stage_model_matches(model)
+        or not formal_preparation_model_matches(model)
+        or model.created_at > now
+        or not model.pricing_available_at <= now < model.pricing_expires_at
+    ):
+        raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
+    return model
+
+
+def formal_preparation_model_matches(model: AgentModelConfigRecord) -> bool:
+    """Exact preparation/Worker identity; output eligibility is checked separately."""
+    from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+
+    if model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        from nexus.agents.codex_capacity import capacity_model_matches
+
+        return capacity_model_matches(model)
+    return formal_stage_model_matches(model)
+
+
+async def require_formal_preparation_model_profile(
+    session: AsyncSession, *, model_config_id: UUID | None, now: datetime
+) -> AgentModelConfigRecord:
+    model = (
+        None
+        if not isinstance(model_config_id, UUID)
+        else await session.get(AgentModelConfigRecord, model_config_id, populate_existing=True)
+    )
+    if (
+        model is None
+        or not formal_preparation_model_matches(model)
         or model.created_at > now
         or not model.pricing_available_at <= now < model.pricing_expires_at
     ):
@@ -175,7 +207,8 @@ async def formal_stage_output_qualified(
         run is None
         or run.status != "completed"
         or run.retry_count != 0
-        or run.pricing_version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        or run.pricing_version
+        not in {FORMAL_STAGE_CAPACITY_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
     ):
         return False
     model = await session.get(AgentModelConfigRecord, run.model_config_id, populate_existing=True)
@@ -183,14 +216,20 @@ async def formal_stage_output_qualified(
     if (
         model is None
         or not isinstance(checked_at, datetime)
-        or not formal_stage_model_matches(model)
+        or not formal_preparation_model_matches(model)
         or decision_time > checked_at
         or model.created_at > decision_time
         or not model.pricing_available_at <= decision_time < model.pricing_expires_at
         or not model.pricing_available_at <= checked_at < model.pricing_expires_at
         or run.model_hash != model.config_hash
+        or run.pricing_version != model.version
     ):
         return False
+    if run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        from nexus.agents.capacity_cycle import capacity_output_mode_qualified
+
+        if not await capacity_output_mode_qualified(session, run, formal=True):
+            return False
     jobs = tuple(
         await session.scalars(
             select(Job)

@@ -27,6 +27,7 @@ from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
@@ -597,6 +598,7 @@ async def admit_research_run(
     reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
     formal_stage_capacity: bool = False,
+    full_input_capacity: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Keep version-inheriting admission failures atomic inside caller transactions."""
@@ -620,11 +622,13 @@ async def admit_research_run(
             reuse_latest_actor_prompts_only=reuse_latest_actor_prompts_only,
             version_source_run_id=version_source_run_id,
             formal_stage_capacity=formal_stage_capacity,
+            full_input_capacity=full_input_capacity,
             economic_allocation=economic_allocation,
         )
 
     if (
         formal_stage_capacity
+        or full_input_capacity
         or economic_allocation is not None
         or reuse_latest_actor_agent_version
         or version_source_run_id is not None
@@ -655,9 +659,9 @@ async def _verify_formal_replay_binding(
         if formal_run:
             raise ValueError("CODEX_FORMAL_STAGE_ACTIVATION_REQUIRED")
         return
-    from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+    from nexus.agents.codex_formal_stage import require_formal_preparation_model_profile
 
-    selected = await require_formal_stage_model_profile(
+    selected = await require_formal_preparation_model_profile(
         session,
         model_config_id=model_config_id,
         now=now,
@@ -689,9 +693,41 @@ async def _admit_research_run(
     reuse_latest_actor_prompts_only: bool = False,
     version_source_run_id: UUID | None = None,
     formal_stage_capacity: bool = False,
+    full_input_capacity: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
+    requested_formal_model_id = model_config_id if formal_stage_capacity else None
+    if (
+        type(full_input_capacity) is not bool
+        or full_input_capacity
+        and (
+            formal_stage_capacity
+            or job_type is not JobType.AGENT_PAPER_RESEARCH
+            or not isinstance(model_config_id, UUID)
+            or reuse_latest_actor_agent_version
+            or reuse_latest_actor_prompts_only
+            or version_source_run_id is not None
+            or economic_allocation is not None
+            or allow_fixture_price_authority
+        )
+    ):
+        raise ValueError("CODEX_CAPACITY_ADMISSION_ARGUMENT_INVALID")
+    if full_input_capacity:
+        from nexus.agents.codex_candidate import require_candidate_database
+        from nexus.agents.codex_capacity import capacity_model_matches
+
+        await require_candidate_database(session)
+        selected = await session.get(
+            AgentModelConfigRecord, model_config_id, populate_existing=True
+        )
+        if (
+            selected is None
+            or not capacity_model_matches(selected)
+            or selected.created_at > now
+            or not selected.pricing_available_at <= now < selected.pricing_expires_at
+        ):
+            raise ValueError("CODEX_CAPACITY_AUTHORITY_INVALID")
     if economic_allocation is not None and (
         job_type is not JobType.AGENT_PAPER_RESEARCH
         or economic_allocation.action == "synthesis"
@@ -729,11 +765,20 @@ async def _admit_research_run(
     ):
         raise ValueError("Agent version authority is ambiguous")
     if formal_stage_capacity:
-        from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+        from nexus.agents.codex_formal_stage import require_formal_preparation_model_profile
 
-        await require_formal_stage_model_profile(session, model_config_id=model_config_id, now=now)
+        await require_formal_preparation_model_profile(
+            session, model_config_id=model_config_id, now=now
+        )
     if model_config_id is not None:
         candidate_preview = await session.get(AgentModelConfigRecord, model_config_id)
+        if (
+            candidate_preview is not None
+            and candidate_preview.version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+            and not full_input_capacity
+            and not formal_stage_capacity
+        ):
+            raise ValueError("CODEX_CAPACITY_ISOLATED_ADMISSION_REQUIRED")
         if (
             candidate_preview is not None
             and candidate_preview.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
@@ -777,6 +822,14 @@ async def _admit_research_run(
         run = await session.get(AgentResearchRunRecord, UUID(raw_run_id), populate_existing=True)
         if run is None:
             raise RuntimeError("Agent idempotency run is missing")
+        await _verify_capacity_replay_binding(
+            session,
+            run,
+            full_input_capacity,
+            model_config_id,
+            now,
+            formal_stage_capacity=formal_stage_capacity,
+        )
         await _verify_formal_replay_binding(
             session,
             run=run,
@@ -845,6 +898,7 @@ async def _admit_research_run(
                         *STAGED_CONFIG_VERSIONS,
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                        FULL_INPUT_CAPACITY_CONFIG_VERSION,
                         "codex-sdk-strategy-rnd-v1",
                         PORTFOLIO_DECISION_CONFIG_VERSION,
                     )
@@ -853,6 +907,23 @@ async def _admit_research_run(
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)
         )
+    if formal_stage_capacity:
+        from nexus.agents.codex_formal_stage import require_formal_preparation_model_profile
+
+        checked_model = await require_formal_preparation_model_profile(
+            session, model_config_id=requested_formal_model_id, now=now
+        )
+        if model is None or model.id != checked_model.id:
+            raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
+        model = checked_model
+    if (
+        model is not None
+        and model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+        and (not (full_input_capacity or formal_stage_capacity) or model.id != model_config_id)
+    ):
+        raise ValueError("CODEX_CAPACITY_ISOLATED_ADMISSION_REQUIRED")
+    if full_input_capacity and (model is None or not capacity_model_matches(model)):
+        raise ValueError("CODEX_CAPACITY_AUTHORITY_INVALID")
     if (
         model is not None
         and model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
@@ -1024,6 +1095,14 @@ async def _admit_research_run(
         existing_run = await session.get(AgentResearchRunRecord, UUID(raw_run_id))
         if existing_run is None:
             raise RuntimeError("Agent durable Job run is missing")
+        await _verify_capacity_replay_binding(
+            session,
+            existing_run,
+            full_input_capacity,
+            model_config_id,
+            now,
+            formal_stage_capacity=formal_stage_capacity,
+        )
         await _verify_formal_replay_binding(
             session,
             run=existing_run,
@@ -1081,6 +1160,7 @@ async def _admit_research_run(
             model.version in SDK_CONFIG_VERSIONS
             or model.version == CANDIDATE_BUDGET_CONFIG_VERSION
             or formal_stage_capacity
+            or full_input_capacity
         )
         else 3,
         available_at=now,
@@ -1099,6 +1179,37 @@ async def _admit_research_run(
     claim.response_payload = {"run_id": str(run.id), "status": "prepared"}
     await session.flush()
     return ResearchAdmission(run=run, replayed=False)
+
+
+async def _verify_capacity_replay_binding(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    enabled: bool,
+    model_id: UUID | None,
+    now: datetime,
+    *,
+    formal_stage_capacity: bool = False,
+) -> None:
+    if formal_stage_capacity and run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        # The caller immediately performs the populated formal revalidation.
+        # This prepares a frozen identity; it never grants isolated-mode execution.
+        return
+    if (run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION) != enabled:
+        raise ValueError("CODEX_CAPACITY_ISOLATED_ADMISSION_REQUIRED")
+    if enabled:
+        from nexus.agents.codex_capacity import capacity_model_matches
+
+        model = await session.get(AgentModelConfigRecord, model_id, populate_existing=True)
+        if (
+            model is None
+            or not capacity_model_matches(model)
+            or model.created_at > now
+            or not model.pricing_available_at <= now < model.pricing_expires_at
+            or run.model_config_id != model.id
+            or run.model_hash != model.config_hash
+            or run.pricing_version != model.version
+        ):
+            raise ValueError("CODEX_CAPACITY_AUTHORITY_INVALID")
 
 
 async def _locked_reservation(
