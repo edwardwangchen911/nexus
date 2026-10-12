@@ -1,0 +1,190 @@
+import subprocess
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+from uuid import UUID
+
+import pytest
+from nexus.paper.history_seal import require_research_processes_quiescent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "priced",
+        "tools",
+        "reserved",
+        "budget-reserved",
+        "unknown-price",
+        "new-version",
+        "running-attempt",
+        "retryable",
+        "bad-event-hash",
+    ],
+)
+async def test_frozen_failure_proof_rejects_unsafe_or_unknown_facts(fault):
+    from nexus.agents.codex_sdk import MODEL_ID
+    from nexus.agents.codex_versions import LEGACY_ACTIONABLE_CONFIG_VERSION
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper.agent_cycle_models import canonical_cycle_event_hash
+    from nexus.paper.history_seal import _proof
+
+    at = datetime(2026, 10, 7, 14, tzinfo=UTC)
+    cycle_id, run_id, instrument_id = (UUID(int=i) for i in (1, 2, 3))
+    cycle = SimpleNamespace(execution_locked=True, decision_time=at)
+    events = []
+    prior = None
+    for sequence, status in enumerate(("prepared", "researching", "unavailable"), 1):
+        facts = {"research_run_ids": [str(run_id)]} if status == "researching" else {}
+        event = SimpleNamespace(
+            sequence=sequence,
+            from_status=prior,
+            to_status=status,
+            result_code="CONTROLLED_FAILURE",
+            fact_ids=facts,
+            occurred_at=at,
+            event_hash=canonical_cycle_event_hash(
+                cycle_id=cycle_id,
+                sequence=sequence,
+                from_status=prior,
+                to_status=status,
+                result_code="CONTROLLED_FAILURE",
+                fact_ids=facts,
+                occurred_at=at,
+            ),
+        )
+        events.append(event)
+        prior = status
+    run = SimpleNamespace(
+        status="prepared",
+        settled_cost_usd=None,
+        input_tokens=None,
+        output_tokens=None,
+        retry_count=0,
+        actor_id="local-agent-paper-cycle",
+        instrument_id=instrument_id,
+        idempotency_key=f"agent-paper:{cycle_id}:{instrument_id}",
+        decision_time=at,
+        reserved_cost_usd=0,
+        pricing_version=LEGACY_ACTIONABLE_CONFIG_VERSION,
+        model_hash="a" * 64,
+        model_config_id=UUID(int=4),
+        data_snapshot_id=UUID(int=5),
+        input_hash="b" * 64,
+        schema_hash="c" * 64,
+        prompt_hash="d" * 64,
+        evidence_hash="e" * 64,
+        tool_hash="f" * 64,
+    )
+    model = SimpleNamespace(
+        model_id=MODEL_ID,
+        config_hash=run.model_hash,
+        version=run.pricing_version,
+        max_tool_calls=0,
+        input_usd_per_million=0,
+        output_usd_per_million=0,
+    )
+    budget = SimpleNamespace(
+        reserved_usd=0, settled_usd=None, state="reserved", pricing_version=run.pricing_version
+    )
+    job = SimpleNamespace(
+        id=UUID(int=6),
+        status="dead_letter",
+        finished_at=at,
+        payload={"run_id": str(run_id)},
+        scope_id=str(instrument_id),
+        effective_at=at,
+        retry_policy="automatic_safe",
+        max_attempts=1,
+        attempt_count=1,
+        manual_retry_count=0,
+        input_hash=job_input_hash(
+            {
+                "instrument_id": str(instrument_id),
+                "data_snapshot_id": str(run.data_snapshot_id),
+                "decision_time": at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "request_hash": run.input_hash,
+                "schema_hash": run.schema_hash,
+                "model_hash": run.model_hash,
+                "prompt_hash": run.prompt_hash,
+                "evidence_hash": run.evidence_hash,
+                "tool_hash": run.tool_hash,
+                "pricing_version": run.pricing_version,
+            }
+        ),
+    )
+    attempt = SimpleNamespace(
+        outcome="lost", finished_at=at, lease_token=UUID(int=7), fence_token=1, attempt_no=1
+    )
+    lease = SimpleNamespace(
+        expires_at=at + timedelta(seconds=30), lease_token=attempt.lease_token, fence_token=1
+    )
+    if fault == "priced":
+        model.input_usd_per_million = 1
+    elif fault == "tools":
+        model.max_tool_calls = 1
+    elif fault == "reserved":
+        run.reserved_cost_usd = 1
+    elif fault == "budget-reserved":
+        budget.reserved_usd = 1
+    elif fault == "unknown-price":
+        model.output_usd_per_million = None
+    elif fault == "new-version":
+        run.pricing_version = "codex-sdk-chatgpt-v8-stage-capacity"
+    elif fault == "running-attempt":
+        attempt.outcome, attempt.finished_at = "running", None
+    elif fault == "retryable":
+        job.retry_policy = "manual_safe"
+    elif fault == "bad-event-hash":
+        events[-1].event_hash = "0" * 64
+    session = SimpleNamespace(
+        get=AsyncMock(side_effect=[cycle, run, model]),
+        scalar=AsyncMock(side_effect=[None, budget]),
+        scalars=AsyncMock(side_effect=[events, [job], [attempt], [lease], []]),
+    )
+    with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+        await _proof(session, cycle_id=cycle_id, run_id=run_id, now=at + timedelta(days=5))
+
+
+@pytest.mark.parametrize(
+    "boundary", ["host-live", "host-full-path", "container-live", "scan-failed", "no-container"]
+)
+def test_process_boundary_is_fail_closed(monkeypatch, boundary):
+    def execute(command, **kwargs):
+        if command[0] == "/bin/ps":
+            if boundary == "scan-failed":
+                raise subprocess.TimeoutExpired(command, 5)
+            output = "/usr/bin/python\n"
+            if boundary == "host-live":
+                output += "/test/.venv/lib/codex_cli_bin/vendor/codex\n"
+            if boundary == "host-full-path":
+                output += "/opt/homebrew/bin/codex\n"
+        elif command[1] == "ps":
+            output = "" if boundary == "no-container" else "abc123\n"
+        else:
+            output = "COMMAND\npython\n" + ("codex\n" if boundary == "container-live" else "")
+        return subprocess.CompletedProcess(command, 0, output)
+
+    monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
+    with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+        require_research_processes_quiescent()
+
+
+def test_quiescence_checks_host_and_existing_project_containers_without_arguments(monkeypatch):
+    execute = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, "/usr/bin/python\n"),
+            subprocess.CompletedProcess([], 0, "abc123\ndef456\n"),
+            subprocess.CompletedProcess([], 0, "COMMAND\npython\n"),
+            subprocess.CompletedProcess([], 0, "COMMAND\nuv\n"),
+        ]
+    )
+    monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
+    require_research_processes_quiescent()
+    commands = [call.args[0] for call in execute.call_args_list]
+    assert commands[0] == ["/bin/ps", "-axo", "comm="]
+    assert "label=com.docker.compose.project=nexus-fosun-live" in commands[1]
+    assert commands[2:] == [
+        ["docker", "top", identity, "-eo", "comm"] for identity in ("abc123", "def456")
+    ]

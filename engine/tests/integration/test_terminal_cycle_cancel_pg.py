@@ -289,5 +289,102 @@ async def test_legacy_terminal_recovery_skips_only_unused_jobs_and_is_idempotent
                 event_values(await agent_cycle._events(session, result.cycle_id)) == original_events
             )
             assert await session.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
+        if prior_claimed:
+            from nexus.paper.manual_request import require_manual_account_available
+            from nexus.persistence.models.runtime import AuditEvent
+
+            monkeypatch.setattr(
+                "nexus.paper.history_seal.require_research_processes_quiescent", lambda: None
+            )
+            seal_now = AT + timedelta(days=3)
+            async with sessions.begin() as session:
+                for heartbeat in await session.scalars(select(WorkerHeartbeat)):
+                    heartbeat.seen_at = seal_now
+
+            async def seal_clock(self, statement, *args, **kwargs):
+                if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+                    return seal_now
+                return await original_scalar(self, statement, *args, **kwargs)
+
+            monkeypatch.setattr(AsyncSession, "scalar", seal_clock)
+            async with sessions() as session:
+                old_run = await session.scalar(
+                    select(AgentResearchRunRecord).where(
+                        AgentResearchRunRecord.settled_cost_usd.is_(None)
+                    )
+                )
+                old_id = old_run.id
+                before_run = (
+                    old_run.status,
+                    old_run.settled_cost_usd,
+                    old_run.input_tokens,
+                    old_run.output_tokens,
+                )
+                before_budget = await session.scalar(
+                    select(AgentDailyBudgetReservationRecord).where(
+                        AgentDailyBudgetReservationRecord.run_id == old_id
+                    )
+                )
+                budget_values = (
+                    before_budget.state,
+                    before_budget.settled_usd,
+                    before_budget.reserved_usd,
+                )
+                before_audit = await session.scalar(select(func.count()).select_from(AuditEvent))
+                with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                    await require_manual_account_available(
+                        session, account_id=authority.account_id, now=seal_now
+                    )
+            for replayed in (False, True):
+                receipt = await manual_paper.run(
+                    runtime,
+                    Namespace(
+                        action="seal-failed-research",
+                        cycle_id=result.cycle_id,
+                        run_ids=[old_id],
+                        accept_unknown_usage=True,
+                    ),
+                )
+                assert receipt.replayed is replayed
+                assert receipt.sealed_research == 1
+            async with sessions.begin() as session:
+                await require_manual_account_available(
+                    session, account_id=authority.account_id, now=seal_now
+                )
+                old_run = await session.get(AgentResearchRunRecord, old_id)
+                assert (
+                    old_run.status,
+                    old_run.settled_cost_usd,
+                    old_run.input_tokens,
+                    old_run.output_tokens,
+                ) == before_run
+                budget = await session.scalar(
+                    select(AgentDailyBudgetReservationRecord).where(
+                        AgentDailyBudgetReservationRecord.run_id == old_id
+                    )
+                )
+                assert (budget.state, budget.settled_usd, budget.reserved_usd) == budget_values
+                assert (
+                    await session.scalar(select(func.count()).select_from(AuditEvent))
+                    == before_audit + 1
+                )
+                assert (
+                    event_values(await agent_cycle._events(session, result.cycle_id))
+                    == original_events
+                )
+                from nexus.jobs.manual_retry import ManualRetryError, retry_manual_safe_job
+
+                old_job = await session.scalar(
+                    select(Job).where(Job.payload["run_id"].as_string() == str(old_id))
+                )
+                with pytest.raises(ManualRetryError, match="RETRY_NOT_PERMITTED"):
+                    await retry_manual_safe_job(
+                        session,
+                        job_id=old_job.id,
+                        actor_id="controlled-human",
+                        expected_version=old_job.version,
+                        idempotency_key="sealed-no-replay",
+                        now=AT + timedelta(minutes=1),
+                    )
     finally:
         await engine.dispose()

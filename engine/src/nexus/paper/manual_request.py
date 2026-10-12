@@ -330,11 +330,22 @@ async def _require_cycle_jobs_settled(
         )
     ).all()
     runs: list[AgentResearchRunRecord | AgentPortfolioSynthesisRunRecord] = [*research, *synthesis]
-    if len(research) != len(run_ids) or any(
-        run.status not in {"completed", "failed", "abstained"} or run.settled_cost_usd is None
-        for run in runs
-    ):
+    if len(research) != len(run_ids):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    for candidate_run in runs:
+        if (
+            candidate_run.status in {"completed", "failed", "abstained"}
+            and candidate_run.settled_cost_usd is not None
+        ):
+            continue
+        from nexus.paper.history_seal import legacy_research_sealed
+
+        if not isinstance(
+            candidate_run, AgentResearchRunRecord
+        ) or not await legacy_research_sealed(
+            session, cycle_id=cycle_id, run_id=candidate_run.id, now=now
+        ):
+            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     if not runs:
         return
     jobs = (

@@ -83,7 +83,8 @@ def test_missing_checkout_revision_does_not_trust_file_but_keeps_receipt_read(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host", ["missing", "wrong-version"])
-async def test_cancel_entry_rejects_bad_host_before_recovery(monkeypatch, host):
+@pytest.mark.parametrize("action", ["cancel-unused-research", "seal-failed-research"])
+async def test_cancel_entry_rejects_bad_host_before_recovery(monkeypatch, host, action):
     from contextlib import asynccontextmanager
     from datetime import UTC, datetime, timedelta
     from unittest.mock import AsyncMock
@@ -123,8 +124,23 @@ async def test_cancel_entry_rejects_bad_host_before_recovery(monkeypatch, host):
     monkeypatch.setattr(manual_paper, "session_factory", lambda config: factory)
     recover = AsyncMock()
     monkeypatch.setattr(manual_paper, "close_terminal_cycle_unused_research", recover)
+    monkeypatch.setattr(manual_paper, "seal_failed_research", recover)
     with pytest.raises(ValueError, match="MANUAL_HOST_NOT_READY"):
-        await manual_paper.run(
-            settings, SimpleNamespace(action="cancel-unused-research", cycle_id=UUID(int=3))
-        )
+        await manual_paper.run(settings, SimpleNamespace(action=action, cycle_id=UUID(int=3)))
     recover.assert_not_awaited()
+
+
+@pytest.mark.parametrize("missing", ["--run-id", "--accept-unknown-usage"])
+def test_history_seal_cli_requires_exact_run_and_explicit_unknown_acceptance(missing):
+    arguments = [
+        "seal-failed-research",
+        "--cycle-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--run-id",
+        "00000000-0000-0000-0000-000000000002",
+        "--accept-unknown-usage",
+    ]
+    index = arguments.index(missing)
+    del arguments[index : index + (2 if missing == "--run-id" else 1)]
+    with pytest.raises(SystemExit):
+        manual_paper.parser().parse_args(arguments)

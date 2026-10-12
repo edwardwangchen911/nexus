@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _checkout_revision, _validate_local_env
+from nexus.paper.history_seal import HistorySealReceipt, seal_failed_research
 from nexus.paper.manual_cancel import (
     TerminalCycleCancelReceipt,
     close_terminal_cycle_unused_research,
@@ -41,17 +42,21 @@ def parser() -> argparse.ArgumentParser:
     read.add_argument("--request-id", type=UUID, required=True)
     cancel = commands.add_parser("cancel-unused-research")
     cancel.add_argument("--cycle-id", type=UUID, required=True)
+    seal = commands.add_parser("seal-failed-research")
+    seal.add_argument("--cycle-id", type=UUID, required=True)
+    seal.add_argument("--run-id", dest="run_ids", type=UUID, action="append", required=True)
+    seal.add_argument("--accept-unknown-usage", action="store_true", required=True)
     return result
 
 
 async def run(
     settings: EngineSettings, args: argparse.Namespace
-) -> ManualRequestView | TerminalCycleCancelReceipt:
+) -> ManualRequestView | TerminalCycleCancelReceipt | HistorySealReceipt:
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     try:
         async with factory.begin() as session:
-            if args.action == "cancel-unused-research":
+            if args.action in {"cancel-unused-research", "seal-failed-research"}:
                 if settings.agent_paper_account_id is None:
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
                 now = await session.scalar(select(func.clock_timestamp()))
@@ -71,6 +76,15 @@ async def run(
                     release_revision=settings.release_revision,
                     scope_hash=manual_host_scope(settings),
                 )
+                if args.action == "seal-failed-research":
+                    return await seal_failed_research(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        cycle_id=args.cycle_id,
+                        run_ids=tuple(args.run_ids),
+                        now=now,
+                        accept_unknown_usage=args.accept_unknown_usage,
+                    )
                 return await close_terminal_cycle_unused_research(
                     session,
                     account_id=settings.agent_paper_account_id,
