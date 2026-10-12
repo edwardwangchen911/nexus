@@ -851,8 +851,11 @@ async def test_fixture_worker_persists_exact_lifecycle_roles_evidence_and_usage(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_write_fails", [False, True])
 async def test_worker_abstains_and_releases_budget_when_fixture_evidence_is_disallowed(
     migrated_database_url: str,
+    monkeypatch,
+    terminal_write_fails: bool,
 ) -> None:
     """Production composition cannot treat fixture evidence as executable authority."""
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
@@ -874,14 +877,28 @@ async def test_worker_abstains_and_releases_budget_when_fixture_evidence_is_disa
             daily_limit_usd=Decimal("3.00"),
             now=_NOW,
         )
-    async with factory() as session, session.begin():
-        result = await execute_research_run(
-            session,
-            run_id=admission.run_id,
-            committee=FixtureCommittee(),
-            allow_fixture_evidence=False,
+
+    async def execute():
+        async with factory() as session, session.begin():
+            return await execute_research_run(
+                session,
+                run_id=admission.run_id,
+                committee=FixtureCommittee(),
+                allow_fixture_evidence=False,
+            )
+
+    if terminal_write_fails:
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setattr(
+            "nexus.agents.execution._append_output",
+            AsyncMock(side_effect=RuntimeError("terminal write failed")),
         )
-    assert result.status == "abstained" and result.intent is None
+        with pytest.raises(RuntimeError, match="terminal write failed"):
+            await execute()
+    else:
+        result = await execute()
+        assert result.status == "abstained" and result.intent is None
     async with factory() as session:
         run = await session.get(AgentResearchRunRecord, admission.run_id)
         reservation = await session.scalar(
@@ -896,9 +913,18 @@ async def test_worker_abstains_and_releases_budget_when_fixture_evidence_is_disa
                 .order_by(AgentResearchEventRecord.sequence)
             )
         )
-    assert run is not None and run.status == "abstained"
+    assert run is not None and reservation is not None
+    if terminal_write_fails:
+        assert run.status == "prepared" and run.settled_cost_usd is None
+        assert run.input_tokens is None and run.output_tokens is None
+        assert reservation.state == "reserved" and reservation.settled_usd is None
+        assert events == ()
+        return
+    assert run.status == "abstained"
     assert reservation is not None and reservation.state == "released"
     assert events == ("prepared", "abstained")
+    assert run.settled_cost_usd == Decimal("0")
+    assert run.input_tokens == 0 and run.output_tokens == 0
 
 
 @pytest.mark.asyncio

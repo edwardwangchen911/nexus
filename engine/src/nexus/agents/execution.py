@@ -3,6 +3,7 @@
 import hashlib
 import json
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
 
@@ -482,7 +483,17 @@ async def _terminal_without_usage(
     status: Literal["failed", "abstained"],
     reason: str,
 ) -> ResearchRunResult:
-    await release_daily_budget_if_reserved(session, run_id=run.id)
+    if any(
+        value not in (None, 0)
+        for value in (run.settled_cost_usd, run.input_tokens, run.output_tokens)
+    ):
+        raise BudgetExhausted("zero-call close conflicts with recorded usage")
+    reservation = await release_daily_budget_if_reserved(session, run_id=run.id)
+    if reservation.state != "released":
+        raise BudgetExhausted("zero-call close conflicts with settled reservation")
+    run.settled_cost_usd = Decimal("0")
+    run.input_tokens = 0
+    run.output_tokens = 0
     return await _persist_terminal(
         session,
         run,

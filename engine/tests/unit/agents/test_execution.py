@@ -360,3 +360,63 @@ def test_structured_synthesis_cannot_self_authorize_complete_intent(price_valid)
 def test_legacy_intent_serialization_omits_only_new_assessment():
     intent = _synthesize(("support",) * 8, staged=True)
     assert "synthesis_assessment" not in intent.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["settled_cost_usd", "input_tokens", "output_tokens"])
+async def test_zero_call_close_cannot_erase_recorded_usage(monkeypatch, field):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import UUID
+
+    from nexus.agents import execution
+    from nexus.agents.budget import BudgetExhausted
+
+    run = SimpleNamespace(
+        id=UUID(int=1), settled_cost_usd=None, input_tokens=None, output_tokens=None
+    )
+    setattr(run, field, 1)
+    release = AsyncMock()
+    monkeypatch.setattr(execution, "release_daily_budget_if_reserved", release)
+    with pytest.raises(BudgetExhausted, match="recorded usage"):
+        await execution._terminal_without_usage(
+            AsyncMock(),
+            run,
+            output_sequence=1,
+            event_sequence=2,
+            status="abstained",
+            reason="evidence_authority_missing",
+        )
+    release.assert_not_awaited()
+    assert getattr(run, field) == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_call_close_cannot_replace_settled_budget(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from nexus.agents import execution
+    from nexus.agents.budget import BudgetExhausted
+
+    run = SimpleNamespace(
+        id=UUID(int=1), settled_cost_usd=None, input_tokens=None, output_tokens=None
+    )
+    monkeypatch.setattr(
+        execution,
+        "release_daily_budget_if_reserved",
+        AsyncMock(return_value=SimpleNamespace(state="settled")),
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(execution, "_persist_terminal", persist)
+    with pytest.raises(BudgetExhausted, match="settled reservation"):
+        await execution._terminal_without_usage(
+            AsyncMock(),
+            run,
+            output_sequence=1,
+            event_sequence=2,
+            status="abstained",
+            reason="evidence_authority_missing",
+        )
+    persist.assert_not_awaited()
+    assert run.settled_cost_usd is None and run.input_tokens is None and run.output_tokens is None
