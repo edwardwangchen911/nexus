@@ -8,7 +8,7 @@ from uuid import UUID
 
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.agent_paper_once import _validate_local_database
-from nexus.ops.local_stack import _validate_local_env
+from nexus.ops.local_stack import _checkout_revision, _validate_local_env
 from nexus.paper.manual_entry import (
     SAFE_ENTRY_CODES,
     read_configured_manual_request,
@@ -55,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
         env_file = args.env_file if args.env_file.is_absolute() else root / args.env_file
         env_file = _validate_local_env(root, env_file)
         environment = load_agent_paper_service_environment(root, {}, env_file=env_file)
+        environment.pop("NEXUS_RELEASE_REVISION", None)
+        revision = _checkout_revision(root)
+        if revision is not None:
+            environment["NEXUS_RELEASE_REVISION"] = revision
         settings = _FileEngineSettings.model_validate(environment)
         view = asyncio.run(run(settings, args))
     except Exception as error:
