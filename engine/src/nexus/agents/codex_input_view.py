@@ -107,8 +107,7 @@ def _string_table_view(view: dict[str, object]) -> dict[str, object] | None:
         if (
             occurrences >= 2
             and literal_bytes >= 26
-            and occurrences * literal_bytes
-            > literal_bytes + occurrences * marker_bytes + 1
+            and occurrences * literal_bytes > literal_bytes + occurrences * marker_bytes + 1
         ):
             strings.append(value)
     if not strings:
@@ -232,15 +231,37 @@ def _inline_citation_payload(payload: dict[str, object]) -> dict[str, object]:
 
 
 def project_staged_payload(
-    payload: dict[str, object], *, inline_citations: bool = False
+    payload: dict[str, object],
+    *,
+    inline_citations: bool = False,
+    financial_table_candidate: bool = False,
 ) -> dict[str, object]:
+    """Opt-in candidate observation; default/v8 construction remains unchanged."""
+    if type(financial_table_candidate) is not bool:
+        raise ValueError("MODEL_FINANCIAL_TABLE_INVALID")
+    if financial_table_candidate and not inline_citations:
+        raise ValueError("MODEL_FINANCIAL_TABLE_BINDING_REQUIRED")
+    if inline_citations:
+        payload = _inline_citation_payload(payload)
+    legacy = _project_annotated_payload(payload)
+    if not financial_table_candidate:
+        return legacy
+    from nexus.agents.financial_input_view import financial_table_payload
+
+    candidate = _project_annotated_payload(financial_table_payload(payload))
+    return (
+        candidate
+        if len(codex_request_wire(candidate).encode()) < len(codex_request_wire(legacy).encode())
+        else legacy
+    )
+
+
+def _project_annotated_payload(payload: dict[str, object]) -> dict[str, object]:
     """Return a smaller model-facing payload, including its fixed decoding note.
 
     Reserved-key collisions, non-JSON inputs and no net savings preserve the
     complete original payload. Object order is not semantic; array order is.
     """
-    if inline_citations:
-        payload = _inline_citation_payload(payload)
     inputs = payload.get("frozen_inputs")
     instructions = payload.get("instructions")
     if (
