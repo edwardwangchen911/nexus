@@ -31,11 +31,14 @@ async def test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
     failure_status=None,
     cancel_unstarted=False,
     cancel_fault=False,
+    profile="v8",
 ):
     now = AT + timedelta(minutes=17, seconds=31)
+    from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
+
     await prepare_database(
         EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk"),
-        **OPTIONS,
+        **(V9_OPTIONS if profile == "v9" else OPTIONS),
     )
     candidates = (
         INSTRUMENTS
@@ -61,7 +64,12 @@ async def test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
         async with sessions.begin() as session:
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
-                    AgentModelConfigRecord.version == "codex-sdk-chatgpt-v8-stage-capacity"
+                    AgentModelConfigRecord.version
+                    == (
+                        "codex-sdk-chatgpt-v9-full-input-capacity"
+                        if profile == "v9"
+                        else "codex-sdk-chatgpt-v8-stage-capacity"
+                    )
                 )
             )
             batch = await create_agent_paper_candidate_batch(
@@ -340,6 +348,25 @@ async def test_manual_unstarted_research_cancels_without_model_or_budget_usage(
         failure_status="failed",
         cancel_unstarted=True,
         cancel_fault=cancel_fault,
+    )
+
+
+@pytest.mark.parametrize("candidate_count", [3, 5])
+@pytest.mark.parametrize("mode", ["research_only", "research_and_paper"])
+@pytest.mark.parametrize("cancel_fault", [False, True])
+@pytest.mark.asyncio
+async def test_manual_v9_unstarted_research_cancels_without_usage(
+    migrated_database_url, monkeypatch, candidate_count, mode, cancel_fault
+):
+    await test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
+        migrated_database_url,
+        monkeypatch,
+        candidate_count,
+        mode,
+        failure_status="failed",
+        cancel_unstarted=True,
+        cancel_fault=cancel_fault,
+        profile="v9",
     )
 
 

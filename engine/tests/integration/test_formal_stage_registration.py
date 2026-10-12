@@ -20,11 +20,24 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["v8", "v9"])
 async def test_pending_formal_registration_is_idempotent_and_default_stays_unchanged(
     migrated_database_url,
+    profile,
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     factory = session_factory(settings)
+    from nexus.agents.codex_capacity import capacity_config_hash
+    from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+    from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
+
+    options = V9_OPTIONS if profile == "v9" else OPTIONS
+    version = (
+        FULL_INPUT_CAPACITY_CONFIG_VERSION
+        if profile == "v9"
+        else FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    )
+    expected_hash = capacity_config_hash() if profile == "v9" else formal_stage_config_hash()
     await _seed_authority(factory)
     await openai_local.prepare_database(settings)
     # Make only future inserts newer; do not rewrite an existing model record.
@@ -35,23 +48,24 @@ async def test_pending_formal_registration_is_idempotent_and_default_stays_uncha
                 "SET DEFAULT '2026-09-02T00:00:00+00:00'::timestamptz"
             )
         )
-    await openai_local.prepare_database(settings, **OPTIONS)
-    await openai_local.prepare_database(settings, **OPTIONS)
+    await openai_local.prepare_database(settings, **options)
+    await openai_local.prepare_database(settings, **options)
     async with factory() as session:
         models = list(
             await session.scalars(
-                select(AgentModelConfigRecord).where(
-                    AgentModelConfigRecord.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
-                )
+                select(AgentModelConfigRecord).where(AgentModelConfigRecord.version == version)
             )
         )
-        assert len(models) == 1 and models[0].config_hash == formal_stage_config_hash()
+        assert len(models) == 1 and models[0].config_hash == expected_hash
         assert await session.scalar(select(func.count()).select_from(Job)) == 0
         assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
     result = await admit(factory, None, job_type=JobType.AGENT_RESEARCH, key="formal-default")
     async with factory() as session:
         chosen = await session.get(AgentModelConfigRecord, result.run.model_config_id)
-        assert chosen.version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        assert chosen.version not in {
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        }
 
 
 @pytest.mark.asyncio

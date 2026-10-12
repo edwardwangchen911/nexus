@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
 from nexus.agents.execution import _terminal_without_usage
 from nexus.agents.persistence import require_reserved_daily_budget, try_lock_budget_day
@@ -164,7 +165,10 @@ async def cancel_unused_manual_research(
         ):
             raise ValueError("MANUAL_RESULT_UNKNOWN")
         legacy = allow_legacy and run.pricing_version in ACTIONABLE_CONFIG_VERSIONS
-        if not legacy and run.pricing_version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
+        if not legacy and run.pricing_version not in {
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        }:
             raise ValueError("MANUAL_RESULT_UNKNOWN")
 
         async def guard(_session: AsyncSession, selected: Job) -> bool:
@@ -179,7 +183,7 @@ async def cancel_unused_manual_research(
             job_ids=(job.id,),
             job_types=("agent.paper.research",),
             locked_job_guard=guard,
-            research_budget_profile=None if legacy else FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            research_budget_profile=None if legacy else run.pricing_version,
         )
         if claim is None:
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")

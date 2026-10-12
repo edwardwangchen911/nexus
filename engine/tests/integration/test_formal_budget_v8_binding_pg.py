@@ -36,13 +36,21 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selection", ["v8", "missing", "legacy", "legacy_binding"])
+@pytest.mark.parametrize("selection", ["v8", "v9", "missing", "legacy", "legacy_binding"])
 async def test_protected_file_freezes_exact_v8_profile(
     migrated_database_url, monkeypatch, tmp_path, selection
 ):
     persisted_inspect = loop.inspect_agent_paper_loop
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
-    await prepare_database(settings, **OPTIONS)
+    from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+    from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
+
+    version = (
+        FULL_INPUT_CAPACITY_CONFIG_VERSION
+        if selection == "v9"
+        else FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    )
+    await prepare_database(settings, **(V9_OPTIONS if selection == "v9" else OPTIONS))
     now = AT - timedelta(hours=1)
     engine, sessions, authority, manifest = await seed_normal_path(
         migrated_database_url, monkeypatch, candidate_instruments=FIVE[:3], decision_time=AT
@@ -63,15 +71,11 @@ async def test_protected_file_freezes_exact_v8_profile(
                 )
             )
             model = await session.scalar(
-                select(AgentModelConfigRecord).where(
-                    AgentModelConfigRecord.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
-                )
+                select(AgentModelConfigRecord).where(AgentModelConfigRecord.version == version)
             )
             assert model is not None
             legacy = await session.scalar(
-                select(AgentModelConfigRecord).where(
-                    AgentModelConfigRecord.version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
-                )
+                select(AgentModelConfigRecord).where(AgentModelConfigRecord.version != version)
             )
             batch = await create_agent_paper_candidate_batch(
                 session,
@@ -110,7 +114,7 @@ async def test_protected_file_freezes_exact_v8_profile(
         monkeypatch.setattr(AsyncSession, "scalar", clock)
         chosen = (
             model.id
-            if selection == "v8"
+            if selection in {"v8", "v9"}
             else UUID(int=999)
             if selection == "missing"
             else legacy.id
@@ -215,7 +219,7 @@ async def test_protected_file_freezes_exact_v8_profile(
                     == 1
                 )
             return
-        if selection != "v8":
+        if selection not in {"v8", "v9"}:
             with pytest.raises(ValueError, match="CODEX_FORMAL_AUTHORITY_INVALID"):
                 await apply(root, idempotency_key="protected-v8")
             async with sessions() as session:
@@ -362,7 +366,7 @@ async def test_protected_file_freezes_exact_v8_profile(
             assert binding.content_hash == result["binding_hash"]
             assert binding.payload["model_id"] == str(model.id)
             assert binding.payload["model_hash"] == model.config_hash
-            assert binding.payload["pricing_version"] == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+            assert binding.payload["pricing_version"] == version
             assert binding.payload["runtime_spec"]["research_job_timeout_seconds"] == 180
             assert binding.payload["runtime_spec"]["research_handler_timeout_seconds"] == 195
         # Normal applied facts prohibit destructive branch rollback. Alembic
@@ -379,7 +383,7 @@ async def test_protected_file_freezes_exact_v8_profile(
 
         async with sessions() as session:
             assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0069_formal_budget_output_merge"
+                "0077_formal_v9_output_binding"
             )
             retained = await session.get(FormalBudgetBindingRecord, binding.id)
             assert retained is not None and retained.content_hash == result["binding_hash"]

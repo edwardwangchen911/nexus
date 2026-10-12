@@ -184,13 +184,27 @@ async def prepare_database(
     allow_stage_time_budget_registration: bool = False,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    full_input_capacity: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
-    host = make_url(settings.database_url).host
-    if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
+    url = make_url(settings.database_url)
+    host = url.host
+    if (
+        host is None
+        or host not in {"127.0.0.1", "localhost", "::1"}
+        or (set(url.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
+    ):
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if (
+        type(full_input_capacity) is not bool
+        or full_input_capacity
+        and (not formal_stage_capacity or candidate_stage_capacity or max_wire_bytes != 100479)
+        or not full_input_capacity
+        and max_wire_bytes == 100479
+    ):
+        raise ValueError("CODEX_CAPACITY_REGISTRATION_ARGUMENT_INVALID")
     if (
         type(formal_stage_capacity) is not bool
         or formal_stage_capacity
@@ -237,7 +251,7 @@ async def prepare_database(
         and (
             not structured_synthesis
             or aggregate_input_tokens != 96000
-            or max_wire_bytes != 64000
+            or max_wire_bytes != (100479 if full_input_capacity else 64000)
             or not inline_citations
             or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
         )
@@ -249,7 +263,7 @@ async def prepare_database(
         and (
             not structured_synthesis
             or aggregate_input_tokens != 96000
-            or max_wire_bytes != 64000
+            or max_wire_bytes != (100479 if full_input_capacity else 64000)
             or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
         )
     ):
@@ -262,7 +276,7 @@ async def prepare_database(
         raise ValueError("CODEX_AGGREGATE_SETUP_INVALID")
     if (
         type(max_wire_bytes) is not int
-        or max_wire_bytes not in {55808, 64000}
+        or max_wire_bytes not in {55808, 64000, 100479}
         or (max_wire_bytes != 55808 and aggregate_input_tokens != 96000)
     ):
         raise ValueError("CODEX_WIRE_SETUP_INVALID")
@@ -339,9 +353,10 @@ async def prepare_database(
 
         config = candidate_config()
     if formal_stage_capacity:
+        from nexus.agents.codex_capacity import capacity_config
         from nexus.agents.codex_formal_stage import formal_stage_config
 
-        config = formal_stage_config()
+        config = capacity_config() if full_input_capacity else formal_stage_config()
     configs = [config]
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         configs.append(
@@ -479,9 +494,9 @@ async def prepare_database(
             elif existing_model.config_hash != config_hash:
                 raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
             elif formal_stage_capacity and existing_model.version == config["version"]:
-                from nexus.agents.codex_formal_stage import formal_stage_model_matches
+                from nexus.agents.codex_formal_stage import formal_preparation_model_matches
 
-                if not formal_stage_model_matches(existing_model):
+                if not formal_preparation_model_matches(existing_model):
                     raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
 
 
@@ -608,7 +623,12 @@ def main() -> int:
     parser.add_argument(
         "--formal-stage-capacity",
         action="store_true",
-        help="Register pending v8 profile only; requires explicit stage registration opt-in",
+        help="Register pending formal profile only; requires explicit stage registration opt-in",
+    )
+    parser.add_argument(
+        "--full-input-capacity",
+        action="store_true",
+        help="Select pending v9 only with formal setup and the fixed 100479-byte contract",
     )
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--news-evidence-id", type=UUID)
@@ -616,7 +636,7 @@ def main() -> int:
     parser.add_argument("--identity-snapshot-id", type=UUID)
     parser.add_argument("--quarter-metrics", action="store_true")
     parser.add_argument("--aggregate-input-tokens", type=int, choices=(64000, 96000), default=64000)
-    parser.add_argument("--max-wire-bytes", type=int, choices=(55808, 64000), default=55808)
+    parser.add_argument("--max-wire-bytes", type=int, choices=(55808, 64000, 100479), default=55808)
     parser.add_argument("--inline-citations", action="store_true")
     parser.add_argument(
         "--stage-time-budget",
@@ -660,6 +680,18 @@ def main() -> int:
         "v6 may change future selection, pending v8 remains inactive; never starts research",
     )
     args = parser.parse_args()
+    if (
+        args.full_input_capacity
+        and (
+            args.action != "setup"
+            or not args.formal_stage_capacity
+            or args.candidate_stage_capacity
+            or args.max_wire_bytes != 100479
+        )
+        or not args.full_input_capacity
+        and args.max_wire_bytes == 100479
+    ):
+        parser.error("--full-input-capacity requires explicit formal setup and 100479 wire bytes")
     if args.formal_stage_capacity and (
         args.action != "setup"
         or not args.stage_time_budget
@@ -694,7 +726,7 @@ def main() -> int:
             or args.backend != "codex_sdk"
             or not args.structured_synthesis
             or args.aggregate_input_tokens != 96000
-            or args.max_wire_bytes != 64000
+            or args.max_wire_bytes != (100479 if args.full_input_capacity else 64000)
             or not args.inline_citations
         ):
             raise ValueError("CODEX_ACTIONABLE_SETUP_INVALID")
@@ -705,7 +737,7 @@ def main() -> int:
             or not args.structured_synthesis
             or args.backend != "codex_sdk"
             or args.aggregate_input_tokens != 96000
-            or args.max_wire_bytes != 64000
+            or args.max_wire_bytes != (100479 if args.full_input_capacity else 64000)
         ):
             raise ValueError("CODEX_CITATION_SETUP_INVALID")
         if args.max_wire_bytes != 55808 and (
@@ -796,6 +828,7 @@ def main() -> int:
                     **({"actionable_paper": True} if args.actionable_paper else {}),
                     **({"stage_time_budget": True} if args.stage_time_budget else {}),
                     **({"formal_stage_capacity": True} if args.formal_stage_capacity else {}),
+                    **({"full_input_capacity": True} if args.full_input_capacity else {}),
                     **({"candidate_stage_capacity": True} if args.candidate_stage_capacity else {}),
                     **(
                         {"allow_stage_time_budget_registration": True}
