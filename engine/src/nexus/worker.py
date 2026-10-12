@@ -21,6 +21,8 @@ from nexus.agents.codex_versions import (
     FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     FORMAL_RESEARCH_JOB_TIMEOUT_SECONDS,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
     INLINE_CITATION_CONFIG_VERSION,
     PAPER_SCOPE_CONFIG_VERSIONS,
     PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
@@ -191,10 +193,27 @@ async def run_agent_worker_once(
     preclaim_guard: PreclaimGuard | None = None,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    full_input_capacity: bool = False,
 ) -> bool:
     """Claim and terminalize at most one queued Agent job outside any HTTP request."""
     runtime_mode = _require_worker_runtime(settings)
     job_ids = None if job_ids is None else tuple(job_ids)
+    if (
+        type(full_input_capacity) is not bool
+        or full_input_capacity
+        and (
+            candidate_stage_capacity
+            or formal_stage_capacity
+            or runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or job_ids is None
+            or len(job_ids) != 1
+            or not isinstance(job_ids[0], UUID)
+            or settings.database_url is None
+            or tools is not None
+            or responses_client is not None
+        )
+    ):
+        raise ValueError("CODEX_CAPACITY_WORKER_ARGUMENT_INVALID")
     if (
         type(candidate_stage_capacity) is not bool
         or candidate_stage_capacity
@@ -227,6 +246,35 @@ async def run_agent_worker_once(
         raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
     factory = session_factory(settings)
     locked_guard: LockedJobGuard | None = None
+    formal_full_input_capacity = False
+    if full_input_capacity:
+        from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
+        from nexus.agents.codex_candidate import require_candidate_database
+        from nexus.agents.codex_capacity import capacity_job_qualified
+
+        async with factory() as session:
+            await require_candidate_database(
+                session, configured_database=make_url(cast(str, settings.database_url)).database
+            )
+        locked_guard = capacity_job_qualified
+        prior_guard = preclaim_guard
+
+        async def guard_complete_pool(session: AsyncSession) -> None:
+            if prior_guard is not None:
+                await prior_guard(session)
+            job = await session.get(Job, cast(tuple[UUID, ...], job_ids)[0], populate_existing=True)
+            if job is None or job.status != "queued":
+                return
+            if not await capacity_job_qualified(session, job):
+                raise ValueError("CODEX_CAPACITY_AUTHORITY_INVALID")
+            run = await session.get(AgentResearchRunRecord, UUID(cast(str, job.payload["run_id"])))
+            if run is None:
+                raise ValueError("CODEX_CAPACITY_AUTHORITY_INVALID")
+            await prepare_cycle_capacity_pool(
+                session, settings, run, deadline=asyncio.get_running_loop().time() + 195
+            )
+
+        preclaim_guard = guard_complete_pool
     if candidate_stage_capacity:
         from nexus.agents.codex_candidate import candidate_job_qualified, require_candidate_database
 
@@ -243,7 +291,47 @@ async def run_agent_worker_once(
             actual = await session.scalar(select(func.current_database()))
             if actual != make_url(cast(str, settings.database_url)).database:
                 raise ValueError("CODEX_FORMAL_WORKER_DATABASE_INVALID")
+            selected = await session.get(Job, cast(tuple[UUID, ...], job_ids)[0])
+            if selected is not None and type(selected.payload.get("run_id")) is str:
+                selected_run = await session.get(
+                    AgentResearchRunRecord, UUID(cast(str, selected.payload["run_id"]))
+                )
+                formal_full_input_capacity = (
+                    selected_run is not None
+                    and selected_run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+                )
         locked_guard = formal_stage_job_qualified
+        if formal_full_input_capacity:
+            if tools is not None or responses_client is not None:
+                raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
+            from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
+
+            prior_formal_guard = preclaim_guard
+
+            async def guard_formal_pool(session: AsyncSession) -> None:
+                if prior_formal_guard is not None:
+                    await prior_formal_guard(session)
+                job = await session.get(
+                    Job, cast(tuple[UUID, ...], job_ids)[0], populate_existing=True
+                )
+                if job is None or job.status != "queued":
+                    return
+                if not await formal_stage_job_qualified(session, job):
+                    raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
+                run = await session.get(
+                    AgentResearchRunRecord, UUID(cast(str, job.payload["run_id"]))
+                )
+                if run is None:
+                    raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
+                await prepare_cycle_capacity_pool(
+                    session,
+                    settings,
+                    run,
+                    deadline=asyncio.get_running_loop().time() + 195,
+                    formal_stage_capacity=True,
+                )
+
+            preclaim_guard = guard_formal_pool
     return await run_job_worker_once(
         factory,
         registry=_agent_registry(
@@ -253,6 +341,8 @@ async def run_agent_worker_once(
             include_agent_paper=job_ids is not None,
             candidate_stage_capacity=candidate_stage_capacity,
             formal_stage_capacity=formal_stage_capacity,
+            full_input_capacity=full_input_capacity,
+            formal_full_input_capacity=formal_full_input_capacity,
         ),
         queue=QueueName.GENERAL,
         worker_id=_ONCE_WORKER_ID,
@@ -427,8 +517,34 @@ def _agent_registry(
     include_agent_paper: bool = False,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    full_input_capacity: bool = False,
+    formal_full_input_capacity: bool = False,
 ) -> JobRegistry:
     runtime_mode = _require_worker_runtime(settings)
+    if (
+        type(formal_full_input_capacity) is not bool
+        or formal_full_input_capacity
+        and (
+            not formal_stage_capacity
+            or full_input_capacity
+            or tools is not None
+            or responses_client is not None
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
+    if (
+        type(full_input_capacity) is not bool
+        or full_input_capacity
+        and (
+            candidate_stage_capacity
+            or formal_stage_capacity
+            or runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or not include_agent_paper
+            or tools is not None
+            or responses_client is not None
+        )
+    ):
+        raise ValueError("CODEX_CAPACITY_WORKER_ARGUMENT_INVALID")
     if (
         type(candidate_stage_capacity) is not bool
         or candidate_stage_capacity
@@ -480,21 +596,44 @@ def _agent_registry(
                 claimed=True,
             ):
                 raise UnsafeJobError("CODEX_FORMAL_AUTHORITY_INVALID")
+        if full_input_capacity:
+            from nexus.agents.codex_capacity import capacity_job_qualified
+
+            selected = await context.session.get(Job, context.claim.job_id, populate_existing=True)
+            if selected is None or not await capacity_job_qualified(
+                context.session, selected, claimed=True
+            ):
+                raise UnsafeJobError("CODEX_CAPACITY_AUTHORITY_INVALID")
         if run.status in TERMINAL:
             return _agent_result(run.status)
         if run.status != "prepared":
             raise UnsafeJobError("RUN_STATE_INVALID")
+        committee: CommitteeModel
         try:
-            committee = await _committee(
-                context.session,
-                settings,
-                run,
-                responses_client=responses_client,
-                tools=tools,
-                deadline=context.monotonic_deadline(),
-                candidate_stage_capacity=candidate_stage_capacity,
-                formal_stage_capacity=formal_stage_capacity,
-            )
+            if full_input_capacity or formal_full_input_capacity:
+                from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
+
+                deadline = context.monotonic_deadline()
+                if deadline is None:
+                    raise ValueError("CODEX_CAPACITY_WORKER_ARGUMENT_INVALID")
+                committee = await prepare_cycle_capacity_pool(
+                    context.session,
+                    settings,
+                    run,
+                    deadline=deadline,
+                    formal_stage_capacity=formal_full_input_capacity,
+                )
+            else:
+                committee = await _committee(
+                    context.session,
+                    settings,
+                    run,
+                    responses_client=responses_client,
+                    tools=tools,
+                    deadline=context.monotonic_deadline(),
+                    candidate_stage_capacity=candidate_stage_capacity,
+                    formal_stage_capacity=formal_stage_capacity,
+                )
         except ToolInputError:
             committee = _UnavailableResponsesCommittee()
         result = await execute_research_run(
@@ -508,7 +647,7 @@ def _agent_registry(
 
     job_types = (
         (JobType.AGENT_PAPER_RESEARCH,)
-        if candidate_stage_capacity or formal_stage_capacity
+        if candidate_stage_capacity or formal_stage_capacity or full_input_capacity
         else (JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH)
         if include_agent_paper
         else (JobType.AGENT_RESEARCH,)
@@ -521,7 +660,7 @@ def _agent_registry(
                 payload_model=_AgentResearchJobPayload,
                 queue=QueueName.GENERAL,
                 timeout_seconds=FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
-                if formal_stage_capacity
+                if formal_stage_capacity or full_input_capacity
                 else CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS
                 if candidate_stage_capacity
                 else RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS
@@ -531,7 +670,9 @@ def _agent_registry(
                 max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
                 idempotency_namespace="agent.research",
                 handler=handle,
-                research_budget_profile=FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+                research_budget_profile=FULL_INPUT_CAPACITY_CONFIG_VERSION
+                if full_input_capacity or formal_full_input_capacity
+                else FORMAL_STAGE_CAPACITY_CONFIG_VERSION
                 if formal_stage_capacity
                 else CANDIDATE_BUDGET_CONFIG_VERSION
                 if candidate_stage_capacity
@@ -567,23 +708,52 @@ async def _committee(
     deadline: float | None = None,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    full_input_capacity: bool = False,
 ) -> CommitteeModel:
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
-    formal_model = model is not None and model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    full_input_model = model is not None and model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+    if (
+        type(full_input_capacity) is not bool
+        or full_input_capacity
+        and formal_stage_capacity
+        or full_input_model != (full_input_capacity or formal_stage_capacity and full_input_model)
+    ):
+        return _UnavailableResponsesCommittee()
+    if full_input_capacity:
+        from nexus.agents.codex_candidate import require_candidate_database
+        from nexus.agents.codex_capacity import capacity_model_matches
+
+        # Only explicit isolated composition. No public Worker/registration flag
+        # routes this candidate into the business database or claims its Jobs.
+        await require_candidate_database(session)
+        if (
+            candidate_stage_capacity
+            or formal_stage_capacity
+            or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or model is None
+            or not capacity_model_matches(model)
+            or deadline is None
+        ):
+            return _UnavailableResponsesCommittee()
+    formal_model = model is not None and (
+        model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        or full_input_model
+        and formal_stage_capacity
+    )
     if type(formal_stage_capacity) is not bool or formal_model != formal_stage_capacity:
         return _UnavailableResponsesCommittee()
     if formal_stage_capacity:
-        from nexus.agents.codex_formal_stage import formal_stage_model_matches
+        from nexus.agents.codex_formal_stage import formal_preparation_model_matches
 
         if (
             candidate_stage_capacity
             or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
             or model is None
-            or not formal_stage_model_matches(model)
+            or not formal_preparation_model_matches(model)
             or deadline is None
         ):
             return _UnavailableResponsesCommittee()
-    capacity_profile = candidate_stage_capacity or formal_stage_capacity
+    capacity_profile = candidate_stage_capacity or formal_stage_capacity or full_input_capacity
     candidate_model = model is not None and model.version == CANDIDATE_BUDGET_CONFIG_VERSION
     if candidate_model != candidate_stage_capacity:
         return _UnavailableResponsesCommittee()
@@ -661,7 +831,7 @@ async def _committee(
             # The worker deadline includes transaction/handler grace. Anchor v6
             # to the original worker start, never reset time after DB preparation.
             deadline -= RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS - RESEARCH_STAGE_JOB_TIMEOUT_SECONDS
-        if formal_stage_capacity and deadline is not None:
+        if (formal_stage_capacity or full_input_capacity) and deadline is not None:
             deadline -= (
                 FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS - FORMAL_RESEARCH_JOB_TIMEOUT_SECONDS
             )
@@ -689,7 +859,12 @@ async def _committee(
             **(
                 {
                     "stage_time_budget": True,
-                    "stage_budget_version": FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                    "stage_budget_version": FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                }
+                if full_input_capacity
+                else {
+                    "stage_time_budget": True,
+                    "stage_budget_version": model.version,
                 }
                 if formal_stage_capacity
                 else {
@@ -716,7 +891,11 @@ async def _committee(
                 {
                     "deadline": deadline,
                     "aggregate_input_tokens": model.max_input_tokens,
-                    "max_wire_bytes": 64000 if capacity_profile else wire_byte_limit(model.version),
+                    "max_wire_bytes": FULL_INPUT_CAPACITY_MAX_WIRE_BYTES
+                    if full_input_model
+                    else 64000
+                    if capacity_profile
+                    else wire_byte_limit(model.version),
                 }
                 if model.version in STAGED_CONFIG_VERSIONS or capacity_profile
                 else {}
