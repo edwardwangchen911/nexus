@@ -160,6 +160,26 @@ uv run --project engine nexus-engine-agent-paper-once trigger \
 
 ## 3. Run research：逐个消费该周期已持久化的 Job
 
+### 已有研究请求的只读大小诊断
+
+在调用或重放模型之前，可针对已有 Run 读取冻结输入并重建请求：
+
+```bash
+uv run --project engine nexus-engine-research-workload-inspection \
+  --repo-root "$PWD" --run-id "$RUN_ID"
+```
+
+该入口支持正式 v8 和既有受支持版本，仅在只读事务中读取现有事实，不调用模型、
+不领取 Job、不改变预算或执行锁。`research.wire_limit_status=exceeded` 表示当前代码
+重建的研究请求超过其冻结配置的上限；`component_bytes` 仅包含固定输入类别的大小，
+不输出内容。构造委员会所需的观察期限不是一次新的执行期限。
+
+`original_request_hash_matched=true` 必须有完整且校验通过的原研究角色、冻结输入与
+请求哈希匹配；原调用前已拒绝、没有原请求哈希时，仅报告 `current_code_reconstruction`。
+critique 只使用它之前的五个研究角色，缺少原研究时明确为不可核验，不制造替代分析。
+命令成功仅表示诊断完成，研究阶段未超限不证明未来 critique/synthesis 也未超限，
+更不代表来源当前有效、业务准入或自然周期验收通过。诊断结果不允许重放失败周期。
+
 使用 `trigger` 返回的 `CYCLE_ID`。入口从该周期的持久化事件解析唯一 Run，只允许领取与之绑定的
 queued `agent.paper.research` Job。每次命令最多领取一个；只有前一 Job 已有明确持久终态时，才为同一
 `CYCLE_ID` 再次运行以领取下一个候选 Job，直到 1–5 个候选都终结：

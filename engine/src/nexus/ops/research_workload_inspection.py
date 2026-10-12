@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_sdk import (
     codex_input_allowance,
@@ -19,7 +20,12 @@ from nexus.agents.codex_sdk import (
     codex_request_wire,
 )
 from nexus.agents.codex_staged import StagedCodexCommittee
+from nexus.agents.codex_versions import (
+    FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+)
 from nexus.agents.committee import ROLE_ORDER, CommitteeRoleOutput
+from nexus.agents.execution import CommitteeModel
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
 from nexus.agents.synthesis import domain_evidence
@@ -38,7 +44,7 @@ from nexus.worker import _committee
 
 
 def summarize_stage_request(
-    payload: dict[str, object], output_model: type[BaseModel]
+    payload: dict[str, object], output_model: type[BaseModel], *, max_wire_bytes: int | None = None
 ) -> dict[str, object]:
     wire = codex_request_wire(payload)
     schema = codex_output_schema(output_model)
@@ -51,6 +57,16 @@ def summarize_stage_request(
         "input_allowance_units": codex_input_allowance(wire, schema),
         "server_token_count": None,
         "request_hash": codex_request_hash(payload, output_model),
+        **(
+            {
+                "wire_limit_bytes": max_wire_bytes,
+                "wire_limit_status": "exceeded"
+                if len(wire.encode()) > max_wire_bytes
+                else "within_limit",
+            }
+            if max_wire_bytes is not None
+            else {}
+        ),
     }
 
 
@@ -68,6 +84,23 @@ def summarize_inputs(inputs: dict[str, object]) -> dict[str, object]:
         "evidence_kind": "current_code_frozen_input_readback",
         "paper_context_present": present,
         "frozen_inputs_bytes": len(wire),
+        "component_bytes": {
+            name: len(
+                json.dumps(
+                    inputs[name], sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                ).encode()
+            )
+            for name in (
+                "security_snapshot",
+                "filing_disclosures",
+                "financial_facts",
+                "trailing_valuation",
+                "price_close",
+                "price_features",
+                "macro",
+            )
+            if name in inputs
+        },
         "frozen_inputs_sha256": hashlib.sha256(wire).hexdigest(),
         "model_calls": 0,
         "business_writes": 0,
@@ -104,7 +137,9 @@ def inspect_critique_request(
             ).hexdigest()
             if record.run_id != run.id or record.content_hash != digest:
                 return unavailable
-        role_records = tuple(record for record in records if record.role is not None)
+        # Reconstruct critique from its five preceding research roles. A later
+        # synthesis assessment is not an input to that original request.
+        role_records = tuple(record for record in records if record.role in ROLE_ORDER[:5])
         if (
             any(record.status != "running" or record.intent is not None for record in role_records)
             or validate_stage_trace(
@@ -161,7 +196,9 @@ def inspect_critique_request(
                 if identity.get("frozen_inputs_hash") != frozen_hash:
                     return unavailable
                 recorded_hashes.add(cast(str, identity.get("request_hash")))
-        summary = summarize_stage_request(payload, output_model)
+        summary = summarize_stage_request(
+            payload, output_model, max_wire_bytes=committee._max_wire_bytes
+        )
         matches = recorded_hashes == {summary["request_hash"]}
         return {
             "status": "request_hash_verified" if matches else "current_code_readback_only",
@@ -176,6 +213,29 @@ def inspect_critique_request(
         }
     except (ValueError, TypeError, KeyError, AttributeError):
         return unavailable
+
+
+async def _inspection_committee(
+    session: AsyncSession,
+    settings: EngineSettings,
+    run: AgentResearchRunRecord,
+    *,
+    model: AgentModelConfigRecord,
+) -> CommitteeModel:
+    formal = model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    # The factory needs the exact frozen profile and a construction deadline.
+    # This observation-only deadline is never used to invoke or resume a model.
+    return await _committee(
+        session,
+        settings,
+        run,
+        responses_client=None,
+        tools=None,
+        formal_stage_capacity=formal,
+        deadline=asyncio.get_running_loop().time() + FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
+        if formal
+        else None,
+    )
 
 
 async def inspect_run(settings: EngineSettings, *, run_id: UUID) -> dict[str, object]:
@@ -194,7 +254,7 @@ async def inspect_run(settings: EngineSettings, *, run_id: UUID) -> dict[str, ob
             )
             if run is None or model is None or model.config_hash != run.model_hash:
                 raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
-            committee = await _committee(session, settings, run, responses_client=None, tools=None)
+            committee = await _inspection_committee(session, settings, run, model=model)
             if not isinstance(committee, StagedCodexCommittee):
                 raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
             # Reuse the normal input builder only. Never call analyze/invoke/Worker.
@@ -214,6 +274,53 @@ async def inspect_run(settings: EngineSettings, *, run_id: UUID) -> dict[str, ob
             )
             evidence = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
             refs = tuple(domain_evidence(record) for record in evidence)
+            input_summary = summarize_inputs(inputs)
+            payload, output_model = committee.build_stage_request(
+                stage="research",
+                request=ResearchRequest(
+                    instrument_id=run.instrument_id,
+                    data_snapshot_id=run.data_snapshot_id,
+                    decision_time=run.decision_time,
+                ),
+                evidence_refs=refs,
+                frozen_inputs=inputs,
+                previous=[],
+            )
+            research = summarize_stage_request(
+                payload, output_model, max_wire_bytes=committee._max_wire_bytes
+            )
+            recorded_hashes = {
+                record.payload.get("stage_input_hash")
+                for record in records
+                if record.payload.get("stage") == "research"
+                and record.payload.get("stage_input_hash")
+            }
+            prior = tuple(record for record in records if record.role in ROLE_ORDER[:5])
+            original_research_matched = (
+                len(prior) == len(ROLE_ORDER[:5])
+                and validate_stage_trace(
+                    run,
+                    prior,
+                    refs,
+                    {role: prompt.content_hash for role, prompt in committee._prompts.items()},
+                ).status
+                == "verified"
+                and all(
+                    record.payload.get("frozen_inputs_hash")
+                    == input_summary["frozen_inputs_sha256"]
+                    for record in prior
+                )
+                and recorded_hashes == {research["request_hash"]}
+            )
+            research.update(
+                {
+                    "original_request_hash_matched": original_research_matched,
+                    "recorded_request_hash_present": bool(recorded_hashes),
+                    "provenance": "persisted_request_hash_match"
+                    if original_research_matched
+                    else "current_code_reconstruction",
+                }
+            )
             critique = inspect_critique_request(
                 committee,
                 run=run,
@@ -231,7 +338,8 @@ async def inspect_run(settings: EngineSettings, *, run_id: UUID) -> dict[str, ob
                 "observed_at": now.isoformat(),
                 "model_version": model.version,
                 "run_status": run.status,
-                **summarize_inputs(inputs),
+                **input_summary,
+                "research": research,
                 "critique": critique,
             }
     finally:
