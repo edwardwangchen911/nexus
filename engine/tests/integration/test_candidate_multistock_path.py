@@ -31,9 +31,14 @@ FIVE = INSTRUMENTS + (
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [3, 5])
 @pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
+@pytest.mark.parametrize("profile", ["v7", "v9", "formal_v9"])
 async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
-    migrated_database_url, monkeypatch, count, trade
+    migrated_database_url, monkeypatch, count, trade, profile
 ):
+    formal = profile == "formal_v9"
+    consumer_mode = (
+        {"formal_stage_capacity": True} if formal else {"candidate_stage_capacity": True}
+    )
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
     engine, sessions, authority, manifest = await seed_normal_path(
@@ -99,10 +104,34 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     try:
         await _set_test_insert_clock(sessions, AT)
         async with sessions.begin() as session:
+            if profile != "v7":
+                from nexus.agents.codex_capacity import capacity_config, capacity_config_hash
+
+                config = capacity_config()
+                session.add(
+                    AgentModelConfigRecord(
+                        model_id=config["model_id"],
+                        version=config["version"],
+                        config_hash=capacity_config_hash(),
+                        max_input_tokens=96000,
+                        max_output_tokens=8192,
+                        max_tool_calls=0,
+                        input_usd_per_million=Decimal(0),
+                        output_usd_per_million=Decimal(0),
+                        pricing_available_at=datetime.fromisoformat(config["pricing_available_at"]),
+                        pricing_expires_at=datetime.fromisoformat(config["pricing_expires_at"]),
+                        created_at=AT - timedelta(seconds=1),
+                    )
+                )
+                await session.flush()
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
                     AgentModelConfigRecord.version
-                    == "codex-sdk-chatgpt-v7-stage-capacity-candidate"
+                    == (
+                        "codex-sdk-chatgpt-v9-full-input-capacity"
+                        if profile != "v7"
+                        else "codex-sdk-chatgpt-v7-stage-capacity-candidate"
+                    )
                 )
             )
             assert model.created_at < AT
@@ -136,8 +165,11 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 idempotency_key=f"candidate-{count}",
                 requested_instrument_ids=batch.instrument_ids,
                 candidate_batch_id=batch.batch_id,
-                candidate_stage_capacity=True,
-                candidate_model_config_id=model.id,
+                **(
+                    {"formal_stage_capacity": True, "formal_model_config_id": model.id}
+                    if formal
+                    else {"candidate_stage_capacity": True, "candidate_model_config_id": model.id}
+                ),
             )
             assert result.result_code == "RESEARCH_JOBS_PREPARED", result
             assert len(result.research_run_ids) == count
@@ -151,23 +183,43 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             )
         await _set_test_insert_clock(sessions, clock_at[0])
         for job in jobs:
-            assert await run_agent_worker_once(
-                settings, job_ids=(job.id,), candidate_stage_capacity=True
+            research_mode = (
+                {"formal_stage_capacity": True}
+                if formal
+                else {"full_input_capacity": True}
+                if profile != "v7"
+                else {"candidate_stage_capacity": True}
             )
-            assert not await run_agent_worker_once(
-                settings, job_ids=(job.id,), candidate_stage_capacity=True
-            )
+            assert await run_agent_worker_once(settings, job_ids=(job.id,), **research_mode)
+            assert not await run_agent_worker_once(settings, job_ids=(job.id,), **research_mode)
         assert calls == ["research", "critique", "synthesis"] * count
         async with sessions() as session:
             for run_id in result.research_run_ids:
                 run = await session.get(AgentResearchRunRecord, run_id)
                 assert run.status == "completed" and run.retry_count == 0
+                if profile != "v7":
+                    from nexus.agents.actionable_research import ActionableResearchError
+
+                    with pytest.raises(
+                        ActionableResearchError, match="RESEARCH_OUTPUT_NOT_ACTIONABLE"
+                    ):
+                        await load_actionable_research_output(
+                            session,
+                            run_id=run_id,
+                            decision_time=AT + timedelta(seconds=2),
+                            allow_safe_no_trade=True,
+                            **(
+                                {"candidate_stage_capacity": True}
+                                if formal
+                                else {"formal_stage_capacity": True}
+                            ),
+                        )
                 action = await load_actionable_research_output(
                     session,
                     run_id=run_id,
                     decision_time=AT + timedelta(seconds=2),
                     allow_safe_no_trade=True,
-                    candidate_stage_capacity=True,
+                    **consumer_mode,
                 )
                 assert action.instrument_id in batch.instrument_ids
                 assert action.stance == ("buy_candidate" if trade else "watch")
@@ -184,7 +236,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 idempotency_key="synthesis-ready",
                 daily_limit_usd=Decimal("3"),
                 now=AT + timedelta(seconds=2),
-                candidate_stage_capacity=True,
+                **consumer_mode,
             )
             assert pending.result_code == "PORTFOLIO_SYNTHESIS_PENDING", pending
             synth = await session.scalar(select(AgentPortfolioSynthesisRunRecord))
@@ -215,8 +267,16 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         clock_at[0] = AT + timedelta(seconds=3)
         await _set_test_insert_clock(sessions, clock_at[0])
         assert await run_portfolio_synthesis_worker_once(
-            settings, job_ids=(synth_job.id,), candidate_stage_capacity=True
+            settings, job_ids=(synth_job.id,), **consumer_mode
         )
+        async with sessions() as session:
+            completed_synth = await session.get(AgentPortfolioSynthesisRunRecord, synth.id)
+            completed_job = await session.get(Job, synth_job.id)
+            assert completed_synth.status == "completed", completed_synth.status
+            assert completed_job.status == "succeeded", (
+                completed_job.status,
+                completed_job.error_code,
+            )
         if not trade and count == 3:
             from sqlalchemy import event
             from sqlalchemy.exc import DBAPIError
@@ -241,7 +301,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                             cycle_id=result.cycle_id,
                             idempotency_key="corrupt-frozen-model",
                             now=AT + timedelta(seconds=4),
-                            candidate_stage_capacity=True,
+                            **consumer_mode,
                         )
             finally:
                 event.remove(
@@ -259,7 +319,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 cycle_id=result.cycle_id,
                 idempotency_key="activate-target",
                 now=AT + timedelta(seconds=4),
-                candidate_stage_capacity=True,
+                **consumer_mode,
             )
             assert finished.result_code == (
                 "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
@@ -312,7 +372,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 cycle_id=result.cycle_id,
                 idempotency_key="activate-target",
                 now=AT + timedelta(seconds=5),
-                candidate_stage_capacity=True,
+                **consumer_mode,
             )
             assert replay.order_ids == finished.order_ids
             assert replay.strategy_decision_id == finished.strategy_decision_id
@@ -321,8 +381,38 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             ] == counts_before
         if trade:
             await _verify_internal_fills(
-                settings, sessions, result.cycle_id, authority.account_id, orders, count
+                settings,
+                sessions,
+                result.cycle_id,
+                authority.account_id,
+                orders,
+                count,
+                formal=formal,
             )
+        elif profile != "v7" and count == 3:
+            import asyncio
+
+            from alembic import command
+            from alembic.config import Config
+            from sqlalchemy import text
+            from sqlalchemy.exc import DBAPIError
+
+            migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+            with pytest.raises(DBAPIError, match="V9_OUTPUT_BINDINGS_EXIST"):
+                await asyncio.to_thread(
+                    command.downgrade, migration_config, "0075_manual_paper_requests"
+                )
+            async with sessions() as session:
+                assert (
+                    await session.scalar(text("SELECT version_num FROM alembic_version"))
+                    == "0077_formal_v9_output_binding"
+                )
+                assert (
+                    await session.scalar(
+                        select(func.count()).select_from(StrategyDecisionAgentOutputRecord)
+                    )
+                    == count
+                )
     finally:
         await engine.dispose()
 
@@ -355,6 +445,7 @@ async def _verify_internal_fills(
     count,
     *,
     verify_reads=True,
+    formal=False,
     host_settings=None,
     monkeypatch=None,
     protected_environment=None,
@@ -626,15 +717,18 @@ async def _verify_internal_fills(
             .where(PaperLedgerTransactionRecord.transaction_type == "fill")
         ) == len(orders)
         if verify_reads:
-            with pytest.raises(NexusError, match="order projection is incomplete"):
-                await PaperReadService(
-                    session, projection.as_of, cursor_signing_secrets=("controlled-test-cursor",)
-                ).orders(status=None, cursor=None, limit=20)
+            if not formal:
+                with pytest.raises(NexusError, match="order projection is incomplete"):
+                    await PaperReadService(
+                        session,
+                        projection.as_of,
+                        cursor_signing_secrets=("controlled-test-cursor",),
+                    ).orders(status=None, cursor=None, limit=20)
             page, page_at = await PaperReadService(
                 session,
                 projection.as_of,
                 cursor_signing_secrets=("controlled-test-cursor",),
-                candidate_stage_capacity=True,
+                candidate_stage_capacity=not formal,
             ).orders(status=None, cursor=None, limit=20)
             assert page_at == projection.as_of and page.next_cursor is None
             assert {item.order_id for item in page.items} == {order.id for order in orders}
@@ -649,7 +743,9 @@ async def _verify_internal_fills(
 
     async with sessions() as session:
         before_reads = await _business_facts(session)
-    await _verify_http_reads(settings.database_url, cycle_id, orders, projection.as_of)
+    await _verify_http_reads(
+        settings.database_url, cycle_id, orders, projection.as_of, formal=formal
+    )
     import os
 
     if os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1":
@@ -661,14 +757,15 @@ async def _verify_internal_fills(
             cycle_id=cycle_id,
             order_ids=tuple(order.id for order in orders),
             candidate_count=count,
-            candidate_stage_capacity_reads=True,
+            candidate_stage_capacity_reads=not formal,
+            formal_readback=formal,
             expected_defer_count=0,
         )
     async with sessions() as session:
         assert await _business_facts(session) == before_reads
 
 
-async def _verify_http_reads(database_url, cycle_id, orders, api_now):
+async def _verify_http_reads(database_url, cycle_id, orders, api_now, *, formal=False):
     import httpx
     from helpers.paper_api import app, headers
 
@@ -686,10 +783,13 @@ async def _verify_http_reads(database_url, cycle_id, orders, api_now):
     ) as client:
         path = paths[0] + "&candidate_stage_capacity=true"
         rejected = await client.get(path, headers=headers("GET", path))
-        assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "DATA_PARTIAL"
+        if not formal:
+            assert (
+                rejected.status_code == 409 and rejected.json()["error"]["code"] == "DATA_PARTIAL"
+            )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(
-            app=app(database_url, now=api_now, candidate_stage_capacity_reads=True)
+            app=app(database_url, now=api_now, candidate_stage_capacity_reads=not formal)
         ),
         base_url="http://testserver",
     ) as client:
@@ -699,13 +799,14 @@ async def _verify_http_reads(database_url, cycle_id, orders, api_now):
             envelopes.append(response.json()["data"])
         unauthenticated = await client.get(paths[0])
         assert unauthenticated.status_code == 401
-        cancel_path = f"/internal/v1/paper/orders/{UUID(int=404)}/cancel"
-        body = b'{"expected_event_seq":1}'
-        signed = headers("POST", cancel_path, body)
-        signed["Idempotency-Key"] = "candidate-read-only-cancel"
-        rejected = await client.post(cancel_path, headers=signed, content=body)
-        assert rejected.status_code == 409
-        assert rejected.json()["error"]["message"] == "Candidate Paper API is read-only."
+        if not formal:
+            cancel_path = f"/internal/v1/paper/orders/{UUID(int=404)}/cancel"
+            body = b'{"expected_event_seq":1}'
+            signed = headers("POST", cancel_path, body)
+            signed["Idempotency-Key"] = "candidate-read-only-cancel"
+            rejected = await client.post(cancel_path, headers=signed, content=body)
+            assert rejected.status_code == 409
+            assert rejected.json()["error"]["message"] == "Candidate Paper API is read-only."
     assert {item["order_id"] for item in envelopes[0]["items"]} == {
         str(order.id) for order in orders
     }

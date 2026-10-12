@@ -12,6 +12,7 @@ from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
     CANDIDATE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
     STAGED_CONFIG_VERSIONS,
     STRUCTURED_CONFIG_VERSIONS,
 )
@@ -36,6 +37,7 @@ def staged_intent_semantics_valid(intent: ResearchIntent, pricing_version: str) 
     if pricing_version in ACTIONABLE_CONFIG_VERSIONS or pricing_version in {
         CANDIDATE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
     }:
         return actionable_intent_shape_valid(intent)
     return pricing_version not in STAGED_CONFIG_VERSIONS or (
@@ -138,6 +140,7 @@ def synthesize_intent(
     capacity_profile = model.version in {
         CANDIDATE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
     }
     structured = model.version in STRUCTURED_CONFIG_VERSIONS or capacity_profile
     staged = model.version in STAGED_CONFIG_VERSIONS or capacity_profile

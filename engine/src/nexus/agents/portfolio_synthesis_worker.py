@@ -11,8 +11,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from nexus.agents.codex_candidate import candidate_model_matches, require_candidate_consumer_profile
-from nexus.agents.codex_formal_stage import formal_stage_model_matches
+from nexus.agents.codex_candidate import (
+    isolated_candidate_model_matches,
+    require_candidate_consumer_profile,
+)
+from nexus.agents.codex_formal_stage import formal_preparation_model_matches
 from nexus.agents.codex_input_view import project_portfolio_payload
 from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
@@ -82,9 +85,9 @@ class CodexSynthesisTransport:
 
     def supports(self, model: AgentModelConfigRecord) -> bool:
         if self._formal_stage_capacity:
-            return formal_stage_model_matches(model)
+            return formal_preparation_model_matches(model)
         if self._candidate_stage_capacity:
-            return candidate_model_matches(model)
+            return isolated_candidate_model_matches(model)
         return (
             model.model_id == MODEL_ID
             and model.version in ACTIONABLE_CONFIG_VERSIONS
@@ -142,7 +145,7 @@ async def candidate_synthesis_job_qualified(
     )
     if (
         model is None
-        or not candidate_model_matches(model)
+        or not isolated_candidate_model_matches(model)
         or run.model_hash != model.config_hash
         or run.pricing_version != model.version
         or model.pricing_available_at > now
@@ -247,7 +250,7 @@ async def formal_synthesis_job_qualified(
     )
     if (
         model is None
-        or not formal_stage_model_matches(model)
+        or not formal_preparation_model_matches(model)
         or run.model_hash != model.config_hash
         or run.pricing_version != model.version
         or model.pricing_available_at > now

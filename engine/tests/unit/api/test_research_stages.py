@@ -152,10 +152,19 @@ def test_damaged_trace_does_not_display_unverified_model_text(damage):
     assert not trace.stages
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "codex-sdk-chatgpt-v3",
+        "codex-sdk-chatgpt-v7-stage-capacity-candidate",
+        "codex-sdk-chatgpt-v8-stage-capacity",
+        "codex-sdk-chatgpt-v9-full-input-capacity",
+    ],
+)
 @pytest.mark.parametrize("damage", [None, "missing", "citation", "coverage"])
-def test_v3_trace_checks_and_preserves_full_assessment(damage):
+def test_structured_trace_checks_and_preserves_full_assessment(damage, version):
     run, records, evidence, prompts = _case()
-    run.pricing_version = "codex-sdk-chatgpt-v3"
+    run.pricing_version = version
     assessment = {
         "stance": "hold",
         "claims": records[-1].payload["claims"],
@@ -186,3 +195,33 @@ def test_v3_trace_checks_and_preserves_full_assessment(damage):
     assert trace.status == ("verified" if damage is None else "invalid")
     if damage is None:
         assert trace.stages[-1].roles[0].synthesis_assessment.model_dump(mode="json") == assessment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "version", ["codex-sdk-chatgpt-v8-stage-capacity", "codex-sdk-chatgpt-v9-full-input-capacity"]
+)
+async def test_capacity_reader_loads_and_validates_persisted_trace(monkeypatch, version):
+    from unittest.mock import AsyncMock
+
+    from nexus.api import research_stages
+
+    run, records, evidence, prompts = _case()
+    run.pricing_version = version
+    session = AsyncMock()
+    session.scalars.return_value = records[:5]
+    monkeypatch.setattr(research_stages, "load_frozen_evidence", AsyncMock(return_value=evidence))
+    monkeypatch.setattr(research_stages, "domain_evidence", lambda value: value)
+    monkeypatch.setattr(
+        research_stages,
+        "load_frozen_prompts",
+        AsyncMock(
+            return_value={
+                role: SimpleNamespace(content_hash=value) for role, value in prompts.items()
+            }
+        ),
+    )
+    trace = await research_stages.read_stage_trace(session, run)
+    assert trace is not None
+    assert trace.status == "verified"
+    assert [stage.status for stage in trace.stages] == ["complete", "unavailable", "unavailable"]

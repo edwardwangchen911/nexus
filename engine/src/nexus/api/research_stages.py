@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_staged import STAGES
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
     STAGED_CONFIG_VERSIONS,
     STRUCTURED_CONFIG_VERSIONS,
 )
@@ -22,11 +24,17 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.strategy.intents import ResearchClaim
 
+_CAPACITY_TRACE_VERSIONS = {
+    CANDIDATE_BUDGET_CONFIG_VERSION,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+}
+
 
 async def read_stage_trace(
     session: AsyncSession, run: AgentResearchRunRecord
 ) -> ResearchStageTrace | None:
-    if run.pricing_version not in (STAGED_CONFIG_VERSIONS | {CANDIDATE_BUDGET_CONFIG_VERSION}):
+    if run.pricing_version not in (STAGED_CONFIG_VERSIONS | _CAPACITY_TRACE_VERSIONS):
         return None
     records = tuple(
         await session.scalars(
@@ -106,8 +114,7 @@ def validate_stage_trace(
                 return invalid
             assessment = output.synthesis_assessment
             if (
-                run.pricing_version
-                in (STRUCTURED_CONFIG_VERSIONS | {CANDIDATE_BUDGET_CONFIG_VERSION})
+                run.pricing_version in (STRUCTURED_CONFIG_VERSIONS | _CAPACITY_TRACE_VERSIONS)
                 and stage == "synthesis"
             ):
                 required = {

@@ -1,17 +1,59 @@
 """Formal capacity uses reviewed actionable semantics, without granting execution."""
 
 import pytest
-from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+)
 from nexus.agents.synthesis import staged_intent_semantics_valid
 from unit.agents.test_actionable_research import _case
 
 
 @pytest.mark.parametrize("valid", [True, False])
-def test_formal_stage_semantics_require_structured_review(valid):
+@pytest.mark.parametrize(
+    "version", [FORMAL_STAGE_CAPACITY_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION]
+)
+def test_formal_stage_semantics_require_structured_review(valid, version):
     intent = _case()["intent"]
     if not valid:
         intent = intent.model_copy(update={"synthesis_assessment": None})
-    assert staged_intent_semantics_valid(intent, FORMAL_STAGE_CAPACITY_CONFIG_VERSION) is valid
+    assert staged_intent_semantics_valid(intent, version) is valid
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {},
+        {"formal_identity_verified": True, "candidate_identity_verified": True},
+        {"formal_identity_verified": 1},
+    ],
+)
+def test_v9_structured_semantics_do_not_grant_actionable_consumption(flags):
+    from nexus.agents.actionable_research import (
+        ActionableResearchError,
+        admit_actionable_research_output,
+    )
+
+    case = _case()
+    case["run"].pricing_version = FULL_INPUT_CAPACITY_CONFIG_VERSION
+    with pytest.raises(ActionableResearchError):
+        admit_actionable_research_output(**case, **flags)
+
+
+@pytest.mark.parametrize("verified", ["candidate_identity_verified", "formal_identity_verified"])
+def test_verified_v9_keeps_existing_content_admission_guards(verified):
+    from nexus.agents.actionable_research import (
+        ActionableResearchError,
+        admit_actionable_research_output,
+    )
+    from nexus.agents.price_authority import FrozenPriceAuthorityStatus
+
+    case = _case()
+    case["run"].pricing_version = FULL_INPUT_CAPACITY_CONFIG_VERSION
+    assert admit_actionable_research_output(**case, **{verified: True}).stance == "buy_candidate"
+    case["price_authority_status"] = FrozenPriceAuthorityStatus.INVALID
+    with pytest.raises(ActionableResearchError):
+        admit_actionable_research_output(**case, **{verified: True})
 
 
 @pytest.mark.asyncio

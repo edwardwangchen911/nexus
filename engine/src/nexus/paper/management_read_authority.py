@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.agents.codex_formal_stage import formal_stage_config_hash
-from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+)
 from nexus.agents.persistence import load_actionable_research_output
 from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisInputV1,
@@ -69,21 +72,35 @@ async def formal_proposal_read_profile(
     read_as_of: datetime,
 ) -> bool:
     """Select a read verifier from persisted identity; this grants no execution authority."""
-    version = await session.scalar(
-        select(AgentPortfolioSynthesisRunRecord.pricing_version)
-        .join(
-            StrategyDecisionRecord,
-            StrategyDecisionRecord.agent_paper_cycle_id
-            == AgentPortfolioSynthesisRunRecord.cycle_id,
+    identity = (
+        await session.execute(
+            select(
+                AgentPortfolioSynthesisRunRecord.pricing_version,
+                AgentPortfolioSynthesisRunRecord.cycle_id,
+            )
+            .join(
+                StrategyDecisionRecord,
+                StrategyDecisionRecord.agent_paper_cycle_id
+                == AgentPortfolioSynthesisRunRecord.cycle_id,
+            )
+            .where(
+                StrategyDecisionRecord.id == decision_id,
+                StrategyDecisionRecord.account_id == account_id,
+                StrategyDecisionRecord.created_at <= read_as_of,
+                AgentPortfolioSynthesisRunRecord.created_at <= read_as_of,
+            )
         )
-        .where(
-            StrategyDecisionRecord.id == decision_id,
-            StrategyDecisionRecord.account_id == account_id,
-            StrategyDecisionRecord.created_at <= read_as_of,
-            AgentPortfolioSynthesisRunRecord.created_at <= read_as_of,
-        )
-    )
-    return version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    ).one_or_none()
+    if identity is None:
+        return False
+    if identity[0] == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
+        return True
+    if identity[0] != FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        return False
+    from nexus.paper.agent_cycle import _events
+
+    events = await _events(session, identity[1])
+    return bool(events and events[0].fact_ids.get("formal_stage_capacity") is True)
 
 
 async def load_candidate_batch_authority(
@@ -120,7 +137,13 @@ async def load_synthesis_read_authority(
     if run is None:
         return None
     frozen = await load_frozen_synthesis_authority(session, run)
-    if run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
+    from nexus.paper.agent_cycle import _events
+
+    events = await _events(session, cycle.id)
+    formal_v9 = run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION and bool(
+        events and events[0].fact_ids.get("formal_stage_capacity") is True
+    )
+    if run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION or formal_v9:
         from nexus.paper.agent_cycle import _require_cycle_candidate_profile
 
         await _require_cycle_candidate_profile(
@@ -131,7 +154,10 @@ async def load_synthesis_read_authority(
             expected_formal_model_id=run.model_config_id,
             now=frozen.admitted_at,
         )
-        if run.model_hash != formal_stage_config_hash() or frozen.admitted_at > read_as_of:
+        from nexus.agents.codex_capacity import capacity_config_hash
+
+        expected_hash = capacity_config_hash() if formal_v9 else formal_stage_config_hash()
+        if run.model_hash != expected_hash or frozen.admitted_at > read_as_of:
             raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
         for source in frozen.security_outputs:
             source_output = await session.get(AgentResearchOutputRecord, source.research_output_id)

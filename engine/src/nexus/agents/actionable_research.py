@@ -128,6 +128,7 @@ def admit_actionable_research_output(
             ACTIONABLE_CONFIG_VERSIONS,
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
         )
 
         if (
@@ -136,18 +137,21 @@ def admit_actionable_research_output(
             or formal_identity_verified
             and candidate_identity_verified
             or formal_identity_verified
-            and run.pricing_version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+            and run.pricing_version
+            not in {FORMAL_STAGE_CAPACITY_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
         ):
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         version_admitted = (
             run.pricing_version in ACTIONABLE_CONFIG_VERSIONS
             or (
                 candidate_identity_verified
-                and run.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION
+                and run.pricing_version
+                in {CANDIDATE_BUDGET_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
             )
             or (
                 formal_identity_verified
-                and run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+                and run.pricing_version
+                in {FORMAL_STAGE_CAPACITY_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
             )
         )
 

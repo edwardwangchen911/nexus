@@ -429,6 +429,7 @@ async def _load_portfolio_target_baseline(
         from nexus.agents.codex_versions import (
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
         )
 
         decision = await session.get(StrategyDecisionRecord, target.strategy_decision_id)
@@ -444,6 +445,17 @@ async def _load_portfolio_target_baseline(
         if prior_run is None or prior_run.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION:
             raise ValueError("PORTFOLIO_PROPOSAL_TARGET_CONFLICT")
         prior_formal = prior_run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        if prior_run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+            from nexus.paper.management_read_authority import formal_proposal_read_profile
+
+            prior_formal = await formal_proposal_read_profile(
+                session,
+                account_id=account_id,
+                decision_id=target.strategy_decision_id,
+                read_as_of=target.created_at,
+            )
+            if not prior_formal:
+                raise ValueError("PORTFOLIO_PROPOSAL_TARGET_CONFLICT")
     return await load_portfolio_proposal(
         session,
         account_id=account_id,
@@ -542,8 +554,7 @@ async def _rebuild_portfolio_proposal(
         raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
     frozen = await load_frozen_synthesis_authority(session, run)
     if formal_stage_capacity:
-        from nexus.agents.codex_formal_stage import formal_stage_config_hash
-        from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+        from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
         from nexus.paper.agent_cycle import _require_cycle_candidate_profile
 
         formal_model_id = await _require_cycle_candidate_profile(
@@ -553,10 +564,15 @@ async def _rebuild_portfolio_proposal(
             formal_stage_capacity=True,
             now=frozen.admitted_at if now is None else now,
         )
+        formal_model = await require_formal_stage_model_profile(
+            session,
+            model_config_id=formal_model_id,
+            now=frozen.admitted_at if now is None else now,
+        )
         if (
             run.model_config_id != formal_model_id
-            or run.model_hash != formal_stage_config_hash()
-            or run.pricing_version != FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+            or run.model_hash != formal_model.config_hash
+            or run.pricing_version != formal_model.version
         ):
             raise ValueError("PORTFOLIO_PROPOSAL_AUTHORITY_CONFLICT")
     job = await read_synthesis_job(session, cycle_id=cycle.id)
