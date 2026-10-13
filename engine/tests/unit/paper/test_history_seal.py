@@ -1,3 +1,4 @@
+import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -12,6 +13,90 @@ _DESKTOP = (
 )
 _APP = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 _BIRTH = "Mon Oct 12 10:00:00 2026"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "unknown-node",
+        "foreign-user",
+        "ancestor-restarted",
+        "ancestor-reparented",
+        "ancestor-user-changed",
+        "ancestor-map",
+        "ancestor-research-cwd",
+        "relative-cwd",
+        "missing-cwd",
+        "cycle",
+        "new-sdk",
+    ],
+)
+def test_exact_desktop_bridge_requires_complete_verified_stable_chain(monkeypatch, fault):
+    repl = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
+    node = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
+    identities = {
+        200: (300, _DESKTOP),
+        300: (400, repl),
+        400: (500, node),
+        500: (100, _DESKTOP),
+        100: (1, _APP),
+    }
+    scans = 0
+
+    def execute(command, **kwargs):
+        nonlocal scans
+        assert not any(flag in command for flag in ("args", "command=", "-e"))
+        if command[0] == "/bin/ps":
+            scans += 1
+            lines = []
+            for pid, (parent, executable) in identities.items():
+                if fault == "unknown-node" and pid == 400:
+                    executable = "/usr/local/bin/node"
+                if fault == "cycle" and pid == 500:
+                    parent = 200
+                if fault == "ancestor-reparented" and scans > 1 and pid == 400:
+                    parent = 100
+                uid = os.getuid() + 1 if fault == "foreign-user" and pid == 400 else os.getuid()
+                if fault == "ancestor-user-changed" and scans > 1 and pid == 400:
+                    uid += 1
+                birth = (
+                    "Mon Oct 12 10:01:00 2026"
+                    if fault == "ancestor-restarted" and scans > 1 and pid == 400
+                    else _BIRTH
+                )
+                uid_field = f"{uid} " if "uid=" in command[-1] else ""
+                lines.append(f"{pid} {parent} {uid_field}{birth} {executable}")
+            if fault == "new-sdk" and scans > 1:
+                uid_field = f"{os.getuid()} " if "uid=" in command[-1] else ""
+                lines.append(f"999 1 {uid_field}{_BIRTH} /test/codex_cli_bin/codex")
+            raw = "\n".join(lines)
+        elif command[0] == "/usr/sbin/lsof":
+            pid = int(command[command.index("-p") + 1])
+            executable = identities[pid][1]
+            if fault == "ancestor-map" and pid == 400:
+                executable = "/other/node"
+            cwd = "/"
+            if fault == "ancestor-research-cwd" and pid == 400:
+                cwd = "/private/tmp/nexus-codex-controlled"
+            if fault == "relative-cwd" and pid == 400:
+                cwd = "relative"
+            raw = f"p{pid}\nftxt\nn{executable}\n"
+            if fault != "missing-cwd" or pid != 400:
+                raw += f"fcwd\nn{cwd}\n"
+        elif command[1] == "ps":
+            raw = "abc123\n"
+        else:
+            raw = "PID COMMAND\n1 python\n"
+        return subprocess.CompletedProcess(command, 0, raw)
+
+    monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
+    if fault is None:
+        require_research_processes_quiescent()
+        assert scans == 2
+    else:
+        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+            require_research_processes_quiescent()
 
 
 @pytest.mark.asyncio
@@ -44,7 +129,9 @@ async def test_exact_terminal_manual_seal_does_not_exempt_another_request(
 def test_docker_top_uses_pid_column_required_by_docker_daemon(monkeypatch):
     def execute(command, **kwargs):
         if command[0] == "/bin/ps":
-            return subprocess.CompletedProcess(command, 0, f"1 0 {_BIRTH} /usr/bin/python\n")
+            return subprocess.CompletedProcess(
+                command, 0, f"1 0 {os.getuid()} {_BIRTH} /usr/bin/python\n"
+            )
         if command[1] == "ps":
             return subprocess.CompletedProcess(command, 0, "abc123\n")
         if command[-1] == "comm":
@@ -83,9 +170,11 @@ def test_desktop_exclusion_requires_independent_stable_process_identity(monkeypa
             parent = "/other/ChatGPT" if fault == "parent-path" else _APP
             birth = "Mon Oct 12 10:01:00 2026" if fault == "restarted" and scans > 1 else _BIRTH
             ppid = 1 if fault == "reparented" and scans > 1 else 100
-            output = f"100 1 {_BIRTH} {parent}\n200 {ppid} {birth} {child}\n"
+            output = (
+                f"100 1 {os.getuid()} {_BIRTH} {parent}\n200 {ppid} {os.getuid()} {birth} {child}\n"
+            )
             if fault == "new-sdk" and scans > 1:
-                output += f"300 1 {_BIRTH} /test/codex_cli_bin/codex\n"
+                output += f"300 1 {os.getuid()} {_BIRTH} /test/codex_cli_bin/codex\n"
         elif command[0] == "/usr/sbin/lsof":
             if fault == "lsof-failed":
                 return subprocess.CompletedProcess(command, 1, "")
@@ -259,11 +348,11 @@ def test_process_boundary_is_fail_closed(monkeypatch, boundary):
         if command[0] == "/bin/ps":
             if boundary == "scan-failed":
                 raise subprocess.TimeoutExpired(command, 5)
-            output = f"1 0 {_BIRTH} /usr/bin/python\n"
+            output = f"1 0 {os.getuid()} {_BIRTH} /usr/bin/python\n"
             if boundary == "host-live":
-                output += f"2 1 {_BIRTH} /test/.venv/lib/codex_cli_bin/vendor/codex\n"
+                output += f"2 1 {os.getuid()} {_BIRTH} /test/.venv/lib/codex_cli_bin/vendor/codex\n"
             if boundary == "host-full-path":
-                output += f"2 1 {_BIRTH} /opt/homebrew/bin/codex\n"
+                output += f"2 1 {os.getuid()} {_BIRTH} /opt/homebrew/bin/codex\n"
         elif command[1] == "ps":
             output = "" if boundary == "no-container" else "abc123\n"
         else:
@@ -280,7 +369,7 @@ def test_process_boundary_is_fail_closed(monkeypatch, boundary):
 def test_quiescence_checks_host_and_existing_project_containers_without_arguments(monkeypatch):
     execute = Mock(
         side_effect=[
-            subprocess.CompletedProcess([], 0, f"1 0 {_BIRTH} /usr/bin/python\n"),
+            subprocess.CompletedProcess([], 0, f"1 0 {os.getuid()} {_BIRTH} /usr/bin/python\n"),
             subprocess.CompletedProcess([], 0, "abc123\ndef456\n"),
             subprocess.CompletedProcess([], 0, "PID COMMAND\n1 python\n"),
             subprocess.CompletedProcess([], 0, "PID COMMAND\n1 uv\n"),
@@ -289,7 +378,7 @@ def test_quiescence_checks_host_and_existing_project_containers_without_argument
     monkeypatch.setattr("nexus.paper.history_seal.subprocess.run", execute)
     require_research_processes_quiescent()
     commands = [call.args[0] for call in execute.call_args_list]
-    assert commands[0] == ["/bin/ps", "-axo", "pid=,ppid=,lstart=,comm="]
+    assert commands[0] == ["/bin/ps", "-axo", "pid=,ppid=,uid=,lstart=,comm="]
     assert "label=com.docker.compose.project=nexus-fosun-live" in commands[1]
     assert commands[2:] == [
         ["docker", "top", identity, "-eo", "pid,comm"] for identity in ("abc123", "def456")

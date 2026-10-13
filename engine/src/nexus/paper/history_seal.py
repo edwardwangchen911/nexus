@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -47,6 +48,8 @@ _DESKTOP_CHILD = (
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 )
 _DESKTOP_PARENT = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+_DESKTOP_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
+_DESKTOP_NODE = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
 
 
 class HistorySealReceipt(BaseModel):
@@ -69,25 +72,25 @@ def require_research_processes_quiescent() -> None:
             raise ValueError(_BLOCKED)
         return result.stdout
 
-    def snapshot() -> dict[int, tuple[int, str, str]]:
-        rows: dict[int, tuple[int, str, str]] = {}
-        raw = output(["/bin/ps", "-axo", "pid=,ppid=,lstart=,comm="])
+    def snapshot() -> dict[int, tuple[int, int, str, str]]:
+        rows: dict[int, tuple[int, int, str, str]] = {}
+        raw = output(["/bin/ps", "-axo", "pid=,ppid=,uid=,lstart=,comm="])
         for line in raw.splitlines():
-            parts = line.strip().split(None, 7)
-            if len(parts) != 8 or not parts[0].isdigit() or not parts[1].isdigit():
+            parts = line.strip().split(None, 8)
+            if len(parts) != 9 or not all(value.isdigit() for value in parts[:3]):
                 raise ValueError(_BLOCKED)
             pid = int(parts[0])
             if pid in rows:
                 raise ValueError(_BLOCKED)
-            rows[pid] = (int(parts[1]), " ".join(parts[2:7]), parts[7])
+            rows[pid] = (int(parts[1]), int(parts[2]), " ".join(parts[3:8]), parts[8])
         if not rows:
             raise ValueError(_BLOCKED)
         return rows
 
-    def candidates(rows: dict[int, tuple[int, str, str]]) -> set[int]:
+    def candidates(rows: dict[int, tuple[int, int, str, str]]) -> set[int]:
         return {
             pid
-            for pid, (_, _, executable) in rows.items()
+            for pid, (_, _, _, executable) in rows.items()
             if Path(executable).name == "codex" or "codex_cli_bin" in executable
         }
 
@@ -109,26 +112,34 @@ def require_research_processes_quiescent() -> None:
 
     host = snapshot()
     desktop = candidates(host)
+    verified: set[int] = set()
     for pid in desktop:
-        parent_id, _, executable = host[pid]
-        parent = host.get(parent_id)
-        if executable != _DESKTOP_CHILD or parent is None or parent[2] != _DESKTOP_PARENT:
-            raise ValueError(_BLOCKED)
-        child_files, parent_files = mappings(pid), mappings(parent_id)
-        if (
-            executable not in child_files["txt"]
-            or _DESKTOP_PARENT not in parent_files["txt"]
-            or len(child_files["cwd"]) != 1
-            or not Path(child_files["cwd"][0]).is_absolute()
-            or any(part.startswith("nexus-codex-") for part in Path(child_files["cwd"][0]).parts)
-        ):
-            raise ValueError(_BLOCKED)
+        parent = host.get(host[pid][0])
+        chain = (
+            (_DESKTOP_CHILD, _DESKTOP_PARENT)
+            if parent is not None and parent[3] == _DESKTOP_PARENT
+            else (_DESKTOP_CHILD, _DESKTOP_REPL, _DESKTOP_NODE, _DESKTOP_CHILD, _DESKTOP_PARENT)
+        )
+        ancestors: set[int] = set()
+        for executable in chain:
+            row = host.get(pid)
+            if row is None or pid in ancestors or row[1] != os.getuid() or row[3] != executable:
+                raise ValueError(_BLOCKED)
+            ancestors.add(pid)
+            if pid not in verified:
+                files = mappings(pid)
+                if (
+                    executable not in files["txt"]
+                    or len(files["cwd"]) != 1
+                    or not Path(files["cwd"][0]).is_absolute()
+                    or any(part.startswith("nexus-codex-") for part in Path(files["cwd"][0]).parts)
+                ):
+                    raise ValueError(_BLOCKED)
+                verified.add(pid)
+            pid = row[0]
     if desktop:
         after = snapshot()
-        if candidates(after) != desktop or any(
-            after.get(pid) != host[pid] or after.get(host[pid][0]) != host[host[pid][0]]
-            for pid in desktop
-        ):
+        if candidates(after) != desktop or any(after.get(pid) != host[pid] for pid in verified):
             raise ValueError(_BLOCKED)
     containers = output(
         [
