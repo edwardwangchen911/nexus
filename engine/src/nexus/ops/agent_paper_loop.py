@@ -36,6 +36,10 @@ from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
 from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
+from nexus.ops.agent_capacity_rejection import (
+    CAPACITY_REJECTION_CODES,
+    close_capacity_rejected_cycle_once,
+)
 from nexus.ops.agent_paper_formal import (
     require_formal_host_configuration_match,
     require_formal_host_trigger_profile,
@@ -3173,7 +3177,9 @@ async def execute_agent_paper_loop_action(
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN") from error
         return None
     if action == AgentPaperLoopAction.RUN_RESEARCH_JOB:
-        if not isinstance(snapshot.research_job_id, UUID):
+        if not isinstance(snapshot.research_job_id, UUID) or not isinstance(
+            snapshot.cycle_id, UUID
+        ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         if await _codex_sdk_preflight_blocker_async():
             await asyncio.sleep(5)
@@ -3195,11 +3201,23 @@ async def execute_agent_paper_loop_action(
         )
         if formal_stage_capacity or settings.agent_paper_formal_model_config_id is not None:
             require_formal_host_configuration_match(settings, research_settings)
-        worked = await run_cycle_job_once(
-            research_settings,
-            job_id=snapshot.research_job_id,
-            **({"formal_stage_capacity": True} if formal_stage_capacity else {}),
-        )
+        try:
+            worked = await run_cycle_job_once(
+                research_settings,
+                job_id=snapshot.research_job_id,
+                **({"formal_stage_capacity": True} if formal_stage_capacity else {}),
+            )
+        except ValueError as error:
+            if not formal_stage_capacity or str(error) not in CAPACITY_REJECTION_CODES:
+                raise
+            await close_capacity_rejected_cycle_once(
+                research_settings,
+                account_id=account_id,
+                cycle_id=snapshot.cycle_id,
+                job_id=snapshot.research_job_id,
+                code=str(error),
+            )
+            return None
         if not worked:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         return None

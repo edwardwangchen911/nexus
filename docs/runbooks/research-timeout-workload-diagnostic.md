@@ -64,6 +64,15 @@ uv run --project engine nexus-engine-research-workload-inspection \
 故最大行投影覆盖较少行导致的原格式回退。该推导依赖现有生产者和投影合同；修改
 字段、顺序、次数、引用或跨 prior 的字符串投影时必须重验。此处不改变固定100479
 上限、冻结输入、历史身份、token额度或SDK实际请求检查。
+
+正式 v9 宿主遇到本次 dispatch 的 `CODEX_CAPACITY_POOL_WIRE_EXCEEDED` 或
+`CODEX_CAPACITY_POOL_INPUT_EXCEEDED` 时，核对完整冻结池及所有 Job 尚未认领，
+再通过原生取消记录零模型用量、释放预留并追加周期 unavailable 事件。事件保存
+`failure_phase=capacity_preflight`、固定失败码、观测时刻和取消数量。手动请求随后由
+正常 `FINISH_MANUAL` 消费该终态；定时周期保持原槽位事实，均不重试 Worker。
+有已认领任务、旧输出/lease/未知用量、预算或任务锁占用时，整项事务回滚并保留
+未知状态；经济 lane 不适用。该入口只处理新 dispatch 的确定性拒绝，不可拿旧日志
+调用它封闭历史 active 请求，也不构成恢复或重放旧请求的授权。
 回退删除/停止选用资格候选即可；未注册阶段不迁移或修改历史Run、输出、周期和订单。
 
 隔离 Worker 构造器仅在显式 `full_input_capacity=True`、实际数据库名为

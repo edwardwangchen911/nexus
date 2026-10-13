@@ -36,6 +36,49 @@ TEST_CANDIDATE = loop.CandidateInstrumentIdentity(
 )
 
 
+@pytest.mark.parametrize(
+    "code", ["CODEX_CAPACITY_POOL_WIRE_EXCEEDED", "CODEX_CAPACITY_POOL_INPUT_EXCEEDED"]
+)
+def test_formal_capacity_rejection_is_closed_without_repeating_worker(
+    monkeypatch, tmp_path, codex_model_ready, code
+):
+    calls = []
+
+    async def formal(*args, **kwargs):
+        return True
+
+    async def reject(*args, **kwargs):
+        calls.append("worker")
+        raise ValueError(code)
+
+    async def close(*args, **kwargs):
+        calls.append("close")
+        assert kwargs["code"] == code
+        assert kwargs["cycle_id"] == UUID(int=31)
+        assert kwargs["job_id"] == UUID(int=41)
+
+    monkeypatch.setattr(loop, "resolve_formal_host_cycle_profile", formal)
+    monkeypatch.setattr(loop, "run_cycle_job_once", reject)
+    monkeypatch.setattr(loop, "close_capacity_rejected_cycle_once", close, raising=False)
+    result = asyncio.run(
+        loop.execute_agent_paper_loop_action(
+            loop.EngineSettings(),
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            env_file=explicit_service_config(tmp_path),
+            action=A.RUN_RESEARCH_JOB,
+            snapshot=snapshot(
+                cycle_id=UUID(int=31),
+                cycle_status="researching",
+                research_job_id=UUID(int=41),
+                research_job_status="queued",
+            ),
+        )
+    )
+    assert result is None
+    assert calls == ["worker", "close"]
+
+
 @pytest.fixture(autouse=True)
 def isolated_loop_candidates(monkeypatch):
     async def candidates(*args, **kwargs):
