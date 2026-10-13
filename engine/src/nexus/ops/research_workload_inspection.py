@@ -24,6 +24,7 @@ from nexus.agents.codex_staged import StagedCodexCommittee
 from nexus.agents.codex_versions import (
     FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
 from nexus.agents.committee import ROLE_ORDER, CommitteeRoleOutput
 from nexus.agents.execution import CommitteeModel
@@ -230,7 +231,10 @@ async def _inspection_committee(
     *,
     model: AgentModelConfigRecord,
 ) -> CommitteeModel:
-    formal = model.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+    formal = model.version in {
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    }
     # The factory needs the exact frozen profile and a construction deadline.
     # This observation-only deadline is never used to invoke or resume a model.
     return await _committee(

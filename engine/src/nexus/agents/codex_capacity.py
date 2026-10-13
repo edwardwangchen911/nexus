@@ -11,7 +11,6 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.codex_input_view import _STAGE_CONTEXT_COLUMNS_NOTE
 from nexus.agents.codex_sdk import (
     BASE_INSTRUCTIONS,
     DEVELOPER_INSTRUCTIONS,
@@ -130,7 +129,11 @@ def candidate_capacity_envelope(
     Valid Unicode characters need at most six UTF-8 JSON bytes. Fixed role/ID
     fields, maximal rows, seven-character votes and widest valid citations form
     a schema superset. Frozen-input projection choices are independent of prior
-    text; context projection can only shrink the raw rows used for this bound.
+    text. Source rows are frozen and prior rows have fixed keys and field order.
+    Column savings therefore depend on row count, not text or citation values.
+    The maximal rows also bound every smaller row-count branch, including raw
+    fallback. Bound the selected lossless wire, with its decoding instructions,
+    rather than an expanded representation that will not be sent.
     No output-token reachability assumption is needed for this conservative set.
     """
     if not evidence_refs:
@@ -203,22 +206,7 @@ def candidate_capacity_envelope(
         check_stage_schema(output_model.model_json_schema())
         if not claims_seen:
             raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
-        raw = dict(payload)
-        decoded = False
-        for field in ("evidence", "previous_claims"):
-            value = raw.get(field)
-            if isinstance(value, dict) and "$nexus_columns" in value:
-                keys, rows = value.get("$nexus_columns"), value.get("rows")
-                if not isinstance(keys, list) or not isinstance(rows, list):
-                    raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
-                raw[field] = [dict(zip(keys, row, strict=True)) for row in rows]
-                decoded = True
-        if decoded:
-            instructions = cast(str, raw["instructions"])
-            if not instructions.endswith(_STAGE_CONTEXT_COLUMNS_NOTE):
-                raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
-            raw["instructions"] = instructions[: -len(_STAGE_CONTEXT_COLUMNS_NOTE)]
-        wire_upper = len(codex_request_wire(raw).encode())
+        wire_upper = len(codex_request_wire(payload).encode())
         sample = {
             "wire_bytes": len(codex_request_wire(payload).encode()),
             "input_allowance_units": codex_input_allowance(

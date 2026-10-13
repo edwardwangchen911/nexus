@@ -63,14 +63,18 @@ def test_missing_or_malformed_security_context_is_unknown_not_absent():
 
 
 @pytest.mark.asyncio
-async def test_formal_inspection_uses_frozen_profile_without_invoking_committee(monkeypatch):
-    from nexus.agents.codex_versions import FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+@pytest.mark.parametrize(
+    "version", ["codex-sdk-chatgpt-v8-stage-capacity", "codex-sdk-chatgpt-v9-full-input-capacity"]
+)
+async def test_formal_inspection_uses_frozen_profile_without_invoking_committee(
+    monkeypatch, version
+):
     from nexus.ops import research_workload_inspection as inspection
 
     committee = SimpleNamespace(analyze=AsyncMock())
     factory = AsyncMock(return_value=committee)
     monkeypatch.setattr(inspection, "_committee", factory)
-    model = SimpleNamespace(version=FORMAL_STAGE_CAPACITY_CONFIG_VERSION)
+    model = SimpleNamespace(version=version)
     result = await inspection._inspection_committee(None, None, None, model=model)
 
     assert result is committee
