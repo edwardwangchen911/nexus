@@ -1,20 +1,22 @@
 """Explicit legacy failure disposition; usage and budget facts remain unknown."""
 
+import hashlib
 import json
 import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_formal_stage import formal_preparation_model_matches
 from nexus.agents.codex_sdk import MODEL_ID
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
+from nexus.agents.committee import CommitteeRoleOutput, StageFailureDiagnostic, StageInputIdentity
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
 from nexus.audit.service import append_audit_event
 from nexus.jobs.models import job_input_hash
@@ -33,6 +35,7 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import AuditEvent, Job, JobAttempt, JobLease
 
@@ -159,6 +162,127 @@ def _row_hash(row: Base) -> str:
     return job_input_hash(json.loads(json.dumps(values, default=str)))
 
 
+async def _require_partial_usage_proof(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    outputs: tuple[AgentResearchOutputRecord, ...],
+    model: AgentModelConfigRecord,
+) -> None:
+    """Verify known earlier stages without settling the unknown later invocation."""
+    from nexus.api.research_stages import read_stage_trace
+
+    roles = tuple(output for output in outputs if output.role is not None)
+    terminal = tuple(output for output in outputs if output.role is None)
+    if (
+        run.status != "failed"
+        or len(roles) not in {5, 7}
+        or len(terminal) != 1
+        or any(output.intent is not None for output in outputs)
+        or any(output.status != "running" for output in roles)
+        or terminal[0].status != "failed"
+        or [output.sequence for output in outputs] != list(range(1, len(outputs) + 1))
+        or outputs[-1] is not terminal[0]
+        or terminal[0].payload.get("reason") != "model_usage_uncertain"
+    ):
+        raise ValueError(_BLOCKED)
+    expected_stage: Literal["critique", "synthesis"] = (
+        "critique" if len(roles) == 5 else "synthesis"
+    )
+    # Reuse the existing observation-only compiler. A current-code rendering
+    # without an exact persisted request-hash match is never seal authority.
+    from nexus.agents.codex_staged import StagedCodexCommittee
+    from nexus.agents.execution_authority import load_frozen_evidence
+    from nexus.agents.models import ResearchRequest
+    from nexus.agents.synthesis import domain_evidence
+    from nexus.ops.research_workload_inspection import (
+        _inspection_committee,
+        inspect_critique_request,
+    )
+    from nexus.settings import AgentRuntimeMode, EngineSettings
+
+    committee = await _inspection_committee(
+        session, EngineSettings(agent_runtime_mode=AgentRuntimeMode.CODEX_SDK), run, model=model
+    )
+    if not isinstance(committee, StagedCodexCommittee):
+        raise ValueError(_BLOCKED)
+    request = ResearchRequest(
+        instrument_id=run.instrument_id,
+        data_snapshot_id=run.data_snapshot_id,
+        decision_time=run.decision_time,
+    )
+    inputs = await committee._inputs(request)
+    evidence = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
+    identity = inspect_critique_request(
+        committee,
+        run=run,
+        request=request,
+        evidence_refs=tuple(domain_evidence(record) for record in evidence),
+        inputs=inputs,
+        records=outputs,
+        stage=expected_stage,
+    )
+    if identity.get("status") != "request_hash_verified":
+        raise ValueError(_BLOCKED)
+    content = {
+        "status": terminal[0].status,
+        "role": None,
+        "payload": terminal[0].payload,
+        "intent": None,
+    }
+    digest = hashlib.sha256(
+        json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+    trace = await read_stage_trace(session, run)
+    if terminal[0].content_hash != digest or trace is None or trace.status != "verified":
+        raise ValueError(_BLOCKED)
+    expected_complete = {"research"} if len(roles) == 5 else {"research", "critique"}
+    if {stage.stage for stage in trace.stages if stage.status == "complete"} != expected_complete:
+        raise ValueError(_BLOCKED)
+    try:
+        parsed = tuple(CommitteeRoleOutput.model_validate(output.payload) for output in roles)
+        diagnostic = StageFailureDiagnostic.model_validate(terminal[0].payload.get("diagnostic"))
+        stage_input = StageInputIdentity.model_validate(terminal[0].payload.get("stage_input"))
+    except ValidationError:
+        raise ValueError(_BLOCKED) from None
+    known_input = sum(output.input_tokens for output in parsed)
+    known_output = sum(output.output_tokens for output in parsed)
+    stored_usage = (run.input_tokens, run.output_tokens)
+    if (
+        stored_usage != (known_input, known_output)
+        and not (stored_usage == (None, None) and (known_input, known_output) == (0, 0))
+    ) or (
+        diagnostic.stage != expected_stage
+        or diagnostic.boundary != "invocation"
+        or stage_input.stage != expected_stage
+        or not parsed[0].frozen_inputs_hash
+        or stage_input.frozen_inputs_hash != parsed[0].frozen_inputs_hash
+    ):
+        raise ValueError(_BLOCKED)
+
+
+async def _seal_manual_scope(
+    session: AsyncSession, *, account_id: UUID, cycle_id: UUID
+) -> ManualPaperRequest | None:
+    from nexus.paper.manual_request import manual_request_for_cycle, read_manual_request
+
+    target = await manual_request_for_cycle(session, cycle_id=cycle_id)
+    rows = tuple(
+        await session.scalars(
+            select(ManualPaperRequest).where(ManualPaperRequest.account_id == account_id)
+        )
+    )
+    for row in rows:
+        view = await read_manual_request(session, row)
+        if target is not None and row.id == target.id:
+            if view.status not in {"active", "unavailable"} or view.cycle_id != cycle_id:
+                raise ValueError(_BLOCKED)
+        elif view.status in {"preparing", "active", "unknown"}:
+            raise ValueError(_BLOCKED)
+    if target is not None and target.account_id != account_id:
+        raise ValueError(_BLOCKED)
+    return target
+
+
 async def _proof(
     session: AsyncSession, *, cycle_id: UUID, run_id: UUID, now: datetime
 ) -> dict[str, object]:
@@ -216,8 +340,6 @@ async def _proof(
     if run is None or (
         run.status not in {"prepared", "failed"}
         or run.settled_cost_usd is not None
-        or run.input_tokens is not None
-        or run.output_tokens is not None
         or run.retry_count != 0
         or run.actor_id != "local-agent-paper-cycle"
         or run.idempotency_key != f"agent-paper:{cycle_id}:{run.instrument_id}"
@@ -326,6 +448,13 @@ async def _proof(
         or attempts[0].lease_token != leases[0].lease_token
         or attempts[0].fence_token != leases[0].fence_token
         or attempts[0].attempt_no != job.attempt_count
+    ):
+        raise ValueError(_BLOCKED)
+    if any(output.role is not None for output in outputs):
+        await _require_partial_usage_proof(session, run, outputs, model)
+    elif (
+        run.input_tokens is not None
+        or run.output_tokens is not None
         or any(output.status != "failed" or output.intent is not None for output in outputs)
     ):
         raise ValueError(_BLOCKED)
@@ -427,9 +556,7 @@ async def seal_failed_research(
     cycle = await session.get(AgentPaperCycleRecord, cycle_id, with_for_update=True)
     if cycle is None or cycle.account_id != account_id:
         raise ValueError(_BLOCKED)
-    from nexus.paper.manual_request import require_no_running_manual_request
-
-    await require_no_running_manual_request(session, account_id=account_id)
+    manual = await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id)
     projection = await load_paper_projection(session, account_id=account_id, as_of=now)
     await require_activation_projection_unoccupied(
         session, account_id=account_id, projection=projection
@@ -449,4 +576,10 @@ async def seal_failed_research(
             occurred_at=now,
         )
         new += 1
+    if manual is not None:
+        from nexus.paper.manual_request import close_failed_manual_request
+
+        # Native cancellation proves zero attempts/outputs/leases before writing
+        # zero usage for untouched siblings. Any failure rolls back the seal too.
+        await close_failed_manual_request(session, request_id=manual.id, cancel_unused=True)
     return HistorySealReceipt(sealed_research=len(run_ids), replayed=new == 0)

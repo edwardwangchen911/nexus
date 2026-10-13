@@ -14,6 +14,33 @@ _APP = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 _BIRTH = "Mon Oct 12 10:00:00 2026"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_status", ["active", "preparing", "unknown"])
+async def test_exact_terminal_manual_seal_does_not_exempt_another_request(
+    monkeypatch, other_status
+):
+    from nexus.paper.history_seal import _seal_manual_scope
+
+    account_id, cycle_id = UUID(int=100), UUID(int=101)
+    target = SimpleNamespace(id=UUID(int=102), account_id=account_id)
+    other = SimpleNamespace(id=UUID(int=103), account_id=account_id)
+    monkeypatch.setattr(
+        "nexus.paper.manual_request.manual_request_for_cycle", AsyncMock(return_value=target)
+    )
+    monkeypatch.setattr(
+        "nexus.paper.manual_request.read_manual_request",
+        AsyncMock(
+            side_effect=[
+                SimpleNamespace(status="active", cycle_id=cycle_id),
+                SimpleNamespace(status=other_status, cycle_id=UUID(int=999)),
+            ]
+        ),
+    )
+    session = SimpleNamespace(scalars=AsyncMock(return_value=(target, other)))
+    with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+        await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id)
+
+
 def test_docker_top_uses_pid_column_required_by_docker_daemon(monkeypatch):
     def execute(command, **kwargs):
         if command[0] == "/bin/ps":
