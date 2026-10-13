@@ -2,12 +2,15 @@
 
 import argparse
 import asyncio
+import importlib
 import json
+import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.agent_paper_once import _validate_local_database
@@ -25,9 +28,46 @@ from nexus.paper.manual_entry import (
     start_configured_manual_request,
 )
 from nexus.paper.manual_request import ManualRequestView
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
+
+
+def _require_maintenance_code(root: Path, revision: str | None) -> None:
+    """Bind this normal CLI's loaded Nexus sources to its checkout, not a caller label."""
+    blocked = "MANUAL_CONFIGURATION_UNAVAILABLE"
+    root = root.resolve()
+    if revision is None or _checkout_revision(root) != revision:
+        raise ValueError(blocked)
+    # Partial proof imports these lazily; include the evidence compiler before
+    # checking provenance, then recheck all loaded sources before commit.
+    for name in ("nexus.api.research_stages", "nexus.ops.research_workload_inspection"):
+        importlib.import_module(name)
+    source = root / "engine/src"
+    paths = {Path(__file__).resolve()}
+    for name, module in tuple(sys.modules.items()):
+        if name == "nexus" or name.startswith("nexus."):
+            filename = getattr(module, "__file__", None)
+            if filename is not None:
+                paths.add(Path(filename).resolve())
+    try:
+        for path in sorted(paths):
+            if not path.is_relative_to(source) or path.suffix != ".py":
+                raise ValueError(blocked)
+            relative = path.relative_to(root).as_posix()
+            result = subprocess.run(
+                ["git", "-C", str(root), "show", f"{revision}:{relative}"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode != 0 or result.stdout != path.read_bytes():
+                raise ValueError(blocked)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError(blocked) from None
+    if _checkout_revision(root) != revision:
+        raise ValueError(blocked)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -62,6 +102,33 @@ async def run(
                 now = await session.scalar(select(func.clock_timestamp()))
                 if now is None:
                     raise ValueError("MANUAL_RESULT_UNKNOWN")
+                if args.action == "seal-failed-research":
+                    _require_maintenance_code(args.repo_root, settings.release_revision)
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                        {"key": SCHEMA_ADMISSION_LOCK_KEY},
+                    )
+                    # Not every historical migration takes the advisory lock.
+                    # Hold the real version table until disposition commits.
+                    await session.execute(text("LOCK TABLE public.alembic_version IN SHARE MODE"))
+                    head = await session.scalar(
+                        text(
+                            "SELECT CASE WHEN COUNT(*) = 1 THEN MIN(version_num) END "
+                            "FROM public.alembic_version"
+                        )
+                    )
+                    if head != CURRENT_MIGRATION_HEAD:
+                        raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                    receipt = await seal_failed_research(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        cycle_id=args.cycle_id,
+                        run_ids=tuple(args.run_ids),
+                        now=now,
+                        accept_unknown_usage=args.accept_unknown_usage,
+                    )
+                    _require_maintenance_code(args.repo_root, settings.release_revision)
+                    return receipt
                 rows = (
                     await session.scalars(
                         select(WorkerHeartbeat).where(
@@ -76,15 +143,6 @@ async def run(
                     release_revision=settings.release_revision,
                     scope_hash=manual_host_scope(settings),
                 )
-                if args.action == "seal-failed-research":
-                    return await seal_failed_research(
-                        session,
-                        account_id=settings.agent_paper_account_id,
-                        cycle_id=args.cycle_id,
-                        run_ids=tuple(args.run_ids),
-                        now=now,
-                        accept_unknown_usage=args.accept_unknown_usage,
-                    )
                 return await close_terminal_cycle_unused_research(
                     session,
                     account_id=settings.agent_paper_account_id,

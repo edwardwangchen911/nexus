@@ -2,6 +2,7 @@
 
 from argparse import Namespace
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from integration.test_candidate_multistock_path import _set_test_insert_clock
@@ -13,8 +14,6 @@ from nexus.ops import manual_paper
 from nexus.ops.openai_local import prepare_database
 from nexus.paper import agent_cycle, manual_request
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
-from nexus.paper.manual_entry import MANUAL_HOST_PROTOCOL, manual_host_scope
-from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
@@ -22,13 +21,59 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.paper import AgentPaperCycleRecord, PaperOrderRecord
-from nexus.persistence.models.runtime import AuditEvent, Job, WorkerHeartbeat
+from nexus.persistence.models.runtime import AuditEvent, Job
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from unit.agents.test_codex_sdk import _staged_batch
 from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
+
+
+@pytest.mark.asyncio
+async def test_maintenance_holds_real_schema_version_until_transaction_end(
+    migrated_database_url, monkeypatch
+):
+    from uuid import UUID
+
+    from nexus.paper.history_seal import HistorySealReceipt
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    settings = EngineSettings(
+        database_url=migrated_database_url, agent_paper_account_id=UUID(int=1)
+    )
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *a: None)
+    engine = create_async_engine(migrated_database_url)
+
+    async def inspect_locked_version(session, **kwargs):
+        async with engine.begin() as competing:
+            with pytest.raises(DBAPIError) as rejected:
+                await competing.execute(
+                    text("LOCK TABLE public.alembic_version IN ROW EXCLUSIVE MODE NOWAIT")
+                )
+            assert rejected.value.orig.sqlstate == "55P03"
+        return HistorySealReceipt(sealed_research=0, replayed=True)
+
+    monkeypatch.setattr(manual_paper, "seal_failed_research", inspect_locked_version)
+    try:
+        await manual_paper.run(
+            settings,
+            Namespace(
+                action="seal-failed-research",
+                repo_root=Path.cwd(),
+                cycle_id=UUID(int=2),
+                run_ids=(UUID(int=3),),
+                accept_unknown_usage=True,
+            ),
+        )
+        async with engine.begin() as competing:
+            await competing.execute(
+                text("LOCK TABLE public.alembic_version IN ROW EXCLUSIVE MODE NOWAIT")
+            )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -79,6 +124,9 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
     monkeypatch.setattr(
         "nexus.paper.history_seal.require_research_processes_quiescent", lambda: None
     )
+    # Isolated provenance adapter only; real migration, native failure/seal and
+    # atomic closure run against PostgreSQL with no dispatch heartbeat.
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *a: None)
     try:
         await _set_test_insert_clock(sessions, AT - timedelta(minutes=1))
         await prepare_database(settings, **V9_OPTIONS)
@@ -153,17 +201,8 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
                 }
             )
             clock[0] = AT + timedelta(days=3)
-            session.add(
-                WorkerHeartbeat(
-                    worker_id=f"agent-paper-loop-{UUID(int=555)}:manual:{manual_host_scope(runtime)}",
-                    queue="agent_paper",
-                    seen_at=clock[0],
-                    started_at=AT,
-                    process_version=f"{MANUAL_HOST_PROTOCOL}+{'a' * 40}",
-                    migration_head=CURRENT_MIGRATION_HEAD,
-                )
-            )
         args = Namespace(
+            repo_root=Path.cwd(),
             action="seal-failed-research",
             cycle_id=result.cycle_id,
             run_ids=(run_id,),
@@ -221,6 +260,8 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
         "unknown-request",
         "sibling-attempt",
         "late-close-failure",
+        "schema",
+        "late-code-identity",
     ],
 )
 async def test_manual_partial_seal_rejection_preserves_all_facts(
@@ -277,6 +318,13 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                     await manual_request.record_manual_request_event(
                         session, row, status="unknown", code="MANUAL_RESULT_UNKNOWN"
                     )
+            if fault == "schema":
+                from sqlalchemy import text
+
+                async with factory.begin() as session:
+                    await session.execute(
+                        text("UPDATE public.alembic_version SET version_num = 'old'")
+                    )
             async with factory() as session:
                 jobs_before = [
                     (j.id, j.status, j.attempt_count)
@@ -291,6 +339,15 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                     run_before.settled_cost_usd,
                 )
             with monkeypatch.context() as scoped:
+                if fault == "late-code-identity":
+                    checks = []
+
+                    def changed_code(*args):
+                        checks.append(True)
+                        if len(checks) == 2:
+                            raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+
+                    scoped.setattr(manual_paper, "_require_maintenance_code", changed_code)
                 if fault in {"usage", "request-hash"}:
 
                     async def altered_proof(session, run, outputs, model):
@@ -337,7 +394,8 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                 if fault == "confirmation":
                     args = Namespace(**{**vars(args), "accept_unknown_usage": False})
                 with pytest.raises(
-                    ValueError, match="MANUAL_(ACCOUNT_BUSY_OR_UNKNOWN|REQUEST_INVALID)"
+                    ValueError,
+                    match="MANUAL_(ACCOUNT_BUSY_OR_UNKNOWN|REQUEST_INVALID|CONFIGURATION_UNAVAILABLE)",
                 ):
                     await original_entry(settings, args)
             async with factory() as session:

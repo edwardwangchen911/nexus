@@ -83,7 +83,7 @@ def test_missing_checkout_revision_does_not_trust_file_but_keeps_receipt_read(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host", ["missing", "wrong-version"])
-@pytest.mark.parametrize("action", ["cancel-unused-research", "seal-failed-research"])
+@pytest.mark.parametrize("action", ["cancel-unused-research"])
 async def test_cancel_entry_rejects_bad_host_before_recovery(monkeypatch, host, action):
     from contextlib import asynccontextmanager
     from datetime import UTC, datetime, timedelta
@@ -128,6 +128,97 @@ async def test_cancel_entry_rejects_bad_host_before_recovery(monkeypatch, host, 
     with pytest.raises(ValueError, match="MANUAL_HOST_NOT_READY"):
         await manual_paper.run(settings, SimpleNamespace(action=action, cycle_id=UUID(int=3)))
     recover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema", ["current", "old", "missing"])
+async def test_seal_maintenance_uses_actual_schema_without_dispatch_heartbeat(monkeypatch, schema):
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+    from uuid import UUID
+
+    from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+    from nexus.settings import EngineSettings
+
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    settings = EngineSettings.for_test().model_copy(
+        update={"agent_paper_account_id": UUID(int=1), "release_revision": "a" * 40}
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(
+            side_effect=[
+                now,
+                CURRENT_MIGRATION_HEAD
+                if schema == "current"
+                else ("old" if schema == "old" else None),
+            ]
+        ),
+        execute=AsyncMock(),
+        scalars=AsyncMock(side_effect=AssertionError("maintenance must not require live host")),
+    )
+
+    @asynccontextmanager
+    async def begin():
+        yield session
+
+    factory = SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=AsyncMock())})
+    monkeypatch.setattr(manual_paper, "session_factory", lambda config: factory)
+    monkeypatch.setattr(manual_paper, "_validate_local_database", lambda url: None)
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *a: None, raising=False)
+    recover = AsyncMock(return_value="sealed")
+    monkeypatch.setattr(manual_paper, "seal_failed_research", recover)
+    args = SimpleNamespace(
+        action="seal-failed-research",
+        repo_root=Path.cwd(),
+        cycle_id=UUID(int=3),
+        run_ids=(UUID(int=4),),
+        accept_unknown_usage=True,
+    )
+    if schema == "current":
+        assert await manual_paper.run(settings, args) == "sealed"
+    else:
+        with pytest.raises(ValueError, match="MANUAL_CONFIGURATION_UNAVAILABLE"):
+            await manual_paper.run(settings, args)
+        recover.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fault", [None, "wrong-root", "revision", "source", "inspection-source"])
+def test_maintenance_code_binds_loaded_sources_to_exact_checkout(monkeypatch, tmp_path, fault):
+    import subprocess
+    from pathlib import Path
+
+    root = Path(manual_paper.__file__).resolve().parents[4]
+    revision = "a" * 40
+    monkeypatch.setattr(manual_paper, "_checkout_revision", lambda path: revision)
+
+    def git(command, **kwargs):
+        relative = command[-1].split(":", 1)[1]
+        content = (root / relative).read_bytes()
+        if fault == "source" and relative.endswith("ops/manual_paper.py"):
+            content += b"changed"
+        if fault == "inspection-source" and relative.endswith(
+            "ops/research_workload_inspection.py"
+        ):
+            content += b"changed"
+        return subprocess.CompletedProcess(command, 0, content)
+
+    monkeypatch.setattr(
+        manual_paper,
+        "subprocess",
+        SimpleNamespace(run=git, SubprocessError=subprocess.SubprocessError),
+        raising=False,
+    )
+    args = (
+        tmp_path if fault == "wrong-root" else root,
+        "b" * 40 if fault == "revision" else revision,
+    )
+    if fault is None:
+        manual_paper._require_maintenance_code(*args)
+    else:
+        with pytest.raises(ValueError, match="MANUAL_CONFIGURATION_UNAVAILABLE"):
+            manual_paper._require_maintenance_code(*args)
 
 
 @pytest.mark.parametrize("missing", ["--run-id", "--accept-unknown-usage"])
