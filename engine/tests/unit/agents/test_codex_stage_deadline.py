@@ -82,7 +82,9 @@ async def test_new_phase_policy_runs_complete_committee_and_retains_cumulative_u
     request, evidence, prompts = _authority()
     observed = []
 
-    async def invoke(payload, *, output_model, timeout_seconds, deadline_at, phase_elapsed_ms):
+    async def invoke(
+        payload, *, output_model, timeout_seconds, deadline_at, phase_elapsed_ms, stream_observer
+    ):
         observed.append((payload["stage"], timeout_seconds))
         remaining = deadline_at - asyncio.get_running_loop().time()
         assert remaining <= timeout_seconds

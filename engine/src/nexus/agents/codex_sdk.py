@@ -44,6 +44,7 @@ from nexus.agents.committee import (
 )
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.sdk_stream_progress import SdkStreamObserver, observe_sdk_notifications
 from nexus.agents.tools import ReadOnlyToolRegistry
 from nexus.agents.trailing_valuation import derive_trailing_valuation
 from nexus.domain.evidence import EvidenceRef
@@ -131,6 +132,7 @@ class _InvocationState:
     provider_call_started: bool = False
     stage_deadline: float | None = None
     phase_elapsed_ms: dict[InvocationPhase, int] = field(default_factory=dict)
+    stream_observer: SdkStreamObserver | None = None
 
 
 class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
@@ -342,6 +344,7 @@ async def invoke_codex(
     timeout_seconds: float | None = None,
     deadline_at: float | None = None,
     phase_elapsed_ms: dict[InvocationPhase, int] | None = None,
+    stream_observer: SdkStreamObserver | None = None,
 ) -> tuple[str, UsageSnapshot]:
     if timeout_seconds is not None and (
         type(timeout_seconds) not in {int, float}
@@ -363,6 +366,7 @@ async def invoke_codex(
         if timeout_seconds is not None
         else None,
         phase_elapsed_ms={} if phase_elapsed_ms is None else phase_elapsed_ms,
+        stream_observer=stream_observer,
     )
     with _invocation_boundary("preflight", state=state):
         return await _invoke_codex(
@@ -466,7 +470,10 @@ async def _invoke_codex(
                         developer_instructions=DEVELOPER_INSTRUCTIONS,
                     )
                 phase = "turn_run"
-                with _invocation_boundary(phase, state=invocation_state):
+                with (
+                    _invocation_boundary(phase, state=invocation_state),
+                    observe_sdk_notifications(client, invocation_state.stream_observer),
+                ):
                     # Mark before entering thread.run; any later cleanup/stream
                     # failure must retain uncertainty even without reported usage.
                     invocation_state.provider_call_started = True

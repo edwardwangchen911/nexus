@@ -84,6 +84,18 @@ type TimeoutSource = Literal[
 ]
 
 
+class SdkStreamProgress(BaseModel):
+    """Delivered notification metadata only; terminal receipt is not success."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    available: bool = Field(strict=True)
+    notifications: int = Field(default=0, strict=True, ge=0, le=1000000)
+    progress_notifications: int = Field(default=0, strict=True, ge=0, le=1000000)
+    first_notification_ms: int | None = Field(default=None, strict=True, ge=0)
+    last_notification_ms: int | None = Field(default=None, strict=True, ge=0)
+    terminal_notification_seen: bool = Field(default=False, strict=True)
+
+
 class StageInvocationTiming(BaseModel):
     """Local monotonic durations only, with no model text or account facts."""
 
@@ -92,6 +104,7 @@ class StageInvocationTiming(BaseModel):
     allocated_timeout_ms: int | None = Field(default=None, strict=True, ge=0, le=108000)
     elapsed_ms: int = Field(strict=True, ge=0)
     phase_elapsed_ms: dict[InvocationPhase, Annotated[int, Field(strict=True, ge=0)]]
+    stream_progress: SdkStreamProgress | None = None
 
 
 class StageFailureDiagnostic(BaseModel):

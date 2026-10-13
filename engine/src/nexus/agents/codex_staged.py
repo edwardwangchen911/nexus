@@ -42,6 +42,7 @@ from nexus.agents.committee import (
 )
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.sdk_stream_progress import SdkStreamObserver
 from nexus.agents.tools import ReadOnlyToolRegistry
 from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import (
@@ -245,6 +246,7 @@ class _StageInvocationOptions(TypedDict, total=False):
     deadline_at: float
     max_wire_bytes: int
     phase_elapsed_ms: dict[InvocationPhase, int]
+    stream_observer: SdkStreamObserver
 
 
 class StagedCodexCommittee(CodexCommittee):
@@ -632,8 +634,11 @@ class StagedCodexCommittee(CodexCommittee):
         if self._max_wire_bytes != 55808:
             invocation_options["max_wire_bytes"] = self._max_wire_bytes
         phase_elapsed_ms: dict[InvocationPhase, int] = {}
+        stream_observer = SdkStreamObserver() if self._stage_time_budget else None
         if self._stage_time_budget:
             invocation_options["phase_elapsed_ms"] = phase_elapsed_ms
+            assert stream_observer is not None
+            invocation_options["stream_observer"] = stream_observer
         invocation_started = perf_counter()
         committee_timer = asyncio.timeout_at(self._deadline)
         try:
@@ -675,6 +680,7 @@ class StagedCodexCommittee(CodexCommittee):
                     phase_elapsed_ms=(
                         error.phase_elapsed_ms if isinstance(error, CodexInvocationError) else {}
                     ),
+                    stream_progress=stream_observer.snapshot() if stream_observer else None,
                 )
                 if self._stage_time_budget
                 else None,
@@ -687,6 +693,7 @@ class StagedCodexCommittee(CodexCommittee):
                 ),
                 elapsed_ms=max(0, int((perf_counter() - invocation_started) * 1000)),
                 phase_elapsed_ms=phase_elapsed_ms,
+                stream_progress=stream_observer.snapshot() if stream_observer else None,
             )
         self.usage = UsageSnapshot(
             input_tokens=self.usage.input_tokens + usage.input_tokens,

@@ -81,7 +81,19 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
         captured.setdefault("observed_at", asyncio.get_running_loop().time())
         stages.append((payload, options))
         if critique_timeout and payload["stage"] == "critique":
+            from types import SimpleNamespace
+
             from nexus.agents.codex_sdk import CodexInvocationError
+            from nexus.agents.sdk_stream_progress import observe_sdk_notifications
+
+            reader = AsyncMock(
+                return_value=SimpleNamespace(
+                    method="item/reasoning/textDelta", payload="private-progress-canary"
+                )
+            )
+            client = SimpleNamespace(_client=SimpleNamespace(next_turn_notification=reader))
+            with observe_sdk_notifications(client, options["stream_observer"]):
+                await client._client.next_turn_notification("private-turn-canary")
 
             failure = CodexInvocationError(
                 "CODEX_TIMEOUT", phase="turn_run", provider_call_started=True
@@ -219,6 +231,13 @@ async def test_frozen_paper_context_reaches_budget_sdk_and_unknown_result_is_not
                 assert diagnostic["invocation_kind"] == "timeout"
                 assert diagnostic["timeout_source"] == critique_timeout
                 assert diagnostic["timing"]["phase_elapsed_ms"] == {"turn_run": 11}
+                progress = diagnostic["timing"]["stream_progress"]
+                assert progress["available"] and progress["progress_notifications"] == 1
+                assert progress["notifications"] == 1
+                assert progress["first_notification_ms"] is not None
+                assert not progress["terminal_notification_seen"]
+                assert "private-progress-canary" not in json.dumps(terminal.payload)
+                assert "private-turn-canary" not in json.dumps(terminal.payload)
                 assert 0 < diagnostic["timing"]["allocated_timeout_ms"] <= 78000
                 assert set(terminal.payload["stage_timings"]) == {"research"}
                 roles = tuple(
