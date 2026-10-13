@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_formal_stage import formal_preparation_model_matches
 from nexus.agents.codex_sdk import MODEL_ID
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
@@ -222,7 +223,6 @@ async def _proof(
         or run.idempotency_key != f"agent-paper:{cycle_id}:{run.instrument_id}"
         or run.decision_time != cycle.decision_time
         or run.reserved_cost_usd != 0
-        or run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS
     ):
         raise ValueError(_BLOCKED)
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
@@ -235,7 +235,11 @@ async def _proof(
         model is None
         or reservation is None
         or (
-            model.model_id != MODEL_ID
+            (
+                run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS
+                and not formal_preparation_model_matches(model)
+            )
+            or model.model_id != MODEL_ID
             or model.config_hash != run.model_hash
             or model.version != run.pricing_version
             or model.max_tool_calls != 0
@@ -248,6 +252,20 @@ async def _proof(
         )
     ):
         raise ValueError(_BLOCKED)
+    if run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS:
+        from nexus.paper.agent_cycle import _require_cycle_candidate_profile
+
+        try:
+            await _require_cycle_candidate_profile(
+                session,
+                cycle=cycle,
+                candidate_stage_capacity=False,
+                formal_stage_capacity=True,
+                expected_formal_model_id=run.model_config_id,
+                now=cycle.decision_time,
+            )
+        except ValueError:
+            raise ValueError(_BLOCKED) from None
     jobs = tuple(
         await session.scalars(
             select(Job)
