@@ -1007,6 +1007,8 @@ async def trigger_once(
     _validate_trigger_dependencies(settings)
     assert settings.database_url is not None
     engine = create_async_engine(settings.database_url)
+    phase = "trigger_reservation"
+    primary_error: Exception | None = None
     try:
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         async with factory() as claim_session, claim_session.begin():
@@ -1027,6 +1029,7 @@ async def trigger_once(
             )
         if reservation.replay is not None:
             return reservation.replay
+        phase = "trigger_provider"
         store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
         try:
             async with (
@@ -1064,8 +1067,18 @@ async def trigger_once(
             except Exception:
                 pass
             raise
+    except Exception as error:
+        from nexus.ops.manual_paper_host import annotate_manual_trigger_failure
+
+        primary_error = error
+        annotate_manual_trigger_failure(error, phase=phase)
+        raise
     finally:
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        except Exception:
+            if primary_error is None:
+                raise
 
 
 def _validate_trigger_dependencies(settings: AgentPaperTriggerSettings) -> None:

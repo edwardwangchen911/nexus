@@ -280,6 +280,25 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
                 stored = await session.get(ManualPaperRequest, fresh.request_id)
                 assert stored.model_config_id == fresh_model.id
                 assert (await session.get(AgentResearchRunRecord, run_id)).settled_cost_usd is None
+            async with sessions.begin() as session:
+                view, claimed = await manual_request.claim_manual_request(
+                    session, request_id=fresh.request_id
+                )
+                assert claimed and view.status == "preparing"
+            async with sessions.begin() as session:
+                fresh_reservation = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=authority.account_id,
+                    candidate_batch_id=batch.batch_id,
+                    client_idempotency_key=f"manual-entry:{fresh.request_id}",
+                    trigger_mode="manual",
+                    manual_request_id=fresh.request_id,
+                    formal_stage_capacity=True,
+                    formal_model_config_id=fresh_model.id,
+                    require_synthesis_prompt=True,
+                    now=clock[0],
+                )
+                assert fresh_reservation.manual_request_id == fresh.request_id
     finally:
         await engine.dispose()
 

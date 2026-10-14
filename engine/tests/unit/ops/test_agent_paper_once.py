@@ -1653,3 +1653,138 @@ def test_schwab_failure_preserves_only_safe_root_cause_diagnostic(tmp_path) -> N
             cli.ProviderMarketStreamError("SCHWAB_MARKET_STREAM_EMPTY"),
             diagnostic_path=blocked_parent / "schwab-failure.json",
         )
+
+
+@pytest.mark.parametrize("source_code", ["CANDIDATE_BATCH_INVALID", "private-credential-canary"])
+def test_trigger_reservation_failure_annotated_before_any_provider(monkeypatch, source_code):
+    class Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        async def scalar(self, _statement):
+            return datetime(2026, 9, 14, 14, tzinfo=UTC)
+
+        def begin(self):
+            return Transaction()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Engine:
+        disposed = False
+
+        async def dispose(self):
+            self.disposed = True
+
+    engine = Engine()
+
+    async def reserve(*_args, **_kwargs):
+        raise ValueError(source_code)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("provider work forbidden after reservation failure")
+
+    monkeypatch.setattr(cli, "create_async_engine", lambda *_a, **_k: engine)
+    monkeypatch.setattr(cli, "async_sessionmaker", lambda *_a, **_k: Session)
+    monkeypatch.setattr(cli, "reserve_schwab_agent_paper_trigger", reserve)
+    monkeypatch.setattr(cli, "S3ProviderEvidenceStore", forbidden)
+    settings = cli.AgentPaperTriggerSettings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1/nexus",
+        object_store_endpoint="http://127.0.0.1:9000",
+        alpaca_key=SecretStr("fixture"),
+        alpaca_secret=SecretStr("fixture"),
+    )
+    with pytest.raises(ValueError) as caught:
+        asyncio.run(
+            cli.trigger_once(
+                settings,
+                AgentPaperTriggerRequest(
+                    action="trigger",
+                    account_id=UUID(int=1),
+                    candidate_batch_id=UUID(int=2),
+                    idempotency_key="diagnose-reservation",
+                ),
+                repo_root=Path("/unused"),
+            )
+        )
+    assert caught.value._nexus_agent_paper_failure_phase == "trigger_reservation"
+    assert caught.value._nexus_agent_paper_failure_code == (
+        source_code if source_code == "CANDIDATE_BATCH_INVALID" else "MANUAL_RESULT_UNKNOWN"
+    )
+    assert engine.disposed
+
+
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
+    monkeypatch, cleanup_failure
+):
+    from nexus.ops import manual_paper_host as host
+    from sqlalchemy.exc import SQLAlchemyError
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args):
+            raise SQLAlchemyError("private-database-canary")
+
+    class Engine:
+        async def dispose(self):
+            if cleanup_failure:
+                raise RuntimeError("private-cleanup-canary")
+
+    class Factory:
+        kw = {"bind": Engine()}
+
+        def begin(self):
+            return Session()
+
+    async def claim(*_args, **_kwargs):
+        return None, True
+
+    async def trigger(*_args, **_kwargs):
+        error = ValueError("CANDIDATE_BATCH_INVALID")
+        host.annotate_manual_trigger_failure(error, phase="trigger_reservation")
+        raise error
+
+    monkeypatch.setattr(host, "session_factory", lambda *_a: Factory())
+    monkeypatch.setattr(host, "claim_configured_manual_request", claim)
+    monkeypatch.setattr(cli, "trigger_once", trigger)
+    settings = EngineSettings(
+        agent_paper_account_id=UUID(int=1),
+        agent_paper_candidate_batch_id=UUID(int=2),
+        agent_paper_formal_model_config_id=UUID(int=5),
+    )
+    trigger_settings = cli.AgentPaperTriggerSettings.model_validate(
+        settings.model_dump()
+        | {
+            "database_url": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "alpaca_key": "fixture",
+            "alpaca_secret": "fixture",
+        }
+    )
+    with pytest.raises(ValueError, match="^MANUAL_RESULT_UNKNOWN$") as caught:
+        asyncio.run(
+            host.dispatch_manual_request(
+                settings,
+                trigger_settings,
+                request_id=UUID(int=3),
+                repo_root=Path("/unused"),
+                calendar_authority_id=UUID(int=4),
+                process_environment={},
+            )
+        )
+    assert caught.value._nexus_agent_paper_failure_phase == "trigger_reservation"
+    assert caught.value._nexus_agent_paper_failure_code == "CANDIDATE_BATCH_INVALID"
+    assert caught.value._nexus_agent_paper_failure_kind == "validation"

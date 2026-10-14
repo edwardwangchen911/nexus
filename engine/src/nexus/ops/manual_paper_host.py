@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
@@ -25,6 +26,63 @@ from nexus.settings import EngineSettings
 if TYPE_CHECKING:
     from nexus.ops.agent_paper_loop import AgentPaperLoopSnapshot
     from nexus.ops.agent_paper_once import AgentPaperTriggerSettings
+
+
+MANUAL_TRIGGER_PHASES = frozenset({"trigger_request", "trigger_reservation", "trigger_provider"})
+MANUAL_TRIGGER_KINDS = frozenset(
+    {"timeout", "database", "name_error", "attribute_error", "validation", "unexpected_exception"}
+)
+MANUAL_TRIGGER_CODES = frozenset(
+    {
+        "MANUAL_REQUEST_INVALID",
+        "MANUAL_REQUEST_TERMINAL_OR_UNKNOWN",
+        "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+        "MANUAL_RESULT_UNKNOWN",
+        "AGENT_PAPER_REQUEST_INVALID",
+        "AGENT_PAPER_OUTSIDE_WINDOW",
+        "AGENT_PAPER_RESULT_UNKNOWN",
+        "AGENT_PAPER_IDEMPOTENCY_CONFLICT",
+        "CANDIDATE_BATCH_INVALID",
+        "CANDIDATE_BATCH_REQUIRED",
+        "CODEX_FORMAL_CYCLE_PROFILE_INVALID",
+        "CODEX_FORMAL_AUTHORITY_INVALID",
+        "FORMAL_BUDGET_TRIGGER_BINDING_INVALID",
+        "FORMAL_BUDGET_BINDING_INVALID",
+        "PORTFOLIO_SYNTHESIS_PROMPT_INVALID",
+        "PRIOR_DAILY_AUTHORITY_MISSING",
+        "RESEARCH_SNAPSHOT_MISSING",
+        "REVIEWED_SECTOR_MISSING",
+        "AGENT_PAPER_CALENDAR_PRIOR_SESSION_MISSING",
+    }
+)
+
+
+def annotate_manual_trigger_failure(error: Exception, *, phase: str) -> None:
+    """Only fixed diagnostics cross the fail-closed manual wrapper."""
+    if phase not in MANUAL_TRIGGER_PHASES:
+        return
+    try:
+        setattr(error, "_nexus_agent_paper_failure_phase", phase)
+        kind = (
+            "timeout"
+            if isinstance(error, TimeoutError)
+            else "database"
+            if isinstance(error, SQLAlchemyError)
+            else "name_error"
+            if isinstance(error, NameError)
+            else "attribute_error"
+            if isinstance(error, AttributeError)
+            else "validation"
+            if isinstance(error, ValueError)
+            else "unexpected_exception"
+        )
+        setattr(error, "_nexus_agent_paper_failure_kind", kind)
+        code = str(error)
+        error._nexus_agent_paper_failure_code = (  # type: ignore[attr-defined]
+            code if code in MANUAL_TRIGGER_CODES else "MANUAL_RESULT_UNKNOWN"
+        )
+    except Exception:
+        return
 
 
 async def dispatch_manual_request(
@@ -48,6 +106,7 @@ async def dispatch_manual_request(
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     _validate_trigger_dependencies(trigger_settings)
     factory = session_factory(settings)
+    failure: ValueError | None = None
     try:
         async with factory.begin() as session:
             _, claimed = await claim_configured_manual_request(
@@ -74,19 +133,37 @@ async def dispatch_manual_request(
                 expected_calendar_authority_id=calendar_authority_id,
                 process_environment=process_environment,
             )
-        except Exception:
-            async with factory.begin() as session:
-                row = await session.get(ManualPaperRequest, request_id)
-                if row is None:
-                    raise ValueError("MANUAL_RESULT_UNKNOWN") from None
-                view = await read_manual_request(session, row)
-                if view.status == "preparing":
-                    await record_manual_request_event(
-                        session, row, status="unknown", code="MANUAL_RESULT_UNKNOWN"
-                    )
-            raise ValueError("MANUAL_RESULT_UNKNOWN") from None
+        except Exception as error:
+            failure = ValueError("MANUAL_RESULT_UNKNOWN")
+            phase = getattr(error, "_nexus_agent_paper_failure_phase", "trigger_request")
+            annotate_manual_trigger_failure(error, phase=phase)
+            code = getattr(error, "_nexus_agent_paper_failure_code", None)
+            annotate_manual_trigger_failure(failure, phase=phase)
+            if code in MANUAL_TRIGGER_CODES:
+                setattr(failure, "_nexus_agent_paper_failure_code", code)
+            kind = getattr(error, "_nexus_agent_paper_failure_kind", None)
+            if kind in MANUAL_TRIGGER_KINDS:
+                setattr(failure, "_nexus_agent_paper_failure_kind", kind)
+            try:
+                async with factory.begin() as session:
+                    row = await session.get(ManualPaperRequest, request_id)
+                    if row is not None:
+                        view = await read_manual_request(session, row)
+                        if view.status == "preparing":
+                            await record_manual_request_event(
+                                session, row, status="unknown", code="MANUAL_RESULT_UNKNOWN"
+                            )
+            except Exception:
+                # A secondary persistence failure cannot replace the primary safe evidence.
+                # A preparing request also remains non-replayable if this transaction fails.
+                pass
+            raise failure from None
     finally:
-        await factory.kw["bind"].dispose()
+        try:
+            await factory.kw["bind"].dispose()
+        except Exception:
+            if failure is None:
+                raise
 
 
 def bind_manual_queue(

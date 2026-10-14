@@ -1922,7 +1922,17 @@ def _normal_wait_until(
 
 
 _SAFE_PREPARATION_FAILURE_PHASES = frozenset(
-    {"configuration", "prior_daily", "macro", "current_trends", "research_identity", "prepare_pair"}
+    {
+        "configuration",
+        "prior_daily",
+        "macro",
+        "current_trends",
+        "research_identity",
+        "prepare_pair",
+        "trigger_request",
+        "trigger_reservation",
+        "trigger_provider",
+    }
 )
 
 
@@ -1966,6 +1976,18 @@ def _emit_agent_paper_unknown_failure(
         phase = getattr(error, "_nexus_agent_paper_failure_phase", None)
         if phase in _SAFE_PREPARATION_FAILURE_PHASES:
             payload["failure_phase"] = phase
+        from nexus.ops.manual_paper_host import (
+            MANUAL_TRIGGER_CODES,
+            MANUAL_TRIGGER_KINDS,
+            MANUAL_TRIGGER_PHASES,
+        )
+
+        code = getattr(error, "_nexus_agent_paper_failure_code", None)
+        if phase in MANUAL_TRIGGER_PHASES and code in MANUAL_TRIGGER_CODES:
+            payload["failure_code"] = code
+        kind = getattr(error, "_nexus_agent_paper_failure_kind", None)
+        if phase in MANUAL_TRIGGER_PHASES and kind in MANUAL_TRIGGER_KINDS:
+            payload["failure_kind"] = kind
         print(
             json.dumps(payload, sort_keys=True),
             file=sys.stderr,

@@ -33,6 +33,7 @@ from nexus.settings import EngineSettings
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from unit.ops.test_formal_stage_registration import OPTIONS
+from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 
 
 @pytest.mark.parametrize("count", [3, 5])
@@ -50,6 +51,7 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
     mode,
     claim_before_close,
     foreground_dispatch=False,
+    profile="v8",
 ):
     at = AT - timedelta(minutes=20) if foreground_dispatch else AT
     dispatch_unknown = claim_before_close == "dispatch_unknown"
@@ -57,7 +59,14 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
     claim_before_close = bool(claim_before_close)
     await prepare_database(
         EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk"),
-        **OPTIONS,
+        **(
+            {
+                **V9_OPTIONS,
+                "formal_flexible_stage_budget": True,
+            }
+            if profile == "v10"
+            else OPTIONS
+        ),
     )
     candidates = (
         INSTRUMENTS
@@ -95,7 +104,12 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
             )
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
-                    AgentModelConfigRecord.version == "codex-sdk-chatgpt-v8-stage-capacity"
+                    AgentModelConfigRecord.version
+                    == (
+                        "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                        if profile == "v10"
+                        else "codex-sdk-chatgpt-v8-stage-capacity"
+                    )
                 )
             )
             batch = await create_agent_paper_candidate_batch(
@@ -438,7 +452,11 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
                     assert request.candidate_batch_id == batch.batch_id
                     assert request.formal_model_config_id == model.id
                     calls.append(request.idempotency_key)
-                    raise RuntimeError("sensitive-canary")
+                    from nexus.ops.manual_paper_host import annotate_manual_trigger_failure
+
+                    failure = RuntimeError("sensitive-canary")
+                    annotate_manual_trigger_failure(failure, phase="trigger_reservation")
+                    raise failure
 
                 monkeypatch.setattr(agent_paper_once, "trigger_once", uncertain_trigger)
                 trigger_settings = agent_paper_once.AgentPaperTriggerSettings.model_validate(
@@ -449,7 +467,7 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
                         "alpaca_secret": "fixture",
                     }
                 )
-                with pytest.raises(ValueError, match="^MANUAL_RESULT_UNKNOWN$"):
+                with pytest.raises(ValueError, match="^MANUAL_RESULT_UNKNOWN$") as caught:
                     await dispatch_manual_request(
                         settings,
                         trigger_settings,
@@ -466,6 +484,9 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
                     calendar_authority_id=CALENDAR_ID,
                     process_environment={},
                 )
+                assert caught.value._nexus_agent_paper_failure_phase == "trigger_reservation"
+                assert caught.value._nexus_agent_paper_failure_code == "MANUAL_RESULT_UNKNOWN"
+                assert "sensitive-canary" not in str(caught.value)
                 assert calls == [f"manual-entry:{request_id}"]
                 async with sessions() as session:
                     row = await session.get(ManualPaperRequest, request_id)
@@ -555,4 +576,21 @@ async def test_manual_foreground_consumes_persisted_request_and_native_failure(
         mode,
         claim_before_close="dispatch_success",
         foreground_dispatch=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_v10_three_stock_normal_host_path(
+    migrated_database_url, monkeypatch, tmp_path, capsys
+):
+    await test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        capsys,
+        count=3,
+        mode="research_and_paper",
+        claim_before_close="dispatch_success",
+        foreground_dispatch=True,
+        profile="v10",
     )

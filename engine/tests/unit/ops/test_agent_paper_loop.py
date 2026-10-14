@@ -6157,3 +6157,18 @@ def test_research_executor_uses_frozen_binding_with_pending_default_configuratio
     )
     assert result is None
     assert len(observed) == 1
+
+
+def test_manual_preparation_diagnostic_preserves_only_safe_phase_and_code(capsys):
+    error = ValueError("MANUAL_RESULT_UNKNOWN")
+    error._nexus_agent_paper_failure_phase = "trigger_reservation"
+    error._nexus_agent_paper_failure_code = "CANDIDATE_BATCH_INVALID"
+    loop._emit_agent_paper_unknown_failure("execute", NOW, error=error)
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["failure_phase"] == "trigger_reservation"
+    assert payload["failure_code"] == "CANDIDATE_BATCH_INVALID"
+    error._nexus_agent_paper_failure_code = "private-credential-canary"
+    loop._emit_agent_paper_unknown_failure("execute", NOW, error=error)
+    captured = capsys.readouterr().err
+    assert "private-credential-canary" not in captured
+    assert "failure_code" not in json.loads(captured)
