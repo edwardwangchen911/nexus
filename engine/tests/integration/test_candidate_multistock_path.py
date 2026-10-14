@@ -31,11 +31,11 @@ FIVE = INSTRUMENTS + (
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [3, 5])
 @pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
-@pytest.mark.parametrize("profile", ["v7", "v9", "formal_v9"])
+@pytest.mark.parametrize("profile", ["v7", "v9", "formal_v9", "formal_v10"])
 async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     migrated_database_url, monkeypatch, count, trade, profile
 ):
-    formal = profile == "formal_v9"
+    formal = profile in {"formal_v9", "formal_v10"}
     consumer_mode = (
         {"formal_stage_capacity": True} if formal else {"candidate_stage_capacity": True}
     )
@@ -106,13 +106,22 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         async with sessions.begin() as session:
             if profile != "v7":
                 from nexus.agents.codex_capacity import capacity_config, capacity_config_hash
+                from nexus.agents.codex_flexible_budget import (
+                    flexible_stage_config,
+                    flexible_stage_config_hash,
+                )
 
-                config = capacity_config()
+                config = flexible_stage_config() if profile == "formal_v10" else capacity_config()
+                config_hash = (
+                    flexible_stage_config_hash()
+                    if profile == "formal_v10"
+                    else capacity_config_hash()
+                )
                 session.add(
                     AgentModelConfigRecord(
                         model_id=config["model_id"],
                         version=config["version"],
-                        config_hash=capacity_config_hash(),
+                        config_hash=config_hash,
                         max_input_tokens=96000,
                         max_output_tokens=8192,
                         max_tool_calls=0,
@@ -128,7 +137,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 select(AgentModelConfigRecord).where(
                     AgentModelConfigRecord.version
                     == (
-                        "codex-sdk-chatgpt-v9-full-input-capacity"
+                        "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                        if profile == "formal_v10"
+                        else "codex-sdk-chatgpt-v9-full-input-capacity"
                         if profile != "v7"
                         else "codex-sdk-chatgpt-v7-stage-capacity-candidate"
                     )
@@ -379,6 +390,27 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             assert [
                 await session.scalar(select(func.count()).select_from(table)) for table in tables
             ] == counts_before
+        if trade and profile == "formal_v10":
+            from nexus.paper.agent_decision_store import _load_portfolio_target_baseline
+
+            async with sessions() as session:
+                target = await session.scalar(
+                    select(PaperTargetVersionRecord).where(
+                        PaperTargetVersionRecord.strategy_decision_id
+                        == finished.strategy_decision_id
+                    )
+                )
+                assert target is not None
+                baseline = await _load_portfolio_target_baseline(
+                    session,
+                    target=target,
+                    account_id=authority.account_id,
+                    candidate_stage_capacity=False,
+                    formal_stage_capacity=True,
+                )
+                assert (
+                    baseline is not None and baseline.decision_id == finished.strategy_decision_id
+                )
         if trade:
             await _verify_internal_fills(
                 settings,
@@ -398,14 +430,19 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             from sqlalchemy.exc import DBAPIError
 
             migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-            with pytest.raises(DBAPIError, match="V9_OUTPUT_BINDINGS_EXIST"):
+            with pytest.raises(
+                DBAPIError,
+                match="V10_OUTPUT_BINDINGS_EXIST"
+                if profile == "formal_v10"
+                else "V9_OUTPUT_BINDINGS_EXIST",
+            ):
                 await asyncio.to_thread(
                     command.downgrade, migration_config, "0075_manual_paper_requests"
                 )
             async with sessions() as session:
                 assert (
                     await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "0077_formal_v9_output_binding"
+                    == "0078_formal_v10_output_binding"
                 )
                 assert (
                     await session.scalar(

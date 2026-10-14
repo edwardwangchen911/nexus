@@ -24,13 +24,17 @@ from unit.agents.test_codex_sdk import _assessment_payload, _staged_batch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("formal", [False, True], ids=["isolated", "formal"])
+@pytest.mark.parametrize(
+    "formal,flexible",
+    [(False, False), (True, False), (False, True), (True, True)],
+    ids=["isolated-v9", "formal-v9", "isolated-v10", "formal-v10"],
+)
 @pytest.mark.parametrize(
     "count,oversized_tail",
     [(3, False), (5, False), (3, True), (3, "invalid_context"), (3, "wrong_mode")],
 )
 async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
-    migrated_database_url, monkeypatch, count, oversized_tail, formal
+    migrated_database_url, monkeypatch, count, oversized_tail, formal, flexible
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
@@ -38,26 +42,43 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
         migrated_database_url, monkeypatch, candidate_instruments=FIVE[:count], decision_time=AT
     )
     calls = []
+    if flexible:
+        from nexus.agents.codex_sdk import invoke_codex as real_sdk_invoke
+        from unit.agents.test_codex_sdk import _sdk
+
+        client, thread, sdk_result, _ = _sdk(monkeypatch)
+    from nexus.agents.codex_flexible_budget import flexible_stage_config, flexible_stage_config_hash
+
+    config = flexible_stage_config() if flexible else capacity_config()
+    config_hash = flexible_stage_config_hash() if flexible else capacity_config_hash()
 
     async def invoke(payload, **options):
         calls.append(payload["stage"])
         assert options["max_wire_bytes"] == 100479
+        if flexible:
+            assert options["stage_budget_version"] == config["version"]
+            later = {"research": 104, "critique": 52, "synthesis": 0}[payload["stage"]]
+            assert options["deadline_at"] <= options["parent_deadline_at"] - 7 - later
+            if payload["stage"] == "critique":
+                assert options["timeout_seconds"] > 45
         body = (
             _assessment_payload(payload["previous_claims"])
             if payload["stage"] == "synthesis"
             else _staged_batch(payload["stage"], payload["requested_roles"])
         )
+        if flexible:
+            sdk_result.final_response = json.dumps(body)
+            return await real_sdk_invoke(payload, **options)
         return json.dumps(body), UsageSnapshot(input_tokens=100, output_tokens=80)
 
     monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
     try:
         await _set_test_insert_clock(sessions, AT)
         async with sessions.begin() as session:
-            config = capacity_config()
             model = AgentModelConfigRecord(
                 model_id=config["model_id"],
                 version=config["version"],
-                config_hash=capacity_config_hash(),
+                config_hash=config_hash,
                 max_input_tokens=96000,
                 max_output_tokens=8192,
                 max_tool_calls=0,
@@ -168,6 +189,23 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
                 job_ids=(job.id,),
                 **({"formal_stage_capacity": True} if formal else {"full_input_capacity": True}),
             )
+            if flexible:
+                from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+                async with sessions() as check:
+                    finished = await check.get(Job, job.id, populate_existing=True)
+                    terminal = await check.scalar(
+                        select(AgentResearchOutputRecord).where(
+                            AgentResearchOutputRecord.run_id == job.payload["run_id"],
+                            AgentResearchOutputRecord.role.is_(None),
+                        )
+                    )
+                    assert finished.status == "succeeded", (
+                        calls,
+                        finished.result_code,
+                        None if terminal is None else terminal.payload.get("reason"),
+                        None if terminal is None else terminal.payload.get("diagnostic"),
+                    )
             assert not await run_agent_worker_once(
                 settings,
                 job_ids=(job.id,),
@@ -178,9 +216,34 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
             assert len(runs) == count and all(
                 r.status == "completed" and r.retry_count == 0 for r in runs
             )
+            if formal:
+                from nexus.agents.codex_formal_stage import formal_stage_output_qualified
+
+                read_as_of = await session.scalar(select(func.clock_timestamp()))
+                for run in runs:
+                    assert await formal_stage_output_qualified(
+                        session, run.id, decision_time=read_as_of
+                    )
+            if flexible:
+                from nexus.api.research_stages import read_stage_trace
+                from nexus.ops.research_budget_diagnostic import timing_metadata
+                from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+                for run in runs:
+                    trace = await read_stage_trace(session, run)
+                    assert trace.status == "verified" and len(trace.stages) == 3
+                    outputs = list(
+                        await session.scalars(
+                            select(AgentResearchOutputRecord).where(
+                                AgentResearchOutputRecord.run_id == run.id
+                            )
+                        )
+                    )
+                    timing = timing_metadata(outputs)["stage_timings"]["critique"]
+                    assert timing["flexible_critique_profile"] == config["version"]
+                    assert 45000 < timing["allocated_timeout_ms"] <= 116000
             assert all(
-                r.pricing_version == config["version"] and r.model_hash == capacity_config_hash()
-                for r in runs
+                r.pricing_version == config["version"] and r.model_hash == config_hash for r in runs
             )
             assert all(
                 j.status == "succeeded" and j.attempt_count == 1

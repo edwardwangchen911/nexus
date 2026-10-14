@@ -428,6 +428,7 @@ async def _load_portfolio_target_baseline(
     if formal_stage_capacity:
         from nexus.agents.codex_versions import (
             CANDIDATE_BUDGET_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
         )
@@ -445,7 +446,10 @@ async def _load_portfolio_target_baseline(
         if prior_run is None or prior_run.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION:
             raise ValueError("PORTFOLIO_PROPOSAL_TARGET_CONFLICT")
         prior_formal = prior_run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
-        if prior_run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        if prior_run.pricing_version in {
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        }:
             from nexus.paper.management_read_authority import formal_proposal_read_profile
 
             prior_formal = await formal_proposal_read_profile(

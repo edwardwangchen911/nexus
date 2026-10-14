@@ -20,7 +20,7 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ["v8", "v9"])
+@pytest.mark.parametrize("profile", ["v8", "v9", "v10", "formal-v10"])
 async def test_pending_formal_registration_is_idempotent_and_default_stays_unchanged(
     migrated_database_url,
     profile,
@@ -28,16 +28,36 @@ async def test_pending_formal_registration_is_idempotent_and_default_stays_uncha
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     factory = session_factory(settings)
     from nexus.agents.codex_capacity import capacity_config_hash
-    from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+    from nexus.agents.codex_flexible_budget import flexible_stage_config_hash
+    from nexus.agents.codex_versions import (
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    )
     from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 
-    options = V9_OPTIONS if profile == "v9" else OPTIONS
+    options = (
+        (V9_OPTIONS | {"formal_flexible_stage_budget": True})
+        if profile == "formal-v10"
+        else (V9_OPTIONS | {"flexible_stage_budget": True})
+        if profile == "v10"
+        else V9_OPTIONS
+        if profile == "v9"
+        else OPTIONS
+    )
     version = (
-        FULL_INPUT_CAPACITY_CONFIG_VERSION
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+        if profile in {"v10", "formal-v10"}
+        else FULL_INPUT_CAPACITY_CONFIG_VERSION
         if profile == "v9"
         else FORMAL_STAGE_CAPACITY_CONFIG_VERSION
     )
-    expected_hash = capacity_config_hash() if profile == "v9" else formal_stage_config_hash()
+    expected_hash = (
+        flexible_stage_config_hash()
+        if profile in {"v10", "formal-v10"}
+        else capacity_config_hash()
+        if profile == "v9"
+        else formal_stage_config_hash()
+    )
     await _seed_authority(factory)
     await openai_local.prepare_database(settings)
     # Make only future inserts newer; do not rewrite an existing model record.
@@ -65,6 +85,7 @@ async def test_pending_formal_registration_is_idempotent_and_default_stays_uncha
         assert chosen.version not in {
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }
 
 

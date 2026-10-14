@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
@@ -171,10 +172,12 @@ def formal_preparation_model_matches(model: AgentModelConfigRecord) -> bool:
     """Exact preparation/Worker identity; output eligibility is checked separately."""
     from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
 
-    if model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+    if model.version in {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}:
         from nexus.agents.codex_capacity import capacity_model_matches
 
-        return capacity_model_matches(model)
+        return capacity_model_matches(
+            model, flexible_stage_budget=model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+        )
     return formal_stage_model_matches(model)
 
 
@@ -208,7 +211,11 @@ async def formal_stage_output_qualified(
         or run.status != "completed"
         or run.retry_count != 0
         or run.pricing_version
-        not in {FORMAL_STAGE_CAPACITY_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
+        not in {
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        }
     ):
         return False
     model = await session.get(AgentModelConfigRecord, run.model_config_id, populate_existing=True)
@@ -225,7 +232,10 @@ async def formal_stage_output_qualified(
         or run.pricing_version != model.version
     ):
         return False
-    if run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+    if run.pricing_version in {
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+    }:
         from nexus.agents.capacity_cycle import capacity_output_mode_qualified
 
         if not await capacity_output_mode_qualified(session, run, formal=True):

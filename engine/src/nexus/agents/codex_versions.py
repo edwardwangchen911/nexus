@@ -20,6 +20,11 @@ DEADLINE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v6-stage-time-budget"
 FORMAL_STAGE_CAPACITY_CONFIG_VERSION = "codex-sdk-chatgpt-v8-stage-capacity"
 # Local qualification profile only; deliberately excluded from admission sets.
 FULL_INPUT_CAPACITY_CONFIG_VERSION = "codex-sdk-chatgpt-v9-full-input-capacity"
+# Isolated qualification only. Formal admission and default selection stay frozen.
+FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v10-flexible-stage-budget"
+ISOLATED_CAPACITY_CONFIG_VERSIONS = frozenset(
+    {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}
+)
 FULL_INPUT_CAPACITY_MAX_WIRE_BYTES = 100_479
 CANDIDATE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v7-stage-capacity-candidate"
 FORMAL_RESEARCH_JOB_TIMEOUT_SECONDS = 180
@@ -104,6 +109,7 @@ def stage_timeout_seconds(
         CANDIDATE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     }:
         if (
             type(deadline) not in {int, float}
@@ -116,6 +122,8 @@ def stage_timeout_seconds(
         # Each future stage reserves both its provider cap and seven-second
         # close bound. Terminal writes are already outside this deadline.
         later_reserve = {"research": 104, "critique": 52, "synthesis": 0}[stage]
+        if version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION and stage == "critique":
+            return max(0.0, deadline - now - 7 - later_reserve)
         return max(0.0, min(cap, deadline - now - 7 - later_reserve))
     if version != DEADLINE_BUDGET_CONFIG_VERSION:
         raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")

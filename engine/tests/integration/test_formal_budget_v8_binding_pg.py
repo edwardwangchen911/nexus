@@ -36,21 +36,35 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selection", ["v8", "v9", "missing", "legacy", "legacy_binding"])
+@pytest.mark.parametrize("selection", ["v8", "v9", "v10", "missing", "legacy", "legacy_binding"])
 async def test_protected_file_freezes_exact_v8_profile(
     migrated_database_url, monkeypatch, tmp_path, selection
 ):
     persisted_inspect = loop.inspect_agent_paper_loop
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
-    from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+    from nexus.agents.codex_versions import (
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    )
     from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 
     version = (
-        FULL_INPUT_CAPACITY_CONFIG_VERSION
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+        if selection == "v10"
+        else FULL_INPUT_CAPACITY_CONFIG_VERSION
         if selection == "v9"
         else FORMAL_STAGE_CAPACITY_CONFIG_VERSION
     )
-    await prepare_database(settings, **(V9_OPTIONS if selection == "v9" else OPTIONS))
+    await prepare_database(
+        settings,
+        **(
+            (V9_OPTIONS | {"formal_flexible_stage_budget": True})
+            if selection == "v10"
+            else V9_OPTIONS
+            if selection == "v9"
+            else OPTIONS
+        ),
+    )
     now = AT - timedelta(hours=1)
     engine, sessions, authority, manifest = await seed_normal_path(
         migrated_database_url, monkeypatch, candidate_instruments=FIVE[:3], decision_time=AT
@@ -114,7 +128,7 @@ async def test_protected_file_freezes_exact_v8_profile(
         monkeypatch.setattr(AsyncSession, "scalar", clock)
         chosen = (
             model.id
-            if selection in {"v8", "v9"}
+            if selection in {"v8", "v9", "v10"}
             else UUID(int=999)
             if selection == "missing"
             else legacy.id
@@ -219,7 +233,7 @@ async def test_protected_file_freezes_exact_v8_profile(
                     == 1
                 )
             return
-        if selection not in {"v8", "v9"}:
+        if selection not in {"v8", "v9", "v10"}:
             with pytest.raises(ValueError, match="CODEX_FORMAL_AUTHORITY_INVALID"):
                 await apply(root, idempotency_key="protected-v8")
             async with sessions() as session:
@@ -383,7 +397,7 @@ async def test_protected_file_freezes_exact_v8_profile(
 
         async with sessions() as session:
             assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0077_formal_v9_output_binding"
+                "0078_formal_v10_output_binding"
             )
             retained = await session.get(FormalBudgetBindingRecord, binding.id)
             assert retained is not None and retained.content_hash == result["binding_hash"]

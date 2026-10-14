@@ -25,8 +25,10 @@ from nexus.agents.codex_sdk import (
 from nexus.agents.codex_staged import STAGES, StagedCodexCommittee
 from nexus.agents.codex_token_budget import INPUT_RESERVE
 from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
+    ISOLATED_CAPACITY_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import ROLE_ORDER
 from nexus.agents.models import ResearchRequest
@@ -54,11 +56,18 @@ def capacity_config_hash() -> str:
     return hashlib.sha256(json.dumps(capacity_config(), sort_keys=True).encode()).hexdigest()
 
 
-def capacity_model_matches(model: AgentModelConfigRecord) -> bool:
-    config = capacity_config()
+def capacity_model_matches(
+    model: AgentModelConfigRecord, *, flexible_stage_budget: bool = False
+) -> bool:
+    if type(flexible_stage_budget) is not bool:
+        return False
+    from nexus.agents.codex_flexible_budget import flexible_stage_config, flexible_stage_config_hash
+
+    config = flexible_stage_config() if flexible_stage_budget else capacity_config()
+    config_hash = flexible_stage_config_hash() if flexible_stage_budget else capacity_config_hash()
     return (
-        model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION
-        and model.config_hash == capacity_config_hash()
+        model.version == config["version"]
+        and model.config_hash == config_hash
         and model.model_id == config["model_id"]
         and model.max_input_tokens == 96000
         and model.max_output_tokens == 8192
@@ -68,6 +77,12 @@ def capacity_model_matches(model: AgentModelConfigRecord) -> bool:
         and model.pricing_available_at
         == datetime.fromisoformat(str(config["pricing_available_at"]))
         and model.pricing_expires_at == datetime.fromisoformat(str(config["pricing_expires_at"]))
+    )
+
+
+def isolated_capacity_model_matches(model: AgentModelConfigRecord) -> bool:
+    return capacity_model_matches(
+        model, flexible_stage_budget=model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
     )
 
 
@@ -105,7 +120,7 @@ async def capacity_job_qualified(session: AsyncSession, job: Job, *, claimed: bo
     return (
         model is not None
         and isinstance(now, datetime)
-        and capacity_model_matches(model)
+        and isolated_capacity_model_matches(model)
         and model.created_at <= now
         and model.pricing_available_at <= now < model.pricing_expires_at
         and run.model_hash == model.config_hash
@@ -294,13 +309,17 @@ async def preflight_capacity_pool(
         or len({id(member.committee) for member in members}) != len(members)
         or len({member.request.decision_time for member in members}) != 1
         or any(
-            member.committee._stage_budget_version != FULL_INPUT_CAPACITY_CONFIG_VERSION
+            member.committee._stage_budget_version not in ISOLATED_CAPACITY_CONFIG_VERSIONS
             or member.committee._capacity_pool_manifest is not None
             or member.committee._attempted
             for member in members
         )
     ):
         raise ValueError("CODEX_CAPACITY_POOL_BINDING_INVALID")
+    profiles = {member.committee._stage_budget_version for member in members}
+    if len(profiles) != 1:
+        raise ValueError("CODEX_CAPACITY_POOL_BINDING_INVALID")
+    profile = next(iter(profiles))
     pending = []
     rows = []
     for member in members:
@@ -335,7 +354,7 @@ async def preflight_capacity_pool(
     manifest = hashlib.sha256(
         json.dumps(
             {
-                "profile": FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                "profile": profile,
                 "members": rows,
             },
             sort_keys=True,
@@ -347,7 +366,7 @@ async def preflight_capacity_pool(
     if any(
         member.committee._capacity_pool_manifest is not None
         or member.committee._attempted
-        or member.committee._stage_budget_version != FULL_INPUT_CAPACITY_CONFIG_VERSION
+        or member.committee._stage_budget_version != profile
         or member.committee._max_wire_bytes != FULL_INPUT_CAPACITY_MAX_WIRE_BYTES
         or member.committee._aggregate_input_tokens != 96000
         or member.committee._inline_citations is not True

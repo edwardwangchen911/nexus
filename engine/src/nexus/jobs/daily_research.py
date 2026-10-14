@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_candidate import require_candidate_model_profile
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
-    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    ISOLATED_CAPACITY_CONFIG_VERSIONS,
     PAPER_SCOPE_CONFIG_VERSIONS,
 )
 from nexus.agents.models import ResearchRequest
@@ -462,6 +462,6 @@ async def admit_agent_paper_research(
         version_source_run_id=version_source_run_id,
         formal_stage_capacity=formal_stage_capacity,
         full_input_capacity=capacity_model is not None
-        and capacity_model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        and capacity_model.version in ISOLATED_CAPACITY_CONFIG_VERSIONS,
         economic_allocation=allocation,
     )

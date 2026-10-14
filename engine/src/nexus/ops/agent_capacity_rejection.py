@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from nexus.agents.capacity_cycle import derive_cycle_members
 from nexus.agents.codex_formal_stage import formal_stage_job_qualified
-from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+from nexus.agents.codex_versions import ISOLATED_CAPACITY_CONFIG_VERSIONS
 from nexus.agents.persistence import try_lock_budget_day
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.paper.agent_cycle import (
@@ -89,7 +89,7 @@ async def close_capacity_rejected_cycle_once(
                 expected_formal_model_id=settings.agent_paper_formal_model_config_id,
                 now=cycle.decision_time,
             )
-            if any(run.pricing_version != FULL_INPUT_CAPACITY_CONFIG_VERSION for run in runs):
+            if any(run.pricing_version not in ISOLATED_CAPACITY_CONFIG_VERSIONS for run in runs):
                 raise ValueError(_BLOCKED)
             days = tuple(
                 await session.scalars(

@@ -37,7 +37,8 @@ async def test_v9_registration_refuses_ambiguous_selection_before_connection(mon
         )
 
 
-def test_cli_v9_setup_dispatches_only_pending_exact_profile(monkeypatch):
+@pytest.mark.parametrize("formal_flexible", [False, True])
+def test_cli_v9_setup_dispatches_only_pending_exact_profile(monkeypatch, formal_flexible):
     settings = EngineSettings(
         database_url="postgresql+asyncpg://localhost/nexus_diag_v9", agent_runtime_mode="codex_sdk"
     )
@@ -62,13 +63,20 @@ def test_cli_v9_setup_dispatches_only_pending_exact_profile(monkeypatch):
             "--inline-citations",
             "--actionable-paper",
             "--skip-key",
+            *(["--formal-flexible-stage-budget"] if formal_flexible else []),
         ],
     )
     monkeypatch.setattr(openai_local, "local_settings", lambda *a, **kw: settings)
     monkeypatch.setattr(openai_local, "prepare_database", prepare)
     monkeypatch.setattr(openai_local, "status", lambda _: {"execution_locked": True})
     assert openai_local.main() == 0
-    prepare.assert_awaited_once_with(settings, staged=False, strategy_rnd=False, **V9_OPTIONS)
+    prepare.assert_awaited_once_with(
+        settings,
+        staged=False,
+        strategy_rnd=False,
+        **V9_OPTIONS,
+        **({"formal_flexible_stage_budget": True} if formal_flexible else {}),
+    )
 
 
 @pytest.mark.parametrize("action", ["status", "admit-research", "run-once"])
@@ -104,3 +112,13 @@ async def test_v9_registration_rejects_connection_overrides_before_factory(monke
             ),
             **V9_OPTIONS,
         )
+
+
+@pytest.mark.parametrize("action", ["status", "admit-research", "run-once"])
+def test_cli_formal_flexible_flag_is_setup_only(monkeypatch, action):
+    monkeypatch.setattr(
+        "sys.argv", ["nexus-openai-local", action, "--formal-flexible-stage-budget"]
+    )
+    with pytest.raises(SystemExit) as error:
+        openai_local.main()
+    assert error.value.code == 2

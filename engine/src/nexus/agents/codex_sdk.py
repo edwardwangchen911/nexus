@@ -27,7 +27,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nexus.agents.codex_token_budget import input_preflight_units
 from nexus.agents.codex_versions import CONFIG_VERSION as CONFIG_VERSION
-from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_MAX_WIRE_BYTES
+from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
+)
 from nexus.agents.codex_versions import (
     PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS as PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS,
 )
@@ -342,14 +345,56 @@ async def invoke_codex(
     output_model: type[BaseModel] = _Batch,
     max_wire_bytes: int = 55808,
     timeout_seconds: float | None = None,
+    stage_budget_version: str | None = None,
+    diagnostic_profile: str | None = None,
+    parent_deadline_at: float | None = None,
     deadline_at: float | None = None,
     phase_elapsed_ms: dict[InvocationPhase, int] | None = None,
     stream_observer: SdkStreamObserver | None = None,
 ) -> tuple[str, UsageSnapshot]:
+    if diagnostic_profile is not None:
+        now = asyncio.get_running_loop().time()
+        if (
+            diagnostic_profile != "full-input-timing-diagnostic-v1"
+            or stage_budget_version is not None
+            or parent_deadline_at is None
+            or type(parent_deadline_at) not in {int, float}
+            or not math.isfinite(parent_deadline_at)
+            or not 0 < parent_deadline_at - now <= 295
+            or deadline_at is None
+            or timeout_seconds is None
+        ):
+            raise ValueError("CODEX_DIAGNOSTIC_BUDGET_INVALID")
+        later = {"research": 14, "critique": 7, "synthesis": 0}.get(str(payload.get("stage")))
+        if later is None or deadline_at > parent_deadline_at - 7 - later:
+            raise ValueError("CODEX_STAGE_DEADLINE_INVALID")
+    if stage_budget_version is not None and (
+        stage_budget_version != FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+        or deadline_at is None
+        or timeout_seconds is None
+        or parent_deadline_at is None
+        or type(parent_deadline_at) not in {int, float}
+        or not math.isfinite(parent_deadline_at)
+    ):
+        raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
+    if parent_deadline_at is not None and diagnostic_profile is None:
+        if stage_budget_version != FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+            raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
+        later = {"research": 104, "critique": 52, "synthesis": 0}.get(str(payload.get("stage")))
+        if later is None or deadline_at is None or deadline_at > parent_deadline_at - 7 - later:
+            raise ValueError("CODEX_STAGE_DEADLINE_INVALID")
+    timeout_limit = (
+        295
+        if diagnostic_profile is not None
+        else 116
+        if stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+        and payload.get("stage") == "critique"
+        else 108
+    )
     if timeout_seconds is not None and (
         type(timeout_seconds) not in {int, float}
         or not math.isfinite(timeout_seconds)
-        or not 0 < timeout_seconds <= 108
+        or not 0 < timeout_seconds <= timeout_limit
     ):
         raise ValueError("CODEX_STAGE_TIMEOUT_INVALID")
     if deadline_at is not None and (

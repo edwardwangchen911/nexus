@@ -45,6 +45,7 @@ from nexus.persistence.models.runtime import (
 def _not_candidate_agent_job() -> ColumnElement[bool]:
     from nexus.agents.codex_versions import (
         CANDIDATE_BUDGET_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
     )
@@ -68,6 +69,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                     )
                 ),
                 AgentModelConfigRecord.version.in_(
@@ -75,6 +77,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                     )
                 ),
             ),
@@ -99,6 +102,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                     )
                 ),
             ),
@@ -335,6 +339,7 @@ async def claim_next_job(
         raise ValueError("LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE")
     from nexus.agents.codex_versions import (
         CANDIDATE_BUDGET_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
     )
@@ -375,6 +380,7 @@ async def claim_next_job(
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }
         or locked_job_guard is None
         or job_ids is None

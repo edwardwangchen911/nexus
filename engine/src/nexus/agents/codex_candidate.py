@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    ISOLATED_CAPACITY_CONFIG_VERSIONS,
 )
 from nexus.jobs.models import JobType, QueueName, RetryPolicy, job_input_hash
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
@@ -100,10 +101,10 @@ async def require_candidate_model_profile(
     )
     # Explicit isolated candidate selection may bind the independent v9
     # identity; this does not change v7's config/hash or output consumers.
-    if model is not None and model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
-        from nexus.agents.codex_capacity import capacity_model_matches
+    if model is not None and model.version in ISOLATED_CAPACITY_CONFIG_VERSIONS:
+        from nexus.agents.codex_capacity import isolated_capacity_model_matches
 
-        matches = capacity_model_matches(model)
+        matches = isolated_capacity_model_matches(model)
     else:
         matches = model is not None and candidate_model_matches(model)
     if (
@@ -136,10 +137,10 @@ def candidate_model_matches(model: AgentModelConfigRecord) -> bool:
 
 def isolated_candidate_model_matches(model: AgentModelConfigRecord) -> bool:
     """Consumers with an independently checked isolated mode may bind v7 or v9."""
-    if model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
-        from nexus.agents.codex_capacity import capacity_model_matches
+    if model.version in ISOLATED_CAPACITY_CONFIG_VERSIONS:
+        from nexus.agents.codex_capacity import isolated_capacity_model_matches
 
-        return capacity_model_matches(model)
+        return isolated_capacity_model_matches(model)
     return candidate_model_matches(model)
 
 

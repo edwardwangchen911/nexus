@@ -185,6 +185,8 @@ async def prepare_database(
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
+    flexible_stage_budget: bool = False,
+    formal_flexible_stage_budget: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -197,6 +199,26 @@ async def prepare_database(
         or (set(url.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if (
+        type(formal_flexible_stage_budget) is not bool
+        or formal_flexible_stage_budget
+        and (
+            flexible_stage_budget
+            or not full_input_capacity
+            or not formal_stage_capacity
+            or candidate_stage_capacity
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_FLEXIBLE_ARGUMENT_INVALID")
+    if (
+        type(flexible_stage_budget) is not bool
+        or flexible_stage_budget
+        and (
+            not full_input_capacity
+            or not (url.database or "").startswith(("nexus_test_", "nexus_diag_"))
+        )
+    ):
+        raise ValueError("CODEX_FLEXIBLE_STAGE_ISOLATION_REQUIRED")
     if (
         type(full_input_capacity) is not bool
         or full_input_capacity
@@ -356,7 +378,12 @@ async def prepare_database(
         from nexus.agents.codex_capacity import capacity_config
         from nexus.agents.codex_formal_stage import formal_stage_config
 
-        config = capacity_config() if full_input_capacity else formal_stage_config()
+        if flexible_stage_budget or formal_flexible_stage_budget:
+            from nexus.agents.codex_flexible_budget import flexible_stage_config
+
+            config = flexible_stage_config()
+        else:
+            config = capacity_config() if full_input_capacity else formal_stage_config()
     configs = [config]
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         configs.append(
@@ -420,7 +447,7 @@ async def prepare_database(
         prompt = load_strategy_rnd_prompt()
         prompts.append((prompt.role, prompt.version, prompt.content, prompt.content_hash))
     async with session_factory(settings)() as session, session.begin():
-        if candidate_stage_capacity:
+        if candidate_stage_capacity or flexible_stage_budget:
             from nexus.agents.codex_candidate import require_candidate_database
 
             await require_candidate_database(
@@ -493,6 +520,11 @@ async def prepare_database(
                 )
             elif existing_model.config_hash != config_hash:
                 raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
+            elif flexible_stage_budget and existing_model.version == config["version"]:
+                from nexus.agents.codex_capacity import isolated_capacity_model_matches
+
+                if not isolated_capacity_model_matches(existing_model):
+                    raise ValueError("OPENAI_MODEL_VERSION_CONFLICT")
             elif formal_stage_capacity and existing_model.version == config["version"]:
                 from nexus.agents.codex_formal_stage import formal_preparation_model_matches
 
@@ -626,9 +658,19 @@ def main() -> int:
         help="Register pending formal profile only; requires explicit stage registration opt-in",
     )
     parser.add_argument(
+        "--formal-flexible-stage-budget",
+        action="store_true",
+        help="Explicit v10 formal setup; does not select or activate it",
+    )
+    parser.add_argument(
         "--full-input-capacity",
         action="store_true",
         help="Select pending v9 only with formal setup and the fixed 100479-byte contract",
+    )
+    parser.add_argument(
+        "--flexible-stage-budget",
+        action="store_true",
+        help="Register isolated v10 only; never enables formal selection",
     )
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--news-evidence-id", type=UUID)
@@ -680,6 +722,18 @@ def main() -> int:
         "v6 may change future selection, pending v8 remains inactive; never starts research",
     )
     args = parser.parse_args()
+    if args.formal_flexible_stage_budget and (
+        args.action != "setup"
+        or not args.full_input_capacity
+        or not args.formal_stage_capacity
+        or args.flexible_stage_budget
+        or args.candidate_stage_capacity
+    ):
+        parser.error("formal flexible budget requires explicit formal full-input setup")
+    if args.flexible_stage_budget and (
+        args.action != "setup" or not args.full_input_capacity or args.database_url_file is None
+    ):
+        parser.error("--flexible-stage-budget requires isolated full-input-capacity setup")
     if (
         args.full_input_capacity
         and (
@@ -718,7 +772,7 @@ def main() -> int:
                 and not (args.stage_time_budget and args.actionable_paper)
             )
             or args.database_url_file is not None
-            and not args.candidate_stage_capacity
+            and not (args.candidate_stage_capacity or args.flexible_stage_budget)
         ):
             raise ValueError("CODEX_CANDIDATE_CLI_ARGUMENT_INVALID")
         if args.actionable_paper and (
@@ -813,7 +867,7 @@ def main() -> int:
             },
             backend=args.backend,
         )
-        if args.candidate_stage_capacity:
+        if args.candidate_stage_capacity or args.flexible_stage_budget:
             from nexus.ops.research_budget_diagnostic import read_database_url
 
             settings = settings.model_copy(
@@ -829,6 +883,12 @@ def main() -> int:
                     **({"stage_time_budget": True} if args.stage_time_budget else {}),
                     **({"formal_stage_capacity": True} if args.formal_stage_capacity else {}),
                     **({"full_input_capacity": True} if args.full_input_capacity else {}),
+                    **({"flexible_stage_budget": True} if args.flexible_stage_budget else {}),
+                    **(
+                        {"formal_flexible_stage_budget": True}
+                        if args.formal_flexible_stage_budget
+                        else {}
+                    ),
                     **({"candidate_stage_capacity": True} if args.candidate_stage_capacity else {}),
                     **(
                         {"allow_stage_time_budget_registration": True}

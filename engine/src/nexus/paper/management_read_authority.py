@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_candidate import require_candidate_consumer_profile
 from nexus.agents.codex_formal_stage import formal_stage_config_hash
 from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
@@ -95,7 +96,10 @@ async def formal_proposal_read_profile(
         return False
     if identity[0] == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
         return True
-    if identity[0] != FULL_INPUT_CAPACITY_CONFIG_VERSION:
+    if identity[0] not in {
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+    }:
         return False
     from nexus.paper.agent_cycle import _events
 
@@ -140,10 +144,11 @@ async def load_synthesis_read_authority(
     from nexus.paper.agent_cycle import _events
 
     events = await _events(session, cycle.id)
-    formal_v9 = run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION and bool(
-        events and events[0].fact_ids.get("formal_stage_capacity") is True
-    )
-    if run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION or formal_v9:
+    formal_full = run.pricing_version in {
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+    } and bool(events and events[0].fact_ids.get("formal_stage_capacity") is True)
+    if run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION or formal_full:
         from nexus.paper.agent_cycle import _require_cycle_candidate_profile
 
         await _require_cycle_candidate_profile(
@@ -155,8 +160,15 @@ async def load_synthesis_read_authority(
             now=frozen.admitted_at,
         )
         from nexus.agents.codex_capacity import capacity_config_hash
+        from nexus.agents.codex_flexible_budget import flexible_stage_config_hash
 
-        expected_hash = capacity_config_hash() if formal_v9 else formal_stage_config_hash()
+        expected_hash = (
+            flexible_stage_config_hash()
+            if run.pricing_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+            else capacity_config_hash()
+            if formal_full
+            else formal_stage_config_hash()
+        )
         if run.model_hash != expected_hash or frozen.admitted_at > read_as_of:
             raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
         for source in frozen.security_outputs:

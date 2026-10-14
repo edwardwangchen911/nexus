@@ -22,6 +22,7 @@ from nexus.agents.codex_sdk import (
 )
 from nexus.agents.codex_staged import StagedCodexCommittee
 from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
@@ -231,10 +232,15 @@ async def _inspection_committee(
     *,
     model: AgentModelConfigRecord,
 ) -> CommitteeModel:
+    flexible = model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
     formal = model.version in {
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
     }
+    if flexible:
+        from nexus.agents.capacity_cycle import capacity_output_mode_qualified
+
+        formal = await capacity_output_mode_qualified(session, run, formal=True)
     # The factory needs the exact frozen profile and a construction deadline.
     # This observation-only deadline is never used to invoke or resume a model.
     return await _committee(
@@ -244,8 +250,9 @@ async def _inspection_committee(
         responses_client=None,
         tools=None,
         formal_stage_capacity=formal,
+        full_input_capacity=flexible and not formal,
         deadline=asyncio.get_running_loop().time() + FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
-        if formal
+        if formal or flexible
         else None,
     )
 

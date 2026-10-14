@@ -28,8 +28,10 @@ from nexus.agents.codex_sdk import (
     invoke_codex,
 )
 from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
+    ISOLATED_CAPACITY_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import (
     ROLE_ORDER,
@@ -243,6 +245,9 @@ def _stage_model_for_prior_claims(stage: str, claim_ids: tuple[str, ...]) -> typ
 
 class _StageInvocationOptions(TypedDict, total=False):
     timeout_seconds: float
+    stage_budget_version: str
+    diagnostic_profile: str
+    parent_deadline_at: float
     deadline_at: float
     max_wire_bytes: int
     phase_elapsed_ms: dict[InvocationPhase, int]
@@ -267,11 +272,12 @@ class StagedCodexCommittee(CodexCommittee):
         paper_stage_scope: bool = False,
         stage_time_budget: bool = False,
         stage_budget_version: str | None = None,
+        diagnostic_profile: str | None = None,
     ) -> None:
         if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
         super().__init__(prompts=prompts, tools=tools)
-        full_capacity = stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+        full_capacity = stage_budget_version in ISOLATED_CAPACITY_CONFIG_VERSIONS
         if full_capacity and (
             not self.structured_synthesis
             or aggregate_input_tokens != 96000
@@ -312,6 +318,7 @@ class StagedCodexCommittee(CodexCommittee):
                 CANDIDATE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }
         ):
             raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
@@ -319,11 +326,22 @@ class StagedCodexCommittee(CodexCommittee):
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }:
             if deadline is None:
                 raise ValueError("CODEX_STAGE_BUDGET_DEADLINE_REQUIRED")
             if type(deadline) not in {int, float} or not isfinite(deadline):
                 raise ValueError("CODEX_STAGE_BUDGET_CLOCK_INVALID")
+        if diagnostic_profile is not None and (
+            diagnostic_profile != "full-input-timing-diagnostic-v1"
+            or stage_budget_version != FULL_INPUT_CAPACITY_CONFIG_VERSION
+            or deadline is None
+            or not 0 < deadline - asyncio.get_running_loop().time() <= 300
+        ):
+            raise ValueError("CODEX_DIAGNOSTIC_BUDGET_INVALID")
+        self._diagnostic_profile = cast(
+            Literal["full-input-timing-diagnostic-v1"] | None, diagnostic_profile
+        )
         self._stage_budget_version = stage_budget_version or DEADLINE_BUDGET_CONFIG_VERSION
         self._max_wire_bytes = max_wire_bytes
         self._aggregate_input_tokens = aggregate_input_tokens
@@ -350,7 +368,7 @@ class StagedCodexCommittee(CodexCommittee):
         """Compile the normal wire without invoking a model or changing Run state."""
         if type(financial_table_candidate) is not bool:
             raise ValueError("MODEL_FINANCIAL_TABLE_CANDIDATE_INVALID")
-        if self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+        if self._stage_budget_version in ISOLATED_CAPACITY_CONFIG_VERSIONS:
             financial_table_candidate = True
         roles = next(roles for name, roles in STAGES if name == stage)
         security = frozen_inputs.get("security_snapshot")
@@ -521,11 +539,11 @@ class StagedCodexCommittee(CodexCommittee):
         prompt: PromptAsset,
     ) -> CommitteeRoleOutput:
         if (
-            self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+            self._stage_budget_version in ISOLATED_CAPACITY_CONFIG_VERSIONS
             and self._capacity_pool_manifest is None
         ):
             raise ValueError("CODEX_CAPACITY_POOL_REQUIRED")
-        if self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION and (
+        if self._stage_budget_version in ISOLATED_CAPACITY_CONFIG_VERSIONS and (
             request != self._capacity_pool_request or evidence_refs != self._capacity_pool_evidence
         ):
             raise ValueError("CODEX_CAPACITY_POOL_BINDING_INVALID")
@@ -575,7 +593,7 @@ class StagedCodexCommittee(CodexCommittee):
         stage_input_hash = codex_request_hash(payload, output_model)
         if (
             stage == "research"
-            and self._stage_budget_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+            and self._stage_budget_version in ISOLATED_CAPACITY_CONFIG_VERSIONS
             and stage_input_hash != self._capacity_research_hash
         ):
             raise ValueError("CODEX_CAPACITY_POOL_BINDING_INVALID")
@@ -596,7 +614,16 @@ class StagedCodexCommittee(CodexCommittee):
                 now=allocated_at,
                 version=self._stage_budget_version,
             )
+            if self._diagnostic_profile is not None:
+                later_close = {"research": 14, "critique": 7, "synthesis": 0}[stage]
+                allocated_timeout = max(0.0, self._deadline - allocated_at - 7 - later_close)
             allocated_deadline = allocated_at + allocated_timeout
+            if self._diagnostic_profile is not None:
+                allocated_deadline = min(allocated_deadline, self._deadline - 7 - later_close)
+            if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+                later_reserve = {"research": 104, "critique": 52, "synthesis": 0}[stage]
+                # Floating-point addition must never round past the reserved cutoff.
+                allocated_deadline = min(allocated_deadline, self._deadline - 7 - later_reserve)
         allowance_reason: str | None = None
         if len(wire.encode()) > self._max_wire_bytes:
             allowance_reason = "model_stage_wire_bytes_exceeded"
@@ -631,6 +658,14 @@ class StagedCodexCommittee(CodexCommittee):
             invocation_options["timeout_seconds"] = allocated_timeout
             assert allocated_deadline is not None
             invocation_options["deadline_at"] = allocated_deadline
+        if self._diagnostic_profile is not None:
+            invocation_options["diagnostic_profile"] = self._diagnostic_profile
+            assert self._deadline is not None
+            invocation_options["parent_deadline_at"] = self._deadline
+        if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+            invocation_options["stage_budget_version"] = self._stage_budget_version
+            assert self._deadline is not None
+            invocation_options["parent_deadline_at"] = self._deadline
         if self._max_wire_bytes != 55808:
             invocation_options["max_wire_bytes"] = self._max_wire_bytes
         phase_elapsed_ms: dict[InvocationPhase, int] = {}
@@ -673,6 +708,13 @@ class StagedCodexCommittee(CodexCommittee):
                 )
                 else None,
                 timing=StageInvocationTiming(
+                    diagnostic_profile=self._diagnostic_profile,
+                    flexible_critique_profile=(
+                        "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                        if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+                        and stage == "critique"
+                        else None
+                    ),
                     allocated_timeout_ms=(
                         int(allocated_timeout * 1000) if allocated_timeout is not None else None
                     ),
@@ -688,6 +730,13 @@ class StagedCodexCommittee(CodexCommittee):
             raise
         if self._stage_time_budget:
             self.stage_timings[stage] = StageInvocationTiming(
+                diagnostic_profile=self._diagnostic_profile,
+                flexible_critique_profile=(
+                    "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                    if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+                    and stage == "critique"
+                    else None
+                ),
                 allocated_timeout_ms=(
                     int(allocated_timeout * 1000) if allocated_timeout is not None else None
                 ),

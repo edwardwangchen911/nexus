@@ -24,6 +24,7 @@ from nexus.agents.codex_versions import (
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
     INLINE_CITATION_CONFIG_VERSION,
+    ISOLATED_CAPACITY_CONFIG_VERSIONS,
     PAPER_SCOPE_CONFIG_VERSIONS,
     PORTFOLIO_DECISION_ABSOLUTE_TIMEOUT_SECONDS,
     RESEARCH_SDK_HANDLER_TIMEOUT_SECONDS,
@@ -247,6 +248,7 @@ async def run_agent_worker_once(
     factory = session_factory(settings)
     locked_guard: LockedJobGuard | None = None
     formal_full_input_capacity = False
+    capacity_profile_version = FULL_INPUT_CAPACITY_CONFIG_VERSION
     if full_input_capacity:
         from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
         from nexus.agents.codex_candidate import require_candidate_database
@@ -256,6 +258,14 @@ async def run_agent_worker_once(
             await require_candidate_database(
                 session, configured_database=make_url(cast(str, settings.database_url)).database
             )
+        async with factory() as session:
+            selected_job = await session.get(Job, cast(tuple[UUID, ...], job_ids)[0])
+            if selected_job is not None and type(selected_job.payload.get("run_id")) is str:
+                selected_run = await session.get(
+                    AgentResearchRunRecord, UUID(cast(str, selected_job.payload["run_id"]))
+                )
+                if selected_run is not None:
+                    capacity_profile_version = selected_run.pricing_version
         locked_guard = capacity_job_qualified
         prior_guard = preclaim_guard
 
@@ -298,8 +308,11 @@ async def run_agent_worker_once(
                 )
                 formal_full_input_capacity = (
                     selected_run is not None
-                    and selected_run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+                    and selected_run.pricing_version in ISOLATED_CAPACITY_CONFIG_VERSIONS
                 )
+                if formal_full_input_capacity:
+                    assert selected_run is not None
+                    capacity_profile_version = selected_run.pricing_version
         locked_guard = formal_stage_job_qualified
         if formal_full_input_capacity:
             if tools is not None or responses_client is not None:
@@ -343,6 +356,7 @@ async def run_agent_worker_once(
             formal_stage_capacity=formal_stage_capacity,
             full_input_capacity=full_input_capacity,
             formal_full_input_capacity=formal_full_input_capacity,
+            capacity_profile_version=capacity_profile_version,
         ),
         queue=QueueName.GENERAL,
         worker_id=_ONCE_WORKER_ID,
@@ -519,7 +533,13 @@ def _agent_registry(
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
     formal_full_input_capacity: bool = False,
+    capacity_profile_version: str = FULL_INPUT_CAPACITY_CONFIG_VERSION,
 ) -> JobRegistry:
+    if capacity_profile_version not in ISOLATED_CAPACITY_CONFIG_VERSIONS or (
+        not (full_input_capacity or formal_full_input_capacity)
+        and capacity_profile_version != FULL_INPUT_CAPACITY_CONFIG_VERSION
+    ):
+        raise ValueError("CODEX_CAPACITY_WORKER_ARGUMENT_INVALID")
     runtime_mode = _require_worker_runtime(settings)
     if (
         type(formal_full_input_capacity) is not bool
@@ -670,7 +690,7 @@ def _agent_registry(
                 max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
                 idempotency_namespace="agent.research",
                 handler=handle,
-                research_budget_profile=FULL_INPUT_CAPACITY_CONFIG_VERSION
+                research_budget_profile=capacity_profile_version
                 if full_input_capacity or formal_full_input_capacity
                 else FORMAL_STAGE_CAPACITY_CONFIG_VERSION
                 if formal_stage_capacity
@@ -711,7 +731,7 @@ async def _committee(
     full_input_capacity: bool = False,
 ) -> CommitteeModel:
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
-    full_input_model = model is not None and model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+    full_input_model = model is not None and model.version in ISOLATED_CAPACITY_CONFIG_VERSIONS
     if (
         type(full_input_capacity) is not bool
         or full_input_capacity
@@ -721,7 +741,7 @@ async def _committee(
         return _UnavailableResponsesCommittee()
     if full_input_capacity:
         from nexus.agents.codex_candidate import require_candidate_database
-        from nexus.agents.codex_capacity import capacity_model_matches
+        from nexus.agents.codex_capacity import isolated_capacity_model_matches
 
         # Only explicit isolated composition. No public Worker/registration flag
         # routes this candidate into the business database or claims its Jobs.
@@ -731,7 +751,7 @@ async def _committee(
             or formal_stage_capacity
             or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
             or model is None
-            or not capacity_model_matches(model)
+            or not isolated_capacity_model_matches(model)
             or deadline is None
         ):
             return _UnavailableResponsesCommittee()
@@ -859,7 +879,7 @@ async def _committee(
             **(
                 {
                     "stage_time_budget": True,
-                    "stage_budget_version": FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    "stage_budget_version": model.version,
                 }
                 if full_input_capacity
                 else {

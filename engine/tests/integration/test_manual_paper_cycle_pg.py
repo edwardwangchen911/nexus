@@ -38,7 +38,13 @@ async def test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
 
     await prepare_database(
         EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk"),
-        **(V9_OPTIONS if profile == "v9" else OPTIONS),
+        **(
+            (V9_OPTIONS | {"formal_flexible_stage_budget": True})
+            if profile == "v10"
+            else V9_OPTIONS
+            if profile == "v9"
+            else OPTIONS
+        ),
     )
     candidates = (
         INSTRUMENTS
@@ -66,7 +72,9 @@ async def test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
                 select(AgentModelConfigRecord).where(
                     AgentModelConfigRecord.version
                     == (
-                        "codex-sdk-chatgpt-v9-full-input-capacity"
+                        "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                        if profile == "v10"
+                        else "codex-sdk-chatgpt-v9-full-input-capacity"
                         if profile == "v9"
                         else "codex-sdk-chatgpt-v8-stage-capacity"
                     )
@@ -355,8 +363,9 @@ async def test_manual_unstarted_research_cancels_without_model_or_budget_usage(
 @pytest.mark.parametrize("mode", ["research_only", "research_and_paper"])
 @pytest.mark.parametrize("cancel_fault", [False, True])
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["v9", "v10"])
 async def test_manual_v9_unstarted_research_cancels_without_usage(
-    migrated_database_url, monkeypatch, candidate_count, mode, cancel_fault
+    migrated_database_url, monkeypatch, candidate_count, mode, cancel_fault, profile
 ):
     await test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
         migrated_database_url,
@@ -366,7 +375,7 @@ async def test_manual_v9_unstarted_research_cancels_without_usage(
         failure_status="failed",
         cancel_unstarted=True,
         cancel_fault=cancel_fault,
-        profile="v9",
+        profile=profile,
     )
 
 

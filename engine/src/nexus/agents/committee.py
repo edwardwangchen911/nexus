@@ -101,10 +101,36 @@ class StageInvocationTiming(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
-    allocated_timeout_ms: int | None = Field(default=None, strict=True, ge=0, le=108000)
+    allocated_timeout_ms: int | None = Field(default=None, strict=True, ge=0, le=295000)
+    flexible_critique_profile: Literal["codex-sdk-chatgpt-v10-flexible-stage-budget"] | None = None
+    diagnostic_profile: Literal["full-input-timing-diagnostic-v1"] | None = None
     elapsed_ms: int = Field(strict=True, ge=0)
     phase_elapsed_ms: dict[InvocationPhase, Annotated[int, Field(strict=True, ge=0)]]
     stream_progress: SdkStreamProgress | None = None
+
+    @model_validator(mode="after")
+    def _profile_allocation(self) -> "StageInvocationTiming":
+        if self.diagnostic_profile is not None and self.flexible_critique_profile is not None:
+            raise ValueError("STAGE_TIMING_PROFILE_INVALID")
+        limit = (
+            295000
+            if self.diagnostic_profile is not None
+            else 116000
+            if self.flexible_critique_profile is not None
+            else 108000
+        )
+        if (self.allocated_timeout_ms or 0) > limit:
+            raise ValueError("STAGE_TIMING_PROFILE_INVALID")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_profile(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        serialized = cast(dict[str, object], handler(self))
+        if self.flexible_critique_profile is None:
+            serialized.pop("flexible_critique_profile", None)
+        if self.diagnostic_profile is None:
+            serialized.pop("diagnostic_profile", None)
+        return serialized
 
 
 class StageFailureDiagnostic(BaseModel):

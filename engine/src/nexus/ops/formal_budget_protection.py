@@ -49,6 +49,7 @@ async def bind_runtime_environment(
             bound["NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID"] = str(p["batch_id"])
             bound["AGENT_DAILY_BUDGET_USD"] = str(binding.daily_limit_usd)
             from nexus.agents.codex_versions import (
+                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
             )
@@ -56,6 +57,7 @@ async def bind_runtime_environment(
             if p["pricing_version"] in {
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }:
                 bound["NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID"] = str(p["model_id"])
             else:

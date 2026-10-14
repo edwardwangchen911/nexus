@@ -23,7 +23,10 @@ async def capacity_output_mode_qualified(
     session: AsyncSession, run: AgentResearchRunRecord, *, formal: bool
 ) -> bool:
     """Prove v9's original whole-cycle mode; version alone cannot choose a consumer."""
-    from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+    from nexus.agents.codex_versions import (
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    )
     from nexus.agents.paper_context import read_agent_paper_research_context
 
     try:
@@ -61,7 +64,9 @@ async def capacity_output_mode_qualified(
             and all(
                 member.model_config_id == run.model_config_id
                 and member.model_hash == run.model_hash
-                and member.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+                and member.pricing_version == run.pricing_version
+                and run.pricing_version
+                in {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}
                 for _, member in paired
             )
         )
@@ -141,7 +146,9 @@ async def prepare_cycle_capacity_pool(
     """Derive every member from persisted authority, not from a caller's subset."""
     from nexus.agents.codex_candidate import require_candidate_database
     from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_pool
-    from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+    from nexus.agents.codex_versions import (
+        ISOLATED_CAPACITY_CONFIG_VERSIONS,
+    )
     from nexus.agents.execution_authority import load_frozen_evidence
     from nexus.agents.models import ResearchRequest
     from nexus.agents.paper_context import (
@@ -154,6 +161,10 @@ async def prepare_cycle_capacity_pool(
 
     invalid = "CODEX_CAPACITY_POOL_BINDING_INVALID"
     if type(formal_stage_capacity) is not bool:
+        raise ValueError(invalid)
+    if run.pricing_version not in ISOLATED_CAPACITY_CONFIG_VERSIONS or (
+        formal_stage_capacity and run.pricing_version not in ISOLATED_CAPACITY_CONFIG_VERSIONS
+    ):
         raise ValueError(invalid)
     if formal_stage_capacity:
         from sqlalchemy import func, select
@@ -220,7 +231,7 @@ async def prepare_cycle_capacity_pool(
         if (
             member.model_config_id != run.model_config_id
             or member.model_hash != run.model_hash
-            or member.pricing_version != FULL_INPUT_CAPACITY_CONFIG_VERSION
+            or member.pricing_version != run.pricing_version
             or member.status not in {"prepared", "completed"}
         ):
             raise ValueError(invalid)

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
@@ -95,6 +96,7 @@ class JobHandlerSpec:
                 CANDIDATE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }
             or self.job_type is not JobType.AGENT_PAPER_RESEARCH
             or self.schema_version != "agent_research_job_v1"
@@ -115,6 +117,7 @@ class JobHandlerSpec:
                 CANDIDATE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }
             else 135
             if self.job_type in {JobType.AGENT_RESEARCH, JobType.AGENT_PAPER_RESEARCH}

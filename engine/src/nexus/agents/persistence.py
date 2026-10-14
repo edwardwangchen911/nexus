@@ -26,8 +26,10 @@ from nexus.agents.actionable_research import (
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
+    ISOLATED_CAPACITY_CONFIG_VERSIONS,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
@@ -715,7 +717,7 @@ async def _admit_research_run(
         raise ValueError("CODEX_CAPACITY_ADMISSION_ARGUMENT_INVALID")
     if full_input_capacity:
         from nexus.agents.codex_candidate import require_candidate_database
-        from nexus.agents.codex_capacity import capacity_model_matches
+        from nexus.agents.codex_capacity import isolated_capacity_model_matches
 
         await require_candidate_database(session)
         selected = await session.get(
@@ -723,7 +725,7 @@ async def _admit_research_run(
         )
         if (
             selected is None
-            or not capacity_model_matches(selected)
+            or not isolated_capacity_model_matches(selected)
             or selected.created_at > now
             or not selected.pricing_available_at <= now < selected.pricing_expires_at
         ):
@@ -774,7 +776,7 @@ async def _admit_research_run(
         candidate_preview = await session.get(AgentModelConfigRecord, model_config_id)
         if (
             candidate_preview is not None
-            and candidate_preview.version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+            and candidate_preview.version in ISOLATED_CAPACITY_CONFIG_VERSIONS
             and not full_input_capacity
             and not formal_stage_capacity
         ):
@@ -899,6 +901,7 @@ async def _admit_research_run(
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                         "codex-sdk-strategy-rnd-v1",
                         PORTFOLIO_DECISION_CONFIG_VERSION,
                     )
@@ -918,11 +921,11 @@ async def _admit_research_run(
         model = checked_model
     if (
         model is not None
-        and model.version == FULL_INPUT_CAPACITY_CONFIG_VERSION
+        and model.version in ISOLATED_CAPACITY_CONFIG_VERSIONS
         and (not (full_input_capacity or formal_stage_capacity) or model.id != model_config_id)
     ):
         raise ValueError("CODEX_CAPACITY_ISOLATED_ADMISSION_REQUIRED")
-    if full_input_capacity and (model is None or not capacity_model_matches(model)):
+    if full_input_capacity and (model is None or not isolated_capacity_model_matches(model)):
         raise ValueError("CODEX_CAPACITY_AUTHORITY_INVALID")
     if (
         model is not None
@@ -1190,19 +1193,19 @@ async def _verify_capacity_replay_binding(
     *,
     formal_stage_capacity: bool = False,
 ) -> None:
-    if formal_stage_capacity and run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION:
+    if formal_stage_capacity and run.pricing_version in ISOLATED_CAPACITY_CONFIG_VERSIONS:
         # The caller immediately performs the populated formal revalidation.
         # This prepares a frozen identity; it never grants isolated-mode execution.
         return
-    if (run.pricing_version == FULL_INPUT_CAPACITY_CONFIG_VERSION) != enabled:
+    if (run.pricing_version in ISOLATED_CAPACITY_CONFIG_VERSIONS) != enabled:
         raise ValueError("CODEX_CAPACITY_ISOLATED_ADMISSION_REQUIRED")
     if enabled:
-        from nexus.agents.codex_capacity import capacity_model_matches
+        from nexus.agents.codex_capacity import isolated_capacity_model_matches
 
         model = await session.get(AgentModelConfigRecord, model_id, populate_existing=True)
         if (
             model is None
-            or not capacity_model_matches(model)
+            or not isolated_capacity_model_matches(model)
             or model.created_at > now
             or not model.pricing_available_at <= now < model.pricing_expires_at
             or run.model_config_id != model.id

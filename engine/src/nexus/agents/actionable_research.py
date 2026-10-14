@@ -127,6 +127,7 @@ def admit_actionable_research_output(
         from nexus.agents.codex_versions import (
             ACTIONABLE_CONFIG_VERSIONS,
             CANDIDATE_BUDGET_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
         )
@@ -138,7 +139,11 @@ def admit_actionable_research_output(
             and candidate_identity_verified
             or formal_identity_verified
             and run.pricing_version
-            not in {FORMAL_STAGE_CAPACITY_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
+            not in {
+                FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+            }
         ):
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         version_admitted = (
@@ -151,7 +156,11 @@ def admit_actionable_research_output(
             or (
                 formal_identity_verified
                 and run.pricing_version
-                in {FORMAL_STAGE_CAPACITY_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
+                in {
+                    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+                    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+                }
             )
         )
 
