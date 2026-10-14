@@ -3,15 +3,17 @@
 from argparse import Namespace
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from integration.test_candidate_multistock_path import _set_test_insert_clock
+from integration.test_candidate_multistock_path import FIVE, _set_test_insert_clock
 from integration.test_portfolio_same_day_research_pg import seed_normal_path
 from integration.test_terminal_cycle_cancel_pg import AT, event_values
 from nexus.agents.codex_formal_stage import formal_stage_job_qualified
 from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
@@ -48,18 +50,26 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
     ],
 )
 async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_account(
-    migrated_database_url, monkeypatch, version, fault
+    migrated_database_url, monkeypatch, version, fault, same_day=False
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     engine, sessions, authority, manifest = await seed_normal_path(
-        migrated_database_url, monkeypatch, decision_time=AT
+        migrated_database_url,
+        monkeypatch,
+        decision_time=AT,
+        **({"candidate_instruments": FIVE[:3]} if same_day else {}),
     )
     try:
         await _set_test_insert_clock(sessions, AT - timedelta(minutes=1))
-        await prepare_database(settings, **(OPTIONS if version == "v8" else V9_OPTIONS))
+        options = dict(OPTIONS if version == "v8" else V9_OPTIONS)
+        if version == "v10":
+            options["formal_flexible_stage_budget"] = True
+        await prepare_database(settings, **options)
         expected = (
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION
             if version == "v8"
+            else FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+            if version == "v10"
             else FULL_INPUT_CAPACITY_CONFIG_VERSION
         )
         async with sessions.begin() as session:
@@ -100,7 +110,7 @@ async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_
             assert claim is not None
             await fail_job(session, claim=claim, now=AT, error_code="AGENT_RESEARCH_RESULT_UNKNOWN")
             run_id = UUID(job.payload["run_id"])
-            if fault == "failed-run":
+            if fault == "failed-run" or (same_day and fault != "prepared-run"):
                 from nexus.agents.execution import _persist_terminal
 
                 run = await session.get(AgentResearchRunRecord, run_id)
@@ -130,13 +140,15 @@ async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_
                     "release_revision": "a" * 40,
                 }
             )
-            seal_now = AT + timedelta(days=3)
+            seal_now = AT + (timedelta(minutes=10) if same_day else timedelta(days=3))
+            if fault == "future-clock":
+                seal_now = AT - timedelta(seconds=1)
             session.add(
                 WorkerHeartbeat(
                     worker_id=f"agent-paper-loop-{UUID(int=555)}:manual:{manual_host_scope(runtime)}",
                     queue="agent_paper",
                     seen_at=seal_now,
-                    started_at=AT,
+                    started_at=min(AT, seal_now),
                     process_version=f"{MANUAL_HOST_PROTOCOL}+{'a' * 40}",
                     migration_head=CURRENT_MIGRATION_HEAD,
                 )
@@ -152,14 +164,29 @@ async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_
             return await original_scalar(self, statement, *args, **kwargs)
 
         monkeypatch.setattr(AsyncSession, "scalar", clock)
+        monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *args: None)
         monkeypatch.setattr(
             "nexus.paper.history_seal.require_research_processes_quiescent", lambda: None
         )
+        if fault in {"process-live", "late-process-live"}:
+            checks = 0
+
+            def process_guard():
+                nonlocal checks
+                checks += 1
+                if fault == "process-live" or checks == 2:
+                    raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+
+            monkeypatch.setattr(
+                "nexus.paper.history_seal.require_research_processes_quiescent", process_guard
+            )
         args = Namespace(
+            repo_root=Path.cwd(),
             action="seal-failed-research",
             cycle_id=result.cycle_id,
             run_ids=(run_id,),
             accept_unknown_usage=fault != "missing-confirmation",
+            same_day=same_day and fault != "default-date-gate",
         )
         async with sessions.begin() as session:
             with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
@@ -208,8 +235,20 @@ async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_
                 )
         async with sessions() as session:
             run = await session.get(AgentResearchRunRecord, run_id)
-            assert run.status == ("failed" if fault == "failed-run" else "prepared")
+            assert run.status == (
+                "failed"
+                if fault == "failed-run" or (same_day and fault != "prepared-run")
+                else "prepared"
+            )
             assert run.settled_cost_usd is run.input_tokens is run.output_tokens is None
+            from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
+
+            budget = await session.scalar(
+                select(AgentDailyBudgetReservationRecord).where(
+                    AgentDailyBudgetReservationRecord.run_id == run.id
+                )
+            )
+            assert budget.settled_usd is None and budget.state == "reserved"
             assert (
                 event_values(await agent_cycle._events(session, result.cycle_id)) == original_events
             )
@@ -222,5 +261,20 @@ async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_
                 )
             )
             assert seals == (0 if rejected else 1)
+            if same_day and not rejected:
+                seal = await session.scalar(
+                    select(AuditEvent).where(AuditEvent.action == "paper.legacy_research.sealed")
+                )
+                assert seal.schema_version == "paper_same_day_close_v1"
+                assert seal.payload["closure_policy"] == "same_day_terminal_failure_v1"
+                # The receipt remains authoritative after the UTC date changes.
+                from nexus.paper.history_seal import legacy_research_sealed
+
+                assert await legacy_research_sealed(
+                    session,
+                    cycle_id=result.cycle_id,
+                    run_id=run_id,
+                    now=seal_now + timedelta(days=2),
+                )
     finally:
         await engine.dispose()

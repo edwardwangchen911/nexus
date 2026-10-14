@@ -86,6 +86,11 @@ def parser() -> argparse.ArgumentParser:
     seal.add_argument("--cycle-id", type=UUID, required=True)
     seal.add_argument("--run-id", dest="run_ids", type=UUID, action="append", required=True)
     seal.add_argument("--accept-unknown-usage", action="store_true", required=True)
+    seal.add_argument(
+        "--same-day",
+        action="store_true",
+        help="Close a terminal failed research today; preserve unknown usage and reservations",
+    )
     return result
 
 
@@ -126,6 +131,7 @@ async def run(
                         run_ids=tuple(args.run_ids),
                         now=now,
                         accept_unknown_usage=args.accept_unknown_usage,
+                        same_day=getattr(args, "same_day", False),
                     )
                     _require_maintenance_code(args.repo_root, settings.release_revision)
                     return receipt

@@ -42,6 +42,7 @@ from nexus.persistence.models.runtime import AuditEvent, Job, JobAttempt, JobLea
 
 _ACTION = "paper.legacy_research.sealed"
 _SCHEMA = "paper_legacy_seal_v1"
+_SAME_DAY_SCHEMA = "paper_same_day_close_v1"
 _ACTOR = "local-manual-history-seal"
 _BLOCKED = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
 _DESKTOP_CHILD = (
@@ -179,6 +180,29 @@ async def _require_partial_usage_proof(
     outputs: tuple[AgentResearchOutputRecord, ...],
     model: AgentModelConfigRecord,
 ) -> None:
+    await _require_stage_usage_proof(session, run, outputs, model, initial=False)
+
+
+async def _require_initial_usage_proof(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    outputs: tuple[AgentResearchOutputRecord, ...],
+    model: AgentModelConfigRecord,
+) -> None:
+    try:
+        await _require_stage_usage_proof(session, run, outputs, model, initial=True)
+    except ValueError:
+        raise ValueError(_BLOCKED) from None
+
+
+async def _require_stage_usage_proof(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    outputs: tuple[AgentResearchOutputRecord, ...],
+    model: AgentModelConfigRecord,
+    *,
+    initial: bool,
+) -> None:
     """Verify known earlier stages without settling the unknown later invocation."""
     from nexus.api.research_stages import read_stage_trace
 
@@ -186,7 +210,7 @@ async def _require_partial_usage_proof(
     terminal = tuple(output for output in outputs if output.role is None)
     if (
         run.status != "failed"
-        or len(roles) not in {5, 7}
+        or len(roles) not in ({0} if initial else {5, 7})
         or len(terminal) != 1
         or any(output.intent is not None for output in outputs)
         or any(output.status != "running" for output in roles)
@@ -196,8 +220,8 @@ async def _require_partial_usage_proof(
         or terminal[0].payload.get("reason") != "model_usage_uncertain"
     ):
         raise ValueError(_BLOCKED)
-    expected_stage: Literal["critique", "synthesis"] = (
-        "critique" if len(roles) == 5 else "synthesis"
+    expected_stage: Literal["research", "critique", "synthesis"] = (
+        "research" if initial else "critique" if len(roles) == 5 else "synthesis"
     )
     # Reuse the existing observation-only compiler. A current-code rendering
     # without an exact persisted request-hash match is never seal authority.
@@ -246,7 +270,9 @@ async def _require_partial_usage_proof(
     trace = await read_stage_trace(session, run)
     if terminal[0].content_hash != digest or trace is None or trace.status != "verified":
         raise ValueError(_BLOCKED)
-    expected_complete = {"research"} if len(roles) == 5 else {"research", "critique"}
+    expected_complete = (
+        set() if initial else {"research"} if len(roles) == 5 else {"research", "critique"}
+    )
     if {stage.stage for stage in trace.stages if stage.status == "complete"} != expected_complete:
         raise ValueError(_BLOCKED)
     try:
@@ -265,8 +291,13 @@ async def _require_partial_usage_proof(
         diagnostic.stage != expected_stage
         or diagnostic.boundary != "invocation"
         or stage_input.stage != expected_stage
-        or not parsed[0].frozen_inputs_hash
-        or stage_input.frozen_inputs_hash != parsed[0].frozen_inputs_hash
+        or (
+            bool(parsed)
+            and (
+                not parsed[0].frozen_inputs_hash
+                or stage_input.frozen_inputs_hash != parsed[0].frozen_inputs_hash
+            )
+        )
     ):
         raise ValueError(_BLOCKED)
 
@@ -295,10 +326,21 @@ async def _seal_manual_scope(
 
 
 async def _proof(
-    session: AsyncSession, *, cycle_id: UUID, run_id: UUID, now: datetime
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    run_id: UUID,
+    now: datetime,
+    same_day: bool = False,
 ) -> dict[str, object]:
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
-    if cycle is None or not cycle.execution_locked or cycle.decision_time.date() >= now.date():
+    if (
+        cycle is None
+        or not cycle.execution_locked
+        or cycle.decision_time > now
+        or (same_day and cycle.decision_time.date() != now.date())
+        or (not same_day and cycle.decision_time.date() >= now.date())
+    ):
         raise ValueError(_BLOCKED)
     events = tuple(
         await session.scalars(
@@ -350,6 +392,7 @@ async def _proof(
     run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
     if run is None or (
         run.status not in {"prepared", "failed"}
+        or (same_day and run.status != "failed")
         or run.settled_cost_usd is not None
         or run.retry_count != 0
         or run.actor_id != "local-agent-paper-cycle"
@@ -463,6 +506,8 @@ async def _proof(
         raise ValueError(_BLOCKED)
     if any(output.role is not None for output in outputs):
         await _require_partial_usage_proof(session, run, outputs, model)
+    elif same_day:
+        await _require_initial_usage_proof(session, run, outputs, model)
     elif (
         run.input_tokens is not None
         or run.output_tokens is not None
@@ -477,6 +522,7 @@ async def _proof(
         )
     )
     return {
+        **({"closure_policy": "same_day_terminal_failure_v1"} if same_day else {}),
         "account_id": str(cycle.account_id),
         "cycle_id": str(cycle_id),
         "run_id": str(run_id),
@@ -520,7 +566,16 @@ async def legacy_research_sealed(
     if len(rows) != 1:
         raise ValueError(_BLOCKED)
     row = rows[0]
-    proof = await _proof(session, cycle_id=cycle_id, run_id=run_id, now=now)
+    if row.schema_version not in {_SCHEMA, _SAME_DAY_SCHEMA} or row.occurred_at > now:
+        raise ValueError(_BLOCKED)
+    same_day = row.schema_version == _SAME_DAY_SCHEMA
+    proof = await _proof(
+        session,
+        cycle_id=cycle_id,
+        run_id=run_id,
+        now=row.occurred_at if same_day else now,
+        same_day=same_day,
+    )
     canonical = canonical_audit_event(
         AuditChainInput(
             event_seq=row.event_seq,
@@ -536,7 +591,6 @@ async def legacy_research_sealed(
     )
     if (
         row.actor_id != _ACTOR
-        or row.schema_version != _SCHEMA
         or row.payload != proof
         or row.occurred_at > now
         or row.chain_version != "audit_jcs_sha256_v1"
@@ -556,9 +610,11 @@ async def seal_failed_research(
     run_ids: tuple[UUID, ...],
     now: datetime,
     accept_unknown_usage: bool,
+    same_day: bool = False,
 ) -> HistorySealReceipt:
     if (
         accept_unknown_usage is not True
+        or type(same_day) is not bool
         or not 1 <= len(run_ids) <= 5
         or len(set(run_ids)) != len(run_ids)
     ):
@@ -577,12 +633,12 @@ async def seal_failed_research(
     for run_id in run_ids:
         if await legacy_research_sealed(session, cycle_id=cycle_id, run_id=run_id, now=now):
             continue
-        proof = await _proof(session, cycle_id=cycle_id, run_id=run_id, now=now)
+        proof = await _proof(session, cycle_id=cycle_id, run_id=run_id, now=now, same_day=same_day)
         await append_audit_event(
             session,
             actor_id=_ACTOR,
             action=_ACTION,
-            schema_version=_SCHEMA,
+            schema_version=_SAME_DAY_SCHEMA if same_day else _SCHEMA,
             payload=proof,
             occurred_at=now,
         )
@@ -593,4 +649,7 @@ async def seal_failed_research(
         # Native cancellation proves zero attempts/outputs/leases before writing
         # zero usage for untouched siblings. Any failure rolls back the seal too.
         await close_failed_manual_request(session, request_id=manual.id, cancel_unused=True)
+    if same_day:
+        # Recheck after proof/audit work, before returning to the CLI's commit fence.
+        require_research_processes_quiescent()
     return HistorySealReceipt(sealed_research=len(run_ids), replayed=new == 0)

@@ -121,7 +121,7 @@ def inspect_critique_request(
     evidence_refs: tuple[EvidenceRef, ...],
     inputs: dict[str, object],
     records: tuple[AgentResearchOutputRecord, ...],
-    stage: Literal["critique", "synthesis"] = "critique",
+    stage: Literal["research", "critique", "synthesis"] = "critique",
     financial_table_candidate: bool = False,
 ) -> dict[str, object]:
     unavailable: dict[str, object] = {"status": "unavailable", "code": "PRIOR_RESEARCH_UNVERIFIED"}
@@ -144,11 +144,15 @@ def inspect_critique_request(
                 return unavailable
         # Reconstruct critique from its five preceding research roles. A later
         # synthesis assessment is not an input to that original request.
-        prior_roles = ROLE_ORDER[:5] if stage == "critique" else ROLE_ORDER[:7]
+        prior_roles = (
+            () if stage == "research" else ROLE_ORDER[:5] if stage == "critique" else ROLE_ORDER[:7]
+        )
         role_records = tuple(record for record in records if record.role in prior_roles)
-        if (
-            any(record.status != "running" or record.intent is not None for record in role_records)
-            or validate_stage_trace(
+        if any(
+            record.status != "running" or record.intent is not None for record in role_records
+        ) or (
+            stage != "research"
+            and validate_stage_trace(
                 run,
                 role_records,
                 evidence_refs,
@@ -187,7 +191,7 @@ def inspect_critique_request(
             for index, claim in enumerate(output.claims)
         ]
         payload, output_model = committee.build_stage_request(
-            stage=cast(Literal["critique", "synthesis"], stage),
+            stage=stage,
             request=request,
             evidence_refs=evidence_refs,
             frozen_inputs=inputs,

@@ -235,3 +235,16 @@ def test_history_seal_cli_requires_exact_run_and_explicit_unknown_acceptance(mis
     del arguments[index : index + (2 if missing == "--run-id" else 1)]
     with pytest.raises(SystemExit):
         manual_paper.parser().parse_args(arguments)
+
+
+def test_same_day_closure_requires_explicit_option_and_keeps_default():
+    arguments = [
+        "seal-failed-research",
+        "--cycle-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--run-id",
+        "00000000-0000-0000-0000-000000000002",
+        "--accept-unknown-usage",
+    ]
+    assert manual_paper.parser().parse_args(arguments).same_day is False
+    assert manual_paper.parser().parse_args([*arguments, "--same-day"]).same_day is True

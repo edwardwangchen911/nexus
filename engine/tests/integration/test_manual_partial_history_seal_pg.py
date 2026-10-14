@@ -5,7 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from integration.test_candidate_multistock_path import _set_test_insert_clock
+from integration.test_candidate_multistock_path import FIVE, _set_test_insert_clock
 from integration.test_portfolio_same_day_research_pg import seed_normal_path
 from integration.test_terminal_cycle_cancel_pg import AT, event_values
 from nexus.agents.codex_sdk import CodexInvocationError
@@ -77,13 +77,17 @@ async def test_maintenance_holds_real_schema_version_until_transaction_end(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_stage", ["critique", "synthesis"])
+@pytest.mark.parametrize("failed_stage", ["research", "critique", "synthesis"])
+@pytest.mark.parametrize("same_day", [False, True])
 async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs(
-    migrated_database_url, monkeypatch, failed_stage
+    migrated_database_url, monkeypatch, failed_stage, same_day
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     engine, sessions, authority, manifest = await seed_normal_path(
-        migrated_database_url, monkeypatch, decision_time=AT
+        migrated_database_url,
+        monkeypatch,
+        decision_time=AT,
+        **({"candidate_instruments": FIVE[:3]} if same_day else {}),
     )
     clock = [AT]
     original_scalar = AsyncSession.scalar
@@ -181,7 +185,13 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
             run = await session.get(AgentResearchRunRecord, run_id)
             assert run.status == "failed" and run.settled_cost_usd is None
             lower_bound = (run.input_tokens, run.output_tokens)
-            assert lower_bound == ((100, 80) if failed_stage == "critique" else (200, 160))
+            assert lower_bound == (
+                (None, None)
+                if failed_stage == "research"
+                else (100, 80)
+                if failed_stage == "critique"
+                else (200, 160)
+            )
             cycle = await session.get(AgentPaperCycleRecord, result.cycle_id)
             await agent_cycle._stop_failed(
                 session,
@@ -200,13 +210,14 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
                     "release_revision": "a" * 40,
                 }
             )
-            clock[0] = AT + timedelta(days=3)
+            clock[0] = AT + (timedelta(minutes=10) if same_day else timedelta(days=3))
         args = Namespace(
             repo_root=Path.cwd(),
             action="seal-failed-research",
             cycle_id=result.cycle_id,
             run_ids=(run_id,),
             accept_unknown_usage=True,
+            same_day=same_day,
         )
         receipt = await manual_paper.run(runtime, args)
         assert receipt.sealed_research == 1 and not receipt.replayed
@@ -241,11 +252,34 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
                 )
                 == 1
             )
-        assert calls == (
-            ["research", "critique"]
-            if failed_stage == "critique"
-            else ["research", "critique", "synthesis"]
+        assert (
+            calls
+            == ["research", "critique", "synthesis"][
+                : ["research", "critique", "synthesis"].index(failed_stage) + 1
+            ]
         )
+        if same_day:
+            # A new request never replays the failed call or changes its usage.
+            await prepare_database(settings, **{**V9_OPTIONS, "formal_flexible_stage_budget": True})
+            async with sessions.begin() as session:
+                fresh_model = await session.scalar(
+                    select(AgentModelConfigRecord).where(
+                        AgentModelConfigRecord.version
+                        == "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                    )
+                )
+                fresh = await manual_request.admit_manual_request(
+                    session,
+                    account_id=authority.account_id,
+                    batch_id=batch.batch_id,
+                    model_config_id=fresh_model.id,
+                    mode="research_and_paper",
+                    idempotency_key="new-v10-after-safe-close",
+                )
+                assert fresh.request_id != request.request_id and fresh.status == "queued"
+                stored = await session.get(ManualPaperRequest, fresh.request_id)
+                assert stored.model_config_id == fresh_model.id
+                assert (await session.get(AgentResearchRunRecord, run_id)).settled_cost_usd is None
     finally:
         await engine.dispose()
 
@@ -265,7 +299,7 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
     ],
 )
 async def test_manual_partial_seal_rejection_preserves_all_facts(
-    migrated_database_url, monkeypatch, fault
+    migrated_database_url, monkeypatch, fault, failed_stage="critique", same_day=False
 ):
     import hashlib
     import json
@@ -276,7 +310,12 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
     from nexus.persistence.session import session_factory
 
     original_entry = manual_paper.run
-    original_proof = history_seal._require_partial_usage_proof
+    proof_name = (
+        "_require_initial_usage_proof"
+        if failed_stage == "research"
+        else "_require_partial_usage_proof"
+    )
+    original_proof = getattr(history_seal, proof_name)
     original_close = manual_request.close_failed_manual_request
     original_stop = agent_cycle._stop_failed
 
@@ -348,21 +387,53 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                             raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
 
                     scoped.setattr(manual_paper, "_require_maintenance_code", changed_code)
-                if fault in {"usage", "request-hash"}:
+                if fault in {"process-live", "late-process-live"}:
+                    calls = 0
+
+                    def process_guard():
+                        nonlocal calls
+                        calls += 1
+                        if fault == "process-live" or calls == 2:
+                            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+
+                    scoped.setattr(
+                        history_seal, "require_research_processes_quiescent", process_guard
+                    )
+                if fault == "order-occupied":
+
+                    async def occupied(*args, **kwargs):
+                        raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+
+                    scoped.setattr(
+                        history_seal, "require_activation_projection_unoccupied", occupied
+                    )
+                if fault in {
+                    "usage",
+                    "request-hash",
+                    "source-evidence",
+                    "terminal-hash",
+                    "stage-input-missing",
+                }:
 
                     async def altered_proof(session, run, outputs, model):
-                        if fault == "usage":
+                        if fault in {"usage", "source-evidence"}:
                             values = {
                                 c.key: getattr(run, c.key) for c in run.__mapper__.column_attrs
                             }
-                            values["input_tokens"] += 1
+                            if fault == "usage":
+                                values["input_tokens"] = (values["input_tokens"] or 0) + 1
+                            else:
+                                values["evidence_hash"] = "0" * 64
                             return await original_proof(
                                 session, SimpleNamespace(**values), outputs, model
                             )
                         last = outputs[-1]
                         values = {c.key: getattr(last, c.key) for c in last.__mapper__.column_attrs}
                         payload = deepcopy(last.payload)
-                        payload["stage_input"]["request_hash"] = "0" * 64
+                        if fault == "stage-input-missing":
+                            payload.pop("stage_input")
+                        else:
+                            payload["stage_input"]["request_hash"] = "0" * 64
                         values["payload"] = payload
                         values["content_hash"] = hashlib.sha256(
                             json.dumps(
@@ -377,11 +448,13 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                                 default=str,
                             ).encode()
                         ).hexdigest()
+                        if fault == "terminal-hash":
+                            values["content_hash"] = "0" * 64
                         return await original_proof(
                             session, run, (*outputs[:-1], SimpleNamespace(**values)), model
                         )
 
-                    scoped.setattr(history_seal, "_require_partial_usage_proof", altered_proof)
+                    scoped.setattr(history_seal, proof_name, altered_proof)
                 if fault == "late-close-failure":
 
                     async def failed_after_close(session, **kwargs):
@@ -423,5 +496,28 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
     monkeypatch.setattr(manual_paper, "run", checked_entry)
     with pytest.raises(VerifiedRejection):
         await test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs(
-            migrated_database_url, monkeypatch, "critique"
+            migrated_database_url, monkeypatch, failed_stage, same_day=same_day
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "usage",
+        "request-hash",
+        "source-evidence",
+        "terminal-hash",
+        "stage-input-missing",
+        "process-live",
+        "late-process-live",
+        "late-close-failure",
+        "order-occupied",
+    ],
+)
+async def test_same_day_initial_failure_rejects_corruption_and_rolls_back(
+    migrated_database_url, monkeypatch, fault
+):
+    await test_manual_partial_seal_rejection_preserves_all_facts(
+        migrated_database_url, monkeypatch, fault, failed_stage="research", same_day=True
+    )
