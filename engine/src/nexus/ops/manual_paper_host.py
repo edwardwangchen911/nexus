@@ -255,17 +255,26 @@ async def peek_manual_request(
     )
     rows = (
         await session.scalars(
-            select(ManualPaperRequest)
-            .where(
+            select(ManualPaperRequest).where(
                 ManualPaperRequest.account_id == account_id,
                 latest_status.is_(None) | latest_status.not_in(("completed", "unavailable")),
             )
-            .limit(2)
         )
     ).all()
-    if len(rows) > 1:
+    from nexus.paper.manual_preparation_close import preparation_closed
+
+    now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
-    return None if not rows else await read_manual_request(session, rows[0])
+    pending = []
+    for row in rows:
+        view = await read_manual_request(session, row)
+        if view.status == "unknown" and await preparation_closed(session, row, now=now):
+            continue
+        pending.append(view)
+    if len(pending) > 1:
+        raise ValueError("MANUAL_RESULT_UNKNOWN")
+    return None if not pending else pending[0]
 
 
 async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> bool:

@@ -6,7 +6,8 @@ import importlib
 import json
 import subprocess
 import sys
-from datetime import timedelta
+from contextlib import ExitStack
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -26,6 +27,10 @@ from nexus.paper.manual_entry import (
     read_configured_manual_request,
     require_manual_host,
     start_configured_manual_request,
+)
+from nexus.paper.manual_preparation_close import (
+    PreparationCloseReceipt,
+    preparation_service_control_lock,
 )
 from nexus.paper.manual_request import ManualRequestView
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
@@ -80,6 +85,8 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--idempotency-key", required=True)
     read = commands.add_parser("read")
     read.add_argument("--request-id", type=UUID, required=True)
+    close = commands.add_parser("close-unstarted-preparation")
+    close.add_argument("--request-id", type=UUID, required=True)
     cancel = commands.add_parser("cancel-unused-research")
     cancel.add_argument("--cycle-id", type=UUID, required=True)
     seal = commands.add_parser("seal-failed-research")
@@ -96,11 +103,54 @@ def parser() -> argparse.ArgumentParser:
 
 async def run(
     settings: EngineSettings, args: argparse.Namespace
-) -> ManualRequestView | TerminalCycleCancelReceipt | HistorySealReceipt:
+) -> ManualRequestView | TerminalCycleCancelReceipt | HistorySealReceipt | PreparationCloseReceipt:
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
+    lifecycle_guards = ExitStack()
     try:
+        if args.action == "close-unstarted-preparation":
+            _require_maintenance_code(args.repo_root, settings.release_revision)
+            try:
+                lifecycle_guards.enter_context(
+                    preparation_service_control_lock(args.repo_root, settings.release_revision)
+                )
+            except RuntimeError:
+                raise ValueError("MANUAL_PREPARATION_CLOSE_BLOCKED") from None
         async with factory.begin() as session:
+            if args.action == "close-unstarted-preparation":
+                from nexus.paper.manual_preparation_close import close_unstarted_preparation
+
+                _require_maintenance_code(args.repo_root, settings.release_revision)
+                if settings.agent_paper_account_id is None:
+                    raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                now = await session.scalar(select(func.clock_timestamp()))
+                if not isinstance(now, datetime) or now.utcoffset() is None:
+                    raise ValueError("MANUAL_RESULT_UNKNOWN")
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                    {"key": SCHEMA_ADMISSION_LOCK_KEY},
+                )
+                await session.execute(text("LOCK TABLE public.alembic_version IN SHARE MODE"))
+                if (
+                    await session.scalar(
+                        text(
+                            "SELECT CASE WHEN COUNT(*)=1 THEN MIN(version_num) END "
+                            "FROM public.alembic_version"
+                        )
+                    )
+                    != CURRENT_MIGRATION_HEAD
+                ):
+                    raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                close_receipt = await close_unstarted_preparation(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    request_id=args.request_id,
+                    now=now,
+                    repo_root=args.repo_root,
+                    env_file=args.env_file,
+                )
+                _require_maintenance_code(args.repo_root, settings.release_revision)
+                return close_receipt
             if args.action in {"cancel-unused-research", "seal-failed-research"}:
                 if settings.agent_paper_account_id is None:
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
@@ -163,7 +213,10 @@ async def run(
                 session, settings, request_id=args.request_id
             )
     finally:
-        await factory.kw["bind"].dispose()
+        try:
+            await factory.kw["bind"].dispose()
+        finally:
+            lifecycle_guards.close()
 
 
 def main(argv: list[str] | None = None) -> int:

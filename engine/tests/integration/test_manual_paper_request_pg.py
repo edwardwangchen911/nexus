@@ -169,6 +169,10 @@ async def test_manual_request_freezes_identity_replays_and_keeps_history(
                     mode="research_only",
                     idempotency_key="after-unknown",
                 )
+        async with sessions.begin() as session:
+            head_before_downgrade = await session.scalar(
+                text("SELECT version_num FROM alembic_version")
+            )
         monkeypatch.setenv("DATABASE_URL", migrated_database_url)
         config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
         with pytest.raises(Exception, match="MANUAL_PAPER_DOWNGRADE_FORBIDDEN"):
@@ -176,7 +180,7 @@ async def test_manual_request_freezes_identity_replays_and_keeps_history(
         async with sessions.begin() as session:
             assert (
                 await session.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0075_manual_paper_requests"
+                == head_before_downgrade
             )
             row = await session.get(ManualPaperRequest, request.request_id)
             assert await read_manual_request(session, row) == unknown

@@ -217,6 +217,11 @@ async def require_manual_account_available(
         if request.id == excluding_request_id:
             continue
         view = await read_manual_request(session, request)
+        if view.status == "unknown":
+            from nexus.paper.manual_preparation_close import preparation_closed
+
+            if await preparation_closed(session, request, now=now):
+                continue
         if view.status not in _TERMINAL or view.status == "unknown":
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     cycles = (
@@ -606,6 +611,11 @@ async def require_no_running_manual_request(session: AsyncSession, *, account_id
     for row in rows:
         view = await read_manual_request(session, row)
         # A pending click yields to the scheduled entry; started/unknown work never does.
+        if view.status == "unknown":
+            from nexus.paper.manual_preparation_close import preparation_closed
+
+            if await preparation_closed(session, row, now=await _database_now(session)):
+                continue
         if view.status in {"preparing", "active", "unknown"}:
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
 

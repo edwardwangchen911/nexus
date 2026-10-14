@@ -248,3 +248,81 @@ def test_same_day_closure_requires_explicit_option_and_keeps_default():
     ]
     assert manual_paper.parser().parse_args(arguments).same_day is False
     assert manual_paper.parser().parse_args([*arguments, "--same-day"]).same_day is True
+
+
+def test_unstarted_preparation_closure_is_explicit_and_request_scoped():
+    args = manual_paper.parser().parse_args(
+        ["close-unstarted-preparation", "--request-id", "00000000-0000-0000-0000-000000000003"]
+    )
+    assert args.action == "close-unstarted-preparation"
+    assert str(args.request_id).endswith("0003")
+
+
+@pytest.mark.asyncio
+async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(monkeypatch, tmp_path):
+    from argparse import Namespace
+    from contextlib import contextmanager
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from nexus.paper import manual_preparation_close as close
+    from nexus.settings import EngineSettings
+
+    observed = []
+    held = [False]
+
+    @contextmanager
+    def fence(*_args):
+        held[0] = True
+        observed.append("lock")
+        try:
+            yield
+        finally:
+            observed.append("unlock")
+            held[0] = False
+
+    class Transaction:
+        async def __aenter__(self):
+            assert held[0]
+            return self
+
+        async def __aexit__(self, *_args):
+            assert held[0]
+            observed.append("commit")
+
+        async def scalar(self, query):
+            if "clock_timestamp" in str(query):
+                return datetime(2026, 10, 14, 18, tzinfo=UTC)
+            return manual_paper.CURRENT_MIGRATION_HEAD
+
+        async def execute(self, *_a, **_k):
+            assert held[0]
+
+    class Engine:
+        async def dispose(self):
+            observed.append("dispose")
+
+    factory = SimpleNamespace(begin=Transaction, kw={"bind": Engine()})
+
+    async def close_request(*_a, **_k):
+        assert held[0]
+        return close.PreparationCloseReceipt(request_id=UUID(int=1), replayed=False)
+
+    monkeypatch.setattr(manual_paper, "session_factory", lambda *_a: factory)
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_a: None)
+    monkeypatch.setattr(manual_paper, "preparation_service_control_lock", fence)
+    monkeypatch.setattr(close, "close_unstarted_preparation", close_request)
+    receipt = await manual_paper.run(
+        EngineSettings(
+            database_url="postgresql+asyncpg://fixture:fixture@127.0.0.1/nexus_test_fixture",
+            agent_paper_account_id=UUID(int=2),
+        ),
+        Namespace(
+            action="close-unstarted-preparation",
+            repo_root=tmp_path,
+            env_file=tmp_path / "env",
+            request_id=UUID(int=1),
+        ),
+    )
+    assert receipt.original_result == "unknown"
+    assert observed == ["lock", "commit", "dispose", "unlock"]
