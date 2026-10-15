@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import type { components } from "../../app/lib/generated/schema";
 import { agentPaperCycle, cancellableOrder, meta, paperPortfolio } from "../unit/paper/fixtures";
 import { assertReleaseAccessibility } from "./helpers/accessibility";
-import { managementDetail } from "../unit/paper/management-fixtures";
+import { managementDetail, managementPlan } from "../unit/paper/management-fixtures";
 
 for (const viewport of [{ width: 1280, height: 910 }, { width: 390, height: 844 }]) {
   test(`portfolio proposal authority fits ${viewport.width} and disclosures work by keyboard`, async ({ page }) => {
@@ -46,7 +46,12 @@ test("opens the latest decision from the workbench as an ordered read-only ledge
     if (response.status() >= 400) failedResponses.push(`${response.status()} ${new URL(response.url()).pathname}`);
   });
   await installFixtures(page, methods);
+  const currentCashResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/paper/actual");
   await page.goto("/workspace");
+  expect((await currentCashResponse).status()).toBe(200);
+  const currentCash = page.getByRole("region", { name: "当前账本现金（内部模拟）" });
+  await expect(currentCash.getByText("USD 3,500", { exact: true })).toBeVisible();
+  await expect(currentCash.getByText("USD 500", { exact: true })).toBeVisible();
 
   await page.getByRole("link", { name: "查看完整决策" }).click();
   await expect(page).toHaveURL(new RegExp(`/decisions/${agentPaperCycle.cycle_id}$`));
@@ -63,7 +68,7 @@ test("opens the latest decision from the workbench as an ordered read-only ledge
   await page.keyboard.press("Enter");
   await expect(page.getByText(agentPaperCycle.cycle_id).last()).toBeVisible();
   await expect(page.getByRole("button", { name: /运行|停止|批准|下单|重试/ })).toHaveCount(0);
-  expect(methods.length).toBeGreaterThanOrEqual(2);
+  expect(methods.length).toBeGreaterThanOrEqual(3);
   expect(methods.every((method) => method === "GET")).toBe(true);
   expect(failedResponses).toEqual([]);
   expect(browserErrors).toEqual([]);
@@ -87,6 +92,10 @@ test("decision records filter the loaded page and the detail ledger fits mobile"
 });
 
 async function installFixtures(page: Page, methods: string[]): Promise<void> {
+  await page.route("**/api/v1/paper/actual", async (route) => {
+    methods.push(route.request().method());
+    await route.fulfill({ json: { data: managementPlan.actual, meta: meta() } });
+  });
   await page.route("**/api/v1/paper/management/portfolio", (route) => route.fulfill({ json: { data: { current_target: null, latest_proposal: null, occupying_plan: null, read_as_of: meta().as_of }, meta: meta() } }));
   await page.route("**/api/v1/integrations", async (route) => route.fulfill({
     status: 200, contentType: "application/json", body: JSON.stringify({
