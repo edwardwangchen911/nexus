@@ -143,6 +143,7 @@ jobs:
             engine/tests/integration/test_current_preparation_recovery_pg.py \
             engine/tests/integration/test_manual_paper_cycle_pg.py \
             engine/tests/integration/test_manual_partial_history_seal_pg.py::test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs \
+            engine/tests/integration/test_sec_exhibit_import.py \
             engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result \
             engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_failure_preserves_recovery_gates \
             engine/tests/integration/test_capacity_rejection_pg.py \
