@@ -1,5 +1,7 @@
 """Keep the absolute envelope while a slow critique borrows unused phase time."""
 
+import math
+
 import pytest
 from nexus.agents.codex_versions import stage_timeout_seconds
 
@@ -42,8 +44,10 @@ def test_old_profiles_keep_their_frozen_hashes_and_phase_limits():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("origin", [0.0, 188.028309716, 1_000_000.1])
 async def test_flexible_committee_reaches_real_sdk_after_complete_pool_and_keeps_three_calls(
     monkeypatch,
+    origin,
 ):
     import asyncio
     import json
@@ -62,17 +66,8 @@ async def test_flexible_committee_reaches_real_sdk_after_complete_pool_and_keeps
     )
 
     real_loop = asyncio.get_running_loop()
-    clock = [real_loop.time()]
-    origin = clock[0]
-
-    class ClockLoop:
-        def time(self):
-            return clock[0]
-
-        def __getattr__(self, name):
-            return getattr(real_loop, name)
-
-    monkeypatch.setattr(asyncio, "get_running_loop", lambda: ClockLoop())
+    clock = [origin]
+    monkeypatch.setattr(real_loop, "time", lambda: clock[0])
     client, thread, result, _ = _sdk(monkeypatch)
     observed = []
     original_invoke = codex_sdk.invoke_codex
@@ -133,7 +128,8 @@ async def test_flexible_committee_reaches_real_sdk_after_complete_pool_and_keeps
         assert stage == expected_stage
         assert limit - 1e-6 <= timeout <= limit
         assert deadline == pytest.approx(cutoff, rel=0, abs=1e-6)
-    assert clock[0] - origin == 134
+    # Preparation plus three stages and closes each advance the binary64 clock.
+    assert clock[0] - origin == pytest.approx(134, rel=0, abs=7 * math.ulp(clock[0]))
     assert committee._deadline == origin + 175
     assert committee.usage.provider_calls == 3
     assert (committee.usage.input_tokens, committee.usage.output_tokens) == (900, 240)

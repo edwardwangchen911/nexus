@@ -2,6 +2,8 @@
 
 ## 当前执行目标与阶段验收（2026-10-15）
 
+最新远端验收：用户批准后已推送候选 `a4e0344d` 至现有 PR #3，远端 head 读回一致。CI run `38711830586` 全部终态：Web、gateway-offline、e2e、real-e2e、policy 五项成功；engine-postgres 在合入测试失败，6072 passed / 1 failed / 6 skipped / 1 deselected。唯一失败为 `test_full_input_timing_diagnostic.py:134` 的 `clock[0] - origin == 178` 精确浮点断言，runner 值为 `366.02830971599997 - 188.028309716`；测试时钟起点来自 loop.time，当前断言依赖时钟起点的可表示精度。恢复演练被跳过，完整 CI 尚未通过。policy 186 项通过，正常策略入口 793 依赖无违规，npm 明确为已批准限期风险接受；real-e2e 的 v10 受控成交/账本/页面整链通过。未自动重跑、重推、合入 main 或部署；证据 `.secrets/entry-result-closure/ci-a4e0344d-result.json` 及同前缀各 job 日志。后续本地最小修复仅调整两个同类测试：使用 0、CI 观测起点 188.028309716 和 1000000.1 的确定性时钟，让 asyncio 定时器与被测代码共用当前 loop.time；诊断耗时 178 及 v10 耗时 134 分别允许六次/七次累加对应的 ULP 舍入误差，rel=0，严格阶段上限、deadline、调用和 token 断言保留。两个小数起点均先复现原失败，修复后相关 206 项测试、Ruff/格式/diff 通过；独立复核无剩余 P1/P2。证据 `diagnostic-clock-red.log`、`flexible-clock-red.log`、`diagnostic-clock-final-green.log`。没有业务代码变化；本地提交尚未推送，完整新 head CI 及被跳过的恢复演练仍待验证。
+
 当前交付是可正常操作、失败可解释并能按既定规则恢复的本地三股票 v10 内部模拟闭环：正常用户入口、研究、组合判断、确定性风控、内部执行、账本及 Workspace/Decisions/Paper/Portfolio 读回；关键失败恢复和代表性默认 CI 同时收口。真实账户只读、execution_locked=true、未知事实及预算不改，不重放未知调用。部署、凭据、真实请求和外部写入仍以各自具体授权为准。
 
 - **工程收口（当前）**：同一请求的成功及关键失败链贯通，定向回归及同一 head 必需 CI 通过；受控测试、提交、远端和运行生效分别证明，不等开盘补工程验证。

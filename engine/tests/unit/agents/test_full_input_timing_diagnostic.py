@@ -1,4 +1,5 @@
 import asyncio
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -48,7 +49,8 @@ async def test_sdk_diagnostic_requires_parent_and_bounded_deadline_before_client
 
 
 @pytest.mark.asyncio
-async def test_real_sdk_three_stages_measure_slow_research_without_retries(monkeypatch):
+@pytest.mark.parametrize("origin", [0.0, 188.028309716, 1_000_000.1])
+async def test_real_sdk_three_stages_measure_slow_research_without_retries(monkeypatch, origin):
     import json
     from unittest.mock import AsyncMock
 
@@ -65,17 +67,10 @@ async def test_real_sdk_three_stages_measure_slow_research_without_retries(monke
     )
 
     loop = asyncio.get_running_loop()
-    clock = [loop.time()]
-    origin = clock[0]
+    clock = [origin]
 
-    class ClockLoop:
-        def time(self):
-            return clock[0]
-
-        def __getattr__(self, name):
-            return getattr(loop, name)
-
-    monkeypatch.setattr(asyncio, "get_running_loop", lambda: ClockLoop())
+    # Keep asyncio timers and the code under test on the same deterministic clock.
+    monkeypatch.setattr(loop, "time", lambda: clock[0])
     client, thread, result, _ = _sdk(monkeypatch)
     observed = []
     original = codex_sdk.invoke_codex
@@ -131,7 +126,8 @@ async def test_real_sdk_three_stages_measure_slow_research_without_retries(monke
     for (stage, timeout), (expected_stage, limit) in zip(observed, expected):
         assert stage == expected_stage
         assert limit - 1e-6 <= timeout <= limit
-    assert clock[0] - origin == 178
+    # Three stage advances and three closes may each round once in binary64.
+    assert clock[0] - origin == pytest.approx(178, rel=0, abs=6 * math.ulp(clock[0]))
     assert committee.usage.provider_calls == 3
     assert committee.usage.input_tokens == 900
     assert all(t.diagnostic_profile == PROFILE for t in committee.stage_timings.values())
