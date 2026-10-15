@@ -1014,7 +1014,14 @@ async def trigger_once(
     phase = "trigger_reservation"
     primary_error: Exception | None = None
     try:
-        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        # Reservation revalidates historical research against archived originals.
+        # Keep the same storage configuration as manual admission and the Worker.
+        factory = async_sessionmaker(
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            info={"engine_settings": settings},
+        )
         async with factory() as claim_session, claim_session.begin():
             now = await claim_session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
@@ -1359,7 +1366,10 @@ async def resume_once(
     assert settings.database_url is not None
     engine = create_async_engine(settings.database_url)
     try:
-        factory = async_sessionmaker(engine, expire_on_commit=False)
+        # Formal synthesis admission revalidates the frozen research originals.
+        factory = async_sessionmaker(
+            engine, expire_on_commit=False, info={"engine_settings": settings}
+        )
         async with factory() as session, session.begin():
             return await resume_schwab_agent_paper_cycle(
                 session,

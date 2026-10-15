@@ -43,7 +43,9 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
     from nexus.ops.sec_exhibit_local import import_sec_exhibit
 
     settings = EngineSettings(
-        database_url=migrated_database_url, object_store_endpoint="http://127.0.0.1:9000"
+        database_url=migrated_database_url,
+        object_store_endpoint="http://127.0.0.1:9000",
+        agent_runtime_mode="codex_sdk",
     )
     await prepare_database(settings)
 
@@ -185,6 +187,87 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
             assert sent["exhibit"]["excerpt"] == report.exhibit.excerpt
             assert sent["raw_content_hash"] == report.raw_content_hash
             assert thread.run.await_count == 1
+        # Exercise the native trigger's own session factory against persisted
+        # originals. A fixture-only disclosure never catches lost store settings.
+        from nexus.ops import agent_paper_once
+        from nexus.paper.agent_cycle_models import (
+            AgentPaperCycleResult,
+            AgentPaperTriggerReservation,
+        )
+        from nexus.research import sec_exhibit_storage
+        from pydantic import SecretStr
+
+        trigger_settings = agent_paper_once.AgentPaperTriggerSettings(
+            database_url=migrated_database_url,
+            object_store_endpoint=settings.object_store_endpoint,
+            alpaca_key=SecretStr("fixture"),
+            alpaca_secret=SecretStr("fixture"),
+        )
+        replay = AgentPaperCycleResult(
+            cycle_id=UUID(int=9),
+            status="researching",
+            result_code="RESEARCH_JOBS_PREPARED",
+            replayed=True,
+        )
+
+        def configured_store(supplied):
+            assert supplied is trigger_settings
+            return store
+
+        async def reservation_with_archived_evidence(session, **kwargs):
+            native_reports = await read_disclosures(
+                session,
+                instrument_id=identity.instrument_id,
+                evidence_ids=(evidence_id,),
+                as_of=kwargs["now"],
+            )
+            assert native_reports[evidence_id].canonical_bytes() == report.canonical_bytes()
+            return AgentPaperTriggerReservation(
+                claim_id=UUID(int=8),
+                decision_session=kwargs["now"].date(),
+                decision_slot_at=kwargs["now"],
+                replay=replay,
+            )
+
+        async def resume_with_archived_evidence(session, **kwargs):
+            await reservation_with_archived_evidence(session, **kwargs)
+            return replay
+
+        with monkeypatch.context() as native:
+            native.setattr(sec_exhibit_storage, "S3ProviderEvidenceStore", configured_store)
+            native.setattr(
+                agent_paper_once,
+                "reserve_schwab_agent_paper_trigger",
+                reservation_with_archived_evidence,
+            )
+            native.setattr(
+                agent_paper_once, "resume_schwab_agent_paper_cycle", resume_with_archived_evidence
+            )
+            assert (
+                await agent_paper_once.trigger_once(
+                    trigger_settings,
+                    agent_paper_once.AgentPaperTriggerRequest(
+                        action="trigger",
+                        account_id=UUID(int=1),
+                        candidate_batch_id=UUID(int=2),
+                        idempotency_key="native-archived-evidence",
+                    ),
+                    repo_root=tmp_path,
+                )
+                == replay
+            )
+            assert (
+                await agent_paper_once.resume_once(
+                    trigger_settings,
+                    agent_paper_once.AgentPaperResumeRequest(
+                        action="resume",
+                        cycle_id=replay.cycle_id,
+                        idempotency_key="native-archived-resume",
+                        formal_stage_capacity=True,
+                    ),
+                )
+                == replay
+            )
         application = app(migrated_database_url, now=datetime.now(UTC))
         application.state.session_factory.configure(info={"sec_exhibit_store": store})
         async with httpx.AsyncClient(
@@ -223,7 +306,9 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
         store.missing_key = key
         async with factory() as session:
             assert not await read_disclosures(
-                session, instrument_id=identity.instrument_id, evidence_ids=(evidence_id,),
+                session,
+                instrument_id=identity.instrument_id,
+                evidence_ids=(evidence_id,),
                 as_of=datetime.now(UTC),
             )
     finally:
