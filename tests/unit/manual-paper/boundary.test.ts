@@ -20,3 +20,11 @@ it("discards raw error details and preserves only manual fixed reason codes", as
   const unknown = rebuildAllowedEngineResponse(409, { error: { ...value.error, details: { reason_code: "PRIVATE_NEW_CODE" } } }, undefined, path)!;
   expect((await unknown.json()).error.details).toEqual({});
 });
+
+it("carries only the exact unknown preparation acknowledgement through the BFF", () => {
+  const acknowledged = { ...data, status: "unknown", code: "MANUAL_RESULT_UNKNOWN", preparation_disposition: "unknown_acknowledged" };
+  expect(rebuildAllowedEngineResponse(200, { data: acknowledged, meta }, undefined, path, undefined, "GET")).not.toBeNull();
+  for (const invalid of [{ ...data, preparation_disposition: "unknown_acknowledged" }, { ...acknowledged, cycle_id: id }, { ...acknowledged, preparation_disposition: "all_unknowns_retriable" }, { ...acknowledged, preparation_disposition: true }]) {
+    expect(rebuildAllowedEngineResponse(200, { data: invalid, meta }, undefined, path, undefined, "GET")).toBeNull();
+  }
+});

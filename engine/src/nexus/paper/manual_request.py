@@ -5,7 +5,7 @@ from hashlib import sha256
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +59,19 @@ class ManualRequestView(BaseModel):
     code: str
     cycle_id: UUID | None
     execution_locked: Literal[True] = True
+    preparation_disposition: Literal["unknown_acknowledged"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def require_disposition_scope(self) -> "ManualRequestView":
+        if self.preparation_disposition is not None and (
+            self.status != "unknown"
+            or self.code != "MANUAL_RESULT_UNKNOWN"
+            or self.cycle_id is not None
+        ):
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
+        return self
 
 
 def manual_request_hash(*, account_id: UUID, batch_id: UUID, mode: ManualMode) -> str:

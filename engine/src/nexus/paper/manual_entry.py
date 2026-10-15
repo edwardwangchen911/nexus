@@ -95,13 +95,31 @@ def manual_host_scope(settings: EngineSettings) -> str:
     )
 
 
+async def _read_presented_manual_request(
+    session: AsyncSession, row: ManualPaperRequest
+) -> ManualRequestView:
+    # Keep the canonical event reader independent: acknowledgement validation
+    # uses it to verify the original unknown facts and must never recurse.
+    view = await read_manual_request(session, row)
+    if view.status != "unknown" or view.cycle_id is not None:
+        return view
+    from nexus.paper.preparation_unknown_ack import acknowledged_request
+
+    now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise ValueError("MANUAL_RESULT_UNKNOWN")
+    if await acknowledged_request(session, row, now=now):
+        return view.model_copy(update={"preparation_disposition": "unknown_acknowledged"})
+    return view
+
+
 async def read_configured_manual_request(
     session: AsyncSession, settings: EngineSettings, *, request_id: UUID
 ) -> ManualRequestView:
     row = await session.get(ManualPaperRequest, request_id)
     if row is None or row.account_id != settings.agent_paper_account_id:
         raise ValueError("MANUAL_NOT_FOUND")
-    return await read_manual_request(session, row)
+    return await _read_presented_manual_request(session, row)
 
 
 async def lookup_configured_manual_request(
@@ -118,7 +136,7 @@ async def lookup_configured_manual_request(
             ManualPaperRequest.key_hash == sha256(idempotency_key.encode()).hexdigest(),
         )
     )
-    return None if row is None else await read_manual_request(session, row)
+    return None if row is None else await _read_presented_manual_request(session, row)
 
 
 async def start_configured_manual_request(

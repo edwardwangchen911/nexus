@@ -76,3 +76,33 @@ it("allows an explicit new selection after a known refusal but hides raw error m
   expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled();
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
+
+it("keeps acknowledged unknown visible and resets only local reference without replay", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "old-unknown", mode: "research_only" }));
+  fetchMock.mockResolvedValue(Response.json({ data: { ...receipt, status: "unknown", code: "MANUAL_RESULT_UNKNOWN", preparation_disposition: "unknown_acknowledged" } }));
+  render(<ManualPaperStart />);
+  await screen.findByText("周期结果尚未确认");
+  expect(screen.getByText(/历史调用、费用和预算保持原样/)).toBeVisible();
+  expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "GET", headers: { "Idempotency-Key": "old-unknown" } });
+  fireEvent.click(screen.getByRole("button", { name: "开始新的请求" }));
+  expect(sessionStorage.getItem("nexus-manual-paper-attempt-v1")).toBeNull();
+  expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("does not clear an unacknowledged unknown or keep a stale acknowledgement after failed GET", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "old-unknown", mode: "research_only" }));
+  fetchMock.mockResolvedValueOnce(Response.json({ data: { ...receipt, status: "unknown", code: "MANUAL_RESULT_UNKNOWN" } }));
+  render(<ManualPaperStart />);
+  await screen.findByText("周期结果尚未确认");
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+  fetchMock.mockResolvedValueOnce(Response.json({ data: { ...receipt, status: "unknown", code: "MANUAL_RESULT_UNKNOWN", preparation_disposition: "unknown_acknowledged" } }));
+  fireEvent.click(screen.getByRole("button", { name: "核对原请求" }));
+  await screen.findByRole("button", { name: "开始新的请求" });
+  fetchMock.mockRejectedValueOnce(new Error("audit unavailable"));
+  fireEvent.click(screen.getByRole("button", { name: "核对原请求" }));
+  await screen.findByText(/提交结果尚未确认/);
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+  expect(sessionStorage.getItem("nexus-manual-paper-attempt-v1")).not.toBeNull();
+  expect(fetchMock.mock.calls.every((call) => call[1].method === "GET")).toBe(true);
+});

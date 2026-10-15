@@ -318,6 +318,40 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
             )
             assert not receipt.replayed and receipt.historical_usage == "unknown"
             assert (await manual_paper.run(settings, args)).replayed
+            if fault == "none":
+                import httpx
+                from helpers.paper_api import headers
+                from helpers.paper_api import settings as api_settings
+                from nexus.main import create_engine_app
+                from nexus.paper.manual_entry import read_configured_manual_request
+
+                async with sessions() as read_session:
+                    displayed = await read_configured_manual_request(
+                        read_session, settings, request_id=old.request_id
+                    )
+                    assert displayed.status == "unknown"
+                    assert displayed.preparation_disposition == "unknown_acknowledged"
+                api_config = api_settings(migrated_database_url).model_dump()
+                api_config.update(
+                    {
+                        "agent_paper_account_id": authority.account_id,
+                        "agent_paper_candidate_batch_id": batch.batch_id,
+                        "agent_paper_formal_model_config_id": model.id,
+                        "agent_runtime_mode": "codex_sdk",
+                        "candidate_stage_capacity_reads": True,
+                    }
+                )
+                app = create_engine_app(EngineSettings(**api_config))
+                path = "/internal/v1/paper/manual-requests"
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    response = await client.get(
+                        path, headers=headers("GET", path) | {"Idempotency-Key": "unknown"}
+                    )
+                assert response.status_code == 200
+                assert response.json()["data"]["status"] == "unknown"
+                assert response.json()["data"]["preparation_disposition"] == "unknown_acknowledged"
         async with sessions.begin() as s:
             audits = tuple(
                 await s.scalars(select(AuditEvent).where(AuditEvent.action == ack.ACTION))
@@ -353,7 +387,28 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
                 audits[0].payload = {**audits[0].payload, "usage": "zero"}
                 with s.no_autoflush, pytest.raises(ValueError):
                     await ack._validate(s, audits[0], now=clock[0])
+                from nexus.paper.manual_entry import read_configured_manual_request
+
+                with s.no_autoflush, pytest.raises(ValueError, match=ack.BLOCKED):
+                    await read_configured_manual_request(s, settings, request_id=old.request_id)
                 s.expunge(audits[0])
+        if fault in {"late-claim", "changed-claim"}:
+            from nexus.paper.manual_entry import read_configured_manual_request
+
+            async with sessions() as read_session:
+                with pytest.raises(ValueError, match=ack.BLOCKED):
+                    await read_configured_manual_request(
+                        read_session, settings, request_id=old.request_id
+                    )
+        if not successful:
+            from nexus.paper.manual_entry import read_configured_manual_request
+
+            async with sessions() as read_session:
+                assert (
+                    await read_configured_manual_request(
+                        read_session, settings, request_id=old.request_id
+                    )
+                ).preparation_disposition is None
         if fault == "concurrent-claim":
             from nexus.paper.target_service import lock_portfolio_account
 

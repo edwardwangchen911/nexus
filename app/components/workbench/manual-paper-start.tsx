@@ -26,6 +26,7 @@ export function ManualPaperStart(): React.ReactElement {
     const current = ++version.current;
     setBusy(true);
     setRejected(false);
+    setReceipt(null);
     try {
       const response = await fetch("/api/v1/paper/manual-requests", {
         method, cache: "no-store", signal: AbortSignal.timeout(10_000),
@@ -87,8 +88,10 @@ export function ManualPaperStart(): React.ReactElement {
     setAttempt(original);
     void send(original, "POST");
   };
+  const resetAllowed = rejected || receipt?.status === "completed" || receipt?.status === "unavailable"
+    || receipt?.status === "unknown" && receipt.preparation_disposition === "unknown_acknowledged";
   const reset = () => {
-    if (busy || !(rejected || receipt?.status === "completed" || receipt?.status === "unavailable")) return;
+    if (busy || !resetAllowed) return;
     try { sessionStorage.removeItem(STORAGE_KEY); }
     catch { setMessage("无法清除本地请求标识，请保留原请求。"); return; }
     setAttempt(null); setReceipt(null); setRejected(false); setMessage("");
@@ -103,11 +106,12 @@ export function ManualPaperStart(): React.ReactElement {
       <p>实盘执行保持锁定。浏览和刷新不会开始新周期。</p>
       {receipt && <div><p>{receipt.mode === "research_only" ? "仅研究" : "研究并内部模拟"} · <strong>{labels[receipt.status]}</strong></p>
         <p>请求时间：<time dateTime={receipt.requested_at}>{receipt.requested_at}</time></p>
+        {receipt.preparation_disposition === "unknown_acknowledged" && <p>准备结果未知已明确接受，调度占用已解除。历史调用、费用和预算保持原样；新请求仍需重新通过准入。</p>}
         {receipt.cycle_id && <a href={`/decisions/${receipt.cycle_id}`}>查看周期决策</a>}
       </div>}
       {message && <p role="status">{message}</p>}
       {attempt && <button type="button" className="button button--quiet" disabled={busy} onClick={() => void send(attempt, "GET")}>{busy ? "正在核对…" : "核对原请求"}</button>}
-      {(rejected || receipt?.status === "completed" || receipt?.status === "unavailable") && <button type="button" className="button button--quiet" disabled={busy} onClick={reset}>开始新的请求</button>}
+      {resetAllowed && <button type="button" className="button button--quiet" disabled={busy} onClick={reset}>开始新的请求</button>}
     </div>
   </section>;
 }

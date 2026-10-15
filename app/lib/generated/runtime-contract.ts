@@ -5779,6 +5779,18 @@ export const runtimeContractSchemas = {
         "title": "Mode",
         "type": "string"
       },
+      "preparation_disposition": {
+        "anyOf": [
+          {
+            "const": "unknown_acknowledged",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Preparation Disposition"
+      },
       "request_id": {
         "format": "uuid",
         "title": "Request Id",

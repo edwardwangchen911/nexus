@@ -105,3 +105,40 @@ def test_manual_cli_explicit_file_does_not_inherit_process_access(monkeypatch):
     monkeypatch.setenv("NEXUS_AGENT_PAPER_ACCOUNT_ID", str(UUID(int=1)))
     settings = _FileEngineSettings.model_validate({"NEXUS_ENV": "test"})
     assert settings.agent_paper_manual_enabled is False and settings.agent_paper_account_id is None
+
+
+def test_preparation_disposition_is_read_metadata_not_a_terminal_or_execution_status():
+    from nexus.paper.manual_request import ManualRequestView
+
+    data = {
+        "request_id": UUID(int=1),
+        "mode": "research_only",
+        "requested_at": datetime(2026, 10, 15, 14, tzinfo=UTC),
+        "status": "unknown",
+        "code": "MANUAL_RESULT_UNKNOWN",
+        "cycle_id": None,
+    }
+    old = ManualRequestView.model_validate(data)
+    assert set(old.model_dump()) == {
+        "request_id",
+        "mode",
+        "requested_at",
+        "status",
+        "code",
+        "cycle_id",
+        "execution_locked",
+    }
+    accepted = ManualRequestView.model_validate(
+        data | {"preparation_disposition": "unknown_acknowledged"}
+    )
+    assert accepted.status == "unknown" and accepted.execution_locked is True
+    for changed in [
+        {"status": "queued"},
+        {"cycle_id": UUID(int=2)},
+        {"preparation_disposition": True},
+        {"preparation_disposition": "all_unknowns_retriable"},
+    ]:
+        with pytest.raises(ValidationError):
+            ManualRequestView.model_validate(
+                data | {"preparation_disposition": "unknown_acknowledged"} | changed
+            )

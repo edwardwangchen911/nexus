@@ -3705,6 +3705,8 @@ export interface components {
              * @enum {string}
              */
             mode: "research_only" | "research_and_paper";
+            /** Preparation Disposition */
+            preparation_disposition?: "unknown_acknowledged" | null;
             /**
              * Request Id
              * Format: uuid

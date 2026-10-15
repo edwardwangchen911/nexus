@@ -145,3 +145,63 @@ test("manual start survives refresh as a readonly original-request lookup", asyn
   expect(calls.slice(1).every((call) => call.method === "GET" && call.key === calls[0].key)).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
+  test(`${viewport.name} acknowledged unknown resets locally and a new start uses a new key`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await installFixtures(page, readyWorkbench(), []);
+    await page.addInitScript(() => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "old-unknown", mode: "research_only" })));
+    const calls: { method: string; key: string | undefined }[] = [];
+    const unknown = { request_id: "0198f7a0-1111-7777-8111-111111111111", mode: "research_only", requested_at: "2026-10-09T14:00:00Z", status: "unknown", code: "MANUAL_RESULT_UNKNOWN", cycle_id: null, execution_locked: true, preparation_disposition: "unknown_acknowledged" };
+    await page.route("**/api/v1/paper/manual-requests", async (route) => {
+      const request = route.request();
+      calls.push({ method: request.method(), key: request.headers()["idempotency-key"] });
+      if (request.method() === "GET") await route.fulfill({ json: { data: unknown, meta: meta() } });
+      else {
+        expect(request.postDataJSON()).toEqual({ mode: "research_only" });
+        expect(request.headers()["idempotency-key"]).not.toBe("old-unknown");
+        await route.fulfill({ json: { data: { ...unknown, request_id: "0198f7a0-2222-7777-8111-111111111111", status: "queued", code: "MANUAL_REQUEST_QUEUED", preparation_disposition: null }, meta: meta() } });
+      }
+    });
+    await page.goto("/workspace");
+    const panel = page.getByRole("region", { name: "开始研究与内部模拟" });
+    await expect(panel.getByText("周期结果尚未确认", { exact: true })).toBeVisible();
+    await expect(panel).toContainText("历史调用、费用和预算保持原样");
+    await page.reload();
+    await expect(panel.getByRole("button", { name: "开始新的请求" })).toBeVisible();
+    expect(calls.every((call) => call.method === "GET" && call.key === "old-unknown")).toBe(true);
+    await panel.screenshot({ path: `test-results/acknowledged-unknown-${viewport.name}.png` });
+    await panel.getByRole("button", { name: "开始新的请求" }).click();
+    expect(await page.evaluate(() => sessionStorage.getItem("nexus-manual-paper-attempt-v1"))).toBeNull();
+    await expect(panel.getByRole("button", { name: "仅研究", exact: true })).toBeEnabled();
+    expect(calls.every((call) => call.method === "GET")).toBe(true);
+    await panel.getByRole("button", { name: "仅研究", exact: true }).click();
+    await expect(panel.getByText("已登记，等待宿主处理", { exact: true })).toBeVisible();
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+}
+
+test("unknown reset requires a confirmed disposition and loses it after failed readback", async ({ page }) => {
+  await installFixtures(page, readyWorkbench(), []);
+  await page.addInitScript(() => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "old-unknown", mode: "research_only" })));
+  let stage = "unaccepted";
+  const methods: string[] = [];
+  await page.route("**/api/v1/paper/manual-requests", async (route) => {
+    methods.push(route.request().method());
+    if (stage === "failed") return route.fulfill({ status: 409, json: { error: { details: { reason_code: "MANUAL_PREPARATION_ACK_BLOCKED" } } } });
+    await route.fulfill({ json: { data: { request_id: "0198f7a0-1111-7777-8111-111111111111", mode: "research_only", requested_at: "2026-10-09T14:00:00Z", status: "unknown", code: "MANUAL_RESULT_UNKNOWN", cycle_id: null, execution_locked: true, ...(stage === "accepted" ? { preparation_disposition: "unknown_acknowledged" } : {}) }, meta: meta() } });
+  });
+  await page.goto("/workspace");
+  const panel = page.getByRole("region", { name: "开始研究与内部模拟" });
+  await expect(panel.getByText("周期结果尚未确认", { exact: true })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "开始新的请求" })).toHaveCount(0);
+  stage = "accepted";
+  await panel.getByRole("button", { name: "核对原请求" }).click();
+  await expect(panel.getByRole("button", { name: "开始新的请求" })).toBeVisible();
+  stage = "failed";
+  await panel.getByRole("button", { name: "核对原请求" }).click();
+  await expect(panel.getByRole("status")).toContainText("提交结果尚未确认");
+  await expect(panel.getByRole("button", { name: "开始新的请求" })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "仅研究", exact: true })).toBeDisabled();
+  expect(methods.every((method) => method === "GET")).toBe(true);
+});
