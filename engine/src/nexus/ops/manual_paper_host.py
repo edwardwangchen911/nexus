@@ -37,6 +37,7 @@ MANUAL_TRIGGER_CODES = frozenset(
         "MANUAL_REQUEST_INVALID",
         "MANUAL_REQUEST_TERMINAL_OR_UNKNOWN",
         "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+        "MANUAL_PREPARATION_ACK_BLOCKED",
         "MANUAL_RESULT_UNKNOWN",
         "AGENT_PAPER_REQUEST_INVALID",
         "AGENT_PAPER_OUTSIDE_WINDOW",
@@ -272,6 +273,16 @@ async def peek_manual_request(
         if view.status == "unknown" and await preparation_closed(session, row, now=now):
             continue
         pending.append(view)
+    from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
+
+    await require_acknowledged_native_claims(
+        session,
+        account_id=account_id,
+        now=now,
+        excluding_request_id=pending[0].request_id
+        if len(pending) == 1 and pending[0].status == "preparing"
+        else None,
+    )
     if len(pending) > 1:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     return None if not pending else pending[0]

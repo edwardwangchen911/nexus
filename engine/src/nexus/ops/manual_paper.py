@@ -33,6 +33,7 @@ from nexus.paper.manual_preparation_close import (
     preparation_service_control_lock,
 )
 from nexus.paper.manual_request import ManualRequestView
+from nexus.paper.preparation_unknown_ack import UnknownPreparationReceipt
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
@@ -87,6 +88,10 @@ def parser() -> argparse.ArgumentParser:
     read.add_argument("--request-id", type=UUID, required=True)
     close = commands.add_parser("close-unstarted-preparation")
     close.add_argument("--request-id", type=UUID, required=True)
+    ack = commands.add_parser("acknowledge-unknown-preparations")
+    ack.add_argument("--request-id", type=UUID, required=True)
+    ack.add_argument("--claim-id", dest="claim_ids", type=UUID, action="append", required=True)
+    ack.add_argument("--accept-unknown-effects", action="store_true", required=True)
     cancel = commands.add_parser("cancel-unused-research")
     cancel.add_argument("--cycle-id", type=UUID, required=True)
     seal = commands.add_parser("seal-failed-research")
@@ -103,12 +108,18 @@ def parser() -> argparse.ArgumentParser:
 
 async def run(
     settings: EngineSettings, args: argparse.Namespace
-) -> ManualRequestView | TerminalCycleCancelReceipt | HistorySealReceipt | PreparationCloseReceipt:
+) -> (
+    ManualRequestView
+    | TerminalCycleCancelReceipt
+    | HistorySealReceipt
+    | PreparationCloseReceipt
+    | UnknownPreparationReceipt
+):
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     lifecycle_guards = ExitStack()
     try:
-        if args.action == "close-unstarted-preparation":
+        if args.action in {"close-unstarted-preparation", "acknowledge-unknown-preparations"}:
             _require_maintenance_code(args.repo_root, settings.release_revision)
             try:
                 lifecycle_guards.enter_context(
@@ -117,7 +128,7 @@ async def run(
             except RuntimeError:
                 raise ValueError("MANUAL_PREPARATION_CLOSE_BLOCKED") from None
         async with factory.begin() as session:
-            if args.action == "close-unstarted-preparation":
+            if args.action in {"close-unstarted-preparation", "acknowledge-unknown-preparations"}:
                 from nexus.paper.manual_preparation_close import close_unstarted_preparation
 
                 _require_maintenance_code(args.repo_root, settings.release_revision)
@@ -141,6 +152,21 @@ async def run(
                     != CURRENT_MIGRATION_HEAD
                 ):
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                if args.action == "acknowledge-unknown-preparations":
+                    from nexus.paper.preparation_unknown_ack import acknowledge_unknown_preparations
+
+                    ack_receipt = await acknowledge_unknown_preparations(
+                        session,
+                        settings=settings,
+                        request_id=args.request_id,
+                        claim_ids=tuple(args.claim_ids),
+                        accept_unknown_effects=args.accept_unknown_effects,
+                        now=now,
+                        repo_root=args.repo_root,
+                        env_file=args.env_file,
+                    )
+                    _require_maintenance_code(args.repo_root, settings.release_revision)
+                    return ack_receipt
                 close_receipt = await close_unstarted_preparation(
                     session,
                     account_id=settings.agent_paper_account_id,

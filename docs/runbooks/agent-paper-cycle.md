@@ -569,3 +569,12 @@ Candidate 92276fa3 fixes primary trigger diagnostics lost by manual dispatch, in
 候选入口 `nexus-engine-manual-paper close-unstarted-preparation --request-id <UUID>` 沿用主仓库与受保护环境配置。必须显式指定旧请求，不自动封存或自动创建下一请求。该入口追加独立审计，保持原 unknown 与原预算，不重放旧调用。需原生产者身份及已审查调用顺序、原生认领/周期绑定缺失、实际进程退出和账户无占用的完整证明；缺失或变化返回固定 `MANUAL_PREPARATION_CLOSE_BLOCKED`。维护与正常服务启动共用生命周期锁，持有至提交。
 
 当前真实旧请求尚不符合该候选证据门槛：心跳早于 preparing，事件未绑定原生产者身份。隔离成功不能授权真实收尾、部署或新周期，也不能还原旧屏蔽异常。不得为通过该记录放宽身份规则，或通过重放采集/模型来补历史事实。
+
+
+### 明确接受历史准备结果未知（本地候选，尚未部署）
+
+`nexus-engine-manual-paper acknowledge-unknown-preparations --request-id <UUID> --claim-id <UUID> --claim-id <UUID> --claim-id <UUID> --claim-id <UUID> --accept-unknown-effects` 使用正常主仓库、受保护配置和数据库时钟。只支持一次明确绑定的一条 unknown 手动请求及四条空回执定时认领，不自动扫描并接受其他未知记录。此入口不证明旧生产者顺序、模型调用或费用为零：原请求、事件、认领及预算全部保留，只追加 `paper.preparation.unknown_acknowledged` 审计以解除这五项调度占用。
+
+维护期间使用既有生命周期、schema、账户和预算日锁，持有至提交；生产者必须退出。读取者重新验证原事实及审计链，迟到周期/认领、事实变更、额外未知占用、有效 Run/Job/租约/订单均拒绝。旧请求和槽位仍不可重放，新任务仍须正常独立准入；仅允许现有本地 Codex 套餐及原额度，受保护经济预算或付费模型不适用。当前零内部定价不回推历史费用。历史正常完成回执按原 route/schema/槽位或请求绑定解码；旧恢复回执按精确前驱和历史周期前缀读取，后续合法周期不使旧回执失效。
+
+本切片不新增迁移或配置，不部署、不处置真实记录、不启动宿主或新周期。候选可在无真实审计时撤回；未来若批准应用并产生审计或后续事实，回退必须先停用新入口并保留数据、核验消费者兼容性，不能直接删除审计恢复旧调度。隔离测试中正常 CLI/宿主 dispatcher/native 入口已可创建独立三股票周期和三个研究任务；来源受控、模型未调用，不代表真实研究或内部模拟验收通过。

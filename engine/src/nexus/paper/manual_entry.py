@@ -40,6 +40,7 @@ SAFE_ENTRY_CODES = frozenset(
         "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
         "MANUAL_RESULT_UNKNOWN",
         "MANUAL_PREPARATION_CLOSE_BLOCKED",
+        "MANUAL_PREPARATION_ACK_BLOCKED",
     }
 )
 
@@ -153,6 +154,11 @@ async def start_configured_manual_request(
     if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     now = now.astimezone(UTC)
+    from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
+
+    await require_acknowledged_operation_scope(
+        session, account_id=account_id, model_config_id=model_id, now=now
+    )
     heartbeats = (
         await session.scalars(
             select(WorkerHeartbeat).where(

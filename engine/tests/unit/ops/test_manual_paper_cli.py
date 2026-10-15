@@ -258,8 +258,13 @@ def test_unstarted_preparation_closure_is_explicit_and_request_scoped():
     assert str(args.request_id).endswith("0003")
 
 
+@pytest.mark.parametrize(
+    "action", ["close-unstarted-preparation", "acknowledge-unknown-preparations"]
+)
 @pytest.mark.asyncio
-async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(monkeypatch, tmp_path):
+async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
+    monkeypatch, tmp_path, action
+):
     from argparse import Namespace
     from contextlib import contextmanager
     from datetime import UTC, datetime
@@ -306,23 +311,49 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(monk
 
     async def close_request(*_a, **_k):
         assert held[0]
+        if action == "acknowledge-unknown-preparations":
+            from nexus.paper.preparation_unknown_ack import UnknownPreparationReceipt
+
+            return UnknownPreparationReceipt(request_id=UUID(int=1), replayed=False)
         return close.PreparationCloseReceipt(request_id=UUID(int=1), replayed=False)
 
     monkeypatch.setattr(manual_paper, "session_factory", lambda *_a: factory)
     monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_a: None)
     monkeypatch.setattr(manual_paper, "preparation_service_control_lock", fence)
     monkeypatch.setattr(close, "close_unstarted_preparation", close_request)
+    from nexus.paper import preparation_unknown_ack
+
+    monkeypatch.setattr(preparation_unknown_ack, "acknowledge_unknown_preparations", close_request)
     receipt = await manual_paper.run(
         EngineSettings(
             database_url="postgresql+asyncpg://fixture:fixture@127.0.0.1/nexus_test_fixture",
             agent_paper_account_id=UUID(int=2),
         ),
         Namespace(
-            action="close-unstarted-preparation",
+            action=action,
+            claim_ids=[UUID(int=i) for i in range(2, 6)],
+            accept_unknown_effects=True,
             repo_root=tmp_path,
             env_file=tmp_path / "env",
             request_id=UUID(int=1),
         ),
     )
-    assert receipt.original_result == "unknown"
+    assert receipt.execution_locked is True
     assert observed == ["lock", "commit", "dispose", "unlock"]
+
+
+def test_unknown_preparation_ack_requires_explicit_five_item_selection():
+    args = manual_paper.parser().parse_args(
+        [
+            "acknowledge-unknown-preparations",
+            "--request-id",
+            str(__import__("uuid").UUID(int=1)),
+            *[
+                part
+                for i in range(2, 6)
+                for part in ("--claim-id", str(__import__("uuid").UUID(int=i)))
+            ],
+            "--accept-unknown-effects",
+        ]
+    )
+    assert len(args.claim_ids) == 4 and args.accept_unknown_effects

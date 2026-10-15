@@ -205,7 +205,9 @@ async def preparation_closed(
         )
     )
     if not audits:
-        return False
+        from nexus.paper.preparation_unknown_ack import acknowledged_request
+
+        return await acknowledged_request(session, row, now=now)
     if len(audits) != 1:
         raise ValueError(BLOCKED)
     audit = audits[0]

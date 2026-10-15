@@ -366,6 +366,11 @@ async def reserve_schwab_agent_paper_trigger(
         claim_key = f"synthesis-recovery:{local_time.date().isoformat()}"
     else:
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
+
+    await require_acknowledged_operation_scope(
+        session, account_id=account_id, model_config_id=formal_model_config_id, now=now
+    )
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
         raise AgentPaperCycleError("CANDIDATE_BATCH_INVALID")
@@ -447,7 +452,9 @@ async def reserve_schwab_agent_paper_trigger(
                 now=now,
             )
         else:
-            await require_no_running_manual_request(session, account_id=account_id)
+            await require_no_running_manual_request(
+                session, account_id=account_id, current_trigger_key=claim_key
+            )
         from nexus.agents.persistence import _lock_budget_day
         from nexus.paper.formal_budget_protection import _validate_binding, latest_binding
 
@@ -1343,6 +1350,15 @@ async def _start_cycle(
         )
     ):
         raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
+
+    await require_acknowledged_operation_scope(
+        session,
+        account_id=authority.account_id,
+        model_config_id=formal_model_config_id,
+        now=authority.decision_time,
+        economic=economic_lane_ref is not None,
+    )
     from nexus.paper.economic_cycle import require_economic_creation
 
     economic = await require_economic_creation(
@@ -1426,7 +1442,11 @@ async def _start_cycle(
             now=authority.decision_time,
         )
     else:
-        await require_no_running_manual_request(session, account_id=authority.account_id)
+        await require_no_running_manual_request(
+            session,
+            account_id=authority.account_id,
+            current_trigger_key=decision_slot_at.isoformat(),
+        )
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time
     )

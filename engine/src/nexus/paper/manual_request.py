@@ -206,8 +206,13 @@ async def require_manual_account_available(
     now: datetime,
     excluding_request_id: UUID | None = None,
 ) -> None:
+    from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
+
     # Exactly the target activation lock and projection authority, not a parallel lock system.
     await lock_portfolio_account(session, account_id)
+    await require_acknowledged_native_claims(
+        session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
+    )
     requests = (
         await session.scalars(
             select(ManualPaperRequest).where(ManualPaperRequest.account_id == account_id)
@@ -601,8 +606,18 @@ async def require_preparing_manual_request(
     return row
 
 
-async def require_no_running_manual_request(session: AsyncSession, *, account_id: UUID) -> None:
+async def require_no_running_manual_request(
+    session: AsyncSession, *, account_id: UUID, current_trigger_key: str | None = None
+) -> None:
+    from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
+
     await lock_portfolio_account(session, account_id)
+    await require_acknowledged_native_claims(
+        session,
+        account_id=account_id,
+        now=await _database_now(session),
+        current_trigger_key=current_trigger_key,
+    )
     rows = (
         await session.scalars(
             select(ManualPaperRequest).where(ManualPaperRequest.account_id == account_id)
