@@ -96,6 +96,33 @@ async def _wait_for_web(url: str, process: asyncio.subprocess.Process) -> None:
     raise AssertionError("controlled Web readiness timed out")
 
 
+def _screenshot_directory(
+    root: Path, revision: str, candidate_count: int, *, formal_readback: bool
+) -> Path:
+    import stat
+
+    screenshots = root
+    for component in (
+        ".secrets",
+        "formal-page-readback-20261010" if formal_readback else "candidate-page-readback-20261010",
+        revision,
+        f"count-{candidate_count}",
+    ):
+        screenshots = screenshots / component
+        try:
+            screenshots.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        info = screenshots.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.getuid()
+        ):
+            raise AssertionError("CONTROLLED_SCREENSHOT_DIRECTORY_REJECTED")
+    return screenshots
+
+
 async def verify_controlled_browser(
     database_url: str,
     *,
@@ -222,22 +249,11 @@ async def verify_controlled_browser(
         if economic_protocol_hash is not None:
             environment["NEXUS_ECONOMIC_PROTOCOL_HASH"] = economic_protocol_hash
         if candidate_stage_capacity_reads or formal_readback:
-            import stat
-
-            screenshots = root / ".secrets"
-            for component in (
-                "formal-page-readback-20261010"
-                if formal_readback
-                else "candidate-page-readback-20261010",
-                revision,
-                f"count-{candidate_count}",
-            ):
-                screenshots = screenshots / component
-                screenshots.mkdir(mode=0o700, exist_ok=True)
-                info = screenshots.stat()
-                if stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid():
-                    raise AssertionError("CONTROLLED_SCREENSHOT_DIRECTORY_REJECTED")
-            environment["NEXUS_CONTROLLED_SCREENSHOT_DIR"] = str(screenshots)
+            environment["NEXUS_CONTROLLED_SCREENSHOT_DIR"] = str(
+                _screenshot_directory(
+                    root, revision, candidate_count, formal_readback=formal_readback
+                )
+            )
         web_root = isolation.enter_context(_web_project_root(root))
         web_process = await asyncio.create_subprocess_exec(
             str(web_root / "node_modules/.bin/vinext"),
