@@ -160,17 +160,19 @@ _EXPECTED_SDK_READ_METHODS = frozenset(
 # semantic checks below.  The four files jointly define the production HTTP
 # and Provider-call surface.  Any byte-level change must update this reviewed
 # contract in the same diff instead of relying on an incomplete AST blacklist.
+# Reviewed local lifecycle entry points reuse main and the same read-only surface;
+# quote clock fields remain opaque provider values, not executable operations.
 _EXPECTED_GATEWAY_SOURCE_SHA256 = {
     "policy/operations.py": "0c91bb7741d51103e6c109f06ae11433b0f80f8ff4eb8e8ed49099b1325e77be",
     "routes/read_only.py": "b989b806f6fcb29cf7cb6cc0f686f2aef89eb933759af3b9fda1bce0d471e995",
     "adapter/sdk.py": "c55898547c29e4e0a4489c17b87b4f10d9c3584d23f99c2660b221c147fa05b7",
-    "main.py": "dcab8e8167b7a866b1fe5b6bd1d36c4c69f75723c338bec68d5052cbc6c8ae65",
+    "main.py": "a546e2b3271a44866c771e26b906e99898f80f34d27262bd00d6215ff98ca219",
 }
 _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256 = (
-    "b916038dc5e7d27f91eb9f3bf7194e9e11ef9f9183270f0506af9f32989b199b"
+    "4b760651cf969f73eec07dade4e02bbdd17161593f612a03e77112c3bafa2883"
 )
 _EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256 = (
-    "4e89cbc386624d338b8d0896808943714e54e2cd38543d87a6d3e3a74dc2879a"
+    "efb699d25e07175471d0ed49f42438f4359894635b656c2dc89b86ab245e8932"
 )
 _EXPECTED_FOSUN_GATEWAY_PROJECT = {
     "name": "nexus-fosun-gateway",
@@ -189,6 +191,8 @@ _EXPECTED_FOSUN_GATEWAY_PROJECT = {
     ],
     "scripts": {
         "nexus-fosun-gateway": "nexus_fosun_gateway.main:run",
+        "nexus-fosun-gateway-local": "nexus_fosun_gateway.local_runtime:main",
+        "nexus-fosun-gateway-service": "nexus_fosun_gateway.local_service:main",
         "nexus-fosun-gateway-ready": "nexus_fosun_gateway.readiness:main",
         "nexus-fosun-activation-gate": "nexus_fosun_gateway.activation:main",
         "nexus-fosun-read-only-probe": "nexus_fosun_gateway.probe_cli:run",
@@ -230,7 +234,7 @@ _EXPECTED_FOSUN_GATEWAY_TOOL = {
     },
 }
 _EXPECTED_COMPOSE_SHA256 = (
-    "ccc520c27490c889835b10a9b23bc7f4041b13f2a3ac9d2ecc7c4ed41cc8f39f"
+    "4871bdde39d37847c3959baab9aadc48f0b7372d6ca077df6f0bf9b403151fd3"
 )
 _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256 = (
     "f22c88598929e7cab2282fab240b0d19791e12a7af4c6ca051df99d7eda9d6f1"
@@ -276,13 +280,14 @@ _REAL_E2E_CONFIG_REQUIRED = (
     'CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"',
 )
 # These hashes freeze the approved, reviewed real-fixture execution boundary.
+# The job also covers the isolated v10 manual-entry browser path.
 # The workflow digest covers only the real-e2e job so unrelated CI maintenance
 # does not require re-approving the real-fixture boundary.
 _EXPECTED_REAL_E2E_CONFIG_SHA256 = (
     "78dbbb17a0bcfa2689a349bd8a98254e9e5797a37ea3a2f2a945cfd7519fffb2"
 )
 _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256 = (
-    "a9f765040dd2916c8950991854944b5a78501c57db87047bcb6e02a3768a2d66"
+    "90e34d6e669d365c34b92915af421a922f58a002fcad46a9901a875cba6185db"
 )
 _EXPECTED_REAL_E2E_TEST_SHA256 = (
     "4814a5d221a2dec347afd2b544df97620b4ff20b18b00d6c1c0a160889c2e001"
@@ -1513,13 +1518,39 @@ def check_container_hardening(root: Path) -> list[PolicyFinding]:
 
 def _container_references(path: Path) -> list[tuple[int, str]]:
     references: list[tuple[int, str]] = []
+    global_args: dict[str, str | None] = {}
+    before_first_from = True
+    supported_preamble = path.name.endswith(".Dockerfile")
     for line_number, line in enumerate(_read_text(path).splitlines(), 1):
         stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
         if stripped.upper().startswith("FROM "):
+            before_first_from = False
             reference = stripped.split()[1]
+            variable = re.fullmatch(r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})", reference)
+            if variable is not None and supported_preamble:
+                name = variable.group(1) or variable.group(2)
+                reference = global_args.get(name) or reference
             references.append((line_number, reference))
         elif re.fullmatch(r"image:\s*[^\s#]+", stripped):
             references.append((line_number, stripped.removeprefix("image:").strip()))
+        elif before_first_from:
+            # Support only literal, single-line global defaults. Ambiguous or
+            # nested expansion remains unresolved and fails the digest check.
+            # Runtime overrides require the separate local-stack image-ID check.
+            argument = re.fullmatch(
+                r"ARG\s+([A-Za-z_]\w*)(?:=([^\s\\`]+))?", stripped, re.IGNORECASE
+            )
+            if argument is None:
+                supported_preamble = False
+            else:
+                name, default = argument.groups()
+                global_args[name] = (
+                    default
+                    if name not in global_args and default is not None and "$" not in default
+                    else None
+                )
     return references
 
 

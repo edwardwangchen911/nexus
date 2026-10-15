@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from scripts.ci import repository_policy
 from scripts.ci.repository_policy import (
     DependencyRecord,
+    PolicyFinding,
     check_container_hardening,
     check_container_pins,
     check_forbidden_gateway_surface,
@@ -1137,6 +1139,70 @@ def test_container_references_require_tag_and_sha256_digest(tmp_path: Path) -> N
     assert {finding.rule for finding in check_container_pins(tmp_path)} == {
         "unpinned_container_image"
     }
+
+
+@pytest.mark.parametrize("reference", ["$BASE", "${BASE}"])
+def test_container_base_accepts_only_a_pinned_global_arg_default(
+    tmp_path: Path, reference: str
+) -> None:
+    docker = tmp_path / "infra/docker"
+    docker.mkdir(parents=True)
+    (docker / "service.Dockerfile").write_text(
+        "ARG BASE=python:3.12-slim@sha256:" + "a" * 64 + f"\nFROM {reference}\n"
+    )
+
+    assert check_container_pins(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "preamble,reference",
+    [
+        ("", "${BASE}"),
+        ("ARG BASE\n", "${BASE}"),
+        ("ARG BASE=python:3.12-slim\n", "${BASE}"),
+        ("ARG BASE=${OTHER}\n", "${BASE}"),
+        ("ARG BASE={pinned}\n", "${BASE}/suffix"),
+        ("ARG BASE=$REGISTRY/{pinned}\n", "${BASE}"),
+        ("ARG BASE={pinned}\n", "${OTHER}"),
+        ("ARG BASE={pinned}\n", "${BASE:-python:latest}"),
+        ("ARG BASE={pinned}\nARG BASE\n", "${BASE}"),
+        ("ARG BASE={pinned}\nARG BASE={pinned}\n", "${BASE}"),
+        ("FROM {pinned}\nARG BASE={pinned}\n", "${BASE}"),
+        ("ARG BASE={pinned} \\\n", "${BASE}"),
+        ("ARG BASE={pinned}\nARG BASE=python:latest # override\n", "${BASE}"),
+    ],
+)
+def test_container_base_rejects_unresolved_or_ambiguous_arg_defaults(
+    tmp_path: Path, preamble: str, reference: str
+) -> None:
+    docker = tmp_path / "infra/docker"
+    docker.mkdir(parents=True)
+    pinned = "python:3.12-slim@sha256:" + "a" * 64
+    content = preamble.replace("{pinned}", pinned) + f"FROM {reference}\n"
+    (docker / "service.Dockerfile").write_text(content)
+
+    findings = check_container_pins(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        ("unpinned_container_image", f"infra/docker/service.Dockerfile:{len(content.splitlines())}")
+    ]
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        check_gateway_entrypoint_isolation,
+        check_gateway_read_allowlist,
+        check_probe_runtime_isolation,
+        check_container_pins,
+        repository_policy.check_real_e2e_boundary,
+    ],
+)
+def test_committed_runtime_matches_reviewed_policy_contract(
+    check: Callable[[Path], list[PolicyFinding]],
+) -> None:
+    # Synthetic mutation fixtures deliberately re-pin hashes to test semantics.
+    # This independent check must never re-pin them: it detects real source drift.
+    assert check(Path(__file__).resolve().parents[2]) == []
 
 
 def test_container_runtime_is_non_root_and_context_excludes_secret_domains(
