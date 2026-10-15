@@ -1,8 +1,8 @@
 import asyncio
 import gc
 import json
-import multiprocessing
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -658,11 +658,12 @@ def test_agent_paper_lock_is_shared_across_spawned_worktrees(tmp_path: Path) -> 
     runtime_root = tmp_path / "shared-runtime"
     side_effect_path = tmp_path / "loser-side-effects"
     result_path = tmp_path / "loser-result"
-    context = multiprocessing.get_context("spawn")
     child = """
 from pathlib import Path
 import sys
 from nexus.ops.agent_paper_loop import acquire_agent_paper_lock
+print("READY", flush=True)
+assert sys.stdin.readline() == "PROBE\\n"
 try:
     with acquire_agent_paper_lock(runtime_root=Path(sys.argv[1])):
         Path(sys.argv[2]).write_text("heartbeat\\ninspection\\nprovider\\nmodel\\n")
@@ -671,27 +672,44 @@ except Exception as error:
     Path(sys.argv[3]).write_text(str(error))
 """
 
-    with loop.acquire_agent_paper_lock(runtime_root=runtime_root):
-        contender = context.Process(
-            target=subprocess.run,
-            args=(
-                (
-                    sys.executable,
-                    "-c",
-                    child,
-                    str(runtime_root),
-                    str(side_effect_path),
-                    str(result_path),
-                ),
-            ),
-            kwargs={"check": False},
-        )
-        contender.start()
-        contender.join(timeout=5)
-
-    assert contender.exitcode == 0
-    assert result_path.read_text(encoding="utf-8") == "AGENT_PAPER_LOOP_ALREADY_RUNNING"
-    assert not side_effect_path.exists()
+    with subprocess.Popen(
+        (
+            sys.executable,
+            "-c",
+            child,
+            str(runtime_root),
+            str(side_effect_path),
+            str(result_path),
+        ),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as contender:
+        try:
+            # Import/startup time is not part of the lock contention contract.
+            with selectors.DefaultSelector() as ready:
+                ready.register(contender.stdout, selectors.EVENT_READ)
+                assert ready.select(timeout=30), "lock contender did not become ready"
+                assert contender.stdout.readline() == "READY\n"
+            with loop.acquire_agent_paper_lock(runtime_root=runtime_root):
+                try:
+                    contender.communicate(input="PROBE\n", timeout=5)
+                    assert contender.returncode == 0
+                    assert (
+                        result_path.read_text(encoding="utf-8")
+                        == "AGENT_PAPER_LOOP_ALREADY_RUNNING"
+                    )
+                    assert not side_effect_path.exists()
+                finally:
+                    # Never release the owner lock while a late contender remains alive.
+                    if contender.poll() is None:
+                        contender.kill()
+                        contender.communicate()
+        finally:
+            if contender.poll() is None:
+                contender.kill()
+                contender.communicate()
 
 
 @pytest.fixture
