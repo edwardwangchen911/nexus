@@ -186,6 +186,8 @@ async def verify_controlled_browser(
     )
     server_task = asyncio.create_task(server.serve(sockets=[api_socket]))
     web_process: asyncio.subprocess.Process | None = None
+    browser: asyncio.subprocess.Process | None = None
+    failure_stage = "api_readiness"
     web_log = tempfile.TemporaryFile(mode="w+b")
     isolation = ExitStack()
     receipt_path = (
@@ -201,6 +203,7 @@ async def verify_controlled_browser(
             await asyncio.sleep(0.1)
         else:
             raise AssertionError("controlled Engine API readiness timed out")
+        failure_stage = "direct_api_readback"
         order_path = (
             "/internal/v1/paper/economic-evidence"
             if economic_protocol_hash is not None
@@ -255,6 +258,7 @@ async def verify_controlled_browser(
                 )
             )
         web_root = isolation.enter_context(_web_project_root(root))
+        failure_stage = "web_readiness"
         web_process = await asyncio.create_subprocess_exec(
             str(web_root / "node_modules/.bin/vinext"),
             "dev",
@@ -268,6 +272,7 @@ async def verify_controlled_browser(
             stderr=asyncio.subprocess.STDOUT,
         )
         await _wait_for_web(environment["NEXUS_CONTROLLED_WEB_URL"], web_process)
+        failure_stage = "browser_start"
         browser = await asyncio.create_subprocess_exec(
             str(web_root / "node_modules/.bin/playwright"),
             "test",
@@ -290,6 +295,7 @@ async def verify_controlled_browser(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
+        failure_stage = "browser_readback"
         output, _ = await asyncio.wait_for(browser.communicate(), timeout=120)
         if browser.returncode != 0:
             web_log.seek(0)
@@ -302,6 +308,47 @@ async def verify_controlled_browser(
             receipt = json.loads(receipt_path.read_text())
             assert receipt["status"] == "queued" and receipt["execution_locked"] is True
             return UUID(receipt["request_id"])
+    except Exception as error:
+        # Persist only fixed process facts in the original checkout's CI artifact
+        # directory, before cleanup changes exit codes or deletes the Web checkout.
+        diagnostic = {
+            "revision": revision,
+            "stage": failure_stage,
+            "web_returncode": None if web_process is None else web_process.returncode,
+            "browser_returncode": None if browser is None else browser.returncode,
+            "api_task_status": (
+                "cancelled"
+                if server_task.cancelled()
+                else "running"
+                if not server_task.done()
+                else "failed"
+                if server_task.exception() is not None
+                else "completed"
+            ),
+            "api_started": server.started,
+            "error_type": (
+                "TimeoutError"
+                if isinstance(error, TimeoutError)
+                else "AssertionError"
+                if isinstance(error, AssertionError)
+                else "Exception"
+            ),
+        }
+        try:
+            artifacts = root / "test-results"
+            artifacts.mkdir(exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                prefix="controlled-browser-failure-",
+                suffix=".json",
+                dir=artifacts,
+                delete=False,
+            ) as diagnostic_file:
+                json.dump(diagnostic, diagnostic_file, sort_keys=True)
+                diagnostic_file.write("\n")
+        except OSError:
+            error.add_note("CONTROLLED_BROWSER_DIAGNOSTIC_WRITE_FAILED")
+        raise
     finally:
         if web_process is not None and web_process.returncode is None:
             web_process.terminate()
