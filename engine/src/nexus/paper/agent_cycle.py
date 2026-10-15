@@ -2088,6 +2088,7 @@ _SYNTHESIS_FAILURE_CODES = frozenset(
         "PORTFOLIO_SYNTHESIS_OUTPUT_INVALID",
         "PORTFOLIO_SYNTHESIS_RUN_INVALID",
         "PORTFOLIO_SYNTHESIS_BUDGET_INVALID",
+        "PORTFOLIO_SYNTHESIS_ADMISSION_CLOCK_INVALID",
         "CODEX_FORMAL_CYCLE_PROFILE_INVALID",
     }
 )
@@ -2137,9 +2138,24 @@ async def _resume_portfolio_synthesis(
     if run is None and (now is None or daily_limit_usd is None):
         raise ValueError("PORTFOLIO_SYNTHESIS_ADMISSION_CONTEXT_REQUIRED")
     failure_phase = "research_admission" if run is None else "synthesis_readback"
+    diagnostic_times: dict[str, str] = {}
     try:
         if run is None:
             assert now is not None and daily_limit_usd is not None
+            if formal_stage_capacity:
+                diagnostic_times["resume_started_at"] = now.isoformat()
+                # The caller's clock precedes connection acquisition and account/cycle
+                # locks. All Jobs are now terminal, so anchor admission to a database
+                # observation after those reads, not to that earlier entry instant.
+                observed_at = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    not isinstance(observed_at, datetime)
+                    or observed_at.tzinfo != UTC
+                    or now > observed_at
+                ):
+                    raise ValueError("PORTFOLIO_SYNTHESIS_ADMISSION_CLOCK_INVALID")
+                now = observed_at
+                diagnostic_times["research_admission_at"] = now.isoformat()
             actions = tuple(
                 [
                     await load_actionable_research_output(
@@ -2234,7 +2250,7 @@ async def _resume_portfolio_synthesis(
             "researching",
             "unavailable",
             "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
-            {"failure_phase": failure_phase, "failure_code": safe_code},
+            {"failure_phase": failure_phase, "failure_code": safe_code, **diagnostic_times},
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     from nexus.paper.manual_request import manual_request_for_cycle

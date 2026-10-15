@@ -64,17 +64,18 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
     calls = []
 
     clock_at = [AT + timedelta(seconds=1)]
-    if protected or manual_mode is not None:
-        from sqlalchemy.ext.asyncio import AsyncSession
+    # Formal admission observes the database clock after reading completed Jobs.
+    # Keep this dated scenario's database and Worker clocks on the same timeline.
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-        original_scalar = AsyncSession.scalar
+    original_scalar = AsyncSession.scalar
 
-        async def database_clock(self, statement, *args, **kwargs):
-            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-                return clock_at[0]
-            return await original_scalar(self, statement, *args, **kwargs)
+    async def database_clock(self, statement, *args, **kwargs):
+        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return clock_at[0]
+        return await original_scalar(self, statement, *args, **kwargs)
 
-        monkeypatch.setattr(AsyncSession, "scalar", database_clock)
+    monkeypatch.setattr(AsyncSession, "scalar", database_clock)
 
     class WorkerClock(datetime):
         @classmethod

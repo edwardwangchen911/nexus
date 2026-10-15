@@ -64,6 +64,20 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             at = clock_at[0]
             return at if tz is None else at.astimezone(tz)
 
+    if formal and not manual_entry:
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_scalar = AsyncSession.scalar
+
+        async def database_clock(self, statement, *args, **kwargs):
+            # This dated scenario controls both clocks; a live database clock
+            # would correctly reject admission after its historical session closed.
+            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+                return clock_at[0]
+            return await original_scalar(self, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "scalar", database_clock)
+
     async def invoke(payload, **kwargs):
         stage = payload["stage"]
         calls.append(stage)

@@ -147,7 +147,8 @@ jobs:
             engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_failure_preserves_recovery_gates \
             engine/tests/integration/test_capacity_rejection_pg.py \
             engine/tests/integration/test_unknown_preparation_ack_pg.py \
-            engine/tests/integration/test_formal_v10_runtime_admission.py
+            engine/tests/integration/test_formal_v10_runtime_admission.py \
+            engine/tests/integration/test_formal_resume_observation_clock.py
       - name: Run full Engine regression manually
         if: github.event_name == 'workflow_dispatch'
         run: uv run pytest engine/tests -q --import-mode=importlib
