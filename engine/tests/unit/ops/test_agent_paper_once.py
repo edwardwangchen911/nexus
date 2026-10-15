@@ -1722,11 +1722,14 @@ def test_trigger_reservation_failure_annotated_before_any_provider(monkeypatch, 
 
 
 @pytest.mark.parametrize("cleanup_failure", [False, True])
+@pytest.mark.parametrize("failure_boundary", ["trigger", "journal", "effects", "claim"])
 def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
-    monkeypatch, cleanup_failure
+    monkeypatch, cleanup_failure, failure_boundary
 ):
     from nexus.ops import manual_paper_host as host
     from sqlalchemy.exc import SQLAlchemyError
+
+    readbacks = []
 
     class Session:
         async def __aenter__(self):
@@ -1736,6 +1739,7 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
             return None
 
         async def get(self, *_args):
+            readbacks.append(True)
             raise SQLAlchemyError("private-database-canary")
 
     class Engine:
@@ -1750,6 +1754,8 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
             return Session()
 
     async def claim(*_args, **_kwargs):
+        if failure_boundary == "claim":
+            raise ValueError("MANUAL_NOT_FOUND")
         return None, True
 
     async def trigger(*_args, **_kwargs):
@@ -1757,6 +1763,18 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
         host.annotate_manual_trigger_failure(error, phase="trigger_reservation")
         raise error
 
+    async def started(*_a, **_kw):
+        if failure_boundary == "journal":
+            raise SQLAlchemyError("private-journal-canary")
+        return UUID(int=6)
+
+    async def effects(*_a, **_kw):
+        if failure_boundary == "effects":
+            raise SQLAlchemyError("private-effects-canary")
+        return None
+
+    monkeypatch.setattr(host, "start_preparation_execution", started)
+    monkeypatch.setattr(host, "begin_preparation_effects", effects)
     monkeypatch.setattr(host, "session_factory", lambda *_a: Factory())
     monkeypatch.setattr(host, "claim_configured_manual_request", claim)
     monkeypatch.setattr(cli, "trigger_once", trigger)
@@ -1785,6 +1803,18 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
                 process_environment={},
             )
         )
-    assert caught.value._nexus_agent_paper_failure_phase == "trigger_reservation"
-    assert caught.value._nexus_agent_paper_failure_code == "CANDIDATE_BATCH_INVALID"
-    assert caught.value._nexus_agent_paper_failure_kind == "validation"
+    assert caught.value._nexus_agent_paper_failure_phase == (
+        "trigger_reservation"
+        if failure_boundary == "trigger"
+        else "preparation_journal"
+        if failure_boundary == "claim"
+        else "preparation_" + failure_boundary
+    )
+    assert caught.value._nexus_agent_paper_failure_code == (
+        "CANDIDATE_BATCH_INVALID" if failure_boundary == "trigger" else "MANUAL_RESULT_UNKNOWN"
+    )
+    assert caught.value._nexus_agent_paper_failure_kind == (
+        "validation" if failure_boundary in {"trigger", "claim"} else "database"
+    )
+    assert "private" not in str(caught.value)
+    assert len(readbacks) == (0 if failure_boundary in {"claim", "journal"} else 1)

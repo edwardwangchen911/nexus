@@ -40,6 +40,7 @@ SAFE_ENTRY_CODES = frozenset(
         "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
         "MANUAL_RESULT_UNKNOWN",
         "MANUAL_PREPARATION_CLOSE_BLOCKED",
+        "MANUAL_PREPARATION_RECOVERY_BLOCKED",
         "MANUAL_PREPARATION_ACK_BLOCKED",
     }
 )
@@ -101,6 +102,13 @@ async def _read_presented_manual_request(
     # Keep the canonical event reader independent: acknowledgement validation
     # uses it to verify the original unknown facts and must never recurse.
     view = await read_manual_request(session, row)
+    from nexus.paper.current_preparation_recovery import read_preparation_recovery
+
+    recovery = await read_preparation_recovery(session, row)
+    if recovery is not None:
+        return view.model_copy(update={"preparation_recovery": recovery})
+    if view.code == "MANUAL_PREPARATION_CANCELLED":
+        raise ValueError("MANUAL_PREPARATION_RECOVERY_BLOCKED")
     if view.status != "unknown" or view.cycle_id is not None:
         return view
     from nexus.paper.preparation_unknown_ack import acknowledged_request
@@ -159,7 +167,7 @@ async def start_configured_manual_request(
     if row is not None:
         if row.mode != mode:
             raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
-        return await read_manual_request(session, row)
+        return await _read_presented_manual_request(session, row)
     if not settings.agent_paper_manual_enabled or not settings.agent_paper_cycle_enabled:
         raise ValueError("MANUAL_ENTRY_DISABLED")
     batch_id = settings.agent_paper_candidate_batch_id

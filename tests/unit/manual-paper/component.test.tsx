@@ -106,3 +106,25 @@ it("does not clear an unacknowledged unknown or keep a stale acknowledgement aft
   expect(sessionStorage.getItem("nexus-manual-paper-attempt-v1")).not.toBeNull();
   expect(fetchMock.mock.calls.every((call) => call[1].method === "GET")).toBe(true);
 });
+
+it("shows verified current preparation cancellation, and revokes it when readback fails", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "interrupted", mode: "research_only" }));
+  fetchMock.mockResolvedValueOnce(Response.json({ data: { ...receipt, status: "unavailable", code: "MANUAL_PREPARATION_CANCELLED", preparation_recovery: { disposition: "cancelled_before_call", external_effects: "not_started", cycle_id: null } } }));
+  render(<ManualPaperStart />);
+  await screen.findByText(/已确认未开始外部操作/);
+  expect(screen.getByRole("button", { name: "开始新的请求" })).toBeEnabled();
+  fetchMock.mockRejectedValueOnce(new Error("recovery proof unavailable"));
+  fireEvent.click(screen.getByRole("button", { name: "核对原请求" }));
+  await screen.findByText(/提交结果尚未确认/);
+  expect(screen.queryByText(/已确认未开始外部操作/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+  expect(fetchMock.mock.calls.every((call) => call[1].method === "GET")).toBe(true);
+});
+
+it("keeps uncertain preparation blocked after maintenance and links a reconciled original cycle", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "uncertain", mode: "research_only" }));
+  fetchMock.mockResolvedValueOnce(Response.json({ data: { ...receipt, status: "unknown", code: "MANUAL_RESULT_UNKNOWN", preparation_recovery: { disposition: "unknown_preserved", external_effects: "unknown", cycle_id: null } } }));
+  render(<ManualPaperStart />);
+  await screen.findByText(/费用和预算继续保留/);
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+});

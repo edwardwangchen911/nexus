@@ -205,3 +205,35 @@ test("unknown reset requires a confirmed disposition and loses it after failed r
   await expect(panel.getByRole("button", { name: "仅研究", exact: true })).toBeDisabled();
   expect(methods.every((method) => method === "GET")).toBe(true);
 });
+
+for (const kind of ["cancelled_before_call", "unknown_preserved", "cycle_reconciled"] as const) {
+  test(`current preparation recovery ${kind} stays read-only and revokes stale proof`, async ({ page }) => {
+    await installFixtures(page, readyWorkbench(), []);
+    await page.addInitScript(() => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "interrupted", mode: "research_only" })));
+    let failed = false;
+    const methods: string[] = [];
+    const cycle = "0198f7a0-2222-7777-8111-111111111111";
+    const cancelled = kind === "cancelled_before_call";
+    await page.route("**/api/v1/paper/manual-requests", async (route) => {
+      methods.push(route.request().method());
+      if (failed) return route.fulfill({ status: 409, json: { error: { details: { reason_code: "MANUAL_PREPARATION_RECOVERY_BLOCKED" } } } });
+      await route.fulfill({ json: { data: {
+        request_id: "0198f7a0-1111-7777-8111-111111111111", mode: "research_only", requested_at: "2026-10-09T14:00:00Z",
+        status: cancelled ? "unavailable" : "unknown", code: cancelled ? "MANUAL_PREPARATION_CANCELLED" : "MANUAL_RESULT_UNKNOWN", cycle_id: null, execution_locked: true,
+        preparation_recovery: { disposition: kind, external_effects: cancelled ? "not_started" : kind === "cycle_reconciled" ? "cycle_recorded" : "unknown", cycle_id: kind === "cycle_reconciled" ? cycle : null },
+      }, meta: meta() } });
+    });
+    await page.goto("/workspace");
+    const panel = page.getByRole("region", { name: "开始研究与内部模拟" });
+    await expect(panel).toContainText(cancelled ? "未开始外部操作" : kind === "unknown_preserved" ? "费用和预算继续保留" : "已找回原周期");
+    await expect(panel.getByRole("button", { name: "开始新的请求" })).toHaveCount(cancelled ? 1 : 0);
+    if (kind === "cycle_reconciled") await expect(panel.getByRole("link", { name: "查看原周期决策" })).toHaveAttribute("href", `/decisions/${cycle}`);
+    await panel.screenshot({ path: `test-results/preparation-recovery-${kind}.png` });
+    failed = true;
+    await panel.getByRole("button", { name: "核对原请求" }).click();
+    await expect(panel.getByRole("status")).toContainText("提交结果尚未确认");
+    await expect(panel.getByRole("button", { name: "开始新的请求" })).toHaveCount(0);
+    await expect(panel.getByRole("link", { name: "查看原周期决策" })).toHaveCount(0);
+    expect(methods.every((method) => method === "GET")).toBe(true);
+  });
+}

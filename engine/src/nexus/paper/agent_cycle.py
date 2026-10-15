@@ -257,6 +257,7 @@ async def reserve_schwab_agent_paper_trigger(
         "scheduled", "manual", "manual_recovery", "synthesis_recovery"
     ] = "scheduled",
     manual_request_id: UUID | None = None,
+    manual_execution_id: UUID | None = None,
     require_synthesis_prompt: bool = False,
     formal_stage_capacity: bool = False,
     formal_model_config_id: UUID | None = None,
@@ -395,6 +396,8 @@ async def reserve_schwab_agent_paper_trigger(
         "candidate_batch_id": str(batch.batch_id),
         "candidate_batch_hash": batch.batch_hash,
     }
+    if manual_execution_id is not None:
+        request_payload["manual_execution_id"] = str(manual_execution_id)
     if trigger_mode != "scheduled":
         request_payload["trigger_mode"] = trigger_mode
     if manual_row is not None:
@@ -426,6 +429,7 @@ async def reserve_schwab_agent_paper_trigger(
         claim_id=claim.id,
         trigger_mode=trigger_mode,
         manual_request_id=manual_request_id,
+        manual_execution_id=manual_execution_id,
         decision_session=local_time.date(),
         decision_slot_at=decision_slot_at,
         candidate_batch_id=batch.batch_id,
@@ -446,6 +450,7 @@ async def reserve_schwab_agent_paper_trigger(
             await require_preparing_manual_request(
                 session,
                 request_id=manual_request_id,
+                execution_id=manual_execution_id,
                 account_id=account_id,
                 batch_id=candidate_batch_id,
                 model_config_id=formal_model_config_id,
@@ -756,6 +761,7 @@ async def start_schwab_agent_paper_cycle(
     formal_stage_capacity: bool = False,
     formal_model_config_id: UUID | None = None,
     manual_request_id: UUID | None = None,
+    manual_execution_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
     _validate_formal_cycle_arguments(
@@ -881,6 +887,7 @@ async def start_schwab_agent_paper_cycle(
         formal_stage_capacity=formal_stage_capacity,
         formal_model_config_id=formal_model_config_id,
         manual_request_id=manual_request_id,
+        manual_execution_id=manual_execution_id,
     )
 
 
@@ -1330,6 +1337,7 @@ async def _start_cycle(
     formal_model_config_id: UUID | None = None,
     economic_lane_ref: EconomicLaneRef | None = None,
     manual_request_id: UUID | None = None,
+    manual_execution_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
     _validate_formal_cycle_arguments(
         formal_stage_capacity=formal_stage_capacity,
@@ -1436,6 +1444,7 @@ async def _start_cycle(
         manual = await require_preparing_manual_request(
             session,
             request_id=manual_request_id,
+            execution_id=manual_execution_id,
             account_id=authority.account_id,
             batch_id=candidate_batch_id,
             model_config_id=formal_model_config_id,
@@ -1548,6 +1557,8 @@ async def _start_cycle(
         }
     if manual is not None:
         profile_facts.update(manual_request_id=str(manual.id), manual_mode=manual.mode)
+    if manual_execution_id is not None:
+        profile_facts["manual_execution_id"] = str(manual_execution_id)
     await _append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", profile_facts)
     if manual is not None:
         from nexus.paper.manual_request import record_manual_request_event

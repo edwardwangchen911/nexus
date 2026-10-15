@@ -16,6 +16,10 @@ from sqlalchemy import func, select, text
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _checkout_revision, _validate_local_env
+from nexus.paper.current_preparation_recovery import (
+    PreparationRecoveryReceipt,
+    recover_current_preparation,
+)
 from nexus.paper.history_seal import HistorySealReceipt, seal_failed_research
 from nexus.paper.manual_cancel import (
     TerminalCycleCancelReceipt,
@@ -86,6 +90,8 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--idempotency-key", required=True)
     read = commands.add_parser("read")
     read.add_argument("--request-id", type=UUID, required=True)
+    recover = commands.add_parser("recover-preparation")
+    recover.add_argument("--request-id", type=UUID, required=True)
     close = commands.add_parser("close-unstarted-preparation")
     close.add_argument("--request-id", type=UUID, required=True)
     ack = commands.add_parser("acknowledge-unknown-preparations")
@@ -114,12 +120,17 @@ async def run(
     | HistorySealReceipt
     | PreparationCloseReceipt
     | UnknownPreparationReceipt
+    | PreparationRecoveryReceipt
 ):
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     lifecycle_guards = ExitStack()
     try:
-        if args.action in {"close-unstarted-preparation", "acknowledge-unknown-preparations"}:
+        if args.action in {
+            "close-unstarted-preparation",
+            "acknowledge-unknown-preparations",
+            "recover-preparation",
+        }:
             _require_maintenance_code(args.repo_root, settings.release_revision)
             try:
                 lifecycle_guards.enter_context(
@@ -128,7 +139,11 @@ async def run(
             except RuntimeError:
                 raise ValueError("MANUAL_PREPARATION_CLOSE_BLOCKED") from None
         async with factory.begin() as session:
-            if args.action in {"close-unstarted-preparation", "acknowledge-unknown-preparations"}:
+            if args.action in {
+                "close-unstarted-preparation",
+                "acknowledge-unknown-preparations",
+                "recover-preparation",
+            }:
                 from nexus.paper.manual_preparation_close import close_unstarted_preparation
 
                 _require_maintenance_code(args.repo_root, settings.release_revision)
@@ -152,6 +167,16 @@ async def run(
                     != CURRENT_MIGRATION_HEAD
                 ):
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                if args.action == "recover-preparation":
+                    recovery_receipt = await recover_current_preparation(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        request_id=args.request_id,
+                        repo_root=args.repo_root,
+                        env_file=args.env_file,
+                    )
+                    _require_maintenance_code(args.repo_root, settings.release_revision)
+                    return recovery_receipt
                 if args.action == "acknowledge-unknown-preparations":
                     from nexus.paper.preparation_unknown_ack import acknowledge_unknown_preparations
 

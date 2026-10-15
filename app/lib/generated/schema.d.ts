@@ -3707,6 +3707,7 @@ export interface components {
             mode: "research_only" | "research_and_paper";
             /** Preparation Disposition */
             preparation_disposition?: "unknown_acknowledged" | null;
+            preparation_recovery?: components["schemas"]["PreparationRecoveryView"] | null;
             /**
              * Request Id
              * Format: uuid
@@ -5757,6 +5758,21 @@ export interface components {
             research?: components["schemas"]["PositionResearchResponse"] | null;
             /** Symbol */
             symbol: string | null;
+        };
+        /** PreparationRecoveryView */
+        PreparationRecoveryView: {
+            /** Cycle Id */
+            cycle_id?: string | null;
+            /**
+             * Disposition
+             * @enum {string}
+             */
+            disposition: "cancelled_before_call" | "unknown_preserved" | "cycle_reconciled";
+            /**
+             * External Effects
+             * @enum {string}
+             */
+            external_effects: "not_started" | "unknown" | "cycle_recorded";
         };
         /** ProposalAdmissionRequest */
         ProposalAdmissionRequest: {

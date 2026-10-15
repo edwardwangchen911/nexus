@@ -5791,6 +5791,16 @@ export const runtimeContractSchemas = {
         ],
         "title": "Preparation Disposition"
       },
+      "preparation_recovery": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PreparationRecoveryView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "request_id": {
         "format": "uuid",
         "title": "Request Id",
@@ -10808,6 +10818,47 @@ export const runtimeContractSchemas = {
       "read_only"
     ],
     "title": "PositionResponse",
+    "type": "object"
+  },
+  "PreparationRecoveryView": {
+    "additionalProperties": false,
+    "properties": {
+      "cycle_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cycle Id"
+      },
+      "disposition": {
+        "enum": [
+          "cancelled_before_call",
+          "unknown_preserved",
+          "cycle_reconciled"
+        ],
+        "title": "Disposition",
+        "type": "string"
+      },
+      "external_effects": {
+        "enum": [
+          "not_started",
+          "unknown",
+          "cycle_recorded"
+        ],
+        "title": "External Effects",
+        "type": "string"
+      }
+    },
+    "required": [
+      "disposition",
+      "external_effects"
+    ],
+    "title": "PreparationRecoveryView",
     "type": "object"
   },
   "ProposalAdmissionResponse": {

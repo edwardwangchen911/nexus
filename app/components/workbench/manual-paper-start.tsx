@@ -104,9 +104,13 @@ export function ManualPaperStart(): React.ReactElement {
         <button type="button" className="button" disabled={!restored || !!attempt || busy} onClick={() => start("research_and_paper")}>研究并内部模拟</button>
       </div>
       <p>实盘执行保持锁定。浏览和刷新不会开始新周期。</p>
-      {receipt && <div><p>{receipt.mode === "research_only" ? "仅研究" : "研究并内部模拟"} · <strong>{labels[receipt.status]}</strong></p>
+      {receipt && <div><p>{receipt.mode === "research_only" ? "仅研究" : "研究并内部模拟"} · <strong>{receipt.code === "MANUAL_PREPARATION_CANCELLED" ? "准备已安全取消" : labels[receipt.status]}</strong></p>
         <p>请求时间：<time dateTime={receipt.requested_at}>{receipt.requested_at}</time></p>
         {receipt.preparation_disposition === "unknown_acknowledged" && <p>准备结果未知已明确接受，调度占用已解除。历史调用、费用和预算保持原样；新请求仍需重新通过准入。</p>}
+        {receipt.preparation_recovery?.disposition === "cancelled_before_call" && <p>已确认未开始外部操作，本次准备已取消。新请求仍需重新通过全部准入。</p>}
+        {receipt.preparation_recovery?.disposition === "unknown_preserved" && <p>准备已收尾，但外部结果仍未知，费用和预算继续保留；当前不能开始新请求。</p>}
+        {receipt.preparation_recovery?.disposition === "cycle_reconciled" && <p>已找回原周期，请继续核对原周期结果；没有创建第二个周期。</p>}
+        {!receipt.cycle_id && receipt.preparation_recovery?.cycle_id && <a href={`/decisions/${receipt.preparation_recovery.cycle_id}`}>查看原周期决策</a>}
         {receipt.cycle_id && <a href={`/decisions/${receipt.cycle_id}`}>查看周期决策</a>}
       </div>}
       {message && <p role="status">{message}</p>}

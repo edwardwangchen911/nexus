@@ -88,6 +88,7 @@ class AgentPaperTriggerReservation(BaseModel):
         "scheduled"
     )
     manual_request_id: UUID | None = None
+    manual_execution_id: UUID | None = None
     decision_session: date
     decision_slot_at: datetime
     candidate_batch_id: UUID | None = None

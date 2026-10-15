@@ -216,6 +216,7 @@ class AgentPaperTriggerRequest(BaseModel):
         "scheduled"
     )
     manual_request_id: UUID | None = None
+    manual_execution_id: UUID | None = None
     account_id: UUID
     candidate_batch_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"\S")
@@ -928,6 +929,7 @@ async def trigger_in_session(
     if (
         request.trigger_mode != reservation.trigger_mode
         or request.manual_request_id != reservation.manual_request_id
+        or request.manual_execution_id != reservation.manual_execution_id
         or request.formal_stage_capacity != reservation.formal_stage_capacity
         or request.formal_model_config_id != reservation.formal_model_config_id
     ):
@@ -947,6 +949,7 @@ async def trigger_in_session(
         await require_preparing_manual_request(
             session,
             request_id=request.manual_request_id,
+            execution_id=request.manual_execution_id,
             account_id=request.account_id,
             batch_id=request.candidate_batch_id,
             model_config_id=request.formal_model_config_id,
@@ -993,6 +996,7 @@ async def trigger_in_session(
         formal_stage_capacity=request.formal_stage_capacity,
         formal_model_config_id=request.formal_model_config_id,
         manual_request_id=request.manual_request_id,
+        manual_execution_id=request.manual_execution_id,
     )
 
 
@@ -1026,6 +1030,7 @@ async def trigger_once(
                 formal_model_config_id=request.formal_model_config_id,
                 trigger_mode=request.trigger_mode,
                 manual_request_id=request.manual_request_id,
+                manual_execution_id=request.manual_execution_id,
             )
         if reservation.replay is not None:
             return reservation.replay

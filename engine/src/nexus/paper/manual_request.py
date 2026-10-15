@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
 from nexus.jobs.models import job_input_hash
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
+from nexus.paper.current_preparation_recovery import PreparationRecoveryView
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.target_service import (
     lock_portfolio_account,
@@ -41,6 +42,7 @@ _SAFE_CODES = {
     "MANUAL_RESEARCH_COMPLETED",
     "MANUAL_PAPER_COMPLETED",
     "MANUAL_INPUTS_UNAVAILABLE",
+    "MANUAL_PREPARATION_CANCELLED",
     "MANUAL_RESULT_UNKNOWN",
 }
 
@@ -59,6 +61,9 @@ class ManualRequestView(BaseModel):
     code: str
     cycle_id: UUID | None
     execution_locked: Literal[True] = True
+    preparation_recovery: PreparationRecoveryView | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     preparation_disposition: Literal["unknown_acknowledged"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -133,7 +138,7 @@ def _validate_event(
         "completed": {"MANUAL_RESEARCH_COMPLETED"}
         if row.mode == "research_only"
         else {"MANUAL_PAPER_COMPLETED"},
-        "unavailable": {"MANUAL_INPUTS_UNAVAILABLE"},
+        "unavailable": {"MANUAL_INPUTS_UNAVAILABLE", "MANUAL_PREPARATION_CANCELLED"},
         "unknown": {"MANUAL_RESULT_UNKNOWN"},
     }
     if (
@@ -235,6 +240,12 @@ async def require_manual_account_available(
         if request.id == excluding_request_id:
             continue
         view = await read_manual_request(session, request)
+        if view.code == "MANUAL_PREPARATION_CANCELLED":
+            from nexus.paper.current_preparation_recovery import read_preparation_recovery
+
+            recovery = await read_preparation_recovery(session, request)
+            if recovery is None or recovery.disposition != "cancelled_before_call":
+                raise ValueError("MANUAL_PREPARATION_RECOVERY_BLOCKED")
         if view.status == "unknown":
             from nexus.paper.manual_preparation_close import preparation_closed
 
@@ -589,6 +600,7 @@ async def require_preparing_manual_request(
     batch_id: UUID | None,
     model_config_id: UUID | None,
     now: datetime,
+    execution_id: UUID | None = None,
 ) -> ManualPaperRequest:
     row = await session.get(ManualPaperRequest, request_id)
     if (
@@ -602,6 +614,9 @@ async def require_preparing_manual_request(
     view = await read_manual_request(session, row)
     if view.status != "preparing":
         raise ValueError("MANUAL_REQUEST_TERMINAL_OR_UNKNOWN")
+    from nexus.paper.current_preparation_recovery import require_preparation_execution
+
+    await require_preparation_execution(session, row, execution_id=execution_id)
     await require_manual_account_available(
         session,
         account_id=account_id,
@@ -638,6 +653,12 @@ async def require_no_running_manual_request(
     ).all()
     for row in rows:
         view = await read_manual_request(session, row)
+        if view.code == "MANUAL_PREPARATION_CANCELLED":
+            from nexus.paper.current_preparation_recovery import read_preparation_recovery
+
+            recovery = await read_preparation_recovery(session, row)
+            if recovery is None or recovery.disposition != "cancelled_before_call":
+                raise ValueError("MANUAL_PREPARATION_RECOVERY_BLOCKED")
         # A pending click yields to the scheduled entry; started/unknown work never does.
         if view.status == "unknown":
             from nexus.paper.manual_preparation_close import preparation_closed

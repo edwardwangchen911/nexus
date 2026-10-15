@@ -1932,6 +1932,8 @@ _SAFE_PREPARATION_FAILURE_PHASES = frozenset(
         "trigger_request",
         "trigger_reservation",
         "trigger_provider",
+        "preparation_journal",
+        "preparation_effects",
     }
 )
 

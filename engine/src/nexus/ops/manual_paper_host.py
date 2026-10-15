@@ -12,6 +12,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
+from nexus.paper.current_preparation_recovery import (
+    begin_preparation_effects,
+    start_preparation_execution,
+)
 from nexus.paper.manual_request import (
     ManualRequestView,
     claim_manual_request,
@@ -28,7 +32,15 @@ if TYPE_CHECKING:
     from nexus.ops.agent_paper_once import AgentPaperTriggerSettings
 
 
-MANUAL_TRIGGER_PHASES = frozenset({"trigger_request", "trigger_reservation", "trigger_provider"})
+MANUAL_TRIGGER_PHASES = frozenset(
+    {
+        "trigger_request",
+        "trigger_reservation",
+        "trigger_provider",
+        "preparation_journal",
+        "preparation_effects",
+    }
+)
 MANUAL_TRIGGER_KINDS = frozenset(
     {"timeout", "database", "name_error", "attribute_error", "validation", "unexpected_exception"}
 )
@@ -38,6 +50,7 @@ MANUAL_TRIGGER_CODES = frozenset(
         "MANUAL_REQUEST_TERMINAL_OR_UNKNOWN",
         "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
         "MANUAL_PREPARATION_ACK_BLOCKED",
+        "MANUAL_PREPARATION_RECOVERY_BLOCKED",
         "MANUAL_RESULT_UNKNOWN",
         "AGENT_PAPER_REQUEST_INVALID",
         "AGENT_PAPER_OUTSIDE_WINDOW",
@@ -108,22 +121,42 @@ async def dispatch_manual_request(
     _validate_trigger_dependencies(trigger_settings)
     factory = session_factory(settings)
     failure: ValueError | None = None
+    phase = "preparation_journal"
+    execution_committed = False
     try:
-        async with factory.begin() as session:
-            _, claimed = await claim_configured_manual_request(
-                session, settings, request_id=request_id
-            )
-        if not claimed:
-            return
-        assert settings.agent_paper_account_id is not None
-        assert settings.agent_paper_candidate_batch_id is not None
         try:
+            async with factory.begin() as session:
+                _, claimed = await claim_configured_manual_request(
+                    session, settings, request_id=request_id
+                )
+                execution_id = (
+                    (
+                        await start_preparation_execution(
+                            session, request_id=request_id, revision=settings.release_revision
+                        )
+                    )
+                    if claimed
+                    else None
+                )
+            if not claimed:
+                return
+            execution_committed = True
+            assert settings.agent_paper_account_id is not None
+            assert settings.agent_paper_candidate_batch_id is not None
+            phase = "preparation_effects"
+            assert execution_id is not None
+            async with factory.begin() as session:
+                await begin_preparation_effects(
+                    session, request_id=request_id, execution_id=execution_id
+                )
+            phase = "trigger_request"
             await trigger_once(
                 trigger_settings,
                 AgentPaperTriggerRequest(
                     action="trigger",
                     trigger_mode="manual",
                     manual_request_id=request_id,
+                    manual_execution_id=execution_id,
                     account_id=settings.agent_paper_account_id,
                     candidate_batch_id=settings.agent_paper_candidate_batch_id,
                     formal_stage_capacity=True,
@@ -136,7 +169,7 @@ async def dispatch_manual_request(
             )
         except Exception as error:
             failure = ValueError("MANUAL_RESULT_UNKNOWN")
-            phase = getattr(error, "_nexus_agent_paper_failure_phase", "trigger_request")
+            phase = getattr(error, "_nexus_agent_paper_failure_phase", phase)
             annotate_manual_trigger_failure(error, phase=phase)
             code = getattr(error, "_nexus_agent_paper_failure_code", None)
             annotate_manual_trigger_failure(failure, phase=phase)
@@ -145,19 +178,21 @@ async def dispatch_manual_request(
             kind = getattr(error, "_nexus_agent_paper_failure_kind", None)
             if kind in MANUAL_TRIGGER_KINDS:
                 setattr(failure, "_nexus_agent_paper_failure_kind", kind)
-            try:
-                async with factory.begin() as session:
-                    row = await session.get(ManualPaperRequest, request_id)
-                    if row is not None:
-                        view = await read_manual_request(session, row)
-                        if view.status == "preparing":
-                            await record_manual_request_event(
-                                session, row, status="unknown", code="MANUAL_RESULT_UNKNOWN"
-                            )
-            except Exception:
-                # A secondary persistence failure cannot replace the primary safe evidence.
-                # A preparing request also remains non-replayable if this transaction fails.
-                pass
+            # A failed claim transaction does not own any later preparing execution.
+            if execution_committed:
+                try:
+                    async with factory.begin() as session:
+                        row = await session.get(ManualPaperRequest, request_id)
+                        if row is not None and row.account_id == settings.agent_paper_account_id:
+                            view = await read_manual_request(session, row)
+                            if view.status == "preparing":
+                                await record_manual_request_event(
+                                    session, row, status="unknown", code="MANUAL_RESULT_UNKNOWN"
+                                )
+                except Exception:
+                    # A secondary persistence failure cannot replace the primary safe evidence.
+                    # A preparing request also remains non-replayable if this transaction fails.
+                    pass
             raise failure from None
     finally:
         try:
