@@ -264,7 +264,11 @@ async def verify_controlled_browser(
                 if economic_protocol_hash is not None
                 else ()
             ),
-            *(("portfolio-controlled.spec.ts",) if first_partial else ()),
+            *(
+                ("portfolio-controlled.spec.ts",)
+                if first_partial or submit_manual or manual_request_id is not None
+                else ()
+            ),
             cwd=web_root,
             env=environment,
             stdout=asyncio.subprocess.PIPE,
