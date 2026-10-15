@@ -3941,6 +3941,7 @@ async def test_trigger_once_persists_and_replays_safe_terminal_failure(
         formal_model_config_id: UUID | None,
         trigger_mode: str,
         manual_request_id: UUID | None,
+        manual_execution_id: UUID | None,
     ):
         del now
         assert require_synthesis_prompt
@@ -3948,6 +3949,7 @@ async def test_trigger_once_persists_and_replays_safe_terminal_failure(
         assert formal_model_config_id is None
         assert trigger_mode == "scheduled"
         assert manual_request_id is None
+        assert manual_execution_id is None
         return await reserve_schwab_agent_paper_trigger(
             session,
             account_id=account_id,
@@ -4036,6 +4038,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         formal_model_config_id: UUID | None,
         trigger_mode: str,
         manual_request_id: UUID | None,
+        manual_execution_id: UUID | None,
     ):
         del now
         assert require_synthesis_prompt
@@ -4043,6 +4046,7 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         assert formal_model_config_id is None
         assert trigger_mode == "scheduled"
         assert manual_request_id is None
+        assert manual_execution_id is None
         return await reserve_schwab_agent_paper_trigger(
             session,
             account_id=account_id,
