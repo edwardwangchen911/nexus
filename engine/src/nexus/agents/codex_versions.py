@@ -1,7 +1,7 @@
 """Exact SDK runtime versions; a budget revision does not upgrade research semantics."""
 
 from decimal import Decimal
-from math import isfinite
+from math import isfinite, ulp
 
 CONFIG_VERSION = "codex-sdk-chatgpt-v1"
 STAGED_CONFIG_VERSION = "codex-sdk-chatgpt-v2"
@@ -122,9 +122,14 @@ def stage_timeout_seconds(
         # Each future stage reserves both its provider cap and seven-second
         # close bound. Terminal writes are already outside this deadline.
         later_reserve = {"research": 104, "critique": 52, "synthesis": 0}[stage]
+        # Absolute deadlines and elapsed clocks have already been rounded when
+        # constructed. Subtraction can otherwise turn an exhausted allowance
+        # into a positive residue (or round above the remaining allowance).
+        # Reserve their representable precision; never grant time from rounding.
+        remaining = deadline - now - 7 - later_reserve - (ulp(deadline) + ulp(now))
         if version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION and stage == "critique":
-            return max(0.0, deadline - now - 7 - later_reserve)
-        return max(0.0, min(cap, deadline - now - 7 - later_reserve))
+            return max(0.0, remaining)
+        return max(0.0, min(cap, remaining))
     if version != DEADLINE_BUDGET_CONFIG_VERSION:
         raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
     # Frozen v6: preserve its exact allocation for old Run identities.

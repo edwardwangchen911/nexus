@@ -50,7 +50,9 @@ async def test_formal_worker_rejects_invalid_scope_before_connecting(scope, mode
 def test_formal_allocator_has_own_version_and_uses_original_deadline():
     version = FORMAL_STAGE_CAPACITY_CONFIG_VERSION
     assert stage_timeout_seconds("research", deadline=175, now=0, version=version) == 60
-    assert stage_timeout_seconds("research", deadline=175, now=10, version=version) == 54
+    assert (
+        54 - 1e-6 <= stage_timeout_seconds("research", deadline=175, now=10, version=version) <= 54
+    )
     assert stage_timeout_seconds("critique", deadline=175, now=67, version=version) == 45
     assert stage_timeout_seconds("synthesis", deadline=175, now=119, version=version) == 45
     assert stage_timeout_seconds("research", deadline=175, now=64, version=version) == 0

@@ -11,9 +11,9 @@ def test_critique_uses_parent_slack_without_spending_synthesis_or_close_reserves
     # Worker origin 0: prepare 3 + research 20 + close 7 = critique start 30.
     # Job 180 minus terminal 5; critique can use 175-30-7-(45+7)=86.
     assert stage_timeout_seconds("critique", deadline=175, now=30, version=V9) == 45
-    assert stage_timeout_seconds("critique", deadline=175, now=30, version=V10) == 86
+    assert 86 - 1e-6 <= stage_timeout_seconds("critique", deadline=175, now=30, version=V10) <= 86
     assert stage_timeout_seconds("research", deadline=175, now=3, version=V10) == 60
-    assert stage_timeout_seconds("synthesis", deadline=175, now=123, version=V10) == 45
+    assert 45 - 1e-6 <= stage_timeout_seconds("synthesis", deadline=175, now=123, version=V10) <= 45
     assert stage_timeout_seconds("critique", deadline=175, now=116, version=V10) == 0
 
 
@@ -222,21 +222,32 @@ def test_worker_registry_binds_v10_only_in_explicit_isolated_capacity_mode():
 
 
 @pytest.mark.asyncio
-async def test_exhausted_parent_budget_never_starts_a_provider_call(monkeypatch):
+@pytest.mark.parametrize("origin", [100.1, 1_000_000.1])
+async def test_exhausted_parent_budget_never_starts_a_provider_call(monkeypatch, origin):
     import asyncio
+    from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
+    from nexus.agents import codex_staged
     from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_pool
     from nexus.agents.codex_staged import StructuredStagedCodexCommittee
     from unit.agents.test_codex_sdk import _authority, _tools
 
     request, refs, prompts = _authority()
-    called = AsyncMock()
+    called = AsyncMock(side_effect=AssertionError("exhausted budget reached SDK"))
     monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", called)
+    monkeypatch.setattr(
+        codex_staged,
+        "asyncio",
+        SimpleNamespace(
+            get_running_loop=lambda: SimpleNamespace(time=lambda: origin + 64),
+            timeout_at=asyncio.timeout_at,
+        ),
+    )
     committee = StructuredStagedCodexCommittee(
         prompts=prompts,
         tools=_tools(),
-        deadline=asyncio.get_running_loop().time() + 60,
+        deadline=origin + 180,
         aggregate_input_tokens=96000,
         max_wire_bytes=100479,
         inline_citations=True,

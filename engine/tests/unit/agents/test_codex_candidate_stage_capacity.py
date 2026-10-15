@@ -16,7 +16,7 @@ def test_candidate_reserves_complete_later_calls_and_cleanup():
     version = codex_versions.CANDIDATE_BUDGET_CONFIG_VERSION
     allocation = codex_versions.stage_timeout_seconds
     assert allocation("research", deadline=175, now=0, version=version) == 60
-    assert allocation("research", deadline=175, now=10, version=version) == 54
+    assert 54 - 1e-6 <= allocation("research", deadline=175, now=10, version=version) <= 54
     assert allocation("critique", deadline=175, now=67, version=version) == 45
     assert allocation("synthesis", deadline=175, now=119, version=version) == 45
     assert allocation("research", deadline=175, now=64, version=version) == 0
@@ -26,6 +26,7 @@ def test_candidate_reserves_complete_later_calls_and_cleanup():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("started", [100.1, 173.41774628300004])
 @pytest.mark.parametrize(
     "candidate, preparation_seconds",
     [(False, 0), (True, 0), (True, 10), ("formal", 0), ("formal", 10)],
@@ -34,20 +35,19 @@ async def test_complete_committee_allocation_counterexample_uses_no_real_sdk(
     monkeypatch,
     candidate,
     preparation_seconds,
+    started,
 ):
     request, evidence, prompts = _authority()
-    loop = asyncio.get_running_loop()
-    started = loop.time()
     elapsed = float(preparation_seconds)
     observed = []
-    # Keep real asyncio timers; only the normal allocator sees the deterministic
-    # elapsed stage work. No wall-clock sleeps or actual SDK/provider calls.
+    # Translate the synthetic absolute clock to a real relative timer. The
+    # allocator sees fixed origins, independent of the runner uptime.
     monkeypatch.setattr(
         codex_staged,
         "asyncio",
         SimpleNamespace(
             get_running_loop=lambda: SimpleNamespace(time=lambda: started + elapsed),
-            timeout_at=asyncio.timeout_at,
+            timeout_at=lambda deadline: asyncio.timeout(deadline - (started + elapsed)),
         ),
     )
 
@@ -156,9 +156,9 @@ def test_invalid_candidate_clock_cannot_create_time_allowance(clock):
 
 
 @pytest.mark.asyncio
-async def test_candidate_preparation_exhaustion_stops_before_sdk(monkeypatch):
+@pytest.mark.parametrize("started", [100.1, 173.41774628300004])
+async def test_candidate_preparation_exhaustion_stops_before_sdk(monkeypatch, started):
     request, evidence, prompts = _authority()
-    started = asyncio.get_running_loop().time()
     monkeypatch.setattr(
         codex_staged,
         "asyncio",
@@ -186,3 +186,49 @@ async def test_candidate_preparation_exhaustion_stops_before_sdk(monkeypatch):
     invoke.assert_not_called()
     assert model.usage.provider_calls == 0
     assert model.failure_reason == "model_stage_deadline_elapsed"
+
+
+@pytest.mark.parametrize("origin", [100.1, 173.41774628300004, 1_000_000.1, 1_000_000_000.1])
+@pytest.mark.parametrize(
+    "version",
+    [
+        codex_versions.CANDIDATE_BUDGET_CONFIG_VERSION,
+        codex_versions.FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        codex_versions.FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        codex_versions.FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+    ],
+)
+@pytest.mark.parametrize(
+    "stage,elapsed,expected",
+    [
+        ("research", 10, 54),
+        ("research", 63, 1),
+        ("research", 64, 0),
+        ("research", 65, 0),
+        ("critique", 115, 1),
+        ("critique", 116, 0),
+        ("critique", 117, 0),
+        ("synthesis", 167, 1),
+        ("synthesis", 168, 0),
+        ("synthesis", 169, 0),
+    ],
+)
+def test_clock_origin_cannot_create_budget_or_spend_close_reserves(
+    origin,
+    version,
+    stage,
+    elapsed,
+    expected,
+):
+    # Independent envelope: 180 total, 5 terminal, 7 per-stage close;
+    # future research/critique reserves are 104/52 seconds respectively.
+    actual = codex_versions.stage_timeout_seconds(
+        stage,
+        deadline=(origin + 180) - 5,
+        now=origin + elapsed,
+        version=version,
+    )
+    if expected == 0:
+        assert actual == 0
+    else:
+        assert expected - 1e-6 <= actual <= expected
