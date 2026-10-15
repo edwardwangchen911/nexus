@@ -485,3 +485,87 @@ GET、CLI read、刷新及重复 POST 均不能领取、恢复或重跑未知请
 0075 迁移增加不可变请求及回执、仅研究原生终态分支和数据库执行门禁；只在隔离库验证。
 有手动事实时不得直接降级删除，应用回退保留 head 与原始事实；尚无主库迁移或服务部署。
 旧应用对新 head 的兼容性须单独验证；不能把保留 schema 等同于旧镜像可直接启动。
+
+### 本地隔离的柔性 critique 预算候选
+
+`codex-sdk-chatgpt-v10-flexible-stage-budget` 仅用于隔离验证。正常 `nexus-openai-local setup`
+需显式加 `--flexible-stage-budget`、现有完整输入配置参数及 `--database-url-file`（受保护的
+`nexus_diag_` 连接文件）；实际数据库也必须通过隔离检查。业务数据库拒绝登记，默认选择、
+正式周期和正式输出资格保持不变，不通过注册启用任何业务周期。
+
+新配置的 Job/handler/lease 仍为 180/195/210 秒。critique 仅使用父截止扣除自身关闭 7 秒、
+synthesis 完整 45+7 秒后的余量；terminal 5 秒已从父截止扣除。research 60 和 synthesis 45
+上限不变，准备与关闭计入原截止；无余量不调用 SDK。新计时记录显式绑定候选版本；旧
+v7/v8/v9 的配置哈希、分配和计时 JSON 保持原样。没有重试、额外调用、token 或字节额度。
+
+隔离回归使用正常准备/原生候选准入、完整候选池及精确 Worker，SDK 外部端由替身返回。
+这证明接线与边界，不证明自然模型会在期限内完成。未应用迁移、未正式登记或选择候选。
+撤回时仅撤回本地候选差量；不得用候选结果改写旧失败或实际运行证据。
+
+
+## 完整输入耗时诊断（本地候选，非正式验收）
+
+`full-input-timing-diagnostic-v1` 仅用于独立测量历史完整输入的三阶段耗时，
+不是 v9/v10 正式模型配置，不登记、选择模型或创建 Run/Job/周期。
+入口只读核对原正式周期的完整候选清单、事件哈希链、同模型和冻结快照归属，
+在全池容量检查通过后只观察指定来源的一份研究。输出标记为当前代码重建，
+不声称还原旧调用字节或继续旧请求；完整前序结论仍由正常 staged 验证器传递。
+
+正常入口（只有另行批准真实诊断调用后才执行）：
+
+```bash
+uv run --project engine python -m nexus.ops.full_input_timing_diagnostic \
+  --repo-root "$PWD" --source-run-id <历史终态研究Run-ID>
+```
+
+固定总观察上限 300 秒包含来源检查、初始化、三个阶段及清理；committee 截止为
+总截止减 5 秒，每个阶段另留自身 7 秒清理及后续各 7 秒清理，允许观察首阶段超过
+旧上限。最多三次调用、96k 输入/8192 输出与 100479 字节限制保持；不能设置任意上限。
+这只测量耗时，不证明正式 180 秒合同能完成，也不改变 handler/lease 或执行许可。
+
+规范私有输出是 `.secrets/nexus-full-input-timing/<source-run-id>/`。
+来源加载前持久化独立身份及不可重放 attempt；叶子存在一律拒绝，不能删除或换目录
+重试未知结果。result 仅保存阶段计时、用量已知部分和安全状态，不打印模型内容或账户事实。
+失败或进程中断保留 attempt；旧业务事实不变。撤回候选代码时保留该私有归档。
+本轮仅替身测试和真实来源只读编译，真实模型调用尚未执行。
+
+
+## v10 正式柔性阶段预算接线（本地候选，尚未启用）
+
+正式 v10 沿用 `codex-sdk-chatgpt-v10-flexible-stage-budget` 的精确冻结 hash。
+新增 `--formal-flexible-stage-budget` 仅接受显式 formal/full-input 的正常 setup；
+原 `--flexible-stage-budget` 仍只用于隔离库，不可隐式改为业务登记。
+setup 只登记待选择版本，不创建研究或自动改运行配置；默认研究仍排除这些专用版本。
+
+正式入口必须证明原周期的完整候选清单、事件链、同一冻结模型和快照 context。
+Worker 根据已登记的精确 profile 使用原180/195/210秒合同，正常记录和读取阶段轨迹。
+输出、组合合成、管理历史读取、目标基线、预算保护及未调用任务作废复用原资格验证；
+300秒观察身份始终无业务模型、Job 或输出绑定资格。
+
+迁移草案 `0078_formal_v10_output_binding` 只向现有 SQL 正式分支增加精确 v10 hash，
+不改写0077或历史事实。后续切换前须备份并核验代码/数据库兼容性，先部署受支持版本再
+登记和选择新模型；本轮没有对业务库执行这些动作。出现 v10 正式输出绑定时直接降级会
+被 `V10_OUTPUT_BINDINGS_EXIST` 拒绝。回退应先停用 v10 新任务、保留所有事实；即使没有
+绑定，也不能假定旧镜像能正确处理新登记模型，须单独核验消费者兼容性，不删除事实通关。
+
+三/五候选买入及不交易受控 PostgreSQL整链（替身模型）、内部成交/账本及 API/BFF
+读回已经通过，活跃目标作为下一轮基线的读取亦通过。研究耗时波动和真实自然周期仍未
+证明稳定；180秒预算没有扩大，本机运行版本及选择仍是旧版本。
+
+### 2026-10-15 same-day recovery candidate (local qualification only)
+
+7617eded adds explicit --same-day while preserving the default prior-UTC-day guard. Only terminal failed research with expired lease, no occupied orders, quiescent processes and verified original frozen input/request/terminal metadata is eligible. Unknown usage and its reservation remain unchanged; no old invocation is replayed. New audit schema paper_same_day_close_v1 preserves old v1 audit semantics, verifies later reads at the original audit time and rejects changed facts. A second process check fences commit; late failure rolls back. 129 targeted tests, Ruff, Mypy and review passed; image candidate-4b540cf09743 matched 658 source files. Real failed input was checked read-only, not disposed. Main remains 199c754b/schema0078. No deployment, real seal or new cycle has run. Before rollback, stop new manual requests and retain all new facts; old consumers are not assumed compatible with new audit receipts. Private evidence: .secrets/same-day-close-qualification/verification.json.
+
+
+### 2026-10-15 manual preparation diagnostics candidate
+
+Candidate 92276fa3 fixes primary trigger diagnostics lost by manual dispatch, including secondary failure while recording unknown or disposing resources. Only fixed trigger_request/trigger_reservation/trigger_provider phases, allowlisted error codes and fixed exception kinds are emitted; original response text remains hidden. Unknown or preparing requests remain non-replayable. No migration, retry, admission, usage, budget or execution permission changes.
+
+368 focused unit tests, 89 isolated PG regressions, 5 post-review targeted PG checks, Ruff, Mypy and independent review passed. Qualification covers same-day failed research disposition through a new v10 request claim/reservation, and normal three-stock v10 HTTP/CLI/host -> trigger_once -> native cycle/research Job persistence with controlled sources, not a live model or simulation acceptance. Candidate image matches 643 Python/migration/project files. Current real batch/model hashes and synthesis prompt read back valid; the old masked preparation cause remains unknown and must not be inferred from tests. Main/runtime and the existing unknown request were not changed. Evidence: .secrets/manual-preparation-diagnostic-qualification/verification.json.
+
+
+### 未建周期的未知准备收尾（本地候选，尚未部署）
+
+候选入口 `nexus-engine-manual-paper close-unstarted-preparation --request-id <UUID>` 沿用主仓库与受保护环境配置。必须显式指定旧请求，不自动封存或自动创建下一请求。该入口追加独立审计，保持原 unknown 与原预算，不重放旧调用。需原生产者身份及已审查调用顺序、原生认领/周期绑定缺失、实际进程退出和账户无占用的完整证明；缺失或变化返回固定 `MANUAL_PREPARATION_CLOSE_BLOCKED`。维护与正常服务启动共用生命周期锁，持有至提交。
+
+当前真实旧请求尚不符合该候选证据门槛：心跳早于 preparing，事件未绑定原生产者身份。隔离成功不能授权真实收尾、部署或新周期，也不能还原旧屏蔽异常。不得为通过该记录放宽身份规则，或通过重放采集/模型来补历史事实。

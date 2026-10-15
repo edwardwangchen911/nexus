@@ -1,5 +1,11 @@
 # NEXUS 主线迭代与新主会话交接
 
+> 2026-10-14 v10正式接线本地实现与隔离验收完成（未提交/未合入）：新setup-only formal-flexible-stage-budget保留原isolated flag；精确hash、完整池/Worker/输出资格、replay、管理read/目标baseline、budget保护和未调用cancel均补齐。迁移草案0078增加正式V10hash，旧0077不改，V10binding存在时拒绝降级；旧镜像与新登记模型不能直接假定兼容。89定向unit、220SDK/trace回归、40集中PG通过；新增4输出资格断言因旧固定读时点早于真实Worker finished而失败，改用DBclock后4定向通过，未改生产时点策略；3/5买入/no-trade四完整场景及1个下一轮baseline定向通过。Ruff/Mypy13source/generated/diff与集中审查通过，无剩余P1/P2。证据 .secrets/formal-flexible-stage-qualification/verification.json。业务未迁移/登记/选择/部署/启动新周期，main服务仍29/schema0077/locktrue；正式180/195/210和token/calls不变。已批准单次真实耗时诊断另已完成三调用：research24.530/critique49.988/synthesis22.773秒、70880/3217token，模型完整返回，仅私有回执无业务写；该次不等于自然周期成功，原失败事实不改。下一步需单独批准本地提交/合入及部署等状态变更，首轮research尾延迟仍未解决。
+
+> 2026-10-14 完整输入耗时诊断入口本地实现完成：独立 full-input-timing-diagnostic-v1 私有身份，固定300秒含来源加载，committee295，最多3调用/96k输入8192输出/wire100479不变。完整历史池复用原manifest/hash/事件链、正式mode及同模型身份、成员终态和冻结context验证；全部来源只读，不创建Run/Job/周期或订单。规范source-run私有叶子在来源读取前写attempt，已有叶子/未知/失败禁重放；仅私有计时及用量下界回执。初始3RED、入口2RED、来源5RED；定向193项、入口8项、轨迹/工作负载54项通过，Ruff/Mypy4source/generated/diff通过，集中审查两P2修正并定向复核无剩余P1/P2。今天3候选真实源只读编译通过，模型0/业务写0；证据本worktree .secrets/full-input-timing-implementation/verification.json。未真实诊断、未提交/合入/部署；实际服务仍29/schema0077/locktrue。新观察入口不改变正式180合同，不证明可用或已解决超时。
+
+> 2026-10-14 柔性阶段预算本地修复与隔离验收完成（未提交）：base29，新增冻结v10，仅critique在父180内扣close7、后续synthesis45+7、已有terminal5后用余量，research60/synthesis45、handler195/lease210、3calls/96k/8192/wire100479不变。旧v7/v8/v9 hash与分配保持。正常setup必须显式flexible-stage-budget及受保护diagnostic URL；configured/实际库都隔离，重复登记匹配新hash，默认/正式资格保持关闭。完整池同配置，隔离native准入和exact Worker载入v10。SDK父截止检查与保守deadline clamp；新增flexible_critique_profile计时身份仅v10critique写，<=116000，旧<=108000且serializer省略None保持JSON。初始RED5、计时RED1；216 SDK关联单测、36真实PG全回归（含v9与未知用量/未执行sibling seal）、最终6个v10 native/readback回归、49最终timing/trace单测通过。Ruff/Mypy15source/diff及generated check通过，独立定向审查无剩余P1/P2。Native PG期间定位并修复registry名单/daily准入/重复登记/旧timing108拒绝等真实接线，未放宽时间或断言。计时/trace正常reader已覆盖，SDK仅替身无额外真实模型。证据本worktree .secrets/flexible-stage-budget/verification.json及logs。main/实际宿主APIWorker仍29、schema0077、locktrue且heartbeat fresh；无迁移/业务登记选择/部署重启/真实新请求/回放/推送，本轮不提交。新profile仅可隔离研究资格，不具有正式输出或激活权限，自然模型是否能在预算内完成仍未知；今晚验收对象保持29。
+
 > 当前自主模拟与策略进化的最终主线说明见
 > `docs/plans/2026-09-12-nexus-simulation-evolution-roadmap.md`。该文档优先于本文下方
 > 历史 Shadow 阶段和本轮未提交的过程性核查记录；后续开发应从其“下一份技术方案的唯一范围”开始。
@@ -379,3 +385,31 @@ README 顶部“研究运行仍为 0”等旧数字已过时。更新文档时�
 - 后续仍以 I1 合格价格及 I2 一个真实组合研究闭环为优先；I3/I4 未因这些代码提交而
   自动达成。下一次模型验证须单独限定调用次数/额度，不扩展到全部持仓，不启动自动调度。
 - 本轮仅本地提交和集成，未推送或部署，未创建订单、修改券商账户或启用后台监控。
+
+## 2026-10-15 v10运行迁移标识最小修复
+
+199c754b仅将CURRENT_MIGRATION_HEAD从0077改为0078，并补充迁移链/运行标识一致性、真实正常Worker首次轮询写心跳、新schema调度准入和旧schema拒绝回归。修复前1项unit及2项PG准确失败；修复后18项定向通过，Ruff/Mypy/diff通过。候选镜像nexus-engine-formal-v10:runtime-head-96200045ab19读回658文件一致，镜像内Worker标识0078；main应用检查通过。私有证据.secrets/v10-runtime-head-fix/verification.json。业务服务未更新，宿主保持停止；遵循上轮失败停止边界，已请求批准合入/更新APIWorker并恢复原宿主，无新迁移/凭据/周期/封存/推送。
+
+### 2026-10-15 same-day recovery candidate (local qualification only)
+
+7617eded adds explicit --same-day while preserving the default prior-UTC-day guard. Only terminal failed research with expired lease, no occupied orders, quiescent processes and verified original frozen input/request/terminal metadata is eligible. Unknown usage and its reservation remain unchanged; no old invocation is replayed. New audit schema paper_same_day_close_v1 preserves old v1 audit semantics, verifies later reads at the original audit time and rejects changed facts. A second process check fences commit; late failure rolls back. 129 targeted tests, Ruff, Mypy and review passed; image candidate-4b540cf09743 matched 658 source files. Real failed input was checked read-only, not disposed. Main remains 199c754b/schema0078. No deployment, real seal or new cycle has run. Before rollback, stop new manual requests and retain all new facts; old consumers are not assumed compatible with new audit receipts. Private evidence: .secrets/same-day-close-qualification/verification.json.
+
+
+### 2026-10-15 manual preparation diagnostics candidate
+
+Candidate 92276fa3 fixes primary trigger diagnostics lost by manual dispatch, including secondary failure while recording unknown or disposing resources. Only fixed trigger_request/trigger_reservation/trigger_provider phases, allowlisted error codes and fixed exception kinds are emitted; original response text remains hidden. Unknown or preparing requests remain non-replayable. No migration, retry, admission, usage, budget or execution permission changes.
+
+368 focused unit tests, 89 isolated PG regressions, 5 post-review targeted PG checks, Ruff, Mypy and independent review passed. Qualification covers same-day failed research disposition through a new v10 request claim/reservation, and normal three-stock v10 HTTP/CLI/host -> trigger_once -> native cycle/research Job persistence with controlled sources, not a live model or simulation acceptance. Candidate image matches 643 Python/migration/project files. Current real batch/model hashes and synthesis prompt read back valid; the old masked preparation cause remains unknown and must not be inferred from tests. Main/runtime and the existing unknown request were not changed. Evidence: .secrets/manual-preparation-diagnostic-qualification/verification.json.
+
+
+### 2026-10-15 未建周期的未知准备收尾：本地隔离候选
+
+新增显式 `close-unstarted-preparation --request-id`，仅对已审查原生产者、完整原请求/事件、原生认领及周期绑定均不存在、宿主及研究进程退出且账户无占用的情况追加独立审计。原 unknown 事件、预算与预留保持不变；旧请求不能重放。准入与宿主队列验证审计后才跳过已收尾未知记录，后续独立请求仍需新鲜宿主和原有全部准入。复用正常服务生命周期锁并持有至数据库提交；证据变化、重复/模糊生产者、未完成原生认领及迟到占用均拒绝。无迁移。
+
+39 项隔离 PostgreSQL 验证、18 项 CLI 定向单测及 Ruff/format/Mypy 通过；此前 370 项聚焦单测通过。修正旧迁移测试：失败降级后应保持实际降级前 head，而非写死 0075。两个历史 trigger 源码哈希已对 Git 原件读回。未构建或部署本候选。
+
+真实适用性仍拒绝：旧请求最后心跳比 preparing 早 0.482 秒，原事件无生产者 ID 绑定；不能仅凭认领/周期为零证明无外部副作用。正常宿主只读状态 inactive，最新研究进程静默检查通过，但不补足历史身份缺口。旧异常已被屏蔽的具体原因仍未知。没有真实收尾、新周期、凭据修改或宿主启动；不能宣称产品真实闭环验收完成。当前批准范围仅本地实现与隔离验收。私有结果 `.secrets/unstarted-preparation-close-qualification/verification.json`。
+
+#### 原生产者归档核对（2026-10-15，只读）
+
+启动归档确认 7617eded 部署；故障日志只有 execute/TRIGGER_MANUAL 结果未知及时间，无 request/producer 身份和原异常。只读业务事务确认 queued→preparing→unknown、无周期绑定、原生认领0、匹配请求审计0；事件表没有 producer 身份字段。最近历史心跳早于 preparing 481.946ms，其他历史版本心跳更早。部署身份不代替逐请求执行身份，现有候选仍不可用于真实旧记录；不能靠等下一周期补历史证据，也不重放或回填。原准备失败原因仍未知。证据 `.secrets/unstarted-preparation-close-qualification/origin-archive-diagnostic.json`。如后续讨论人工明确接受准备结果未知的处置，须与已证明无副作用的收尾分开，保留未知事实并保守覆盖可能消耗，另行评审合同；本轮未实施或授权该替代。
