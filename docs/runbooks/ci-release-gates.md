@@ -50,11 +50,32 @@ uv run python scripts/ci/repository_policy.py \
   --root . \
   --inventory-output /tmp/nexus-dependency-inventory.json
 
-npm audit --audit-level=high
+uv run python scripts/ci/npm_audit_gate.py --report /tmp/nexus-npm-audit.json
 uv run pip-audit --local --skip-editable
 ```
 
-`pip-audit` 跳过两个 editable 的本地 NEXUS package，因为它们不是第三方发行依赖；本地代码由 Pytest、Ruff、Mypy、E2E 和策略门禁覆盖。审计返回任何第三方已知漏洞时 CI 失败，不通过忽略项静默放行。
+`pip-audit` 跳过两个 editable 的本地 NEXUS package，因为它们不是第三方发行依赖；本地代码由 Pytest、Ruff、Mypy、E2E 和策略门禁覆盖。除下述用户明确批准的限期风险接受外，审计返回任何第三方已知漏洞时 CI 失败。
+
+### 2026-10-15 批准的唯一限期风险接受
+
+仅接受 [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)，
+截止 **2026-10-22 00:00 UTC（北京时间 08:00）**。这是对尚未修复的 `braces`
+高危告警的显式风险接受，不能称为漏洞修复或零漏洞。当前审查的调用点由本地源码、配置和
+lint 输入驱动，未发现业务 HTTP/Provider 输入进入 pattern 的路径；空 `next.config.ts`
+仍会进入配置 runner，不能声称该依赖不可达。上游争议和本机未复现不作为安全证明。
+
+`npm_audit_gate.py` 仍运行完整 `npm audit --audit-level=high --json`，显式包含 dev、
+optional 和 peer 依赖，不重试；完整 JSON 保存在 `--report` 指定的源码树外路径，CI 不上传。
+报告中的各类依赖数量必须与锁文件一致，缺项或漏扫拒绝；截止时间在审计及身份核对完成后检查。
+仅当前七个报告节点、两处 fast-glob 节点、单一 advisory、精确依赖锁文件和已审查前端源码/
+配置指纹全部匹配时输出 `risk_accepted_until_2026-10-22T00:00:00Z`。所有其他漏洞、报告
+异常、依赖漂移、相关源码/配置变化或到期均失败；真正无漏洞且审计成功时才输出 `clean`。
+指纹包括版本控制下及非忽略的 JS/TS/JSON 文件，并额外检查根配置及 app/worker 实际文件；
+符号链接拒绝。指纹变化需要重新核查并明确批准，不随日常升级自动更新。
+
+该批准仅覆盖本地实现和隔离验证，不授权推送或部署。撤销接受时恢复原 npm 审计命令及
+对应策略断言即可；业务库、凭据和运行服务均不受影响。上游修复后应升级并恢复无漏洞门禁，
+不自动延长期限，也不建立通用漏洞例外清单。
 
 ## Artifact 与日志
 

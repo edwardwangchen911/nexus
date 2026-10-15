@@ -2120,7 +2120,8 @@ def check_workflow(root: Path) -> list[PolicyFinding]:
         "scripts/offline_guard/selftest.py",
         "scripts/ci/repository_policy.py",
         "nexus-engine-backup-restore-drill",
-        "npm audit --audit-level=high",
+        "      - run: uv run python scripts/ci/npm_audit_gate.py "
+        '--report "$RUNNER_TEMP/nexus-npm-audit.json"\n',
         "pip-audit",
         "docker compose -f infra/compose.yaml --profile app config --quiet",
         "docker compose -f infra/compose.yaml --profile broker config --quiet",

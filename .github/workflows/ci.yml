@@ -263,7 +263,7 @@ jobs:
           uv run python scripts/ci/repository_policy.py
           --root .
           --inventory-output "$RUNNER_TEMP/nexus-dependency-inventory.json"
-      - run: npm audit --audit-level=high
+      - run: uv run python scripts/ci/npm_audit_gate.py --report "$RUNNER_TEMP/nexus-npm-audit.json"
       - run: uv run pip-audit --local --skip-editable
       - name: Validate all Compose capability profiles
         env:
