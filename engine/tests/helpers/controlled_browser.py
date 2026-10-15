@@ -1,6 +1,7 @@
 """Read an isolated controlled Paper cycle through the real local BFF and browser."""
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -17,6 +18,7 @@ from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET
 from helpers.paper_api import app, headers
 from helpers.paper_api import settings as paper_api_settings
 from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
+from nexus.settings import EngineSettings
 
 
 def _listen_socket() -> socket.socket:
@@ -106,7 +108,10 @@ async def verify_controlled_browser(
     candidate_stage_capacity_reads: bool = False,
     formal_readback: bool = False,
     expected_defer_count: int | None = None,
-) -> None:
+    manual_settings: EngineSettings | None = None,
+    manual_request_id: UUID | None = None,
+    submit_manual: bool = False,
+) -> UUID | None:
     root = Path(__file__).resolve().parents[3]
     if not (root / "node_modules/.bin/vinext").exists():
         raise AssertionError("controlled browser dependencies are unavailable")
@@ -120,25 +125,34 @@ async def verify_controlled_browser(
     if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
         raise AssertionError("controlled browser release revision is invalid")
     heartbeat_at = datetime.now(UTC)
-    await heartbeat_agent_paper_loop(
-        paper_api_settings(database_url).model_copy(update={"release_revision": revision}),
-        worker_id=f"agent-paper-loop-{UUID(int=1)}",
-        started_at=heartbeat_at - timedelta(minutes=1),
-        seen_at=heartbeat_at,
-    )
+    if not submit_manual:
+        await heartbeat_agent_paper_loop(
+            paper_api_settings(database_url).model_copy(update={"release_revision": revision}),
+            worker_id=f"agent-paper-loop-{UUID(int=1)}",
+            started_at=heartbeat_at - timedelta(minutes=1),
+            seen_at=heartbeat_at,
+        )
     api_socket = _listen_socket()
     api_port = api_socket.getsockname()[1]
     web_socket = _listen_socket()
     web_port = web_socket.getsockname()[1]
     web_socket.close()
+    api_app = app(
+        database_url,
+        now=api_now,
+        release_revision=revision,
+        candidate_stage_capacity_reads=candidate_stage_capacity_reads,
+    )
+    if manual_settings is not None:
+        from nexus.main import create_engine_app
+
+        api_app = create_engine_app(
+            manual_settings.model_copy(update={"release_revision": revision})
+        )
+        api_app.state.utc_clock = lambda: api_now
     server = uvicorn.Server(
         uvicorn.Config(
-            app(
-                database_url,
-                now=api_now,
-                release_revision=revision,
-                candidate_stage_capacity_reads=candidate_stage_capacity_reads,
-            ),
+            api_app,
             log_config=None,
             access_log=False,
         )
@@ -147,6 +161,10 @@ async def verify_controlled_browser(
     web_process: asyncio.subprocess.Process | None = None
     web_log = tempfile.TemporaryFile(mode="w+b")
     isolation = ExitStack()
+    receipt_path = (
+        Path(isolation.enter_context(tempfile.TemporaryDirectory(prefix="nexus-manual-browser-")))
+        / "receipt.json"
+    )
     try:
         for _ in range(100):
             if server.started:
@@ -193,6 +211,14 @@ async def verify_controlled_browser(
             NEXUS_LOCAL_PAPER_READONLY="1",
             WRANGLER_LOG_PATH=".wrangler/wrangler.log",
         )
+        if manual_request_id is not None:
+            environment["NEXUS_CONTROLLED_MANUAL_REQUEST_ID"] = str(manual_request_id)
+            environment["NEXUS_CONTROLLED_MANUAL_KEY"] = "v10-entry-result"
+        if submit_manual:
+            environment["NEXUS_CONTROLLED_MANUAL_SUBMIT"] = "1"
+            environment["NEXUS_CONTROLLED_MANUAL_RECEIPT_PATH"] = str(receipt_path)
+        if channel := os.environ.get("NEXUS_E2E_BROWSER_CHANNEL"):
+            environment["NEXUS_E2E_BROWSER_CHANNEL"] = channel
         if economic_protocol_hash is not None:
             environment["NEXUS_ECONOMIC_PROTOCOL_HASH"] = economic_protocol_hash
         if candidate_stage_capacity_reads or formal_readback:
@@ -232,7 +258,9 @@ async def verify_controlled_browser(
             "--config",
             "playwright.controlled-paper.config.ts",
             *(
-                ("--grep", "registered economic protocol")
+                ("--grep", "starts one manual request")
+                if submit_manual
+                else ("--grep", "registered economic protocol")
                 if economic_protocol_hash is not None
                 else ()
             ),
@@ -250,6 +278,10 @@ async def verify_controlled_browser(
                 + "\nWeb log:\n"
                 + web_log.read().decode(errors="replace")[-3000:]
             )
+        if submit_manual:
+            receipt = json.loads(receipt_path.read_text())
+            assert receipt["status"] == "queued" and receipt["execution_locked"] is True
+            return UUID(receipt["request_id"])
     finally:
         if web_process is not None and web_process.returncode is None:
             web_process.terminate()

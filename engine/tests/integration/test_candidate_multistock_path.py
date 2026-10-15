@@ -33,7 +33,14 @@ FIVE = INSTRUMENTS + (
 @pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
 @pytest.mark.parametrize("profile", ["v7", "v9", "formal_v9", "formal_v10"])
 async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
-    migrated_database_url, monkeypatch, count, trade, profile
+    migrated_database_url,
+    monkeypatch,
+    count,
+    trade,
+    profile,
+    manual_entry=False,
+    tmp_path=None,
+    fault=None,
 ):
     formal = profile in {"formal_v9", "formal_v10"}
     consumer_mode = (
@@ -61,6 +68,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         stage = payload["stage"]
         calls.append(stage)
         assert kwargs["timeout_seconds"] > 0
+        if fault == "research_unknown" and stage == "critique":
+            raise TimeoutError("controlled unknown model result")
         if stage == "synthesis":
             response = {
                 "synthesis_assessment": {
@@ -169,19 +178,35 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 approved_at=AT,
                 idempotency_key="controlled-initial-baseline",
             )
-            result = await start_schwab_agent_paper_cycle(
-                session,
-                authority=authority,
-                decision_slot_at=AT,
-                idempotency_key=f"candidate-{count}",
-                requested_instrument_ids=batch.instrument_ids,
-                candidate_batch_id=batch.batch_id,
-                **(
-                    {"formal_stage_capacity": True, "formal_model_config_id": model.id}
-                    if formal
-                    else {"candidate_stage_capacity": True, "candidate_model_config_id": model.id}
-                ),
+        manual = None
+        if manual_entry:
+            assert profile == "formal_v10" and count == 3 and tmp_path is not None
+            manual = await _start_manual_http_request(
+                settings, sessions, authority, batch, model, monkeypatch, clock_at, tmp_path, fault
             )
+            if fault == "preparation_failure":
+                assert manual is None and calls == []
+                return
+            settings, request_id, result = manual
+        else:
+            async with sessions.begin() as session:
+                result = await start_schwab_agent_paper_cycle(
+                    session,
+                    authority=authority,
+                    decision_slot_at=AT,
+                    idempotency_key=f"candidate-{count}",
+                    requested_instrument_ids=batch.instrument_ids,
+                    candidate_batch_id=batch.batch_id,
+                    **(
+                        {"formal_stage_capacity": True, "formal_model_config_id": model.id}
+                        if formal
+                        else {
+                            "candidate_stage_capacity": True,
+                            "candidate_model_config_id": model.id,
+                        }
+                    ),
+                )
+        async with sessions() as session:
             assert result.result_code == "RESEARCH_JOBS_PREPARED", result
             assert len(result.research_run_ids) == count
             runs = tuple(await session.scalars(select(AgentResearchRunRecord)))
@@ -201,9 +226,41 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 if profile != "v7"
                 else {"candidate_stage_capacity": True}
             )
-            assert await run_agent_worker_once(settings, job_ids=(job.id,), **research_mode)
+            if manual:
+                state = await _consume_manual_host_action(settings, "RUN_RESEARCH_JOB")
+                assert state.research_job_id == job.id
+            else:
+                assert await run_agent_worker_once(settings, job_ids=(job.id,), **research_mode)
             assert not await run_agent_worker_once(settings, job_ids=(job.id,), **research_mode)
+            if fault == "research_unknown":
+                from nexus.ops.manual_paper_host import finish_configured_manual_request
+                from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
+
+                await _consume_manual_host_action(settings, "RESUME")
+                async with sessions() as session:
+                    failed = await session.get(AgentResearchRunRecord, UUID(job.payload["run_id"]))
+                    assert failed.status == "failed" and failed.retry_count == 0
+                    assert failed.settled_cost_usd is None
+                    assert (failed.input_tokens, failed.output_tokens) == (100, 100)
+                    budget = await session.scalar(
+                        select(AgentDailyBudgetReservationRecord).where(
+                            AgentDailyBudgetReservationRecord.run_id == failed.id
+                        )
+                    )
+                    assert budget.settled_usd is None
+                    before_close = await _manual_recovery_facts(session)
+                with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                    async with sessions.begin() as session:
+                        await finish_configured_manual_request(
+                            session, settings, request_id=request_id, cancel_unused=True
+                        )
+                async with sessions() as session:
+                    assert await _manual_recovery_facts(session) == before_close
+                await _verify_failed_manual_intent(settings, sessions, request_id, "active")
+                assert calls == ["research", "critique"]
+                return
         assert calls == ["research", "critique", "synthesis"] * count
+        clock_at[0] = AT + timedelta(seconds=2)
         async with sessions() as session:
             for run_id in result.research_run_ids:
                 run = await session.get(AgentResearchRunRecord, run_id)
@@ -240,17 +297,27 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         from nexus.worker import run_portfolio_synthesis_worker_once
 
         await _set_test_insert_clock(sessions, AT + timedelta(seconds=2))
+        if manual:
+            await _consume_manual_host_action(settings, "RESUME")
         async with sessions.begin() as session:
-            pending = await resume_schwab_agent_paper_cycle(
-                session,
-                cycle_id=result.cycle_id,
-                idempotency_key="synthesis-ready",
-                daily_limit_usd=Decimal("3"),
-                now=AT + timedelta(seconds=2),
-                **consumer_mode,
+            pending = (
+                await _read_cycle_result(session, result.cycle_id)
+                if manual
+                else await resume_schwab_agent_paper_cycle(
+                    session,
+                    cycle_id=result.cycle_id,
+                    idempotency_key="synthesis-ready",
+                    daily_limit_usd=Decimal("3"),
+                    now=AT + timedelta(seconds=2),
+                    **consumer_mode,
+                )
             )
-            assert pending.result_code == "PORTFOLIO_SYNTHESIS_PENDING", pending
+            if not manual:
+                assert pending.result_code == "PORTFOLIO_SYNTHESIS_PENDING", pending
+            else:
+                assert pending.status == "researching"
             synth = await session.scalar(select(AgentPortfolioSynthesisRunRecord))
+            assert synth is not None and synth.status == "prepared"
             intent = synthesis_intent(synth)
             if trade:
                 intent = intent.model_copy(
@@ -277,9 +344,13 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         )
         clock_at[0] = AT + timedelta(seconds=3)
         await _set_test_insert_clock(sessions, clock_at[0])
-        assert await run_portfolio_synthesis_worker_once(
-            settings, job_ids=(synth_job.id,), **consumer_mode
-        )
+        if manual:
+            state = await _consume_manual_host_action(settings, "RUN_RESEARCH_JOB")
+            assert state.research_job_id == synth_job.id
+        else:
+            assert await run_portfolio_synthesis_worker_once(
+                settings, job_ids=(synth_job.id,), **consumer_mode
+            )
         async with sessions() as session:
             completed_synth = await session.get(AgentPortfolioSynthesisRunRecord, synth.id)
             completed_job = await session.get(Job, synth_job.id)
@@ -288,7 +359,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 completed_job.status,
                 completed_job.error_code,
             )
-        if not trade and count == 3:
+        clock_at[0] = AT + timedelta(seconds=4)
+        if not trade and count == 3 and not manual:
             from sqlalchemy import event
             from sqlalchemy.exc import DBAPIError
 
@@ -323,14 +395,21 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     row.model_hash == model.config_hash
                     for row in await session.scalars(select(AgentResearchRunRecord))
                 )
-        await _set_test_insert_clock(sessions, AT + timedelta(seconds=4))
+        clock_at[0] = AT + timedelta(seconds=4)
+        await _set_test_insert_clock(sessions, clock_at[0])
+        if manual:
+            await _consume_manual_host_action(settings, "RESUME")
         async with sessions.begin() as session:
-            finished = await resume_schwab_agent_paper_cycle(
-                session,
-                cycle_id=result.cycle_id,
-                idempotency_key="activate-target",
-                now=AT + timedelta(seconds=4),
-                **consumer_mode,
+            finished = (
+                await _read_cycle_result(session, result.cycle_id)
+                if manual
+                else await resume_schwab_agent_paper_cycle(
+                    session,
+                    cycle_id=result.cycle_id,
+                    idempotency_key="activate-target",
+                    now=AT + timedelta(seconds=4),
+                    **consumer_mode,
+                )
             )
             assert finished.result_code == (
                 "PAPER_ORDERS_AWAITING_MARKET" if trade else "NO_ORDER_REQUIRED"
@@ -378,12 +457,16 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             counts_before = [
                 await session.scalar(select(func.count()).select_from(table)) for table in tables
             ]
-            replay = await resume_schwab_agent_paper_cycle(
-                session,
-                cycle_id=result.cycle_id,
-                idempotency_key="activate-target",
-                now=AT + timedelta(seconds=5),
-                **consumer_mode,
+            replay = (
+                await _read_cycle_result(session, result.cycle_id)
+                if manual
+                else await resume_schwab_agent_paper_cycle(
+                    session,
+                    cycle_id=result.cycle_id,
+                    idempotency_key="activate-target",
+                    now=AT + timedelta(seconds=5),
+                    **consumer_mode,
+                )
             )
             assert replay.order_ids == finished.order_ids
             assert replay.strategy_decision_id == finished.strategy_decision_id
@@ -420,6 +503,12 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 orders,
                 count,
                 formal=formal,
+                database_clock_at=clock_at if manual else None,
+                manual_settings=settings if manual else None,
+                manual_request_id=request_id if manual else None,
+                host_settings=settings if manual else None,
+                monkeypatch=monkeypatch if manual else None,
+                calendar_authority_id=authority.calendar_authority_id if manual else None,
             )
         elif profile != "v7" and count == 3:
             import asyncio
@@ -450,8 +539,383 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     )
                     == count
                 )
+        if manual:
+            import httpx
+            from helpers.paper_api import headers
+            from nexus.main import create_engine_app
+            from nexus.ops.manual_paper_host import finish_configured_manual_request
+
+            async with sessions.begin() as session:
+                view = await finish_configured_manual_request(
+                    session, settings, request_id=request_id
+                )
+                assert view.status == "completed" and view.cycle_id == result.cycle_id
+            path = "/internal/v1/paper/manual-requests"
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_engine_app(settings)),
+                base_url="http://test",
+            ) as client:
+                response = await client.get(
+                    path, headers={**headers("GET", path), "Idempotency-Key": "v10-entry-result"}
+                )
+                assert response.status_code == 200
+                assert response.json()["data"] == view.model_dump(mode="json")
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
+async def test_v10_manual_entry_to_result(migrated_database_url, monkeypatch, tmp_path, trade):
+    await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
+        migrated_database_url, monkeypatch, 3, trade, "formal_v10", True, tmp_path
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["preparation_failure", "research_unknown"])
+async def test_v10_manual_entry_failure_preserves_recovery_gates(
+    migrated_database_url, monkeypatch, tmp_path, fault
+):
+    await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
+        migrated_database_url, monkeypatch, 3, True, "formal_v10", True, tmp_path, fault
+    )
+
+
+async def _verify_failed_manual_intent(settings, sessions, request_id, status):
+    import httpx
+    from helpers.paper_api import headers
+    from nexus.main import create_engine_app
+    from nexus.persistence.models.paper import PaperOrderRecord
+    from sqlalchemy import func
+
+    async with sessions() as session:
+        before = await _manual_recovery_facts(session)
+        assert await session.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
+    path = "/internal/v1/paper/manual-requests"
+    body = b'{"mode":"research_and_paper"}'
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_engine_app(settings)), base_url="http://test"
+    ) as client:
+        read = await client.get(
+            path, headers={**headers("GET", path), "Idempotency-Key": "v10-entry-result"}
+        )
+        assert read.status_code == 200
+        assert read.json()["data"]["request_id"] == str(request_id)
+        assert read.json()["data"]["status"] == status
+        original = await client.post(
+            path,
+            content=body,
+            headers={**headers("POST", path, body), "Idempotency-Key": "v10-entry-result"},
+        )
+        assert original.json()["data"] == read.json()["data"]
+        other = await client.post(
+            path,
+            content=body,
+            headers={**headers("POST", path, body), "Idempotency-Key": "must-not-bypass-unknown"},
+        )
+        assert other.status_code == 409
+        assert other.json()["error"]["details"]["reason_code"] == "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+    async with sessions() as session:
+        assert await _manual_recovery_facts(session) == before
+    from nexus.ops import agent_paper_loop as loop
+
+    state = await _inspect_manual_host(settings)
+    assert loop.choose_loop_action(state) in {
+        loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
+        loop.AgentPaperLoopAction.FINISH_MANUAL,
+    }
+
+
+async def _manual_recovery_facts(session):
+    from hashlib import sha256
+
+    from sqlalchemy import text
+
+    tables = (
+        "manual_paper_requests",
+        "manual_paper_request_events",
+        "agent_research_runs",
+        "agent_research_outputs",
+        "jobs",
+        "job_attempts",
+        "job_leases",
+        "agent_daily_budget_reservations",
+        "agent_portfolio_synthesis_budget_reservations",
+        "portfolio_decision_budget_reservations",
+        "paper_orders",
+        "paper_fills",
+        "paper_ledger_transactions",
+        "paper_ledger_entries",
+    )
+    return {
+        table: sorted(
+            sha256(row.encode()).hexdigest()
+            for row in (
+                await session.execute(text("SELECT row_to_json(t)::text FROM " + table + " t"))
+            ).scalars()
+        )
+        for table in tables
+    }
+
+
+async def _start_manual_http_request(
+    settings, sessions, authority, batch, model, monkeypatch, clock_at, root, fault=None
+):
+    import httpx
+    from helpers.paper_api import headers
+    from helpers.paper_api import settings as api_settings
+    from helpers.paper_batch import CALENDAR_ID
+    from nexus.main import create_engine_app
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.ops import agent_paper_once as once
+    from nexus.ops.schwab_market_stream import SchwabMarketStreamImportResult
+    from nexus.paper import agent_cycle
+    from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+    from nexus.persistence.models.data import DataArtifact
+    from nexus.persistence.models.manual_paper import ManualPaperRequest
+    from nexus.persistence.models.market import LatestQuote
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    clock_at[0] = AT
+    scalar = AsyncSession.scalar
+
+    async def clock(self, statement, *args, **kwargs):
+        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return clock_at[0]
+        return await scalar(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "scalar", clock)
+    async with sessions.begin() as session:
+        later = AT + timedelta(days=3)
+        session.add(
+            ExchangeCalendarSessionRecord(
+                calendar_authority_id=CALENDAR_ID,
+                session=later.date(),
+                decision_at=later.replace(hour=21),
+                market_open_at=later.replace(hour=13, minute=30),
+                market_close_at=later.replace(hour=20),
+                created_at=AT - timedelta(hours=1),
+            )
+        )
+    settings = EngineSettings.model_validate(
+        api_settings(settings.database_url).model_dump()
+        | {
+            "agent_runtime_mode": "codex_sdk",
+            "agent_paper_account_id": authority.account_id,
+            "agent_paper_candidate_batch_id": batch.batch_id,
+            "agent_paper_formal_model_config_id": model.id,
+            "agent_paper_cycle_enabled": True,
+            "agent_paper_manual_enabled": True,
+            "release_revision": "a" * 40,
+        }
+    )
+    source_calls = []
+
+    async def proofs(**kwargs):
+        assert {x.instrument_id for x in kwargs["candidates"]} == set(batch.instrument_ids)
+        source_calls.append("risk")
+        if fault == "preparation_failure":
+            raise ValueError("RISK_SOURCE_COLLECTION_FAILED")
+        return {i: () for i in batch.instrument_ids}
+
+    async def persisted_risk(*args, **kwargs):
+        # Controlled risk source records were ingested by seed_normal_path;
+        # their normal native authority/hash readers remain active.
+        assert kwargs["proofs"] == ()
+        source_calls.append("risk-import")
+
+    async def quotes(session, store, **kwargs):
+        from nexus.persistence.models.runtime import IdempotencyRecord
+
+        claim = await session.scalar(
+            select(IdempotencyRecord).where(IdempotencyRecord.idempotency_key == str(request_id))
+        )
+        assert claim is not None and claim.response_payload == {}
+        source_calls.append("quotes")
+        rows = tuple(
+            await session.scalars(
+                select(LatestQuote).where(
+                    LatestQuote.instrument_id.in_(batch.instrument_ids),
+                    LatestQuote.source == "schwab",
+                )
+            )
+        )
+        artifact = await session.get(DataArtifact, rows[0].data_artifact_id)
+        assert set(kwargs["bindings"].values()) == set(batch.instrument_ids)
+        return SchwabMarketStreamImportResult(
+            raw_sha256=artifact.sha256,
+            created_observations=len(rows),
+            symbols_observed=len(rows),
+            artifact_id=artifact.id,
+            quote_ids={
+                symbol: next(q.id for q in rows if q.instrument_id == i)
+                for symbol, i in kwargs["bindings"].items()
+            },
+            trade_ids={},
+        )
+
+    monkeypatch.setattr(once, "collect_source_proofs_batch", proofs)
+    monkeypatch.setattr(once, "persist_query_authorities", persisted_risk)
+    monkeypatch.setattr(once, "capture_and_import_schwab_level_one_batch", quotes)
+    monkeypatch.setattr(once, "S3ProviderEvidenceStore", lambda *_a, **_k: object())
+
+    async def sdk_ready():
+        return None
+
+    monkeypatch.setattr(loop, "_codex_sdk_preflight_blocker_async", sdk_ready)
+    monkeypatch.setattr(loop, "local_settings", lambda *_a, **_k: settings)
+    import os
+
+    browser_entry = os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1" and fault is None
+    if browser_entry:
+        import subprocess
+
+        settings.release_revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    await loop.heartbeat_agent_paper_loop(
+        settings,
+        account_id=authority.account_id,
+        worker_id=f"agent-paper-loop-{UUID(int=1)}",
+        started_at=AT - timedelta(minutes=1),
+        seen_at=AT,
+    )
+    app = create_engine_app(settings)
+    path = "/internal/v1/paper/manual-requests"
+    if browser_entry:
+        from helpers.controlled_browser import verify_controlled_browser
+
+        request_id = await verify_controlled_browser(
+            settings.database_url,
+            api_now=AT,
+            cycle_id=None,
+            order_ids=(),
+            manual_settings=settings,
+            submit_manual=True,
+        )
+        assert request_id is not None
+    else:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = b'{"mode":"research_and_paper"}'
+            response = await client.post(
+                path,
+                content=body,
+                headers={**headers("POST", path, body), "Idempotency-Key": "v10-entry-result"},
+            )
+            assert response.status_code == 200, response.text
+            request_id = UUID(response.json()["data"]["request_id"])
+            assert response.json()["data"]["status"] == "queued"
+    trigger_settings = once.AgentPaperTriggerSettings.model_validate(
+        settings.model_dump()
+        | {
+            "object_store_endpoint": "http://127.0.0.1:9",
+            "alpaca_key": "fixture",
+            "alpaca_secret": "fixture",
+        }
+    )
+    monkeypatch.setattr(
+        loop,
+        "load_agent_paper_service_environment",
+        lambda *_a, **_k: trigger_settings.model_dump(),
+    )
+    from nexus.ops.manual_paper_host import inspect_manual_queue
+
+    state = await loop.inspect_agent_paper_loop(
+        settings, account_id=authority.account_id, expected_calendar_authority_id=CALENDAR_ID
+    )
+    state = await inspect_manual_queue(settings, account_id=authority.account_id, snapshot=state)
+    assert loop.choose_loop_action(state) == loop.AgentPaperLoopAction.TRIGGER_MANUAL
+    try:
+        dispatched = await loop.execute_agent_paper_loop_action(
+            settings,
+            account_id=authority.account_id,
+            repo_root=root,
+            action=loop.AgentPaperLoopAction.TRIGGER_MANUAL,
+            snapshot=state,
+        )
+    except ValueError as error:
+        if fault == "preparation_failure":
+            assert str(error) == "MANUAL_RESULT_UNKNOWN"
+            assert vars(error)["_nexus_agent_paper_failure_phase"] == "trigger_provider"
+            assert source_calls == ["risk"]
+            await _verify_failed_manual_intent(settings, sessions, request_id, "unknown")
+            return None
+        raise AssertionError((vars(error), source_calls)) from error
+    assert dispatched is None
+    async with sessions() as session:
+        row = await session.get(ManualPaperRequest, request_id)
+        from nexus.paper.manual_request import read_manual_request
+
+        view = await read_manual_request(session, row)
+        assert view.status == "active" and view.cycle_id is not None
+        result = agent_cycle._result(
+            view.cycle_id, await agent_cycle._events(session, view.cycle_id), replayed=False
+        )
+    assert source_calls == ["risk", "quotes", *(["risk-import"] * 3)]
+    clock_at[0] = AT + timedelta(seconds=1)
+    return settings, request_id, result
+
+
+async def _inspect_manual_host(settings):
+    from helpers.paper_batch import CALENDAR_ID
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.ops.manual_paper_host import inspect_manual_close, inspect_manual_queue
+
+    state = await loop.inspect_agent_paper_loop(
+        settings,
+        account_id=settings.agent_paper_account_id,
+        expected_calendar_authority_id=CALENDAR_ID,
+    )
+    state = await inspect_manual_close(
+        settings, account_id=settings.agent_paper_account_id, snapshot=state
+    )
+    return await inspect_manual_queue(
+        settings, account_id=settings.agent_paper_account_id, snapshot=state
+    )
+
+
+async def _consume_manual_host_action(settings, expected):
+    from contextlib import nullcontext
+    from unittest.mock import patch
+
+    from nexus.ops import agent_paper_loop as loop
+
+    state = await _inspect_manual_host(settings)
+    action = loop.choose_loop_action(state)
+    assert action == getattr(loop.AgentPaperLoopAction, expected), (expected, action, state)
+
+    class ResumeClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return state.now if tz is None else state.now.astimezone(tz)
+
+    with (
+        patch("nexus.ops.agent_paper_once.datetime", ResumeClock)
+        if expected == "RESUME"
+        else nullcontext()
+    ):
+        assert (
+            await loop.execute_agent_paper_loop_action(
+                settings,
+                account_id=settings.agent_paper_account_id,
+                repo_root=Path.cwd(),
+                action=action,
+                snapshot=state,
+            )
+            is None
+        )
+    return state
+
+
+async def _read_cycle_result(session, cycle_id):
+    from nexus.paper import agent_cycle
+
+    return agent_cycle._result(
+        cycle_id, await agent_cycle._events(session, cycle_id), replayed=False
+    )
 
 
 async def _set_test_insert_clock(sessions, at):
@@ -488,6 +952,8 @@ async def _verify_internal_fills(
     protected_environment=None,
     calendar_authority_id=None,
     database_clock_at=None,
+    manual_settings=None,
+    manual_request_id=None,
 ):
     from integration.test_agent_paper_cycle_pg import _ObjectStore, _SchwabPriceHistoryProvider
     from nexus.api.errors import NexusError
@@ -543,12 +1009,21 @@ async def _verify_internal_fills(
             )
             assert scope.window_start > AT + timedelta(seconds=4)
         evaluated_at = scope.window_end + timedelta(seconds=2)
+        if manual_settings is not None:
+            from nexus.ops.agent_paper_loop import choose_loop_action
+
+            evaluated_at = max(evaluated_at, database_clock_at[0])
+            database_clock_at[0] = evaluated_at
+            waiting = await _inspect_manual_host(manual_settings)
+            if choose_loop_action(waiting).value == "wait_for_market":
+                assert waiting.market_window_end_at is not None
+                evaluated_at = waiting.market_window_end_at
         if database_clock_at is not None:
             database_clock_at[0] = evaluated_at
         await _set_test_insert_clock(sessions, evaluated_at)
         if host_settings is not None:
             market_clock[0] = evaluated_at
-            if not windows and protected_environment is None:
+            if not windows and protected_environment is None and manual_settings is None:
                 from integration.test_portfolio_management_e2e import _business_facts
 
                 async with sessions() as session:
@@ -573,21 +1048,25 @@ async def _verify_internal_fills(
                 assert provider.calls == 0
                 async with sessions() as session:
                     assert await _business_facts(session) == before_bad_config
-            assert (
-                await execute_agent_paper_loop_action(
-                    host_settings,
-                    account_id=account_id,
-                    repo_root=Path.cwd(),
-                    action=AgentPaperLoopAction.COLLECT_WINDOW,
-                    snapshot=snapshot(
-                        calendar_authority_id=calendar_authority_id,
-                        now=evaluated_at,
-                        cycle_id=cycle_id,
-                        instrument_id=order.instrument_id,
-                    ),
+            if manual_settings is not None:
+                selected = await _consume_manual_host_action(manual_settings, "COLLECT_WINDOW")
+                assert selected.instrument_id == order.instrument_id
+            else:
+                assert (
+                    await execute_agent_paper_loop_action(
+                        host_settings,
+                        account_id=account_id,
+                        repo_root=Path.cwd(),
+                        action=AgentPaperLoopAction.COLLECT_WINDOW,
+                        snapshot=snapshot(
+                            calendar_authority_id=calendar_authority_id,
+                            now=evaluated_at,
+                            cycle_id=cycle_id,
+                            instrument_id=order.instrument_id,
+                        ),
+                    )
+                    is None
                 )
-                is None
-            )
             window = await collect_agent_paper_window(
                 sessions,
                 cycle_id=cycle_id,
@@ -634,23 +1113,27 @@ async def _verify_internal_fills(
                     )
                 }
             )
-            assert (
-                await execute_agent_paper_loop_action(
-                    host_settings,
-                    account_id=account_id,
-                    repo_root=Path.cwd(),
-                    action=AgentPaperLoopAction.ADVANCE_ORDER,
-                    snapshot=snapshot(
-                        calendar_authority_id=calendar_authority_id,
-                        now=evaluated_at,
-                        cycle_id=cycle_id,
-                        order_id=order.id,
-                        instrument_id=order.instrument_id,
-                        market_window_id=window.authority_id,
-                    ),
+            if manual_settings is not None:
+                selected = await _consume_manual_host_action(manual_settings, "ADVANCE_ORDER")
+                assert selected.order_id == order.id
+            else:
+                assert (
+                    await execute_agent_paper_loop_action(
+                        host_settings,
+                        account_id=account_id,
+                        repo_root=Path.cwd(),
+                        action=AgentPaperLoopAction.ADVANCE_ORDER,
+                        snapshot=snapshot(
+                            calendar_authority_id=calendar_authority_id,
+                            now=evaluated_at,
+                            cycle_id=cycle_id,
+                            order_id=order.id,
+                            instrument_id=order.instrument_id,
+                            market_window_id=window.authority_id,
+                        ),
+                    )
+                    is None
                 )
-                is None
-            )
         if host_settings is not None:
             from integration.test_portfolio_management_e2e import _business_facts
             from nexus.persistence.models.paper import PaperOrderEventRecord
@@ -693,6 +1176,12 @@ async def _verify_internal_fills(
             == filled
         )
     assert provider.calls == len(orders)
+    projection_at = max(
+        max(window.window_end for window in windows) + timedelta(seconds=5),
+        evaluated_at + timedelta(seconds=3),
+    )
+    if database_clock_at is not None:
+        database_clock_at[0] = projection_at
     async with sessions() as session:
         fills = tuple(await session.scalars(select(PaperFillRecord)))
         assert len(fills) == len(orders)
@@ -723,7 +1212,7 @@ async def _verify_internal_fills(
         projection = await load_paper_projection(
             session,
             account_id=account_id,
-            as_of=max(window.window_end for window in windows) + timedelta(seconds=5),
+            as_of=projection_at,
         )
         assert projection.reserved_cash == 0
         assert projection.available_cash == before.available_cash + before.reserved_cash - sum(
@@ -776,10 +1265,23 @@ async def _verify_internal_fills(
                 assert len(item.fills) == 1
     if not verify_reads:
         return
+    if manual_request_id is not None:
+        from nexus.ops.manual_paper_host import finish_configured_manual_request
+
+        await _consume_manual_host_action(manual_settings, "FINISH_MANUAL")
+        async with sessions.begin() as session:
+            view = await finish_configured_manual_request(
+                session, manual_settings, request_id=manual_request_id
+            )
+            assert view.status == "completed" and view.cycle_id == cycle_id
     from integration.test_portfolio_management_e2e import _business_facts
 
     async with sessions() as session:
-        before_reads = await _business_facts(session)
+        before_reads = (
+            await _manual_recovery_facts(session)
+            if manual_request_id
+            else await _business_facts(session)
+        )
     await _verify_http_reads(
         settings.database_url, cycle_id, orders, projection.as_of, formal=formal
     )
@@ -797,9 +1299,16 @@ async def _verify_internal_fills(
             candidate_stage_capacity_reads=not formal,
             formal_readback=formal,
             expected_defer_count=0,
+            manual_settings=manual_settings,
+            manual_request_id=manual_request_id,
         )
     async with sessions() as session:
-        assert await _business_facts(session) == before_reads
+        after_reads = (
+            await _manual_recovery_facts(session)
+            if manual_request_id
+            else await _business_facts(session)
+        )
+        assert after_reads == before_reads
 
 
 async def _verify_http_reads(database_url, cycle_id, orders, api_now, *, formal=False):

@@ -10,7 +10,7 @@ export default defineConfig({
   use: {
     baseURL: process.env.NEXUS_CONTROLLED_WEB_URL,
     browserName: "chromium",
-    channel: "chrome",
+    channel: process.env.NEXUS_E2E_BROWSER_CHANNEL ?? "chrome",
     viewport: { width: 1440, height: 900 },
     screenshot: "off",
     trace: "off",

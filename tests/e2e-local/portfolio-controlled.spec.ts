@@ -1,8 +1,24 @@
 import { expect, test } from "@playwright/test";
-import { chmod } from "node:fs/promises";
+import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { formatDisplayDecimal } from "../../app/lib/display-decimal";
 import type { components } from "../../app/lib/generated/schema";
+
+test("controlled Workspace starts one manual request through the real BFF", async ({ page }) => {
+  test.skip(process.env.NEXUS_CONTROLLED_MANUAL_SUBMIT !== "1", "isolated manual submission phase required");
+  await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: () => "v10-entry-result" }));
+  await page.goto("/workspace");
+  const response = page.waitForResponse((r) => r.url().endsWith("/api/v1/paper/manual-requests") && r.request().method() === "POST");
+  await page.getByRole("region", { name: "开始研究与内部模拟" }).getByRole("button", { name: "研究并内部模拟", exact: true }).click();
+  const posted = await response;
+  expect(posted.status()).toBe(200);
+  const data = (await posted.json()).data;
+  expect(data.status).toBe("queued");
+  expect(data.mode).toBe("research_and_paper");
+  expect(data.execution_locked).toBe(true);
+  await expect(page.getByText(/已登记，等待宿主处理/)).toBeVisible();
+  await writeFile(process.env.NEXUS_CONTROLLED_MANUAL_RECEIPT_PATH!, JSON.stringify(data), { mode: 0o600 });
+});
 
 type OrderPage = components["schemas"]["PaperOrderPageResponse"];
 type Actual = components["schemas"]["PaperPlanActualResponse"];
@@ -94,6 +110,22 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   });
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
+  const manualRequestId = process.env.NEXUS_CONTROLLED_MANUAL_REQUEST_ID;
+  if (manualRequestId) {
+    await page.evaluate((key) => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key, mode: "research_and_paper" })), process.env.NEXUS_CONTROLLED_MANUAL_KEY!);
+    await page.reload();
+    const manual = page.getByRole("region", { name: "开始研究与内部模拟" });
+    await expect(manual.getByText("周期已完成", { exact: false })).toBeVisible();
+    const receipt = await request.get("/api/v1/paper/manual-requests", { headers: { "Idempotency-Key": process.env.NEXUS_CONTROLLED_MANUAL_KEY! } });
+    expect(receipt.status()).toBe(200);
+    const data = (await receipt.json()).data;
+    expect(data.request_id).toBe(manualRequestId);
+    expect(data.cycle_id).toBe(cycleId);
+    expect(data.status).toBe("completed");
+    await manual.getByRole("button", { name: "开始新的请求", exact: true }).click();
+    expect(await page.evaluate(() => sessionStorage.getItem("nexus-manual-paper-attempt-v1"))).toBeNull();
+    await expect(manual.getByRole("button", { name: "研究并内部模拟", exact: true })).toBeEnabled();
+  }
   await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
   await expect(page.getByRole("region", { name: "最新决策" }).getByText(firstPartial ? "部分成交" : "本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByText(firstPartial ? "partially_filled" : "本周期订单已终态")).toBeVisible();

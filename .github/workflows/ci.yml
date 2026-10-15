@@ -138,7 +138,15 @@ jobs:
             engine/tests/integration/test_fred_research_context.py \
             engine/tests/integration/test_agent_paper_cycle_e2e.py \
             engine/tests/integration/test_portfolio_decision_e2e.py \
-            engine/tests/integration/test_portfolio_decision_admission_pg.py
+            engine/tests/integration/test_portfolio_decision_admission_pg.py \
+            engine/tests/integration/test_manual_paper_api_pg.py \
+            engine/tests/integration/test_manual_paper_cycle_pg.py \
+            engine/tests/integration/test_manual_partial_history_seal_pg.py::test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs \
+            engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result \
+            engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_failure_preserves_recovery_gates \
+            engine/tests/integration/test_capacity_rejection_pg.py \
+            engine/tests/integration/test_unknown_preparation_ack_pg.py \
+            engine/tests/integration/test_formal_v10_runtime_admission.py
       - name: Run full Engine regression manually
         if: github.event_name == 'workflow_dispatch'
         run: uv run pytest engine/tests -q --import-mode=importlib
@@ -212,6 +220,15 @@ jobs:
       - run: uv sync --frozen --package nexus-engine
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e:real
+      - name: Verify formal v10 manual entry through fills, ledger and pages
+        env:
+          NEXUS_ENV: test
+          DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci
+          NEXUS_CONTROLLED_BROWSER: "1"
+        run: >-
+          uv run --package nexus-engine pytest -q --import-mode=importlib
+          engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result
+          -k buy
       - name: Upload real fixture failure evidence only
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
