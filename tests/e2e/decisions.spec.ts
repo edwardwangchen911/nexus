@@ -40,7 +40,11 @@ test("opens the latest decision from the workbench as an ordered read-only ledge
   await page.emulateMedia({ reducedMotion: "reduce" });
   const methods: string[] = [];
   const browserErrors: string[] = [];
+  const failedResponses: string[] = [];
   page.on("console", (message) => { if (message.type() === "error") browserErrors.push(message.text()); });
+  page.on("response", (response) => {
+    if (response.status() >= 400) failedResponses.push(`${response.status()} ${new URL(response.url()).pathname}`);
+  });
   await installFixtures(page, methods);
   await page.goto("/workspace");
 
@@ -61,6 +65,7 @@ test("opens the latest decision from the workbench as an ordered read-only ledge
   await expect(page.getByRole("button", { name: /运行|停止|批准|下单|重试/ })).toHaveCount(0);
   expect(methods.length).toBeGreaterThanOrEqual(2);
   expect(methods.every((method) => method === "GET")).toBe(true);
+  expect(failedResponses).toEqual([]);
   expect(browserErrors).toEqual([]);
   await assertReleaseAccessibility(page);
   await page.screenshot({ path: "test-results/decision-detail-desktop.png", fullPage: true });

@@ -57,7 +57,8 @@ async def test_complete_committee_allocation_counterexample_uses_no_real_sdk(
         work = {"research": 47.786, "critique": 35.0, "synthesis": 35.744}[stage]
         observed.append(stage)
         if candidate and stage == "research":
-            assert timeout_seconds == (54 if preparation_seconds else 60)
+            expected_limit = 54 if preparation_seconds else 60
+            assert expected_limit - 1e-6 <= timeout_seconds <= expected_limit
         assert deadline_at == pytest.approx(started + elapsed + timeout_seconds)
         if work > timeout_seconds:
             elapsed += timeout_seconds

@@ -1357,6 +1357,16 @@ def test_accelerated_host_resumes_failed_research_then_enters_next_slot(
     async def evaluation_candidate(*_args, **_kwargs):
         return (await candidates())[0]
 
+    async def legacy_profile(_settings, *, account_id, cycle_id, research_job_id=None):
+        # This scheduler test supplies synthetic snapshots, not persisted cycles.
+        # Native profile admission is covered by test_formal_v10_runtime_admission.
+        assert _settings.agent_paper_formal_model_config_id is None
+        assert account_id == UUID(int=1)
+        assert cycle_id == UUID(int=201)
+        assert research_job_id in (None, UUID(int=202))
+        return False
+
+    monkeypatch.setattr(agent_paper_loop, "resolve_formal_host_cycle_profile", legacy_profile)
     monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
     monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
@@ -1564,6 +1574,16 @@ def test_restarted_host_runs_only_the_existing_cycle_job(
     async def evaluation_candidate(*_args, **_kwargs):
         return (await candidates())[0]
 
+    async def legacy_profile(_settings, *, account_id, cycle_id, research_job_id=None):
+        # This scheduler test supplies synthetic snapshots, not persisted cycles.
+        # Native profile admission is covered by test_formal_v10_runtime_admission.
+        assert _settings.agent_paper_formal_model_config_id is None
+        assert account_id == UUID(int=1)
+        assert cycle_id == UUID(int=401)
+        assert research_job_id in (None, UUID(int=402))
+        return False
+
+    monkeypatch.setattr(agent_paper_loop, "resolve_formal_host_cycle_profile", legacy_profile)
     monkeypatch.setattr(agent_paper_loop, "_load_loop_candidates", candidates)
     monkeypatch.setattr(agent_paper_loop, "load_agent_version_candidate", evaluation_candidate)
     monkeypatch.setattr(agent_paper_loop, "acquire_agent_paper_lock", lambda: nullcontext())
@@ -3294,8 +3314,10 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
             decision_time: datetime,
             allow_safe_no_trade: bool,
             candidate_stage_capacity: bool = False,
+            formal_stage_capacity: bool = False,
         ) -> ActionableResearchDecision:
             assert candidate_stage_capacity is False
+            assert formal_stage_capacity is False
             assert decision_time in {train_slots[0], output_at}
             assert allow_safe_no_trade is True
             return admitted[run_id]
@@ -3915,9 +3937,17 @@ async def test_trigger_once_persists_and_replays_safe_terminal_failure(
         now: datetime,
         candidate_batch_id: UUID,
         require_synthesis_prompt: bool,
+        formal_stage_capacity: bool,
+        formal_model_config_id: UUID | None,
+        trigger_mode: str,
+        manual_request_id: UUID | None,
     ):
         del now
         assert require_synthesis_prompt
+        assert formal_stage_capacity is False
+        assert formal_model_config_id is None
+        assert trigger_mode == "scheduled"
+        assert manual_request_id is None
         return await reserve_schwab_agent_paper_trigger(
             session,
             account_id=account_id,
@@ -4002,9 +4032,17 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
         now: datetime,
         candidate_batch_id: UUID,
         require_synthesis_prompt: bool,
+        formal_stage_capacity: bool,
+        formal_model_config_id: UUID | None,
+        trigger_mode: str,
+        manual_request_id: UUID | None,
     ):
         del now
         assert require_synthesis_prompt
+        assert formal_stage_capacity is False
+        assert formal_model_config_id is None
+        assert trigger_mode == "scheduled"
+        assert manual_request_id is None
         return await reserve_schwab_agent_paper_trigger(
             session,
             account_id=account_id,
@@ -6271,8 +6309,10 @@ async def test_legacy_manifest_resumes_research_without_duplicate_jobs(
             decision_time: datetime,
             allow_safe_no_trade: bool,
             candidate_stage_capacity: bool = False,
+            formal_stage_capacity: bool = False,
         ) -> ActionableResearchDecision:
             assert candidate_stage_capacity is False
+            assert formal_stage_capacity is False
             assert decision_time == DECISION_TIME
             assert allow_safe_no_trade is True
             return admitted[run_id]

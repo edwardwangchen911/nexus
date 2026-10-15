@@ -126,7 +126,11 @@ async def test_real_sdk_three_stages_measure_slow_research_without_retries(monke
     )
     for role in ROLE_ORDER:
         await committee.analyze(role, request, evidence, prompts[role])
-    assert observed == [("research", 274), ("critique", 200), ("synthesis", 141)]
+    expected = [("research", 274), ("critique", 200), ("synthesis", 141)]
+    assert len(observed) == len(expected)
+    for (stage, timeout), (expected_stage, limit) in zip(observed, expected):
+        assert stage == expected_stage
+        assert limit - 1e-6 <= timeout <= limit
     assert clock[0] - origin == 178
     assert committee.usage.provider_calls == 3
     assert committee.usage.input_tokens == 900

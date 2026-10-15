@@ -127,7 +127,12 @@ async def test_flexible_committee_reaches_real_sdk_after_complete_pool_and_keeps
     )
     for role in ROLE_ORDER:
         await committee.analyze(role, request, evidence, prompts[role])
-    assert observed == [("research", 60, 63), ("critique", 86, 116), ("synthesis", 45, 142)]
+    expected = [("research", 60, 63), ("critique", 86, 116), ("synthesis", 45, 142)]
+    assert len(observed) == len(expected)
+    for (stage, timeout, deadline), (expected_stage, limit, cutoff) in zip(observed, expected):
+        assert stage == expected_stage
+        assert limit - 1e-6 <= timeout <= limit
+        assert deadline == pytest.approx(cutoff, rel=0, abs=1e-6)
     assert clock[0] - origin == 134
     assert committee._deadline == origin + 175
     assert committee.usage.provider_calls == 3

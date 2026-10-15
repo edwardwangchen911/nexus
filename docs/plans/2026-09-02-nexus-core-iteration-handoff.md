@@ -10,6 +10,8 @@
 
 长期产品目标仍包括可追溯的经济评价、样本外验证和策略进化，作为上述可用性阶段之后的工作；不作为本阶段投用的前置条件。原生 Goal 保留原长期 objective，本段没有修改 Goal 原文或宣称完成。本切片仅补既有正常链和默认门槛，不扩展经济评价、缓存、checkpoint 或自动进化。
 
+本地正常入口闭环候选 `f7f3c5a7` 已通过 125 项相关 PostgreSQL 用例及同请求浏览器买入整链，默认 CI 已接入代表性成功/失败路径；这是受控来源与 SDK 替身证据，未推送或部署。随后汇总主线 `bf948268` 的 CI run `38696184936`，确认 Engine 15 项失败、synthetic E2E 1 项失败及 policy 4 项报告。本次修正测试对个人 tokenizer 缓存的依赖、浮点精确相等和旧 profile/参数替身，保持生产限制；44 单测、71 PG 与 4 页面用例及独立审查通过。页面原 HTTP 500 未复现，仅补失败响应路径诊断；policy 的网关指纹、入口登记及 Docker ARG 解析仍待修复，不能声称整轮 CI 通过。证据位于本 worktree `.secrets/entry-result-closure/`；实际 main/API/Worker 仍为 `bf948268`，宿主保持停止，真实新周期和跨日验收尚未完成。
+
 > 2026-10-15 Workspace 已处置 unknown 的只读衔接本地完成，候选 b889f1dd，尚未部署。可选 preparation_disposition=unknown_acknowledged 只在配置账户的 GET/CLI 读回中逐次核验既有审计后提供；canonical reader 保持独立，原 unknown、事件、费用及预算不变，默认仍是旧七字段。页面保留未知说明，复位只清本地引用；刷新只 GET，GET 失败撤销旧回执，显式新开始使用新 key 并仍走原准入。最终 47 PG、35 unit、3 桌面/手机浏览器场景、vinext build、类型/ESLint/Ruff/Mypy/generated/diff 及集中审查通过。证据本 worktree .secrets/manual-unknown-workspace-qualification/verification.json。实际 main/API/Worker 仍为 2c98c2bb，五项真实处置已完成；本轮未部署、修改业务数据、调用真实模型、启动宿主或新周期。真实研究/内部模拟、自然验收与 OOS 仍未完成。
 
 > 2026-10-15 当前切片：本地实现“明确接受历史准备结果未知”，限定一条 unknown 请求和四条空回执认领，独立审计只解除其调度占用。原 unknown、空回执、未知调用/费用及预算原样保留，旧请求/槽位禁止重放；迟到事实、审计失效、其他 Run/Job/租约/订单及账户占用仍拒绝。正常 CLI、宿主读取/派发、native 准入均已接线；账户及预算日并发反例补在原锁边界，历史恢复完成回执按原前驱/历史前缀兼容读取。真实库只读核对：五项证明可读，其他未合格认领为零，业务写零；不能代替真实处置或新周期验收。本轮未迁移、合入 main、部署、处置真实记录、启动宿主/新周期或改凭据；execution_locked=true 不变。81 项相关 PostgreSQL 回归、29 项 CLI/宿主单测、Ruff/Mypy 和独立审查通过；新正常请求落盘到周期及三个研究 Job，未调用真实模型。详细边界见运行手册“明确接受历史准备结果未知”，验证回执见本 worktree `.secrets/unknown-preparation-ack-qualification/verification.json`。

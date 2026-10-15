@@ -1,5 +1,7 @@
 """Admission bounds the lossless wire, including projection fallback branches."""
 
+import base64
+import hashlib
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,7 +18,23 @@ from unit.agents.test_full_input_capacity_v9 import committee
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("padding", [61088, 61089, 61441])
-async def test_pool_accepts_wire_within_limit_even_when_decoded_rows_exceed_it(padding):
+@pytest.mark.parametrize("vocabulary_available", [True, False])
+async def test_pool_accepts_wire_within_limit_even_when_decoded_rows_exceed_it(
+    padding, vocabulary_available, monkeypatch, tmp_path
+):
+    from nexus.agents import codex_token_budget as budget
+
+    # Exercise the real tokenizer with a deterministic, offline vocabulary.
+    # A developer's cached public vocabulary must not decide the test outcome.
+    path = tmp_path / "synthetic-vocabulary"
+    monkeypatch.setattr(budget, "tokenizer_cache_path", lambda: path)
+    if vocabulary_available:
+        tokens = [bytes([value]) for value in range(256)] + [b"x" * (2**i) for i in range(1, 10)]
+        data = b"".join(
+            base64.b64encode(token) + f" {rank}\n".encode() for rank, token in enumerate(tokens)
+        )
+        path.write_bytes(data)
+        monkeypatch.setattr(budget, "VOCABULARY_SHA256", hashlib.sha256(data).hexdigest())
     request, evidence, _ = _authority()
     model = committee()
     inputs = {
@@ -24,6 +42,15 @@ async def test_pool_accepts_wire_within_limit_even_when_decoded_rows_exceed_it(p
         "financial_facts": {"items": []},
     }
     model._inputs = AsyncMock(return_value=inputs)
+    if not vocabulary_available:
+        with pytest.raises(ValueError, match="^CODEX_CAPACITY_POOL_INPUT_EXCEEDED$"):
+            await preflight_capacity_pool(
+                [CapacityPoolMember(model, request, evidence)],
+                expected_instrument_ids=(request.instrument_id,),
+            )
+        assert model._capacity_pool_manifest is None
+        assert model.usage.provider_calls == 0
+        return
     receipt = await preflight_capacity_pool(
         [CapacityPoolMember(model, request, evidence)],
         expected_instrument_ids=(request.instrument_id,),
