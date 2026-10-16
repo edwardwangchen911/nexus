@@ -41,6 +41,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     manual_entry=False,
     tmp_path=None,
     fault=None,
+    recover_unknown=False,
 ):
     formal = profile in {"formal_v9", "formal_v10"}
     consumer_mode = (
@@ -196,12 +197,21 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         if manual_entry:
             assert profile == "formal_v10" and count == 3 and tmp_path is not None
             manual = await _start_manual_http_request(
-                settings, sessions, authority, batch, model, monkeypatch, clock_at, tmp_path, fault
+                settings,
+                sessions,
+                authority,
+                batch,
+                model,
+                monkeypatch,
+                clock_at,
+                tmp_path,
+                fault,
+                recovery_entry=manifest[0] if recover_unknown else None,
             )
             if fault == "preparation_failure":
                 assert manual is None and calls == []
                 return
-            settings, request_id, result = manual
+            settings, request_id, result, recovery = manual
         else:
             async with sessions.begin() as session:
                 result = await start_schwab_agent_paper_cycle(
@@ -223,8 +233,22 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         async with sessions() as session:
             assert result.result_code == "RESEARCH_JOBS_PREPARED", result
             assert len(result.research_run_ids) == count
-            runs = tuple(await session.scalars(select(AgentResearchRunRecord)))
-            jobs = tuple(await session.scalars(select(Job)))
+            runs = tuple(
+                await session.scalars(
+                    select(AgentResearchRunRecord).where(
+                        AgentResearchRunRecord.id.in_(result.research_run_ids)
+                    )
+                )
+            )
+            jobs = tuple(
+                await session.scalars(
+                    select(Job).where(
+                        Job.payload["run_id"].astext.in_(
+                            [str(run_id) for run_id in result.research_run_ids]
+                        )
+                    )
+                )
+            )
             assert len(runs) == len(jobs) == count
             assert {run.instrument_id for run in runs} == set(batch.instrument_ids)
             assert all(run.model_config_id == model.id for run in runs)
@@ -649,6 +673,13 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 )
                 assert response.status_code == 200
                 assert response.json()["data"] == view.model_dump(mode="json")
+            if recovery is not None:
+                old_id, old_facts = recovery
+                async with sessions() as session:
+                    after = await _manual_recovery_facts(session)
+                for table, hashes in old_facts.items():
+                    assert set(hashes).issubset(after[table]), table
+                await _verify_acknowledged_request(settings, old_id)
     finally:
         await engine.dispose()
 
@@ -657,7 +688,14 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
 @pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
 async def test_v10_manual_entry_to_result(migrated_database_url, monkeypatch, tmp_path, trade):
     await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
-        migrated_database_url, monkeypatch, 3, trade, "formal_v10", True, tmp_path
+        migrated_database_url,
+        monkeypatch,
+        3,
+        trade,
+        "formal_v10",
+        True,
+        tmp_path,
+        recover_unknown=trade,
     )
 
 
@@ -832,7 +870,17 @@ async def _manual_recovery_facts(session):
 
 
 async def _start_manual_http_request(
-    settings, sessions, authority, batch, model, monkeypatch, clock_at, root, fault=None
+    settings,
+    sessions,
+    authority,
+    batch,
+    model,
+    monkeypatch,
+    clock_at,
+    root,
+    fault=None,
+    *,
+    recovery_entry=None,
 ):
     import httpx
     from helpers.paper_api import headers
@@ -953,6 +1001,11 @@ async def _start_manual_http_request(
         started_at=AT - timedelta(minutes=1),
         seen_at=AT,
     )
+    recovery = None
+    if recovery_entry is not None:
+        recovery = await _accept_old_preparation(
+            settings, sessions, model, recovery_entry, monkeypatch, root
+        )
     app = create_engine_app(settings)
     path = "/internal/v1/paper/manual-requests"
     if browser_entry:
@@ -965,6 +1018,7 @@ async def _start_manual_http_request(
             order_ids=(),
             manual_settings=settings,
             submit_manual=True,
+            recovered_manual_request_id=recovery[0] if recovery else None,
         )
         assert request_id is not None
     else:
@@ -980,6 +1034,8 @@ async def _start_manual_http_request(
             assert response.status_code == 200, response.text
             request_id = UUID(response.json()["data"]["request_id"])
             assert response.json()["data"]["status"] == "queued"
+    if recovery is not None:
+        assert request_id != recovery[0]
     trigger_settings = once.AgentPaperTriggerSettings.model_validate(
         settings.model_dump()
         | {
@@ -1028,7 +1084,112 @@ async def _start_manual_http_request(
         )
     assert source_calls == ["risk", "quotes", *(["risk-import"] * 3)]
     clock_at[0] = AT + timedelta(seconds=1)
-    return settings, request_id, result
+    return settings, request_id, result, recovery
+
+
+async def _accept_old_preparation(settings, sessions, model, entry, monkeypatch, root):
+    """Accept one unknown in the same database that will run the new v10 cycle."""
+    from contextlib import nullcontext
+
+    import httpx
+    from helpers.paper_api import headers
+    from helpers.paper_batch import CALENDAR_ID
+    from integration.test_current_preparation_recovery_pg import _seed_acceptance_budget
+    from nexus.main import create_engine_app
+    from nexus.ops import agent_paper_once, manual_paper, manual_paper_host
+    from nexus.paper import current_preparation_recovery
+
+    path = "/internal/v1/paper/manual-requests"
+    body = b'{"mode":"research_and_paper"}'
+    app = create_engine_app(settings)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                path,
+                content=body,
+                headers={**headers("POST", path, body), "Idempotency-Key": "interrupted"},
+            )
+            assert response.status_code == 200, response.text
+            old_id = UUID(response.json()["data"]["request_id"])
+            assert response.json()["data"]["status"] == "queued"
+    finally:
+        await app.state.session_factory.kw["bind"].dispose()
+
+    async def interrupted(*_a, **_k):
+        raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+
+    trigger = agent_paper_once.AgentPaperTriggerSettings.model_validate(
+        settings.model_dump()
+        | {
+            "object_store_endpoint": "http://127.0.0.1:9",
+            "alpaca_key": "fixture",
+            "alpaca_secret": "fixture",
+        }
+    )
+    with monkeypatch.context() as m:
+        # Fault at the existing preparation boundary; never replay this old request.
+        m.setattr(agent_paper_once, "trigger_once", interrupted)
+        with pytest.raises(ValueError, match="^MANUAL_RESULT_UNKNOWN$"):
+            await manual_paper_host.dispatch_manual_request(
+                settings,
+                trigger,
+                request_id=old_id,
+                repo_root=root,
+                calendar_authority_id=CALENDAR_ID,
+                process_environment={},
+            )
+    async with sessions.begin() as session:
+        await _seed_acceptance_budget(session, entry, model, "accept_prepared_closed")
+    async with sessions() as session:
+        before = await _manual_recovery_facts(session)
+    args = manual_paper.parser().parse_args(
+        [
+            "--repo-root",
+            str(root),
+            "recover-preparation",
+            "--request-id",
+            str(old_id),
+            "--accept-unknown-effects",
+        ]
+    )
+    with monkeypatch.context() as m:
+        # OS checkout/producer ownership are isolated substitutes; maintenance
+        # locks, persisted proofs, account/job/budget checks and audit remain real.
+        m.setattr(manual_paper, "_require_maintenance_code", lambda *_: None)
+        m.setattr(manual_paper, "preparation_service_control_lock", lambda *_: nullcontext())
+        m.setattr(
+            current_preparation_recovery, "_require_execution_producer_stopped", lambda *_: None
+        )
+        accepted = await manual_paper.run(settings, args)
+    assert accepted.status == "preparation_unknown_acknowledged" and not accepted.replayed
+    async with sessions() as session:
+        assert await _manual_recovery_facts(session) == before
+    await _verify_acknowledged_request(settings, old_id)
+    return old_id, before
+
+
+async def _verify_acknowledged_request(settings, request_id):
+    import httpx
+    from helpers.paper_api import headers
+    from nexus.main import create_engine_app
+
+    app = create_engine_app(settings)
+    path = f"/internal/v1/paper/manual-requests/{request_id}"
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(path, headers=headers("GET", path))
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["request_id"] == str(request_id)
+        assert data["status"] == "unknown" and data["cycle_id"] is None
+        assert data["preparation_disposition"] == "unknown_acknowledged"
+        assert data["execution_locked"] is True
+    finally:
+        await app.state.session_factory.kw["bind"].dispose()
 
 
 async def _inspect_manual_host(settings):

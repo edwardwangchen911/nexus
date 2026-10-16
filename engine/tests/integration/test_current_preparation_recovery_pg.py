@@ -327,7 +327,6 @@ async def test_current_host_interruption_recovers_via_normal_cli(
         from nexus.paper.history_seal import _row_hash
         from nexus.persistence.models.agents import (
             AgentDailyBudgetReservationRecord,
-            AgentPromptVersionRecord,
             AgentResearchRunRecord,
             FormalBudgetBindingRecord,
         )
@@ -357,54 +356,8 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                 }
 
         if acceptance_case:
-            # A real nonzero, unresolved reservation must survive acceptance.
-            from decimal import Decimal
-
             async with sessions.begin() as session:
-                prompt = await session.scalar(
-                    select(AgentPromptVersionRecord)
-                    .where(AgentPromptVersionRecord.role == "orchestrator")
-                    .limit(1)
-                )
-                budget_run = AgentResearchRunRecord(
-                    instrument_id=manifest[0].instrument_id,
-                    data_snapshot_id=manifest[0].research_snapshot_id,
-                    prompt_version_id=prompt.id,
-                    model_config_id=model.id,
-                    decision_time=AT,
-                    actor_id="independent-budget-fixture",
-                    idempotency_key="unsettled-acceptance",
-                    status="prepared"
-                    if acceptance_case.startswith("accept_prepared_")
-                    else "failed",
-                    schema_hash="a" * 64,
-                    model_hash=model.config_hash,
-                    prompt_hash=prompt.content_hash,
-                    prompt_manifest={},
-                    evidence_hash="b" * 64,
-                    evidence_manifest=[{"source": "fixture"}],
-                    tool_hash="c" * 64,
-                    input_hash="d" * 64,
-                    reserved_cost_usd=Decimal("1"),
-                    settled_cost_usd=None,
-                    pricing_version="fixture",
-                    input_tokens=None,
-                    output_tokens=None,
-                )
-                session.add(budget_run)
-                await session.flush()
-                session.add(
-                    AgentDailyBudgetReservationRecord(
-                        business_date=AT.date(),
-                        run_id=budget_run.id,
-                        pricing_version="fixture",
-                        reserved_usd=Decimal("1"),
-                        settled_usd=None,
-                        state="reserved",
-                    )
-                )
-                if acceptance_case.startswith("accept_prepared_"):
-                    await _seed_closed_prepared_run(session, budget_run, acceptance_case)
+                await _seed_acceptance_budget(session, manifest[0], model, acceptance_case)
         before = await business_facts()
         if direct_acceptance:
             monkeypatch.setattr(manual_request, "require_manual_account_available", account_guard)
@@ -659,6 +612,61 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                     )
     finally:
         await engine.dispose()
+
+
+async def _seed_acceptance_budget(session, entry, model, case):
+    """Historical unresolved usage, shared by recovery and subsequent execution tests."""
+    from decimal import Decimal
+
+    from nexus.persistence.models.agents import (
+        AgentDailyBudgetReservationRecord,
+        AgentPromptVersionRecord,
+        AgentResearchRunRecord,
+    )
+
+    prompt = await session.scalar(
+        select(AgentPromptVersionRecord)
+        .where(AgentPromptVersionRecord.role == "orchestrator")
+        .limit(1)
+    )
+    budget_run = AgentResearchRunRecord(
+        instrument_id=entry.instrument_id,
+        data_snapshot_id=entry.research_snapshot_id,
+        prompt_version_id=prompt.id,
+        model_config_id=model.id,
+        decision_time=AT,
+        actor_id="independent-budget-fixture",
+        idempotency_key="unsettled-acceptance",
+        status="prepared" if case.startswith("accept_prepared_") else "failed",
+        schema_hash="a" * 64,
+        model_hash=model.config_hash,
+        prompt_hash=prompt.content_hash,
+        prompt_manifest={},
+        evidence_hash="b" * 64,
+        evidence_manifest=[{"source": "fixture"}],
+        tool_hash="c" * 64,
+        input_hash="d" * 64,
+        reserved_cost_usd=Decimal("1"),
+        settled_cost_usd=None,
+        pricing_version="fixture",
+        input_tokens=None,
+        output_tokens=None,
+    )
+    session.add(budget_run)
+    await session.flush()
+    session.add(
+        AgentDailyBudgetReservationRecord(
+            business_date=AT.date(),
+            run_id=budget_run.id,
+            pricing_version="fixture",
+            reserved_usd=Decimal("1"),
+            settled_usd=None,
+            state="reserved",
+        )
+    )
+    if case.startswith("accept_prepared_"):
+        await _seed_closed_prepared_run(session, budget_run, case)
+    return budget_run
 
 
 async def _seed_closed_prepared_run(session, run, case):
