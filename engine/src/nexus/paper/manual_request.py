@@ -396,6 +396,21 @@ async def _require_cycle_jobs_settled(
         job.status not in {"succeeded", "failed", "skipped", "dead_letter"} for job in jobs
     ):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    # Equal totals can hide two Jobs for one Run and none for another. A terminal
+    # controller must prove each binding, not merely count terminal consumers.
+    for candidate_run in runs:
+        bound = [job for job in jobs if job.payload.get("run_id") == str(candidate_run.id)]
+        allowed_types = (
+            {"agent.research", "agent.paper.research"}
+            if isinstance(candidate_run, AgentResearchRunRecord)
+            else {"agent.portfolio_synthesis"}
+        )
+        if (
+            len(bound) != 1
+            or bound[0].payload != {"run_id": str(candidate_run.id)}
+            or bound[0].job_type not in allowed_types
+        ):
+            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     if require_no_live_lease:
         leases = tuple(
             await session.scalars(
