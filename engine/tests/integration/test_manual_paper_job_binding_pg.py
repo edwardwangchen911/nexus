@@ -3,7 +3,7 @@
 import json
 from datetime import timedelta
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -17,11 +17,15 @@ from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
 from nexus.ops.openai_local import prepare_database
 from nexus.paper import agent_cycle
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
-from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.agents import (
+    AgentDailyBudgetReservationRecord,
+    AgentModelConfigRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.paper import AgentPaperCycleRecord
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import Job, JobLease
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +33,20 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shape", ["valid", "duplicate_missing", "wrong_family", "extra_payload"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "valid",
+        "duplicate_missing",
+        "wrong_family",
+        "extra_payload",
+        "queued",
+        "running",
+        "live_lease",
+        "expired_lease",
+        "unknown_usage",
+    ],
+)
 async def test_manual_http_requires_one_matching_job_per_historical_run(
     migrated_database_url, monkeypatch, shape
 ):
@@ -93,21 +110,43 @@ async def test_manual_http_requires_one_matching_job_per_historical_run(
             runs = list(await session.scalars(select(AgentResearchRunRecord)))
             jobs = list(await session.scalars(select(Job).order_by(Job.id)))
             assert len(jobs) == len(runs) == 3
+            assert all(
+                job.retry_policy == "automatic_safe" and job.max_attempts == 1 for job in jobs
+            )
             for run in runs:
                 run.status = "failed"
                 run.settled_cost_usd = Decimal("0")
+            if shape == "unknown_usage":
+                runs[0].settled_cost_usd = None
             for job in jobs:
+                if shape == "queued" and job == jobs[0]:
+                    continue
                 job.status = "running"
                 job.started_at = AT
                 job.attempt_count = 1
                 job.version += 1
             await session.flush()
             for job in jobs:
+                if shape in {"queued", "running"} and job == jobs[0]:
+                    continue
                 job.status = "dead_letter"
                 job.finished_at = AT
                 job.version += 1
             await session.flush()
-            if shape != "valid":
+            if shape in {"live_lease", "expired_lease"}:
+                session.add(
+                    JobLease(
+                        job_id=jobs[0].id,
+                        worker_id="historical-binding-test",
+                        expires_at=AT + timedelta(minutes=1) if shape == "live_lease" else AT,
+                        lease_token=uuid4(),
+                        fence_token=1,
+                        acquired_at=AT - timedelta(minutes=1),
+                        heartbeat_at=AT - timedelta(minutes=1),
+                    )
+                )
+                await session.flush()
+            if shape in {"duplicate_missing", "wrong_family", "extra_payload"}:
                 # Corruption fixture only, in a freshly provisioned test database.
                 # Normal producers cannot mutate immutable Job authority this way.
                 await session.execute(text("ALTER TABLE jobs DISABLE TRIGGER USER"))
@@ -122,6 +161,18 @@ async def test_manual_http_requires_one_matching_job_per_historical_run(
             before = [
                 (run.id, run.status, run.reserved_cost_usd, run.settled_cost_usd) for run in runs
             ]
+            budget_query = (
+                select(
+                    AgentDailyBudgetReservationRecord.run_id,
+                    AgentDailyBudgetReservationRecord.state,
+                    AgentDailyBudgetReservationRecord.reserved_usd,
+                    AgentDailyBudgetReservationRecord.settled_usd,
+                )
+                .where(AgentDailyBudgetReservationRecord.run_id.in_(result.research_run_ids))
+                .order_by(AgentDailyBudgetReservationRecord.run_id)
+            )
+            before_budgets = (await session.execute(budget_query)).all()
+            assert len(before_budgets) == 3
         settings = EngineSettings(
             **{
                 **api_settings(migrated_database_url).model_dump(),
@@ -152,9 +203,28 @@ async def test_manual_http_requires_one_matching_job_per_historical_run(
                 content=body,
                 headers={**headers("POST", path, body), "Idempotency-Key": "independent-new"},
             )
-        if shape == "valid":
+        admitted = shape in {"valid", "expired_lease"}
+        if admitted:
             assert response.status_code == 200, response.text
             assert response.json()["data"]["status"] == "queued"
+            # Missing legacy Attempt history is not permission to replay a v10
+            # Job. Exercise the normal retry API with its exact current version.
+            retry_path = f"/internal/v1/jobs/{jobs[0].id}/retry"
+            retry_body = b"{}"
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                retry = await client.post(
+                    retry_path,
+                    content=retry_body,
+                    headers={
+                        **headers("POST", retry_path, retry_body),
+                        "Idempotency-Key": "old-research-must-not-replay",
+                        "If-Match": f'"{jobs[0].version}"',
+                    },
+                )
+            assert retry.status_code == 403, retry.text
+            assert retry.json()["error"]["code"] == "FORBIDDEN"
         else:
             assert response.status_code == 409, response.text
             assert (
@@ -163,12 +233,19 @@ async def test_manual_http_requires_one_matching_job_per_historical_run(
             )
         async with sessions.begin() as session:
             assert await session.scalar(select(func.count()).select_from(ManualPaperRequest)) == (
-                1 if shape == "valid" else 0
+                1 if admitted else 0
+            )
+            old_job = await session.get(Job, jobs[0].id)
+            assert (old_job.status, old_job.version, old_job.manual_retry_count) == (
+                jobs[0].status,
+                jobs[0].version,
+                0,
             )
             after = list(await session.scalars(select(AgentResearchRunRecord)))
             assert sorted(before) == sorted(
                 (run.id, run.status, run.reserved_cost_usd, run.settled_cost_usd) for run in after
             )
+            assert (await session.execute(budget_query)).all() == before_budgets
     finally:
         if app is not None:
             await app.state.session_factory.kw["bind"].dispose()
