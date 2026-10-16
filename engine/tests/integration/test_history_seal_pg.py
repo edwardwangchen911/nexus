@@ -36,7 +36,7 @@ class VerifiedRejection(Exception):
     ],
 )
 async def test_history_seal_guards_and_whole_transaction_rollback(
-    migrated_database_url, monkeypatch, fault
+    migrated_database_url, monkeypatch, fault, tmp_path
 ):
     original = manual_paper.run
 
@@ -103,12 +103,12 @@ async def test_history_seal_guards_and_whole_transaction_rollback(
 
     monkeypatch.setattr(manual_paper, "run", checked)
     with pytest.raises(VerifiedRejection):
-        await legacy_case(migrated_database_url, monkeypatch, "v4", True, False)
+        await legacy_case(migrated_database_url, monkeypatch, "v4", True, False, tmp_path)
 
 
 @pytest.mark.asyncio
 async def test_failed_unknown_usage_and_released_budget_remain_unknown(
-    migrated_database_url, monkeypatch
+    migrated_database_url, monkeypatch, tmp_path
 ):
     original = manual_paper.run
     cancellations = 0
@@ -146,4 +146,4 @@ async def test_failed_unknown_usage_and_released_budget_remain_unknown(
         return result
 
     monkeypatch.setattr(manual_paper, "run", historical_failure)
-    await legacy_case(migrated_database_url, monkeypatch, "v4", True, False)
+    await legacy_case(migrated_database_url, monkeypatch, "v4", True, False, tmp_path)

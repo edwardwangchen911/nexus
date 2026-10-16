@@ -801,7 +801,7 @@ async def test_prepared_execution_gate_keeps_account_history_seal_required(
             await factory.kw["bind"].dispose()
 
     monkeypatch.setattr(manual_paper, "run", verify_seal_boundary)
-    await legacy_case(migrated_database_url, monkeypatch, "v4", True, False)
+    await legacy_case(migrated_database_url, monkeypatch, "v4", True, False, tmp_path)
     assert checked == 2
 
 
