@@ -39,6 +39,7 @@ from nexus.paper.manual_entry import (
     start_configured_manual_request,
 )
 from nexus.paper.manual_preparation_close import (
+    PreparationCloseDiagnosticError,
     PreparationCloseReceipt,
     preparation_service_control_lock,
 )
@@ -148,8 +149,12 @@ async def run(
                 lifecycle_guards.enter_context(
                     preparation_service_control_lock(args.repo_root, settings.release_revision)
                 )
-            except RuntimeError:
-                raise ValueError("MANUAL_PREPARATION_CLOSE_BLOCKED") from None
+            except RuntimeError as error:
+                reason = {
+                    "AGENT_PAPER_SERVICE_CONTROL_BUSY": "LOCK_BUSY",
+                    "AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE": "LOCK_UNSAFE",
+                }.get(str(error), "LOCK_UNAVAILABLE")
+                raise PreparationCloseDiagnosticError("service_control_lock", reason) from None
         async with factory.begin() as session:
             if args.action in {
                 "check-preparation-acceptance",
@@ -318,7 +323,14 @@ def main(argv: list[str] | None = None) -> int:
         view = asyncio.run(run(settings, args))
     except Exception as error:
         code = str(error) if str(error) in SAFE_ENTRY_CODES else "MANUAL_RESULT_UNKNOWN"
-        print(json.dumps({"status": "blocked", "error_code": code, "execution_locked": True}))
+        report: dict[str, object] = {
+            "status": "blocked",
+            "error_code": code,
+            "execution_locked": True,
+        }
+        if isinstance(error, PreparationCloseDiagnosticError):
+            report.update(error.safe_diagnostics())
+        print(json.dumps(report))
         return 1
     print(view.model_dump_json())
     return 0

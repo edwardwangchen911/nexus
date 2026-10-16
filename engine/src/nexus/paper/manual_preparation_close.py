@@ -41,6 +41,40 @@ QUALIFIED_PRODUCERS = {
 }
 
 
+class PreparationCloseDiagnosticError(ValueError):
+    """Fixed failure classification; never carries external command text."""
+
+    _SAFE_CODES = {
+        "service_control_source": {
+            "SOURCE_IDENTITY_INVALID",
+            "INSPECTION_TIMEOUT",
+            "INSPECTION_FAILED",
+        },
+        "service_control_lock": {"LOCK_BUSY", "LOCK_UNSAFE", "LOCK_UNAVAILABLE"},
+        "host_status": {
+            "INSPECTION_TIMEOUT",
+            "INSPECTION_FAILED",
+            "STATUS_INVALID",
+            "HOST_NOT_INACTIVE",
+        },
+        "research_processes": {"QUIESCENCE_UNCONFIRMED"},
+    }
+
+    def __init__(self, stage: str, code: str) -> None:
+        super().__init__(BLOCKED)
+        self.stage = stage
+        self.code = code
+
+    def safe_diagnostics(self) -> dict[str, str]:
+        if (
+            isinstance(self.stage, str)
+            and isinstance(self.code, str)
+            and self.code in self._SAFE_CODES.get(self.stage, set())
+        ):
+            return {"diagnostic_stage": self.stage, "diagnostic_code": self.code}
+        return {}
+
+
 class PreparationCloseReceipt(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     request_id: UUID
@@ -57,7 +91,9 @@ def preparation_service_control_lock(
     script = repo_root / "scripts/macos/agent-paper-loop-service.py"
     try:
         if revision is None or script.is_symlink():
-            raise ValueError(BLOCKED)
+            raise PreparationCloseDiagnosticError(
+                "service_control_source", "SOURCE_IDENTITY_INVALID"
+            )
         source = subprocess.run(
             [
                 "git",
@@ -70,12 +106,24 @@ def preparation_service_control_lock(
             timeout=5,
             check=False,
         )
-        if source.returncode != 0 or source.stdout != script.read_bytes():
-            raise ValueError(BLOCKED)
+        if source.returncode != 0:
+            raise PreparationCloseDiagnosticError("service_control_source", "INSPECTION_FAILED")
+        if source.stdout != script.read_bytes():
+            raise PreparationCloseDiagnosticError(
+                "service_control_source", "SOURCE_IDENTITY_INVALID"
+            )
         namespace = runpy.run_path(str(script))
         return cast(AbstractContextManager[None], namespace["_service_control_lock"]())
+    except PreparationCloseDiagnosticError:
+        raise
+    except subprocess.TimeoutExpired:
+        raise PreparationCloseDiagnosticError(
+            "service_control_source", "INSPECTION_TIMEOUT"
+        ) from None
     except (OSError, subprocess.SubprocessError, ValueError):
-        raise ValueError(BLOCKED) from None
+        raise PreparationCloseDiagnosticError(
+            "service_control_source", "INSPECTION_FAILED"
+        ) from None
 
 
 def require_preparation_producers_stopped(repo_root: Path, env_file: Path) -> None:
@@ -97,16 +145,26 @@ def require_preparation_producers_stopped(repo_root: Path, env_file: Path) -> No
             text=True,
             timeout=15,
         )
+    except subprocess.TimeoutExpired:
+        raise PreparationCloseDiagnosticError("host_status", "INSPECTION_TIMEOUT") from None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise PreparationCloseDiagnosticError("host_status", "INSPECTION_FAILED") from None
+    if result.returncode != 0:
+        raise PreparationCloseDiagnosticError("host_status", "INSPECTION_FAILED")
+    try:
         status = json.loads(result.stdout)
-        if (
-            result.returncode != 0
-            or not isinstance(status, dict)
-            or status.get("status") != "inactive"
-        ):
-            raise ValueError(BLOCKED)
+    except ValueError:
+        raise PreparationCloseDiagnosticError("host_status", "STATUS_INVALID") from None
+    if not isinstance(status, dict):
+        raise PreparationCloseDiagnosticError("host_status", "STATUS_INVALID")
+    if status.get("status") != "inactive":
+        raise PreparationCloseDiagnosticError("host_status", "HOST_NOT_INACTIVE")
+    try:
         require_research_processes_quiescent()
     except (OSError, subprocess.SubprocessError, ValueError):
-        raise ValueError(BLOCKED) from None
+        raise PreparationCloseDiagnosticError(
+            "research_processes", "QUIESCENCE_UNCONFIRMED"
+        ) from None
 
 
 async def _proof(

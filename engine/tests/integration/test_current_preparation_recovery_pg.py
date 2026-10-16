@@ -52,6 +52,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "accept_unknown",
         "accept_late_claim",
         "accept_audit_rollback",
+        "accept_host_diagnostic_rollback",
         "accept_queued_job",
         "accept_running_job",
         "accept_live_producer",
@@ -1019,6 +1020,63 @@ async def _check_explicit_acceptance(
             with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
                 await manual_request.admit_manual_request(
                     session, **admission, idempotency_key="new"
+                )
+        return
+    if case == "accept_host_diagnostic_rollback":
+        from types import SimpleNamespace
+
+        from nexus.paper import manual_preparation_close as close
+        from nexus.paper.history_seal import _row_hash
+        from nexus.persistence.models.manual_paper import ManualPaperRequestEvent
+
+        async def stored_facts():
+            facts = await business_facts()
+            async with sessions() as session:
+                for table in (ManualPaperRequest, ManualPaperRequestEvent, AuditEvent):
+                    facts[table.__tablename__] = sorted(
+                        _row_hash(row) for row in await session.scalars(select(table))
+                    )
+            return facts
+
+        original = await stored_facts()
+        audit_appended = []
+        append = acceptance.append_audit_event
+
+        async def append_then_fail_inspection(*a, **k):
+            result = await append(*a, **k)
+            audit_appended.append(True)
+            return result
+
+        def status(argv, **kwargs):
+            assert "status" in argv and kwargs["timeout"] == 15
+            return subprocess.CompletedProcess(
+                argv, 1 if audit_appended else 0, '{"status":"inactive"}', "private-stderr"
+            )
+
+        with monkeypatch.context() as m:
+            m.setattr(acceptance, "append_audit_event", append_then_fail_inspection)
+            # Only OS boundaries are substituted; run the real status classifier
+            # before and after the real audit append in the normal CLI transaction.
+            m.setattr(close, "subprocess", SimpleNamespace(run=status))
+            m.setattr(close, "require_research_processes_quiescent", lambda: None)
+            m.setattr(
+                recovery,
+                "_require_execution_producer_stopped",
+                lambda _, root, env: close.require_preparation_producers_stopped(root, env),
+            )
+            with pytest.raises(ValueError, match="MANUAL_PREPARATION_CLOSE_BLOCKED") as failure:
+                await manual_paper.run(settings, args)
+        assert isinstance(failure.value, close.PreparationCloseDiagnosticError)
+        assert failure.value.safe_diagnostics() == {
+            "diagnostic_stage": "host_status",
+            "diagnostic_code": "INSPECTION_FAILED",
+        }
+        assert audit_appended == [True]
+        assert await stored_facts() == original
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                await manual_request.admit_manual_request(
+                    session, **admission, idempotency_key="new-after-diagnostic-failure"
                 )
         return
     if case in {"accept_prepared_closed", "accept_check_late"}:

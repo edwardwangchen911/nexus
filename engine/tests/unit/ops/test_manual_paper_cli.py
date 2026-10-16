@@ -375,3 +375,205 @@ def test_unknown_preparation_ack_requires_explicit_five_item_selection():
         ]
     )
     assert len(args.claim_ids) == 4 and args.accept_unknown_effects
+
+
+@pytest.mark.parametrize(
+    "failure,stage,code",
+    [
+        ("source_timeout", "service_control_source", "INSPECTION_TIMEOUT"),
+        ("source_mismatch", "service_control_source", "SOURCE_IDENTITY_INVALID"),
+        ("source_nonzero", "service_control_source", "INSPECTION_FAILED"),
+        ("source_oserror", "service_control_source", "INSPECTION_FAILED"),
+        ("host_timeout", "host_status", "INSPECTION_TIMEOUT"),
+        ("host_nonzero", "host_status", "INSPECTION_FAILED"),
+        ("host_oserror", "host_status", "INSPECTION_FAILED"),
+        ("host_json", "host_status", "STATUS_INVALID"),
+        ("host_object", "host_status", "STATUS_INVALID"),
+        ("host_running", "host_status", "HOST_NOT_INACTIVE"),
+        ("research", "research_processes", "QUIESCENCE_UNCONFIRMED"),
+    ],
+)
+def test_preparation_failures_report_safe_stage_through_cli(
+    monkeypatch, tmp_path, capsys, failure, stage, code
+):
+    import subprocess
+
+    from nexus.paper import manual_preparation_close as close
+
+    secret = "private-response-must-not-escape"
+    script = tmp_path / "scripts/macos/agent-paper-loop-service.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("fixture")
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append(argv[0])
+        assert kwargs["timeout"] == (5 if failure.startswith("source") else 15)
+        if failure.endswith("timeout"):
+            raise subprocess.TimeoutExpired([secret], kwargs["timeout"], output=secret)
+        if failure.endswith("oserror"):
+            raise OSError(secret)
+        stdout = {
+            "source_mismatch": b"different",
+            "source_nonzero": b"fixture",
+            "host_nonzero": '{"status":"inactive"}',
+            "host_json": secret,
+            "host_object": "[]",
+            "host_running": '{"status":"active"}',
+            "research": '{"status":"inactive"}',
+        }[failure]
+        return subprocess.CompletedProcess(argv, int(failure.endswith("nonzero")), stdout, secret)
+
+    def quiescent():
+        assert failure == "research"
+        raise ValueError(secret)
+
+    monkeypatch.setattr(close.subprocess, "run", command)
+    monkeypatch.setattr(close, "require_research_processes_quiescent", quiescent)
+    monkeypatch.setattr(manual_paper, "_validate_local_env", lambda root, path: path)
+    monkeypatch.setattr(manual_paper, "load_agent_paper_service_environment", lambda *a, **k: {})
+    monkeypatch.setattr(manual_paper, "_checkout_revision", lambda root: "a" * 40)
+
+    async def run(settings, args):
+        if failure.startswith("source"):
+            close.preparation_service_control_lock(args.repo_root, settings.release_revision)
+        else:
+            close.require_preparation_producers_stopped(args.repo_root, args.env_file)
+        raise AssertionError("failed inspection must block")
+
+    monkeypatch.setattr(manual_paper, "run", run)
+    assert (
+        manual_paper.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "recover-preparation",
+                "--request-id",
+                "00000000-0000-0000-0000-000000000001",
+                "--accept-unknown-effects",
+            ]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert output.err == "" and secret not in output.out
+    assert json.loads(output.out) == {
+        "status": "blocked",
+        "error_code": "MANUAL_PREPARATION_CLOSE_BLOCKED",
+        "execution_locked": True,
+        "diagnostic_stage": stage,
+        "diagnostic_code": code,
+    }
+    assert len(calls) == 1  # Observability must not add retries.
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "AGENT_PAPER_SERVICE_CONTROL_BUSY",
+        "AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE",
+        "private-message",
+    ],
+)
+def test_lifecycle_lock_failure_blocks_before_database_and_disposes(
+    monkeypatch, tmp_path, capsys, reason
+):
+    from contextlib import contextmanager
+
+    disposed = []
+
+    @contextmanager
+    def fence(*_):
+        raise RuntimeError(reason)
+        yield
+
+    class Engine:
+        async def dispose(self):
+            disposed.append(True)
+
+    def forbidden_transaction():
+        raise AssertionError("failed fence must not enter database")
+
+    monkeypatch.setattr(
+        manual_paper,
+        "session_factory",
+        lambda *_: SimpleNamespace(begin=forbidden_transaction, kw={"bind": Engine()}),
+    )
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_: None)
+    monkeypatch.setattr(manual_paper, "preparation_service_control_lock", fence)
+    monkeypatch.setattr(manual_paper, "_validate_local_env", lambda root, path: path)
+    monkeypatch.setattr(
+        manual_paper,
+        "load_agent_paper_service_environment",
+        lambda *a, **k: {
+            "DATABASE_URL": "postgresql+asyncpg://fixture:fixture@127.0.0.1/nexus_test_fixture"
+        },
+    )
+    monkeypatch.setattr(manual_paper, "_checkout_revision", lambda root: "a" * 40)
+    assert (
+        manual_paper.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "recover-preparation",
+                "--request-id",
+                "00000000-0000-0000-0000-000000000001",
+                "--accept-unknown-effects",
+            ]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert output.err == "" and "private-message" not in output.out
+    report = json.loads(output.out)
+    assert report["error_code"] == "MANUAL_PREPARATION_CLOSE_BLOCKED"
+    assert report["diagnostic_stage"] == "service_control_lock"
+    assert report["diagnostic_code"] == {
+        "AGENT_PAPER_SERVICE_CONTROL_BUSY": "LOCK_BUSY",
+        "AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE": "LOCK_UNSAFE",
+    }.get(reason, "LOCK_UNAVAILABLE")
+    assert disposed == [True]
+
+
+@pytest.mark.parametrize("kind", ["untyped", "unsafe_stage", "unsafe_code"])
+def test_preparation_cli_drops_untrusted_diagnostic_fields(monkeypatch, tmp_path, capsys, kind):
+    from nexus.paper.manual_preparation_close import PreparationCloseDiagnosticError
+
+    secret = "private-path-or-response"
+    if kind == "untyped":
+        error = ValueError("MANUAL_PREPARATION_CLOSE_BLOCKED")
+        error.stage = "host_status"
+        error.code = "INSPECTION_FAILED"
+    else:
+        error = PreparationCloseDiagnosticError(
+            secret if kind == "unsafe_stage" else "host_status",
+            secret if kind == "unsafe_code" else "INSPECTION_FAILED",
+        )
+
+    async def run(*_):
+        raise error
+
+    monkeypatch.setattr(manual_paper, "run", run)
+    monkeypatch.setattr(manual_paper, "_validate_local_env", lambda root, path: path)
+    monkeypatch.setattr(manual_paper, "load_agent_paper_service_environment", lambda *a, **k: {})
+    monkeypatch.setattr(manual_paper, "_checkout_revision", lambda root: "a" * 40)
+    assert (
+        manual_paper.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "recover-preparation",
+                "--request-id",
+                "00000000-0000-0000-0000-000000000001",
+                "--accept-unknown-effects",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.err == "" and secret not in captured.out
+    assert json.loads(captured.out) == {
+        "status": "blocked",
+        "error_code": "MANUAL_PREPARATION_CLOSE_BLOCKED",
+        "execution_locked": True,
+    }
