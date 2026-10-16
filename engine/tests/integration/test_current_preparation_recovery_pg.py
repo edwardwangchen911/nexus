@@ -60,6 +60,16 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "accept_writer_contention",
         "accept_audit_contention",
         "accept_open_order",
+        "accept_prepared_closed",
+        "accept_prepared_missing_job",
+        "accept_prepared_identity",
+        "accept_prepared_retryable",
+        "accept_prepared_live_lease",
+        "accept_prepared_missing_attempt",
+        "accept_prepared_fence",
+        "accept_prepared_future",
+        "accept_prepared_succeeded",
+        "accept_prepared_running",
     ],
 )
 @pytest.mark.asyncio
@@ -67,6 +77,9 @@ async def test_current_host_interruption_recovers_via_normal_cli(
     migrated_database_url, monkeypatch, tmp_path, failure_point
 ):
     acceptance_case = failure_point if failure_point.startswith("accept_") else None
+    direct_acceptance = acceptance_case in {"accept_direct", "accept_open_order"} or bool(
+        acceptance_case and acceptance_case.startswith("accept_prepared_")
+    )
     native_trigger = agent_paper_once.trigger_once
     if acceptance_case:
         failure_point = "effects_unknown"
@@ -184,7 +197,7 @@ async def test_current_host_interruption_recovers_via_normal_cli(
             monkeypatch.setattr(manual_paper_host, "begin_preparation_effects", interrupted)
             monkeypatch.setattr(agent_paper_once, "trigger_once", no_provider)
         elif failure_point == "effects_unknown":
-            if acceptance_case in {"accept_direct", "accept_open_order"}:
+            if direct_acceptance:
 
                 async def failed_before_cycle(*_a, **_k):
                     raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
@@ -270,7 +283,7 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                     "maintenance_before_worker",
                 }
                 else "unknown"
-                if acceptance_case in {"accept_direct", "accept_open_order"}
+                if direct_acceptance
                 else "preparing"
             )
             starts = list(
@@ -356,7 +369,9 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                     decision_time=AT,
                     actor_id="independent-budget-fixture",
                     idempotency_key="unsettled-acceptance",
-                    status="failed",
+                    status="prepared"
+                    if acceptance_case.startswith("accept_prepared_")
+                    else "failed",
                     schema_hash="a" * 64,
                     model_hash=model.config_hash,
                     prompt_hash=prompt.content_hash,
@@ -383,8 +398,10 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                         state="reserved",
                     )
                 )
+                if acceptance_case.startswith("accept_prepared_"):
+                    await _seed_closed_prepared_run(session, budget_run, acceptance_case)
         before = await business_facts()
-        if acceptance_case in {"accept_direct", "accept_open_order"}:
+        if direct_acceptance:
             monkeypatch.setattr(manual_request, "require_manual_account_available", account_guard)
             await _check_explicit_acceptance(
                 acceptance_case,
@@ -639,6 +656,136 @@ async def test_current_host_interruption_recovers_via_normal_cli(
         await engine.dispose()
 
 
+async def _seed_closed_prepared_run(session, run, case):
+    from uuid import uuid4
+
+    from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy, job_input_hash
+    from nexus.jobs.repository import enqueue_job
+    from nexus.persistence.models.runtime import JobAttempt, JobLease
+
+    run.status = "running" if case == "accept_prepared_running" else "prepared"
+    if case == "accept_prepared_missing_job":
+        return
+    digest = job_input_hash(
+        {
+            "instrument_id": str(run.instrument_id),
+            "data_snapshot_id": str(run.data_snapshot_id),
+            "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "request_hash": run.input_hash,
+            "schema_hash": run.schema_hash,
+            "model_hash": run.model_hash,
+            "prompt_hash": run.prompt_hash,
+            "evidence_hash": run.evidence_hash,
+            "tool_hash": run.tool_hash,
+            "pricing_version": run.pricing_version,
+        }
+    )
+    job = await enqueue_job(
+        session,
+        key=JobKeyV1(
+            job_type=JobType.AGENT_RESEARCH,
+            scope_kind="instrument",
+            scope_id=str(run.instrument_id),
+            effective_at=run.decision_time,
+            input_hash="e" * 64 if case == "accept_prepared_identity" else digest,
+        ),
+        schema_version="agent_research_job_v1",
+        queue=QueueName.GENERAL,
+        payload={"run_id": str(run.id)},
+        retry_policy=RetryPolicy.MANUAL_SAFE
+        if case == "accept_prepared_retryable"
+        else RetryPolicy.AUTOMATIC_SAFE,
+        max_attempts=1,
+    )
+    start, end = AT - timedelta(minutes=5), AT - timedelta(seconds=1)
+    if case == "accept_prepared_future":
+        end = AT + timedelta(seconds=1)
+    job.status = "running"
+    job.attempt_count = 1
+    job.started_at = start
+    job.version += 1
+    await session.flush()
+    job.status = "succeeded" if case == "accept_prepared_succeeded" else "dead_letter"
+    job.finished_at = end
+    job.last_error_code = "LEASE_EXPIRED"
+    job.version += 1
+    token = uuid4()
+    session.add(
+        JobLease(
+            job_id=job.id,
+            worker_id="historical-fixture",
+            lease_token=token,
+            fence_token=2 if case == "accept_prepared_fence" else 1,
+            acquired_at=start,
+            heartbeat_at=start,
+            expires_at=AT + timedelta(seconds=1) if case == "accept_prepared_live_lease" else end,
+        )
+    )
+    if case != "accept_prepared_missing_attempt":
+        session.add(
+            JobAttempt(
+                job_id=job.id,
+                attempt_no=1,
+                lease_token=token,
+                fence_token=1,
+                worker_id="historical-fixture",
+                started_at=start,
+                finished_at=end,
+                outcome="lost",
+                error_code="LEASE_EXPIRED",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepared_execution_gate_keeps_account_history_seal_required(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from integration.test_terminal_cycle_cancel_pg import (
+        test_legacy_terminal_recovery_skips_only_unused_jobs_and_is_idempotent as legacy_case,
+    )
+    from nexus.paper.current_preparation_acceptance import require_no_live_research_runs
+    from nexus.persistence.session import session_factory
+    from sqlalchemy import func
+
+    original = manual_paper.run
+    checked = 0
+    # This inherited fixture uses a synthetic release; provenance is covered by
+    # the normal current-recovery CLI cases, not by this historical seal boundary.
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_args: None)
+
+    async def verify_seal_boundary(settings, args):
+        nonlocal checked
+        if args.action != "seal-failed-research":
+            return await original(settings, args)
+        args.repo_root = tmp_path
+        factory = session_factory(settings)
+        try:
+            async with factory.begin() as session:
+                now = await session.scalar(select(func.clock_timestamp()))
+                await require_no_live_research_runs(session, now=now)
+                if checked == 0:
+                    with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                        await manual_request.require_manual_account_available(
+                            session, account_id=settings.agent_paper_account_id, now=now
+                        )
+            receipt = await original(settings, args)
+            async with factory.begin() as session:
+                now = await session.scalar(select(func.clock_timestamp()))
+                await require_no_live_research_runs(session, now=now)
+                await manual_request.require_manual_account_available(
+                    session, account_id=settings.agent_paper_account_id, now=now
+                )
+            checked += 1
+            return receipt
+        finally:
+            await factory.kw["bind"].dispose()
+
+    monkeypatch.setattr(manual_paper, "run", verify_seal_boundary)
+    await legacy_case(migrated_database_url, monkeypatch, "v4", True, False)
+    assert checked == 2
+
+
 async def _check_explicit_acceptance(
     case,
     settings,
@@ -671,6 +818,18 @@ async def _check_explicit_acceptance(
             "--accept-unknown-effects",
         ]
     )
+    if case.startswith("accept_prepared_") and case != "accept_prepared_closed":
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await manual_paper.run(settings, args)
+        assert await business_facts() == before
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(AuditEvent.id).where(AuditEvent.action == acceptance.ACTION)
+                )
+                is None
+            )
+        return
     if case in {"accept_queued_job", "accept_running_job", "accept_lease"}:
         from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy
         from nexus.jobs.repository import enqueue_job

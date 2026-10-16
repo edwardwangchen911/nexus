@@ -12,13 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
 from nexus.audit.service import append_audit_event
+from nexus.jobs.models import JobKeyV1, JobType, canonical_job_key, job_input_hash
 from nexus.paper import current_preparation_recovery as recovery
 from nexus.paper.history_seal import _row_hash
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPaperRequestEvent
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord
-from nexus.persistence.models.runtime import AuditEvent, Job
+from nexus.persistence.models.runtime import AuditEvent, Job, JobAttempt, JobLease
 
 ACTION = "paper.manual_preparation.unknown_accepted"
 SCHEMA = "manual_preparation_acceptance_v1"
@@ -150,6 +151,85 @@ async def current_unknown_accepted(session: AsyncSession, row: ManualPaperReques
         raise ValueError(BLOCKED) from None
 
 
+async def require_no_live_research_runs(session: AsyncSession, *, now: datetime) -> None:
+    """Execution quiescence only; account usage/seal authority remains a separate gate."""
+    runs = await session.scalars(
+        select(AgentResearchRunRecord).where(
+            AgentResearchRunRecord.status.not_in(["completed", "failed", "abstained"])
+        )
+    )
+    for run in runs:
+        if run.status != "prepared":
+            raise ValueError(BLOCKED)
+        jobs = list(
+            await session.scalars(select(Job).where(Job.payload["run_id"].astext == str(run.id)))
+        )
+        if len(jobs) != 1:
+            raise ValueError(BLOCKED)
+        job = jobs[0]
+        expected = job_input_hash(
+            {
+                "instrument_id": str(run.instrument_id),
+                "data_snapshot_id": str(run.data_snapshot_id),
+                "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "request_hash": run.input_hash,
+                "schema_hash": run.schema_hash,
+                "model_hash": run.model_hash,
+                "prompt_hash": run.prompt_hash,
+                "evidence_hash": run.evidence_hash,
+                "tool_hash": run.tool_hash,
+                "pricing_version": run.pricing_version,
+            }
+        )
+        if (
+            job.job_type not in {"agent.research", "agent.paper.research"}
+            or job.schema_version != "agent_research_job_v1"
+            or job.scope_kind != "instrument"
+            or job.scope_id != str(run.instrument_id)
+            or job.effective_at != run.decision_time
+            or job.payload != {"run_id": str(run.id)}
+            or job.input_hash != expected
+            or job.status not in {"failed", "dead_letter"}
+            or job.finished_at is None
+            or job.finished_at > now
+            or job.retry_policy != "automatic_safe"
+            or job.max_attempts != 1
+            or job.attempt_count != 1
+            or job.manual_retry_count != 0
+        ):
+            raise ValueError(BLOCKED)
+        if job.job_key != canonical_job_key(
+            JobKeyV1(
+                job_type=JobType(job.job_type),
+                scope_kind="instrument",
+                scope_id=str(run.instrument_id),
+                effective_at=run.decision_time,
+                input_hash=expected,
+            )
+        ):
+            raise ValueError(BLOCKED)
+        attempts = list(
+            await session.scalars(select(JobAttempt).where(JobAttempt.job_id == job.id))
+        )
+        leases = list(await session.scalars(select(JobLease).where(JobLease.job_id == job.id)))
+        if len(attempts) != 1 or len(leases) != 1:
+            raise ValueError(BLOCKED)
+        attempt, lease = attempts[0], leases[0]
+        if (
+            attempt.outcome not in {"failed", "lost"}
+            or attempt.finished_at is None
+            or attempt.finished_at > now
+            or attempt.finished_at != job.finished_at
+            or attempt.started_at != job.started_at
+            or lease.expires_at > now
+            or attempt.lease_token != lease.lease_token
+            or attempt.fence_token != lease.fence_token
+            or attempt.worker_id != lease.worker_id
+            or attempt.attempt_no != job.attempt_count
+        ):
+            raise ValueError(BLOCKED)
+
+
 async def accept_current_unknown(
     session: AsyncSession,
     *,
@@ -180,7 +260,10 @@ async def accept_current_unknown(
     # snapshot against every Job/lease writer, including non-manual producers.
     try:
         await session.execute(
-            text("LOCK TABLE jobs, job_leases, agent_research_runs IN SHARE MODE NOWAIT")
+            text(
+                "LOCK TABLE jobs, job_leases, agent_research_runs, job_attempts "
+                "IN SHARE MODE NOWAIT"
+            )
         )
     except DBAPIError as exc:
         if getattr(exc.orig, "sqlstate", None) == "55P03":
@@ -201,17 +284,7 @@ async def accept_current_unknown(
         is not None
     ):
         raise ValueError(BLOCKED)
-    if (
-        await session.scalar(
-            select(AgentResearchRunRecord.id)
-            .where(
-                AgentResearchRunRecord.status.not_in(["completed", "failed", "abstained"]),
-            )
-            .limit(1)
-        )
-        is not None
-    ):
-        raise ValueError(BLOCKED)
+    await require_no_live_research_runs(session, now=now)
     await recovery._require_idle_consumers(session, row, now)
     await recovery._require_other_claims_settled(session, row, now)
     await require_manual_account_available(
