@@ -253,6 +253,25 @@ async def require_manual_account_available(
                 continue
         if view.status not in _TERMINAL or view.status == "unknown":
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    await require_settled_account_cycle_history(session, account_id=account_id, now=now)
+    projection = await load_paper_projection(session, account_id=account_id, as_of=now)
+    await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
+    await require_activation_projection_unoccupied(
+        session, account_id=account_id, projection=projection
+    )
+
+
+async def require_settled_account_cycle_history(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    now: datetime | None = None,
+    allow_scheduled_completion: bool = False,
+) -> None:
+    """Share historical research safety without changing entry scheduling priority."""
+    await lock_portfolio_account(session, account_id)
+    if now is None:
+        now = await _database_now(session)
     cycles = (
         await session.scalars(
             select(AgentPaperCycleRecord.id).where(AgentPaperCycleRecord.account_id == account_id)
@@ -266,13 +285,25 @@ async def require_manual_account_available(
             .limit(1)
         )
         if status not in {"completed", "unavailable", "failed"}:
-            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+            # Scheduled execution has no manual finalization event. Preserve
+            # its existing deterministic completion projection without writing
+            # history or treating an unfinished manual request as completed.
+            if (
+                not allow_scheduled_completion
+                or status != "awaiting_market"
+                or await manual_request_for_cycle(session, cycle_id=cycle_id) is not None
+            ):
+                raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+            from nexus.paper.read_service import PaperReadService
+
+            detail = await PaperReadService(session, now).agent_cycle_detail(cycle_id)
+            if (
+                detail is None
+                or detail.cycle.status != "completed"
+                or detail.cycle.result_code != "PAPER_CYCLE_COMPLETED"
+            ):
+                raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
         await _require_cycle_jobs_settled(session, cycle_id=cycle_id, now=now)
-    projection = await load_paper_projection(session, account_id=account_id, as_of=now)
-    await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
-    await require_activation_projection_unoccupied(
-        session, account_id=account_id, projection=projection
-    )
 
 
 async def admit_manual_request(

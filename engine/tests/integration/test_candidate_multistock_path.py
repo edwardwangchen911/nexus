@@ -524,6 +524,57 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 monkeypatch=monkeypatch if manual else None,
                 calendar_authority_id=authority.calendar_authority_id if manual else None,
             )
+            if formal and not manual:
+                from nexus.paper.manual_request import require_settled_account_cycle_history
+                from nexus.paper.read_service import PaperReadService
+                from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+
+                clock_at[0] = AT + timedelta(hours=1)
+                async with sessions.begin() as session:
+                    last = await session.scalar(
+                        select(AgentPaperCycleEventRecord)
+                        .where(AgentPaperCycleEventRecord.cycle_id == result.cycle_id)
+                        .order_by(AgentPaperCycleEventRecord.sequence.desc())
+                        .limit(1)
+                    )
+                    assert last.to_status == "awaiting_market"
+                    detail = await PaperReadService(session, clock_at[0]).agent_cycle_detail(
+                        result.cycle_id
+                    )
+                    assert detail.cycle.status == "completed"
+                    assert detail.cycle.result_code == "PAPER_CYCLE_COMPLETED"
+                    await require_settled_account_cycle_history(
+                        session,
+                        account_id=authority.account_id,
+                        now=clock_at[0],
+                        allow_scheduled_completion=True,
+                    )
+                    # Keep manual finalization semantics unchanged.
+                    with pytest.raises(ValueError, match="^MANUAL_ACCOUNT_BUSY_OR_UNKNOWN$"):
+                        await require_settled_account_cycle_history(
+                            session, account_id=authority.account_id, now=clock_at[0]
+                        )
+                from nexus.persistence.models.runtime import JobLease
+
+                async with sessions() as session:
+                    transaction = await session.begin()
+                    try:
+                        lease = await session.scalar(
+                            select(JobLease).where(JobLease.job_id == jobs[0].id)
+                        )
+                        assert lease is not None
+                        lease.expires_at = clock_at[0] + timedelta(minutes=1)
+                        await session.flush()
+                        # Projected execution completion never waives research leases.
+                        with pytest.raises(ValueError, match="^MANUAL_ACCOUNT_BUSY_OR_UNKNOWN$"):
+                            await require_settled_account_cycle_history(
+                                session,
+                                account_id=authority.account_id,
+                                now=clock_at[0],
+                                allow_scheduled_completion=True,
+                            )
+                    finally:
+                        await transaction.rollback()
         elif profile != "v7" and count == 3:
             import asyncio
 
@@ -1182,6 +1233,18 @@ async def _verify_internal_fills(
             async with sessions() as session:
                 assert await _business_facts(session) == before_fill_readback
         assert filled["status"] == filled["action"] == "filled", filled
+        if formal and manual_settings is None and len(windows) == 1 and count > 1:
+            from nexus.paper.manual_request import require_settled_account_cycle_history
+
+            async with sessions.begin() as session:
+                # One actual fill with other orders pending is not completion.
+                with pytest.raises(ValueError, match="^MANUAL_ACCOUNT_BUSY_OR_UNKNOWN$"):
+                    await require_settled_account_cycle_history(
+                        session,
+                        account_id=account_id,
+                        now=evaluated_at + timedelta(hours=1),
+                        allow_scheduled_completion=True,
+                    )
         assert (
             await run_once(
                 settings,

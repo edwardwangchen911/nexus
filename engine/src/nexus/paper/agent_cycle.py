@@ -442,6 +442,7 @@ async def reserve_schwab_agent_paper_trigger(
         from nexus.paper.manual_request import (
             require_no_running_manual_request,
             require_preparing_manual_request,
+            require_settled_account_cycle_history,
         )
 
         if manual_request_id is not None:
@@ -460,6 +461,10 @@ async def reserve_schwab_agent_paper_trigger(
             await require_no_running_manual_request(
                 session, account_id=account_id, current_trigger_key=claim_key
             )
+            if formal_stage_capacity:
+                await require_settled_account_cycle_history(
+                    session, account_id=account_id, now=now, allow_scheduled_completion=True
+                )
         from nexus.agents.persistence import _lock_budget_day
         from nexus.paper.formal_budget_protection import _validate_binding, latest_binding
 
@@ -1435,6 +1440,7 @@ async def _start_cycle(
     from nexus.paper.manual_request import (
         require_no_running_manual_request,
         require_preparing_manual_request,
+        require_settled_account_cycle_history,
     )
 
     manual = None
@@ -1456,6 +1462,10 @@ async def _start_cycle(
             account_id=authority.account_id,
             current_trigger_key=decision_slot_at.isoformat(),
         )
+        if formal_stage_capacity:
+            await require_settled_account_cycle_history(
+                session, account_id=authority.account_id, allow_scheduled_completion=True
+            )
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time
     )
