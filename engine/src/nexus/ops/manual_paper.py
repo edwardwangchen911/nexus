@@ -26,7 +26,11 @@ from nexus.paper.current_preparation_recovery import (
     PreparationRecoveryReceipt,
     recover_current_preparation,
 )
-from nexus.paper.history_seal import HistorySealReceipt, seal_failed_research
+from nexus.paper.history_seal import (
+    HistorySealReceipt,
+    ResearchProcessDiagnosticError,
+    seal_failed_research,
+)
 from nexus.paper.manual_cancel import (
     TerminalCycleCancelReceipt,
     close_terminal_cycle_unused_research,
@@ -328,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             "error_code": code,
             "execution_locked": True,
         }
-        if isinstance(error, PreparationCloseDiagnosticError):
+        if isinstance(error, PreparationCloseDiagnosticError | ResearchProcessDiagnosticError):
             report.update(error.safe_diagnostics())
         print(json.dumps(report))
         return 1

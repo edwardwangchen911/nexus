@@ -53,6 +53,10 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "accept_late_claim",
         "accept_audit_rollback",
         "accept_host_diagnostic_rollback",
+        "accept_flush_rollback",
+        "accept_precommit_rollback",
+        "accept_commit_rollback",
+        "accept_cleanup_unknown",
         "accept_queued_job",
         "accept_running_job",
         "accept_live_producer",
@@ -1022,6 +1026,109 @@ async def _check_explicit_acceptance(
                     session, **admission, idempotency_key="new"
                 )
         return
+    if case == "accept_cleanup_unknown":
+        from types import SimpleNamespace
+
+        factory = manual_paper.session_factory
+        disposed = []
+
+        def with_failed_cleanup(config):
+            real = factory(config)
+
+            async def dispose():
+                await real.kw["bind"].dispose()
+                disposed.append(True)
+                raise RuntimeError("isolated cleanup after commit")
+
+            return SimpleNamespace(begin=real.begin, kw={"bind": SimpleNamespace(dispose=dispose)})
+
+        with monkeypatch.context() as m:
+            m.setattr(manual_paper, "session_factory", with_failed_cleanup)
+            with pytest.raises(RuntimeError, match="isolated cleanup after commit"):
+                await manual_paper.run(settings, args)
+        assert disposed == [True]
+        assert await business_facts() == before
+        # An exit/cleanup failure can follow a committed acceptance. Never
+        # infer rollback from the caller's failure or retry to discover it.
+        async with sessions() as session:
+            row = await session.get(ManualPaperRequest, request.request_id)
+            assert await acceptance.current_unknown_accepted(session, row)
+            audits = list(
+                await session.scalars(
+                    select(AuditEvent).where(AuditEvent.action == acceptance.ACTION)
+                )
+            )
+            assert len(audits) == 1
+        return
+    if case in {"accept_flush_rollback", "accept_precommit_rollback", "accept_commit_rollback"}:
+        from nexus.paper.history_seal import _row_hash
+        from nexus.persistence.models.manual_paper import ManualPaperRequestEvent
+        from sqlalchemy import text
+        from sqlalchemy.exc import DBAPIError
+
+        async def stored_facts():
+            facts = await business_facts()
+            async with sessions() as session:
+                for table in (ManualPaperRequest, ManualPaperRequestEvent, AuditEvent):
+                    facts[table.__tablename__] = sorted(
+                        _row_hash(row) for row in await session.scalars(select(table))
+                    )
+            return facts
+
+        original = await stored_facts()
+        appended = []
+        append = acceptance.append_audit_event
+
+        async def observed_append(*a, **k):
+            result = await append(*a, **k)
+            appended.append(True)
+            if case == "accept_flush_rollback":
+                raise RuntimeError("isolated post-flush failure")
+            return result
+
+        def source_recheck(*_args):
+            if appended:
+                raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+
+        if case == "accept_commit_rollback":
+            # A real PostgreSQL deferred constraint trigger fires only at COMMIT,
+            # after append/flush, producer recheck and proof readback all succeeded.
+            async with sessions.begin() as session:
+                await session.execute(
+                    text("""
+                    CREATE FUNCTION reject_acceptance_commit() RETURNS trigger
+                    LANGUAGE plpgsql AS $$ BEGIN
+                    IF NEW.action = 'paper.manual_preparation.unknown_accepted' THEN
+                      RAISE EXCEPTION 'isolated deferred commit rejection';
+                    END IF; RETURN NEW; END $$
+                """)
+                )
+                await session.execute(
+                    text("""
+                    CREATE CONSTRAINT TRIGGER reject_acceptance_commit
+                    AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED
+                    FOR EACH ROW EXECUTE FUNCTION reject_acceptance_commit()
+                """)
+                )
+        with monkeypatch.context() as m:
+            m.setattr(acceptance, "append_audit_event", observed_append)
+            if case == "accept_precommit_rollback":
+                m.setattr(manual_paper, "_require_maintenance_code", source_recheck)
+            expected = (
+                DBAPIError
+                if case == "accept_commit_rollback"
+                else (ValueError if case == "accept_precommit_rollback" else RuntimeError)
+            )
+            message = {
+                "accept_commit_rollback": "isolated deferred commit rejection",
+                "accept_precommit_rollback": "MANUAL_CONFIGURATION_UNAVAILABLE",
+                "accept_flush_rollback": "isolated post-flush failure",
+            }[case]
+            with pytest.raises(expected, match=message):
+                await manual_paper.run(settings, args)
+        assert appended == [True]
+        assert await stored_facts() == original
+        return
     if case == "accept_host_diagnostic_rollback":
         from types import SimpleNamespace
 
@@ -1070,6 +1177,7 @@ async def _check_explicit_acceptance(
         assert failure.value.safe_diagnostics() == {
             "diagnostic_stage": "host_status",
             "diagnostic_code": "INSPECTION_FAILED",
+            "diagnostic_point": "accept_producer_recheck",
         }
         assert audit_appended == [True]
         assert await stored_facts() == original

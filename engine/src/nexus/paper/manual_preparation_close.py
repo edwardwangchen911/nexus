@@ -17,7 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
 from nexus.audit.service import append_audit_event
 from nexus.jobs.models import job_input_hash
-from nexus.paper.history_seal import _row_hash, require_research_processes_quiescent
+from nexus.paper.history_seal import (
+    ResearchProcessDiagnosticError,
+    _row_hash,
+    require_research_processes_quiescent,
+)
 from nexus.paper.manual_entry import manual_host_scope
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPaperRequestEvent
@@ -57,13 +61,16 @@ class PreparationCloseDiagnosticError(ValueError):
             "STATUS_INVALID",
             "HOST_NOT_INACTIVE",
         },
-        "research_processes": {"QUIESCENCE_UNCONFIRMED"},
+        "research_processes": {"QUIESCENCE_UNCONFIRMED"}
+        | ResearchProcessDiagnosticError.SAFE_CODES,
+        "historical_preparation_proof": {"PROOF_UNCONFIRMED"},
     }
 
     def __init__(self, stage: str, code: str) -> None:
         super().__init__(BLOCKED)
         self.stage = stage
         self.code = code
+        self.point: str | None = None
 
     def safe_diagnostics(self) -> dict[str, str]:
         if (
@@ -71,7 +78,14 @@ class PreparationCloseDiagnosticError(ValueError):
             and isinstance(self.code, str)
             and self.code in self._SAFE_CODES.get(self.stage, set())
         ):
-            return {"diagnostic_stage": self.stage, "diagnostic_code": self.code}
+            result = {"diagnostic_stage": self.stage, "diagnostic_code": self.code}
+            if isinstance(self.point, str) and self.point in {
+                "eligibility_producer",
+                "check_producer_recheck",
+                "accept_producer_recheck",
+            }:
+                result["diagnostic_point"] = self.point
+            return result
         return {}
 
 
@@ -161,6 +175,9 @@ def require_preparation_producers_stopped(repo_root: Path, env_file: Path) -> No
         raise PreparationCloseDiagnosticError("host_status", "HOST_NOT_INACTIVE")
     try:
         require_research_processes_quiescent()
+    except ResearchProcessDiagnosticError as error:
+        code = error.safe_diagnostics().get("diagnostic_code", "QUIESCENCE_UNCONFIRMED")
+        raise PreparationCloseDiagnosticError("research_processes", code) from None
     except (OSError, subprocess.SubprocessError, ValueError):
         raise PreparationCloseDiagnosticError(
             "research_processes", "QUIESCENCE_UNCONFIRMED"
@@ -253,6 +270,19 @@ async def _proof(
 
 
 async def preparation_closed(
+    session: AsyncSession, row: ManualPaperRequest, *, now: datetime
+) -> bool:
+    try:
+        return await _preparation_closed(session, row, now=now)
+    except ValueError as error:
+        if str(error) != BLOCKED or isinstance(error, PreparationCloseDiagnosticError):
+            raise
+        raise PreparationCloseDiagnosticError(
+            "historical_preparation_proof", "PROOF_UNCONFIRMED"
+        ) from None
+
+
+async def _preparation_closed(
     session: AsyncSession, row: ManualPaperRequest, *, now: datetime
 ) -> bool:
     from nexus.paper.current_preparation_acceptance import current_unknown_accepted

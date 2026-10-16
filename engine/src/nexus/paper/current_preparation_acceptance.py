@@ -240,6 +240,18 @@ async def require_no_live_research_runs(session: AsyncSession, *, now: datetime)
             raise ValueError(BLOCKED)
 
 
+def _require_producer_stopped(
+    producer: AuditEvent, repo_root: Path, env_file: Path, *, point: str
+) -> None:
+    from nexus.paper.manual_preparation_close import PreparationCloseDiagnosticError
+
+    try:
+        recovery._require_execution_producer_stopped(producer, repo_root, env_file)
+    except PreparationCloseDiagnosticError as error:
+        error.point = point
+        raise
+
+
 async def _check_current_unknown(
     session: AsyncSession,
     *,
@@ -260,7 +272,7 @@ async def _check_current_unknown(
         return row, now, None, None
     proof = await _proof(session, row, now)
     journal = await recovery._journal(session, row, now)
-    recovery._require_execution_producer_stopped(journal[0], repo_root, env_file)
+    _require_producer_stopped(journal[0], repo_root, env_file, point="eligibility_producer")
     # Audit append may flush other writers' pending Jobs. Take its exact lock
     # without waiting, before any table fence, to avoid reversed lock ordering.
     if not await session.scalar(
@@ -324,7 +336,7 @@ async def check_current_unknown(
         env_file=env_file,
     )
     if producer is not None:
-        recovery._require_execution_producer_stopped(producer, repo_root, env_file)
+        _require_producer_stopped(producer, repo_root, env_file, point="check_producer_recheck")
         if await _proof(session, row, now) != proof:
             raise ValueError(BLOCKED)
     return PreparationAcceptanceCheck(
@@ -361,7 +373,7 @@ async def accept_current_unknown(
         occurred_at=now,
         payload=proof,
     )
-    recovery._require_execution_producer_stopped(producer, repo_root, env_file)
+    _require_producer_stopped(producer, repo_root, env_file, point="accept_producer_recheck")
     if not await current_unknown_accepted(session, row):
         raise ValueError(BLOCKED)
     return PreparationAcceptanceReceipt(request_id=row.id, replayed=False)

@@ -577,3 +577,144 @@ def test_preparation_cli_drops_untrusted_diagnostic_fields(monkeypatch, tmp_path
         "error_code": "MANUAL_PREPARATION_CLOSE_BLOCKED",
         "execution_locked": True,
     }
+
+
+@pytest.mark.parametrize(
+    "point", ["eligibility_producer", "check_producer_recheck", "accept_producer_recheck"]
+)
+def test_preparation_diagnostic_identifies_repeated_check(monkeypatch, tmp_path, point):
+    from nexus.paper import current_preparation_acceptance as acceptance
+    from nexus.paper.manual_preparation_close import PreparationCloseDiagnosticError
+
+    def fail(*_args):
+        raise PreparationCloseDiagnosticError("host_status", "INSPECTION_FAILED")
+
+    monkeypatch.setattr(acceptance.recovery, "_require_execution_producer_stopped", fail)
+    with pytest.raises(PreparationCloseDiagnosticError) as failure:
+        acceptance._require_producer_stopped(None, tmp_path, tmp_path / "env", point=point)
+    assert failure.value.safe_diagnostics() == {
+        "diagnostic_stage": "host_status",
+        "diagnostic_code": "INSPECTION_FAILED",
+        "diagnostic_point": point,
+    }
+
+
+@pytest.mark.asyncio
+async def test_legacy_close_proof_failure_is_not_process_inspection(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from nexus.paper import current_preparation_acceptance as acceptance
+    from nexus.paper import manual_preparation_close as close
+
+    monkeypatch.setattr(acceptance, "current_unknown_accepted", AsyncMock(return_value=False))
+    session = SimpleNamespace(scalars=AsyncMock(return_value=[object(), object()]))
+    with pytest.raises(close.PreparationCloseDiagnosticError) as failure:
+        await close.preparation_closed(session, SimpleNamespace(id="fixture"), now=None)
+    assert failure.value.safe_diagnostics() == {
+        "diagnostic_stage": "historical_preparation_proof",
+        "diagnostic_code": "PROOF_UNCONFIRMED",
+    }
+
+
+@pytest.mark.parametrize("point", ["private-command-or-path", [], {}])
+def test_diagnostic_point_rejects_untrusted_text(point):
+    from nexus.paper.manual_preparation_close import PreparationCloseDiagnosticError
+
+    error = PreparationCloseDiagnosticError("host_status", "INSPECTION_FAILED")
+    error.point = point
+    assert "diagnostic_point" not in error.safe_diagnostics()
+
+
+@pytest.mark.parametrize("producer_live", [False, True])
+def test_stopped_guard_with_real_owned_child_and_process_snapshot(
+    monkeypatch, tmp_path, producer_live
+):
+    import os
+    import subprocess
+    import sys
+
+    from nexus.paper import current_preparation_recovery as recovery
+    from nexus.paper import history_seal
+    from nexus.paper import manual_preparation_close as close
+
+    # Exercise real child startup/exit and ps parsing. Docker's transport is
+    # represented by fixed wire output; no live NEXUS service is queried/changed.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; print('ready', flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    run = subprocess.run
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        if not producer_live:
+            child.stdin.close()
+            assert child.wait(timeout=5) == 0
+        commands = []
+
+        def transport(argv, **kwargs):
+            commands.append(argv)
+            if "status" in argv:
+                # Actual subprocess with the same stdout/returncode boundary as
+                # the owner-aware service command, not a successful guard mock.
+                return run([sys.executable, "-c", 'print(\'{"status":"inactive"}\')'], **kwargs)
+            if argv[0] == "/bin/ps":
+                return run(["/bin/ps", "-p", str(os.getpid()), "-o", argv[-1]], **kwargs)
+            assert argv[0] == "docker"
+            raw = "abcdef123456\n" if argv[1] == "ps" else "PID COMMAND\n1 python\n"
+            return subprocess.CompletedProcess(argv, 0, raw)
+
+        monkeypatch.setattr(close, "subprocess", SimpleNamespace(run=transport))
+        monkeypatch.setattr(history_seal, "subprocess", SimpleNamespace(run=transport))
+        start = SimpleNamespace(payload={"producer_pid": child.pid})
+        if producer_live:
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                recovery._require_execution_producer_stopped(start, tmp_path, tmp_path / "env")
+        else:
+            recovery._require_execution_producer_stopped(start, tmp_path, tmp_path / "env")
+        assert len([c for c in commands if "status" in c]) == 1
+        assert any(c[0] == "/bin/ps" for c in commands)
+        assert any(c[:2] == ["docker", "top"] for c in commands)
+    finally:
+        if child.poll() is None:
+            child.stdin.close()
+        child.wait(timeout=5)
+        child.stdout.close()
+
+
+@pytest.mark.parametrize("code", ["HOST_MAPPING_UNCONFIRMED", "private-inspection-detail"])
+def test_shared_history_inspection_cli_reports_only_fixed_codes(
+    monkeypatch, tmp_path, capsys, code
+):
+    from nexus.paper.history_seal import ResearchProcessDiagnosticError
+
+    async def run(*_):
+        raise ResearchProcessDiagnosticError(code)
+
+    monkeypatch.setattr(manual_paper, "run", run)
+    monkeypatch.setattr(manual_paper, "_validate_local_env", lambda root, path: path)
+    monkeypatch.setattr(manual_paper, "load_agent_paper_service_environment", lambda *a, **k: {})
+    monkeypatch.setattr(manual_paper, "_checkout_revision", lambda root: "a" * 40)
+    assert (
+        manual_paper.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "check-preparation-acceptance",
+                "--request-id",
+                "00000000-0000-0000-0000-000000000001",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.err == "" and "private-inspection-detail" not in captured.out
+    expected = {
+        "status": "blocked",
+        "error_code": "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+        "execution_locked": True,
+    }
+    if code == "HOST_MAPPING_UNCONFIRMED":
+        expected.update(diagnostic_stage="research_processes", diagnostic_code=code)
+    assert json.loads(captured.out) == expected

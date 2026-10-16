@@ -53,6 +53,30 @@ _DESKTOP_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_
 _DESKTOP_NODE = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
 
 
+class ResearchProcessDiagnosticError(ValueError):
+    """Fixed process boundary only; no PID, executable path or command output."""
+
+    SAFE_CODES = frozenset(
+        {
+            "HOST_SNAPSHOT_UNCONFIRMED",
+            "HOST_MAPPING_UNCONFIRMED",
+            "HOST_IDENTITY_UNCONFIRMED",
+            "HOST_CHANGED_DURING_CHECK",
+            "CONTAINER_LIST_UNCONFIRMED",
+            "CONTAINER_PROCESSES_UNCONFIRMED",
+        }
+    )
+
+    def __init__(self, code: str) -> None:
+        super().__init__(_BLOCKED)
+        self.code = code
+
+    def safe_diagnostics(self) -> dict[str, str]:
+        if isinstance(self.code, str) and self.code in self.SAFE_CODES:
+            return {"diagnostic_stage": "research_processes", "diagnostic_code": self.code}
+        return {}
+
+
 class HistorySealReceipt(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     status: str = "legacy_research_sealed_usage_unknown"
@@ -65,12 +89,21 @@ def require_research_processes_quiescent() -> None:
     """Inspect process identity and executable mappings; never argv or credentials."""
 
     def output(command: list[str]) -> str:
+        code = (
+            "HOST_SNAPSHOT_UNCONFIRMED"
+            if command[0] == "/bin/ps"
+            else "HOST_MAPPING_UNCONFIRMED"
+            if command[0] == "/usr/sbin/lsof"
+            else "CONTAINER_LIST_UNCONFIRMED"
+            if command[1] == "ps"
+            else "CONTAINER_PROCESSES_UNCONFIRMED"
+        )
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
         except (OSError, subprocess.SubprocessError):
-            raise ValueError(_BLOCKED) from None
+            raise ResearchProcessDiagnosticError(code) from None
         if result.returncode != 0:
-            raise ValueError(_BLOCKED)
+            raise ResearchProcessDiagnosticError(code)
         return result.stdout
 
     def snapshot() -> dict[int, tuple[int, int, str, str]]:
@@ -79,13 +112,13 @@ def require_research_processes_quiescent() -> None:
         for line in raw.splitlines():
             parts = line.strip().split(None, 8)
             if len(parts) != 9 or not all(value.isdigit() for value in parts[:3]):
-                raise ValueError(_BLOCKED)
+                raise ResearchProcessDiagnosticError("HOST_SNAPSHOT_UNCONFIRMED")
             pid = int(parts[0])
             if pid in rows:
-                raise ValueError(_BLOCKED)
+                raise ResearchProcessDiagnosticError("HOST_SNAPSHOT_UNCONFIRMED")
             rows[pid] = (int(parts[1]), int(parts[2]), " ".join(parts[3:8]), parts[8])
         if not rows:
-            raise ValueError(_BLOCKED)
+            raise ResearchProcessDiagnosticError("HOST_SNAPSHOT_UNCONFIRMED")
         return rows
 
     def candidates(rows: dict[int, tuple[int, int, str, str]]) -> set[int]:
@@ -108,7 +141,7 @@ def require_research_processes_quiescent() -> None:
             elif line.startswith("n") and descriptor in fields:
                 fields[descriptor].append(line[1:])
         if identities != [str(pid)]:
-            raise ValueError(_BLOCKED)
+            raise ResearchProcessDiagnosticError("HOST_MAPPING_UNCONFIRMED")
         return fields
 
     host = snapshot()
@@ -125,7 +158,7 @@ def require_research_processes_quiescent() -> None:
         for executable in chain:
             row = host.get(pid)
             if row is None or pid in ancestors or row[1] != os.getuid() or row[3] != executable:
-                raise ValueError(_BLOCKED)
+                raise ResearchProcessDiagnosticError("HOST_IDENTITY_UNCONFIRMED")
             ancestors.add(pid)
             if pid not in verified:
                 files = mappings(pid)
@@ -135,13 +168,13 @@ def require_research_processes_quiescent() -> None:
                     or not Path(files["cwd"][0]).is_absolute()
                     or any(part.startswith("nexus-codex-") for part in Path(files["cwd"][0]).parts)
                 ):
-                    raise ValueError(_BLOCKED)
+                    raise ResearchProcessDiagnosticError("HOST_MAPPING_UNCONFIRMED")
                 verified.add(pid)
             pid = row[0]
     if desktop:
         after = snapshot()
         if candidates(after) != desktop or any(after.get(pid) != host[pid] for pid in verified):
-            raise ValueError(_BLOCKED)
+            raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
     containers = output(
         [
             "docker",
@@ -153,11 +186,11 @@ def require_research_processes_quiescent() -> None:
         ]
     ).splitlines()
     if not containers or any(re.fullmatch(r"[0-9a-f]{6,64}", row) is None for row in containers):
-        raise ValueError(_BLOCKED)
+        raise ResearchProcessDiagnosticError("CONTAINER_LIST_UNCONFIRMED")
     for identity in containers:
         names = output(["docker", "top", identity, "-eo", "pid,comm"]).splitlines()
         if len(names) < 2 or names[0].split() != ["PID", "COMMAND"]:
-            raise ValueError(_BLOCKED)
+            raise ResearchProcessDiagnosticError("CONTAINER_PROCESSES_UNCONFIRMED")
         for line in names[1:]:
             parts = line.strip().split(None, 1)
             if (
@@ -166,7 +199,7 @@ def require_research_processes_quiescent() -> None:
                 or Path(parts[1]).name == "codex"
                 or "codex_cli_bin" in parts[1]
             ):
-                raise ValueError(_BLOCKED)
+                raise ResearchProcessDiagnosticError("CONTAINER_PROCESSES_UNCONFIRMED")
 
 
 def _row_hash(row: Base) -> str:

@@ -383,3 +383,78 @@ def test_quiescence_checks_host_and_existing_project_containers_without_argument
     assert commands[2:] == [
         ["docker", "top", identity, "-eo", "pid,comm"] for identity in ("abc123", "def456")
     ]
+
+
+@pytest.mark.parametrize(
+    "boundary,code",
+    [
+        ("ps", "HOST_SNAPSHOT_UNCONFIRMED"),
+        ("lsof", "HOST_MAPPING_UNCONFIRMED"),
+        ("identity", "HOST_IDENTITY_UNCONFIRMED"),
+        ("changed", "HOST_CHANGED_DURING_CHECK"),
+        ("docker-list", "CONTAINER_LIST_UNCONFIRMED"),
+        ("docker-top", "CONTAINER_PROCESSES_UNCONFIRMED"),
+    ],
+)
+def test_process_inspection_preserves_safe_failure_boundary(monkeypatch, boundary, code):
+    from pathlib import Path
+
+    from nexus.paper import history_seal
+    from nexus.paper import manual_preparation_close as close
+
+    scans = 0
+
+    def execute(command, **kwargs):
+        nonlocal scans
+        if "status" in command:
+            return subprocess.CompletedProcess(command, 0, '{"status":"inactive"}')
+        if command[0] == "/bin/ps":
+            scans += 1
+            if boundary == "ps":
+                raise OSError("private host details")
+            executable = "/foreign/codex" if boundary == "identity" else _DESKTOP
+            raw = (
+                f"100 1 {os.getuid()} {_BIRTH} {_APP}\n"
+                f"200 100 {os.getuid()} {_BIRTH} {executable}\n"
+            )
+            if boundary == "changed" and scans > 1:
+                raw += f"300 1 {os.getuid()} {_BIRTH} /foreign/codex\n"
+        elif command[0] == "/usr/sbin/lsof":
+            if boundary == "lsof":
+                return subprocess.CompletedProcess(command, 1, "private mapping details")
+            pid = command[command.index("-p") + 1]
+            executable = _DESKTOP if pid == "200" else _APP
+            raw = f"p{pid}\nftxt\nn{executable}\nfcwd\nn/\n"
+        elif command[1] == "ps":
+            raw = "" if boundary == "docker-list" else "abcdef123456\n"
+        else:
+            raw = (
+                "PID COMMAND\n1 codex\n" if boundary == "docker-top" else "PID COMMAND\n1 python\n"
+            )
+        return subprocess.CompletedProcess(command, 0, raw)
+
+    monkeypatch.setattr(
+        history_seal,
+        "subprocess",
+        SimpleNamespace(
+            run=execute,
+            SubprocessError=subprocess.SubprocessError,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
+    monkeypatch.setattr(
+        close,
+        "subprocess",
+        SimpleNamespace(
+            run=execute,
+            SubprocessError=subprocess.SubprocessError,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
+    with pytest.raises(close.PreparationCloseDiagnosticError) as failure:
+        close.require_preparation_producers_stopped(Path("/fixture"), Path("/fixture/env"))
+    assert str(failure.value) == close.BLOCKED
+    assert failure.value.safe_diagnostics() == {
+        "diagnostic_stage": "research_processes",
+        "diagnostic_code": code,
+    }
