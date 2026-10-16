@@ -80,7 +80,7 @@ async def test_maintenance_holds_real_schema_version_until_transaction_end(
 @pytest.mark.parametrize("failed_stage", ["research", "critique", "synthesis"])
 @pytest.mark.parametrize("same_day", [False, True])
 async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs(
-    migrated_database_url, monkeypatch, failed_stage, same_day
+    migrated_database_url, monkeypatch, failed_stage, same_day, prior_preparation=None
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     engine, sessions, authority, manifest = await seed_normal_path(
@@ -149,6 +149,12 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
                 idempotency_key="partial-seal-batch",
                 created_at=AT,
             )
+            if prior_preparation is not None:
+                from helpers.sealed_preparation import seed_closed_preparation
+
+                historical_id = await seed_closed_preparation(
+                    session, monkeypatch, authority.account_id, batch, model, at=AT
+                )
             request = await manual_request.admit_manual_request(
                 session,
                 account_id=authority.account_id,
@@ -219,6 +225,21 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
             accept_unknown_usage=True,
             same_day=same_day,
         )
+        if prior_preparation is not None:
+            from helpers.sealed_preparation import check_seal_with_preparation
+
+            rejected = await check_seal_with_preparation(
+                sessions,
+                runtime,
+                args,
+                historical_id,
+                prior_preparation,
+                run_id=run_id,
+                lower_bound=lower_bound,
+                now=clock[0],
+            )
+            if rejected:
+                return
         receipt = await manual_paper.run(runtime, args)
         assert receipt.sealed_research == 1 and not receipt.replayed
         assert (await manual_paper.run(runtime, args)).replayed

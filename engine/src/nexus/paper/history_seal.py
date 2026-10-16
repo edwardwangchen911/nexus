@@ -336,8 +336,9 @@ async def _require_stage_usage_proof(
 
 
 async def _seal_manual_scope(
-    session: AsyncSession, *, account_id: UUID, cycle_id: UUID
+    session: AsyncSession, *, account_id: UUID, cycle_id: UUID, now: datetime
 ) -> ManualPaperRequest | None:
+    from nexus.paper.manual_preparation_close import preparation_closed
     from nexus.paper.manual_request import manual_request_for_cycle, read_manual_request
 
     target = await manual_request_for_cycle(session, cycle_id=cycle_id)
@@ -352,6 +353,8 @@ async def _seal_manual_scope(
             if view.status not in {"active", "unavailable"} or view.cycle_id != cycle_id:
                 raise ValueError(_BLOCKED)
         elif view.status in {"preparing", "active", "unknown"}:
+            if view.status == "unknown" and await preparation_closed(session, row, now=now):
+                continue
             raise ValueError(_BLOCKED)
     if target is not None and target.account_id != account_id:
         raise ValueError(_BLOCKED)
@@ -656,7 +659,7 @@ async def seal_failed_research(
     cycle = await session.get(AgentPaperCycleRecord, cycle_id, with_for_update=True)
     if cycle is None or cycle.account_id != account_id:
         raise ValueError(_BLOCKED)
-    manual = await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id)
+    manual = await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id, now=now)
     projection = await load_paper_projection(session, account_id=account_id, as_of=now)
     await require_activation_projection_unoccupied(
         session, account_id=account_id, projection=projection
