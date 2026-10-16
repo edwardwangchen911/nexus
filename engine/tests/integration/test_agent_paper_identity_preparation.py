@@ -53,21 +53,29 @@ from unit.market.test_object_store import FakeS3Client
     ],
 )
 async def test_formal_batch_preparation_once_without_cycle_or_order(
-    migrated_database_url, tmp_path, monkeypatch, case
+    migrated_database_url, tmp_path, monkeypatch, case, capsys
 ):
-    # Explicit synthetic database/receipt clock in the current NY day, before
-    # real wall time; this test does not manufacture any business evidence.
-    day = datetime.now(UTC).astimezone(ZoneInfo("America/New_York")).date()
+    # Use one coherent synthetic clock in a past NY day, including snapshot
+    # compilation; this must also pass before today's market opens.
+    day = (datetime.now(UTC) - timedelta(days=1)).astimezone(ZoneInfo("America/New_York")).date()
     now = datetime.combine(day, time(9, 35), ZoneInfo("America/New_York")).astimezone(UTC)
     clock = [now]
     monkeypatch.setattr(func, "clock_timestamp", lambda: literal(clock[0]))
 
-    class ReceiptClock(datetime):
+    class ClockMeta(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    class ReceiptClock(datetime, metaclass=ClockMeta):
         @classmethod
         def now(cls, tz=None):
             return clock[0].replace(tzinfo=None) if tz is None else clock[0].astimezone(tz)
 
     monkeypatch.setattr(collector, "datetime", ReceiptClock)
+    monkeypatch.setattr(identity, "datetime", ReceiptClock)
+    from nexus.ops import agent_paper_loop
+
+    monkeypatch.setattr(agent_paper_loop, "datetime", ReceiptClock)
 
     def published_master(_mapper, _connection, instrument):
         if instrument.id in (AAPL_ID, NVDA_ID):
@@ -253,6 +261,25 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             result = await identity.prepare_agent_paper_identity_once(settings, **args)
         success = case in ("ready", "partially_registered")
         assert result == ("prepared" if success else "unavailable")
+        diagnostics = [
+            json.loads(line)
+            for line in capsys.readouterr().err.splitlines()
+            if line.startswith('{"event": "agent_paper_preparation_unavailable"')
+        ]
+        if not success and case != "unsafe_parent":
+            assert len(diagnostics) == 1
+            assert diagnostics[0]["failure_phase"] == "research_identity"
+            assert (
+                diagnostics[0]["failure_point"]
+                == {
+                    "source_failure": "collect",
+                    "import_mismatch": "import",
+                    "closed_window": "scope",
+                    "closed_during_collect": "readback",
+                    "closed_during_import": "import",
+                    "existing_incomplete": "archive",
+                }[case]
+            )
         if case != "unsafe_parent":
             assert await identity.prepare_agent_paper_identity_once(settings, **args) == (
                 "ready" if success else "unavailable"

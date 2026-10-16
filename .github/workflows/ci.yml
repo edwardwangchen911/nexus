@@ -142,6 +142,7 @@ jobs:
             engine/tests/integration/test_manual_paper_api_pg.py \
             engine/tests/integration/test_manual_paper_job_binding_pg.py \
             engine/tests/integration/test_current_preparation_recovery_pg.py \
+            engine/tests/integration/test_agent_paper_identity_preparation.py \
             engine/tests/integration/test_manual_paper_cycle_pg.py \
             engine/tests/integration/test_manual_partial_history_seal_pg.py::test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs \
             engine/tests/integration/test_sec_exhibit_import.py \

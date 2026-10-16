@@ -423,7 +423,10 @@ def test_opening_preparation_reports_safe_failure_phase(
         "execute", market_open, action=A.PREPARE_INPUTS, error=caught.value
     )
     diagnostic = capsys.readouterr().err
-    assert json.loads(diagnostic)["failure_phase"] == failure_phase
+    events = [json.loads(line) for line in diagnostic.splitlines()]
+    failures = [event for event in events if event["event"] == "agent_paper_loop_failure"]
+    assert len(failures) == 1
+    assert failures[0]["failure_phase"] == failure_phase
     assert "private-provider-detail" not in diagnostic
 
 

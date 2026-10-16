@@ -71,6 +71,16 @@ from nexus.ops.local_stack import LocalStackConfigurationError, _validate_local_
 from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest, read_agent_window_advance_result
 from nexus.ops.paper_once import run_once as run_paper_once
+from nexus.ops.preparation_diagnostics import (
+    PHASES,
+    exception_code,
+    preparation_call,
+    preparation_failure_fields,
+    preparation_rejected,
+    preparation_step,
+    preparation_unavailable,
+    preparation_unknown,
+)
 from nexus.paper.agent_cycle_authority import (
     ServiceCalendarAuthority,
     load_agent_paper_service_calendar_authority,
@@ -951,68 +961,87 @@ async def prepare_prior_daily_once(
     candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Create at most one exact prior-session daily authority before a cycle."""
-    scope = await _inspect_prior_daily_scope(
-        settings,
-        account_id=account_id,
-        now=now,
-        expected_calendar_authority_id=expected_calendar_authority_id,
-        candidate=candidate,
+    scope = await preparation_call(
+        "prior_daily",
+        "scope",
+        _inspect_prior_daily_scope(
+            settings,
+            account_id=account_id,
+            now=now,
+            expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
+        ),
     )
     if scope.authority_ready:
         return "ready"
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "daily"
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with preparation_step("prior_daily", "archive"):
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if candidate.symbol == "AAPL" and (parent / scope.prior_session.isoformat()).exists():
-        return "unavailable"
+        return preparation_unavailable("prior_daily", "archive", "ATTEMPT_EXISTS")
     output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
-        output_dir.mkdir(mode=0o700)
+        with preparation_step("prior_daily", "archive"):
+            output_dir.mkdir(mode=0o700)
     except FileExistsError:
-        return "unavailable"
+        return preparation_unavailable("prior_daily", "archive", "ATTEMPT_EXISTS")
     try:
-        request, calendar = collection_window(
-            scope.instrument_id,
-            scope.prior_session,
-            scope.prior_session,
-            "all",
-            now=now,
-        )
-        collected = await collect_prices(
-            request,
-            symbol=candidate.symbol,
-            calendar=calendar,
-            resolved_at=now,
-            key_id=settings.alpaca_key,
-            secret=settings.alpaca_secret,
-            output_dir=output_dir,
-            max_pages=10,
-            identity_asof=scope.prior_session,
+        with preparation_step("prior_daily", "window"):
+            request, calendar = collection_window(
+                scope.instrument_id,
+                scope.prior_session,
+                scope.prior_session,
+                "all",
+                now=now,
+            )
+        collected = await preparation_call(
+            "prior_daily",
+            "collect",
+            collect_prices(
+                request,
+                symbol=candidate.symbol,
+                calendar=calendar,
+                resolved_at=now,
+                key_id=settings.alpaca_key,
+                secret=settings.alpaca_secret,
+                output_dir=output_dir,
+                max_pages=10,
+                identity_asof=scope.prior_session,
+            ),
         )
         if collected.get("status") != "collected" or collected.get("readback_verified") is not True:
-            return "unavailable"
-        imported = await import_adjusted_authority(
-            settings,
-            instrument_id=scope.instrument_id,
-            collection_dir=output_dir,
-            purpose="agent-paper-decision",
+            return preparation_unavailable("prior_daily", "collect", "COLLECTION_UNAVAILABLE")
+        imported = await preparation_call(
+            "prior_daily",
+            "import",
+            import_adjusted_authority(
+                settings,
+                instrument_id=scope.instrument_id,
+                collection_dir=output_dir,
+                purpose="agent-paper-decision",
+            ),
         )
         if imported.get("status") != "stored_authority":
-            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-    except ValueError:
-        return "unavailable"
-    verified = await _inspect_prior_daily_scope(
-        settings,
-        account_id=account_id,
-        now=datetime.now(UTC),
-        expected_calendar_authority_id=expected_calendar_authority_id,
-        candidate=candidate,
+            raise preparation_unknown("prior_daily", "import", "IMPORT_RESULT_INVALID")
+    except ValueError as error:
+        return preparation_rejected("prior_daily", "window", error)
+    verified = await preparation_call(
+        "prior_daily",
+        "readback",
+        _inspect_prior_daily_scope(
+            settings,
+            account_id=account_id,
+            now=datetime.now(UTC),
+            expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
+        ),
     )
     if (
         not verified.authority_ready
         or verified.instrument_id != scope.instrument_id
         or verified.prior_session != scope.prior_session
     ):
-        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        raise preparation_unknown("prior_daily", "readback", "READBACK_MISMATCH")
     return "prepared"
 
 
@@ -1125,28 +1154,40 @@ async def prepare_macro_once(
     candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Best-effort daily macro preparation; unavailable macro does not block a cycle."""
-    scope = await _inspect_macro_scope(
-        settings,
-        account_id=account_id,
-        now=now,
-        expected_calendar_authority_id=expected_calendar_authority_id,
-        candidate=candidate,
+    scope = await preparation_call(
+        "macro",
+        "scope",
+        _inspect_macro_scope(
+            settings,
+            account_id=account_id,
+            now=now,
+            expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
+        ),
     )
     if scope.ready_series == _PAPER_MACRO_SERIES:
         if scope.snapshot_ready:
             return "ready"
-        await _prepare_current_trends_research_snapshot(
-            settings,
-            instrument_id=scope.instrument_id,
-            now=datetime.now(UTC),
-            macro_vintage=scope.vintage,
+        await preparation_call(
+            "macro",
+            "snapshot",
+            _prepare_current_trends_research_snapshot(
+                settings,
+                instrument_id=scope.instrument_id,
+                now=datetime.now(UTC),
+                macro_vintage=scope.vintage,
+            ),
         )
-        verified = await _inspect_macro_scope(
-            settings,
-            account_id=account_id,
-            now=datetime.now(UTC),
-            expected_calendar_authority_id=expected_calendar_authority_id,
-            candidate=candidate,
+        verified = await preparation_call(
+            "macro",
+            "readback",
+            _inspect_macro_scope(
+                settings,
+                account_id=account_id,
+                now=datetime.now(UTC),
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            ),
         )
         if (
             verified.instrument_id != scope.instrument_id
@@ -1154,58 +1195,79 @@ async def prepare_macro_once(
             or verified.ready_series != _PAPER_MACRO_SERIES
             or not verified.snapshot_ready
         ):
-            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            raise preparation_unknown("macro", "readback", "READBACK_MISMATCH")
         return "prepared"
     try:
         validate_local_import(settings)
     except ValueError:
-        return "unavailable"
+        return preparation_unavailable("macro", "configuration", "VALIDATION_REJECTED")
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "macro"
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with preparation_step("macro", "archive"):
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     attempt_session = getattr(scope, "attempt_session", None)
     if not isinstance(attempt_session, date):
         attempt_session = now.astimezone(ZoneInfo("America/New_York")).date()
     output_dir = parent / attempt_session.isoformat()
     try:
-        output_dir.mkdir(mode=0o700)
+        with preparation_step("macro", "archive"):
+            output_dir.mkdir(mode=0o700)
     except FileExistsError:
-        return "unavailable"
+        return preparation_unavailable("macro", "archive", "ATTEMPT_EXISTS")
     missing = _PAPER_MACRO_SERIES - scope.ready_series
     for series in sorted(missing):
         series_dir = output_dir / series
-        series_dir.mkdir(mode=0o700)
+        with preparation_step("macro", "archive"):
+            series_dir.mkdir(mode=0o700)
         try:
-            collected = await collect_fred(
-                _macro_request(series, scope.vintage),
-                key=fred_key,
-                directory=series_dir,
+            collected = await preparation_call(
+                "macro",
+                "collect",
+                collect_fred(
+                    _macro_request(series, scope.vintage),
+                    key=fred_key,
+                    directory=series_dir,
+                ),
             )
         except TimeoutError:
             if has_archived_timeout_failure(series_dir):
-                return "unavailable"
+                return preparation_unavailable("macro", "collect", "ARCHIVED_TIMEOUT")
             raise
-        except (HttpPolicyError, ValueError):
-            return "unavailable"
+        except (HttpPolicyError, ValueError) as error:
+            return preparation_rejected("macro", "collect", error)
         if collected.get("status") != "collected" or not collected.get("observation_count"):
-            return "unavailable"
-        imported = await import_fred_collection(
-            settings,
-            collection=load_fred_collection(series_dir),
+            return preparation_unavailable("macro", "collect", "COLLECTION_UNAVAILABLE")
+        with preparation_step("macro", "archive"):
+            collection = load_fred_collection(series_dir)
+        imported = await preparation_call(
+            "macro",
+            "import",
+            import_fred_collection(
+                settings,
+                collection=collection,
+            ),
         )
         if imported.get("status") != "imported" or not imported.get("visible_observation_count"):
-            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-    await _prepare_current_trends_research_snapshot(
-        settings,
-        instrument_id=scope.instrument_id,
-        now=datetime.now(UTC),
-        macro_vintage=scope.vintage,
+            raise preparation_unknown("macro", "import", "IMPORT_RESULT_INVALID")
+    await preparation_call(
+        "macro",
+        "snapshot",
+        _prepare_current_trends_research_snapshot(
+            settings,
+            instrument_id=scope.instrument_id,
+            now=datetime.now(UTC),
+            macro_vintage=scope.vintage,
+        ),
     )
-    verified = await _inspect_macro_scope(
-        settings,
-        account_id=account_id,
-        now=datetime.now(UTC),
-        expected_calendar_authority_id=expected_calendar_authority_id,
-        candidate=candidate,
+    verified = await preparation_call(
+        "macro",
+        "readback",
+        _inspect_macro_scope(
+            settings,
+            account_id=account_id,
+            now=datetime.now(UTC),
+            expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
+        ),
     )
     if (
         verified.instrument_id != scope.instrument_id
@@ -1213,7 +1275,7 @@ async def prepare_macro_once(
         or verified.ready_series != _PAPER_MACRO_SERIES
         or not verified.snapshot_ready
     ):
-        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        raise preparation_unknown("macro", "readback", "READBACK_MISMATCH")
     return "prepared"
 
 
@@ -1416,27 +1478,39 @@ async def prepare_current_trends_once(
     candidate: CandidateInstrumentIdentity,
 ) -> str:
     """Create at most one current-trends evidence record for the prior session."""
-    scope = await _inspect_current_trends_scope(
-        settings,
-        account_id=account_id,
-        now=now,
-        expected_calendar_authority_id=expected_calendar_authority_id,
-        candidate=candidate,
+    scope = await preparation_call(
+        "current_trends",
+        "scope",
+        _inspect_current_trends_scope(
+            settings,
+            account_id=account_id,
+            now=now,
+            expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
+        ),
     )
     if scope.snapshot_ready:
         return "ready"
     if scope.evidence_ready:
-        await _prepare_current_trends_research_snapshot(
-            settings,
-            instrument_id=scope.instrument_id,
-            now=datetime.now(UTC),
+        await preparation_call(
+            "current_trends",
+            "snapshot",
+            _prepare_current_trends_research_snapshot(
+                settings,
+                instrument_id=scope.instrument_id,
+                now=datetime.now(UTC),
+            ),
         )
-        verified = await _inspect_current_trends_scope(
-            settings,
-            account_id=account_id,
-            now=datetime.now(UTC),
-            expected_calendar_authority_id=expected_calendar_authority_id,
-            candidate=candidate,
+        verified = await preparation_call(
+            "current_trends",
+            "readback",
+            _inspect_current_trends_scope(
+                settings,
+                account_id=account_id,
+                now=datetime.now(UTC),
+                expected_calendar_authority_id=expected_calendar_authority_id,
+                candidate=candidate,
+            ),
         )
         if (
             not verified.evidence_ready
@@ -1444,62 +1518,81 @@ async def prepare_current_trends_once(
             or verified.instrument_id != scope.instrument_id
             or verified.prior_session != scope.prior_session
         ):
-            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            raise preparation_unknown("current_trends", "readback", "READBACK_MISMATCH")
         return "prepared"
     if scope.start_session is None:
-        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        raise preparation_unknown("current_trends", "scope", "SCOPE_UNAVAILABLE")
     parent = repo_root / ".secrets" / "nexus-agent-paper" / "trends"
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with preparation_step("current_trends", "archive"):
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if candidate.symbol == "AAPL" and (parent / scope.prior_session.isoformat()).exists():
-        return "unavailable"
+        return preparation_unavailable("current_trends", "archive", "ATTEMPT_EXISTS")
     output_dir = parent / f"{scope.prior_session.isoformat()}-{scope.instrument_id}"
     try:
-        output_dir.mkdir(mode=0o700)
+        with preparation_step("current_trends", "archive"):
+            output_dir.mkdir(mode=0o700)
     except FileExistsError:
-        return "unavailable"
+        return preparation_unavailable("current_trends", "archive", "ATTEMPT_EXISTS")
     try:
-        request, calendar = collection_window(
-            scope.instrument_id,
-            scope.start_session,
-            scope.prior_session,
-            "split",
-            now=now,
-        )
+        with preparation_step("current_trends", "window"):
+            request, calendar = collection_window(
+                scope.instrument_id,
+                scope.start_session,
+                scope.prior_session,
+                "split",
+                now=now,
+            )
     except ValueError:
-        return "unavailable"
-    collected = await collect_prices(
-        request,
-        symbol=candidate.symbol,
-        calendar=calendar,
-        resolved_at=now,
-        key_id=settings.alpaca_key,
-        secret=settings.alpaca_secret,
-        output_dir=output_dir,
-        max_pages=10,
-        identity_asof=scope.prior_session,
+        return preparation_unavailable("current_trends", "window", "VALIDATION_REJECTED")
+    collected = await preparation_call(
+        "current_trends",
+        "collect",
+        collect_prices(
+            request,
+            symbol=candidate.symbol,
+            calendar=calendar,
+            resolved_at=now,
+            key_id=settings.alpaca_key,
+            secret=settings.alpaca_secret,
+            output_dir=output_dir,
+            max_pages=10,
+            identity_asof=scope.prior_session,
+        ),
     )
     if collected.get("status") != "collected" or collected.get("readback_verified") is not True:
-        return "unavailable"
-    imported = await import_trends(
-        settings,
-        instrument_id=scope.instrument_id,
-        collection_dir=output_dir,
+        return preparation_unavailable("current_trends", "collect", "COLLECTION_UNAVAILABLE")
+    imported = await preparation_call(
+        "current_trends",
+        "import",
+        import_trends(
+            settings,
+            instrument_id=scope.instrument_id,
+            collection_dir=output_dir,
+        ),
     )
     if imported.get("status") != "stored_context":
-        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        raise preparation_unknown("current_trends", "import", "IMPORT_RESULT_INVALID")
     if imported.get("last_observed_on") != scope.prior_session.isoformat():
-        return "unavailable"
-    await _prepare_current_trends_research_snapshot(
-        settings,
-        instrument_id=scope.instrument_id,
-        now=datetime.now(UTC),
+        return preparation_unavailable("current_trends", "import", "OBSERVATION_SESSION_MISMATCH")
+    await preparation_call(
+        "current_trends",
+        "snapshot",
+        _prepare_current_trends_research_snapshot(
+            settings,
+            instrument_id=scope.instrument_id,
+            now=datetime.now(UTC),
+        ),
     )
-    verified = await _inspect_current_trends_scope(
-        settings,
-        account_id=account_id,
-        now=datetime.now(UTC),
-        expected_calendar_authority_id=expected_calendar_authority_id,
-        candidate=candidate,
+    verified = await preparation_call(
+        "current_trends",
+        "readback",
+        _inspect_current_trends_scope(
+            settings,
+            account_id=account_id,
+            now=datetime.now(UTC),
+            expected_calendar_authority_id=expected_calendar_authority_id,
+            candidate=candidate,
+        ),
     )
     if (
         not verified.evidence_ready
@@ -1507,7 +1600,7 @@ async def prepare_current_trends_once(
         or verified.instrument_id != scope.instrument_id
         or verified.prior_session != scope.prior_session
     ):
-        raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        raise preparation_unknown("current_trends", "readback", "READBACK_MISMATCH")
     return "prepared"
 
 
@@ -1944,6 +2037,10 @@ def _annotate_agent_paper_failure(error: Exception, *, phase: str) -> None:
         return
     try:
         setattr(error, "_nexus_agent_paper_failure_phase", phase)
+        if phase in PHASES and not preparation_failure_fields(error):
+            setattr(
+                error, "_nexus_preparation_diagnostic", (phase, "operation", exception_code(error))
+            )
     except Exception:
         return
 
@@ -1990,6 +2087,7 @@ def _emit_agent_paper_unknown_failure(
         kind = getattr(error, "_nexus_agent_paper_failure_kind", None)
         if phase in MANUAL_TRIGGER_PHASES and kind in MANUAL_TRIGGER_KINDS:
             payload["failure_kind"] = kind
+        payload.update(preparation_failure_fields(error))
         print(
             json.dumps(payload, sort_keys=True),
             file=sys.stderr,
@@ -2796,6 +2894,12 @@ async def execute_agent_paper_loop_action(
             <= snapshot.now
             < _portfolio_slot(snapshot.decision_window_start_at)
         ):
+            _emit_agent_paper_unknown_failure(
+                "execute",
+                snapshot.now,
+                action=action,
+                error=preparation_unknown("configuration", "window", "SCOPE_UNAVAILABLE"),
+            )
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         try:
             environment = (
@@ -2824,12 +2928,13 @@ async def execute_agent_paper_loop_action(
         except Exception as error:
             _annotate_agent_paper_failure(error, phase="configuration")
             raise
-        candidates = await _load_loop_candidates(
-            trigger_settings,
-            account_id=account_id,
-            batch_id=_candidate_batch_setting(environment),
-            expected_calendar_authority_id=snapshot.calendar_authority_id,
-        )
+        with preparation_step("configuration", "candidates"):
+            candidates = await _load_loop_candidates(
+                trigger_settings,
+                account_id=account_id,
+                batch_id=_candidate_batch_setting(environment),
+                expected_calendar_authority_id=snapshot.calendar_authority_id,
+            )
         for candidate in candidates:
             try:
                 daily = await prepare_prior_daily_once(
@@ -2844,6 +2949,12 @@ async def execute_agent_paper_loop_action(
                 _annotate_agent_paper_failure(error, phase="prior_daily")
                 raise
             if daily not in {"ready", "prepared", "unavailable"}:
+                _emit_agent_paper_unknown_failure(
+                    "execute",
+                    snapshot.now,
+                    action=action,
+                    error=preparation_unknown("prior_daily", "readback", "READBACK_MISMATCH"),
+                )
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         try:
             identity_status = await prepare_agent_paper_identity_once(
@@ -2858,6 +2969,12 @@ async def execute_agent_paper_loop_action(
             _annotate_agent_paper_failure(error, phase="research_identity")
             raise
         if identity_status not in {"ready", "prepared", "unavailable"}:
+            _emit_agent_paper_unknown_failure(
+                "execute",
+                snapshot.now,
+                action=action,
+                error=preparation_unknown("research_identity", "readback", "READBACK_MISMATCH"),
+            )
             return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         for candidate in candidates:
             try:
@@ -2874,6 +2991,12 @@ async def execute_agent_paper_loop_action(
                 _annotate_agent_paper_failure(error, phase="macro")
                 raise
             if macro not in {"ready", "prepared", "unavailable"}:
+                _emit_agent_paper_unknown_failure(
+                    "execute",
+                    snapshot.now,
+                    action=action,
+                    error=preparation_unknown("macro", "readback", "READBACK_MISMATCH"),
+                )
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         for candidate in candidates:
             try:
@@ -2889,6 +3012,12 @@ async def execute_agent_paper_loop_action(
                 _annotate_agent_paper_failure(error, phase="current_trends")
                 raise
             if trends not in {"ready", "prepared", "unavailable"}:
+                _emit_agent_paper_unknown_failure(
+                    "execute",
+                    snapshot.now,
+                    action=action,
+                    error=preparation_unknown("current_trends", "readback", "READBACK_MISMATCH"),
+                )
                 return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         return None
     if action == AgentPaperLoopAction.ADVANCE_EVALUATION:

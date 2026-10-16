@@ -6,16 +6,20 @@ import importlib
 import json
 import subprocess
 import sys
-from contextlib import ExitStack
+from collections.abc import AsyncIterator
+from contextlib import ExitStack, asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _checkout_revision, _validate_local_env
+from nexus.ops.preparation_diagnostics import ERROR_CODES, exception_code
 from nexus.paper.current_preparation_acceptance import (
     PreparationAcceptanceCheck,
     PreparationAcceptanceReceipt,
@@ -53,6 +57,94 @@ from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSIO
 from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
+
+
+@dataclass
+class _OperationDiagnostic:
+    stage: str = "maintenance_guard"
+    outcome: str = "not_started"
+    primary: BaseException | None = None
+    primary_stage: str = "maintenance_guard"
+    secondary: list[dict[str, str]] = field(default_factory=list)
+
+    def record(self, error: BaseException) -> None:
+        if self.primary is None:
+            self.primary = error
+            self.primary_stage = self.stage
+            error._nexus_manual_operation = self  # type: ignore[attr-defined]
+        elif error is not self.primary:
+            self.secondary.append({"stage": self.stage, "code": exception_code(error)})
+
+    @asynccontextmanager
+    async def transaction(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> AsyncIterator[AsyncSession]:
+        self.stage, self.outcome = "transaction_open", "unconfirmed"
+        try:
+            async with factory() as session:
+                try:
+                    await session.begin()
+                    self.stage = "transaction_body"
+                    try:
+                        yield session
+                        self.stage = "transaction_commit"
+                        await session.commit()
+                    except BaseException as error:
+                        self.record(error)
+                        self.stage = "transaction_rollback"
+                        try:
+                            await session.rollback()
+                        except BaseException as rollback_error:
+                            self.record(rollback_error)
+                        raise
+                    self.outcome = "committed"
+                except BaseException as error:
+                    self.record(error)
+                    raise
+                finally:
+                    self.stage = "session_close"
+        except BaseException as error:
+            self.record(error)
+            # Closing or rollback must not erase the first failure.
+            if self.primary is not error:
+                assert self.primary is not None
+                raise self.primary from None
+            raise
+
+
+def _operation_fields(error: BaseException) -> dict[str, object]:
+    state = getattr(error, "_nexus_manual_operation", None)
+    stages = {
+        "maintenance_guard",
+        "transaction_open",
+        "session_close",
+        "transaction_body",
+        "transaction_commit",
+        "transaction_rollback",
+        "engine_dispose",
+        "lifecycle_unlock",
+    }
+    if (
+        not isinstance(state, _OperationDiagnostic)
+        or state.primary_stage not in stages
+        or state.outcome not in {"not_started", "unconfirmed", "committed"}
+    ):
+        return {}
+    result: dict[str, object] = {
+        "operation_stage": state.primary_stage,
+        "operation_code": exception_code(error),
+        "transaction_outcome": state.outcome,
+    }
+    secondary = [
+        item
+        for item in state.secondary
+        if set(item) == {"stage", "code"}
+        and item["stage"] in stages
+        and item["code"] in ERROR_CODES
+    ]
+    if secondary:
+        result["secondary_failures"] = secondary
+    return result
 
 
 def _require_maintenance_code(root: Path, revision: str | None) -> None:
@@ -141,6 +233,7 @@ async def run(
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     lifecycle_guards = ExitStack()
+    diagnostic = _OperationDiagnostic()
     try:
         if args.action in {
             "check-preparation-acceptance",
@@ -159,7 +252,7 @@ async def run(
                     "AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE": "LOCK_UNSAFE",
                 }.get(str(error), "LOCK_UNAVAILABLE")
                 raise PreparationCloseDiagnosticError("service_control_lock", reason) from None
-        async with factory.begin() as session:
+        async with diagnostic.transaction(factory) as session:
             if args.action in {
                 "check-preparation-acceptance",
                 "close-unstarted-preparation",
@@ -305,11 +398,23 @@ async def run(
             return await read_configured_manual_request(
                 session, settings, request_id=args.request_id
             )
+    except BaseException as error:
+        diagnostic.record(error)
+        raise
     finally:
+        had_primary = diagnostic.primary is not None
         try:
+            diagnostic.stage = "engine_dispose"
             await factory.kw["bind"].dispose()
-        finally:
+        except BaseException as error:
+            diagnostic.record(error)
+        try:
+            diagnostic.stage = "lifecycle_unlock"
             lifecycle_guards.close()
+        except BaseException as error:
+            diagnostic.record(error)
+        if not had_primary and diagnostic.primary is not None:
+            raise diagnostic.primary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -334,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         if isinstance(error, PreparationCloseDiagnosticError | ResearchProcessDiagnosticError):
             report.update(error.safe_diagnostics())
+        report.update(_operation_fields(error))
         print(json.dumps(report))
         return 1
     print(view.model_dump_json())

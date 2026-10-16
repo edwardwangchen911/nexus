@@ -44,7 +44,7 @@ def event_values(events):
 @pytest.mark.parametrize("prior_claimed", [False, True])
 @pytest.mark.parametrize("guard_fault", [False, True])
 async def test_legacy_terminal_recovery_skips_only_unused_jobs_and_is_idempotent(
-    migrated_database_url, monkeypatch, legacy_version, prior_claimed, guard_fault
+    migrated_database_url, monkeypatch, legacy_version, prior_claimed, guard_fault, tmp_path
 ):
     from nexus.agents.codex_versions import (
         ACTIONABLE_CONFIG_VERSION,
@@ -335,11 +335,19 @@ async def test_legacy_terminal_recovery_skips_only_unused_jobs_and_is_idempotent
                     await require_manual_account_available(
                         session, account_id=authority.account_id, now=seal_now
                     )
+
+            # The normal CLI binds maintenance sources; this isolated historical
+            # case supplies its explicit fixture root, as the formal seal tests do.
+            def fixture_source(root, revision):
+                assert root == tmp_path and revision == runtime.release_revision
+
+            monkeypatch.setattr(manual_paper, "_require_maintenance_code", fixture_source)
             for replayed in (False, True):
                 receipt = await manual_paper.run(
                     runtime,
                     Namespace(
                         action="seal-failed-research",
+                        repo_root=tmp_path,
                         cycle_id=result.cycle_id,
                         run_ids=[old_id],
                         accept_unknown_usage=True,

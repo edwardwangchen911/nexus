@@ -5,6 +5,39 @@ import pytest
 from nexus.ops import manual_paper
 
 
+class _SessionFactory:
+    def __init__(self, begin, engine):
+        self.begin = begin
+        self.kw = {"bind": engine}
+
+    def __call__(self):
+        factory = self
+
+        class Session:
+            async def __aenter__(self):
+                self.transaction = factory.begin()
+                self.original = await self.transaction.__aenter__()
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def begin(self):
+                pass
+
+            async def commit(self):
+                await self.transaction.__aexit__(None, None, None)
+
+            async def rollback(self):
+                error = RuntimeError("test rollback")
+                await self.transaction.__aexit__(type(error), error, None)
+
+            def __getattr__(self, name):
+                return getattr(self.original, name)
+
+        return Session()
+
+
 @pytest.mark.parametrize("file_revision", [None, "1" * 40])
 def test_normal_cli_binds_host_version_to_requested_repo_head(
     tmp_path, monkeypatch, capsys, file_revision
@@ -119,7 +152,7 @@ async def test_cancel_entry_rejects_bad_host_before_recovery(monkeypatch, host, 
     async def begin():
         yield session
 
-    factory = SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=AsyncMock())})
+    factory = _SessionFactory(begin, SimpleNamespace(dispose=AsyncMock()))
     monkeypatch.setattr(manual_paper, "_validate_local_database", lambda url: None)
     monkeypatch.setattr(manual_paper, "session_factory", lambda config: factory)
     recover = AsyncMock()
@@ -163,7 +196,7 @@ async def test_seal_maintenance_uses_actual_schema_without_dispatch_heartbeat(mo
     async def begin():
         yield session
 
-    factory = SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=AsyncMock())})
+    factory = _SessionFactory(begin, SimpleNamespace(dispose=AsyncMock()))
     monkeypatch.setattr(manual_paper, "session_factory", lambda config: factory)
     monkeypatch.setattr(manual_paper, "_validate_local_database", lambda url: None)
     monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *a: None, raising=False)
@@ -313,7 +346,7 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
         async def dispose(self):
             observed.append("dispose")
 
-    factory = SimpleNamespace(begin=Transaction, kw={"bind": Engine()})
+    factory = _SessionFactory(Transaction, Engine())
 
     async def close_request(*_a, **_k):
         assert held[0]

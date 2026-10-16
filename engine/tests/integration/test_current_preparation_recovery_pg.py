@@ -57,6 +57,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "accept_precommit_rollback",
         "accept_commit_rollback",
         "accept_cleanup_unknown",
+        "accept_commit_ack_lost",
         "accept_queued_job",
         "accept_running_job",
         "accept_live_producer",
@@ -1026,7 +1027,7 @@ async def _check_explicit_acceptance(
                     session, **admission, idempotency_key="new"
                 )
         return
-    if case == "accept_cleanup_unknown":
+    if case in {"accept_cleanup_unknown", "accept_commit_ack_lost"}:
         from types import SimpleNamespace
 
         factory = manual_paper.session_factory
@@ -1038,14 +1039,41 @@ async def _check_explicit_acceptance(
             async def dispose():
                 await real.kw["bind"].dispose()
                 disposed.append(True)
-                raise RuntimeError("isolated cleanup after commit")
+                if case == "accept_cleanup_unknown":
+                    raise RuntimeError("isolated cleanup after commit")
 
-            return SimpleNamespace(begin=real.begin, kw={"bind": SimpleNamespace(dispose=dispose)})
+            class Factory:
+                kw = {"bind": SimpleNamespace(dispose=dispose)}
+
+                def __call__(self):
+                    session = real()
+                    original_commit = session.commit
+
+                    async def commit():
+                        await original_commit()
+                        # Real commit succeeded but its acknowledgement is lost.
+                        if case == "accept_commit_ack_lost":
+                            raise RuntimeError("isolated commit acknowledgement lost")
+
+                    session.commit = commit
+                    return session
+
+            return Factory()
 
         with monkeypatch.context() as m:
             m.setattr(manual_paper, "session_factory", with_failed_cleanup)
-            with pytest.raises(RuntimeError, match="isolated cleanup after commit"):
+            with pytest.raises(RuntimeError, match="isolated") as caught:
                 await manual_paper.run(settings, args)
+            fields = manual_paper._operation_fields(caught.value)
+            assert fields == {
+                "operation_stage": "engine_dispose"
+                if case == "accept_cleanup_unknown"
+                else "transaction_commit",
+                "operation_code": "UNEXPECTED_EXCEPTION",
+                "transaction_outcome": "committed"
+                if case == "accept_cleanup_unknown"
+                else "unconfirmed",
+            }
         assert disposed == [True]
         assert await business_facts() == before
         # An exit/cleanup failure can follow a committed acceptance. Never
@@ -1124,8 +1152,21 @@ async def _check_explicit_acceptance(
                 "accept_precommit_rollback": "MANUAL_CONFIGURATION_UNAVAILABLE",
                 "accept_flush_rollback": "isolated post-flush failure",
             }[case]
-            with pytest.raises(expected, match=message):
+            with pytest.raises(expected, match=message) as caught:
                 await manual_paper.run(settings, args)
+            fields = manual_paper._operation_fields(caught.value)
+            assert fields["operation_stage"] == (
+                "transaction_commit" if case == "accept_commit_rollback" else "transaction_body"
+            )
+            assert fields["transaction_outcome"] == "unconfirmed"
+            assert (
+                fields["operation_code"]
+                == {
+                    "accept_commit_rollback": "DATABASE_ERROR",
+                    "accept_precommit_rollback": "VALIDATION_REJECTED",
+                    "accept_flush_rollback": "UNEXPECTED_EXCEPTION",
+                }[case]
+            )
         assert appended == [True]
         assert await stored_facts() == original
         return

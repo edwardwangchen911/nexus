@@ -13,6 +13,12 @@ from sqlalchemy import func, select, text
 
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.ops.agent_paper_once import _validate_local_database
+from nexus.ops.preparation_diagnostics import (
+    preparation_call,
+    preparation_rejected,
+    preparation_step,
+    preparation_unavailable,
+)
 from nexus.ops.research_identity_local import collect_identity_sources
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
@@ -209,100 +215,143 @@ async def prepare_agent_paper_identity_once(
 ) -> str:
     """Archive once, atomically register the batch, then freeze future snapshots."""
     if not contact:
-        return "unavailable"
-    scope = await _read_scope(
-        settings,
-        account_id=account_id,
-        batch_id=batch_id,
-        calendar_id=expected_calendar_authority_id,
+        return preparation_unavailable("research_identity", "configuration", "CONTACT_MISSING")
+    scope = await preparation_call(
+        "research_identity",
+        "scope",
+        _read_scope(
+            settings,
+            account_id=account_id,
+            batch_id=batch_id,
+            calendar_id=expected_calendar_authority_id,
+        ),
     )
-    if scope is None or scope.capacity_exhausted:
-        return "unavailable"
+    if scope is None:
+        return preparation_unavailable("research_identity", "scope", "SCOPE_UNAVAILABLE")
+    if scope.capacity_exhausted:
+        return preparation_unavailable("research_identity", "scope", "CAPACITY_EXHAUSTED")
     if scope.ready:
         return "ready"
     if any(base is None for _, _, base in scope.candidates):
-        return "unavailable"
+        return preparation_unavailable("research_identity", "scope", "IDENTITY_BASE_MISSING")
     if not scope.evidence_ready:
-        directory = _private_parent(repo_root) / scope.day.strftime("%Y%m%d")
+        with preparation_step("research_identity", "archive"):
+            directory = _private_parent(repo_root) / scope.day.strftime("%Y%m%d")
         failure_marker = directory.with_name(directory.name + "-import-failure.json")
         if failure_marker.exists() or failure_marker.is_symlink():
-            return "unavailable"
+            return preparation_unavailable("research_identity", "archive", "PRIOR_IMPORT_FAILED")
         result: object
         if not directory.exists() and not directory.is_symlink():
             try:
-                result = await collect_identity_sources(
-                    symbols=tuple(symbol for _, symbol, _ in scope.candidates),
-                    contact=contact,
-                    output_dir=directory,
+                result = await preparation_call(
+                    "research_identity",
+                    "collect",
+                    collect_identity_sources(
+                        symbols=tuple(symbol for _, symbol, _ in scope.candidates),
+                        contact=contact,
+                        output_dir=directory,
+                    ),
                 )
             except ValueError as error:
                 if str(error) != "IDENTITY_COLLECTION_FAILED":
                     raise
                 # The collector persisted its fixed failure receipt. Keep other
                 # independent preparations running without retrying this source.
-                return "unavailable"
+                return preparation_unavailable(
+                    "research_identity", "collect", "COLLECTION_UNAVAILABLE"
+                )
         else:
             # Existing incomplete or failed archives never cause a fresh request.
             try:
-                result = _archive_result(directory)
+                with preparation_step("research_identity", "archive"):
+                    result = _archive_result(directory)
             except (OSError, ValueError):
-                return "unavailable"
+                return preparation_unavailable("research_identity", "archive", "ARCHIVE_INVALID")
         if not isinstance(result, dict) or result.get("status") != "archived":
-            return "unavailable"
-        refreshed = await _read_scope(
-            settings,
-            account_id=account_id,
-            batch_id=batch_id,
-            calendar_id=expected_calendar_authority_id,
+            return preparation_unavailable("research_identity", "archive", "ARCHIVE_INVALID")
+        refreshed = await preparation_call(
+            "research_identity",
+            "readback",
+            _read_scope(
+                settings,
+                account_id=account_id,
+                batch_id=batch_id,
+                calendar_id=expected_calendar_authority_id,
+            ),
         )
         if (
             refreshed is None
             or refreshed.candidates != scope.candidates
             or refreshed.registered != scope.registered
         ):
-            return "unavailable"
+            return preparation_unavailable("research_identity", "readback", "SCOPE_CHANGED")
         factory = session_factory(settings)
         try:
-            async with factory() as session, session.begin():
-                store = configured_exhibit_store(session)
-                for instrument_id, _, base_id in scope.candidates:
-                    if instrument_id in scope.registered:
-                        continue
-                    assert base_id is not None
-                    await import_identity_binding(
-                        session, store, identity_snapshot_id=base_id, collection_dir=directory
-                    )
-                now = await session.scalar(select(func.clock_timestamp()))
-                if (
-                    not isinstance(now, datetime)
-                    or now >= scope.slot
-                    or now.astimezone(ZoneInfo("America/New_York")).date() != scope.day
-                ):
-                    raise ValueError("AGENT_PAPER_IDENTITY_WINDOW_CLOSED")
-        except ValueError:
-            _import_failure_marker(failure_marker)
-            return "unavailable"
+            with preparation_step("research_identity", "import"):
+                async with factory() as session, session.begin():
+                    store = configured_exhibit_store(session)
+                    for instrument_id, _, base_id in scope.candidates:
+                        if instrument_id in scope.registered:
+                            continue
+                        assert base_id is not None
+                        await preparation_call(
+                            "research_identity",
+                            "import",
+                            import_identity_binding(
+                                session,
+                                store,
+                                identity_snapshot_id=base_id,
+                                collection_dir=directory,
+                            ),
+                        )
+                    now = await session.scalar(select(func.clock_timestamp()))
+                    if (
+                        not isinstance(now, datetime)
+                        or now >= scope.slot
+                        or now.astimezone(ZoneInfo("America/New_York")).date() != scope.day
+                    ):
+                        raise ValueError("AGENT_PAPER_IDENTITY_WINDOW_CLOSED")
+        except ValueError as error:
+            with preparation_step("research_identity", "archive"):
+                _import_failure_marker(failure_marker)
+            return preparation_rejected("research_identity", "import", error)
         finally:
             await factory.kw["bind"].dispose()
     # Use the existing host producer, preserving macro/trend snapshot contracts.
     from nexus.ops.agent_paper_loop import _prepare_current_trends_research_snapshot
 
     for instrument_id, _, _ in scope.candidates:
-        current = await _read_scope(
+        current = await preparation_call(
+            "research_identity",
+            "readback",
+            _read_scope(
+                settings,
+                account_id=account_id,
+                batch_id=batch_id,
+                calendar_id=expected_calendar_authority_id,
+            ),
+        )
+        if current is None or current.candidates != scope.candidates:
+            return preparation_unavailable("research_identity", "readback", "SCOPE_CHANGED")
+        await preparation_call(
+            "research_identity",
+            "snapshot",
+            _prepare_current_trends_research_snapshot(
+                settings, instrument_id=instrument_id, now=datetime.now(UTC)
+            ),
+        )
+    verified = await preparation_call(
+        "research_identity",
+        "readback",
+        _read_scope(
             settings,
             account_id=account_id,
             batch_id=batch_id,
             calendar_id=expected_calendar_authority_id,
-        )
-        if current is None or current.candidates != scope.candidates:
-            return "unavailable"
-        await _prepare_current_trends_research_snapshot(
-            settings, instrument_id=instrument_id, now=datetime.now(UTC)
-        )
-    verified = await _read_scope(
-        settings,
-        account_id=account_id,
-        batch_id=batch_id,
-        calendar_id=expected_calendar_authority_id,
+        ),
     )
-    return "prepared" if verified is not None and verified.ready else "unavailable"
+    return (
+        "prepared"
+        if verified is not None and verified.ready
+        else preparation_unavailable("research_identity", "readback", "READBACK_MISMATCH")
+    )
