@@ -348,7 +348,18 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 select(Job).where(Job.payload["run_id"].astext == str(synth.id))
             )
 
+        portfolio_calls = []
+
         async def invoke_portfolio(payload, **kwargs):
+            portfolio_calls.append(payload["input_hash"])
+            if fault in {"synthesis_unknown", "synthesis_preflight"}:
+                from nexus.agents.codex_sdk import CodexInvocationError
+
+                raise CodexInvocationError(
+                    "CODEX_TIMEOUT" if fault == "synthesis_unknown" else "CODEX_INPUT_TOO_LARGE",
+                    phase="turn_run" if fault == "synthesis_unknown" else "preflight",
+                    provider_call_started=None if fault == "synthesis_unknown" else False,
+                )
             return intent.model_dump_json(), UsageSnapshot(
                 input_tokens=100, output_tokens=100, provider_calls=1
             )
@@ -365,6 +376,19 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             assert await run_portfolio_synthesis_worker_once(
                 settings, job_ids=(synth_job.id,), **consumer_mode
             )
+        if fault in {"synthesis_unknown", "synthesis_preflight"}:
+            assert manual is not None
+            await _verify_synthesis_retry_refused(settings, sessions, synth.id, synth_job.id, fault)
+            assert portfolio_calls == [synth.input_hash]
+            with pytest.raises(ValueError, match="^PORTFOLIO_SYNTHESIS_UNAVAILABLE$"):
+                await _consume_manual_host_action(settings, "RESUME")
+            async with sessions() as session:
+                unavailable = await _read_cycle_result(session, result.cycle_id)
+                assert unavailable.status == "unavailable"
+                assert unavailable.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+            await _verify_failed_manual_intent(settings, sessions, request_id, "active")
+            assert portfolio_calls == [synth.input_hash]
+            return
         async with sessions() as session:
             completed_synth = await session.get(AgentPortfolioSynthesisRunRecord, synth.id)
             completed_job = await session.get(Job, synth_job.id)
@@ -638,13 +662,91 @@ async def test_v10_manual_entry_to_result(migrated_database_url, monkeypatch, tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", ["preparation_failure", "research_unknown"])
+@pytest.mark.parametrize(
+    "fault", ["preparation_failure", "research_unknown", "synthesis_unknown", "synthesis_preflight"]
+)
 async def test_v10_manual_entry_failure_preserves_recovery_gates(
     migrated_database_url, monkeypatch, tmp_path, fault
 ):
     await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         migrated_database_url, monkeypatch, 3, True, "formal_v10", True, tmp_path, fault
     )
+
+
+async def _verify_synthesis_retry_refused(settings, sessions, run_id, job_id, fault):
+    import httpx
+    from helpers.paper_api import headers
+    from nexus.main import create_engine_app
+    from nexus.persistence.models.agents import (
+        AgentPortfolioSynthesisBudgetReservationRecord,
+        AgentPortfolioSynthesisRunRecord,
+    )
+    from nexus.persistence.models.runtime import IdempotencyRecord
+    from nexus.worker import run_portfolio_synthesis_worker_once
+    from sqlalchemy import func
+
+    async with sessions() as session:
+        job = await session.get(Job, job_id)
+        run = await session.get(AgentPortfolioSynthesisRunRecord, run_id)
+        reserve = await session.scalar(
+            select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+                AgentPortfolioSynthesisBudgetReservationRecord.run_id == run_id
+            )
+        )
+        assert job.job_type == "agent.portfolio_synthesis"
+        assert (job.status, job.retry_policy, job.max_attempts, job.attempt_count) == (
+            "failed",
+            "never",
+            1,
+            1,
+        )
+        assert job.manual_retry_count == 0 and run.status == "failed"
+        assert job.last_error_code == (
+            "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"
+            if fault == "synthesis_unknown"
+            else "PORTFOLIO_SYNTHESIS_PRE_DISPATCH_PREFLIGHT"
+        )
+        if fault == "synthesis_unknown":
+            assert run.settled_cost_usd is None
+            assert reserve.state == "reserved" and reserve.settled_usd is None
+        else:
+            assert run.settled_cost_usd == Decimal("0")
+            assert reserve.state == "released" and reserve.settled_usd == Decimal("0")
+        before = await _manual_recovery_facts(session)
+        version = job.version
+    assert not await run_portfolio_synthesis_worker_once(
+        settings, job_ids=(job_id,), formal_stage_capacity=True
+    )
+    path = f"/internal/v1/jobs/{job_id}/retry"
+    body = b"{}"
+    app = create_engine_app(settings)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                path,
+                content=body,
+                headers={
+                    **headers("POST", path, body),
+                    "Idempotency-Key": "synthesis-must-not-replay",
+                    "If-Match": f'"{version}"',
+                },
+            )
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+        async with sessions() as session:
+            assert await _manual_recovery_facts(session) == before
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(IdempotencyRecord)
+                    .where(IdempotencyRecord.route == path)
+                )
+                == 0
+            )
+    finally:
+        await app.state.session_factory.kw["bind"].dispose()
 
 
 async def _verify_failed_manual_intent(settings, sessions, request_id, status):
@@ -700,8 +802,13 @@ async def _manual_recovery_facts(session):
     tables = (
         "manual_paper_requests",
         "manual_paper_request_events",
+        "agent_paper_cycles",
+        "agent_paper_cycle_events",
+        "strategy_decisions",
         "agent_research_runs",
         "agent_research_outputs",
+        "agent_portfolio_synthesis_runs",
+        "agent_portfolio_synthesis_outputs",
         "jobs",
         "job_attempts",
         "job_leases",
