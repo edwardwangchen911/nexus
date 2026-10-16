@@ -34,6 +34,8 @@ async def test_observer_preserves_reader_identity_result_and_private_payload(mon
         "first_notification_ms": 1000,
         "last_notification_ms": 3000,
         "terminal_notification_seen": True,
+        "reasoning_notifications": 0,
+        "answer_notifications": 1,
     }
     assert "private" not in json.dumps(snapshot)
     assert reader.await_count == 3
@@ -71,8 +73,48 @@ def test_old_timing_remains_readable_and_progress_rejects_raw_fields():
     from pydantic import ValidationError
 
     assert StageInvocationTiming(elapsed_ms=0, phase_elapsed_ms={}).stream_progress is None
+    old = SdkStreamProgress(available=True, progress_notifications=5)
+    assert old.reasoning_notifications is None
+    assert old.answer_notifications is None
+    assert "answer_notifications" not in old.model_dump(mode="json")
+    timing = StageInvocationTiming(elapsed_ms=0, phase_elapsed_ms={})
+    assert timing.committee_remaining_ms is None
+    assert timing.stage_preparation_ms is None
+    assert "committee_remaining_ms" not in timing.model_dump(mode="json")
     with pytest.raises(ValidationError):
         SdkStreamProgress(available=True, raw_payload="private-canary")
+
+
+@pytest.mark.asyncio
+async def test_reasoning_and_answer_progress_are_distinct_without_reading_payload():
+    class Notification:
+        def __init__(self, method):
+            self.method = method
+
+        @property
+        def payload(self):
+            pytest.fail("observer accessed private payload")
+
+    events = [
+        Notification(method)
+        for method in (
+            "item/reasoning/textDelta",
+            "item/reasoning/summaryTextDelta",
+            "item/agentMessage/delta",
+            "item/completed",
+            "turn/completed",
+        )
+    ]
+    transport = SimpleNamespace(next_turn_notification=AsyncMock(side_effect=events))
+    observer = progress.SdkStreamObserver()
+    with progress.observe_sdk_notifications(SimpleNamespace(_client=transport), observer):
+        for event in events:
+            assert await transport.next_turn_notification("private-turn") is event
+    result = observer.snapshot()
+    assert result.progress_notifications == 3
+    assert result.reasoning_notifications == 2
+    assert result.answer_notifications == 1
+    assert result.terminal_notification_seen
 
 
 @pytest.mark.asyncio

@@ -10,9 +10,11 @@ import importlib
 import json
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from functools import lru_cache
 from importlib import metadata
 from pathlib import Path
+from typing import Protocol
 
 VOCABULARY_URL = "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
 VOCABULARY_SHA256 = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
@@ -59,28 +61,39 @@ def local_vocabulary() -> bytes | None:
         return None
 
 
+class _Encoding(Protocol):
+    def encode_ordinary(self, text: str) -> list[int]: ...
+
+
+@lru_cache(maxsize=1)
+def _validated_encoding(factory: Callable[..., _Encoding], data: bytes) -> _Encoding:
+    """Reuse only the encoder built from exact, freshly validated public bytes."""
+    ranks = {}
+    for line in data.splitlines():
+        token, rank = line.split()
+        ranks[base64.b64decode(token, validate=True)] = int(rank)
+    return factory(
+        name="o200k_base",
+        pat_str=_PATTERN,
+        mergeable_ranks=ranks,
+        special_tokens=_SPECIAL_TOKENS,
+    )
+
+
 def payload_input_units(text: str, *, model: str) -> int:
     """Count ordinary wire-text tokens, or conservatively fall back to UTF-8 bytes."""
     fallback = len(text.encode("utf-8"))
     try:
-        if model not in {"gpt-5.4-mini", "gpt-5.6-terra"} or metadata.version(
-            "tiktoken"
-        ) != "0.14.0":
+        if (
+            model not in {"gpt-5.4-mini", "gpt-5.6-terra"}
+            or metadata.version("tiktoken") != "0.14.0"
+        ):
             return fallback
         tiktoken = importlib.import_module("tiktoken")
         data = local_vocabulary()
         if data is None:
             return fallback
-        ranks = {}
-        for line in data.splitlines():
-            token, rank = line.split()
-            ranks[base64.b64decode(token, validate=True)] = int(rank)
-        encoding = tiktoken.Encoding(
-            name="o200k_base",
-            pat_str=_PATTERN,
-            mergeable_ranks=ranks,
-            special_tokens=_SPECIAL_TOKENS,
-        )
+        encoding = _validated_encoding(tiktoken.Encoding, data)
         return len(encoding.encode_ordinary(text))
     except Exception:
         # No download/alternate encoding, and no exception text containing inputs.

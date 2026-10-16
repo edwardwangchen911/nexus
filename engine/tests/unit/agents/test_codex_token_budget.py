@@ -109,6 +109,55 @@ def test_real_encoding_merges_synthetic_vocabulary_without_official_asset(
     assert not forbid_network
 
 
+def test_repeated_counts_reuse_encoder_but_revalidate_local_authority(
+    tmp_path, monkeypatch, forbid_network
+):
+    from nexus.agents import codex_token_budget as budget
+
+    tokens = [bytes([value]) for value in range(256)] + [b"ab", b"abc"]
+    data = b"".join(
+        base64.b64encode(token) + f" {rank}\n".encode() for rank, token in enumerate(tokens)
+    )
+    path = tmp_path / "synthetic-vocabulary"
+    path.write_bytes(data)
+    monkeypatch.setattr(budget, "tokenizer_cache_path", lambda: path)
+    monkeypatch.setattr(budget, "VOCABULARY_SHA256", hashlib.sha256(data).hexdigest())
+    real_encoding = importlib.import_module("tiktoken").Encoding
+    constructed = []
+
+    def construct(**kwargs):
+        constructed.append(1)
+        return real_encoding(**kwargs)
+
+    monkeypatch.setattr(
+        budget.importlib, "import_module", lambda _: SimpleNamespace(Encoding=construct)
+    )
+    for _ in range(3):
+        assert budget.payload_input_units("abc abc", model="gpt-5.6-terra") == 3
+    assert len(constructed) == 1
+    # Unchanged, parseable bytes must still match the current authority hash.
+    monkeypatch.setattr(budget, "VOCABULARY_SHA256", "0" * 64)
+    assert budget.payload_input_units("abc abc", model="gpt-5.6-terra") == 7
+    assert len(constructed) == 1
+    monkeypatch.setattr(budget, "VOCABULARY_SHA256", hashlib.sha256(data).hexdigest())
+    # A warm encoder never grants use of corrupt, removed, redirected or
+    # version-mismatched authority. No stale count is substituted.
+    path.write_bytes(b"corrupt")
+    assert budget.payload_input_units("abc abc", model="gpt-5.6-terra") == 7
+    path.unlink()
+    assert budget.payload_input_units("abc abc", model="gpt-5.6-terra") == 7
+    target = tmp_path / "target"
+    target.write_bytes(data)
+    path.symlink_to(target)
+    assert budget.payload_input_units("abc abc", model="gpt-5.6-terra") == 7
+    path.unlink()
+    path.write_bytes(data)
+    monkeypatch.setattr(budget.metadata, "version", lambda _: "0.13.0")
+    assert budget.payload_input_units("abc abc", model="gpt-5.6-terra") == 7
+    assert len(constructed) == 1
+    assert not forbid_network
+
+
 @pytest.mark.parametrize("case", ["missing", "corrupt", "oversized", "model", "version", "package"])
 def test_local_counter_failures_fall_back_to_utf8_bytes_without_network(
     tmp_path,

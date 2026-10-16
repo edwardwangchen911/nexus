@@ -34,7 +34,13 @@ from unit.agents.test_codex_sdk import _assessment_payload, _staged_batch
     [(3, False), (5, False), (3, True), (3, "invalid_context"), (3, "wrong_mode")],
 )
 async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
-    migrated_database_url, monkeypatch, count, oversized_tail, formal, flexible
+    migrated_database_url,
+    monkeypatch,
+    count,
+    oversized_tail,
+    formal,
+    flexible,
+    research_timeout=False,
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
@@ -47,6 +53,37 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
         from unit.agents.test_codex_sdk import _sdk
 
         client, thread, sdk_result, _ = _sdk(monkeypatch)
+        if research_timeout:
+            import asyncio
+            from types import SimpleNamespace
+            from unittest.mock import AsyncMock
+
+            # Real product SDK wrapper deadline/cancellation and close dispatch,
+            # driven by an event. SDK client, turn and close are test doubles.
+            timers = []
+            timeout_at = asyncio.timeout_at
+
+            def observe_timer(deadline):
+                timer = timeout_at(deadline)
+                timers.append(timer)
+                return timer
+
+            monkeypatch.setattr(asyncio, "timeout_at", observe_timer)
+            closed = asyncio.Event()
+            client.close.side_effect = closed.set
+            client._client.next_turn_notification = AsyncMock(
+                return_value=SimpleNamespace(
+                    method="item/reasoning/textDelta", payload="private-progress-canary"
+                )
+            )
+
+            async def unfinished_turn(*args, **kwargs):
+                await client._client.next_turn_notification("private-turn-canary")
+                timers[-1].reschedule(asyncio.get_running_loop().time())
+                await closed.wait()
+                return sdk_result
+
+            thread.run.side_effect = unfinished_turn
     from nexus.agents.codex_flexible_budget import flexible_stage_config, flexible_stage_config_hash
 
     config = flexible_stage_config() if flexible else capacity_config()
@@ -189,6 +226,80 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
                 job_ids=(job.id,),
                 **({"formal_stage_capacity": True} if formal else {"full_input_capacity": True}),
             )
+            if research_timeout:
+                from uuid import UUID
+
+                import httpx
+                from helpers.portfolio_api import app, headers
+                from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
+                from nexus.persistence.models.agents import (
+                    AgentDailyBudgetReservationRecord,
+                    AgentPortfolioSynthesisRunRecord,
+                    AgentResearchOutputRecord,
+                )
+                from nexus.persistence.models.paper import PaperOrderRecord
+
+                assert not await run_agent_worker_once(
+                    settings, job_ids=(job.id,), formal_stage_capacity=True
+                )
+                async with sessions.begin() as check:
+                    failed = await check.get(AgentResearchRunRecord, UUID(job.payload["run_id"]))
+                    assert failed.status == "failed" and failed.retry_count == 0
+                    assert failed.input_tokens is None and failed.output_tokens is None
+                    reservation = await check.scalar(
+                        select(AgentDailyBudgetReservationRecord).where(
+                            AgentDailyBudgetReservationRecord.run_id == failed.id
+                        )
+                    )
+                    assert reservation.state == "reserved" and reservation.settled_usd is None
+                    terminal = await check.scalar(
+                        select(AgentResearchOutputRecord).where(
+                            AgentResearchOutputRecord.run_id == failed.id,
+                            AgentResearchOutputRecord.status == "failed",
+                        )
+                    )
+                    diagnostic = terminal.payload["diagnostic"]
+                    assert diagnostic["stage"] == "research"
+                    assert diagnostic["invocation_phase"] == "turn_run"
+                    assert diagnostic["timeout_source"] == "stage_deadline"
+                    timing = diagnostic["timing"]
+                    assert timing["stage_preparation_ms"] >= 0
+                    assert 0 < timing["committee_remaining_ms"] <= 175000
+                    assert 0 < timing["allocated_timeout_ms"] <= 60000
+                    assert timing["stream_progress"]["reasoning_notifications"] == 1
+                    assert timing["stream_progress"]["answer_notifications"] == 0
+                    assert not timing["stream_progress"]["terminal_notification_seen"]
+                    assert "private-" not in json.dumps(terminal.payload)
+                    stopped = await resume_schwab_agent_paper_cycle(
+                        check,
+                        cycle_id=result.cycle_id,
+                        idempotency_key="synthetic-timeout-close",
+                        now=AT + timedelta(minutes=5),
+                        formal_stage_capacity=True,
+                    )
+                    assert stopped.status == "unavailable"
+                    assert stopped.result_code == "RESEARCH_OUTPUT_NOT_ACTIONABLE"
+                    assert (
+                        await check.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
+                    )
+                    assert (
+                        await check.scalar(
+                            select(func.count()).select_from(AgentPortfolioSynthesisRunRecord)
+                        )
+                        == 0
+                    )
+                path = f"/internal/v1/research-runs/{failed.id}"
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app(migrated_database_url)),
+                    base_url="http://testserver",
+                ) as api:
+                    response = await api.get(path, headers=headers("GET", path))
+                assert response.status_code == 200
+                assert response.json()["data"]["abstention_reason"] == "model_usage_uncertain"
+                assert calls == ["research"]
+                thread.run.assert_awaited_once()
+                client.close.assert_awaited_once()
+                return
             if flexible:
                 from nexus.persistence.models.agents import AgentResearchOutputRecord
 
@@ -252,3 +363,12 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
         assert calls == ["research", "critique", "synthesis"] * count
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_formal_v10_research_deadline_preserves_unknown_usage_and_closes_cycle(
+    migrated_database_url, monkeypatch
+):
+    await test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
+        migrated_database_url, monkeypatch, 3, False, True, True, research_timeout=True
+    )

@@ -25,6 +25,8 @@ class SdkStreamObserver:
     available: bool = False
     notifications: int = 0
     progress_notifications: int = 0
+    reasoning_notifications: int = 0
+    answer_notifications: int = 0
     first_notification_ms: int | None = None
     last_notification_ms: int | None = None
     terminal_notification_seen: bool = False
@@ -42,6 +44,10 @@ class SdkStreamObserver:
         method = getattr(event, "method", None)
         if type(method) is str and method in _PROGRESS_METHODS:
             self.progress_notifications = min(1000000, self.progress_notifications + 1)
+            if method == "item/agentMessage/delta":
+                self.answer_notifications = min(1000000, self.answer_notifications + 1)
+            else:
+                self.reasoning_notifications = min(1000000, self.reasoning_notifications + 1)
         if method == "turn/completed":
             self.terminal_notification_seen = True
 
@@ -53,6 +59,8 @@ class SdkStreamObserver:
             first_notification_ms=self.first_notification_ms,
             last_notification_ms=self.last_notification_ms,
             terminal_notification_seen=self.terminal_notification_seen,
+            reasoning_notifications=self.reasoning_notifications if self.available else None,
+            answer_notifications=self.answer_notifications if self.available else None,
         )
 
 

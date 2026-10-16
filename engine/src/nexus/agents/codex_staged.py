@@ -568,6 +568,7 @@ class StagedCodexCommittee(CodexCommittee):
         self.failure_reason = "model_execution_failed"
         self.last_stage_input = None
         self.failure_diagnostic = None
+        preparation_started = asyncio.get_running_loop().time() if self._stage_time_budget else None
         previous: list[dict[str, object]] = [
             {
                 "claim_id": f"{output.role}:{index}",
@@ -606,8 +607,13 @@ class StagedCodexCommittee(CodexCommittee):
 
         allocated_timeout = None
         allocated_deadline = None
+        committee_remaining_ms = None
+        stage_preparation_ms = None
         if self._stage_time_budget and self._deadline is not None:
             allocated_at = asyncio.get_running_loop().time()
+            committee_remaining_ms = max(0, int((self._deadline - allocated_at) * 1000))
+            assert preparation_started is not None
+            stage_preparation_ms = max(0, int((allocated_at - preparation_started) * 1000))
             allocated_timeout = stage_timeout_seconds(
                 stage,
                 deadline=self._deadline,
@@ -708,6 +714,8 @@ class StagedCodexCommittee(CodexCommittee):
                 )
                 else None,
                 timing=StageInvocationTiming(
+                    committee_remaining_ms=committee_remaining_ms,
+                    stage_preparation_ms=stage_preparation_ms,
                     diagnostic_profile=self._diagnostic_profile,
                     flexible_critique_profile=(
                         "codex-sdk-chatgpt-v10-flexible-stage-budget"
@@ -730,6 +738,8 @@ class StagedCodexCommittee(CodexCommittee):
             raise
         if self._stage_time_budget:
             self.stage_timings[stage] = StageInvocationTiming(
+                committee_remaining_ms=committee_remaining_ms,
+                stage_preparation_ms=stage_preparation_ms,
                 diagnostic_profile=self._diagnostic_profile,
                 flexible_critique_profile=(
                     "codex-sdk-chatgpt-v10-flexible-stage-budget"

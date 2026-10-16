@@ -94,6 +94,17 @@ class SdkStreamProgress(BaseModel):
     first_notification_ms: int | None = Field(default=None, strict=True, ge=0)
     last_notification_ms: int | None = Field(default=None, strict=True, ge=0)
     terminal_notification_seen: bool = Field(default=False, strict=True)
+    # Absent in old receipts: unknown, never inferred from the combined count.
+    reasoning_notifications: int | None = Field(default=None, strict=True, ge=0, le=1000000)
+    answer_notifications: int | None = Field(default=None, strict=True, ge=0, le=1000000)
+
+    @model_serializer(mode="wrap")
+    def _serialize_counts(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        serialized = cast(dict[str, object], handler(self))
+        for field in ("reasoning_notifications", "answer_notifications"):
+            if getattr(self, field) is None:
+                serialized.pop(field, None)
+        return serialized
 
 
 class StageInvocationTiming(BaseModel):
@@ -107,6 +118,9 @@ class StageInvocationTiming(BaseModel):
     elapsed_ms: int = Field(strict=True, ge=0)
     phase_elapsed_ms: dict[InvocationPhase, Annotated[int, Field(strict=True, ge=0)]]
     stream_progress: SdkStreamProgress | None = None
+    # Sampled together at allocation, before SDK invocation; not new allowances.
+    committee_remaining_ms: int | None = Field(default=None, strict=True, ge=0)
+    stage_preparation_ms: int | None = Field(default=None, strict=True, ge=0)
 
     @model_validator(mode="after")
     def _profile_allocation(self) -> "StageInvocationTiming":
@@ -130,6 +144,9 @@ class StageInvocationTiming(BaseModel):
             serialized.pop("flexible_critique_profile", None)
         if self.diagnostic_profile is None:
             serialized.pop("diagnostic_profile", None)
+        for field in ("committee_remaining_ms", "stage_preparation_ms"):
+            if getattr(self, field) is None:
+                serialized.pop(field, None)
         return serialized
 
 

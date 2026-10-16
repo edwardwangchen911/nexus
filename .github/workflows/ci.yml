@@ -151,6 +151,7 @@ jobs:
             engine/tests/integration/test_capacity_rejection_pg.py \
             engine/tests/integration/test_unknown_preparation_ack_pg.py \
             engine/tests/integration/test_formal_v10_runtime_admission.py \
+            engine/tests/integration/test_full_input_capacity_cycle.py::test_formal_v10_research_deadline_preserves_unknown_usage_and_closes_cycle \
             engine/tests/integration/test_formal_resume_observation_clock.py
       - name: Run full Engine regression manually
         if: github.event_name == 'workflow_dispatch'

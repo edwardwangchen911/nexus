@@ -362,3 +362,79 @@ def test_new_timing_identity_records_flexible_limit_and_old_receipts_round_trip(
         flexible_critique_profile=V10,
     )
     assert new.model_dump(mode="json")["flexible_critique_profile"] == V10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_research_records_spent_preparation_and_remaining_budget_without_extending_it(
+    monkeypatch, fail
+):
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock
+
+    from nexus.agents import codex_staged
+    from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_pool
+    from nexus.agents.codex_sdk import CodexInvocationError
+    from nexus.agents.responses_budget import UsageSnapshot
+    from unit.agents.test_codex_sdk import _authority, _staged_batch, _tools
+
+    clock = [100.0]
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock[0])
+    request, evidence, prompts = _authority()
+    committee = codex_staged.StructuredStagedCodexCommittee(
+        prompts=prompts,
+        tools=_tools(),
+        deadline=280.0,
+        aggregate_input_tokens=96000,
+        max_wire_bytes=100479,
+        inline_citations=True,
+        paper_stage_scope=True,
+        stage_time_budget=True,
+        stage_budget_version=V10,
+    )
+    inputs = {"security_snapshot": {"items": []}, "financial_facts": {"items": []}}
+    monkeypatch.setattr(committee, "_inputs", AsyncMock(return_value=inputs))
+    await preflight_capacity_pool(
+        [CapacityPoolMember(committee, request, evidence)],
+        expected_instrument_ids=(request.instrument_id,),
+    )
+    clock[0] += 4.767  # Worker/whole-pool preparation before this stage.
+
+    async def stage_inputs(_request):
+        clock[0] += 2
+        return inputs
+
+    monkeypatch.setattr(committee, "_inputs", stage_inputs)
+    calls = []
+
+    async def invoke(payload, **options):
+        calls.append(options)
+        assert options["timeout_seconds"] == pytest.approx(57.233)
+        assert options["deadline_at"] == pytest.approx(164)
+        assert options["parent_deadline_at"] == 275
+        if fail:
+            error = CodexInvocationError(
+                "CODEX_TIMEOUT", phase="turn_run", provider_call_started=True
+            )
+            error.timeout_source = "stage_deadline"
+            raise error
+        return json.dumps(_staged_batch("research", payload["requested_roles"])), UsageSnapshot(
+            input_tokens=300, output_tokens=80
+        )
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    if fail:
+        with pytest.raises(CodexInvocationError):
+            await committee.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+        timing = committee.failure_diagnostic.timing
+        assert committee.failure_reason == "model_usage_uncertain"
+        with pytest.raises(ValueError, match="CODEX_REQUEST_ALREADY_FAILED"):
+            await committee.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    else:
+        await committee.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+        timing = committee.stage_timings["research"]
+    assert timing.committee_remaining_ms == pytest.approx(168233, abs=1)
+    assert timing.stage_preparation_ms == 2000
+    assert committee._deadline == 275
+    assert len(calls) == committee.usage.provider_calls == 1
