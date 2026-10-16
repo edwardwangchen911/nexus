@@ -138,6 +138,7 @@ async def verify_controlled_browser(
     manual_settings: EngineSettings | None = None,
     manual_request_id: UUID | None = None,
     submit_manual: bool = False,
+    recovered_manual_request_id: UUID | None = None,
 ) -> UUID | None:
     root = Path(__file__).resolve().parents[3]
     if not (root / "node_modules/.bin/vinext").exists():
@@ -247,6 +248,8 @@ async def verify_controlled_browser(
         if submit_manual:
             environment["NEXUS_CONTROLLED_MANUAL_SUBMIT"] = "1"
             environment["NEXUS_CONTROLLED_MANUAL_RECEIPT_PATH"] = str(receipt_path)
+        if recovered_manual_request_id is not None:
+            environment["NEXUS_CONTROLLED_RECOVERED_MANUAL_ID"] = str(recovered_manual_request_id)
         if channel := os.environ.get("NEXUS_E2E_BROWSER_CHANNEL"):
             environment["NEXUS_E2E_BROWSER_CHANNEL"] = channel
         if economic_protocol_hash is not None:

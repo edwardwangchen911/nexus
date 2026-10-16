@@ -4,19 +4,50 @@ import { join } from "node:path";
 import { formatDisplayDecimal } from "../../app/lib/display-decimal";
 import type { components } from "../../app/lib/generated/schema";
 
-test("controlled Workspace starts one manual request through the real BFF", async ({ page }) => {
+test("controlled Workspace starts one manual request through the real BFF", async ({ page, request }) => {
   test.skip(process.env.NEXUS_CONTROLLED_MANUAL_SUBMIT !== "1", "isolated manual submission phase required");
   await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: () => "v10-entry-result" }));
   await page.goto("/workspace");
+  const manual = page.getByRole("region", { name: "开始研究与内部模拟" });
+  const writes: string[] = [];
+  page.on("request", (r) => {
+    if (!["GET", "HEAD"].includes(r.method())) writes.push(r.method());
+  });
+  const recoveredId = process.env.NEXUS_CONTROLLED_RECOVERED_MANUAL_ID;
+  let original: unknown;
+  if (recoveredId) {
+    const old = await request.get("/api/v1/paper/manual-requests", { headers: { "Idempotency-Key": "interrupted" } });
+    expect(old.status()).toBe(200);
+    original = (await old.json()).data;
+    expect(original).toMatchObject({ request_id: recoveredId, status: "unknown", cycle_id: null, preparation_disposition: "unknown_acknowledged", execution_locked: true });
+    await page.evaluate(() => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "interrupted", mode: "research_and_paper" })));
+    await page.reload();
+    await expect(manual.getByText("周期结果尚未确认", { exact: true })).toBeVisible();
+    await expect(manual.getByText(/准备结果未知已明确接受，调度占用已解除/)).toBeVisible();
+    await expect(manual.getByRole("button", { name: "研究并内部模拟", exact: true })).toBeDisabled();
+    await manual.getByRole("button", { name: "开始新的请求", exact: true }).click();
+    expect(await page.evaluate(() => sessionStorage.getItem("nexus-manual-paper-attempt-v1"))).toBeNull();
+    expect(writes).toEqual([]);
+  }
   const response = page.waitForResponse((r) => r.url().endsWith("/api/v1/paper/manual-requests") && r.request().method() === "POST");
-  await page.getByRole("region", { name: "开始研究与内部模拟" }).getByRole("button", { name: "研究并内部模拟", exact: true }).click();
+  await manual.getByRole("button", { name: "研究并内部模拟", exact: true }).click();
   const posted = await response;
   expect(posted.status()).toBe(200);
   const data = (await posted.json()).data;
   expect(data.status).toBe("queued");
   expect(data.mode).toBe("research_and_paper");
   expect(data.execution_locked).toBe(true);
+  expect(posted.request().headers()["idempotency-key"]).toBe("v10-entry-result");
   await expect(page.getByText(/已登记，等待宿主处理/)).toBeVisible();
+  await page.reload();
+  await expect(manual.getByText(/已登记，等待宿主处理/)).toBeVisible();
+  expect(writes).toEqual(["POST"]);
+  if (recoveredId) {
+    expect(data.request_id).not.toBe(recoveredId);
+    const old = await request.get("/api/v1/paper/manual-requests", { headers: { "Idempotency-Key": "interrupted" } });
+    expect(old.status()).toBe(200);
+    expect((await old.json()).data).toEqual(original);
+  }
   await writeFile(process.env.NEXUS_CONTROLLED_MANUAL_RECEIPT_PATH!, JSON.stringify(data), { mode: 0o600 });
 });
 

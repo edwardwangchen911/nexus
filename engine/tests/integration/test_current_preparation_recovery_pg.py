@@ -1,8 +1,11 @@
 """Current host crash boundaries on isolated PG; no live source/model calls."""
 
 import asyncio
+import os
+import subprocess
 from contextlib import nullcontext
 from datetime import timedelta
+from uuid import UUID
 
 import httpx
 import pytest
@@ -13,6 +16,7 @@ from integration.test_manual_paper_request_pg import AT
 from integration.test_portfolio_same_day_research_pg import seed_normal_path
 from nexus.main import create_engine_app
 from nexus.ops import agent_paper_once, manual_paper, manual_paper_host
+from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
 from nexus.ops.openai_local import prepare_database
 from nexus.paper import manual_request
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
@@ -1059,9 +1063,57 @@ async def _check_explicit_acceptance(
                     session, **admission, idempotency_key="new"
                 )
         return
+    # Recovery must compose with the configured user entry, including the host,
+    # version and trading-session gates, not only the lower-level admission helper.
+    browser_entry = (
+        os.environ.get("NEXUS_CONTROLLED_BROWSER") == "1" and case == "accept_prepared_closed"
+    )
+    if browser_entry:
+        settings.release_revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    await heartbeat_agent_paper_loop(
+        settings,
+        account_id=admission["account_id"],
+        worker_id=f"agent-paper-loop-{UUID(int=1)}",
+        started_at=AT - timedelta(minutes=1),
+        seen_at=AT,
+    )
+    if browser_entry:
+        from helpers.controlled_browser import verify_controlled_browser
+
+        new_id = await verify_controlled_browser(
+            settings.database_url,
+            api_now=AT,
+            cycle_id=None,
+            order_ids=(),
+            manual_settings=settings,
+            submit_manual=True,
+            recovered_manual_request_id=request.request_id,
+        )
+    else:
+        app = create_engine_app(settings)
+        path = "/internal/v1/paper/manual-requests"
+        body = b'{"mode":"research_and_paper"}'
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    path,
+                    content=body,
+                    headers={**headers("POST", path, body), "Idempotency-Key": "new"},
+                )
+            assert response.status_code == 200, response.text
+            assert response.json()["data"]["status"] == "queued"
+            new_id = UUID(response.json()["data"]["request_id"])
+        finally:
+            await app.state.session_factory.kw["bind"].dispose()
+    assert new_id is not None and new_id != request.request_id
+    assert await business_facts() == before
     async with sessions.begin() as session:
-        new = await manual_request.admit_manual_request(session, **admission, idempotency_key="new")
-        assert new.status == "queued" and new.request_id != request.request_id
+        new = await read_configured_manual_request(session, settings, request_id=new_id)
+        assert new.status == "queued" and new.mode == "research_and_paper"
 
     async def source(*_a, **_k):
         return authority
@@ -1077,6 +1129,9 @@ async def _check_explicit_acceptance(
         calendar_authority_id=CALENDAR_ID,
         process_environment={},
     )
+    after = await business_facts()
+    for table, original_hashes in before.items():
+        assert set(original_hashes).issubset(after[table]), table
     async with sessions.begin() as session:
         current = await read_configured_manual_request(session, settings, request_id=new.request_id)
         assert current.status == "active" and current.cycle_id is not None

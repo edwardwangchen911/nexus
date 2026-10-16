@@ -233,6 +233,14 @@ jobs:
           uv run --package nexus-engine pytest -q --import-mode=importlib
           engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result
           -k buy
+      - name: Verify unknown recovery through configured entry and Workspace
+        env:
+          NEXUS_ENV: test
+          DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci
+          NEXUS_CONTROLLED_BROWSER: "1"
+        run: >-
+          uv run --package nexus-engine pytest -q --import-mode=importlib
+          'engine/tests/integration/test_current_preparation_recovery_pg.py::test_current_host_interruption_recovers_via_normal_cli[accept_prepared_closed]'
       - name: Upload real fixture failure evidence only
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
