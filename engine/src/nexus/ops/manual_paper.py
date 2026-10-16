@@ -16,6 +16,10 @@ from sqlalchemy import func, select, text
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _checkout_revision, _validate_local_env
+from nexus.paper.current_preparation_acceptance import (
+    PreparationAcceptanceReceipt,
+    accept_current_unknown,
+)
 from nexus.paper.current_preparation_recovery import (
     PreparationRecoveryReceipt,
     recover_current_preparation,
@@ -92,6 +96,7 @@ def parser() -> argparse.ArgumentParser:
     read.add_argument("--request-id", type=UUID, required=True)
     recover = commands.add_parser("recover-preparation")
     recover.add_argument("--request-id", type=UUID, required=True)
+    recover.add_argument("--accept-unknown-effects", action="store_true")
     close = commands.add_parser("close-unstarted-preparation")
     close.add_argument("--request-id", type=UUID, required=True)
     ack = commands.add_parser("acknowledge-unknown-preparations")
@@ -121,6 +126,7 @@ async def run(
     | PreparationCloseReceipt
     | UnknownPreparationReceipt
     | PreparationRecoveryReceipt
+    | PreparationAcceptanceReceipt
 ):
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
@@ -168,6 +174,16 @@ async def run(
                 ):
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
                 if args.action == "recover-preparation":
+                    if getattr(args, "accept_unknown_effects", False):
+                        accepted = await accept_current_unknown(
+                            session,
+                            account_id=settings.agent_paper_account_id,
+                            request_id=args.request_id,
+                            repo_root=args.repo_root,
+                            env_file=args.env_file,
+                        )
+                        _require_maintenance_code(args.repo_root, settings.release_revision)
+                        return accepted
                     recovery_receipt = await recover_current_preparation(
                         session,
                         account_id=settings.agent_paper_account_id,

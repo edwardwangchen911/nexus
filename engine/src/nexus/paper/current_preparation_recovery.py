@@ -144,6 +144,9 @@ async def start_preparation_execution(
     if row is None or revision is None or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError(BLOCKED)
     await lock_portfolio_account(session, row.account_id)
+    from nexus.paper.current_preparation_acceptance import require_execution_not_accepted
+
+    await require_execution_not_accepted(session, row.id)
     now = await _now(session)
     if (await read_manual_request(session, row)).status != "preparing" or await _journal(
         session, row, now
@@ -211,6 +214,9 @@ async def require_preparation_execution(
 ) -> None:
     """Fence both native reservation and cycle creation, under the same account lock."""
     await lock_portfolio_account(session, row.account_id)
+    from nexus.paper.current_preparation_acceptance import require_execution_not_accepted
+
+    await require_execution_not_accepted(session, row.id)
     events = await _journal(session, row, await _now(session))
     if not events and execution_id is None:
         return  # Existing legacy requests retain their original admission rules.
@@ -442,6 +448,9 @@ async def recover_current_preparation(
     row = await session.get(ManualPaperRequest, request_id, with_for_update=True)
     if row is None or row.account_id != account_id:
         raise ValueError(BLOCKED)
+    from nexus.paper.current_preparation_acceptance import require_execution_not_accepted
+
+    await require_execution_not_accepted(session, row.id)
     now = await _now(session)
     existing = await read_preparation_recovery(session, row)
     if existing:

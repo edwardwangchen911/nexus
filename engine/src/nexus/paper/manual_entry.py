@@ -102,6 +102,10 @@ async def _read_presented_manual_request(
     # Keep the canonical event reader independent: acknowledgement validation
     # uses it to verify the original unknown facts and must never recurse.
     view = await read_manual_request(session, row)
+    from nexus.paper.current_preparation_acceptance import current_unknown_accepted
+
+    if await current_unknown_accepted(session, row):
+        return view.model_copy(update={"preparation_disposition": "unknown_acknowledged"})
     from nexus.paper.current_preparation_recovery import read_preparation_recovery
 
     recovery = await read_preparation_recovery(session, row)

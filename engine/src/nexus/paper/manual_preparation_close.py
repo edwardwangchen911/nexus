@@ -197,6 +197,10 @@ async def _proof(
 async def preparation_closed(
     session: AsyncSession, row: ManualPaperRequest, *, now: datetime
 ) -> bool:
+    from nexus.paper.current_preparation_acceptance import current_unknown_accepted
+
+    if await current_unknown_accepted(session, row):
+        return True
     audits = tuple(
         await session.scalars(
             select(AuditEvent).where(

@@ -45,20 +45,53 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "concurrent_admission",
         "concurrent_late_effects",
         "concurrent_recovery",
+        "accept_unknown",
+        "accept_late_claim",
+        "accept_audit_rollback",
+        "accept_queued_job",
+        "accept_running_job",
+        "accept_live_producer",
+        "accept_concurrent",
+        "accept_direct",
+        "accept_lease",
+        "accept_corrupt_audit",
+        "accept_late_cycle",
+        "accept_other_unknown",
+        "accept_writer_contention",
+        "accept_audit_contention",
+        "accept_open_order",
     ],
 )
 @pytest.mark.asyncio
 async def test_current_host_interruption_recovers_via_normal_cli(
     migrated_database_url, monkeypatch, tmp_path, failure_point
 ):
+    acceptance_case = failure_point if failure_point.startswith("accept_") else None
+    native_trigger = agent_paper_once.trigger_once
+    if acceptance_case:
+        failure_point = "effects_unknown"
     await prepare_database(
         EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk"),
         **V9_OPTIONS,
         formal_flexible_stage_budget=True,
     )
     engine, sessions, authority, manifest = await seed_normal_path(
-        migrated_database_url, monkeypatch, decision_time=AT, candidate_instruments=INSTRUMENTS
+        migrated_database_url,
+        monkeypatch,
+        decision_time=AT,
+        candidate_instruments=INSTRUMENTS,
+        occupied=acceptance_case == "accept_open_order",
     )
+    account_guard = manual_request.require_manual_account_available
+    if acceptance_case == "accept_open_order":
+        # Construct a historical unknown alongside independently occupied orders;
+        # restore the real guard before exercising the maintenance entry.
+        async def seed_historical_request(*_a, **_k):
+            pass
+
+        monkeypatch.setattr(
+            manual_request, "require_manual_account_available", seed_historical_request
+        )
     scalar = AsyncSession.scalar
 
     async def clock(self, statement, *args, **kwargs):
@@ -151,7 +184,15 @@ async def test_current_host_interruption_recovers_via_normal_cli(
             monkeypatch.setattr(manual_paper_host, "begin_preparation_effects", interrupted)
             monkeypatch.setattr(agent_paper_once, "trigger_once", no_provider)
         elif failure_point == "effects_unknown":
-            monkeypatch.setattr(agent_paper_once, "trigger_once", interrupted)
+            if acceptance_case in {"accept_direct", "accept_open_order"}:
+
+                async def failed_before_cycle(*_a, **_k):
+                    raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+
+                monkeypatch.setattr(agent_paper_once, "trigger_once", failed_before_cycle)
+                expected_error = ValueError
+            else:
+                monkeypatch.setattr(agent_paper_once, "trigger_once", interrupted)
         elif failure_point in {"native_claim_unknown", "late_claim_change"}:
             monkeypatch.setattr(agent_paper_once, "prepare_schwab_decision_authority", interrupted)
             monkeypatch.setattr(
@@ -228,6 +269,8 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                     "worker_claim_first",
                     "maintenance_before_worker",
                 }
+                else "unknown"
+                if acceptance_case in {"accept_direct", "accept_open_order"}
                 else "preparing"
             )
             starts = list(
@@ -266,6 +309,7 @@ async def test_current_host_interruption_recovers_via_normal_cli(
         from nexus.paper.history_seal import _row_hash
         from nexus.persistence.models.agents import (
             AgentDailyBudgetReservationRecord,
+            AgentPromptVersionRecord,
             AgentResearchRunRecord,
             FormalBudgetBindingRecord,
         )
@@ -294,7 +338,71 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                     )
                 }
 
+        if acceptance_case:
+            # A real nonzero, unresolved reservation must survive acceptance.
+            from decimal import Decimal
+
+            async with sessions.begin() as session:
+                prompt = await session.scalar(
+                    select(AgentPromptVersionRecord)
+                    .where(AgentPromptVersionRecord.role == "orchestrator")
+                    .limit(1)
+                )
+                budget_run = AgentResearchRunRecord(
+                    instrument_id=manifest[0].instrument_id,
+                    data_snapshot_id=manifest[0].research_snapshot_id,
+                    prompt_version_id=prompt.id,
+                    model_config_id=model.id,
+                    decision_time=AT,
+                    actor_id="independent-budget-fixture",
+                    idempotency_key="unsettled-acceptance",
+                    status="failed",
+                    schema_hash="a" * 64,
+                    model_hash=model.config_hash,
+                    prompt_hash=prompt.content_hash,
+                    prompt_manifest={},
+                    evidence_hash="b" * 64,
+                    evidence_manifest=[{"source": "fixture"}],
+                    tool_hash="c" * 64,
+                    input_hash="d" * 64,
+                    reserved_cost_usd=Decimal("1"),
+                    settled_cost_usd=None,
+                    pricing_version="fixture",
+                    input_tokens=None,
+                    output_tokens=None,
+                )
+                session.add(budget_run)
+                await session.flush()
+                session.add(
+                    AgentDailyBudgetReservationRecord(
+                        business_date=AT.date(),
+                        run_id=budget_run.id,
+                        pricing_version="fixture",
+                        reserved_usd=Decimal("1"),
+                        settled_usd=None,
+                        state="reserved",
+                    )
+                )
         before = await business_facts()
+        if acceptance_case in {"accept_direct", "accept_open_order"}:
+            monkeypatch.setattr(manual_request, "require_manual_account_available", account_guard)
+            await _check_explicit_acceptance(
+                acceptance_case,
+                settings,
+                args,
+                sessions,
+                request,
+                admission,
+                starts[0],
+                business_facts,
+                before,
+                monkeypatch,
+                trigger,
+                authority,
+                tmp_path,
+                native_trigger,
+            )
+            return
 
         async def claim_original_job():
             from nexus.agents.codex_versions import FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
@@ -443,6 +551,24 @@ async def test_current_host_interruption_recovers_via_normal_cli(
         assert receipt.disposition == expected
         assert receipt.execution_locked
         assert (await manual_paper.run(settings, args)).replayed
+        if acceptance_case:
+            await _check_explicit_acceptance(
+                acceptance_case,
+                settings,
+                args,
+                sessions,
+                request,
+                admission,
+                starts[0],
+                business_facts,
+                before,
+                monkeypatch,
+                trigger,
+                authority,
+                tmp_path,
+                native_trigger,
+            )
+            return
         async with sessions.begin() as session:
             old = await manual_request.admit_manual_request(
                 session, **admission, idempotency_key="interrupted"
@@ -511,3 +637,330 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                     )
     finally:
         await engine.dispose()
+
+
+async def _check_explicit_acceptance(
+    case,
+    settings,
+    args,
+    sessions,
+    request,
+    admission,
+    start,
+    business_facts,
+    before,
+    monkeypatch,
+    trigger,
+    authority,
+    tmp_path,
+    native_trigger,
+):
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper import current_preparation_acceptance as acceptance
+    from nexus.paper import current_preparation_recovery as recovery
+    from nexus.paper.manual_entry import read_configured_manual_request
+    from nexus.persistence.models.runtime import IdempotencyRecord
+
+    args = manual_paper.parser().parse_args(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "recover-preparation",
+            "--request-id",
+            str(request.request_id),
+            "--accept-unknown-effects",
+        ]
+    )
+    if case in {"accept_queued_job", "accept_running_job", "accept_lease"}:
+        from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy
+        from nexus.jobs.repository import enqueue_job
+
+        async with sessions.begin() as session:
+            job = await enqueue_job(
+                session,
+                key=JobKeyV1(
+                    job_type=JobType.AGENT_RESEARCH,
+                    scope_kind="portfolio",
+                    scope_id=str(admission["account_id"]),
+                    effective_at=AT,
+                    input_hash=job_input_hash({"fixture": "occupied"}),
+                ),
+                schema_version="isolated_v1",
+                queue=QueueName.GENERAL,
+                payload={"fixture": "occupied"},
+                retry_policy=RetryPolicy.NEVER,
+                max_attempts=1,
+            )
+            if case in {"accept_running_job", "accept_lease"}:
+                job.status = "running"
+                job.started_at = AT
+                job.version += 1
+                await session.flush()
+            if case == "accept_lease":
+                from uuid import uuid4
+
+                from nexus.persistence.models.runtime import JobLease
+
+                job.status = "failed"
+                job.version += 1
+                job.started_at = job.finished_at = AT
+                await session.flush()
+                session.add(
+                    JobLease(
+                        job_id=job.id,
+                        worker_id="isolated",
+                        lease_token=uuid4(),
+                        fence_token=1,
+                        acquired_at=AT,
+                        heartbeat_at=AT,
+                        expires_at=AT + timedelta(seconds=210),
+                    )
+                )
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await manual_paper.run(settings, args)
+        return
+    if case in {"accept_writer_contention", "accept_audit_contention"}:
+        from sqlalchemy import text
+
+        async with sessions.begin() as writer:
+            # The normal producer holds this lock after flushing a Run and before
+            # enqueuing its Job; keep that deterministic boundary open throughout.
+            if case == "accept_audit_contention":
+                await writer.execute(
+                    text(
+                        "SELECT pg_advisory_xact_lock(hashtextextended('nexus:audit-chain', 2020))"
+                    )
+                )
+            else:
+                await writer.execute(
+                    text("UPDATE agent_research_runs SET status=status WHERE false")
+                )
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await asyncio.wait_for(manual_paper.run(settings, args), timeout=10)
+            # The failed maintenance transaction released its earlier jobs lock.
+            await writer.execute(text("LOCK TABLE jobs IN ROW EXCLUSIVE MODE NOWAIT"))
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(AuditEvent.id).where(AuditEvent.action == acceptance.ACTION).limit(1)
+                )
+                is None
+            )
+        assert await business_facts() == before
+        return
+    if case == "accept_open_order":
+        from nexus.paper.projection import load_paper_projection
+        from nexus.paper.target_service import TargetActivationBlockedError
+
+        async with sessions() as session:
+            projection = await load_paper_projection(
+                session, account_id=admission["account_id"], as_of=AT
+            )
+            assert projection.open_orders and projection.reserved_cash > 0
+        with pytest.raises(TargetActivationBlockedError):
+            await manual_paper.run(settings, args)
+        assert await business_facts() == before
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(AuditEvent.id).where(AuditEvent.action == acceptance.ACTION).limit(1)
+                )
+                is None
+            )
+        return
+    if case == "accept_other_unknown":
+        async with sessions.begin() as session:
+            original = await session.get(ManualPaperRequest, request.request_id)
+            other = ManualPaperRequest(
+                **{
+                    k: getattr(original, k)
+                    for k in (
+                        "account_id",
+                        "candidate_batch_id",
+                        "model_config_id",
+                        "model_hash",
+                        "batch_hash",
+                        "mode",
+                        "request_hash",
+                        "requested_at",
+                    )
+                },
+                key_hash="b" * 64,
+            )
+            session.add(other)
+            await session.flush()
+            await manual_request._append(
+                session, other, status="queued", code="MANUAL_REQUEST_QUEUED", at=AT
+            )
+            for status, code in [
+                ("preparing", "MANUAL_PREPARATION_STARTED"),
+                ("unknown", "MANUAL_RESULT_UNKNOWN"),
+            ]:
+                await manual_request.record_manual_request_event(
+                    session, other, status=status, code=code
+                )
+        with pytest.raises(ValueError):
+            await manual_paper.run(settings, args)
+        return
+    if case == "accept_live_producer":
+
+        def live(*_):
+            raise ValueError(recovery.BLOCKED)
+
+        monkeypatch.setattr(recovery, "_require_execution_producer_stopped", live)
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await manual_paper.run(settings, args)
+        return
+    if case == "accept_audit_rollback":
+
+        async def fail(*_a, **_k):
+            raise RuntimeError("isolated audit failure")
+
+        with monkeypatch.context() as m:
+            m.setattr(acceptance, "append_audit_event", fail)
+            with pytest.raises(RuntimeError, match="isolated audit failure"):
+                await manual_paper.run(settings, args)
+        assert await business_facts() == before
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                await manual_request.admit_manual_request(
+                    session, **admission, idempotency_key="new"
+                )
+        return
+    if case == "accept_concurrent":
+        first, second = await asyncio.gather(
+            manual_paper.run(settings, args),
+            manual_paper.run(settings, args),
+        )
+        assert sorted([first.replayed, second.replayed]) == [False, True]
+    else:
+        first = await manual_paper.run(settings, args)
+        assert first.replayed is False
+    assert first.status == "preparation_unknown_acknowledged"
+    assert await business_facts() == before
+    assert (await manual_paper.run(settings, args)).replayed
+    if case == "accept_corrupt_audit":
+        from sqlalchemy import text
+
+        async with sessions.begin() as session:
+            await session.execute(text("ALTER TABLE audit_events DISABLE TRIGGER USER"))
+            audit = await session.scalar(
+                select(AuditEvent).where(AuditEvent.action == acceptance.ACTION)
+            )
+            audit.payload = {**audit.payload, "budget_preserved": False}
+            await session.flush()
+            await session.execute(text("ALTER TABLE audit_events ENABLE TRIGGER USER"))
+        async with sessions.begin() as session:
+            row = await session.get(ManualPaperRequest, request.request_id)
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await read_configured_manual_request(session, settings, request_id=row.id)
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await recovery.require_preparation_execution(session, row, execution_id=start.id)
+        return
+    async with sessions.begin() as session:
+        old = await read_configured_manual_request(session, settings, request_id=request.request_id)
+        assert old.status == "unknown" and old.cycle_id is None
+        assert old.preparation_disposition == "unknown_acknowledged"
+        assert old.preparation_recovery is None
+        assert (
+            await manual_paper_host.peek_manual_request(session, account_id=admission["account_id"])
+            is None
+        )
+        row = await session.get(ManualPaperRequest, request.request_id)
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await recovery.require_preparation_execution(session, row, execution_id=start.id)
+        assert (
+            await manual_request.admit_manual_request(
+                session, **admission, idempotency_key="interrupted"
+            )
+        ).status == "unknown"
+    if case == "accept_late_claim":
+        async with sessions.begin() as session:
+            session.add(
+                IdempotencyRecord(
+                    actor_id="local-agent-paper-schwab:" + str(admission["account_id"]),
+                    idempotency_key=str(request.request_id),
+                    route="agent-paper-explicit-manual-v1",
+                    schema_version="agent_paper_explicit_manual_v1",
+                    request_hash=job_input_hash({"late": True}),
+                    response_payload={},
+                    created_at=AT,
+                )
+            )
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await read_configured_manual_request(
+                    session, settings, request_id=request.request_id
+                )
+            row = await session.get(ManualPaperRequest, request.request_id)
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await recovery.require_preparation_execution(session, row, execution_id=start.id)
+            with pytest.raises(ValueError):
+                await manual_request.admit_manual_request(
+                    session, **admission, idempotency_key="new"
+                )
+        return
+    async with sessions.begin() as session:
+        new = await manual_request.admit_manual_request(session, **admission, idempotency_key="new")
+        assert new.status == "queued" and new.request_id != request.request_id
+
+    async def source(*_a, **_k):
+        return authority
+
+    monkeypatch.setattr(agent_paper_once, "trigger_once", native_trigger)
+    monkeypatch.setattr(agent_paper_once, "prepare_schwab_decision_authority", source)
+    monkeypatch.setattr(agent_paper_once, "S3ProviderEvidenceStore", lambda *_a, **_k: object())
+    await manual_paper_host.dispatch_manual_request(
+        settings,
+        trigger,
+        request_id=new.request_id,
+        repo_root=tmp_path,
+        calendar_authority_id=CALENDAR_ID,
+        process_environment={},
+    )
+    async with sessions.begin() as session:
+        current = await read_configured_manual_request(session, settings, request_id=new.request_id)
+        assert current.status == "active" and current.cycle_id is not None
+        old = await read_configured_manual_request(session, settings, request_id=request.request_id)
+        assert old.preparation_disposition == "unknown_acknowledged"
+        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+            await manual_request.admit_manual_request(session, **admission, idempotency_key="third")
+
+    def live_again(*_):
+        raise AssertionError("replay must not require the new producer to stop")
+
+    monkeypatch.setattr(recovery, "_require_execution_producer_stopped", live_again)
+    assert (await manual_paper.run(settings, args)).replayed
+    if case == "accept_late_cycle":
+        from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+        from sqlalchemy import text
+
+        async with sessions.begin() as session:
+            await session.execute(text("ALTER TABLE agent_paper_cycle_events DISABLE TRIGGER USER"))
+            event = await session.scalar(
+                select(AgentPaperCycleEventRecord).where(
+                    AgentPaperCycleEventRecord.cycle_id == current.cycle_id,
+                    AgentPaperCycleEventRecord.sequence == 1,
+                )
+            )
+            event.fact_ids = {**event.fact_ids, "manual_request_id": str(request.request_id)}
+            await session.flush()
+            await session.execute(text("ALTER TABLE agent_paper_cycle_events ENABLE TRIGGER USER"))
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await read_configured_manual_request(
+                    session, settings, request_id=request.request_id
+                )
+            row = await session.get(ManualPaperRequest, request.request_id)
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await recovery.require_preparation_execution(session, row, execution_id=start.id)
+        return
+    # GET uses the same validated presentation, including the original unknown.
+    app = create_engine_app(settings)
+    path = f"/internal/v1/paper/manual-requests/{request.request_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+        assert response.status_code == 200
+        assert response.json()["data"]["preparation_disposition"] == "unknown_acknowledged"
