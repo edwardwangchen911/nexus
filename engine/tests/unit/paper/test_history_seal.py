@@ -109,6 +109,11 @@ async def test_exact_terminal_manual_seal_does_not_exempt_another_request(
     account_id, cycle_id = UUID(int=100), UUID(int=101)
     target = SimpleNamespace(id=UUID(int=102), account_id=account_id)
     other = SimpleNamespace(id=UUID(int=103), account_id=account_id)
+    now = datetime(2026, 10, 16, 14, tzinfo=UTC)
+    preparation_closed = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        "nexus.paper.manual_preparation_close.preparation_closed", preparation_closed
+    )
     monkeypatch.setattr(
         "nexus.paper.manual_request.manual_request_for_cycle", AsyncMock(return_value=target)
     )
@@ -123,7 +128,11 @@ async def test_exact_terminal_manual_seal_does_not_exempt_another_request(
     )
     session = SimpleNamespace(scalars=AsyncMock(return_value=(target, other)))
     with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
-        await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id)
+        await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id, now=now)
+    if other_status == "unknown":
+        preparation_closed.assert_awaited_once_with(session, other, now=now)
+    else:
+        preparation_closed.assert_not_awaited()
 
 
 def test_docker_top_uses_pid_column_required_by_docker_daemon(monkeypatch):
