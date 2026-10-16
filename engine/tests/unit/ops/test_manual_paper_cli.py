@@ -259,7 +259,12 @@ def test_unstarted_preparation_closure_is_explicit_and_request_scoped():
 
 
 @pytest.mark.parametrize(
-    "action", ["close-unstarted-preparation", "acknowledge-unknown-preparations"]
+    "action",
+    [
+        "close-unstarted-preparation",
+        "acknowledge-unknown-preparations",
+        "check-preparation-acceptance",
+    ],
 )
 @pytest.mark.asyncio
 async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
@@ -275,6 +280,7 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
 
     observed = []
     held = [False]
+    code_checks = []
 
     @contextmanager
     def fence(*_args):
@@ -311,6 +317,12 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
 
     async def close_request(*_a, **_k):
         assert held[0]
+        if action == "check-preparation-acceptance":
+            return manual_paper.PreparationAcceptanceCheck(
+                request_id=UUID(int=1),
+                status="eligible_at_check",
+                checked_at=datetime(2026, 10, 14, 18, tzinfo=UTC),
+            )
         if action == "acknowledge-unknown-preparations":
             from nexus.paper.preparation_unknown_ack import UnknownPreparationReceipt
 
@@ -318,9 +330,12 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
         return close.PreparationCloseReceipt(request_id=UUID(int=1), replayed=False)
 
     monkeypatch.setattr(manual_paper, "session_factory", lambda *_a: factory)
-    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_a: None)
+    monkeypatch.setattr(
+        manual_paper, "_require_maintenance_code", lambda *_a: code_checks.append(True)
+    )
     monkeypatch.setattr(manual_paper, "preparation_service_control_lock", fence)
     monkeypatch.setattr(close, "close_unstarted_preparation", close_request)
+    monkeypatch.setattr(manual_paper, "check_current_unknown", close_request)
     from nexus.paper import preparation_unknown_ack
 
     monkeypatch.setattr(preparation_unknown_ack, "acknowledge_unknown_preparations", close_request)
@@ -340,6 +355,9 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
     )
     assert receipt.execution_locked is True
     assert observed == ["lock", "commit", "dispose", "unlock"]
+    if action == "check-preparation-acceptance":
+        assert len(code_checks) == 3
+        assert receipt.check_only
 
 
 def test_unknown_preparation_ack_requires_explicit_five_item_selection():

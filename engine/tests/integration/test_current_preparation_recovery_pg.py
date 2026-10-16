@@ -57,6 +57,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "accept_live_producer",
         "accept_concurrent",
         "accept_direct",
+        "accept_check_late",
         "accept_lease",
         "accept_corrupt_audit",
         "accept_late_cycle",
@@ -879,12 +880,32 @@ async def _check_explicit_acceptance(
                         expires_at=AT + timedelta(seconds=210),
                     )
                 )
+        check_args = manual_paper.parser().parse_args(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "check-preparation-acceptance",
+                "--request-id",
+                str(request.request_id),
+            ]
+        )
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await manual_paper.run(settings, check_args)
         with pytest.raises(ValueError, match=recovery.BLOCKED):
             await manual_paper.run(settings, args)
         return
     if case in {"accept_writer_contention", "accept_audit_contention"}:
         from sqlalchemy import text
 
+        check_args = manual_paper.parser().parse_args(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "check-preparation-acceptance",
+                "--request-id",
+                str(request.request_id),
+            ]
+        )
         async with sessions.begin() as writer:
             # The normal producer holds this lock after flushing a Run and before
             # enqueuing its Job; keep that deterministic boundary open throughout.
@@ -898,6 +919,8 @@ async def _check_explicit_acceptance(
                 await writer.execute(
                     text("UPDATE agent_research_runs SET status=status WHERE false")
                 )
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await asyncio.wait_for(manual_paper.run(settings, check_args), timeout=10)
             with pytest.raises(ValueError, match=recovery.BLOCKED):
                 await asyncio.wait_for(manual_paper.run(settings, args), timeout=10)
             # The failed maintenance transaction released its earlier jobs lock.
@@ -990,6 +1013,78 @@ async def _check_explicit_acceptance(
                     session, **admission, idempotency_key="new"
                 )
         return
+    if case in {"accept_prepared_closed", "accept_check_late"}:
+        from nexus.paper.history_seal import _row_hash
+        from nexus.persistence.models.manual_paper import ManualPaperRequestEvent
+        from nexus.persistence.models.runtime import JobAttempt, JobLease
+
+        async def stored_facts():
+            facts = await business_facts()
+            async with sessions() as session:
+                for table in (
+                    ManualPaperRequest,
+                    ManualPaperRequestEvent,
+                    AuditEvent,
+                    JobAttempt,
+                    JobLease,
+                ):
+                    facts[table.__tablename__] = sorted(
+                        _row_hash(row) for row in await session.scalars(select(table))
+                    )
+            return facts
+
+        check_args = manual_paper.parser().parse_args(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "check-preparation-acceptance",
+                "--request-id",
+                str(request.request_id),
+            ]
+        )
+        original = await stored_facts()
+
+        async def forbidden_write(*_a, **_k):
+            raise AssertionError("inspection must not call the audit writer")
+
+        with monkeypatch.context() as m:
+            m.setattr(acceptance, "append_audit_event", forbidden_write)
+            missing_args = manual_paper.parser().parse_args(
+                [
+                    "--repo-root",
+                    str(tmp_path),
+                    "check-preparation-acceptance",
+                    "--request-id",
+                    str(UUID(int=1)),
+                ]
+            )
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await manual_paper.run(settings, missing_args)
+            checked = await manual_paper.run(settings, check_args)
+        assert checked.status == "eligible_at_check"
+        assert checked.request_id == request.request_id
+        assert checked.check_only and checked.execution_locked and checked.budget_preserved
+        assert checked.checked_at == AT
+        assert await stored_facts() == original
+        if case == "accept_check_late":
+            # A check is an observation, never a capability consumed by accept.
+            async with sessions.begin() as session:
+                session.add(
+                    IdempotencyRecord(
+                        actor_id="local-agent-paper-schwab:" + str(admission["account_id"]),
+                        idempotency_key=str(request.request_id),
+                        route="agent-paper-explicit-manual-v1",
+                        schema_version="agent_paper_explicit_manual_v1",
+                        request_hash=job_input_hash({"late_after_check": True}),
+                        response_payload={},
+                        created_at=AT,
+                    )
+                )
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await manual_paper.run(settings, args)
+            changed = await stored_facts()
+            assert changed["audit_events"] == original["audit_events"]
+            return
     if case == "accept_concurrent":
         first, second = await asyncio.gather(
             manual_paper.run(settings, args),
@@ -1145,6 +1240,11 @@ async def _check_explicit_acceptance(
 
     monkeypatch.setattr(recovery, "_require_execution_producer_stopped", live_again)
     assert (await manual_paper.run(settings, args)).replayed
+    if case == "accept_prepared_closed":
+        before_check = await stored_facts()
+        checked = await manual_paper.run(settings, check_args)
+        assert checked.status == "already_acknowledged" and checked.check_only
+        assert await stored_facts() == before_check
     if case == "accept_late_cycle":
         from nexus.persistence.models.paper import AgentPaperCycleEventRecord
         from sqlalchemy import text

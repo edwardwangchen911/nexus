@@ -602,6 +602,14 @@ GET/CLI 每次验证原事件链、处置锚点、周期执行身份及哈希；
 
 #### 显式接受当前准备结果未知（本地候选，尚未部署）
 
+处置前可通过正常配置入口检查当前资格（本地候选）：
+
+```sh
+uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-file infra/.env.local check-preparation-acceptance --request-id <UUID>
+```
+
+该命令复用接受入口的源码/schema、执行证明、生产者退出、任务/租约、账户占用和历史封存检查，并持有相同的必要维护锁。它不调用审计写入函数，不改变请求、事件、Run、Job、预算或订单；这是带锁的无业务写入检查，不是 PostgreSQL 的 `READ ONLY` 事务。锁争用仍固定拒绝，命令退出后释放锁。返回 `eligible_at_check`（仅检查时满足条件）或 `already_acknowledged`（原处置证明有效），附请求 ID、数据库检查时间、`check_only=true` 和执行锁；不得把回执当作实际处置授权或新周期准入。已接受分支允许后续合法工作，仍验证原证据。实际接受不消费检查回执，必须独立重验全部门禁；迟到事实、版本或占用变化可能使其拒绝。检查不停止服务，不刷新凭据，不调用模型或来源。
+
 仅在用户明确接受指定请求准备结果仍未知后，使用同一正常入口并增加 `--accept-unknown-effects`：
 
 ```sh

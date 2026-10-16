@@ -37,6 +37,16 @@ class PreparationAcceptanceReceipt(BaseModel):
     execution_locked: Literal[True] = True
 
 
+class PreparationAcceptanceCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    request_id: UUID
+    status: Literal["eligible_at_check", "already_acknowledged"]
+    checked_at: datetime
+    check_only: Literal[True] = True
+    budget_preserved: Literal[True] = True
+    execution_locked: Literal[True] = True
+
+
 async def _acceptances(session: AsyncSession, request_id: UUID) -> list[AuditEvent]:
     return list(
         await session.scalars(
@@ -230,23 +240,24 @@ async def require_no_live_research_runs(session: AsyncSession, *, now: datetime)
             raise ValueError(BLOCKED)
 
 
-async def accept_current_unknown(
+async def _check_current_unknown(
     session: AsyncSession,
     *,
     account_id: UUID,
     request_id: UUID,
     repo_root: Path,
     env_file: Path,
-) -> PreparationAcceptanceReceipt:
+) -> tuple[ManualPaperRequest, datetime, dict[str, object] | None, AuditEvent | None]:
+    """Shared locked eligibility checks; never append an acceptance or change facts."""
     from nexus.paper.manual_request import require_manual_account_available
 
     await lock_portfolio_account(session, account_id)
     row = await session.get(ManualPaperRequest, request_id, with_for_update=True)
     if row is None or row.account_id != account_id:
         raise ValueError(BLOCKED)
-    if await current_unknown_accepted(session, row):
-        return PreparationAcceptanceReceipt(request_id=row.id, replayed=True)
     now = await recovery._now(session)
+    if await current_unknown_accepted(session, row):
+        return row, now, None, None
     proof = await _proof(session, row, now)
     journal = await recovery._journal(session, row, now)
     recovery._require_execution_producer_stopped(journal[0], repo_root, env_file)
@@ -293,6 +304,54 @@ async def accept_current_unknown(
         now=now,
         excluding_request_id=row.id,
     )
+    return row, now, proof, journal[0]
+
+
+async def check_current_unknown(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    request_id: UUID,
+    repo_root: Path,
+    env_file: Path,
+) -> PreparationAcceptanceCheck:
+    """Observe eligibility without writes; a later acceptance must recheck everything."""
+    row, now, proof, producer = await _check_current_unknown(
+        session,
+        account_id=account_id,
+        request_id=request_id,
+        repo_root=repo_root,
+        env_file=env_file,
+    )
+    if producer is not None:
+        recovery._require_execution_producer_stopped(producer, repo_root, env_file)
+        if await _proof(session, row, now) != proof:
+            raise ValueError(BLOCKED)
+    return PreparationAcceptanceCheck(
+        request_id=row.id,
+        status="already_acknowledged" if proof is None else "eligible_at_check",
+        checked_at=now,
+    )
+
+
+async def accept_current_unknown(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    request_id: UUID,
+    repo_root: Path,
+    env_file: Path,
+) -> PreparationAcceptanceReceipt:
+    row, now, proof, producer = await _check_current_unknown(
+        session,
+        account_id=account_id,
+        request_id=request_id,
+        repo_root=repo_root,
+        env_file=env_file,
+    )
+    if proof is None:
+        return PreparationAcceptanceReceipt(request_id=row.id, replayed=True)
+    assert producer is not None
     # No old record or budget is mutated. The audit is the persistent execution fence.
     await append_audit_event(
         session,
@@ -302,7 +361,7 @@ async def accept_current_unknown(
         occurred_at=now,
         payload=proof,
     )
-    recovery._require_execution_producer_stopped(journal[0], repo_root, env_file)
+    recovery._require_execution_producer_stopped(producer, repo_root, env_file)
     if not await current_unknown_accepted(session, row):
         raise ValueError(BLOCKED)
     return PreparationAcceptanceReceipt(request_id=row.id, replayed=False)
