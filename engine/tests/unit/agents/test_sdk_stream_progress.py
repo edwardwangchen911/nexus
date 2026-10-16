@@ -39,6 +39,11 @@ async def test_observer_preserves_reader_identity_result_and_private_payload(mon
     }
     assert "private" not in json.dumps(snapshot)
     assert reader.await_count == 3
+    assert observer.diagnostic_timestamps() == {
+        "first_reasoning_ms": None,
+        "first_answer_ms": 1000,
+        "terminal_notification_ms": 3000,
+    }
 
 
 @pytest.mark.asyncio

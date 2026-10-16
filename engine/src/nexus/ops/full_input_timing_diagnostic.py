@@ -11,9 +11,16 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 
 from nexus.agents.capacity_cycle import capacity_output_mode_qualified, derive_cycle_members
-from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_pool
-from nexus.agents.codex_staged import StructuredStagedCodexCommittee
-from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+from nexus.agents.codex_capacity import (
+    CapacityPoolMember,
+    isolated_capacity_model_matches,
+    preflight_capacity_pool,
+)
+from nexus.agents.codex_staged import STAGES, StructuredStagedCodexCommittee
+from nexus.agents.codex_versions import (
+    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+)
 from nexus.agents.committee import ROLE_ORDER, AgentRole, PromptAsset
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
@@ -36,6 +43,9 @@ from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 
 PROFILE = "full-input-timing-diagnostic-v1"
+SOURCE_PROFILES = frozenset(
+    {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}
+)
 
 
 @dataclass(frozen=True)
@@ -54,12 +64,16 @@ def validate_source_pool(
     source: AgentResearchRunRecord,
 ) -> tuple[tuple[CandidateManifestEntry, AgentResearchRunRecord], ...]:
     paired = derive_cycle_members(cycle, events, runs)
-    if source.id not in {run.id for _, run in paired} or any(
-        run.status not in {"failed", "completed", "abstained"}
-        or run.model_config_id != source.model_config_id
-        or run.model_hash != source.model_hash
-        or run.pricing_version != FULL_INPUT_CAPACITY_CONFIG_VERSION
-        for _, run in paired
+    if (
+        source.pricing_version not in SOURCE_PROFILES
+        or source.id not in {run.id for _, run in paired}
+        or any(
+            run.status not in {"failed", "completed", "abstained"}
+            or run.model_config_id != source.model_config_id
+            or run.model_hash != source.model_hash
+            or run.pricing_version != source.pricing_version
+            for _, run in paired
+        )
     ):
         raise ValueError("TIMING_DIAGNOSTIC_SOURCE_INVALID")
     return paired
@@ -109,7 +123,8 @@ async def load_case(settings: EngineSettings, run_id: UUID, *, deadline: float) 
                     run is None
                     or model is None
                     or model.config_hash != run.model_hash
-                    or model.version != FULL_INPUT_CAPACITY_CONFIG_VERSION
+                    or model.version != source.pricing_version
+                    or not isolated_capacity_model_matches(model)
                 ):
                     raise ValueError("TIMING_DIAGNOSTIC_SOURCE_INVALID")
                 original = await _inspection_committee(session, settings, run, model=model)
@@ -124,7 +139,7 @@ async def load_case(settings: EngineSettings, run_id: UUID, *, deadline: float) 
                     inline_citations=True,
                     paper_stage_scope=True,
                     stage_time_budget=True,
-                    stage_budget_version=FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    stage_budget_version=source.pricing_version,
                     diagnostic_profile=PROFILE,
                 )
                 evidence = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
@@ -174,7 +189,7 @@ async def load_case(settings: EngineSettings, run_id: UUID, *, deadline: float) 
                 dict(committee._prompts),
                 {
                     "candidate_count": len(members),
-                    "source_profile": FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    "source_profile": source.pricing_version,
                     "provenance": "current_code_frozen_input_reconstruction",
                     "original_invocation_reconstructed": False,
                 },
@@ -201,8 +216,12 @@ async def execute_timing_diagnostic(
             "retry_allowed": False,
         },
     )
-    deadline = asyncio.get_running_loop().time() + 300
+    started = asyncio.get_running_loop().time()
+    deadline = started + 300
     case = None
+    source_finished = None
+    current_stage = "source_load_validate_compile"
+    stage_wall: dict[str, int] = {}
     result: dict[str, object] = {
         "diagnostic_id": identity,
         "profile": PROFILE,
@@ -216,19 +235,39 @@ async def execute_timing_diagnostic(
     try:
         async with asyncio.timeout_at(deadline):
             case = await load_case(settings, run_id, deadline=deadline)
+            source_finished = asyncio.get_running_loop().time()
             result.update(case.summary)
             for role in ROLE_ORDER:
-                await case.committee.analyze(role, case.request, case.evidence, case.prompts[role])
+                current_stage = next(stage for stage, roles in STAGES if role in roles)
+                stage_started = asyncio.get_running_loop().time()
+                try:
+                    await case.committee.analyze(
+                        role, case.request, case.evidence, case.prompts[role]
+                    )
+                finally:
+                    stage_wall[current_stage] = stage_wall.get(current_stage, 0) + max(
+                        0, int((asyncio.get_running_loop().time() - stage_started) * 1000)
+                    )
             result["status"] = "observed"
     except Exception:
         # A failed or unknown attempt is terminal; no raw exception or content leaves this entry.
         result["code"] = "TIMING_DIAGNOSTIC_NOT_COMPLETED"
+        result["failure_stage"] = current_stage
+    finished = asyncio.get_running_loop().time()
+    result.update(
+        wall_elapsed_ms=max(0, int((finished - started) * 1000)),
+        source_load_validate_compile_ms=max(
+            0, int(((source_finished or finished) - started) * 1000)
+        ),
+        stage_wall_elapsed_ms=stage_wall,
+    )
     if case is not None:
         result.update(
             model_calls=case.committee.usage.provider_calls,
             known_input_tokens=case.committee.usage.input_tokens,
             known_output_tokens=case.committee.usage.output_tokens,
             usage_complete=result["status"] == "observed",
+            stream_timestamps=case.committee.diagnostic_stream_timings,
             stage_timings={
                 stage: value.model_dump(mode="json")
                 for stage, value in case.committee.stage_timings.items()

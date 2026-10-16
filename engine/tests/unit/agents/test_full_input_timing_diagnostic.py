@@ -49,8 +49,14 @@ async def test_sdk_diagnostic_requires_parent_and_bounded_deadline_before_client
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "version",
+    ["codex-sdk-chatgpt-v9-full-input-capacity", "codex-sdk-chatgpt-v10-flexible-stage-budget"],
+)
 @pytest.mark.parametrize("origin", [0.0, 188.028309716, 1_000_000.1])
-async def test_real_sdk_three_stages_measure_slow_research_without_retries(monkeypatch, origin):
+async def test_real_sdk_three_stages_measure_slow_research_without_retries(
+    monkeypatch, origin, version
+):
     import json
     from unittest.mock import AsyncMock
 
@@ -105,7 +111,7 @@ async def test_real_sdk_three_stages_measure_slow_research_without_retries(monke
         inline_citations=True,
         paper_stage_scope=True,
         stage_time_budget=True,
-        stage_budget_version="codex-sdk-chatgpt-v9-full-input-capacity",
+        stage_budget_version=version,
         diagnostic_profile=PROFILE,
     )
     monkeypatch.setattr(

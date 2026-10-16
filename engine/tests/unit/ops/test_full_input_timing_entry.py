@@ -17,6 +17,7 @@ async def test_normal_diagnostic_entry_marks_attempt_before_call_and_never_repla
     calls = []
     committee = SimpleNamespace(
         stage_timings={},
+        diagnostic_stream_timings={},
         failure_diagnostic=None,
         failure_reason=None,
         usage=SimpleNamespace(provider_calls=0, input_tokens=0, output_tokens=0),
@@ -41,6 +42,10 @@ async def test_normal_diagnostic_entry_marks_attempt_before_call_and_never_repla
     assert result["formal_acceptance"] is False
     assert result["business_writes"] == 0
     assert result["retry_allowed"] is False
+    assert result["failure_stage"] == "research"
+    assert result["wall_elapsed_ms"] >= 0
+    assert result["source_load_validate_compile_ms"] >= 0
+    assert result["stage_wall_elapsed_ms"]["research"] >= 0
     assert len(calls) == 1
     with pytest.raises(ValueError, match="TIMING_DIAGNOSTIC_ALREADY_ATTEMPTED"):
         await ops.execute_timing_diagnostic(object(), run_id=uuid4(), output_dir=output)
@@ -60,8 +65,14 @@ async def test_diagnostic_rejects_public_directory_before_loading(tmp_path, monk
     loader.assert_not_awaited()
 
 
-@pytest.mark.parametrize("damage", [None, "omitted", "hash", "model", "active"])
-def test_source_pool_uses_manifest_chain_and_accepts_completed(damage):
+@pytest.mark.parametrize(
+    "version",
+    ["codex-sdk-chatgpt-v9-full-input-capacity", "codex-sdk-chatgpt-v10-flexible-stage-budget"],
+)
+@pytest.mark.parametrize(
+    "damage", [None, "omitted", "hash", "model", "active", "mixed-version", "unsupported"]
+)
+def test_source_pool_uses_manifest_chain_and_accepts_completed(damage, version):
     from nexus.ops.full_input_timing_diagnostic import validate_source_pool
     from unit.test_research_capacity_pool import case
 
@@ -71,7 +82,12 @@ def test_source_pool_uses_manifest_chain_and_accepts_completed(damage):
         run.status = "completed"
         run.model_config_id = model
         run.model_hash = "a" * 64
-        run.pricing_version = "codex-sdk-chatgpt-v9-full-input-capacity"
+        run.pricing_version = version
+    if damage == "mixed-version":
+        runs[1].pricing_version = "codex-sdk-chatgpt-v8-stage-capacity"
+    if damage == "unsupported":
+        for run in runs:
+            run.pricing_version = "unrecognized"
     if damage == "omitted":
         runs = runs[:1]
     if damage == "hash":
@@ -115,3 +131,18 @@ def test_cli_uses_canonical_source_attempt_directory(tmp_path, monkeypatch, caps
     ] == tmp_path / ".secrets/nexus-full-input-timing" / str(rid)
     assert execute.call_args.kwargs["run_id"] == rid
     assert str(rid) not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_source_failure_is_sanitized_and_timed_without_model_call(tmp_path, monkeypatch):
+    from nexus.ops import full_input_timing_diagnostic as ops
+
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(ops, "load_case", AsyncMock(side_effect=ValueError("secret raw body")))
+    result = await ops.execute_timing_diagnostic(
+        object(), run_id=uuid4(), output_dir=tmp_path / "one"
+    )
+    assert result["failure_stage"] == "source_load_validate_compile"
+    assert result["code"] == "TIMING_DIAGNOSTIC_NOT_COMPLETED"
+    assert result["wall_elapsed_ms"] >= result["source_load_validate_compile_ms"] >= 0
+    assert "secret" not in json.dumps(result)

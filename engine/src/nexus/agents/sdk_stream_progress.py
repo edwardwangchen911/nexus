@@ -30,6 +30,9 @@ class SdkStreamObserver:
     first_notification_ms: int | None = None
     last_notification_ms: int | None = None
     terminal_notification_seen: bool = False
+    first_reasoning_ms: int | None = None
+    first_answer_ms: int | None = None
+    terminal_notification_ms: int | None = None
     _started: float = field(default_factory=lambda: perf_counter())
     _active: bool = False
 
@@ -46,10 +49,24 @@ class SdkStreamObserver:
             self.progress_notifications = min(1000000, self.progress_notifications + 1)
             if method == "item/agentMessage/delta":
                 self.answer_notifications = min(1000000, self.answer_notifications + 1)
+                if self.first_answer_ms is None:
+                    self.first_answer_ms = elapsed
             else:
                 self.reasoning_notifications = min(1000000, self.reasoning_notifications + 1)
+                if self.first_reasoning_ms is None:
+                    self.first_reasoning_ms = elapsed
         if method == "turn/completed":
             self.terminal_notification_seen = True
+            if self.terminal_notification_ms is None:
+                self.terminal_notification_ms = elapsed
+
+    def diagnostic_timestamps(self) -> dict[str, int | None]:
+        """Private timing receipt only; the persisted business snapshot is unchanged."""
+        return {
+            "first_reasoning_ms": self.first_reasoning_ms,
+            "first_answer_ms": self.first_answer_ms,
+            "terminal_notification_ms": self.terminal_notification_ms,
+        }
 
     def snapshot(self) -> SdkStreamProgress:
         return SdkStreamProgress(

@@ -334,7 +334,8 @@ class StagedCodexCommittee(CodexCommittee):
                 raise ValueError("CODEX_STAGE_BUDGET_CLOCK_INVALID")
         if diagnostic_profile is not None and (
             diagnostic_profile != "full-input-timing-diagnostic-v1"
-            or stage_budget_version != FULL_INPUT_CAPACITY_CONFIG_VERSION
+            or stage_budget_version
+            not in {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}
             or deadline is None
             or not 0 < deadline - asyncio.get_running_loop().time() <= 300
         ):
@@ -354,6 +355,7 @@ class StagedCodexCommittee(CodexCommittee):
         self.last_stage_input: StageInputIdentity | None = None
         self.failure_diagnostic: StageFailureDiagnostic | None = None
         self.stage_timings: dict[str, StageInvocationTiming] = {}
+        self.diagnostic_stream_timings: dict[str, dict[str, int | None]] = {}
 
     def build_stage_request(
         self,
@@ -626,7 +628,7 @@ class StagedCodexCommittee(CodexCommittee):
             allocated_deadline = allocated_at + allocated_timeout
             if self._diagnostic_profile is not None:
                 allocated_deadline = min(allocated_deadline, self._deadline - 7 - later_close)
-            if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+            elif self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
                 later_reserve = {"research": 104, "critique": 52, "synthesis": 0}[stage]
                 # Floating-point addition must never round past the reserved cutoff.
                 allocated_deadline = min(allocated_deadline, self._deadline - 7 - later_reserve)
@@ -668,7 +670,7 @@ class StagedCodexCommittee(CodexCommittee):
             invocation_options["diagnostic_profile"] = self._diagnostic_profile
             assert self._deadline is not None
             invocation_options["parent_deadline_at"] = self._deadline
-        if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+        elif self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
             invocation_options["stage_budget_version"] = self._stage_budget_version
             assert self._deadline is not None
             invocation_options["parent_deadline_at"] = self._deadline
@@ -721,6 +723,7 @@ class StagedCodexCommittee(CodexCommittee):
                         "codex-sdk-chatgpt-v10-flexible-stage-budget"
                         if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
                         and stage == "critique"
+                        and self._diagnostic_profile is None
                         else None
                     ),
                     allocated_timeout_ms=(
@@ -736,6 +739,9 @@ class StagedCodexCommittee(CodexCommittee):
                 else None,
             )
             raise
+        finally:
+            if self._diagnostic_profile is not None and stream_observer is not None:
+                self.diagnostic_stream_timings[stage] = stream_observer.diagnostic_timestamps()
         if self._stage_time_budget:
             self.stage_timings[stage] = StageInvocationTiming(
                 committee_remaining_ms=committee_remaining_ms,
@@ -745,6 +751,7 @@ class StagedCodexCommittee(CodexCommittee):
                     "codex-sdk-chatgpt-v10-flexible-stage-budget"
                     if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
                     and stage == "critique"
+                    and self._diagnostic_profile is None
                     else None
                 ),
                 allocated_timeout_ms=(
