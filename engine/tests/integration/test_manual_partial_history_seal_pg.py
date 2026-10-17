@@ -339,7 +339,12 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
     ],
 )
 async def test_manual_partial_seal_rejection_preserves_all_facts(
-    migrated_database_url, monkeypatch, fault, failed_stage="critique", same_day=False
+    migrated_database_url,
+    monkeypatch,
+    fault,
+    failed_stage="critique",
+    same_day=False,
+    identity_reason=None,
 ):
     import hashlib
     import json
@@ -411,6 +416,14 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                 ]
                 row = await session.scalar(select(ManualPaperRequest))
                 request_before = await manual_request.read_manual_request(session, row)
+                budgets_before = [
+                    (b.run_id, b.reserved_usd, b.settled_usd, b.state)
+                    for b in await session.scalars(
+                        select(AgentDailyBudgetReservationRecord).order_by(
+                            AgentDailyBudgetReservationRecord.id
+                        )
+                    )
+                ]
                 run_before = await session.get(AgentResearchRunRecord, args.run_ids[0])
                 usage_before = (
                     run_before.input_tokens,
@@ -434,6 +447,10 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                         nonlocal calls
                         calls += 1
                         if fault == "process-live" or calls == 2:
+                            if identity_reason is not None:
+                                raise history_seal.ResearchProcessDiagnosticError(
+                                    "HOST_IDENTITY_UNCONFIRMED", reason=identity_reason
+                                )
                             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
 
                     scoped.setattr(
@@ -509,8 +526,18 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                 with pytest.raises(
                     ValueError,
                     match="MANUAL_(ACCOUNT_BUSY_OR_UNKNOWN|REQUEST_INVALID|CONFIGURATION_UNAVAILABLE)",
-                ):
+                ) as rejected:
                     await original_entry(settings, args)
+                if identity_reason is not None:
+                    assert rejected.value.safe_diagnostics() == {
+                        "diagnostic_stage": "research_processes",
+                        "diagnostic_code": "HOST_IDENTITY_UNCONFIRMED",
+                        "diagnostic_reason": identity_reason,
+                    }
+                    assert (
+                        manual_paper._operation_fields(rejected.value)["operation_stage"]
+                        == "transaction_body"
+                    )
             async with factory() as session:
                 assert [
                     (j.id, j.status, j.attempt_count)
@@ -520,6 +547,14 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
                 assert await manual_request.read_manual_request(session, row) == request_before
                 run = await session.get(AgentResearchRunRecord, args.run_ids[0])
                 assert (run.input_tokens, run.output_tokens, run.settled_cost_usd) == usage_before
+                assert [
+                    (b.run_id, b.reserved_usd, b.settled_usd, b.state)
+                    for b in await session.scalars(
+                        select(AgentDailyBudgetReservationRecord).order_by(
+                            AgentDailyBudgetReservationRecord.id
+                        )
+                    )
+                ] == budgets_before
                 assert (
                     await session.scalar(
                         select(func.count())
@@ -560,4 +595,22 @@ async def test_same_day_initial_failure_rejects_corruption_and_rolls_back(
 ):
     await test_manual_partial_seal_rejection_preserves_all_facts(
         migrated_database_url, monkeypatch, fault, failed_stage="research", same_day=True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["process-live", "late-process-live"])
+@pytest.mark.parametrize(
+    "reason", ["ANCESTOR_MISSING", "ANCESTOR_CYCLE", "OWNER_MISMATCH", "EXECUTABLE_MISMATCH"]
+)
+async def test_identity_diagnostic_preserves_seal_transaction_rollback(
+    migrated_database_url, monkeypatch, fault, reason
+):
+    await test_manual_partial_seal_rejection_preserves_all_facts(
+        migrated_database_url,
+        monkeypatch,
+        fault,
+        failed_stage="research",
+        same_day=True,
+        identity_reason=reason,
     )

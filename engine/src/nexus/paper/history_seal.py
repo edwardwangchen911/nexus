@@ -67,13 +67,25 @@ class ResearchProcessDiagnosticError(ValueError):
         }
     )
 
-    def __init__(self, code: str) -> None:
+    IDENTITY_REASONS = frozenset(
+        {"ANCESTOR_MISSING", "ANCESTOR_CYCLE", "OWNER_MISMATCH", "EXECUTABLE_MISMATCH"}
+    )
+
+    def __init__(self, code: str, *, reason: str | None = None) -> None:
         super().__init__(_BLOCKED)
         self.code = code
+        self.reason = reason
 
     def safe_diagnostics(self) -> dict[str, str]:
         if isinstance(self.code, str) and self.code in self.SAFE_CODES:
-            return {"diagnostic_stage": "research_processes", "diagnostic_code": self.code}
+            result = {"diagnostic_stage": "research_processes", "diagnostic_code": self.code}
+            if (
+                self.code == "HOST_IDENTITY_UNCONFIRMED"
+                and isinstance(self.reason, str)
+                and self.reason in self.IDENTITY_REASONS
+            ):
+                result["diagnostic_reason"] = self.reason
+            return result
         return {}
 
 
@@ -157,8 +169,22 @@ def require_research_processes_quiescent() -> None:
         ancestors: set[int] = set()
         for executable in chain:
             row = host.get(pid)
-            if row is None or pid in ancestors or row[1] != os.getuid() or row[3] != executable:
-                raise ResearchProcessDiagnosticError("HOST_IDENTITY_UNCONFIRMED")
+            if row is None:
+                raise ResearchProcessDiagnosticError(
+                    "HOST_IDENTITY_UNCONFIRMED", reason="ANCESTOR_MISSING"
+                )
+            if pid in ancestors:
+                raise ResearchProcessDiagnosticError(
+                    "HOST_IDENTITY_UNCONFIRMED", reason="ANCESTOR_CYCLE"
+                )
+            if row[1] != os.getuid():
+                raise ResearchProcessDiagnosticError(
+                    "HOST_IDENTITY_UNCONFIRMED", reason="OWNER_MISMATCH"
+                )
+            if row[3] != executable:
+                raise ResearchProcessDiagnosticError(
+                    "HOST_IDENTITY_UNCONFIRMED", reason="EXECUTABLE_MISMATCH"
+                )
             ancestors.add(pid)
             if pid not in verified:
                 files = mappings(pid)

@@ -648,6 +648,12 @@ uv run --project engine nexus-engine-manual-paper --repo-root <主仓库> --env-
 提交异常或取消均保持 `unconfirmed`，不能由非零退出推断未提交或再次执行。
 先以正常只读入口核对持久化事实；这些字段不是新的恢复许可。
 
+进程检查的 `HOST_IDENTITY_UNCONFIRMED` 保留原拒绝含义，并可附
+`diagnostic_reason`：`ANCESTOR_MISSING`（祖先缺失）、`ANCESTOR_CYCLE`（进程链循环）、
+`OWNER_MISMATCH`（属主不符）或 `EXECUTABLE_MISMATCH`（执行文件身份不符）。
+封存 CLI 和准备检查封装均保留该固定原因；旧回执未带原因时保持未知。
+字段不包含 PID、路径、进程参数或属主标识，不改变身份准入和失败后的处理权限。
+
 诊断字段全部采用固定白名单，原异常、SQL、账户资料及凭据不进入输出。
 新诊断无法追溯还原旧的被屏蔽异常；它也不保证上游一定提供足够信息确认根因。
 本候选不改变预算、180 秒研究合同、执行锁、失败停止或旧请求不可重放边界。

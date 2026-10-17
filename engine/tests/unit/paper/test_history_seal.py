@@ -463,7 +463,7 @@ def test_process_inspection_preserves_safe_failure_boundary(monkeypatch, boundar
     with pytest.raises(close.PreparationCloseDiagnosticError) as failure:
         close.require_preparation_producers_stopped(Path("/fixture"), Path("/fixture/env"))
     assert str(failure.value) == close.BLOCKED
-    assert failure.value.safe_diagnostics() == {
-        "diagnostic_stage": "research_processes",
-        "diagnostic_code": code,
-    }
+    expected = {"diagnostic_stage": "research_processes", "diagnostic_code": code}
+    if boundary == "identity":
+        expected["diagnostic_reason"] = "EXECUTABLE_MISMATCH"
+    assert failure.value.safe_diagnostics() == expected

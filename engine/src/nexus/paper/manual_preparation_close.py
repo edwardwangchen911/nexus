@@ -66,10 +66,11 @@ class PreparationCloseDiagnosticError(ValueError):
         "historical_preparation_proof": {"PROOF_UNCONFIRMED"},
     }
 
-    def __init__(self, stage: str, code: str) -> None:
+    def __init__(self, stage: str, code: str, *, reason: str | None = None) -> None:
         super().__init__(BLOCKED)
         self.stage = stage
         self.code = code
+        self.reason = reason
         self.point: str | None = None
 
     def safe_diagnostics(self) -> dict[str, str]:
@@ -79,6 +80,14 @@ class PreparationCloseDiagnosticError(ValueError):
             and self.code in self._SAFE_CODES.get(self.stage, set())
         ):
             result = {"diagnostic_stage": self.stage, "diagnostic_code": self.code}
+            if self.stage == "research_processes":
+                reason = (
+                    ResearchProcessDiagnosticError(self.code, reason=self.reason)
+                    .safe_diagnostics()
+                    .get("diagnostic_reason")
+                )
+                if reason is not None:
+                    result["diagnostic_reason"] = reason
             if isinstance(self.point, str) and self.point in {
                 "eligibility_producer",
                 "check_producer_recheck",
@@ -176,8 +185,11 @@ def require_preparation_producers_stopped(repo_root: Path, env_file: Path) -> No
     try:
         require_research_processes_quiescent()
     except ResearchProcessDiagnosticError as error:
-        code = error.safe_diagnostics().get("diagnostic_code", "QUIESCENCE_UNCONFIRMED")
-        raise PreparationCloseDiagnosticError("research_processes", code) from None
+        diagnostic = error.safe_diagnostics()
+        code = diagnostic.get("diagnostic_code", "QUIESCENCE_UNCONFIRMED")
+        raise PreparationCloseDiagnosticError(
+            "research_processes", code, reason=diagnostic.get("diagnostic_reason")
+        ) from None
     except (OSError, subprocess.SubprocessError, ValueError):
         raise PreparationCloseDiagnosticError(
             "research_processes", "QUIESCENCE_UNCONFIRMED"
