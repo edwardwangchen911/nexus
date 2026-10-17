@@ -221,6 +221,7 @@ async def formal_stage_output_qualified(
         not in {
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
             FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }
     ):
@@ -241,6 +242,7 @@ async def formal_stage_output_qualified(
         return False
     if run.pricing_version in {
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     }:
         from nexus.agents.capacity_cycle import capacity_output_mode_qualified

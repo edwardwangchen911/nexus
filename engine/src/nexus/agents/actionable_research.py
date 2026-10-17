@@ -126,6 +126,7 @@ def admit_actionable_research_output(
     try:
         from nexus.agents.codex_versions import (
             ACTIONABLE_CONFIG_VERSIONS,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
@@ -142,6 +143,7 @@ def admit_actionable_research_output(
             not in {
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                 FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }
         ):
@@ -159,6 +161,7 @@ def admit_actionable_research_output(
                 in {
                     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                     FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                 }
             )

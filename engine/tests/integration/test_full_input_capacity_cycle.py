@@ -15,7 +15,10 @@ from nexus.paper.agent_cycle import start_schwab_agent_paper_cycle
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.target_service import approve_initial_target_projection
-from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.runtime import Job, JobAttempt
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
@@ -41,6 +44,8 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
     formal,
     flexible,
     research_timeout=False,
+    bounded=False,
+    preclaim_timeout=None,
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
@@ -48,7 +53,8 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
         migrated_database_url, monkeypatch, candidate_instruments=FIVE[:count], decision_time=AT
     )
     calls = []
-    if flexible:
+    observed_parent = [None]
+    if flexible or bounded:
         from nexus.agents.codex_sdk import invoke_codex as real_sdk_invoke
         from unit.agents.test_codex_sdk import _sdk
 
@@ -79,21 +85,36 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
 
             async def unfinished_turn(*args, **kwargs):
                 await client._client.next_turn_notification("private-turn-canary")
-                timers[-1].reschedule(asyncio.get_running_loop().time())
+                timer = (
+                    next(t for t in timers if t.when() == observed_parent[0])
+                    if research_timeout == "committee"
+                    else timers[-1]
+                )
+                timer.reschedule(asyncio.get_running_loop().time())
                 await closed.wait()
                 return sdk_result
 
             thread.run.side_effect = unfinished_turn
     from nexus.agents.codex_flexible_budget import flexible_stage_config, flexible_stage_config_hash
 
-    config = flexible_stage_config() if flexible else capacity_config()
-    config_hash = flexible_stage_config_hash() if flexible else capacity_config_hash()
+    if bounded:
+        from nexus.agents.codex_bounded_budget import (
+            bounded_stage_config,
+            bounded_stage_config_hash,
+        )
+
+        config, config_hash = bounded_stage_config(), bounded_stage_config_hash()
+    elif flexible:
+        config, config_hash = flexible_stage_config(), flexible_stage_config_hash()
+    else:
+        config, config_hash = capacity_config(), capacity_config_hash()
 
     async def invoke(payload, **options):
         calls.append(payload["stage"])
         assert options["max_wire_bytes"] == 100479
-        if flexible:
+        if flexible or bounded:
             assert options["stage_budget_version"] == config["version"]
+            observed_parent[0] = options["parent_deadline_at"]
             later = {"research": 104, "critique": 52, "synthesis": 0}[payload["stage"]]
             assert options["deadline_at"] <= options["parent_deadline_at"] - 7 - later
             if payload["stage"] == "critique":
@@ -103,7 +124,7 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
             if payload["stage"] == "synthesis"
             else _staged_batch(payload["stage"], payload["requested_roles"])
         )
-        if flexible:
+        if flexible or bounded:
             sdk_result.final_response = json.dumps(body)
             return await real_sdk_invoke(payload, **options)
         return json.dumps(body), UsageSnapshot(input_tokens=100, output_tokens=80)
@@ -163,6 +184,76 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
             assert result.result_code == "RESEARCH_JOBS_PREPARED"
             assert len(result.research_run_ids) == count
             jobs = tuple(await session.scalars(select(Job).order_by(Job.created_at, Job.id)))
+        if preclaim_timeout is not None:
+            import asyncio
+
+            from nexus.agents import capacity_cycle
+            from nexus.persistence.models.agents import (
+                AgentDailyBudgetReservationRecord,
+                AgentResearchOutputRecord,
+            )
+            from nexus.persistence.models.runtime import WorkerHeartbeat
+            from nexus.worker import CapacityPreclaimTimeout
+
+            original_prepare = capacity_cycle.prepare_cycle_capacity_pool
+            loop = asyncio.get_running_loop()
+            original_time = loop.time
+            original_timeout = asyncio.timeout_at
+            timers = []
+            offset = [0.0]
+
+            def timeout_at(deadline):
+                timer = original_timeout(deadline)
+                timers.append(timer)
+                return timer
+
+            async def prepare(*args, **kwargs):
+                await original_prepare(*args, **kwargs)
+                if preclaim_timeout == "sync":
+                    offset[0] = 196
+                else:
+                    timers[-1].reschedule(loop.time())
+                    await asyncio.Future()
+
+            budget_query = select(
+                AgentDailyBudgetReservationRecord.id,
+                AgentDailyBudgetReservationRecord.state,
+                AgentDailyBudgetReservationRecord.reserved_usd,
+                AgentDailyBudgetReservationRecord.settled_usd,
+            ).order_by(AgentDailyBudgetReservationRecord.id)
+            async with sessions() as session:
+                budget_before = tuple(await session.execute(budget_query))
+                heartbeat_count = await session.scalar(
+                    select(func.count()).select_from(WorkerHeartbeat)
+                )
+            with monkeypatch.context() as patch:
+                patch.setattr(loop, "time", lambda: original_time() + offset[0])
+                patch.setattr(asyncio, "timeout_at", timeout_at)
+                patch.setattr(capacity_cycle, "prepare_cycle_capacity_pool", prepare)
+                with pytest.raises(CapacityPreclaimTimeout):
+                    await run_agent_worker_once(
+                        settings, job_ids=(jobs[0].id,), formal_stage_capacity=True
+                    )
+            async with sessions() as session:
+                assert tuple(await session.execute(budget_query)) == budget_before
+                assert await session.scalar(select(func.count()).select_from(JobAttempt)) == 0
+                assert (
+                    await session.scalar(
+                        select(func.count()).select_from(AgentResearchOutputRecord)
+                    )
+                    == 0
+                )
+                assert (
+                    await session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+                    == heartbeat_count
+                )
+                assert all(job.status == "queued" for job in await session.scalars(select(Job)))
+                assert all(
+                    run.status == "prepared"
+                    for run in await session.scalars(select(AgentResearchRunRecord))
+                )
+            assert calls == []
+            return
         if oversized_tail == "wrong_mode":
             with pytest.raises(ValueError, match="CODEX_CAPACITY_POOL_BINDING_INVALID"):
                 await run_agent_worker_once(
@@ -260,12 +351,21 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
                     )
                     diagnostic = terminal.payload["diagnostic"]
                     assert diagnostic["stage"] == "research"
-                    assert diagnostic["invocation_phase"] == "turn_run"
-                    assert diagnostic["timeout_source"] == "stage_deadline"
+                    assert diagnostic["invocation_phase"] == (
+                        "aggregate_wait" if research_timeout == "committee" else "turn_run"
+                    )
+                    assert diagnostic["timeout_source"] == (
+                        "committee_deadline"
+                        if research_timeout == "committee"
+                        else "stage_deadline"
+                    )
                     timing = diagnostic["timing"]
                     assert timing["stage_preparation_ms"] >= 0
-                    assert 0 < timing["committee_remaining_ms"] <= 175000
-                    assert 0 < timing["allocated_timeout_ms"] <= 60000
+                    assert 0 < timing["committee_remaining_ms"] <= (295000 if bounded else 175000)
+                    assert 0 < timing["allocated_timeout_ms"] <= (184000 if bounded else 60000)
+                    if bounded:
+                        assert timing["bounded_stage_profile"] == config["version"]
+                        assert timing["allocated_timeout_ms"] > 60000
                     assert timing["stream_progress"]["reasoning_notifications"] == 1
                     assert timing["stream_progress"]["answer_notifications"] == 0
                     assert not timing["stream_progress"]["terminal_notification_seen"]
@@ -300,7 +400,7 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
                 thread.run.assert_awaited_once()
                 client.close.assert_awaited_once()
                 return
-            if flexible:
+            if flexible or bounded:
                 from nexus.persistence.models.agents import AgentResearchOutputRecord
 
                 async with sessions() as check:
@@ -335,7 +435,7 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
                     assert await formal_stage_output_qualified(
                         session, run.id, decision_time=read_as_of
                     )
-            if flexible:
+            if flexible or bounded:
                 from nexus.api.research_stages import read_stage_trace
                 from nexus.ops.research_budget_diagnostic import timing_metadata
                 from nexus.persistence.models.agents import AgentResearchOutputRecord
@@ -350,9 +450,20 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
                             )
                         )
                     )
-                    timing = timing_metadata(outputs)["stage_timings"]["critique"]
-                    assert timing["flexible_critique_profile"] == config["version"]
-                    assert 45000 < timing["allocated_timeout_ms"] <= 116000
+                    timings = timing_metadata(outputs)["stage_timings"]
+                    if bounded:
+                        for stage, maximum in (
+                            ("research", 184000),
+                            ("critique", 236000),
+                            ("synthesis", 288000),
+                        ):
+                            timing = timings[stage]
+                            assert timing["bounded_stage_profile"] == config["version"]
+                            assert 60000 < timing["allocated_timeout_ms"] <= maximum
+                    else:
+                        timing = timings["critique"]
+                        assert timing["flexible_critique_profile"] == config["version"]
+                        assert 45000 < timing["allocated_timeout_ms"] <= 116000
             assert all(
                 r.pricing_version == config["version"] and r.model_hash == config_hash for r in runs
             )
@@ -371,4 +482,52 @@ async def test_formal_v10_research_deadline_preserves_unknown_usage_and_closes_c
 ):
     await test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
         migrated_database_url, monkeypatch, 3, False, True, True, research_timeout=True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "count,invalid", [(3, False), (5, False), (3, True), (3, "invalid_context"), (3, "wrong_mode")]
+)
+async def test_formal_v11_complete_pool_through_sdk(
+    migrated_database_url, monkeypatch, count, invalid
+):
+    await test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
+        migrated_database_url, monkeypatch, count, invalid, True, False, bounded=True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deadline", ["stage", "committee"])
+async def test_formal_v11_deadline_keeps_late_result_unknown_and_closes_cycle(
+    migrated_database_url, monkeypatch, deadline
+):
+    # The SDK double returns a valid result only after the close signal. Neither
+    # stage nor parent expiry may turn that late response into a business output.
+    await test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
+        migrated_database_url,
+        monkeypatch,
+        3,
+        False,
+        True,
+        False,
+        research_timeout=deadline,
+        bounded=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["sync", "async"])
+async def test_v11_preclaim_expiry_leaves_no_claim_attempt_output_or_sdk(
+    migrated_database_url, monkeypatch, kind
+):
+    await test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
+        migrated_database_url,
+        monkeypatch,
+        3,
+        False,
+        True,
+        False,
+        bounded=True,
+        preclaim_timeout=kind,
     )

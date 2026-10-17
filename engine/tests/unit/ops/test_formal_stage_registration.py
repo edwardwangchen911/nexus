@@ -111,3 +111,35 @@ def test_cli_setup_dispatches_only_explicit_pending_registration(monkeypatch):
     monkeypatch.setattr(openai_local, "status", lambda _: {"execution_locked": True})
     assert openai_local.main() == 0
     prepare.assert_awaited_once_with(settings, staged=False, strategy_rnd=False, **OPTIONS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"formal_bounded_stage_budget": 1},
+        {"formal_flexible_stage_budget": True},
+        {"flexible_stage_budget": True},
+        {"full_input_capacity": False},
+        {"formal_stage_capacity": False},
+    ],
+)
+async def test_v11_registration_rejects_ambiguity_before_connection(monkeypatch, change):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("must validate before connection")
+
+    monkeypatch.setattr(openai_local, "session_factory", forbidden)
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus_test_v11", agent_runtime_mode="codex_sdk"
+    )
+    options = (
+        OPTIONS
+        | {
+            "max_wire_bytes": 100479,
+            "full_input_capacity": True,
+            "formal_bounded_stage_budget": True,
+        }
+        | change
+    )
+    with pytest.raises(ValueError, match="CODEX_FORMAL_BOUNDED_ARGUMENT_INVALID"):
+        await openai_local.prepare_database(settings, **options)

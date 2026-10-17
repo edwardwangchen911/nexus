@@ -25,6 +25,7 @@ from nexus.agents.actionable_research import (
 )
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     CANDIDATE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
@@ -901,6 +902,7 @@ async def _admit_research_run(
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                         "codex-sdk-strategy-rnd-v1",
                         PORTFOLIO_DECISION_CONFIG_VERSION,

@@ -24,6 +24,7 @@ async def capacity_output_mode_qualified(
 ) -> bool:
     """Prove v9's original whole-cycle mode; version alone cannot choose a consumer."""
     from nexus.agents.codex_versions import (
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
     )
@@ -66,7 +67,11 @@ async def capacity_output_mode_qualified(
                 and member.model_hash == run.model_hash
                 and member.pricing_version == run.pricing_version
                 and run.pricing_version
-                in {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}
+                in {
+                    FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+                    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+                }
                 for _, member in paired
             )
         )

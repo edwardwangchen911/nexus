@@ -427,6 +427,7 @@ async def _load_portfolio_target_baseline(
     prior_formal = False
     if formal_stage_capacity:
         from nexus.agents.codex_versions import (
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
@@ -448,6 +449,7 @@ async def _load_portfolio_target_baseline(
         prior_formal = prior_run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
         if prior_run.pricing_version in {
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
             FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }:
             from nexus.paper.management_read_authority import formal_proposal_read_profile

@@ -22,6 +22,7 @@ from nexus.agents.codex_sdk import (
 )
 from nexus.agents.codex_staged import StagedCodexCommittee
 from nexus.agents.codex_versions import (
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
@@ -236,7 +237,10 @@ async def _inspection_committee(
     *,
     model: AgentModelConfigRecord,
 ) -> CommitteeModel:
-    flexible = model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+    flexible = model.version in {
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+    }
     formal = model.version in {
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
@@ -255,7 +259,12 @@ async def _inspection_committee(
         tools=None,
         formal_stage_capacity=formal,
         full_input_capacity=flexible and not formal,
-        deadline=asyncio.get_running_loop().time() + FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
+        deadline=asyncio.get_running_loop().time()
+        + (
+            315
+            if model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+            else FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
+        )
         if formal or flexible
         else None,
     )

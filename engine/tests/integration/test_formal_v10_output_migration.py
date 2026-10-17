@@ -15,7 +15,7 @@ def test_formal_v10_empty_roundtrip_preserves_frozen_v9_and_diagnostic_exclusion
     assert (
         "run_version_ref IN ('codex-sdk-chatgpt-v8-stage-capacity', "
         "'codex-sdk-chatgpt-v9-full-input-capacity', "
-        "'codex-sdk-chatgpt-v10-flexible-stage-budget')"
+        "'codex-sdk-chatgpt-v10-flexible-stage-budget'"
     ) in upgraded
     assert flexible_stage_config_hash() in upgraded
     assert "full-input-timing-diagnostic-v1" not in upgraded

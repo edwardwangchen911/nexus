@@ -187,6 +187,7 @@ async def prepare_database(
     full_input_capacity: bool = False,
     flexible_stage_budget: bool = False,
     formal_flexible_stage_budget: bool = False,
+    formal_bounded_stage_budget: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -199,6 +200,18 @@ async def prepare_database(
         or (set(url.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if (
+        type(formal_bounded_stage_budget) is not bool
+        or formal_bounded_stage_budget
+        and (
+            formal_flexible_stage_budget
+            or flexible_stage_budget
+            or candidate_stage_capacity
+            or not full_input_capacity
+            or not formal_stage_capacity
+        )
+    ):
+        raise ValueError("CODEX_FORMAL_BOUNDED_ARGUMENT_INVALID")
     if (
         type(formal_flexible_stage_budget) is not bool
         or formal_flexible_stage_budget
@@ -378,7 +391,11 @@ async def prepare_database(
         from nexus.agents.codex_capacity import capacity_config
         from nexus.agents.codex_formal_stage import formal_stage_config
 
-        if flexible_stage_budget or formal_flexible_stage_budget:
+        if formal_bounded_stage_budget:
+            from nexus.agents.codex_bounded_budget import bounded_stage_config
+
+            config = bounded_stage_config()
+        elif flexible_stage_budget or formal_flexible_stage_budget:
             from nexus.agents.codex_flexible_budget import flexible_stage_config
 
             config = flexible_stage_config()
@@ -721,7 +738,21 @@ def main() -> int:
         help="Explicitly allow v6 or pending v8 registration in the configured local database; "
         "v6 may change future selection, pending v8 remains inactive; never starts research",
     )
+    parser.add_argument(
+        "--formal-bounded-stage-budget",
+        action="store_true",
+        help="Explicit v11 registration only; does not start research",
+    )
     args = parser.parse_args()
+    if args.formal_bounded_stage_budget and (
+        args.action != "setup"
+        or not args.full_input_capacity
+        or not args.formal_stage_capacity
+        or args.flexible_stage_budget
+        or args.formal_flexible_stage_budget
+        or args.candidate_stage_capacity
+    ):
+        parser.error("formal bounded budget requires explicit formal full-input setup")
     if args.formal_flexible_stage_budget and (
         args.action != "setup"
         or not args.full_input_capacity
@@ -884,6 +915,11 @@ def main() -> int:
                     **({"formal_stage_capacity": True} if args.formal_stage_capacity else {}),
                     **({"full_input_capacity": True} if args.full_input_capacity else {}),
                     **({"flexible_stage_budget": True} if args.flexible_stage_budget else {}),
+                    **(
+                        {"formal_bounded_stage_budget": True}
+                        if args.formal_bounded_stage_budget
+                        else {}
+                    ),
                     **(
                         {"formal_flexible_stage_budget": True}
                         if args.formal_flexible_stage_budget

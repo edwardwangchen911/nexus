@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
@@ -169,6 +170,7 @@ async def cancel_unused_manual_research(
         if not legacy and run.pricing_version not in {
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
             FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }:
             raise ValueError("MANUAL_RESULT_UNKNOWN")
@@ -181,7 +183,11 @@ async def cancel_unused_manual_research(
             queue=QueueName.GENERAL,
             worker_id=f"manual-cancel:{cycle.id}",
             now=now,
-            lease_seconds=30 if legacy else 210,
+            lease_seconds=30
+            if legacy
+            else 330
+            if run.pricing_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+            else 210,
             job_ids=(job.id,),
             job_types=("agent.paper.research",),
             locked_job_guard=guard,
