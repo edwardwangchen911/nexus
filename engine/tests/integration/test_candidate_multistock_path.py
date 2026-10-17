@@ -42,8 +42,10 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     tmp_path=None,
     fault=None,
     recover_unknown=False,
+    decision_delay=None,
 ):
-    formal = profile in {"formal_v9", "formal_v10"}
+    post_research_at = AT + (decision_delay or timedelta())
+    formal = profile in {"formal_v9", "formal_v10", "formal_v11"}
     consumer_mode = (
         {"formal_stage_capacity": True} if formal else {"candidate_stage_capacity": True}
     )
@@ -135,12 +137,17 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     flexible_stage_config_hash,
                 )
 
-                config = flexible_stage_config() if profile == "formal_v10" else capacity_config()
-                config_hash = (
-                    flexible_stage_config_hash()
-                    if profile == "formal_v10"
-                    else capacity_config_hash()
-                )
+                if profile == "formal_v11":
+                    from nexus.agents.codex_bounded_budget import (
+                        bounded_stage_config,
+                        bounded_stage_config_hash,
+                    )
+
+                    config, config_hash = bounded_stage_config(), bounded_stage_config_hash()
+                elif profile == "formal_v10":
+                    config, config_hash = flexible_stage_config(), flexible_stage_config_hash()
+                else:
+                    config, config_hash = capacity_config(), capacity_config_hash()
                 session.add(
                     AgentModelConfigRecord(
                         model_id=config["model_id"],
@@ -161,7 +168,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 select(AgentModelConfigRecord).where(
                     AgentModelConfigRecord.version
                     == (
-                        "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                        "codex-sdk-chatgpt-v11-bounded-stage-budget"
+                        if profile == "formal_v11"
+                        else "codex-sdk-chatgpt-v10-flexible-stage-budget"
                         if profile == "formal_v10"
                         else "codex-sdk-chatgpt-v9-full-input-capacity"
                         if profile != "v7"
@@ -195,7 +204,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             )
         manual = None
         if manual_entry:
-            assert profile == "formal_v10" and count == 3 and tmp_path is not None
+            assert profile in {"formal_v10", "formal_v11"} and tmp_path is not None
             manual = await _start_manual_http_request(
                 settings,
                 sessions,
@@ -298,7 +307,52 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert calls == ["research", "critique"]
                 return
         assert calls == ["research", "critique", "synthesis"] * count
-        clock_at[0] = AT + timedelta(seconds=2)
+        if decision_delay is not None:
+            # Source snapshots stay frozen at AT. Move only the decision observer,
+            # after all research jobs have already reached their terminal states.
+            from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
+            from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
+            from nexus.persistence.models.paper import AgentPaperCycleEventRecord, PaperOrderRecord
+            from sqlalchemy import func
+
+            clock_at[0] = AT + decision_delay
+            await _set_test_insert_clock(sessions, clock_at[0])
+            async with sessions.begin() as session:
+                observed = await resume_schwab_agent_paper_cycle(
+                    session,
+                    cycle_id=result.cycle_id,
+                    idempotency_key="bounded-delayed-research-observation",
+                    daily_limit_usd=Decimal("3"),
+                    now=clock_at[0],
+                    formal_stage_capacity=True,
+                )
+                assert await session.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
+                synthesis = await session.scalar(select(AgentPortfolioSynthesisRunRecord))
+                if decision_delay >= timedelta(hours=6):
+                    assert observed.status == "unavailable"
+                    assert observed.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+                    terminal = await session.scalar(
+                        select(AgentPaperCycleEventRecord)
+                        .where(AgentPaperCycleEventRecord.cycle_id == result.cycle_id)
+                        .order_by(AgentPaperCycleEventRecord.sequence.desc())
+                        .limit(1)
+                    )
+                    assert terminal.fact_ids["failure_phase"] == "synthesis_admission"
+                    assert (
+                        terminal.fact_ids["failure_code"] == "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED"
+                    )
+                    assert synthesis is None
+                else:
+                    assert observed.result_code == "PORTFOLIO_SYNTHESIS_PENDING"
+                    assert synthesis is not None and synthesis.status == "prepared"
+                    assert synthesis.decision_time == AT
+                assert all(
+                    run.status == "completed"
+                    for run in await session.scalars(select(AgentResearchRunRecord))
+                )
+            if decision_delay >= timedelta(hours=6):
+                return
+        clock_at[0] = post_research_at + timedelta(seconds=2)
         async with sessions() as session:
             for run_id in result.research_run_ids:
                 run = await session.get(AgentResearchRunRecord, run_id)
@@ -312,7 +366,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                         await load_actionable_research_output(
                             session,
                             run_id=run_id,
-                            decision_time=AT + timedelta(seconds=2),
+                            decision_time=post_research_at + timedelta(seconds=2),
                             allow_safe_no_trade=True,
                             **(
                                 {"candidate_stage_capacity": True}
@@ -323,7 +377,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 action = await load_actionable_research_output(
                     session,
                     run_id=run_id,
-                    decision_time=AT + timedelta(seconds=2),
+                    decision_time=post_research_at + timedelta(seconds=2),
                     allow_safe_no_trade=True,
                     **consumer_mode,
                 )
@@ -334,7 +388,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
         from nexus.worker import run_portfolio_synthesis_worker_once
 
-        await _set_test_insert_clock(sessions, AT + timedelta(seconds=2))
+        await _set_test_insert_clock(sessions, post_research_at + timedelta(seconds=2))
         if manual:
             await _consume_manual_host_action(settings, "RESUME")
         async with sessions.begin() as session:
@@ -346,7 +400,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     cycle_id=result.cycle_id,
                     idempotency_key="synthesis-ready",
                     daily_limit_usd=Decimal("3"),
-                    now=AT + timedelta(seconds=2),
+                    now=post_research_at + timedelta(seconds=2),
                     **consumer_mode,
                 )
             )
@@ -391,7 +445,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         monkeypatch.setattr(
             "nexus.agents.portfolio_synthesis_worker.invoke_codex_portfolio", invoke_portfolio
         )
-        clock_at[0] = AT + timedelta(seconds=3)
+        clock_at[0] = post_research_at + timedelta(seconds=3)
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             state = await _consume_manual_host_action(settings, "RUN_RESEARCH_JOB")
@@ -421,7 +475,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 completed_job.status,
                 completed_job.error_code,
             )
-        clock_at[0] = AT + timedelta(seconds=4)
+        clock_at[0] = post_research_at + timedelta(seconds=4)
         if not trade and count == 3 and not manual:
             from sqlalchemy import event
             from sqlalchemy.exc import DBAPIError
@@ -445,7 +499,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                             session,
                             cycle_id=result.cycle_id,
                             idempotency_key="corrupt-frozen-model",
-                            now=AT + timedelta(seconds=4),
+                            now=post_research_at + timedelta(seconds=4),
                             **consumer_mode,
                         )
             finally:
@@ -457,7 +511,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     row.model_hash == model.config_hash
                     for row in await session.scalars(select(AgentResearchRunRecord))
                 )
-        clock_at[0] = AT + timedelta(seconds=4)
+        clock_at[0] = post_research_at + timedelta(seconds=4)
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             await _consume_manual_host_action(settings, "RESUME")
@@ -469,7 +523,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     session,
                     cycle_id=result.cycle_id,
                     idempotency_key="activate-target",
-                    now=AT + timedelta(seconds=4),
+                    now=post_research_at + timedelta(seconds=4),
                     **consumer_mode,
                 )
             )
@@ -526,7 +580,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     session,
                     cycle_id=result.cycle_id,
                     idempotency_key="activate-target",
-                    now=AT + timedelta(seconds=5),
+                    now=post_research_at + timedelta(seconds=5),
                     **consumer_mode,
                 )
             )
@@ -535,7 +589,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             assert [
                 await session.scalar(select(func.count()).select_from(table)) for table in tables
             ] == counts_before
-        if trade and profile == "formal_v10":
+        if trade and profile in {"formal_v10", "formal_v11"}:
             from nexus.paper.agent_decision_store import _load_portfolio_target_baseline
 
             async with sessions() as session:
@@ -565,6 +619,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 orders,
                 count,
                 formal=formal,
+                decision_observed_at=post_research_at + timedelta(seconds=4),
                 database_clock_at=clock_at if manual else None,
                 manual_settings=settings if manual else None,
                 manual_request_id=request_id if manual else None,
@@ -634,17 +689,21 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
             with pytest.raises(
                 DBAPIError,
-                match="V10_OUTPUT_BINDINGS_EXIST"
+                match="V11_RUN_BINDINGS_EXIST"
+                if profile == "formal_v11"
+                else "V10_OUTPUT_BINDINGS_EXIST"
                 if profile == "formal_v10"
                 else "V9_OUTPUT_BINDINGS_EXIST",
             ):
                 await asyncio.to_thread(
                     command.downgrade, migration_config, "0075_manual_paper_requests"
                 )
+            from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+
             async with sessions() as session:
                 assert (
                     await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "0078_formal_v10_output_binding"
+                    == CURRENT_MIGRATION_HEAD
                 )
                 assert (
                     await session.scalar(
@@ -708,6 +767,51 @@ async def test_v10_manual_entry_failure_preserves_recovery_gates(
 ):
     await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         migrated_database_url, monkeypatch, 3, True, "formal_v10", True, tmp_path, fault
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [3, 5])
+@pytest.mark.parametrize("trade", [False, True], ids=["no-trade", "buy"])
+async def test_v11_manual_entry_to_result(
+    migrated_database_url, monkeypatch, tmp_path, count, trade
+):
+    """Controlled model/source fixtures; normal admission, workers and execution stay real."""
+    await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
+        migrated_database_url,
+        monkeypatch,
+        count,
+        trade,
+        "formal_v11",
+        True,
+        tmp_path,
+        recover_unknown=trade and count == 3,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault", ["preparation_failure", "research_unknown", "synthesis_unknown", "synthesis_preflight"]
+)
+async def test_v11_manual_entry_failure_preserves_recovery_gates(
+    migrated_database_url, monkeypatch, tmp_path, fault
+):
+    await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
+        migrated_database_url, monkeypatch, 3, True, "formal_v11", True, tmp_path, fault
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "count,delay",
+    [(3, timedelta(minutes=17, seconds=30)), (5, timedelta(minutes=28)), (3, timedelta(hours=6))],
+    ids=["three-candidate-budget", "five-candidate-budget", "session-closed"],
+)
+async def test_v11_delayed_research_observation_keeps_session_boundary(
+    migrated_database_url, monkeypatch, count, delay
+):
+    await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
+        migrated_database_url, monkeypatch, count, True, "formal_v11", decision_delay=delay
     )
 
 
@@ -1082,13 +1186,13 @@ async def _start_manual_http_request(
         result = agent_cycle._result(
             view.cycle_id, await agent_cycle._events(session, view.cycle_id), replayed=False
         )
-    assert source_calls == ["risk", "quotes", *(["risk-import"] * 3)]
+    assert source_calls == ["risk", "quotes", *(["risk-import"] * len(batch.instrument_ids))]
     clock_at[0] = AT + timedelta(seconds=1)
     return settings, request_id, result, recovery
 
 
 async def _accept_old_preparation(settings, sessions, model, entry, monkeypatch, root):
-    """Accept one unknown in the same database that will run the new v10 cycle."""
+    """Accept one unknown in the same database that will run the new formal cycle."""
     from contextlib import nullcontext
 
     import httpx
@@ -1287,6 +1391,7 @@ async def _verify_internal_fills(
     database_clock_at=None,
     manual_settings=None,
     manual_request_id=None,
+    decision_observed_at=None,
 ):
     from integration.test_agent_paper_cycle_pg import _ObjectStore, _SchwabPriceHistoryProvider
     from nexus.api.errors import NexusError
@@ -1331,16 +1436,17 @@ async def _verify_internal_fills(
         )
         monkeypatch.setattr("nexus.paper.agent_market._utc_now", lambda: market_clock[0])
     windows = []
+    decision_observed_at = decision_observed_at or AT + timedelta(seconds=4)
     async with sessions() as session:
         before = await load_paper_projection(
-            session, account_id=account_id, as_of=AT + timedelta(seconds=5)
+            session, account_id=account_id, as_of=decision_observed_at + timedelta(seconds=1)
         )
     for order in orders:
         async with sessions() as session:
             scope = await resolve_agent_paper_market_scope(
                 session, cycle_id=cycle_id, instrument_id=order.instrument_id
             )
-            assert scope.window_start > AT + timedelta(seconds=4)
+            assert scope.window_start > decision_observed_at
         evaluated_at = scope.window_end + timedelta(seconds=2)
         if manual_settings is not None:
             from nexus.ops.agent_paper_loop import choose_loop_action

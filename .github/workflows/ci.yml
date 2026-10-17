@@ -113,6 +113,7 @@ jobs:
             engine/tests/test_health.py \
             engine/tests/integration/test_temporary_database_lifecycle.py \
             engine/tests/integration/test_job_checkpoint.py \
+            engine/tests/integration/test_job_worker.py \
             engine/tests/integration/test_portfolio_api.py \
             engine/tests/integration/test_optimization_writer.py \
             engine/tests/integration/test_formal_optimization_producer.py \
@@ -145,15 +146,24 @@ jobs:
             engine/tests/integration/test_agent_paper_identity_preparation.py \
             engine/tests/integration/test_manual_paper_cycle_pg.py \
             engine/tests/integration/test_manual_partial_history_seal_pg.py::test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs \
+            engine/tests/integration/test_manual_partial_history_seal_pg.py::test_v11_failed_research_seal_keeps_unknown_budget_and_allows_new_request \
             engine/tests/integration/test_history_seal_preparation_scope_pg.py \
             engine/tests/integration/test_manual_partial_history_seal_pg.py::test_identity_diagnostic_preserves_seal_transaction_rollback \
             engine/tests/integration/test_sec_exhibit_import.py \
             engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result \
             engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_failure_preserves_recovery_gates \
+            engine/tests/integration/test_candidate_multistock_path.py::test_v11_manual_entry_to_result \
+            engine/tests/integration/test_candidate_multistock_path.py::test_v11_manual_entry_failure_preserves_recovery_gates \
+            engine/tests/integration/test_candidate_multistock_path.py::test_v11_delayed_research_observation_keeps_session_boundary \
             engine/tests/integration/test_capacity_rejection_pg.py \
             engine/tests/integration/test_unknown_preparation_ack_pg.py \
             engine/tests/integration/test_formal_v10_runtime_admission.py \
+            engine/tests/integration/test_formal_v11_output_migration.py \
+            engine/tests/integration/test_formal_stage_registration.py \
             engine/tests/integration/test_full_input_capacity_cycle.py::test_formal_v10_research_deadline_preserves_unknown_usage_and_closes_cycle \
+            engine/tests/integration/test_full_input_capacity_cycle.py::test_formal_v11_complete_pool_through_sdk \
+            engine/tests/integration/test_full_input_capacity_cycle.py::test_v11_preclaim_expiry_leaves_no_claim_attempt_output_or_sdk \
+            engine/tests/integration/test_full_input_capacity_cycle.py::test_formal_v11_deadline_keeps_late_result_unknown_and_closes_cycle \
             engine/tests/integration/test_formal_resume_observation_clock.py
       - name: Run full Engine regression manually
         if: github.event_name == 'workflow_dispatch'
@@ -237,6 +247,14 @@ jobs:
           uv run --package nexus-engine pytest -q --import-mode=importlib
           engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result
           -k buy
+      - name: Verify formal v11 manual recovery through fills, ledger and four pages
+        env:
+          NEXUS_ENV: test
+          DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci
+          NEXUS_CONTROLLED_BROWSER: "1"
+        run: >-
+          uv run --package nexus-engine pytest -q --import-mode=importlib
+          'engine/tests/integration/test_candidate_multistock_path.py::test_v11_manual_entry_to_result[buy-3]'
       - name: Verify unknown recovery through configured entry and Workspace
         env:
           NEXUS_ENV: test

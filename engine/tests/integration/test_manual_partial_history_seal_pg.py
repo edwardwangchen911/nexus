@@ -80,7 +80,12 @@ async def test_maintenance_holds_real_schema_version_until_transaction_end(
 @pytest.mark.parametrize("failed_stage", ["research", "critique", "synthesis"])
 @pytest.mark.parametrize("same_day", [False, True])
 async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs(
-    migrated_database_url, monkeypatch, failed_stage, same_day, prior_preparation=None
+    migrated_database_url,
+    monkeypatch,
+    failed_stage,
+    same_day,
+    prior_preparation=None,
+    bounded=False,
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     engine, sessions, authority, manifest = await seed_normal_path(
@@ -133,11 +138,18 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
     monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *a: None)
     try:
         await _set_test_insert_clock(sessions, AT - timedelta(minutes=1))
-        await prepare_database(settings, **V9_OPTIONS)
+        await prepare_database(
+            settings, **{**V9_OPTIONS, **({"formal_bounded_stage_budget": True} if bounded else {})}
+        )
         async with sessions.begin() as session:
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
-                    AgentModelConfigRecord.version == "codex-sdk-chatgpt-v9-full-input-capacity"
+                    AgentModelConfigRecord.version
+                    == (
+                        "codex-sdk-chatgpt-v11-bounded-stage-budget"
+                        if bounded
+                        else "codex-sdk-chatgpt-v9-full-input-capacity"
+                    )
                 )
             )
             assert model is not None
@@ -281,12 +293,24 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
         )
         if same_day:
             # A new request never replays the failed call or changes its usage.
-            await prepare_database(settings, **{**V9_OPTIONS, "formal_flexible_stage_budget": True})
+            await prepare_database(
+                settings,
+                **{
+                    **V9_OPTIONS,
+                    (
+                        "formal_bounded_stage_budget" if bounded else "formal_flexible_stage_budget"
+                    ): True,
+                },
+            )
             async with sessions.begin() as session:
                 fresh_model = await session.scalar(
                     select(AgentModelConfigRecord).where(
                         AgentModelConfigRecord.version
-                        == "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                        == (
+                            "codex-sdk-chatgpt-v11-bounded-stage-budget"
+                            if bounded
+                            else "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                        )
                     )
                 )
                 fresh = await manual_request.admit_manual_request(
@@ -295,7 +319,7 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
                     batch_id=batch.batch_id,
                     model_config_id=fresh_model.id,
                     mode="research_and_paper",
-                    idempotency_key="new-v10-after-safe-close",
+                    idempotency_key="new-after-safe-close",
                 )
                 assert fresh.request_id != request.request_id and fresh.status == "queued"
                 stored = await session.get(ManualPaperRequest, fresh.request_id)
@@ -322,6 +346,15 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
                 assert fresh_reservation.manual_request_id == fresh.request_id
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_v11_failed_research_seal_keeps_unknown_budget_and_allows_new_request(
+    migrated_database_url, monkeypatch
+):
+    await test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs(
+        migrated_database_url, monkeypatch, "critique", True, bounded=True
+    )
 
 
 @pytest.mark.asyncio
