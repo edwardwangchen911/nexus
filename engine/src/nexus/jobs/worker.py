@@ -117,7 +117,6 @@ async def run_job_worker_once(
         or len(job_ids) != 1
     ):
         raise ValueError("RESEARCH_BUDGET_PROFILE_REQUIRES_LOCKED_SCOPE")
-    claim_time = clock()
     # Preserve the normal 60s lease; a bounded research handler needs its full
     # runtime plus the same 15s margin before another worker may reclaim it.
     lease_seconds = max(
@@ -133,6 +132,9 @@ async def run_job_worker_once(
     async with factory() as session, session.begin():
         if preclaim_guard is not None:
             await preclaim_guard(session)
+        # Preparation has not claimed a Job yet. Anchor its lease to the actual
+        # claim, so validating a complete candidate pool cannot consume it.
+        claim_time = clock()
         await upsert_worker_heartbeat(
             session,
             queue=queue,

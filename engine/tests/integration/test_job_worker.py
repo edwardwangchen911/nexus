@@ -178,12 +178,14 @@ def _spec(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("timeout,attempts,elapsed,lease", [(2, 3, 1, 60), (135, 1, 90, 150)])
+@pytest.mark.parametrize("preclaim_elapsed", [0, 90])
 async def test_worker_lease_covers_bounded_handler_and_terminal_write(
     migrated_database_url,
     timeout,
     attempts,
     elapsed,
     lease,
+    preclaim_elapsed,
 ):
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     job_id = await _enqueue(
@@ -194,9 +196,13 @@ async def test_worker_lease_covers_bounded_handler_and_terminal_write(
     )
     now = _NOW
 
+    async def prepare(_session):
+        nonlocal now
+        now += timedelta(seconds=preclaim_elapsed)
+
     async def handler(context):
         nonlocal now
-        assert (context.claim.expires_at - _NOW).total_seconds() == lease
+        assert (context.claim.expires_at - now).total_seconds() == lease
         now += timedelta(seconds=elapsed)
         return JobHandlerResult(outcome="succeeded", result_code="STAGES_COMPLETED")
 
@@ -209,6 +215,7 @@ async def test_worker_lease_covers_bounded_handler_and_terminal_write(
         process_version="test",
         migration_head="0033_cash_flow_business_date",
         clock=lambda: now,
+        preclaim_guard=prepare,
     )
     async with factory() as session:
         job = await session.get(Job, job_id)
