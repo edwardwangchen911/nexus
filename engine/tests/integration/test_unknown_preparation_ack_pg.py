@@ -15,6 +15,7 @@ from nexus.ops import manual_paper
 from nexus.ops.openai_local import prepare_database
 from nexus.paper import manual_request
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
@@ -544,7 +545,7 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
                         + ":manual:"
                         + manual_host_scope(settings),
                         process_version="nexus-manual-paper-v1+" + "a" * 40,
-                        migration_head="0078_formal_v10_output_binding",
+                        migration_head=CURRENT_MIGRATION_HEAD,
                         started_at=clock[0],
                         seen_at=clock[0],
                     )

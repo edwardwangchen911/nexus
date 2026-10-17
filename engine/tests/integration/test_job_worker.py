@@ -25,6 +25,7 @@ from nexus.jobs.repository import (
     finalize_job,
 )
 from nexus.jobs.worker import run_job_worker_once
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.runtime import IntegrationStatus, Job, WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -705,7 +706,7 @@ async def test_v11_claim_delay_consumes_handler_budget_and_fences_late_result(
         worker_id="bounded-v11",
         worker_started_at=_NOW,
         process_version="test",
-        migration_head="0078_formal_v10_output_binding",
+        migration_head=CURRENT_MIGRATION_HEAD,
         clock=lambda: now,
         job_ids=(job_id,),
         locked_job_guard=guard,

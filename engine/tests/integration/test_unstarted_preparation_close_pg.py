@@ -13,6 +13,7 @@ from nexus.ops.openai_local import prepare_database
 from nexus.paper import manual_request
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
 from nexus.paper.manual_entry import manual_host_scope
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
@@ -268,7 +269,7 @@ async def test_no_trigger_close_retains_unknown_and_fences_new_admission(
                                 queue="agent_paper",
                                 worker_id=f"agent-paper-loop-{UUID(int=12)}:manual:{scope}",
                                 process_version="nexus-manual-paper-v1+" + "a" * 40,
-                                migration_head="0078_formal_v10_output_binding",
+                                migration_head=CURRENT_MIGRATION_HEAD,
                                 started_at=clock[0],
                                 seen_at=clock[0],
                             )

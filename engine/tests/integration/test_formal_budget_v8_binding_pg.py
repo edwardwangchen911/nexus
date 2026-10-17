@@ -22,6 +22,7 @@ from nexus.ops.formal_budget_inventory import configuration
 from nexus.ops.formal_budget_protection import apply, bind_runtime_environment, inspect_protection
 from nexus.ops.openai_local import prepare_database
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -397,7 +398,7 @@ async def test_protected_file_freezes_exact_v8_profile(
 
         async with sessions() as session:
             assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0078_formal_v10_output_binding"
+                CURRENT_MIGRATION_HEAD
             )
             retained = await session.get(FormalBudgetBindingRecord, binding.id)
             assert retained is not None and retained.content_hash == result["binding_hash"]
