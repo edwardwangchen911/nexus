@@ -81,8 +81,11 @@ def test_new_timing_profile_cannot_be_used_as_diagnostic_or_legacy_profile():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("origin", [0.1, 100.1, 1024.1, 1_000_000_000.1])
 @pytest.mark.parametrize("work", [(100, 90, 60), (20, 150, 40), (10, 10, 200)])
-async def test_slow_research_over_old_limit_finishes_all_stages_through_sdk(monkeypatch, work):
+async def test_slow_research_over_old_limit_finishes_all_stages_through_sdk(
+    monkeypatch, work, origin
+):
     import asyncio
     from unittest.mock import AsyncMock
 
@@ -99,7 +102,6 @@ async def test_slow_research_over_old_limit_finishes_all_stages_through_sdk(monk
     )
 
     loop = asyncio.get_running_loop()
-    origin = loop.time()
     clock = [origin]
     monkeypatch.setattr(loop, "time", lambda: clock[0])
     client, thread, result, _ = _sdk(monkeypatch)

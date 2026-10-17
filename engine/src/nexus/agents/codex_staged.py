@@ -5,7 +5,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from enum import Enum
-from math import isfinite
+from math import inf, isfinite, nextafter
 from time import perf_counter
 from types import GenericAlias
 from typing import Literal, TypedDict, cast
@@ -638,6 +638,10 @@ class StagedCodexCommittee(CodexCommittee):
                 later_reserve = {"research": 104, "critique": 52, "synthesis": 0}[stage]
                 # Floating-point addition must never round past the reserved cutoff.
                 allocated_deadline = min(allocated_deadline, self._deadline - 7 - later_reserve)
+            # Adding an absolute clock can round up even below the parent cutoff.
+            # Keep the SDK's strict relative-time check valid without granting time.
+            if allocated_deadline - allocated_at > allocated_timeout:
+                allocated_deadline = nextafter(allocated_deadline, -inf)
         allowance_reason: str | None = None
         if len(wire.encode()) > self._max_wire_bytes:
             allowance_reason = "model_stage_wire_bytes_exceeded"
