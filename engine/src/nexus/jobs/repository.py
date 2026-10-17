@@ -44,6 +44,7 @@ from nexus.persistence.models.runtime import (
 
 def _not_candidate_agent_job() -> ColumnElement[bool]:
     from nexus.agents.codex_versions import (
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         CANDIDATE_BUDGET_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
@@ -69,6 +70,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                     )
                 ),
@@ -77,6 +79,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                     )
                 ),
@@ -102,6 +105,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
                         CANDIDATE_BUDGET_CONFIG_VERSION,
                         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                         FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
                     )
                 ),
@@ -338,6 +342,7 @@ async def claim_next_job(
     if locked_job_guard is not None and (job_ids is None or len(job_ids) != 1):
         raise ValueError("LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE")
     from nexus.agents.codex_versions import (
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         CANDIDATE_BUDGET_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
@@ -380,13 +385,15 @@ async def claim_next_job(
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
             FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }
         or locked_job_guard is None
         or job_ids is None
         or len(job_ids) != 1
         or type(lease_seconds) is not int
-        or lease_seconds != 210
+        or lease_seconds
+        != (330 if research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION else 210)
         or queue is not QueueName.GENERAL
     ):
         raise ValueError("RESEARCH_BUDGET_PROFILE_REQUIRES_LOCKED_SCOPE")

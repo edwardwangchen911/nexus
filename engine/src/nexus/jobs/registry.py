@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     CANDIDATE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
@@ -96,11 +97,13 @@ class JobHandlerSpec:
                 CANDIDATE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                 FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }
             or self.job_type is not JobType.AGENT_PAPER_RESEARCH
             or self.schema_version != "agent_research_job_v1"
-            or self.timeout_seconds != 195
+            or self.timeout_seconds
+            != (315 if self.research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION else 195)
             or self.max_attempts != 1
             or self.retry_policy is not RetryPolicy.AUTOMATIC_SAFE
             or self.idempotency_namespace != "agent.research"
@@ -111,12 +114,15 @@ class JobHandlerSpec:
         if self.payload_model.model_config.get("extra") != "forbid":
             raise ValueError("handler payload model must set extra='forbid'")
         maximum_timeout = (
-            195
+            315
+            if self.research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+            else 195
             if self.research_budget_profile
             in {
                 CANDIDATE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                 FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }
             else 135

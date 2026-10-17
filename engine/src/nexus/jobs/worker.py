@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
 from nexus.jobs.errors import RetryableJobError, UnsafeJobError
 from nexus.jobs.models import QueueName
 from nexus.jobs.registry import (
@@ -129,11 +130,13 @@ async def run_job_worker_once(
         )
         + 15,
     )
+    loop = asyncio.get_running_loop()
     async with factory() as session, session.begin():
         if preclaim_guard is not None:
             await preclaim_guard(session)
         # Preparation has not claimed a Job yet. Anchor its lease to the actual
         # claim, so validating a complete candidate pool cannot consume it.
+        claim_started_at = loop.time()
         claim_time = clock()
         await upsert_worker_heartbeat(
             session,
@@ -213,10 +216,15 @@ async def run_job_worker_once(
         )
         return True
 
-    loop = asyncio.get_running_loop()
-    handler_deadline = loop.time() + spec.timeout_seconds
+    handler_deadline = (
+        claim_started_at
+        if research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+        else loop.time()
+    ) + spec.timeout_seconds
     try:
         async with asyncio.timeout_at(handler_deadline):
+            if loop.time() >= handler_deadline:
+                raise TimeoutError
             async with factory() as session, session.begin():
 
                 async def execute(target_session: AsyncSession) -> JobCompletion:
@@ -228,6 +236,11 @@ async def run_job_worker_once(
                         _monotonic_deadline=handler_deadline,
                     )
                     result = await spec.handler(context)
+                    if (
+                        research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                        and loop.time() >= handler_deadline
+                    ):
+                        raise TimeoutError
                     return JobCompletion(
                         outcome=result.outcome,
                         result_code=result.result_code,

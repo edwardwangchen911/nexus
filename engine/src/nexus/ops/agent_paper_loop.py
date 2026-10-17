@@ -2087,6 +2087,18 @@ def _emit_agent_paper_unknown_failure(
         kind = getattr(error, "_nexus_agent_paper_failure_kind", None)
         if phase in MANUAL_TRIGGER_PHASES and kind in MANUAL_TRIGGER_KINDS:
             payload["failure_kind"] = kind
+        from nexus.worker import CapacityPreclaimTimeout
+
+        if (
+            stage == "execute"
+            and action == AgentPaperLoopAction.RUN_RESEARCH_JOB
+            and isinstance(error, CapacityPreclaimTimeout)
+        ):
+            payload.update(
+                failure_phase="research_preclaim",
+                failure_code="CODEX_CAPACITY_PRECLAIM_TIMEOUT",
+                failure_kind="timeout",
+            )
         payload.update(preparation_failure_fields(error))
         print(
             json.dumps(payload, sort_keys=True),

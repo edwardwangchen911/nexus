@@ -638,3 +638,86 @@ async def test_timeout_obeys_declared_retry_policy_and_attempt_limit(
             exhausted = await session.get(Job, job_id)
         assert exhausted is not None
         assert (exhausted.status, exhausted.attempt_count) == ("dead_letter", 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", ["success", "handler_deadline", "lease_expired"])
+async def test_v11_claim_delay_consumes_handler_budget_and_fences_late_result(
+    migrated_database_url, monkeypatch, result
+):
+    from integration.test_candidate_research_authority import NOW, admit, prepare
+    from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+    from nexus.jobs import worker
+    from nexus.worker import _AgentResearchJobPayload
+
+    factory, model_id = await prepare(
+        EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    )
+    await admit(factory, model_id)
+    async with factory() as session:
+        job_id = await session.scalar(select(Job.id))
+    now = NOW
+    offset = 0.0
+    loop = asyncio.get_running_loop()
+    original_clock = loop.time
+    original_claim = worker.claim_next_job
+
+    async def delayed_claim(*args, **kwargs):
+        nonlocal now, offset
+        claim = await original_claim(*args, **kwargs)
+        assert kwargs["lease_seconds"] == 330
+        now += timedelta(seconds=90)
+        offset += 90
+        return claim
+
+    async def handler(context):
+        nonlocal now, offset
+        # Transaction/claim latency consumes the original 315 second allowance.
+        assert context.monotonic_deadline() - loop.time() == pytest.approx(225, abs=2)
+        assert (context.claim.expires_at - now).total_seconds() == 240
+        elapsed = 200 if result == "success" else 230 if result == "handler_deadline" else 250
+        now += timedelta(seconds=elapsed)
+        if result != "lease_expired":
+            offset += elapsed
+        return JobHandlerResult(outcome="succeeded", result_code="BOUNDED_COMPLETE")
+
+    async def guard(_session, selected):
+        return selected.id == job_id
+
+    monkeypatch.setattr(loop, "time", lambda: original_clock() + offset)
+    monkeypatch.setattr(worker, "claim_next_job", delayed_claim)
+    spec = JobHandlerSpec(
+        job_type=JobType.AGENT_PAPER_RESEARCH,
+        schema_version="agent_research_job_v1",
+        payload_model=_AgentResearchJobPayload,
+        queue=QueueName.GENERAL,
+        timeout_seconds=315,
+        retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+        max_attempts=1,
+        idempotency_namespace="agent.research",
+        handler=handler,
+        research_budget_profile=BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=JobRegistry((spec,)),
+        queue=QueueName.GENERAL,
+        worker_id="bounded-v11",
+        worker_started_at=_NOW,
+        process_version="test",
+        migration_head="0078_formal_v10_output_binding",
+        clock=lambda: now,
+        job_ids=(job_id,),
+        locked_job_guard=guard,
+    )
+    async with factory() as session:
+        stored = await session.get(Job, job_id)
+        assert stored.attempt_count == 1
+        if result == "success":
+            assert stored.status == "succeeded"
+        elif result == "handler_deadline":
+            assert stored.status == "dead_letter"
+            assert stored.last_error_code == "HANDLER_TIMEOUT"
+        else:
+            assert stored.status == "running"
+            assert stored.result_code is None

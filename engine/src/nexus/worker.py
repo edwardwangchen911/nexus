@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     CANDIDATE_BUDGET_CONFIG_VERSION,
     CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     CANDIDATE_RESEARCH_JOB_TIMEOUT_SECONDS,
@@ -250,7 +251,6 @@ async def run_agent_worker_once(
     formal_full_input_capacity = False
     capacity_profile_version = FULL_INPUT_CAPACITY_CONFIG_VERSION
     if full_input_capacity:
-        from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
         from nexus.agents.codex_candidate import require_candidate_database
         from nexus.agents.codex_capacity import capacity_job_qualified
 
@@ -280,9 +280,7 @@ async def run_agent_worker_once(
             run = await session.get(AgentResearchRunRecord, UUID(cast(str, job.payload["run_id"])))
             if run is None:
                 raise ValueError("CODEX_CAPACITY_AUTHORITY_INVALID")
-            await prepare_cycle_capacity_pool(
-                session, settings, run, deadline=asyncio.get_running_loop().time() + 195
-            )
+            await _prepare_preclaim_capacity_pool(session, settings, run)
 
         preclaim_guard = guard_complete_pool
     if candidate_stage_capacity:
@@ -317,8 +315,6 @@ async def run_agent_worker_once(
         if formal_full_input_capacity:
             if tools is not None or responses_client is not None:
                 raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
-            from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
-
             prior_formal_guard = preclaim_guard
 
             async def guard_formal_pool(session: AsyncSession) -> None:
@@ -336,12 +332,8 @@ async def run_agent_worker_once(
                 )
                 if run is None:
                     raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
-                await prepare_cycle_capacity_pool(
-                    session,
-                    settings,
-                    run,
-                    deadline=asyncio.get_running_loop().time() + 195,
-                    formal_stage_capacity=True,
+                await _prepare_preclaim_capacity_pool(
+                    session, settings, run, formal_stage_capacity=True
                 )
 
             preclaim_guard = guard_formal_pool
@@ -369,6 +361,50 @@ async def run_agent_worker_once(
         preclaim_guard=preclaim_guard,
         locked_job_guard=locked_guard,
     )
+
+
+class CapacityPreclaimTimeout(TimeoutError):
+    """Only the bounded input-only preclaim allowance expired; no claim was made."""
+
+
+async def _prepare_preclaim_capacity_pool(
+    session: AsyncSession,
+    settings: EngineSettings,
+    run: AgentResearchRunRecord,
+    *,
+    formal_stage_capacity: bool = False,
+) -> None:
+    """Bound v11 input-only preparation before any Job claim or SDK call."""
+    from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 195
+    if run.pricing_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
+        await prepare_cycle_capacity_pool(
+            session,
+            settings,
+            run,
+            deadline=deadline,
+            formal_stage_capacity=formal_stage_capacity,
+        )
+        return
+    allowance = asyncio.timeout_at(deadline)
+    try:
+        async with allowance:
+            await prepare_cycle_capacity_pool(
+                session,
+                settings,
+                run,
+                deadline=deadline,
+                formal_stage_capacity=formal_stage_capacity,
+            )
+            # A synchronous tokenizer can exhaust the allowance without yielding.
+            if loop.time() >= deadline:
+                raise CapacityPreclaimTimeout("CODEX_CAPACITY_PRECLAIM_TIMEOUT")
+    except TimeoutError as error:
+        if allowance.expired():
+            raise CapacityPreclaimTimeout("CODEX_CAPACITY_PRECLAIM_TIMEOUT") from error
+        raise
 
 
 def _openai_portfolio_responses_client(
@@ -679,7 +715,10 @@ def _agent_registry(
                 schema_version=_JOB_SCHEMA,
                 payload_model=_AgentResearchJobPayload,
                 queue=QueueName.GENERAL,
-                timeout_seconds=FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
+                timeout_seconds=315
+                if capacity_profile_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                and (formal_full_input_capacity or full_input_capacity)
+                else FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
                 if formal_stage_capacity or full_input_capacity
                 else CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS
                 if candidate_stage_capacity
