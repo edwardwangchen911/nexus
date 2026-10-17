@@ -666,8 +666,8 @@ Job/Run/Output、周期、目标或订单，也不取得正式输出资格。研
 committee、完整池容量检查、组合 transport 和引用验证器；没有调用正式 Worker，
 因此此入口及其替身测试不能替代正式 Worker、API 或四页面验收。
 
-分开的正常命令如下；本轮仅授权 `prepare` / `read` 和模型替身隔离验证，
-**没有授权对真实案例执行 `run`**：
+分开的正常命令如下；`prepare` / `read` 与模型替身隔离验证不代表已执行真实观察。
+真实 `run` 须在用户当前批准的范围内执行，失败或未知不得重跑：
 
 ```bash
 uv run --project engine nexus-engine-historical-pool prepare \
@@ -697,6 +697,17 @@ uv run --project engine nexus-engine-historical-pool run \
 保留历史值，admitted_at/expires_at 仅描述本次诊断，不代表当时已经形成研究。
 每只结果保存独立 output_id、完整角色结果与用量；组合保存完整输入、哈希和引用。
 读回重新验证案例、输出哈希及组合绑定；终端只输出固定状态/诊断，不展示账户或研究正文。
+
+研究三阶段返回后，`HISTORICAL_RESEARCH_NOT_ACTIONABLE` 仍由原语义与质量门禁拒绝。
+新回执的 `diagnostic.research_rejection`（version=1）分别保存 `semantics_valid` 和
+`quality_complete`；两者可能同时为 false，因为 v11 语义门禁本身包含质量完整要求。
+`reason_codes` 为拒绝时的固定条件：语义/质量、审查结论、证据审查票与状态、未解决异议、
+角色数量、方向/动作、正反论据及审查覆盖等；只保存布尔值、计数和固定代码，不复制
+研究正文、缺失证据原文或账户信息。`assessment_conclusion_downgraded` 区分综合时因
+证据审查未支持而收紧结论的情况，避免把有效结论和原模型表态混淆。
+这些字段只解释拒绝，不替代原准入；原 unknown、已知用量、未知预留和不可重试规则不变。
+旧回执缺少该字段时仍表示具体原因未保存，读回不得推断或补写。此诊断仅覆盖历史案例
+入口的上述拒绝点，不表示正式 Worker、API 或页面增加了相同诊断。
 
 10月16日案例没有匹配的后续执行行情归档，始终标记 `EXECUTION_WINDOW_MISSING`。
 最小补证方案是取得同一批 Instrument 在历史决策时点之后、满足既有执行窗口/质量/

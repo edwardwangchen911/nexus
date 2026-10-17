@@ -167,7 +167,9 @@ def historical_case():
     )
 
 
-def install_transport(monkeypatch, calls, *, fail_call=None, bad_reference=False):
+def install_transport(
+    monkeypatch, calls, *, fail_call=None, bad_reference=False, rejection=None, reject_member=1
+):
     import json
     from uuid import UUID
 
@@ -189,10 +191,25 @@ def install_transport(monkeypatch, calls, *, fail_call=None, bad_reference=False
             assessment["review_conclusion"] = "sufficient"
             for review in assessment["reviews"]:
                 review.update(resolved=True, missing_evidence=[], prevented_conclusion=None)
+            if len(calls) == reject_member * 3:
+                if rejection in {"limited", "unresolved"}:
+                    assessment["review_conclusion"] = "limited"
+                if rejection == "unresolved":
+                    assessment["reviews"][0].update(
+                        resolved=False,
+                        missing_evidence=["PRIVATE_MISSING_EVIDENCE"],
+                        prevented_conclusion="PRIVATE_PREVENTED_CONCLUSION",
+                    )
         else:
             body = _staged_batch(payload["stage"], payload["requested_roles"])
             for role in body["roles"]:
                 role["vote"] = "support"
+                if (
+                    rejection == "audit"
+                    and len(calls) == reject_member * 3 - 1
+                    and role["role"] == "evidence_audit"
+                ):
+                    role["vote"] = "abstain"
         return json.dumps(body), UsageSnapshot(
             input_tokens=300, output_tokens=100, provider_calls=1
         )
@@ -454,3 +471,168 @@ def test_only_exact_fixed_failure_codes_are_exposed(message, expected):
     from nexus.ops.historical_pool_diagnostic import safe_error_code
 
     assert safe_error_code(ValueError(message)) == expected
+
+
+@pytest.mark.parametrize(
+    "rejection,expected",
+    [
+        ("limited", {"REVIEW_CONCLUSION_NOT_SUFFICIENT"}),
+        ("unresolved", {"REVIEW_CONCLUSION_NOT_SUFFICIENT", "UNRESOLVED_REVIEW"}),
+        (
+            "audit",
+            {
+                "REVIEW_CONCLUSION_NOT_SUFFICIENT",
+                "EVIDENCE_AUDIT_NOT_SUPPORTED",
+                "EVIDENCE_AUDIT_INCOMPLETE",
+            },
+        ),
+    ],
+)
+def test_cli_research_rejection_reasons_survive_readback_without_retry(
+    tmp_path, monkeypatch, capsys, rejection, expected
+):
+    """SDK output -> committee -> intent gates -> SQLite -> CLI read preserves reasons."""
+    import json
+    import sys
+
+    from nexus.ops.historical_pool_diagnostic import CaseStore, main
+
+    tmp_path.chmod(0o700)
+    calls = []
+    install_transport(monkeypatch, calls, rejection=rejection, reject_member=2)
+    with CaseStore.create(tmp_path / "case.sqlite3", historical_case()):
+        pass
+    monkeypatch.setattr(sys, "argv", ["historical", "run", "--case-dir", str(tmp_path)])
+    assert main() == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "unknown"
+    assert result["stage"] == "research_2"
+    assert result["output_count"] == 1
+    assert result["observation_finished_at"] is not None
+    detail = result["diagnostic"]
+    assert detail["code"] == "HISTORICAL_RESEARCH_NOT_ACTIONABLE"
+    rejection_detail = detail["research_rejection"]
+    assert rejection_detail["semantics_valid"] is False
+    assert rejection_detail["quality_complete"] is False
+    assert expected <= set(rejection_detail["reason_codes"])
+    assert {"SEMANTICS_INVALID", "QUALITY_INCOMPLETE"} <= set(rejection_detail["reason_codes"])
+    assert rejection_detail["unresolved_review_count"] == (1 if rejection == "unresolved" else 0)
+    assert rejection_detail["assessment_conclusion_downgraded"] == (rejection == "audit")
+    assert detail["known_usage"]["provider_calls"] == 3
+    assert detail["usage_complete"] is False
+    assert detail["unknown_reservations"] == "held"
+    assert calls == ["research", "critique", "synthesis"] * 2
+    assert result["business_writes"] == 0
+    assert result["execution_locked"] is True
+    assert result["formal_acceptance"] is False
+    assert "PRIVATE_" not in json.dumps(result)
+    assert "account_id" not in json.dumps(result)
+    with CaseStore.open(tmp_path / "case.sqlite3") as store:
+        before = list(store.db.iterdump())
+        assert "PRIVATE_" not in str(before)
+    for command in ("read", "run"):
+        monkeypatch.setattr(sys, "argv", ["historical", command, "--case-dir", str(tmp_path)])
+        assert main() == 1
+        reread = json.loads(capsys.readouterr().out)
+        assert reread["diagnostic"] == detail
+    with CaseStore.open(tmp_path / "case.sqlite3") as store:
+        assert list(store.db.iterdump()) == before
+    assert len(calls) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault,reasons",
+    [
+        ("exposure", {"EXPOSURE_ACTION_MISMATCH"}),
+        ("assessment", {"ASSESSMENT_MISSING", "REVIEW_COVERAGE_INVALID"}),
+        ("audit_status", {"EVIDENCE_AUDIT_INCOMPLETE"}),
+        ("role_count", {"ROLE_COUNT_INVALID"}),
+        ("audit_vote", {"EVIDENCE_AUDIT_NOT_SUPPORTED"}),
+        ("stance", {"STANCE_MISMATCH"}),
+        ("theses", {"THESES_MISSING"}),
+        ("counter_theses", {"COUNTER_THESES_MISSING"}),
+        ("review_coverage", {"REVIEW_COVERAGE_INVALID"}),
+    ],
+)
+async def test_semantic_only_rejection_is_not_mislabeled_as_quality_failure(
+    tmp_path, monkeypatch, fault, reasons
+):
+    """Inject an inconsistent intent at synthesis boundary, keep both real gates active."""
+    from nexus.ops import historical_pool_diagnostic as module
+
+    original = module.synthesize_intent
+
+    def inconsistent(*args, **kwargs):
+        intent = original(*args, **kwargs)
+        updates = {
+            "exposure": {"exposure_action": "none"},
+            "assessment": {"synthesis_assessment": None},
+            "audit_status": {"evidence_audit": "partial"},
+            "role_count": {"role_votes": tuple(v for v in intent.role_votes if v.role != "bull")},
+            "audit_vote": {
+                "role_votes": tuple(
+                    v.model_copy(update={"vote": "abstain"}) if v.role == "evidence_audit" else v
+                    for v in intent.role_votes
+                )
+            },
+            "stance": {
+                "synthesis_assessment": intent.synthesis_assessment.model_copy(
+                    update={"stance": "hold"}
+                )
+            },
+            "theses": {"theses": ()},
+            "counter_theses": {"counter_theses": ()},
+            "review_coverage": {
+                "synthesis_assessment": intent.synthesis_assessment.model_copy(
+                    update={
+                        "reviews": tuple(
+                            r
+                            for r in intent.synthesis_assessment.reviews
+                            if r.claim_id.startswith("bear:")
+                        )
+                    }
+                )
+            },
+        }
+        return intent.model_copy(update=updates[fault])
+
+    monkeypatch.setattr(module, "synthesize_intent", inconsistent)
+    calls = []
+    install_transport(monkeypatch, calls)
+    tmp_path.chmod(0o700)
+    with module.CaseStore.create(tmp_path / "case.sqlite3", historical_case()) as store:
+        with pytest.raises(ValueError, match="HISTORICAL_RESEARCH_NOT_ACTIONABLE"):
+            await module.execute_case(store)
+        detail = store.summary()["diagnostic"]["research_rejection"]
+        assert detail["semantics_valid"] is False
+        assert detail["quality_complete"] is True
+        assert set(detail["reason_codes"]) == {"SEMANTICS_INVALID"} | reasons
+        assert store.summary()["output_count"] == 0
+    assert len(calls) == 3
+
+
+def test_legacy_unknown_readback_never_invents_missing_rejection_detail(
+    tmp_path, monkeypatch, capsys
+):
+    import json
+    import sys
+
+    from nexus.ops.historical_pool_diagnostic import CaseStore, main
+
+    tmp_path.chmod(0o700)
+    path = tmp_path / "case.sqlite3"
+    with CaseStore.create(path, historical_case()) as store:
+        store.claim()
+        store.stage("research_1")
+        store.diagnostic({"code": "HISTORICAL_RESEARCH_NOT_ACTIONABLE", "usage_complete": False})
+        store.finish("unknown")
+    before = path.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["historical", "read", "--case-dir", str(tmp_path)])
+    assert main() == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["diagnostic"] == {
+        "code": "HISTORICAL_RESEARCH_NOT_ACTIONABLE",
+        "usage_complete": False,
+    }
+    assert path.read_bytes() == before

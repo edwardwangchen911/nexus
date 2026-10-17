@@ -18,7 +18,7 @@ from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_p
 from nexus.agents.codex_sdk import MODEL_ID
 from nexus.agents.codex_staged import StructuredStagedCodexCommittee
 from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
-from nexus.agents.committee import ROLE_ORDER, PromptAsset
+from nexus.agents.committee import ROLE_ORDER, CommitteeRoleOutput, PromptAsset
 from nexus.agents.models import ResearchRequest
 from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.agents.portfolio_synthesis_contracts import (
@@ -29,7 +29,12 @@ from nexus.agents.portfolio_synthesis_contracts import (
     validate_portfolio_synthesis_intent,
 )
 from nexus.agents.portfolio_synthesis_worker import CodexSynthesisTransport
-from nexus.agents.synthesis import citations_bound, staged_intent_semantics_valid, synthesize_intent
+from nexus.agents.synthesis import (
+    citations_bound,
+    exposure_action_for_stance,
+    staged_intent_semantics_valid,
+    synthesize_intent,
+)
 from nexus.agents.tools import ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
 from nexus.ops.research_budget_diagnostic import _private_directory
@@ -40,6 +45,7 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.risk.canonical import canonical_paper_projection_hash
+from nexus.strategy.intents import ResearchIntent
 
 PROFILE = "historical-three-stock-v11-v1"
 
@@ -352,11 +358,73 @@ async def preflight_frozen_pool(
     return committees, refs
 
 
+def _research_rejection_detail(
+    intent: ResearchIntent,
+    outputs: list[CommitteeRoleOutput],
+    *,
+    semantics_valid: bool,
+    quality_complete: bool,
+    price_authority_valid: bool,
+) -> dict[str, Any]:
+    """Explain the existing v11 gates without admitting outputs or copying model prose."""
+    assessment = intent.synthesis_assessment
+    original = next(o.synthesis_assessment for o in outputs if o.role == "portfolio")
+    votes = {vote.role: vote.vote for vote in intent.role_votes}
+    reviews = () if assessment is None else assessment.reviews
+    coverage: dict[str, set[int]] = {"bear": set(), "evidence_audit": set()}
+    for review in reviews:
+        role, index = review.claim_id.split(":", 1)
+        coverage[role].add(int(index))
+    unresolved = sum(not review.resolved for review in reviews)
+    # These are observations of the rejected intent, not an alternative admission policy.
+    reasons = (
+        (not semantics_valid, "SEMANTICS_INVALID"),
+        (not quality_complete, "QUALITY_INCOMPLETE"),
+        (assessment is None, "ASSESSMENT_MISSING"),
+        (
+            assessment is not None and assessment.review_conclusion != "sufficient",
+            "REVIEW_CONCLUSION_NOT_SUFFICIENT",
+        ),
+        (intent.evidence_audit != "complete", "EVIDENCE_AUDIT_INCOMPLETE"),
+        (len(votes) != 8, "ROLE_COUNT_INVALID"),
+        (votes.get("evidence_audit") != "support", "EVIDENCE_AUDIT_NOT_SUPPORTED"),
+        (assessment is not None and assessment.stance != intent.stance, "STANCE_MISMATCH"),
+        (
+            intent.exposure_action != exposure_action_for_stance(intent.stance),
+            "EXPOSURE_ACTION_MISMATCH",
+        ),
+        (not intent.theses, "THESES_MISSING"),
+        (not intent.counter_theses, "COUNTER_THESES_MISSING"),
+        (bool(unresolved), "UNRESOLVED_REVIEW"),
+        (
+            not all(
+                indexes and indexes == set(range(max(indexes) + 1)) for indexes in coverage.values()
+            ),
+            "REVIEW_COVERAGE_INVALID",
+        ),
+        (intent.display_symbol == "00656.HK", "FUNDAMENTAL_UNAVAILABLE"),
+        (not price_authority_valid, "PRICE_UNAVAILABLE"),
+    )
+    return dict(
+        version=1,
+        semantics_valid=semantics_valid,
+        quality_complete=quality_complete,
+        reason_codes=[code for rejected, code in reasons if rejected],
+        unresolved_review_count=unresolved,
+        assessment_conclusion_downgraded=(
+            original is not None
+            and assessment is not None
+            and original.review_conclusion != assessment.review_conclusion
+        ),
+    )
+
+
 async def execute_case(store: CaseStore) -> dict[str, Any]:
     """One new historical observation using v11, not replay/resume of a source Run."""
     store.claim()
     stage = "pool_preflight"
     active: FrozenCommittee | None = None
+    research_rejection: dict[str, Any] | None = None
     try:
         case = store.case()
         committees, refs = await preflight_frozen_pool(case)
@@ -410,10 +478,16 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
                 if row["portfolio_context"] is None
                 else PortfolioResearchContext.model_validate(row["portfolio_context"]),
             )
-            if (
-                not staged_intent_semantics_valid(intent, model.version)
-                or intent.quality_status != "complete"
-            ):
+            semantics_valid = staged_intent_semantics_valid(intent, model.version)
+            quality_complete = intent.quality_status == "complete"
+            if not semantics_valid or not quality_complete:
+                research_rejection = _research_rejection_detail(
+                    intent,
+                    outputs,
+                    semantics_valid=semantics_valid,
+                    quality_complete=quality_complete,
+                    price_authority_valid=row["paper_context_validated"],
+                )
                 raise ValueError("HISTORICAL_RESEARCH_NOT_ACTIONABLE")
             result = dict(
                 output_id=str(run.id),
@@ -498,6 +572,8 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
             "usage_complete": False,
             "unknown_reservations": "held",
         }
+        if research_rejection is not None:
+            detail["research_rejection"] = research_rejection
         if active is not None:
             detail["known_usage"] = dict(
                 input_tokens=active.usage.input_tokens,
