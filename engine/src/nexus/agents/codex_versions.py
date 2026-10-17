@@ -22,8 +22,16 @@ FORMAL_STAGE_CAPACITY_CONFIG_VERSION = "codex-sdk-chatgpt-v8-stage-capacity"
 FULL_INPUT_CAPACITY_CONFIG_VERSION = "codex-sdk-chatgpt-v9-full-input-capacity"
 # Isolated qualification only. Formal admission and default selection stay frozen.
 FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v10-flexible-stage-budget"
+BOUNDED_STAGE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v11-bounded-stage-budget"
+BOUNDED_RESEARCH_JOB_TIMEOUT_SECONDS = 300
+BOUNDED_RESEARCH_HANDLER_TIMEOUT_SECONDS = 315
+BOUNDED_RESEARCH_LEASE_SECONDS = 330
 ISOLATED_CAPACITY_CONFIG_VERSIONS = frozenset(
-    {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}
+    {
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+    }
 )
 FULL_INPUT_CAPACITY_MAX_WIRE_BYTES = 100_479
 CANDIDATE_BUDGET_CONFIG_VERSION = "codex-sdk-chatgpt-v7-stage-capacity-candidate"
@@ -110,6 +118,7 @@ def stage_timeout_seconds(
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     }:
         if (
             type(deadline) not in {int, float}
@@ -127,7 +136,9 @@ def stage_timeout_seconds(
         # into a positive residue (or round above the remaining allowance).
         # Reserve their representable precision; never grant time from rounding.
         remaining = deadline - now - 7 - later_reserve - (ulp(deadline) + ulp(now))
-        if version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION and stage == "critique":
+        if version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION or (
+            version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION and stage == "critique"
+        ):
             return max(0.0, remaining)
         return max(0.0, min(cap, remaining))
     if version != DEADLINE_BUDGET_CONFIG_VERSION:

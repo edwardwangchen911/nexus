@@ -26,11 +26,12 @@ from openai_codex.models import JsonObject
 from pydantic import BaseModel, ConfigDict, Field
 
 from nexus.agents.codex_token_budget import input_preflight_units
-from nexus.agents.codex_versions import CONFIG_VERSION as CONFIG_VERSION
 from nexus.agents.codex_versions import (
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
 )
+from nexus.agents.codex_versions import CONFIG_VERSION as CONFIG_VERSION
 from nexus.agents.codex_versions import (
     PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS as PORTFOLIO_DECISION_SDK_TIMEOUT_SECONDS,
 )
@@ -369,7 +370,8 @@ async def invoke_codex(
         if later is None or deadline_at > parent_deadline_at - 7 - later:
             raise ValueError("CODEX_STAGE_DEADLINE_INVALID")
     if stage_budget_version is not None and (
-        stage_budget_version != FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+        stage_budget_version
+        not in {FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION, BOUNDED_STAGE_BUDGET_CONFIG_VERSION}
         or deadline_at is None
         or timeout_seconds is None
         or parent_deadline_at is None
@@ -378,14 +380,24 @@ async def invoke_codex(
     ):
         raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
     if parent_deadline_at is not None and diagnostic_profile is None:
-        if stage_budget_version != FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+        if stage_budget_version not in {
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+        }:
             raise ValueError("CODEX_STAGE_BUDGET_VERSION_INVALID")
         later = {"research": 104, "critique": 52, "synthesis": 0}.get(str(payload.get("stage")))
         if later is None or deadline_at is None or deadline_at > parent_deadline_at - 7 - later:
             raise ValueError("CODEX_STAGE_DEADLINE_INVALID")
+    if stage_budget_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION and (
+        parent_deadline_at is None
+        or not 0 < parent_deadline_at - asyncio.get_running_loop().time() <= 295
+    ):
+        raise ValueError("CODEX_STAGE_DEADLINE_INVALID")
     timeout_limit = (
         295
         if diagnostic_profile is not None
+        else {"research": 184, "critique": 236, "synthesis": 288}.get(str(payload.get("stage")), 0)
+        if stage_budget_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
         else 116
         if stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
         and payload.get("stage") == "critique"

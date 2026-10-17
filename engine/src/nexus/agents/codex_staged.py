@@ -28,6 +28,7 @@ from nexus.agents.codex_sdk import (
     invoke_codex,
 )
 from nexus.agents.codex_versions import (
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
@@ -318,6 +319,7 @@ class StagedCodexCommittee(CodexCommittee):
                 CANDIDATE_BUDGET_CONFIG_VERSION,
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
                 FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
             }
         ):
@@ -326,6 +328,7 @@ class StagedCodexCommittee(CodexCommittee):
             CANDIDATE_BUDGET_CONFIG_VERSION,
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
             FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
         }:
             if deadline is None:
@@ -628,7 +631,10 @@ class StagedCodexCommittee(CodexCommittee):
             allocated_deadline = allocated_at + allocated_timeout
             if self._diagnostic_profile is not None:
                 allocated_deadline = min(allocated_deadline, self._deadline - 7 - later_close)
-            elif self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+            elif self._stage_budget_version in {
+                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+                BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+            }:
                 later_reserve = {"research": 104, "critique": 52, "synthesis": 0}[stage]
                 # Floating-point addition must never round past the reserved cutoff.
                 allocated_deadline = min(allocated_deadline, self._deadline - 7 - later_reserve)
@@ -670,7 +676,10 @@ class StagedCodexCommittee(CodexCommittee):
             invocation_options["diagnostic_profile"] = self._diagnostic_profile
             assert self._deadline is not None
             invocation_options["parent_deadline_at"] = self._deadline
-        elif self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION:
+        elif self._stage_budget_version in {
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+        }:
             invocation_options["stage_budget_version"] = self._stage_budget_version
             assert self._deadline is not None
             invocation_options["parent_deadline_at"] = self._deadline
@@ -719,6 +728,11 @@ class StagedCodexCommittee(CodexCommittee):
                     committee_remaining_ms=committee_remaining_ms,
                     stage_preparation_ms=stage_preparation_ms,
                     diagnostic_profile=self._diagnostic_profile,
+                    bounded_stage_profile=(
+                        "codex-sdk-chatgpt-v11-bounded-stage-budget"
+                        if self._stage_budget_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                        else None
+                    ),
                     flexible_critique_profile=(
                         "codex-sdk-chatgpt-v10-flexible-stage-budget"
                         if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
@@ -747,6 +761,11 @@ class StagedCodexCommittee(CodexCommittee):
                 committee_remaining_ms=committee_remaining_ms,
                 stage_preparation_ms=stage_preparation_ms,
                 diagnostic_profile=self._diagnostic_profile,
+                bounded_stage_profile=(
+                    "codex-sdk-chatgpt-v11-bounded-stage-budget"
+                    if self._stage_budget_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                    else None
+                ),
                 flexible_critique_profile=(
                     "codex-sdk-chatgpt-v10-flexible-stage-budget"
                     if self._stage_budget_version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION

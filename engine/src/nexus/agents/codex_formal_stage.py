@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
@@ -172,11 +173,17 @@ def formal_preparation_model_matches(model: AgentModelConfigRecord) -> bool:
     """Exact preparation/Worker identity; output eligibility is checked separately."""
     from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
 
-    if model.version in {FULL_INPUT_CAPACITY_CONFIG_VERSION, FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION}:
+    if model.version in {
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+    }:
         from nexus.agents.codex_capacity import capacity_model_matches
 
         return capacity_model_matches(
-            model, flexible_stage_budget=model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+            model,
+            flexible_stage_budget=model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+            bounded_stage_budget=model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         )
     return formal_stage_model_matches(model)
 

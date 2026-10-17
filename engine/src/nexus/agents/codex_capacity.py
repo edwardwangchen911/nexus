@@ -25,6 +25,7 @@ from nexus.agents.codex_sdk import (
 from nexus.agents.codex_staged import STAGES, StagedCodexCommittee
 from nexus.agents.codex_token_budget import INPUT_RESERVE
 from nexus.agents.codex_versions import (
+    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
@@ -57,14 +58,34 @@ def capacity_config_hash() -> str:
 
 
 def capacity_model_matches(
-    model: AgentModelConfigRecord, *, flexible_stage_budget: bool = False
+    model: AgentModelConfigRecord,
+    *,
+    flexible_stage_budget: bool = False,
+    bounded_stage_budget: bool = False,
 ) -> bool:
-    if type(flexible_stage_budget) is not bool:
+    if (
+        type(flexible_stage_budget) is not bool
+        or type(bounded_stage_budget) is not bool
+        or (flexible_stage_budget and bounded_stage_budget)
+    ):
         return False
+    from nexus.agents.codex_bounded_budget import bounded_stage_config, bounded_stage_config_hash
     from nexus.agents.codex_flexible_budget import flexible_stage_config, flexible_stage_config_hash
 
-    config = flexible_stage_config() if flexible_stage_budget else capacity_config()
-    config_hash = flexible_stage_config_hash() if flexible_stage_budget else capacity_config_hash()
+    config = (
+        bounded_stage_config()
+        if bounded_stage_budget
+        else flexible_stage_config()
+        if flexible_stage_budget
+        else capacity_config()
+    )
+    config_hash = (
+        bounded_stage_config_hash()
+        if bounded_stage_budget
+        else flexible_stage_config_hash()
+        if flexible_stage_budget
+        else capacity_config_hash()
+    )
     return (
         model.version == config["version"]
         and model.config_hash == config_hash
@@ -82,7 +103,9 @@ def capacity_model_matches(
 
 def isolated_capacity_model_matches(model: AgentModelConfigRecord) -> bool:
     return capacity_model_matches(
-        model, flexible_stage_budget=model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
+        model,
+        flexible_stage_budget=model.version == FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        bounded_stage_budget=model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     )
 
 
