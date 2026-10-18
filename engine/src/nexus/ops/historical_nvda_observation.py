@@ -45,7 +45,7 @@ def target_index(case: dict[str, Any]) -> int:
         matches = [i for i, row in enumerate(case["members"]) if row["symbol"] == "NVDA"]
         if (
             case["profile"] != NVDA_PROFILE
-            or metadata["version"] != 1
+            or metadata["version"] not in {1, 2}
             or metadata["limits"] != OBSERVATION_LIMITS
             or metadata["source_case_hash"] != _hash(restored)
             or not isinstance(metadata["source_receipt_hash"], str)
@@ -169,6 +169,14 @@ async def validate_observation(store: CaseStore) -> int:
     cycle_id = UUID(case["source_cycle_id"])
     path = Path(store.db.execute("PRAGMA database_list").fetchone()[2])
     directory = observation_directory(root, cycle_id)
+    if case["observation"]["version"] == 2:
+        from nexus.ops.nvda_rejection_diagnostic import (
+            diagnostic_directory,
+            validate_rejection_identity,
+        )
+
+        directory = diagnostic_directory(root, cycle_id)
+        validate_rejection_identity(store)
     _private_directory(directory.parent)
     if path != directory / "case.sqlite3" or root != root.resolve():
         raise ValueError("HISTORICAL_OBSERVATION_INVALID")

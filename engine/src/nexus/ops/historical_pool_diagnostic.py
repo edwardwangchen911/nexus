@@ -79,6 +79,7 @@ _SAFE_CODES = frozenset(
         "HISTORICAL_OBSERVATION_SOURCE_CHANGED",
         "HISTORICAL_OBSERVATION_INVALID",
         "HISTORICAL_CASE_V11_REQUIRED",
+        "HISTORICAL_DIAGNOSTIC_STORAGE_UNAVAILABLE",
     }
 )
 
@@ -260,6 +261,10 @@ class CaseStore:
                 raise ValueError("HISTORICAL_CASE_READBACK_INVALID")
             result["observation_id"] = case["observation"]["id"]
             result["observation_limits"] = case["observation"]["limits"]
+            if case["observation"]["version"] == 2:
+                from nexus.ops.nvda_rejection_diagnostic import validate_rejection_identity
+
+                validate_rejection_identity(self, for_execution=False)
         return result
 
 
@@ -687,6 +692,9 @@ def main() -> int:
     observation = sub.add_parser("prepare-nvda-observation")
     observation.add_argument("--repo-root", type=Path, required=True)
     observation.add_argument("--source-cycle-id", type=UUID, required=True)
+    rejection = sub.add_parser("prepare-nvda-rejection-diagnostic")
+    rejection.add_argument("--repo-root", type=Path, required=True)
+    rejection.add_argument("--source-cycle-id", type=UUID, required=True)
     for name in ("run", "read"):
         sub.add_parser(name).add_argument("--case-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -699,6 +707,10 @@ def main() -> int:
             from nexus.ops.historical_nvda_observation import prepare_nvda_observation
 
             path = asyncio.run(prepare_nvda_observation(args.repo_root, args.source_cycle_id))
+        elif args.command == "prepare-nvda-rejection-diagnostic":
+            from nexus.ops.nvda_rejection_diagnostic import prepare_rejection_diagnostic
+
+            path = asyncio.run(prepare_rejection_diagnostic(args.repo_root, args.source_cycle_id))
         else:
             path = args.case_dir.absolute() / "case.sqlite3"
         execution_error = False
@@ -706,7 +718,7 @@ def main() -> int:
             if args.command == "run":
                 try:
                     asyncio.run(execute_case(store))
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt, asyncio.CancelledError):
                     execution_error = True
             result = store.summary()
         if execution_error:
