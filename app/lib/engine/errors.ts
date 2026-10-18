@@ -909,6 +909,9 @@ function managementCycleSemanticsValid(value: Record<string, unknown>): boolean 
   if (candidate === undefined || synthesis === undefined || proposal === undefined
     || target === undefined || activation === undefined || blocker === undefined
     || blockingPlan === undefined || plan === undefined) return false;
+  const cycle = plainOrNull(value.cycle);
+  if (cycle?.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED"
+    && (candidate === null || synthesis === null || synthesis.status !== "completed")) return false;
 
   if (blocker?.code === "AGENT_PAPER_PROVIDER_CAPACITY_EXCEEDED") {
     return blocker.source_stage === "provider" && blocker.category === "provider_capacity"
@@ -941,6 +944,17 @@ function managementCycleSemanticsValid(value: Record<string, unknown>): boolean 
       && proposal === null && activation === null && blocker === null && blockingPlan === null && plan === null;
   }
   if (!synthesisChoicesValid(synthesis, candidateIds)) return false;
+
+  if (cycle?.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED") {
+    return cycle.status === "completed" && cycle.decision === null
+      && Array.isArray(value.orders) && value.orders.length === 0
+      && proposal === null && activation === null && blocker === null
+      && blockingPlan === null && plan === null
+      && research.some((item) => isPlain(item) && item.quality_status === "partial")
+      && Array.isArray(synthesis.choices)
+      && synthesis.choices.every((choice) => isPlain(choice) && choice.action === "defer"
+        && choice.role === "none" && choice.rank === null);
+  }
 
   if (blocker?.code === "POLICY_UNCONFIRMED") {
     return synthesis.status === "completed" && proposal === null

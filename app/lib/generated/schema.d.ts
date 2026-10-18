@@ -1589,6 +1589,7 @@ export interface components {
             blocking_plan: components["schemas"]["PaperPlanSummaryResponse"] | null;
             candidate_batch: components["schemas"]["AgentPaperCandidateBatchResponse"] | null;
             cycle: components["schemas"]["AgentPaperCycleResponse"];
+            historical_source?: components["schemas"]["HistoricalAssessmentSourceResponse"] | null;
             /** Orders */
             orders: components["schemas"]["PaperOrderResponse"][];
             plan_summary: components["schemas"]["PaperPlanSummaryResponse"] | null;
@@ -3337,6 +3338,42 @@ export interface components {
             status: "PASS" | "FAIL" | "UNKNOWN" | "STALE";
             /** Thresholds */
             thresholds: string[];
+        };
+        /** HistoricalAssessmentSourceResponse */
+        HistoricalAssessmentSourceResponse: {
+            /** Archive Hash */
+            archive_hash: string;
+            /**
+             * Evidence At
+             * Format: date-time
+             */
+            evidence_at: string;
+            /**
+             * Execution Allowed
+             * @default false
+             * @constant
+             */
+            execution_allowed: false;
+            /**
+             * Imported At
+             * Format: date-time
+             */
+            imported_at: string;
+            /**
+             * Observation Id
+             * Format: uuid
+             */
+            observation_id: string;
+            /**
+             * Observed Finished At
+             * Format: date-time
+             */
+            observed_finished_at: string;
+            /**
+             * Observed Started At
+             * Format: date-time
+             */
+            observed_started_at: string;
         };
         /**
          * IntegrationConnectivityTestRequest

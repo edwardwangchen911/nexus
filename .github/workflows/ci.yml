@@ -138,6 +138,8 @@ jobs:
             engine/tests/integration/test_agent_paper_market_pg.py \
             engine/tests/integration/test_fred_research_context.py \
             engine/tests/integration/test_agent_paper_cycle_e2e.py \
+            engine/tests/integration/test_partial_portfolio_closeout.py \
+            engine/tests/integration/test_historical_assessment_guards.py \
             engine/tests/integration/test_portfolio_decision_e2e.py \
             engine/tests/integration/test_portfolio_decision_admission_pg.py \
             engine/tests/integration/test_manual_paper_api_pg.py \

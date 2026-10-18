@@ -95,6 +95,10 @@ export function executionPresentation(cycle: Cycle, orders: Order[]): Actionable
   if (orders.length === 0 && cycle.result_code === "NO_ORDER_REQUIRED") {
     return actionable("no_order", "无需下单", "本周期已完成，确定性结果不需要创建订单。", "neutral", cycle.result_code);
   }
+  if (orders.length === 0 && cycle.order_ids.length === 0 && cycle.status === "completed"
+    && cycle.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED") {
+    return actionable("no_order", "暂缓执行", "研究仍有证据缺口，组合全部暂缓；未激活目标或创建订单，不代表充分研究后的不调整。", "warning", cycle.result_code);
+  }
   if (orders.length === 0 && cycle.status === "completed"
     && cycle.result_code === "PAPER_CYCLE_COMPLETED" && cycle.order_ids.length > 0) {
     return actionable("completed", "本周期订单已终态", "关联订单已成交、取消或被拒绝；具体结果请查看全部订单。", "neutral", cycle.result_code);
@@ -153,6 +157,9 @@ export function attentionPresentation(item: Attention): ActionableProductPresent
 }
 
 function decisionSummary(cycle: Cycle): ProductPresentation<DecisionSummaryKey> {
+  if (cycle.status === "completed" && cycle.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED") {
+    return presentation("data_insufficient", "证据不足，暂缓决策", "已保留研究缺口与组合暂缓结果，本轮非执行收尾。", "warning", cycle.result_code);
+  }
   const executionFailure = researchExecutionFailureExplanation(cycle);
   if (executionFailure) {
     return presentation("model_failed", "研究任务运行失败", executionFailure, "critical", cycle.result_code);

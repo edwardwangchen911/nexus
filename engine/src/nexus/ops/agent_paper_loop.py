@@ -4268,6 +4268,17 @@ async def _inspect_portfolio_batch(
                 or target_decision.strategy_version != "agent_portfolio_proposal_v1"
             ):
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        # A validated partial/all-defer assessment finishes without a target.
+        # The coordinator rechecks research and settled jobs before recording it.
+        if (
+            proposal is None
+            and any(source.intent.quality_status == "partial" for source in frozen.security_outputs)
+            and all(choice.action == "defer" for choice in intent.choices)
+        ):
+            from nexus.paper.economic_cycle import read_economic_cycle
+
+            if await read_economic_cycle(session, cycle_id=cycle.id) is None:
+                policy_block = False
         if activation_pending:
             if (
                 policy_block

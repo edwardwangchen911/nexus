@@ -485,7 +485,19 @@ class PaperReadService:
         )
         plan_summary = None if batch is None else await self._plan_summary(batch.id)
         blocking_plan = await self._blocking_plan_summary(activation_event)
+        from nexus.api.schemas.paper import HistoricalAssessmentSourceResponse
+        from nexus.paper.historical_assessment import source_for_cycle
+
+        historical = await source_for_cycle(self._session, cycle_id)
+        provenance = None if historical is None else HistoricalAssessmentSourceResponse(
+            observation_id=historical.id, archive_hash=historical.archive_hash,
+            evidence_at=historical.evidence_at,
+            observed_started_at=historical.observed_started_at,
+            observed_finished_at=historical.observed_finished_at,
+            imported_at=historical.imported_at,
+        )
         return AgentPaperManagementCycleResponse(
+            historical_source=provenance,
             cycle=cycle_response,
             orders=await self._orders_for_cycle(cycle_id),
             candidate_batch=candidate_batch,
@@ -949,6 +961,20 @@ class PaperReadService:
     ) -> AgentPaperCycleBlockerResponse | None:
         code = event.result_code
         facts = event.fact_ids if isinstance(event.fact_ids, dict) else {}
+        if code == "PORTFOLIO_ASSESSMENT_DEFERRED":
+            if (
+                event.to_status != "completed"
+                or synthesis_output is None
+                or synthesis_output.status != "completed"
+                or facts.get("portfolio_synthesis_output_id") != str(synthesis_output.id)
+                or decision is not None
+            ):
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The deferred assessment binding is incomplete.",
+                    status_code=409,
+                )
+            return None
         rejection = facts.get("proposal_rejection_code")
         if code == "PORTFOLIO_PROPOSAL_UNAVAILABLE":
             if not isinstance(rejection, str) or rejection not in {

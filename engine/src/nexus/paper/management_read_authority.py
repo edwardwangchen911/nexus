@@ -142,6 +142,11 @@ async def load_synthesis_read_authority(
     )
     if run is None:
         return None
+    from nexus.paper.historical_assessment import source_for_cycle, validate_research
+
+    archive_source = await source_for_cycle(session, cycle.id)
+    if archive_source is not None:
+        await validate_research(session, archive_source, at=read_as_of)
     frozen = await load_frozen_synthesis_authority(session, run)
     from nexus.paper.agent_cycle import _events
 

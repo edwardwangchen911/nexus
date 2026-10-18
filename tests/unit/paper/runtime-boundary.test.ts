@@ -253,6 +253,31 @@ describe("internal-paper Engine response boundary", () => {
     legacy.blocker = null; legacy.blocking_plan = null; legacy.plan_summary = null;
     expect((await sanitizeEngineResponse(json({ data: legacy, meta }), undefined, path, "GET")).status).toBe(200);
 
+    const closedAssessment = structuredClone(policyUnconfirmed) as Record<string, unknown>;
+    closedAssessment.blocker = null;
+    closedAssessment.cycle = { ...cycle, result_code: "PORTFOLIO_ASSESSMENT_DEFERRED" };
+    const closedAssessmentResearch = closedAssessment.security_research as Array<Record<string, unknown>>;
+    closedAssessmentResearch[0].quality_status = "partial";
+    closedAssessmentResearch[0].stance = "watch";
+    const closedAssessmentChoices = (closedAssessment.synthesis as Record<string, unknown>).choices as Array<Record<string, unknown>>;
+    Object.assign(closedAssessmentChoices[0], { action: "defer", role: "none", rank: null });
+    expect((await sanitizeEngineResponse(json({ data: closedAssessment, meta }), undefined, path, "GET")).status).toBe(200);
+    for (const mutate of [
+      (v: Record<string, unknown>) => { (v.cycle as Record<string, unknown>).status = "researching"; },
+      (v: Record<string, unknown>) => { v.proposal = valid.proposal; },
+      (v: Record<string, unknown>) => { v.activation_result = valid.activation_result; },
+      (v: Record<string, unknown>) => { v.security_research = valid.security_research; },
+      (v: Record<string, unknown>) => { v.synthesis = valid.synthesis; },
+      (v: Record<string, unknown>) => { v.candidate_batch = null; v.security_research = []; v.synthesis = null; },
+      (v: Record<string, unknown>) => { v.synthesis = null; },
+      (v: Record<string, unknown>) => { Object.assign(v.synthesis as Record<string, unknown>, { status: "failed", choices: [], cash_rationale: null }); },
+      (v: Record<string, unknown>) => { Object.assign(v.synthesis as Record<string, unknown>, { status: "abstained", choices: [], cash_rationale: null }); },
+    ]) {
+      const drift = structuredClone(closedAssessment);
+      mutate(drift);
+      expect((await sanitizeEngineResponse(json({ data: drift, meta }), undefined, path, "GET")).status).toBe(500);
+    }
+
     const historicalTarget = structuredClone(valid) as Record<string, unknown>;
     (historicalTarget.active_target as Record<string, unknown>).target_version_id = requestId;
     (historicalTarget.active_target as Record<string, unknown>).strategy_decision_id = orderId;

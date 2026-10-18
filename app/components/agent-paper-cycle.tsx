@@ -21,6 +21,7 @@ const marketStatusLabels: Record<AgentPaperCycleFact["execution_market"]["status
 };
 
 const resultExplanations = new Map<string, string>([
+  ["PORTFOLIO_ASSESSMENT_DEFERRED", "研究仍有证据缺口，组合全部暂缓；本轮已收尾，未激活目标或创建订单，不代表充分研究后的不调整。"],
   ["NO_ORDER_REQUIRED", "Agent 已完成判断，确定性仓位计算结果为不调整，因此没有创建模拟订单。"],
   ["RESEARCH_OUTPUT_NOT_ACTIONABLE", "研究结果未通过可执行准入；本周期未创建模拟订单。"],
   ["RISK_INPUT_REQUIRED", "风险输入不足，系统已停止本周期，没有创建模拟订单。"],

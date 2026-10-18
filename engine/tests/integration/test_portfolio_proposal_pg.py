@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 async def proposal_source(
     url, *, approve=True, seeded=None, intent_factory=synthesis_intent, approval_offset=0
 ):
-    engine, sessions, kwargs = seeded or await seed_synthesis(url)
+    engine, sessions, kwargs = seeded or await seed_synthesis(url, partial_research=False)
     async with sessions.begin() as session:
         cycle = await session.get(AgentPaperCycleRecord, kwargs["cycle_id"])
         if approve:
@@ -469,7 +469,9 @@ async def test_policy_wait_publishes_one_persisted_close_and_summary(
     from nexus.settings import EngineSettings
     from sqlalchemy import literal, text
 
-    seeded = await _seed_normal_synthesis(migrated_database_url, monkeypatch)
+    seeded = await _seed_normal_synthesis(
+        migrated_database_url, monkeypatch, partial_research=False
+    )
     engine, sessions, args = await proposal_source(
         migrated_database_url, approve=False, seeded=seeded
     )
@@ -955,16 +957,82 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
                     AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
                 )
             )
+            from uuid import UUID
+
+            from nexus.agents.paper_context import (
+                SOURCE,
+                prepare_agent_paper_research_snapshot,
+                read_agent_paper_research_context,
+            )
+            from nexus.agents.price_authority import freeze_price_authority
+            from nexus.domain.evidence import EvidenceRef
+            from nexus.paper.agent_cycle_models import CandidateManifestEntry
+            from nexus.persistence.models.research import ResearchEvidenceRef
+
+            projection = await load_paper_projection(
+                session, account_id=cycle.account_id, as_of=new_time
+            )
             run_ids, output_ids = [], []
             for source_id in synthesis_run.research_output_ids:
                 old_output = await session.get(AgentResearchOutputRecord, source_id)
                 old_run = await session.get(AgentResearchRunRecord, old_output.run_id)
+                # A fresh synthetic checkpoint gets fresh cycle context. Never
+                # relabel the first cycle's frozen context as a later observation.
+                candidate = next(
+                    CandidateManifestEntry.model_validate(item)
+                    for item in second.candidate_manifest
+                    if item["instrument_id"] == str(old_run.instrument_id)
+                )
+                snapshot = await prepare_agent_paper_research_snapshot(
+                    session,
+                    cycle_id=second.id,
+                    decision_time=new_time,
+                    candidate=candidate,
+                    projection=projection,
+                )
+                await freeze_price_authority(
+                    session,
+                    snapshot=snapshot,
+                    instrument_id=old_run.instrument_id,
+                    decision_time=new_time,
+                    allow_fixture=False,
+                )
+                context = await read_agent_paper_research_context(
+                    session,
+                    snapshot_id=snapshot.id,
+                    instrument_id=old_run.instrument_id,
+                    as_of=new_time,
+                )
+                assert context is not None
+                bound = context[1]
+                manifest = [
+                    dict(item)
+                    if item["source"] != SOURCE
+                    else {
+                        "id": str(bound.id),
+                        "source": bound.source,
+                        "provider_object_id": bound.provider_object_id,
+                        "revision": bound.revision,
+                        "available_at": bound.available_at.isoformat().replace("+00:00", "Z"),
+                        "location": bound.location,
+                        "content_hash": bound.content_hash,
+                    }
+                    for item in old_run.evidence_manifest
+                ]
+                bound_records = [
+                    await session.get(ResearchEvidenceRef, UUID(item["id"])) for item in manifest
+                ]
                 new_run = AgentResearchRunRecord(
                     id=uuid4(),
                     **(
                         values(old_run)
                         | {
                             "decision_time": new_time,
+                            "data_snapshot_id": snapshot.id,
+                            "evidence_manifest": manifest,
+                            "evidence_hash": sha256(
+                                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+                            ).hexdigest(),
                             "idempotency_key": f"agent-paper:{second.id}:{old_run.instrument_id}",
                             "created_at": new_time,
                         }
@@ -975,6 +1043,17 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
                 intent_doc = deepcopy(old_output.intent)
                 intent_doc["decision_time"] = new_time.isoformat()
                 intent_doc["decision_id"] = str(new_run.id)
+                intent_doc["data_snapshot_id"] = str(snapshot.id)
+                intent_doc["evidence_refs"] = [
+                    EvidenceRef(
+                        source=item.source,
+                        object_id=item.provider_object_id,
+                        available_at=item.available_at,
+                        location=item.location,
+                        content_hash=item.content_hash,
+                    ).model_dump(mode="json")
+                    for item in bound_records
+                ]
                 from nexus.strategy.intents import ResearchIntent
 
                 intent_doc = ResearchIntent.model_validate(intent_doc).model_dump(mode="json")
@@ -1002,14 +1081,17 @@ async def test_later_proposal_uses_active_target_and_preserves_historical_replay
                 )
                 session.add(new_output)
                 await session.flush()
-                for evidence in await session.scalars(
-                    select(AgentResearchOutputEvidenceRecord).where(
-                        AgentResearchOutputEvidenceRecord.output_id == old_output.id
-                    )
-                ):
+                for evidence in bound_records:
                     session.add(
                         AgentResearchOutputEvidenceRecord(
-                            **(values(evidence) | {"output_id": new_output.id})
+                            output_id=new_output.id,
+                            evidence_ref_id=evidence.id,
+                            source=evidence.source,
+                            provider_object_id=evidence.provider_object_id,
+                            revision=evidence.revision,
+                            available_at=evidence.available_at,
+                            location=evidence.location,
+                            content_hash=evidence.content_hash,
                         )
                     )
                 old_job = await session.scalar(

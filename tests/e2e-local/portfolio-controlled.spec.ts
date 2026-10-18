@@ -207,3 +207,67 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   await capture("portfolio");
   expect(writes).toEqual([]);
 });
+
+
+test("partial assessment closes without execution through normal BFF and pages", async ({ page, request }) => {
+  test.skip(process.env.NEXUS_CONTROLLED_DEFERRED_CLOSEOUT !== "1", "isolated deferred assessment required");
+  const id = process.env.NEXUS_CONTROLLED_CYCLE_ID!;
+  const endpoint = `/api/v1/paper/management/cycles/${id}`;
+  const response = await request.get(endpoint);
+  expect(response.status()).toBe(200);
+  const original = (await response.json()).data as Detail;
+  expect(original.cycle.status).toBe("completed");
+  expect(original.cycle.result_code).toBe("PORTFOLIO_ASSESSMENT_DEFERRED");
+  expect(original.cycle.execution_locked).toBe(true);
+  expect(original.blocker).toBeNull();
+  expect(original.proposal).toBeNull();
+  expect(original.activation_result).toBeNull();
+  expect(original.orders).toEqual([]);
+  expect(original.security_research).toHaveLength(3);
+  expect(original.security_research.filter((item) => item.quality_status === "partial")).toHaveLength(
+    process.env.NEXUS_CONTROLLED_HISTORICAL_ARCHIVE === "1" ? 2 : 3);
+  if (process.env.NEXUS_CONTROLLED_HISTORICAL_ARCHIVE === "1") {
+    expect(original.historical_source?.execution_allowed).toBe(false);
+    expect(Date.parse(original.historical_source!.imported_at)).toBeGreaterThan(
+      Date.parse(original.historical_source!.observed_finished_at));
+  }
+  expect(original.synthesis?.choices.every((choice) => choice.action === "defer")).toBe(true);
+  const writes: string[] = [];
+  page.on("request", (r) => { if (!["GET", "HEAD"].includes(r.method())) writes.push(r.method()); });
+  await page.goto("/workspace");
+  await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
+  if (process.env.NEXUS_CONTROLLED_HISTORICAL_ARCHIVE === "1") {
+    const current = await request.get("/api/v1/workbench");
+    expect(current.status()).toBe(200);
+    const currentData = (await current.json()).data;
+    // Real clock stays intact: a historical import is not today's scheduled cycle.
+    if (currentData.latest_cycle === null) {
+      await expect(page.getByRole("region", { name: "最新决策" })).toContainText("尚无已保存");
+      expect(currentData.session.decision_session).not.toBe(original.cycle.decision_session);
+    } else {
+      expect(currentData.latest_cycle.cycle_id).toBe(id);
+      await expect(page.getByRole("region", { name: "最新决策" })).toContainText("暂缓");
+    }
+  } else {
+    await expect(page.getByRole("region", { name: "最新决策" })).toContainText("暂缓");
+  }
+  await page.goto("/decisions");
+  await expect(page.locator(`a[href="/decisions/${id}"]`)).toBeVisible();
+  await page.goto(`/decisions/${id}`);
+  await expect(page.getByRole("heading", { name: "组合决策详情" })).toBeVisible();
+  if (process.env.NEXUS_CONTROLLED_HISTORICAL_ARCHIVE === "1") {
+    await expect(page.getByRole("note", { name: "历史归档来源" })).toContainText("不可执行");
+  }
+  await expect(page.locator(".pm-agent strong").filter({ hasText: "暂缓" })).toHaveCount(3);
+  await expect(page.getByRole("note", { name: "目标生效结论" }).getByText("已保留研究缺口与组合暂缓结果，本轮非执行收尾。", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("note", { name: "目标生效结论" }).getByText("已保留研究缺口与组合暂缓结果，本轮非执行收尾。", { exact: true })).toBeVisible();
+  await page.goto("/paper");
+  await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
+  await page.goto("/portfolio");
+  await expect(page.getByRole("heading", { name: "组合事实" })).toBeVisible();
+  expect(writes).toEqual([]);
+  const after = await request.get(endpoint);
+  expect(after.status()).toBe(200);
+  expect((await after.json()).data).toEqual(original);
+});

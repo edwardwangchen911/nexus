@@ -69,9 +69,19 @@ async def seed_synthesis(
     *,
     normal_path=None,
     complete_research=True,
+    partial_research=True,
     candidate_instruments=INSTRUMENTS[:2],
 ):
     additional = tuple(item for item in candidate_instruments if item not in INSTRUMENTS)
+    if not partial_research and normal_path is None:
+        # Complete research needs the normal frozen same-session price context;
+        # the legacy partial fixture deliberately has no such authority.
+        from integration.test_portfolio_same_day_research_pg import seed_normal_path
+
+        with pytest.MonkeyPatch.context() as patcher:
+            normal_path = await seed_normal_path(
+                url, patcher, candidate_instruments=candidate_instruments
+            )
     if normal_path is None:
         seed = await seed_paper_batch(url, additional_instruments=additional)
         engine = create_async_engine(url)
@@ -140,6 +150,23 @@ async def seed_synthesis(
             intent = intent.model_copy(
                 update={"display_symbol": symbol_by_instrument[run.instrument_id]}
             )
+            if not partial_research:
+                # Independently complete synthetic research for allocation-policy
+                # tests; partial fixtures keep their missing-evidence semantics.
+                document = intent.model_dump(mode="json")
+                document.update(quality_status="complete", evidence_audit="complete")
+                document["synthesis_assessment"]["review_conclusion"] = "sufficient"
+                for review in document["synthesis_assessment"]["reviews"]:
+                    review.update(
+                        status="accepted",
+                        resolved=True,
+                        missing_evidence=[],
+                        prevented_conclusion=None,
+                    )
+                for vote in document["role_votes"]:
+                    vote["vote"] = "support"
+                intent = type(intent).model_validate(document)
+
             bound_records = [
                 await session.get(ResearchEvidenceRef, UUID(frozen["id"]))
                 for frozen in run.evidence_manifest
@@ -192,7 +219,10 @@ async def seed_synthesis(
                 )
             await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             await session.execute(
-                text("UPDATE agent_research_runs SET status='completed' WHERE id=:id"),
+                text(
+                    "UPDATE agent_research_runs SET status='completed', settled_cost_usd=0, "
+                    "input_tokens=0, output_tokens=0 WHERE id=:id"
+                ),
                 {"id": run_id},
             )
             await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
@@ -540,6 +570,7 @@ async def test_five_candidate_cycle_reaches_no_trade_and_replays_exactly_once(
     seeded = await seed_synthesis(
         migrated_database_url,
         candidate_instruments=candidates,
+        partial_research=False,
     )
     engine, sessions, args = await proposal_source(
         migrated_database_url,

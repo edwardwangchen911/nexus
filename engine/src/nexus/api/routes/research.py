@@ -263,6 +263,9 @@ async def get_instrument_research(
         .where(
             AgentResearchRunRecord.instrument_id == instrument_id,
             AgentResearchRunRecord.decision_time <= bounded_as_of,
+            # Archive normalization becomes visible only when actually imported.
+            (AgentResearchRunRecord.actor_id != "historical-archive-consumer-v1")
+            | (AgentResearchRunRecord.created_at <= bounded_as_of),
         )
         .order_by(desc(AgentResearchRunRecord.decision_time), desc(AgentResearchRunRecord.id))
         .limit(1)
@@ -270,6 +273,12 @@ async def get_instrument_research(
     if run is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Instrument research was not found.", status_code=404)
     output = await _latest_output(session, run.id)
+    if (
+        run.actor_id == "historical-archive-consumer-v1"
+        and output is not None
+        and output.created_at > bounded_as_of
+    ):
+        output = None
     return ResearchRunEnvelope(
         data=await _hydrate_response(session, run, output),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),

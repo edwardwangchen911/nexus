@@ -435,7 +435,18 @@ class AgentPaperCycleDetailResponse(_StrictSchema):
     orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
 
 
+class HistoricalAssessmentSourceResponse(_StrictSchema):
+    observation_id: UUID
+    archive_hash: str
+    evidence_at: AwareDatetime
+    observed_started_at: AwareDatetime
+    observed_finished_at: AwareDatetime
+    imported_at: AwareDatetime
+    execution_allowed: Literal[False] = False
+
+
 class AgentPaperManagementCycleResponse(_StrictSchema):
+    historical_source: HistoricalAssessmentSourceResponse | None = None
     cycle: AgentPaperCycleResponse
     orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
     candidate_batch: AgentPaperCandidateBatchResponse | None

@@ -12,8 +12,16 @@ export function PortfolioDecisionDetail({ detail, paperHref }: { detail: Detail;
   const proposalState = blocked ? "未生效 · 等待重新校验" : activation?.target_version_id ? "已完成生效校验" : "未生效";
   const blockText = blocker ? ({ resource_occupied: "前序计划仍占用资源；须结清且无未知后重新校验。", policy_unconfirmed: "政策未确认；不生成默认配置。", proposal_rejected: "提案校验未通过；保留原目标。", provider_capacity: "研究输入容量受限；未形成完整提案。" })[blocker.category] : null;
   const terminal = detail.cycle.status === "unavailable" || detail.cycle.status === "failed"
+    || (detail.cycle.status === "completed" && detail.cycle.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED")
     ? cycleDecisionPresentation(detail.cycle).summary : null;
   return <div className="portfolio-decision pm-stack">
+    {detail.historical_source ? <aside role="note" aria-label="历史归档来源">
+      <strong>历史研究归档 · 仅暂缓展示，不可执行</strong>
+      <p>保留原研究缺口；本次只接入归档，没有重新调用模型。</p>
+      <dl><div><dt>证据时点</dt><dd>{formatDisplayTime(detail.historical_source.evidence_at)}</dd></div>
+      <div><dt>原观察完成</dt><dd>{formatDisplayTime(detail.historical_source.observed_finished_at)}</dd></div>
+      <div><dt>本次接入</dt><dd>{formatDisplayTime(detail.historical_source.imported_at)}</dd></div></dl>
+    </aside> : null}
     <div className="pm-conclusion" role="note" aria-label="目标生效结论"><AlertTriangle aria-hidden="true" size={30} /><div><h2>{proposal ? <>提案 <span className="pm-id" title={proposal.strategy_decision_id}>…{proposal.strategy_decision_id.slice(-4)}</span> {proposalState}；</> : blocker?.category === "policy_unconfirmed" ? "政策未确认；" : terminal ? `${terminal.label}；` : "尚无完整提案；"}{active ? `目标 V${active.version_seq} 继续生效` : "尚未建立目标"}</h2><p>{blockText ?? terminal?.detail ?? "目标生效、计划建立和模拟成交分别核对。"}</p></div>{plan ? <a className="button button--quiet" href={paperHref ?? `/paper?plan=${encodeURIComponent(plan.batch_id)}`}>查看调整计划</a> : null}</div>
     <dl className="pm-identity"><div><dt>当前生效目标</dt><dd>{active ? `V${active.version_seq} · 生效` : "尚未建立目标"}</dd></div><div><dt>本轮提案</dt><dd>{proposal ? proposalState : "未形成"}</dd></div><div><dt>判断时点</dt><dd className="numeric-data">{formatDisplayTime(detail.cycle.decision_time)}</dd></div></dl>
     <section className="pm-panel" aria-labelledby="portfolio-choice-title"><header className="pm-panel__heading"><h2 id="portfolio-choice-title">本轮组合取舍</h2><span>Agent 原始判断</span></header><div className="pm-agent"><Bot aria-hidden="true" size={28} /><div>{synthesis ? <><p>{synthesis.cash_rationale ?? "现金理由未提供"}</p>{synthesis.choices.map((choice) => <div key={choice.instrument_id}><p><strong title={choice.instrument_id}>{instrumentLabel(detail, choice.instrument_id)} · {actions[choice.action]}</strong>：{choice.thesis}</p>{choice.replaces_instrument_id ? <p>拟替换 {instrumentLabel(detail, choice.replaces_instrument_id)}</p> : null}{choice.depends_on_instrument_ids.length ? <p>依赖：{choice.depends_on_instrument_ids.map((id) => instrumentLabel(detail, id)).join("、")}</p> : null}</div>)}</> : <p>组合级 Agent 判断暂不可用；不从单股方向拼接。</p>}</div></div></section>

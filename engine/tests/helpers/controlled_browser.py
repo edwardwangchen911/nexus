@@ -139,6 +139,8 @@ async def verify_controlled_browser(
     manual_request_id: UUID | None = None,
     submit_manual: bool = False,
     recovered_manual_request_id: UUID | None = None,
+    deferred_closeout: bool = False,
+    historical_archive: bool = False,
 ) -> UUID | None:
     root = Path(__file__).resolve().parents[3]
     if not (root / "node_modules/.bin/vinext").exists():
@@ -153,7 +155,7 @@ async def verify_controlled_browser(
     if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
         raise AssertionError("controlled browser release revision is invalid")
     heartbeat_at = datetime.now(UTC)
-    if not submit_manual:
+    if not submit_manual and not historical_archive:
         await heartbeat_agent_paper_loop(
             paper_api_settings(database_url).model_copy(update={"release_revision": revision}),
             worker_id=f"agent-paper-loop-{UUID(int=1)}",
@@ -178,6 +180,14 @@ async def verify_controlled_browser(
             manual_settings.model_copy(update={"release_revision": revision})
         )
         api_app.state.utc_clock = lambda: api_now
+    if historical_archive:
+        from nexus.main import create_engine_app
+
+        api_app = create_engine_app(
+            (manual_settings or paper_api_settings(database_url)).model_copy(
+                update={"release_revision": revision}
+            )
+        )
     server = uvicorn.Server(
         uvicorn.Config(
             api_app,
@@ -235,6 +245,8 @@ async def verify_controlled_browser(
             NEXUS_CONTROLLED_CYCLE_ID="" if cycle_id is None else str(cycle_id),
             NEXUS_CONTROLLED_ORDER_IDS=",".join(str(order_id) for order_id in order_ids),
             NEXUS_CONTROLLED_CANDIDATE_COUNT=str(candidate_count),
+            NEXUS_CONTROLLED_DEFERRED_CLOSEOUT="1" if deferred_closeout else "0",
+            NEXUS_CONTROLLED_HISTORICAL_ARCHIVE="1" if historical_archive else "0",
             NEXUS_CONTROLLED_FIRST_PARTIAL="1" if first_partial else "0",
             NEXUS_CONTROLLED_DEFER_COUNT=str(
                 candidate_count - 2 if expected_defer_count is None else expected_defer_count
@@ -284,6 +296,8 @@ async def verify_controlled_browser(
             *(
                 ("--grep", "starts one manual request")
                 if submit_manual
+                else ("--grep", "partial assessment closes")
+                if deferred_closeout
                 else ("--grep", "registered economic protocol")
                 if economic_protocol_hash is not None
                 else ()

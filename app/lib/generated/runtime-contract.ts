@@ -826,6 +826,16 @@ export const runtimeContractSchemas = {
       "cycle": {
         "$ref": "#/components/schemas/AgentPaperCycleResponse"
       },
+      "historical_source": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/HistoricalAssessmentSourceResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "orders": {
         "items": {
           "$ref": "#/components/schemas/PaperOrderResponse"
@@ -4946,6 +4956,56 @@ export const runtimeContractSchemas = {
       "reason_code"
     ],
     "title": "GateResultResponse",
+    "type": "object"
+  },
+  "HistoricalAssessmentSourceResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "archive_hash": {
+        "title": "Archive Hash",
+        "type": "string"
+      },
+      "evidence_at": {
+        "format": "date-time",
+        "title": "Evidence At",
+        "type": "string"
+      },
+      "execution_allowed": {
+        "const": false,
+        "default": false,
+        "title": "Execution Allowed",
+        "type": "boolean"
+      },
+      "imported_at": {
+        "format": "date-time",
+        "title": "Imported At",
+        "type": "string"
+      },
+      "observation_id": {
+        "format": "uuid",
+        "title": "Observation Id",
+        "type": "string"
+      },
+      "observed_finished_at": {
+        "format": "date-time",
+        "title": "Observed Finished At",
+        "type": "string"
+      },
+      "observed_started_at": {
+        "format": "date-time",
+        "title": "Observed Started At",
+        "type": "string"
+      }
+    },
+    "required": [
+      "observation_id",
+      "archive_hash",
+      "evidence_at",
+      "observed_started_at",
+      "observed_finished_at",
+      "imported_at"
+    ],
+    "title": "HistoricalAssessmentSourceResponse",
     "type": "object"
   },
   "IntegrationStatusResponse": {

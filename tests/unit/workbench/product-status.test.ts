@@ -74,6 +74,16 @@ const session: Session = {
 };
 
 describe("central product-state vocabulary", () => {
+  it("keeps evidence deferral distinct from an allocation requiring no order", () => {
+    const deferred = cycle({ status: "completed", result_code: "PORTFOLIO_ASSESSMENT_DEFERRED", decision: null, order_ids: [] });
+    expect(executionPresentation(deferred, [])).toMatchObject({
+      key: "no_order", label: "暂缓执行", tone: "warning",
+    });
+    expect(cycleDecisionPresentation(deferred).summary).toMatchObject({
+      key: "data_insufficient", label: "证据不足，暂缓决策",
+    });
+    expect(executionPresentation(deferred, [order("submitted")]).key).not.toBe("no_order");
+  });
   it.each([
     ["unavailable", "unknown", "阻断原因待核对"],
     ["failed", "model_failed", "运行失败"],

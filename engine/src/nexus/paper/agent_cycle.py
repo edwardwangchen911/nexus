@@ -2276,6 +2276,52 @@ async def _resume_portfolio_synthesis(
             {"portfolio_synthesis_output_id": str(output.id)},
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
+    # Incomplete research authorizes observation, not rebalancing an inherited
+    # target. Keep this separate from NO_ORDER_REQUIRED (a computed allocation).
+    # Economic lanes retain their separately frozen evaluation contract.
+    from nexus.paper.economic_cycle import read_economic_cycle
+
+    if (
+        any(source.intent.quality_status == "partial" for source in frozen.security_outputs)
+        and all(choice.action == "defer" for choice in intent.choices)
+        and await read_economic_cycle(session, cycle_id=cycle.id) is None
+    ):
+        if now is None or now < output.created_at:
+            raise ValueError("PORTFOLIO_ASSESSMENT_CLOSEOUT_TIME_INVALID")
+        from nexus.paper.agent_decision_store import _portfolio_bindings
+
+        # Reuse the proposal consumer's exact underlying research validation.
+        # The derived bindings are not persisted as a strategy decision.
+        from nexus.paper.historical_assessment import source_for_cycle, validate_research
+        from nexus.paper.manual_request import _require_cycle_jobs_settled
+
+        archive_source = await source_for_cycle(session, cycle.id)
+        if archive_source is not None:
+            await validate_research(session, archive_source, at=now)
+        else:
+            await _portfolio_bindings(
+                session,
+                frozen=frozen,
+                decision_hash=output.content_hash,
+                at=now,
+                candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
+            )
+        # Completion records a non-executing result; it does not release a
+        # retained Worker lease. Account admission still requires lease expiry.
+        await _require_cycle_jobs_settled(
+            session, cycle_id=cycle.id, now=now, require_no_live_lease=False
+        )
+        await _append_event(
+            session,
+            cycle,
+            "researching",
+            "completed",
+            "PORTFOLIO_ASSESSMENT_DEFERRED",
+            {"portfolio_synthesis_output_id": str(output.id)},
+            occurred_at=now,
+        )
+        return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     try:
         if now is None:
             raise ValueError("PORTFOLIO_PROPOSAL_TIME_REQUIRED")
@@ -2410,6 +2456,8 @@ async def _append_event(
     to_status: CycleStatus,
     result_code: str,
     fact_ids: dict[str, object],
+    *,
+    occurred_at: datetime | None = None,
 ) -> None:
     sequence = (
         int(
@@ -2423,14 +2471,16 @@ async def _append_event(
         + 1
     )
     manual = None
-    event_at = cycle.decision_time
+    event_at = cycle.decision_time if occurred_at is None else occurred_at
+    if event_at.tzinfo != UTC or event_at < cycle.decision_time:
+        raise ValueError("AGENT_PAPER_EVENT_TIME_INVALID")
     if to_status == "completed":
         from nexus.paper.manual_request import _database_now, manual_request_for_cycle
 
         manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
         if manual is not None:
             event_at = await _database_now(session)
-            if event_at < cycle.decision_time:
+            if event_at < cycle.decision_time or occurred_at is not None and event_at < occurred_at:
                 raise ValueError("MANUAL_RESULT_UNKNOWN")
     event = AgentPaperCycleEventRecord(
         cycle_id=cycle.id,

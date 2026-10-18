@@ -18,7 +18,12 @@ from sqlalchemy import func, select
 
 
 async def _seed_normal_synthesis(
-    url, monkeypatch, *, complete_research=True, candidate_instruments=INSTRUMENTS[:2]
+    url,
+    monkeypatch,
+    *,
+    complete_research=True,
+    candidate_instruments=INSTRUMENTS[:2],
+    partial_research=True,
 ):
     from helpers.paper_batch import CALENDAR_ID
     from integration.test_portfolio_same_day_research_pg import seed_normal_path
@@ -45,6 +50,7 @@ async def _seed_normal_synthesis(
         url,
         normal_path=normal,
         complete_research=complete_research,
+        partial_research=partial_research,
         candidate_instruments=candidate_instruments,
     )
     _, sessions, kwargs = seeded
@@ -496,10 +502,10 @@ async def test_cycle_admits_once_and_resumes_exact_output_without_legacy_decisio
                     events=await _events(session, cycle.id),
                     now=kwargs["now"],
                 )
-                assert result.status == "researching"
-                assert result.result_code == "POLICY_UNCONFIRMED"
+                assert result.status == "completed"
+                assert result.result_code == "PORTFOLIO_ASSESSMENT_DEFERRED"
                 assert result.portfolio_synthesis_output_id == output.id
-            assert len(await _events(session, cycle.id)) == len(events)
+            assert len(await _events(session, cycle.id)) == len(events) + 1
             assert (
                 await session.scalar(
                     select(func.count()).select_from(AgentPortfolioSynthesisRunRecord)
@@ -740,15 +746,15 @@ async def test_product_dispatch_executes_synthesis_and_recovers_committed_output
                 settings, account_id=cycle.account_id, expected_calendar_authority_id=CALENDAR_ID
             )
             assert snapshot.research_job_status == "succeeded"
-            assert snapshot.cycle_result_code == "POLICY_UNCONFIRMED"
-            assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.WAIT_FOR_SLOT
+            assert snapshot.cycle_result_code is None
+            assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RESUME
         replay = await once.resume_once(
             settings,
             once.AgentPaperResumeRequest(
                 action="resume", cycle_id=cycle.id, idempotency_key="terminal-replay"
             ),
         )
-        assert replay.result_code == "POLICY_UNCONFIRMED"
+        assert replay.result_code == "PORTFOLIO_ASSESSMENT_DEFERRED"
         assert replay.portfolio_synthesis_output_id is not None
         assert len(calls) == 1
     finally:

@@ -45,7 +45,7 @@ export function DecisionTimeline({ detail, paperHref = "/paper" }: { detail: Det
     <Stage title={stages[4]} state={risk.key === "not_evaluated" ? "unknown" : risk.key === "risk_rejected" ? "attention" : "known"} summary={risk.key === "not_evaluated" ? `未知：${risk.detail}` : `${risk.label}：${risk.detail}`}>
       {cycle.decision ? <FactDetails rows={[["风控结果", cycle.decision.risk_outcomes.join("、") || "未知"]]} /> : null}
     </Stage>
-    <Stage title={stages[5]} state={orders.length || cycle.result_code === "NO_ORDER_REQUIRED" ? "known" : "unknown"} summary={orderConclusion(cycle.result_code, orders)}>
+    <Stage title={stages[5]} state={orders.length || cycle.result_code === "NO_ORDER_REQUIRED" || execution.key === "no_order" ? "known" : "unknown"} summary={orderConclusion(cycle.result_code, orders, execution.key === "no_order")}>
       {orders.length ? <FactDetails rows={orders.map((order) => [order.order_id, `${order.symbol ?? "未知标的"} · ${order.side} · ${order.status}`])} /> : null}
     </Stage>
     <Stage title={stages[6]} state={executionState} summary={resultUnknown ? "结果未知：现有周期与订单事实不能证明最终结果。" : `${execution.label}：${execution.detail}`}>
@@ -78,9 +78,10 @@ function ExecutionDetails({ orders }: { orders: Order[] }): React.ReactElement {
   </div>)}</details>;
 }
 
-function orderConclusion(resultCode: string, orders: Order[]): string {
+function orderConclusion(resultCode: string, orders: Order[], noOrder: boolean): string {
   if (orders.length) return `已关联 ${orders.length} 笔订单；展开查看精确订单 ID 与状态。`;
   if (resultCode === "NO_ORDER_REQUIRED") return "无需下单：确定性结果不需要创建订单。";
+  if (noOrder && resultCode === "PORTFOLIO_ASSESSMENT_DEFERRED") return "证据不足，组合全部暂缓：本轮未激活目标，也未创建订单。";
   return "未知：没有关联订单事实，无法证明订单结果。";
 }
 
