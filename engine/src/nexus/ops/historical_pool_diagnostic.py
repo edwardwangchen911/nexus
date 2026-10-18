@@ -48,6 +48,7 @@ from nexus.risk.canonical import canonical_paper_projection_hash
 from nexus.strategy.intents import ResearchIntent
 
 PROFILE = "historical-three-stock-v11-v1"
+NVDA_PROFILE = "historical-nvda-observation-v1"
 
 _SAFE_CODES = frozenset(
     {
@@ -75,6 +76,9 @@ _SAFE_CODES = frozenset(
         "HISTORICAL_RESEARCH_INVALID",
         "HISTORICAL_RESEARCH_NOT_ACTIONABLE",
         "HISTORICAL_SYNTHESIS_BUDGET_INVALID",
+        "HISTORICAL_OBSERVATION_SOURCE_CHANGED",
+        "HISTORICAL_OBSERVATION_INVALID",
+        "HISTORICAL_CASE_V11_REQUIRED",
     }
 )
 
@@ -121,12 +125,12 @@ class CaseStore:
         return cls(db)
 
     @classmethod
-    def open(cls, path: Path) -> Self:
+    def open(cls, path: Path, *, read_only: bool = False) -> Self:
         _private_directory(path.parent)
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("HISTORICAL_CASE_DIRECTORY_UNSAFE")
-        db = sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True)
+        db = sqlite3.connect(f"{path.as_uri()}?mode={'ro' if read_only else 'rw'}", uri=True)
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if tables != {"historical_case", "historical_outputs"}:
             db.close()
@@ -182,7 +186,7 @@ class CaseStore:
             )
 
     def summary(self) -> dict[str, Any]:
-        self.case()
+        case = self.case()
         status, stage, started, finished, detail = self.db.execute(
             "SELECT status,stage,started_at,finished_at,diagnostic FROM historical_case"
         ).fetchone()
@@ -195,8 +199,8 @@ class CaseStore:
             outputs.append(json.loads(raw))
         if status == "observed":
             verify_results(self.case(), outputs)
-        return dict(
-            profile=PROFILE,
+        result = dict(
+            profile=case.get("profile", PROFILE),
             status=status,
             stage=stage,
             output_count=self.db.execute("SELECT count(*) FROM historical_outputs").fetchone()[0],
@@ -210,10 +214,30 @@ class CaseStore:
             observation_finished_at=finished,
             diagnostic=json.loads(detail),
         )
+        if case.get("profile") == NVDA_PROFILE:
+            from nexus.ops.historical_nvda_observation import target_index
+
+            index = target_index(case)
+            ordinals = [
+                row[0]
+                for row in self.db.execute(
+                    "SELECT ordinal FROM historical_outputs ORDER BY ordinal"
+                )
+            ]
+            if ordinals and ordinals != [index]:
+                raise ValueError("HISTORICAL_CASE_READBACK_INVALID")
+            result["observation_id"] = case["observation"]["id"]
+            result["observation_limits"] = case["observation"]["limits"]
+        return result
 
 
 def verify_results(case: dict[str, Any], outputs: list[dict[str, Any]]) -> None:
     validate_case(case)
+    if case["profile"] == NVDA_PROFILE:
+        from nexus.ops.historical_nvda_observation import verify_nvda_result
+
+        verify_nvda_result(case, outputs)
+        return
     if len(outputs) != 4:
         raise ValueError("HISTORICAL_CASE_READBACK_INVALID")
     frozen = PortfolioSynthesisInputV1.model_validate(outputs[3]["frozen_input"])
@@ -275,7 +299,7 @@ class FrozenCommittee(StructuredStagedCodexCommittee):
 
 def validate_case(case: dict[str, Any]) -> None:
     if (
-        case.get("profile") != PROFILE
+        case.get("profile") not in {PROFILE, NVDA_PROFILE}
         or case.get("model_hash") != bounded_stage_config_hash()
         or len(case.get("members", [])) != 3
     ):
@@ -427,11 +451,18 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
     research_rejection: dict[str, Any] | None = None
     try:
         case = store.case()
+        target = None
+        if case.get("profile") == NVDA_PROFILE:
+            from nexus.ops.historical_nvda_observation import validate_observation
+
+            target = await validate_observation(store)
         committees, refs = await preflight_frozen_pool(case)
         security = []
         for index, (row, committee, evidence) in enumerate(
             zip(case["members"], committees, refs, strict=True)
         ):
+            if target is not None and index != target:
+                continue
             active = committee
             stage = f"research_{index + 1}"
             store.stage(stage)
@@ -500,6 +531,9 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
                 ),
             )
             store.append(index, result)
+            if target is not None:
+                store.finish("observed")
+                return store.summary()
             security.append(
                 PortfolioSecurityOutputV1(
                     instrument_id=run.instrument_id,
@@ -595,6 +629,9 @@ def main() -> int:
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--repo-root", type=Path, required=True)
     prepare.add_argument("--source-cycle-id", type=UUID, required=True)
+    observation = sub.add_parser("prepare-nvda-observation")
+    observation.add_argument("--repo-root", type=Path, required=True)
+    observation.add_argument("--source-cycle-id", type=UUID, required=True)
     for name in ("run", "read"):
         sub.add_parser(name).add_argument("--case-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -603,6 +640,10 @@ def main() -> int:
             from nexus.ops.historical_pool_source import prepare_historical_case
 
             path = asyncio.run(prepare_historical_case(args.repo_root, args.source_cycle_id))
+        elif args.command == "prepare-nvda-observation":
+            from nexus.ops.historical_nvda_observation import prepare_nvda_observation
+
+            path = asyncio.run(prepare_nvda_observation(args.repo_root, args.source_cycle_id))
         else:
             path = args.case_dir.absolute() / "case.sqlite3"
         execution_error = False

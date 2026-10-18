@@ -709,6 +709,29 @@ uv run --project engine nexus-engine-historical-pool run \
 旧回执缺少该字段时仍表示具体原因未保存，读回不得推断或补写。此诊断仅覆盖历史案例
 入口的上述拒绝点，不表示正式 Worker、API 或页面增加了相同诊断。
 
+新增的独立 NVDA 观察使用显式入口，不允许复制旧案例后换目录重跑：
+
+```bash
+uv run --project engine nexus-engine-historical-pool prepare-nvda-observation \
+  --repo-root <配置所在主仓库> --source-cycle-id <原历史案例周期ID>
+# read/run 沿用上述入口，case-dir 使用本命令创建的固定新叶子目录。
+```
+
+该入口仅接受完整三股票历史案例中已结束、在 NVDA 研究可用性校验拒绝的 unknown。
+原案例只读保留；新身份绑定原完整输入与全部持久化回执哈希，固定保存于
+`.secrets/nexus-historical-nvda-observations/<source-cycle-id>-v1/case.sqlite3`。
+同源只创建一次，目录已存在即拒绝；执行前验证固定路径、来源未变化及完整池容量，
+不能通过复制目录再次执行。准备与执行均通过正常配置、只读数据库事务重新核对精确
+v11 身份和当前共享预算，检查不创建排他预留、不释放旧未知费用或预留。
+
+本次显式额度为 NVDA 三阶段最多3次调用、300秒、96k输入/8192输出，组合调用0次。
+来源的旧预算字段保留作为原始证据，本次额度由 `observation_limits` 单独显示。
+完整池均须校验，但只执行 NVDA；调用前先持久化不可重试认领，失败、超时、取消或
+未知即停止。成功只表示这份历史证据下的新 NVDA 观察合格，不表示三股票或正式周期通过。
+新回执保留同一拒绝诊断；读回同时核验完整来源绑定、NVDA标的/快照/证据/时点及原序号。
+原 `compiled_at` 和 `evidence_as_of` 保留，新身份的 `prepared_at` 与本次调用时间独立记录。
+只写新私有诊断库，不执行组合、订单或账本，不修改原观察和正式服务。
+
 10月16日案例没有匹配的后续执行行情归档，始终标记 `EXECUTION_WINDOW_MISSING`。
 最小补证方案是取得同一批 Instrument 在历史决策时点之后、满足既有执行窗口/质量/
 可用时间条件的真实行情原件并独立归档，验证标的绑定及严格解析。今天新产生的研究
