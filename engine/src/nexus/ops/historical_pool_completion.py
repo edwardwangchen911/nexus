@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from nexus.ops.historical_pool_diagnostic import (
+    ASSESSMENT_PROFILE,
     COMPLETION_PROFILE,
     PROFILE,
     CaseStore,
@@ -44,14 +45,16 @@ def code_hash() -> str:
                     "portfolio_synthesis_worker.py",
                     "portfolio_synthesis_contracts.py",
                     "codex_input_view.py",
+                    "actionable_research.py",
                 )
             },
         )
     )
 
 
-def completion_directory(root: Path, cycle_id: UUID) -> Path:
-    return root / ".secrets/nexus-historical-three-stock" / f"{cycle_id}-completion-v1"
+def completion_directory(root: Path, cycle_id: UUID, *, assessment: bool = False) -> Path:
+    suffix = "assessment-v1" if assessment else "completion-v1"
+    return root / ".secrets/nexus-historical-three-stock" / f"{cycle_id}-{suffix}"
 
 
 def read_accepted(root: Path, cycle_id: UUID) -> tuple[dict[str, Any], str, int, dict[str, Any]]:
@@ -85,6 +88,7 @@ def read_accepted(root: Path, cycle_id: UUID) -> tuple[dict[str, Any], str, int,
 
 def validate_completion(store: CaseStore, *, execution: bool = False) -> tuple[int, dict[str, Any]]:
     case = store.case()
+    assessment = case["profile"] == ASSESSMENT_PROFILE
     metadata = case["completion"]
     root = Path(metadata["repo_root"])
     cycle = UUID(case["source_cycle_id"])
@@ -98,15 +102,15 @@ def validate_completion(store: CaseStore, *, execution: bool = False) -> tuple[i
         or len(digest) != 64
         or any(c not in "0123456789abcdef" for c in digest)
         or Path(store.db.execute("PRAGMA database_list").fetchone()[2])
-        != completion_directory(root, cycle) / "case.sqlite3"
+        != completion_directory(root, cycle, assessment=assessment) / "case.sqlite3"
     ):
         raise ValueError("HISTORICAL_OBSERVATION_INVALID")
     parent, receipt, index, output = read_accepted(root, cycle)
     expected = {k: v for k, v in parent.items() if k != "observation"}
     expected.update(
-        profile=COMPLETION_PROFILE,
+        profile=ASSESSMENT_PROFILE if assessment else COMPLETION_PROFILE,
         completion=dict(
-            version=1,
+            version=2 if assessment else 1,
             id=metadata["id"],
             repo_root=str(root),
             prepared_at=metadata["prepared_at"],
@@ -140,11 +144,11 @@ def validate_completion(store: CaseStore, *, execution: bool = False) -> tuple[i
     return index, output
 
 
-async def prepare_completion(root: Path, cycle_id: UUID) -> Path:
+async def prepare_completion(root: Path, cycle_id: UUID, *, assessment: bool = False) -> Path:
     from nexus.ops.historical_nvda_observation import check_current_configuration
 
     root = root.resolve()
-    directory = completion_directory(root, cycle_id)
+    directory = completion_directory(root, cycle_id, assessment=assessment)
     _private_directory(root / ".secrets")
     _private_directory(directory.parent)
     if directory.exists():
@@ -152,9 +156,9 @@ async def prepare_completion(root: Path, cycle_id: UUID) -> Path:
     parent, receipt, index, output = read_accepted(root, cycle_id)
     case = {k: v for k, v in parent.items() if k != "observation"}
     case.update(
-        profile=COMPLETION_PROFILE,
+        profile=ASSESSMENT_PROFILE if assessment else COMPLETION_PROFILE,
         completion=dict(
-            version=1,
+            version=2 if assessment else 1,
             id=str(uuid4()),
             repo_root=str(root),
             prepared_at=datetime.now(UTC).isoformat(),

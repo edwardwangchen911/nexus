@@ -1,5 +1,80 @@
 # NEXUS 主线迭代与新主会话交接
 
+## 2026-10-18 拒绝诊断、预测权限与合法暂缓接线（本地隔离验收）
+
+用户批准按最小方案补齐拒绝诊断和数据接线，保持partial/不可执行、旧观察不重跑、
+正式服务不动。另已通过read_thread核对审查会话用户原文：先跑通包括数据不足在内的
+合法流程，不把增强估值资料全部补齐当作前置。本地新`prepare-pool-assessment`复用完整
+同源池与已成功NVDA，固定独立assessment-v1身份，仅允许严格complete或现有
+safe_no_trade_intent_shape_valid；partial保持watch/none和原缺口，组合只可defer。
+原assessment仍buy、无效引用/审计、身份降级及组合越权仍拒绝；读回重验角色原件、
+投票、姿态、引用和资格。旧completion/NVDA入口语义及禁止重放不变。
+
+拒绝私有回执v2保存原/最终stance、action、quality、audit vote；普通汇总只返回固定枚举，
+正文不泄漏，v1不回填。新forecast_probe正常模块CLI固定FMP estimates单次请求，
+0700新目录先占用、0600原件/回执、有界无重试、离线read；current_context仅为新私有
+诊断上下文，partial且不可执行，不接正式业务输入。历史date/预测期不能作为版本
+可用时间，晚收件拒绝旧截止，缺来源vintage仍未验证。增强数据不阻塞合法defer。
+
+真实FMP AVGO单次调用返回HTTP402，阶段request、FORECAST_HTTP_REJECTED，
+未取得预测原件，历史能力及完整套餐权利仍未知；没有重试、升级套餐或业务导入。
+正常read读回一致，回执位于主仓库`.secrets/nexus-forecast-probe/20261018-AVGO-v1/receipt.json`，
+SHA256=`0ed61bce7a1685d28dd530bc00900715892d7494082ca29921aa3fd721e8619d`。
+
+验证：124项历史/预测聚焦回归通过；后续读回和安全枚举增量30项通过；186项policy通过。
+正常隔离PG三候选partial/defer执行/API回归通过；另单独NO_ORDER_REQUIRED及API回归通过。
+浏览器首次因worktree无node_modules在启动前停止，确认与main锁文件SHA相同后复用
+本机现有依赖，隔离动态端口浏览器三候选partial分支通过（1项65.30秒）。其他两股
+合成成交用于原页面整链测试，partial标的无订单；不代表真实成交或新历史案例已获正式资格。
+私有研究生产者到组合读回使用模型替身，与正常PG/页面回归属于分层证据，尚未取得
+新的真实三股票/组合结果，未创建正式Job/Run或把私有产物导入正式周期。
+独立静态审查及定向复核无剩余明确阻断项；四份旧归档hash保持上一节记录不变。
+无真实模型调用、部署、推送、迁移、凭据变更；新增私有回执保留，不删除后重跑。
+
+## 2026-10-18 完整池比较接线及一次真实输入验证（AVGO质量拒绝）
+
+用户要求继续查清三股票研究/组合/内部执行缺口，能补的本地补齐并隔离验证，再用真实输入；
+旧观察不重跑、正式服务不动。本地提交`71f7088c`新增正常`prepare-pool-completion`，
+新身份绑定同源完整冻结池及已成功NVDA rejection-v2的案例/回执/输出，NVDA只读复用，
+只新研究另两股并在全部合格后组合一次。固定叶子、调用上限、配置/预算及源码绑定均重验；
+不恢复旧Run、不赋予正式业务资格。新增身份降级和序号漂移问题先红测复现，再修复并定向复核。
+87项历史入口回归、151项关联回归（含预算乘数新增覆盖；两组有重叠）、186项策略测试、
+Ruff/Mypy与独立审查通过；没有推送、远端CI或部署。原入口异常合同保持兼容，
+新组合路径区分schema、输入绑定、动作超出研究、缺本标的引用、外来引用等安全拒绝码并保留用量。
+
+真实新身份`f02035e4-10c2-4c8e-a69d-a973ee5ebd2c`执行于06:08:30.613751至
+06:10:09.502676 UTC，98.888925秒。只读复用NVDA后，AVGO三次调用返回已知90533输入/
+3090输出，未超时，在research_2被`HISTORICAL_RESEARCH_NOT_ACTIONABLE`拒绝。
+私有最终审查回执保留1项未解决意见bear:1，结论limited：历史滚动估值无法验证安全边际，
+缺同业估值、可核验长期增长预期、独立盈利预测，因此不能形成有安全边际的买入结论。
+其余三项最终审查均已解决；以上属于本次模型陈述。只读核对冻结工具输入确有历史财报、
+滚动估值/TTM EPS、披露、宏观和价格特征，未包含独立同业/增长预期/盈利预测数据区段；
+这不是断言公开披露里没有任何增长讨论。不得用新增资料回填旧快照，后续需新输入身份和时点绑定。
+结果unknown、output_count=1（仅复用NVDA）、usage_complete=false、未知预留保留，
+AAPL、组合、订单及账本均未运行；正常read独立读回一致，不重试。
+
+新归档：主仓库`.secrets/nexus-historical-three-stock/`
+`01a14504-0113-7c08-bec4-eb47b6a0fc17-completion-v1/case.sqlite3`，SHA256
+`2183bdc331072a8c50dcfb3e55770bb469801894a3eb691afeba8edf8b717ddf`。
+三份父归档SHA256依次仍为`01e2a1073fb3661a929462d41a02372241b5c3cc393a1233f4b0d6b4835b46bf`、
+`5376cc9f8a3a86cffc28d10a0824159804eca4cb54e0cc05a6f2060e0800936e`、
+`895b9b2694772dc4cf210b8dd555057045368dd9593be24dee4776fa852a2059`，字节未变。
+
+执行缺口核查新增证据：主库只读事务复用正常`_load_portfolio_target_baseline`确认
+TARGET_BASELINE_VALID；角色原件仍在主库，未打包入旧私有案例，不能默认空角色。
+按候选/历史目标/持仓/未结订单并集复用`prepare_schwab_realtime_risk_snapshot`，
+3个Instrument的冻结价格、日历、白名单、行业及查询证明整体返回FROZEN_RISK_SNAPSHOT_VALID，
+authority_hash=`52a476a6015375da5fa5a823b266007bd33904abc856729caba669cae350301e`。
+周期market_window_count=0，execution_locked=true。先前将projection的JSON字符串直接交给
+Decimal模型的辅助只读检查在本地解析阶段拒绝，未执行风险查询；改用原冻结标的集合后完成上述核验，
+没有重放模型、采集行情或写业务库。
+
+真实链仍未闭合：研究质量先阻断；组合结果未取得；私有输出无正常成功Job/Run/周期绑定，
+不能直接进入`_rebuild_portfolio_proposal`。可复用确定性build_portfolio_proposal、风控及执行服务，
+但还需独立隔离入口显式绑定历史基线/风险原件及真实后续行情，并区分历史证据时点与本次调用时间。
+现行成交要求实际决策后窗口、连续5根raw 1Min及结束后120秒内收件；今天补抓历史bar不能倒填收件时间。
+本回合按失败停止边界结束，未启动下一观察或扩大为反事实成交合同，不宣称三股票/自然周期验收完成。
+
 ## 2026-10-18 新的有界NVDA拒绝诊断身份（本地实现及单次真实观察）
 
 本地候选`f926cb4b`的单次真实观察已完成：身份`ddbe7a17-7688-45e7-b02e-c8f6e2cbad7b`，

@@ -769,6 +769,34 @@ prepare/run按三个保守预算单位重验当前配置与共享额度，不新
 缺少正常Job/Run、组合基线与风险原件和合格执行窗口时不制造订单/成交/账本。
 不推送或部署即可隔离验证；撤回代码保留新私有事实，由兼容消费者读取。
 
+`prepare-pool-assessment` 是同一有界比较入口的独立一次性身份，固定后缀
+`-assessment-v1`；沿用上述完整池、成功NVDA原件、额度与调用上限，旧completion和
+旧观察不可重放。仅此身份复用正常`safe_no_trade_intent_shape_valid`允许合法
+`partial/watch/none`进入组合；保留原assessment、审计投票、缺口和未解决意见。
+原assessment仍主张买入、审计failed、角色或引用不合法时仍拒绝。组合只能对partial
+选择`defer`，读回重验资格和角色原件；`observed`只证明私有观察完成，不代表研究全部
+complete、正式周期或成交验收。`deferred_research_count`单独报告，执行资格始终关闭。
+新拒绝回执v2保存原/最终stance、action、quality、audit vote；安全汇总仅输出固定枚举，
+意见正文仍为私有。旧v1不补字段、不倒推历史；回退消费者必须兼容新profile/v2归档。
+
+预测资料的只读可得性检查采用正常模块CLI，不调用模型或业务库：
+
+```bash
+uv run --project engine python -m nexus.ops.forecast_probe probe \
+  --repo-root "$PWD" --symbol AVGO --as-of '<原证据UTC时点>'
+uv run --project engine python -m nexus.ops.forecast_probe read \
+  --directory '<主仓库>/.secrets/nexus-forecast-probe/YYYYMMDD-AVGO-v1' \
+  --as-of '<原证据UTC时点>'
+```
+
+复用受保护本地FMP配置，仅固定域名analyst-estimates、annual/page0/limit10；
+单次请求无重试，新0700目录先占用，成功原件和安全回执0600留存。HTTP拒绝不保存
+错误正文，也不凭状态码推断完整套餐权利；目录存在只用read，不换目录重试。
+新输入适配器`current_context`只产生partial、不可执行的私有诊断上下文，未接业务研究。
+本次received_at晚于旧截止时拒绝旧绑定；预测所属财年/date不能充当来源版本发布时间，
+即使本次可访问也保持`FORECAST_VINTAGE_UNVERIFIED`，不得回填旧快照。
+增强预测资料不足不阻塞合法defer流程，也不会自动解决研究意见。
+
 10月16日原案例没有匹配的后续执行行情归档，仍标记 `EXECUTION_WINDOW_MISSING`。
 最小补证方案是取得同一批 Instrument 在历史决策时点之后、满足既有执行窗口/质量/
 可用时间条件的真实行情原件并独立归档，验证标的绑定及严格解析。今天新产生的研究

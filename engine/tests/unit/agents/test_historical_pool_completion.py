@@ -192,3 +192,94 @@ def test_completion_read_refuses_shifted_output_ordinals(tmp_path, monkeypatch, 
         store.db.execute("UPDATE historical_outputs SET ordinal=ordinal+10")
         store.db.commit()
     assert invoke(monkeypatch, capsys, "read", "--case-dir", directory)[0] == 1
+
+
+@pytest.mark.parametrize("unsafe", [False, True, "portfolio", "downgrade"])
+def test_new_assessment_preserves_partial_and_only_allows_defer(
+    tmp_path, monkeypatch, capsys, unsafe
+):
+    root, source, parent, accepted, case = accepted_parent(tmp_path, monkeypatch, capsys)
+    old = [p.read_bytes() for p in (source, parent, accepted)]
+    calls = []
+    install_transport(monkeypatch, calls, rejection="unresolved")
+    from nexus.agents import codex_staged
+
+    underlying = codex_staged.invoke_codex
+
+    async def research(payload, **options):
+        raw, usage = await underlying(payload, **options)
+        body = json.loads(raw)
+        if payload["stage"] == "synthesis":
+            body["synthesis_assessment"]["stance"] = "buy_candidate" if unsafe is True else "watch"
+        return json.dumps(body), usage
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", research)
+    if unsafe == "portfolio":
+        from nexus.agents import portfolio_synthesis_worker
+
+        underlying_portfolio = portfolio_synthesis_worker.invoke_codex_portfolio
+
+        async def portfolio(payload, **options):
+            raw, usage = await underlying_portfolio(payload, **options)
+            body = json.loads(raw)
+            body["choices"][0].update(action="include", role="tactical", rank=1)
+            return json.dumps(body), usage
+
+        monkeypatch.setattr(portfolio_synthesis_worker, "invoke_codex_portfolio", portfolio)
+    assert (
+        invoke(
+            monkeypatch,
+            capsys,
+            "prepare-pool-assessment",
+            "--repo-root",
+            root,
+            "--source-cycle-id",
+            case["source_cycle_id"],
+        )[0]
+        == 0
+    )
+    directory = (
+        root / ".secrets/nexus-historical-three-stock" / f"{case['source_cycle_id']}-assessment-v1"
+    )
+    if unsafe == "downgrade":
+        with diagnostic.CaseStore.open(directory / "case.sqlite3") as store:
+            document = store.case()
+            document["profile"] = diagnostic.COMPLETION_PROFILE
+            document["completion"]["version"] = 1
+            store.db.execute(
+                "UPDATE historical_case SET payload=?,digest=?",
+                (diagnostic._wire(document), diagnostic._hash(document)),
+            )
+            store.db.commit()
+    code, result = invoke(monkeypatch, capsys, "run", "--case-dir", directory)
+    if unsafe:
+        assert code == 1
+        if unsafe == "downgrade":
+            assert len(calls) == 0
+        else:
+            assert result["status"] == "unknown"
+            assert len(calls) == (7 if unsafe == "portfolio" else 3)
+            if unsafe == "portfolio":
+                assert (
+                    result["diagnostic"]["code"] == "HISTORICAL_SYNTHESIS_ACTION_EXCEEDS_RESEARCH"
+                )
+    else:
+        assert code == 0 and result["status"] == "observed"
+        assert result["deferred_research_count"] == 1
+        assert result["business_writes"] == 0 and result["formal_acceptance"] is False
+        with diagnostic.CaseStore.open(directory / "case.sqlite3", read_only=True) as store:
+            rows = [
+                json.loads(r[0])
+                for r in store.db.execute("SELECT payload FROM historical_outputs ORDER BY ordinal")
+            ]
+            partial = next(
+                r["intent"] for r in rows[:3] if r["intent"]["quality_status"] == "partial"
+            )
+            assert partial["synthesis_assessment"]["reviews"][0]["resolved"] is False
+            assert all(c["action"] == "defer" for c in rows[3]["intent"]["choices"])
+        assert invoke(monkeypatch, capsys, "read", "--case-dir", directory)[1] == result
+    before = (directory / "case.sqlite3").read_bytes()
+    count = len(calls)
+    assert invoke(monkeypatch, capsys, "run", "--case-dir", directory)[0] == 1
+    assert len(calls) == count and (directory / "case.sqlite3").read_bytes() == before
+    assert old == [p.read_bytes() for p in (source, parent, accepted)]

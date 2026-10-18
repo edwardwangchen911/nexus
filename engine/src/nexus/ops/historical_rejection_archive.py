@@ -29,11 +29,21 @@ def capture_rejection(
             dict(claim=claim.model_dump(mode="json"), review=review.model_dump(mode="json"))
         )
     payload = dict(
-        version=1,
+        version=2,
         case_hash=_hash(case),
         member_ordinal=index,
         review_conclusion=None if assessment is None else assessment.review_conclusion,
         original_review_conclusion=None if original is None else original.review_conclusion,
+        outcome=dict(
+            original_stance=None if original is None else original.stance,
+            assessment_stance=None if assessment is None else assessment.stance,
+            stance=intent.stance,
+            exposure_action=intent.exposure_action,
+            quality_status=intent.quality_status,
+            evidence_audit=intent.evidence_audit,
+            audit_vote=roles["evidence_audit"].vote,
+            execution_permitted=False,
+        ),
         items=items,
     )
     return dict(payload=payload, digest=_hash(payload))
@@ -53,7 +63,8 @@ def safe_rejection_detail(
         payload = envelope["payload"]
         index = payload["member_ordinal"]
         if (
-            payload["version"] != 1
+            type(payload["version"]) is not int
+            or payload["version"] not in {1, 2}
             or _hash(payload) != envelope["digest"]
             or payload["case_hash"] != _hash(case)
             or type(index) is not int
@@ -67,6 +78,32 @@ def safe_rejection_detail(
             or len(payload["items"]) > 4
         ):
             raise ValueError
+        if payload["version"] == 2:
+            outcome = payload["outcome"]
+            stances = {"watch", "hold", "buy_candidate", "reduce_candidate"}
+            if (
+                set(outcome)
+                != {
+                    "original_stance",
+                    "assessment_stance",
+                    "stance",
+                    "exposure_action",
+                    "quality_status",
+                    "evidence_audit",
+                    "audit_vote",
+                    "execution_permitted",
+                }
+                or outcome["original_stance"] not in stances | {None}
+                or outcome["assessment_stance"] not in stances | {None}
+                or outcome["stance"] not in stances
+                or outcome["exposure_action"]
+                not in {"eligible_for_increase", "reduce", "maintain", "none"}
+                or outcome["quality_status"] not in {"complete", "partial"}
+                or outcome["evidence_audit"] not in {"complete", "partial", "failed"}
+                or outcome["audit_vote"] not in {"support", "oppose", "abstain"}
+                or outcome["execution_permitted"] is not False
+            ):
+                raise ValueError
         evidence = tuple(
             EvidenceRef.model_validate(ref) for ref in case["members"][index]["evidence"]
         )
@@ -98,6 +135,8 @@ def safe_rejection_detail(
         safe["research_rejection"] = dict(
             detail["research_rejection"], private_detail_available=True, review_details=summaries
         )
+        if payload["version"] == 2:
+            safe["research_rejection"]["outcome"] = dict(payload["outcome"])
         return safe
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         raise ValueError("HISTORICAL_CASE_READBACK_INVALID") from None

@@ -86,7 +86,20 @@ def test_rejected_nvda_keeps_private_review_chain_but_cli_never_prints_text(
         assert item["claim"]["text"].strip()
         assert item["claim"]["evidence_refs"]
         assert archive["review_conclusion"] == "limited"
+        assert archive["version"] == 2
+        assert archive["outcome"]["stance"] == "watch"
+        assert archive["outcome"]["exposure_action"] == "none"
+        assert archive["outcome"]["quality_status"] == "partial"
+        assert archive["outcome"]["original_stance"] in {
+            "watch",
+            "hold",
+            "buy_candidate",
+            "reduce_candidate",
+        }
+        assert archive["outcome"]["audit_vote"] in {"support", "oppose", "abstain"}
+        assert archive["outcome"]["execution_permitted"] is False
     safe = result["diagnostic"]["research_rejection"]["review_details"]
+    assert result["diagnostic"]["research_rejection"]["outcome"] == archive["outcome"]
     assert any(not item["resolved"] and item["missing_evidence_count"] == 1 for item in safe)
     assert "PRIVATE_" not in json.dumps(result)
     assert "rationale" not in json.dumps(result)
@@ -214,6 +227,41 @@ def test_private_rejection_cannot_be_overwritten(tmp_path, monkeypatch, capsys):
                 )
             )
         assert list(store.db.iterdump()) == before
+
+
+def test_legacy_rejection_keeps_unknown_stance_without_backfill(tmp_path, monkeypatch, capsys):
+    directory, _, _ = rejected_case(tmp_path, monkeypatch, capsys)
+    with diagnostic.CaseStore.open(directory / "case.sqlite3") as store:
+        payload = store.private_rejection()["payload"]
+        payload["version"] = 1
+        payload.pop("outcome")
+        store.db.execute(
+            "UPDATE historical_rejection_details SET payload=?,digest=?",
+            (diagnostic._wire(payload), diagnostic._hash(payload)),
+        )
+        store.db.commit()
+    before = (directory / "case.sqlite3").read_bytes()
+    result = invoke(monkeypatch, capsys, "read", "--case-dir", directory)[1]
+    assert result["status"] == "unknown"
+    assert before == (directory / "case.sqlite3").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("audit_vote", "PRIVATE"), ("execution_permitted", True), ("quality_status", "INVALID")],
+)
+def test_v2_outcome_corruption_is_rejected(tmp_path, monkeypatch, capsys, field, value):
+    directory, _, _ = rejected_case(tmp_path, monkeypatch, capsys)
+    with diagnostic.CaseStore.open(directory / "case.sqlite3") as store:
+        payload = store.private_rejection()["payload"]
+        payload["outcome"][field] = value
+        store.db.execute(
+            "UPDATE historical_rejection_details SET payload=?,digest=?",
+            (diagnostic._wire(payload), diagnostic._hash(payload)),
+        )
+        store.db.commit()
+    result = invoke(monkeypatch, capsys, "read", "--case-dir", directory)[1]
+    assert result["code"] == "HISTORICAL_CASE_READBACK_INVALID"
 
 
 def test_private_insert_failure_preserves_primary_refusal_through_cli(

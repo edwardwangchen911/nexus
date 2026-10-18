@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Self, cast
 from uuid import UUID, uuid4
 
+from nexus.agents.actionable_research import safe_no_trade_intent_shape_valid
 from nexus.agents.codex_bounded_budget import bounded_stage_config_hash
 from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_pool
 from nexus.agents.codex_sdk import MODEL_ID
@@ -50,6 +51,8 @@ from nexus.strategy.intents import ResearchIntent
 PROFILE = "historical-three-stock-v11-v1"
 NVDA_PROFILE = "historical-nvda-observation-v1"
 COMPLETION_PROFILE = "historical-pool-completion-v1"
+ASSESSMENT_PROFILE = "historical-pool-assessment-v1"
+COMPARISON_PROFILES = {COMPLETION_PROFILE, ASSESSMENT_PROFILE}
 _SYNTHESIS_REJECTIONS = {
     "portfolio synthesis input binding mismatch": "HISTORICAL_SYNTHESIS_INPUT_MISMATCH",
     "portfolio choice exceeds admitted security research": (
@@ -162,10 +165,10 @@ class CaseStore:
         if _hash(payload) != digest:
             raise ValueError("HISTORICAL_CASE_HASH_MISMATCH")
         directory = Path(self.db.execute("PRAGMA database_list").fetchone()[2]).parent.name
-        completion = payload.get("profile") == COMPLETION_PROFILE
+        completion = payload.get("profile") in COMPARISON_PROFILES
         if (
             ("completion" in payload) != completion
-            or directory.endswith("-completion-v1")
+            or directory.endswith(("-completion-v1", "-assessment-v1"))
             and not completion
         ):
             raise ValueError("HISTORICAL_OBSERVATION_INVALID")
@@ -284,7 +287,7 @@ class CaseStore:
                 from nexus.ops.nvda_rejection_diagnostic import validate_rejection_identity
 
                 validate_rejection_identity(self, for_execution=False)
-        if case.get("profile") == COMPLETION_PROFILE:
+        if case.get("profile") in COMPARISON_PROFILES:
             from nexus.ops.historical_pool_completion import validate_completion
 
             reused, _ = validate_completion(self)
@@ -301,6 +304,12 @@ class CaseStore:
                 + diagnostics.get("known_usage", {}).get("provider_calls", 0),
                 execution_status="HISTORICAL_EXECUTION_NOT_ADMITTED",
             )
+            if case["profile"] == ASSESSMENT_PROFILE:
+                result["deferred_research_count"] = sum(
+                    json.loads(raw)["intent"].get("quality_status") == "partial"
+                    for ordinal, raw in rows
+                    if ordinal < 3
+                )
         return result
 
 
@@ -337,8 +346,27 @@ def verify_results(case: dict[str, Any], outputs: list[dict[str, Any]]) -> None:
             or security.intent.model_dump(mode="json") != result["intent"]
             or tuple(refs) != security.intent.evidence_refs
             or tuple(UUID(i) for i in row["evidence_ids"]) != security.evidence_ref_ids
+            or case["profile"] == ASSESSMENT_PROFILE
+            and not _research_admitted(case, security.intent)
         ):
             raise ValueError("HISTORICAL_CASE_READBACK_INVALID")
+        if case["profile"] == ASSESSMENT_PROFILE:
+            roles = [CommitteeRoleOutput.model_validate(v) for v in result["roles"]]
+            portfolio = next((r for r in roles if r.role == "portfolio"), None)
+            if (
+                [r.role for r in roles] != list(ROLE_ORDER)
+                or any(
+                    r.conflicting_facts or not citations_bound(r.claims, tuple(refs)) for r in roles
+                )
+                or {r.role: r.vote for r in roles}
+                != {r.role: r.vote for r in security.intent.role_votes}
+                or portfolio is None
+                or portfolio.synthesis_assessment is None
+                or security.intent.synthesis_assessment is None
+                or portfolio.synthesis_assessment.stance
+                != security.intent.synthesis_assessment.stance
+            ):
+                raise ValueError("HISTORICAL_CASE_READBACK_INVALID")
     validate_portfolio_synthesis_intent(
         PortfolioSynthesisIntentV1.model_validate(outputs[3]["intent"]), frozen
     )
@@ -372,7 +400,7 @@ class FrozenCommittee(StructuredStagedCodexCommittee):
 
 def validate_case(case: dict[str, Any]) -> None:
     if (
-        case.get("profile") not in {PROFILE, NVDA_PROFILE, COMPLETION_PROFILE}
+        case.get("profile") not in {PROFILE, NVDA_PROFILE, *COMPARISON_PROFILES}
         or case.get("model_hash") != bounded_stage_config_hash()
         or len(case.get("members", [])) != 3
     ):
@@ -516,6 +544,16 @@ def _research_rejection_detail(
     )
 
 
+def _research_admitted(case: dict[str, Any], intent: ResearchIntent) -> bool:
+    complete = (
+        staged_intent_semantics_valid(intent, BOUNDED_STAGE_BUDGET_CONFIG_VERSION)
+        and intent.quality_status == "complete"
+    )
+    return complete or (
+        case.get("profile") == ASSESSMENT_PROFILE and safe_no_trade_intent_shape_valid(intent)
+    )
+
+
 async def execute_case(store: CaseStore) -> dict[str, Any]:
     """One new historical observation using v11, not replay/resume of a source Run."""
     store.claim()
@@ -530,7 +568,7 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
         target = None
         reused = None
         reused_result = None
-        if case.get("profile") == COMPLETION_PROFILE:
+        if case.get("profile") in COMPARISON_PROFILES:
             from nexus.ops.historical_nvda_observation import check_current_configuration
             from nexus.ops.historical_pool_completion import validate_completion
 
@@ -611,7 +649,7 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
             )
             semantics_valid = staged_intent_semantics_valid(intent, model.version)
             quality_complete = intent.quality_status == "complete"
-            if not semantics_valid or not quality_complete:
+            if not _research_admitted(case, intent):
                 research_rejection = _research_rejection_detail(
                     intent,
                     outputs,
@@ -682,14 +720,14 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
         try:
             portfolio_intent = PortfolioSynthesisIntentV1.model_validate_json(raw)
         except ValueError:
-            if case.get("profile") != COMPLETION_PROFILE:
+            if case.get("profile") not in COMPARISON_PROFILES:
                 raise
             raise ValueError("HISTORICAL_SYNTHESIS_SCHEMA_INVALID") from None
         try:
             validate_portfolio_synthesis_intent(portfolio_intent, frozen)
         except ValueError as error:
             if (
-                case.get("profile") == COMPLETION_PROFILE
+                case.get("profile") in COMPARISON_PROFILES
                 and len(error.args) == 1
                 and error.args[0] in _SYNTHESIS_REJECTIONS
             ):
@@ -780,6 +818,9 @@ def main() -> int:
     completion = sub.add_parser("prepare-pool-completion")
     completion.add_argument("--repo-root", type=Path, required=True)
     completion.add_argument("--source-cycle-id", type=UUID, required=True)
+    assessment = sub.add_parser("prepare-pool-assessment")
+    assessment.add_argument("--repo-root", type=Path, required=True)
+    assessment.add_argument("--source-cycle-id", type=UUID, required=True)
     for name in ("run", "read"):
         sub.add_parser(name).add_argument("--case-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -796,10 +837,16 @@ def main() -> int:
             from nexus.ops.nvda_rejection_diagnostic import prepare_rejection_diagnostic
 
             path = asyncio.run(prepare_rejection_diagnostic(args.repo_root, args.source_cycle_id))
-        elif args.command == "prepare-pool-completion":
+        elif args.command in {"prepare-pool-completion", "prepare-pool-assessment"}:
             from nexus.ops.historical_pool_completion import prepare_completion
 
-            path = asyncio.run(prepare_completion(args.repo_root, args.source_cycle_id))
+            path = asyncio.run(
+                prepare_completion(
+                    args.repo_root,
+                    args.source_cycle_id,
+                    assessment=args.command == "prepare-pool-assessment",
+                )
+            )
         else:
             path = args.case_dir.absolute() / "case.sqlite3"
         execution_error = False
