@@ -88,12 +88,14 @@ def read_source(root: Path, cycle_id: UUID) -> tuple[dict[str, Any], str]:
         ):
             raise ValueError("HISTORICAL_OBSERVATION_INVALID")
         # Bind all persisted facts, including any earlier outputs; never update the source.
-        receipt = _hash(
-            dict(
-                case=list(store.db.execute("SELECT * FROM historical_case")),
-                outputs=list(store.db.execute("SELECT * FROM historical_outputs ORDER BY ordinal")),
-            )
+        facts = dict(
+            case=list(store.db.execute("SELECT * FROM historical_case")),
+            outputs=list(store.db.execute("SELECT * FROM historical_outputs ORDER BY ordinal")),
         )
+        private = store.private_rejection()
+        if private is not None:
+            facts["rejection"] = [private]
+        receipt = _hash(facts)
         return case, receipt
 
 

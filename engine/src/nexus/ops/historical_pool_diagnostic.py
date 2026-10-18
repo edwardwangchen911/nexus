@@ -132,7 +132,8 @@ class CaseStore:
             raise ValueError("HISTORICAL_CASE_DIRECTORY_UNSAFE")
         db = sqlite3.connect(f"{path.as_uri()}?mode={'ro' if read_only else 'rw'}", uri=True)
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if tables != {"historical_case", "historical_outputs"}:
+        base_tables = {"historical_case", "historical_outputs"}
+        if tables not in (base_tables, base_tables | {"historical_rejection_details"}):
             db.close()
             raise ValueError("HISTORICAL_CASE_DATABASE_INVALID")
         return cls(db)
@@ -173,10 +174,35 @@ class CaseStore:
             )
 
     def diagnostic(self, detail: dict[str, Any]) -> None:
+        safe = dict(detail)
+        private = safe.pop("private_research_rejection", None)
         with self.db:
+            if not self.db.in_transaction:
+                self.db.execute("BEGIN IMMEDIATE")
+            if private is not None:
+                # A separate table makes old readers reject instead of printing private text.
+                self.db.execute(
+                    "CREATE TABLE IF NOT EXISTS historical_rejection_details ("
+                    "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                    "payload TEXT NOT NULL,digest TEXT NOT NULL)"
+                )
+                self.db.execute(
+                    "INSERT INTO historical_rejection_details VALUES (1,?,?)",
+                    (_wire(private["payload"]), private["digest"]),
+                )
             self.db.execute(
-                "UPDATE historical_case SET diagnostic=? WHERE singleton=1", (_wire(detail),)
+                "UPDATE historical_case SET diagnostic=? WHERE singleton=1", (_wire(safe),)
             )
+
+    def private_rejection(self) -> dict[str, Any] | None:
+        if not self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='historical_rejection_details'"
+        ).fetchone():
+            return None
+        rows = self.db.execute("SELECT payload,digest FROM historical_rejection_details").fetchall()
+        if len(rows) != 1:
+            raise ValueError("HISTORICAL_CASE_READBACK_INVALID")
+        return dict(payload=json.loads(rows[0][0]), digest=rows[0][1])
 
     def finish(self, status: str) -> None:
         with self.db:
@@ -186,10 +212,16 @@ class CaseStore:
             )
 
     def summary(self) -> dict[str, Any]:
+        from nexus.ops.historical_rejection_archive import safe_rejection_detail
+
         case = self.case()
         status, stage, started, finished, detail = self.db.execute(
             "SELECT status,stage,started_at,finished_at,diagnostic FROM historical_case"
         ).fetchone()
+        diagnostics = json.loads(detail)
+        private = self.private_rejection()
+        if private is not None:
+            diagnostics["private_research_rejection"] = private
         outputs = []
         for raw, digest in self.db.execute(
             "SELECT payload,digest FROM historical_outputs ORDER BY ordinal"
@@ -212,7 +244,7 @@ class CaseStore:
             evidence_as_of=self.case().get("evidence_as_of"),
             observation_started_at=started,
             observation_finished_at=finished,
-            diagnostic=json.loads(detail),
+            diagnostic=safe_rejection_detail(case, stage, diagnostics),
         )
         if case.get("profile") == NVDA_PROFILE:
             from nexus.ops.historical_nvda_observation import target_index
@@ -449,6 +481,8 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
     stage = "pool_preflight"
     active: FrozenCommittee | None = None
     research_rejection: dict[str, Any] | None = None
+    private_rejection: dict[str, Any] | None = None
+    archive_unavailable = False
     try:
         case = store.case()
         target = None
@@ -519,6 +553,13 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
                     quality_complete=quality_complete,
                     price_authority_valid=row["paper_context_validated"],
                 )
+                from nexus.ops.historical_rejection_archive import capture_rejection
+
+                try:
+                    private_rejection = capture_rejection(case, index, intent, outputs)
+                except Exception:
+                    # Diagnostic capture must never replace the primary refusal or retry it.
+                    archive_unavailable = True
                 raise ValueError("HISTORICAL_RESEARCH_NOT_ACTIONABLE")
             result = dict(
                 output_id=str(run.id),
@@ -588,7 +629,8 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
         )
         store.finish("observed")
     except (Exception, asyncio.CancelledError) as error:
-        # Fixed codes only. Never persist exception messages, model text or command arguments.
+        # Safe summary only; final review statements use the separate private archive.
+        # Never persist exception messages, raw model responses or command arguments.
         code = (
             "CANCELLED"
             if isinstance(error, asyncio.CancelledError)
@@ -608,6 +650,10 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
         }
         if research_rejection is not None:
             detail["research_rejection"] = research_rejection
+        if private_rejection is not None:
+            detail["private_research_rejection"] = private_rejection
+        if archive_unavailable:
+            detail["rejection_archive_status"] = "UNAVAILABLE"
         if active is not None:
             detail["known_usage"] = dict(
                 input_tokens=active.usage.input_tokens,
@@ -616,7 +662,16 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
             )
             if active.failure_diagnostic is not None:
                 detail["stage_failure"] = active.failure_diagnostic.model_dump(mode="json")
-        store.diagnostic(detail)
+        try:
+            store.diagnostic(detail)
+        except sqlite3.Error:
+            if "private_research_rejection" not in detail:
+                raise
+            # The private transaction rolled back. Keep the primary refusal even
+            # when optional detail storage fails; never repeat the model call.
+            detail.pop("private_research_rejection")
+            detail["rejection_archive_status"] = "UNAVAILABLE"
+            store.diagnostic(detail)
         # Unknown usage remains held: claim and stage survive cancellation and process death.
         store.finish("unknown")
         raise

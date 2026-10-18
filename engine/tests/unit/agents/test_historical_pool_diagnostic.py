@@ -529,7 +529,8 @@ def test_cli_research_rejection_reasons_survive_readback_without_retry(
     assert "account_id" not in json.dumps(result)
     with CaseStore.open(tmp_path / "case.sqlite3") as store:
         before = list(store.db.iterdump())
-        assert "PRIVATE_" not in str(before)
+        # Review text is now retained privately; the CLI assertions above still forbid it.
+        assert ("PRIVATE_MISSING_EVIDENCE" in str(before)) == (rejection == "unresolved")
     for command in ("read", "run"):
         monkeypatch.setattr(sys, "argv", ["historical", command, "--case-dir", str(tmp_path)])
         assert main() == 1
