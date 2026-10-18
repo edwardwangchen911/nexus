@@ -204,7 +204,9 @@ async def test_prepare_rejects_invalid_source_or_entire_pool_before_calls(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [None, "account", "model", "hash", "version", "budget", "clock"])
+@pytest.mark.parametrize(
+    "fault", [None, "account", "model", "hash", "version", "budget", "pool_budget", "clock"]
+)
 async def test_current_configuration_and_budget_check_is_read_only(tmp_path, monkeypatch, fault):
     from datetime import UTC, datetime
     from decimal import Decimal
@@ -275,7 +277,9 @@ async def test_current_configuration_and_budget_check_is_read_only(tmp_path, mon
     monkeypatch.setattr(observation, "_shared_daily_budget_used", used)
     if fault:
         with pytest.raises(ValueError, match="HISTORICAL_CASE_"):
-            await observation.check_current_configuration(tmp_path, case)
+            await observation.check_current_configuration(
+                tmp_path, case, budget_units=3 if fault == "pool_budget" else 1
+            )
     else:
         await observation.check_current_configuration(tmp_path, case)
     assert events == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY", "disposed"]

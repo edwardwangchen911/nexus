@@ -49,6 +49,15 @@ from nexus.strategy.intents import ResearchIntent
 
 PROFILE = "historical-three-stock-v11-v1"
 NVDA_PROFILE = "historical-nvda-observation-v1"
+COMPLETION_PROFILE = "historical-pool-completion-v1"
+_SYNTHESIS_REJECTIONS = {
+    "portfolio synthesis input binding mismatch": "HISTORICAL_SYNTHESIS_INPUT_MISMATCH",
+    "portfolio choice exceeds admitted security research": (
+        "HISTORICAL_SYNTHESIS_ACTION_EXCEEDS_RESEARCH"
+    ),
+    "choice lacks its own security evidence": "HISTORICAL_SYNTHESIS_OWN_EVIDENCE_MISSING",
+    "portfolio synthesis evidence reference is unbound": "HISTORICAL_SYNTHESIS_EVIDENCE_UNBOUND",
+}
 
 _SAFE_CODES = frozenset(
     {
@@ -80,6 +89,8 @@ _SAFE_CODES = frozenset(
         "HISTORICAL_OBSERVATION_INVALID",
         "HISTORICAL_CASE_V11_REQUIRED",
         "HISTORICAL_DIAGNOSTIC_STORAGE_UNAVAILABLE",
+        "HISTORICAL_SYNTHESIS_SCHEMA_INVALID",
+        *_SYNTHESIS_REJECTIONS.values(),
     }
 )
 
@@ -150,6 +161,14 @@ class CaseStore:
         payload = json.loads(raw)
         if _hash(payload) != digest:
             raise ValueError("HISTORICAL_CASE_HASH_MISMATCH")
+        directory = Path(self.db.execute("PRAGMA database_list").fetchone()[2]).parent.name
+        completion = payload.get("profile") == COMPLETION_PROFILE
+        if (
+            ("completion" in payload) != completion
+            or directory.endswith("-completion-v1")
+            and not completion
+        ):
+            raise ValueError("HISTORICAL_OBSERVATION_INVALID")
         return cast(dict[str, Any], payload)
 
     def claim(self) -> None:
@@ -265,6 +284,23 @@ class CaseStore:
                 from nexus.ops.nvda_rejection_diagnostic import validate_rejection_identity
 
                 validate_rejection_identity(self, for_execution=False)
+        if case.get("profile") == COMPLETION_PROFILE:
+            from nexus.ops.historical_pool_completion import validate_completion
+
+            reused, _ = validate_completion(self)
+            rows = list(self.db.execute("SELECT ordinal,payload FROM historical_outputs"))
+            result.update(
+                observation_id=case["completion"]["id"],
+                observation_limits=case["completion"]["limits"],
+                reused_research_count=1,
+                new_provider_calls=sum(
+                    json.loads(raw)["usage"]["provider_calls"]
+                    for ordinal, raw in rows
+                    if ordinal != reused
+                )
+                + diagnostics.get("known_usage", {}).get("provider_calls", 0),
+                execution_status="HISTORICAL_EXECUTION_NOT_ADMITTED",
+            )
         return result
 
 
@@ -336,7 +372,7 @@ class FrozenCommittee(StructuredStagedCodexCommittee):
 
 def validate_case(case: dict[str, Any]) -> None:
     if (
-        case.get("profile") not in {PROFILE, NVDA_PROFILE}
+        case.get("profile") not in {PROFILE, NVDA_PROFILE, COMPLETION_PROFILE}
         or case.get("model_hash") != bounded_stage_config_hash()
         or len(case.get("members", [])) != 3
     ):
@@ -488,9 +524,21 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
     research_rejection: dict[str, Any] | None = None
     private_rejection: dict[str, Any] | None = None
     archive_unavailable = False
+    portfolio_usage = None
     try:
         case = store.case()
         target = None
+        reused = None
+        reused_result = None
+        if case.get("profile") == COMPLETION_PROFILE:
+            from nexus.ops.historical_nvda_observation import check_current_configuration
+            from nexus.ops.historical_pool_completion import validate_completion
+
+            reused, reused_result = validate_completion(store, execution=True)
+            async with asyncio.timeout(195):
+                await check_current_configuration(
+                    Path(case["completion"]["repo_root"]), case, budget_units=3
+                )
         if case.get("profile") == NVDA_PROFILE:
             from nexus.ops.historical_nvda_observation import validate_observation
 
@@ -501,6 +549,19 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
             zip(case["members"], committees, refs, strict=True)
         ):
             if target is not None and index != target:
+                continue
+            if index == reused and reused_result is not None:
+                store.append(index, reused_result)
+                security.append(
+                    PortfolioSecurityOutputV1(
+                        instrument_id=committee.request.instrument_id,
+                        research_output_id=UUID(reused_result["output_id"]),
+                        content_hash=_hash(reused_result),
+                        intent_hash=_hash(reused_result["intent"]),
+                        evidence_ref_ids=tuple(UUID(v) for v in row["evidence_ids"]),
+                        intent=ResearchIntent.model_validate(reused_result["intent"]),
+                    )
+                )
                 continue
             active = committee
             stage = f"research_{index + 1}"
@@ -610,6 +671,7 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
         )
         async with asyncio.timeout(195):
             raw, usage = await CodexSynthesisTransport(formal_stage_capacity=True).invoke(payload)
+        portfolio_usage = usage
         if (
             usage.input_tokens > 64000
             or usage.output_tokens > 8192
@@ -617,8 +679,22 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
             or usage.tool_calls
         ):
             raise ValueError("HISTORICAL_SYNTHESIS_BUDGET_INVALID")
-        portfolio_intent = PortfolioSynthesisIntentV1.model_validate_json(raw)
-        validate_portfolio_synthesis_intent(portfolio_intent, frozen)
+        try:
+            portfolio_intent = PortfolioSynthesisIntentV1.model_validate_json(raw)
+        except ValueError:
+            if case.get("profile") != COMPLETION_PROFILE:
+                raise
+            raise ValueError("HISTORICAL_SYNTHESIS_SCHEMA_INVALID") from None
+        try:
+            validate_portfolio_synthesis_intent(portfolio_intent, frozen)
+        except ValueError as error:
+            if (
+                case.get("profile") == COMPLETION_PROFILE
+                and len(error.args) == 1
+                and error.args[0] in _SYNTHESIS_REJECTIONS
+            ):
+                raise ValueError(_SYNTHESIS_REJECTIONS[error.args[0]]) from None
+            raise
         store.append(
             3,
             dict(
@@ -667,6 +743,12 @@ async def execute_case(store: CaseStore) -> dict[str, Any]:
             )
             if active.failure_diagnostic is not None:
                 detail["stage_failure"] = active.failure_diagnostic.model_dump(mode="json")
+        elif portfolio_usage is not None:
+            detail["known_usage"] = dict(
+                input_tokens=portfolio_usage.input_tokens,
+                output_tokens=portfolio_usage.output_tokens,
+                provider_calls=portfolio_usage.provider_calls,
+            )
         try:
             store.diagnostic(detail)
         except sqlite3.Error:
@@ -695,6 +777,9 @@ def main() -> int:
     rejection = sub.add_parser("prepare-nvda-rejection-diagnostic")
     rejection.add_argument("--repo-root", type=Path, required=True)
     rejection.add_argument("--source-cycle-id", type=UUID, required=True)
+    completion = sub.add_parser("prepare-pool-completion")
+    completion.add_argument("--repo-root", type=Path, required=True)
+    completion.add_argument("--source-cycle-id", type=UUID, required=True)
     for name in ("run", "read"):
         sub.add_parser(name).add_argument("--case-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -711,6 +796,10 @@ def main() -> int:
             from nexus.ops.nvda_rejection_diagnostic import prepare_rejection_diagnostic
 
             path = asyncio.run(prepare_rejection_diagnostic(args.repo_root, args.source_cycle_id))
+        elif args.command == "prepare-pool-completion":
+            from nexus.ops.historical_pool_completion import prepare_completion
+
+            path = asyncio.run(prepare_completion(args.repo_root, args.source_cycle_id))
         else:
             path = args.case_dir.absolute() / "case.sqlite3"
         execution_error = False

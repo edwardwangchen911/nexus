@@ -1,6 +1,24 @@
 # NEXUS 主线迭代与新主会话交接
 
-## 2026-10-18 新的有界NVDA拒绝诊断身份（本地实现）
+## 2026-10-18 新的有界NVDA拒绝诊断身份（本地实现及单次真实观察）
+
+本地候选`f926cb4b`的单次真实观察已完成：身份`ddbe7a17-7688-45e7-b02e-c8f6e2cbad7b`，
+2026-10-18 05:15:32.040462至05:16:53.542967 UTC，81.502505秒，3次调用，
+70478输入/2697输出token。正常CLI执行和独立只读read均返回observed、output_count=1；
+quality_status=complete、review_conclusion=sufficient、evidence_audit=complete，
+stance=watch、exposure_action=none。四项最终审查均accepted/resolved，未出现新拒绝。
+本次接受的意见涉及收购与监管风险、偏弱趋势的有限解释，以及两项披露来源审计；
+这些是本次模型最终陈述，不代表独立事实核验，也不能倒推上次丢失的三项意见正文。
+
+新归档为主仓库`.secrets/nexus-historical-nvda-observations/`
+`01a14504-0113-7c08-bec4-eb47b6a0fc17-rejection-v2/case.sqlite3`，SHA256为
+`895b9b2694772dc4cf210b8dd555057045368dd9593be24dee4776fa852a2059`。
+原三股票及v1归档SHA256仍分别为`01e2a1073fb3661a929462d41a02372241b5c3cc393a1233f4b0d6b4835b46bf`
+和`5376cc9f8a3a86cffc28d10a0824159804eca4cb54e0cc05a6f2060e0800936e`，字节未变。
+本次未调用AAPL/AVGO或组合，未产生订单/账本，business_writes=0、execution_locked=true。
+正式服务未改，本地新入口未推送或通过远端CI；不能将af77c647的CI覆盖声称为新入口CI。
+旧三项意见仍不可恢复；新拒绝落盘路径已隔离验证，但本次真实成功未触发该路径。
+本切片已结束，不追加调用以追求复现，不宣称三股票整链或自然周期验收通过。
 
 af77c647已推送PR#3，同版GitHub run 39097724257六项通过，未部署。用户在审查会话
 最新原文明确要求能补的先补齐，再用真实输入/真实模型验证；本任务通过read_thread
@@ -20,7 +38,7 @@ price_series_manifests为0；仅有Schwab L1决策原件，observed_at为14:00:4
 不能替代旧Schwab来源。执行实际需要5根连续raw 1Min OHLCV，bid/ask可选；现有门禁
 要求最后bar结束后120秒内收件，补抓旧数据不能倒填received_at。还需要隔离历史归档
 入口和明确的反事实时间合同，不能把历史诊断输出赋予正式Worker/风控/账本资格。
-当前不改正式服务、不推送本候选，下一步按已核实授权只执行新的NVDA诊断一次。
+当前不改正式服务、不推送本候选；已核实授权覆盖的单次NVDA诊断结果见本节顶部。
 
 ## 2026-10-18 NVDA 三项未解决意见的私有诊断补齐（本地候选）
 

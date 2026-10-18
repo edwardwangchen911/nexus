@@ -99,7 +99,11 @@ def read_source(root: Path, cycle_id: UUID) -> tuple[dict[str, Any], str]:
         return case, receipt
 
 
-async def check_current_configuration(root: Path, case: dict[str, Any]) -> None:
+async def check_current_configuration(
+    root: Path, case: dict[str, Any], *, budget_units: int = 1
+) -> None:
+    if type(budget_units) is not int or not 1 <= budget_units <= 4:
+        raise ValueError("HISTORICAL_CASE_BUDGET_UNAVAILABLE")
     settings = local_settings(root, backend="codex_sdk")
     factory = session_factory(settings)
     try:
@@ -121,7 +125,7 @@ async def check_current_configuration(root: Path, case: dict[str, Any]) -> None:
             ):
                 raise ValueError("HISTORICAL_CASE_V11_REQUIRED")
             used = await _shared_daily_budget_used(session, business_date=now.date())
-            if used + model.worst_case_cost_usd > settings.agent_daily_budget_usd:
+            if used + budget_units * model.worst_case_cost_usd > settings.agent_daily_budget_usd:
                 raise ValueError("HISTORICAL_CASE_BUDGET_UNAVAILABLE")
     finally:
         await factory.kw["bind"].dispose()
