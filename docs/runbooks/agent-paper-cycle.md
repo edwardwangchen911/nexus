@@ -846,6 +846,16 @@ uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-fil
 uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-file infra/.env.local accept-failed-synthesis-usage --cycle-id <UUID> --run-id <UUID> --accept-unknown-usage
 ```
 
+隔离原生数据库快照验收时，可在这两个命令显式成对附加
+`--recovery-producer-repo-root <原宿主仓库>` 与
+`--recovery-producer-env-file <原宿主受保护配置>`。命令自身的 `--repo-root` 与
+`--env-file` 仍指向已提交候选及隔离库配置；目标必须为本机不同源库的
+`nexus_recovery_*`，实际数据库名须匹配。默认正式路径不变。
+只运行候选提交中校验过的检查脚本，按原宿主路径检查注册与退出状态；不会连接源数据库。
+检查前后及提交前重验原提交脚本，源配置身份与目标库也在提交前重验；漂移整笔回滚。
+该模式仍使用原生命周期互斥、进程/租约/账户/订单/证明门禁，不允许跳过检查，
+隔离通过不等于获准处置真实记录。
+
 只接受原生周期中唯一 failed synthesis、单次失败 Job/attempt、failed/null intent Output、
 未知用量和完整 reserved 绑定；关联研究必须按原合同成功终态并已结算，partial 不升级。
 周期必须已 unavailable/failed 且无本轮策略决策及其下游执行产品。旧手动请求若仍 active、

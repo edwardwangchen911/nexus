@@ -20,6 +20,7 @@ from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_ser
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _checkout_revision, _validate_local_env
 from nexus.ops.preparation_diagnostics import ERROR_CODES, exception_code
+from nexus.ops.synthesis_recovery_target import load_recovery_producer
 from nexus.paper.current_preparation_acceptance import (
     PreparationAcceptanceCheck,
     PreparationAcceptanceReceipt,
@@ -50,6 +51,7 @@ from nexus.paper.manual_preparation_close import (
     PreparationCloseDiagnosticError,
     PreparationCloseReceipt,
     preparation_service_control_lock,
+    require_preparation_inspector_source,
 )
 from nexus.paper.manual_request import ManualRequestView
 from nexus.paper.preparation_unknown_ack import UnknownPreparationReceipt
@@ -225,6 +227,8 @@ def parser() -> argparse.ArgumentParser:
         synthesis = commands.add_parser(action)
         synthesis.add_argument("--cycle-id", type=UUID, required=True)
         synthesis.add_argument("--run-id", type=UUID, required=True)
+        synthesis.add_argument("--recovery-producer-repo-root", type=Path)
+        synthesis.add_argument("--recovery-producer-env-file", type=Path)
         if action == "accept-failed-synthesis-usage":
             synthesis.add_argument("--accept-unknown-usage", action="store_true", required=True)
     return result
@@ -300,13 +304,18 @@ async def run(
                 ):
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
                 if args.action in {"check-synthesis-acceptance", "accept-failed-synthesis-usage"}:
+                    recovery = load_recovery_producer(settings, args)
+                    if recovery is not None:
+                        await recovery.verify(session)
                     options = dict(
                         account_id=settings.agent_paper_account_id,
                         cycle_id=args.cycle_id,
                         run_id=args.run_id,
                         now=now,
-                        repo_root=args.repo_root,
-                        env_file=args.env_file,
+                        repo_root=recovery.repo_root if recovery else args.repo_root,
+                        env_file=recovery.env_file if recovery else args.env_file,
+                        inspector_repo_root=args.repo_root if recovery else None,
+                        inspector_revision=settings.release_revision if recovery else None,
                     )
                     if args.action == "check-synthesis-acceptance":
                         synthesis_receipt = await check_failed_synthesis_usage(session, **options)
@@ -315,6 +324,11 @@ async def run(
                             session, **options, accept_unknown_usage=args.accept_unknown_usage
                         )
                     _require_maintenance_code(args.repo_root, settings.release_revision)
+                    if recovery is not None:
+                        require_preparation_inspector_source(
+                            args.repo_root, settings.release_revision
+                        )
+                        await recovery.verify(session)
                     return synthesis_receipt
                 if args.action == "check-preparation-acceptance":
                     checked = await check_current_unknown(

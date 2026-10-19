@@ -710,3 +710,141 @@ async def test_accepted_unknown_synthesis_still_consumes_shared_budget(
             assert await _audit_count(session) == 1
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+def recovery_database_url(temporary_database_factory, migrated_database_template):
+    """Own one strict recovery-named clone; never address a formal database."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    name = "nexus_recovery_" + uuid4().hex
+    admin = temporary_database_factory.admin_url
+
+    async def command(statement):
+        engine = create_async_engine(admin, isolation_level="AUTOCOMMIT")
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(statement))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(command(f'CREATE DATABASE "{name}" TEMPLATE "{migrated_database_template.name}"'))
+    try:
+        yield admin.set(database=name).render_as_string(hide_password=False)
+    finally:
+        asyncio.run(command(f'DROP DATABASE "{name}" WITH (FORCE)'))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["none", "source_configuration", "inspector_script"])
+async def test_isolated_normal_cli_uses_owner_and_rolls_back_identity_change(
+    recovery_database_url, monkeypatch, tmp_path, fault
+):
+    import subprocess
+
+    from sqlalchemy.engine import make_url
+
+    engine, sessions, settings, scope, _ = await _failed_case(recovery_database_url, monkeypatch)
+    from nexus.paper import synthesis_usage_acceptance as acceptance
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    subprocess.run(["git", "init", "-q", str(owner)], check=True)
+    (owner / ".gitignore").write_text("*.env\n")
+    source = owner / "source.env"
+    source.write_text(
+        "DATABASE_URL="
+        + make_url(recovery_database_url)
+        .set(database="postgres")
+        .render_as_string(hide_password=False)
+        + "\n"
+    )
+    source.chmod(0o600)
+    candidate = tmp_path / "candidate"
+    script = candidate / "scripts/macos/agent-paper-loop-service.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# trusted test inspector\n")
+    subprocess.run(["git", "init", "-q", str(candidate)], check=True)
+    subprocess.run(["git", "-C", str(candidate), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(candidate),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(candidate), "rev-parse", "HEAD"], text=True
+    ).strip()
+    settings = settings.model_copy(update={"release_revision": revision})
+    guards = []
+
+    def producer(root, env, *, inspector_repo_root=None, inspector_revision=None):
+        assert root == owner and env == source and inspector_repo_root == candidate
+        assert inspector_revision == revision
+        guards.append(True)
+        if fault == "inspector_script" and len(guards) == 3:
+            script.write_text("# drift during transaction\n")
+        if fault == "source_configuration" and len(guards) == 3:
+            # The last guard occurs after the audit insertion, before CLI commit.
+            source.write_text(source.read_text() + "# changed\n")
+
+    monkeypatch.setattr(acceptance, "require_preparation_producers_stopped", producer)
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_a: None)
+    monkeypatch.setattr(manual_paper, "preparation_service_control_lock", lambda *_a: nullcontext())
+    base = ["--repo-root", str(candidate), "--env-file", str(candidate / "isolated.env")]
+    ids = [
+        "--cycle-id",
+        str(scope["cycle_id"]),
+        "--run-id",
+        str(scope["run_id"]),
+        "--recovery-producer-repo-root",
+        str(owner),
+        "--recovery-producer-env-file",
+        str(source),
+    ]
+    try:
+        async with sessions() as session:
+            before = await _facts(session)
+        check = manual_paper.parser().parse_args(base + ["check-synthesis-acceptance"] + ids)
+        assert (await manual_paper.run(settings, check)).status == "eligible_at_check"
+        accept = manual_paper.parser().parse_args(
+            base + ["accept-failed-synthesis-usage"] + ids + ["--accept-unknown-usage"]
+        )
+        if fault != "none":
+            from nexus.paper.manual_preparation_close import PreparationCloseDiagnosticError
+
+            error = (
+                PreparationCloseDiagnosticError
+                if fault == "inspector_script"
+                else acceptance.SynthesisUsageDiagnosticError
+            )
+            with pytest.raises(error):
+                await manual_paper.run(settings, accept)
+        else:
+            assert (await manual_paper.run(settings, accept)).status == "accepted_usage_unknown"
+            assert (await manual_paper.run(settings, accept)).replayed
+        async with sessions() as session:
+            assert await _facts(session) == before
+            assert await _audit_count(session) == (0 if fault != "none" else 1)
+            if fault != "none":
+                with pytest.raises(ValueError, match=BLOCKED):
+                    await manual_request.require_manual_account_available(
+                        session, account_id=scope["account_id"], now=scope["now"]
+                    )
+            else:
+                await manual_request.require_manual_account_available(
+                    session, account_id=scope["account_id"], now=scope["now"]
+                )
+            await session.rollback()
+    finally:
+        await engine.dispose()

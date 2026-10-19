@@ -57,6 +57,12 @@ class SynthesisUsageDiagnosticError(ValueError):
             ("synthesis_acceptance", "PROOF_INVALID"),
             ("synthesis_occupancy", "ACCOUNT_NOT_IDLE"),
             ("synthesis_fence", "WRITER_BUSY"),
+            ("synthesis_recovery_target", "SOURCE_CONFIGURATION_UNSAFE"),
+            ("synthesis_recovery_target", "SOURCE_CONFIGURATION_CHANGED"),
+            ("synthesis_recovery_target", "SOURCE_TARGET_DATABASE_IDENTICAL"),
+            ("synthesis_recovery_target", "ACTUAL_DATABASE_MISMATCH"),
+            ("synthesis_recovery_target", "PRODUCER_ARGUMENT_PAIR_REQUIRED"),
+            ("synthesis_recovery_target", "RECOVERY_DATABASE_REQUIRED"),
         }
         if (self.stage, self.code) not in pairs:
             return {}
@@ -516,13 +522,20 @@ async def check_failed_synthesis_usage(
     now: datetime,
     repo_root: Path,
     env_file: Path,
+    inspector_repo_root: Path | None = None,
+    inspector_revision: str | None = None,
 ) -> SynthesisUsageReceipt:
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
     if cycle is None or cycle.account_id != account_id:
         raise ValueError(BLOCKED)
     accepted = await synthesis_usage_accepted(session, cycle_id=cycle_id, run_id=run_id, now=now)
     if not accepted:
-        require_preparation_producers_stopped(repo_root, env_file)
+        require_preparation_producers_stopped(
+            repo_root,
+            env_file,
+            inspector_repo_root=inspector_repo_root,
+            inspector_revision=inspector_revision,
+        )
         await _eligibility(
             session, account_id=account_id, cycle_id=cycle_id, run_id=run_id, now=now
         )
@@ -545,6 +558,8 @@ async def accept_failed_synthesis_usage(
     repo_root: Path,
     env_file: Path,
     accept_unknown_usage: bool,
+    inspector_repo_root: Path | None = None,
+    inspector_revision: str | None = None,
 ) -> SynthesisUsageReceipt:
     if accept_unknown_usage is not True:
         raise ValueError("MANUAL_REQUEST_INVALID")
@@ -556,7 +571,12 @@ async def accept_failed_synthesis_usage(
         return SynthesisUsageReceipt(
             cycle_id=cycle_id, run_id=run_id, status="accepted_usage_unknown", replayed=True
         )
-    require_preparation_producers_stopped(repo_root, env_file)
+    require_preparation_producers_stopped(
+        repo_root,
+        env_file,
+        inspector_repo_root=inspector_repo_root,
+        inspector_revision=inspector_revision,
+    )
     # Match the existing maintenance lock order; never wait behind a writer with a
     # different table order. Table fences also cover previously absent associated rows.
     if not await session.scalar(
@@ -591,5 +611,10 @@ async def accept_failed_synthesis_usage(
     from nexus.paper.manual_request import require_manual_account_available
 
     await require_manual_account_available(session, account_id=account_id, now=now)
-    require_preparation_producers_stopped(repo_root, env_file)
+    require_preparation_producers_stopped(
+        repo_root,
+        env_file,
+        inspector_repo_root=inspector_repo_root,
+        inspector_revision=inspector_revision,
+    )
     return SynthesisUsageReceipt(cycle_id=cycle_id, run_id=run_id, status="accepted_usage_unknown")
