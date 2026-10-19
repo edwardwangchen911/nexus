@@ -751,3 +751,53 @@ def test_shared_history_inspection_cli_reports_only_fixed_codes(
     if code == "HOST_MAPPING_UNCONFIRMED":
         expected.update(diagnostic_stage="research_processes", diagnostic_code=code)
     assert json.loads(captured.out) == expected
+
+
+@pytest.mark.parametrize("action", ["check-synthesis-acceptance", "accept-failed-synthesis-usage"])
+def test_synthesis_disposition_cli_uses_fixed_safe_diagnostic(
+    monkeypatch, tmp_path, capsys, action
+):
+    from uuid import UUID
+
+    from nexus.paper.synthesis_usage_acceptance import SynthesisUsageDiagnosticError
+
+    monkeypatch.setattr(manual_paper, "_validate_local_env", lambda root, path: path)
+    monkeypatch.setattr(manual_paper, "load_agent_paper_service_environment", lambda *a, **k: {})
+    monkeypatch.setattr(manual_paper, "_checkout_revision", lambda root: "a" * 40)
+
+    async def blocked(settings, args):
+        assert args.cycle_id == UUID(int=1)
+        assert args.run_id == UUID(int=2)
+        if action == "accept-failed-synthesis-usage":
+            assert args.accept_unknown_usage is True
+        raise SynthesisUsageDiagnosticError("synthesis_history", "BINDING_INVALID")
+
+    monkeypatch.setattr(manual_paper, "run", blocked)
+    args = [
+        "--repo-root",
+        str(tmp_path),
+        action,
+        "--cycle-id",
+        str(UUID(int=1)),
+        "--run-id",
+        str(UUID(int=2)),
+    ]
+    if action == "accept-failed-synthesis-usage":
+        args.append("--accept-unknown-usage")
+    assert manual_paper.main(args) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report == {
+        "status": "blocked",
+        "error_code": "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+        "execution_locked": True,
+        "diagnostic_stage": "synthesis_history",
+        "diagnostic_code": "BINDING_INVALID",
+    }
+
+
+def test_synthesis_diagnostic_never_echoes_unknown_fields():
+    from nexus.paper.synthesis_usage_acceptance import SynthesisUsageDiagnosticError
+
+    error = SynthesisUsageDiagnosticError("secret-looking-stage", "secret-looking-code")
+    assert error.safe_diagnostics() == {}
+    assert str(error) == "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"

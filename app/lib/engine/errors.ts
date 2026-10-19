@@ -910,6 +910,10 @@ function managementCycleSemanticsValid(value: Record<string, unknown>): boolean 
     || target === undefined || activation === undefined || blocker === undefined
     || blockingPlan === undefined || plan === undefined) return false;
   const cycle = plainOrNull(value.cycle);
+  if (value.synthesis_usage_disposition != null
+    && (!["failed", "unavailable"].includes(String(cycle?.status)) || synthesis?.status !== "failed"
+      || cycle?.decision !== null || !Array.isArray(value.orders) || value.orders.length !== 0
+      || proposal !== null || activation !== null || blockingPlan !== null || plan !== null)) return false;
   if (cycle?.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED"
     && (candidate === null || synthesis === null || synthesis.status !== "completed")) return false;
 

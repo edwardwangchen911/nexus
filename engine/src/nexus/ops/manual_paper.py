@@ -53,6 +53,12 @@ from nexus.paper.manual_preparation_close import (
 )
 from nexus.paper.manual_request import ManualRequestView
 from nexus.paper.preparation_unknown_ack import UnknownPreparationReceipt
+from nexus.paper.synthesis_usage_acceptance import (
+    SynthesisUsageDiagnosticError,
+    SynthesisUsageReceipt,
+    accept_failed_synthesis_usage,
+    check_failed_synthesis_usage,
+)
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
@@ -215,6 +221,12 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Close a terminal failed research today; preserve unknown usage and reservations",
     )
+    for action in ("check-synthesis-acceptance", "accept-failed-synthesis-usage"):
+        synthesis = commands.add_parser(action)
+        synthesis.add_argument("--cycle-id", type=UUID, required=True)
+        synthesis.add_argument("--run-id", type=UUID, required=True)
+        if action == "accept-failed-synthesis-usage":
+            synthesis.add_argument("--accept-unknown-usage", action="store_true", required=True)
     return result
 
 
@@ -229,6 +241,7 @@ async def run(
     | PreparationRecoveryReceipt
     | PreparationAcceptanceReceipt
     | PreparationAcceptanceCheck
+    | SynthesisUsageReceipt
 ):
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
@@ -236,6 +249,8 @@ async def run(
     diagnostic = _OperationDiagnostic()
     try:
         if args.action in {
+            "check-synthesis-acceptance",
+            "accept-failed-synthesis-usage",
             "check-preparation-acceptance",
             "close-unstarted-preparation",
             "acknowledge-unknown-preparations",
@@ -254,6 +269,8 @@ async def run(
                 raise PreparationCloseDiagnosticError("service_control_lock", reason) from None
         async with diagnostic.transaction(factory) as session:
             if args.action in {
+                "check-synthesis-acceptance",
+                "accept-failed-synthesis-usage",
                 "check-preparation-acceptance",
                 "close-unstarted-preparation",
                 "acknowledge-unknown-preparations",
@@ -282,6 +299,23 @@ async def run(
                     != CURRENT_MIGRATION_HEAD
                 ):
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                if args.action in {"check-synthesis-acceptance", "accept-failed-synthesis-usage"}:
+                    options = dict(
+                        account_id=settings.agent_paper_account_id,
+                        cycle_id=args.cycle_id,
+                        run_id=args.run_id,
+                        now=now,
+                        repo_root=args.repo_root,
+                        env_file=args.env_file,
+                    )
+                    if args.action == "check-synthesis-acceptance":
+                        synthesis_receipt = await check_failed_synthesis_usage(session, **options)
+                    else:
+                        synthesis_receipt = await accept_failed_synthesis_usage(
+                            session, **options, accept_unknown_usage=args.accept_unknown_usage
+                        )
+                    _require_maintenance_code(args.repo_root, settings.release_revision)
+                    return synthesis_receipt
                 if args.action == "check-preparation-acceptance":
                     checked = await check_current_unknown(
                         session,
@@ -437,7 +471,12 @@ def main(argv: list[str] | None = None) -> int:
             "error_code": code,
             "execution_locked": True,
         }
-        if isinstance(error, PreparationCloseDiagnosticError | ResearchProcessDiagnosticError):
+        if isinstance(
+            error,
+            PreparationCloseDiagnosticError
+            | ResearchProcessDiagnosticError
+            | SynthesisUsageDiagnosticError,
+        ):
             report.update(error.safe_diagnostics())
         report.update(_operation_fields(error))
         print(json.dumps(report))

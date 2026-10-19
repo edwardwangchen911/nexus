@@ -511,6 +511,9 @@ async def run_synthesis_job_once(
         run = await session.get(AgentPortfolioSynthesisRunRecord, run_id, with_for_update=True)
         if run is None:
             raise ValueError("PORTFOLIO_SYNTHESIS_RUN_INVALID")
+        from nexus.paper.synthesis_usage_acceptance import require_synthesis_not_accepted
+
+        await require_synthesis_not_accepted(session, run_id)
         frozen = await load_frozen_synthesis_authority(session, run)
         from nexus.paper.economic_cycle import read_economic_cycle
 

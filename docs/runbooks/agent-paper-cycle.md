@@ -832,3 +832,38 @@ Job 和一个组合 Job，再调用正常组合收尾。相同来源/归档不�
 下一次模型研究均已通过。不得伪造将来时间、修改原失败或补造行情来通过下一轮准入。
 有新增来源事实时 0081 拒绝降级；回退保留数据并使用兼容消费者。本地迁移和此入口
 不包含任何正式服务更新授权。
+
+### 失败组合调用的未知用量接受（本地候选，未部署）
+
+这是一项显式维护动作，只解除精确失败 synthesis 对后续调度的历史占用；不是费用结算、
+研究合格、组合成功、合理不交易或执行许可。原 Run/Job/Output、unknown 用量和全部
+reserved 预算保持不变。当前预算核算仍包含原预留，新请求仍可能因额度不足被拒绝。
+
+正常入口（须在批准部署及真实处置后使用；本地隔离验证不授予真实写入权限）：
+
+```bash
+uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-file infra/.env.local check-synthesis-acceptance --cycle-id <UUID> --run-id <UUID>
+uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-file infra/.env.local accept-failed-synthesis-usage --cycle-id <UUID> --run-id <UUID> --accept-unknown-usage
+```
+
+只接受原生周期中唯一 failed synthesis、单次失败 Job/attempt、failed/null intent Output、
+未知用量和完整 reserved 绑定；关联研究必须按原合同成功终态并已结算，partial 不升级。
+周期必须已 unavailable/failed 且无本轮策略决策及其下游执行产品。旧手动请求若仍 active、
+其他任务、有效租约、订单或计划占用存在，仍拒绝，不顺带处置其他记录。
+
+首次接受重验代码/schema、数据库时间、相关生产者退出；生命周期互斥、账户锁、审计锁和
+关联表 NOWAIT 写入围栏保持到提交。check 不追加审计，结果不构成稍后 accept 的授权证据。
+只追加 `paper.synthesis.unknown_usage_accepted` 审计，之后再走正常账户准入作提交前校验；
+任一失败整体回滚。固定诊断区分历史绑定、接受证明及写入者冲突，不输出原异常正文。
+
+审计读回绑定旧周期、模型/提示/输入、完整输出/任务/attempt/lease/预算关联集合及原时间。
+迟到事实、哈希或审计变化使证明失效；审计不可删除、改写或换键重新接受。合法新周期的任务、
+预算及新审计不使该历史证明自我失效。重复接受只验证原证明并返回原结果，不要求停止合法
+新生产者。无论证明有效与否，旧调用均由终态、非重试策略、唯一身份、fencing 和接受墓碑拒绝。
+
+管理详情只读展示“组合失败／用量未知／未执行”及未接受、已接受或证明失效；不得展示为
+completed 或有依据的不调整。只对调度历史检查启用接受证明，其他财务结算和输出资格检查
+继续拒绝。页面和 check 不采集、不调用模型、不释放资源。
+
+无迁移。代码回退不得删除新审计或改动历史数据；旧消费者不认识该审计时仍会阻断下一轮，
+因此不能将回退代码描述为恢复调度。需要运行生效时须单独批准部署及具体真实处置。

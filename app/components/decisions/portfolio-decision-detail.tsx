@@ -7,6 +7,7 @@ type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
 const actions = { include: "拟纳入", increase: "拟增加", reduce: "拟降低", exit: "拟退出", maintain: "维持目标", defer: "暂缓" };
 export function PortfolioDecisionDetail({ detail, paperHref }: { detail: Detail; paperHref?: string }): React.ReactElement {
   const { active_target: active, proposal, synthesis, blocker, activation_result: activation } = detail;
+  const usageDisposition = detail.synthesis_usage_disposition;
   const plan = detail.blocking_plan ?? detail.plan_summary;
   const blocked = blocker?.category === "resource_occupied" || activation?.result_code === "TARGET_ACTIVATION_BLOCKED";
   const proposalState = blocked ? "未生效 · 等待重新校验" : activation?.target_version_id ? "已完成生效校验" : "未生效";
@@ -15,6 +16,11 @@ export function PortfolioDecisionDetail({ detail, paperHref }: { detail: Detail;
     || (detail.cycle.status === "completed" && detail.cycle.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED")
     ? cycleDecisionPresentation(detail.cycle).summary : null;
   return <div className="portfolio-decision pm-stack">
+    {usageDisposition ? <aside className="pm-panel" role="note" aria-label="组合用量历史处置">
+      <h2>组合失败／用量未知／未执行</h2>
+      <p>{({ accepted: "历史未知已接受，预算保留", not_accepted: "历史未知尚未接受，预算保留", invalid: "历史接受证明失效，预算保留" })[usageDisposition.status]}。</p>
+      <p>这里只记录本次历史用量未知的处置，不改变原失败结果。后续周期仍须独立通过准入校验。</p>
+    </aside> : null}
     {detail.historical_source ? <aside role="note" aria-label="历史归档来源">
       <strong>历史研究归档 · 仅暂缓展示，不可执行</strong>
       <p>保留原研究缺口；本次只接入归档，没有重新调用模型。</p>
