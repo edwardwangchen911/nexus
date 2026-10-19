@@ -413,8 +413,13 @@ async def read_fred_observations(
     observation_ids: tuple[UUID, ...] | None = None,
     series: frozenset[str] | None = None,
     vintage: date | None = None,
+    latest_per_series: bool = False,
 ) -> dict[UUID, FredResearchObservation]:
-    """Exact optional evidence scope; invalid optional originals never hide unrelated research."""
+    """Read verified optional originals within the exact evidence/time scope.
+
+    Snapshot callers scan in batches and retain the latest valid source rank per
+    series, including all ties. Other callers keep their existing bounded read.
+    """
     require_utc(as_of)
     if evidence_ids == () or observation_ids == () or series == frozenset():
         return {}
@@ -449,6 +454,36 @@ async def read_fred_observations(
             MacroObservation.real_time_start == vintage,
             MacroObservation.real_time_end == vintage,
         )
+    if latest_per_series:
+        # Snapshot context needs every series, not the first 512 daily observations.
+        # Stream visible candidates and rank only after original verification. Keep
+        # every latest tie so the context selector can reject conflicting facts.
+        groups: dict[str, dict[UUID, FredResearchObservation]] = {}
+        ranks: dict[str, tuple[date, date, datetime]] = {}
+        stream = await session.stream(query.execution_options(yield_per=512))
+        try:
+            async for row, ref, snapshot in stream:
+                try:
+                    item = await _read_one(session, row, ref, snapshot, as_of)
+                except (
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    AttributeError,
+                    StopIteration,
+                    OverflowError,
+                ):
+                    continue
+                rank = (item.observed_on, item.vintage, item.received_at)
+                previous = ranks.get(item.series)
+                if previous is None or rank > previous:
+                    ranks[item.series] = rank
+                    groups[item.series] = {item.evidence_ref_id: item}
+                elif rank == previous:
+                    groups[item.series][item.evidence_ref_id] = item
+        finally:
+            await stream.close()
+        return {key: value for group in groups.values() for key, value in group.items()}
     rows = (await session.execute(query.limit(512))).all()
     result = {}
     for row, ref, snapshot in rows:

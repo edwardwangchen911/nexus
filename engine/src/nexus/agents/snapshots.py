@@ -170,6 +170,7 @@ async def prepare_research_snapshot(
             as_of=as_of,
             series=macro_series,
             vintage=macro_vintage,
+            latest_per_series=True,
         )
     )
     if macro_ids:
