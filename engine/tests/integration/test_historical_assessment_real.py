@@ -26,10 +26,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 @pytest.mark.asyncio
 async def test_real_archive_normal_jobs_pages_closeout_and_next_admission(monkeypatch):
-    raw = os.environ.get("NEXUS_REAL_ASSESSMENT_ARCHIVE")
+    observation = os.environ.get("NEXUS_REAL_SYNTHESIS_OBSERVATION")
+    raw = observation or os.environ.get("NEXUS_REAL_ASSESSMENT_ARCHIVE")
     if not raw:
         pytest.skip("explicit protected real archive required; never synthesizes its contents")
-    path = Path(raw)
+    path = Path(raw) / "result.json" if observation else Path(raw)
     original = hashlib.sha256(path.read_bytes()).hexdigest()
     root = Path(__file__).resolve().parents[3]
     repo = Path(os.environ["NEXUS_REAL_SOURCE_REPO"])
@@ -83,7 +84,7 @@ async def test_real_archive_normal_jobs_pages_closeout_and_next_admission(monkey
                 "python",
                 "-m",
                 "nexus.ops.historical_assessment",
-                "--case-dir",
+                "--observation-dir" if observation else "--case-dir",
                 str(path.parent),
                 "--source-repo",
                 str(repo),
@@ -137,7 +138,13 @@ async def test_real_archive_normal_jobs_pages_closeout_and_next_admission(monkey
 
             with pytest.raises(ValueError, match="ARCHIVE_ALREADY_CONSUMED"):
                 async with sessions.begin() as session:
-                    await admit_archive(session, read_archive(path))
+                    if observation:
+                        from nexus.ops.synthesis_observation import read_observation
+
+                        archive = read_observation(path.parent)
+                    else:
+                        archive = read_archive(path)
+                    await admit_archive(session, archive)
             async with sessions.begin() as session:
                 with pytest.raises(ValueError, match="ARCHIVE_SOURCE_BINDING_INVALID"):
                     await validate_source(
