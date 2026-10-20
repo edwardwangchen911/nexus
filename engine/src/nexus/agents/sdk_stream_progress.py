@@ -1,6 +1,7 @@
 """Bounded metadata observer around the pinned SDK's existing turn reader.
 
-Never consume a second stream, inspect payloads, retain notification objects,
+Never consume a second stream or retain notification objects. Read only typed
+terminal status/error tags and token counts, never text or account fields,
 or alter SDK collection, cancellation, retry or cleanup behavior.
 """
 
@@ -9,7 +10,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from time import perf_counter
 
-from nexus.agents.committee import SdkStreamProgress
+from openai_codex.generated.v2_all import (
+    CodexErrorInfoValue,
+    ThreadTokenUsageUpdatedNotification,
+    TurnCompletedNotification,
+)
+from openai_codex.models import Notification
+
+from nexus.agents.committee import SdkFailureFacts, SdkStreamProgress
+from nexus.agents.responses_budget import UsageSnapshot
 
 _PROGRESS_METHODS = frozenset(
     {
@@ -22,6 +31,9 @@ _PROGRESS_METHODS = frozenset(
 
 @dataclass
 class SdkStreamObserver:
+    measured_usage: UsageSnapshot | None = None
+    _reported_usage: UsageSnapshot | None = None
+    failure_facts: SdkFailureFacts | None = None
     available: bool = False
     notifications: int = 0
     progress_notifications: int = 0
@@ -36,7 +48,7 @@ class SdkStreamObserver:
     _started: float = field(default_factory=lambda: perf_counter())
     _active: bool = False
 
-    def observe(self, event: object) -> None:
+    def observe(self, event: object, turn_id: str | None = None) -> None:
         if not self._active:
             return
         elapsed = max(0, int((perf_counter() - self._started) * 1000))
@@ -55,7 +67,59 @@ class SdkStreamObserver:
                 self.reasoning_notifications = min(1000000, self.reasoning_notifications + 1)
                 if self.first_reasoning_ms is None:
                     self.first_reasoning_ms = elapsed
+        if method == "thread/tokenUsage/updated" and isinstance(event, Notification):
+            payload = event.payload
+            if (
+                isinstance(payload, ThreadTokenUsageUpdatedNotification)
+                and payload.turn_id == turn_id
+            ):
+                usage = payload.token_usage.total
+                if (
+                    type(usage.input_tokens) is int
+                    and type(usage.output_tokens) is int
+                    and min(usage.input_tokens, usage.output_tokens) >= 0
+                ):
+                    self._reported_usage = UsageSnapshot(
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        provider_calls=1,
+                    )
         if method == "turn/completed":
+            terminal = event.payload if isinstance(event, Notification) else None
+            if isinstance(terminal, TurnCompletedNotification) and terminal.turn.id == turn_id:
+                turn = terminal.turn
+                self.measured_usage = self._reported_usage
+                reason = None
+                if turn.error is not None and turn.error.codex_error_info is not None:
+                    info = turn.error.codex_error_info.root
+                    if isinstance(info, CodexErrorInfoValue):
+                        reason = info.value
+                    else:
+                        # Only the typed union discriminator is retained, never its body.
+                        for key in (
+                            "httpConnectionFailed",
+                            "responseStreamConnectionFailed",
+                            "responseStreamDisconnected",
+                            "responseTooManyFailedAttempts",
+                            "activeTurnNotSteerable",
+                        ):
+                            if key in type(info).model_fields:
+                                reason = key
+                                break
+                        if reason is None:
+                            for field in type(info).model_fields.values():
+                                if field.alias in (
+                                    "httpConnectionFailed",
+                                    "responseStreamConnectionFailed",
+                                    "responseStreamDisconnected",
+                                    "responseTooManyFailedAttempts",
+                                    "activeTurnNotSteerable",
+                                ):
+                                    reason = field.alias
+                                    break
+                self.failure_facts = SdkFailureFacts.model_validate(
+                    {"terminal_status": turn.status.value, "provider_reason": reason}
+                )
             self.terminal_notification_seen = True
             if self.terminal_notification_ms is None:
                 self.terminal_notification_ms = elapsed
@@ -94,7 +158,7 @@ def observe_sdk_notifications(client: object, observer: SdkStreamObserver | None
 
     async def observed_reader(turn_id: str) -> object:
         event = await reader(turn_id)
-        observer.observe(event)
+        observer.observe(event, turn_id)
         return event
 
     transport.next_turn_notification = observed_reader

@@ -165,6 +165,41 @@ class StageInvocationTiming(BaseModel):
         return serialized
 
 
+type SdkExceptionKind = Literal[
+    "transport_closed", "rpc_error", "runtime_error", "timeout", "validation_error", "other"
+]
+
+
+class SdkFailureFacts(BaseModel):
+    """Allowlisted metadata only; no exception messages or provider response bodies."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    exception_kind: SdkExceptionKind = "other"
+    cleanup_kind: SdkExceptionKind | None = None
+    terminal_status: Literal["completed", "failed", "interrupted", "inProgress"] | None = None
+    provider_reason: (
+        Literal[
+            "contextWindowExceeded",
+            "sessionBudgetExceeded",
+            "usageLimitExceeded",
+            "serverOverloaded",
+            "cyberPolicy",
+            "internalServerError",
+            "unauthorized",
+            "badRequest",
+            "threadRollbackFailed",
+            "sandboxError",
+            "other",
+            "httpConnectionFailed",
+            "responseStreamConnectionFailed",
+            "responseStreamDisconnected",
+            "responseTooManyFailedAttempts",
+            "activeTurnNotSteerable",
+        ]
+        | None
+    ) = None
+
+
 class StageFailureDiagnostic(BaseModel):
     """Safe local terminal metadata, never response text or exception context."""
 
@@ -177,6 +212,7 @@ class StageFailureDiagnostic(BaseModel):
     invocation_kind: InvocationKind | None = None
     timeout_source: TimeoutSource | None = None
     timing: StageInvocationTiming | None = None
+    failure_facts: SdkFailureFacts | None = None
     validation_kind: (
         Literal[
             "schema_validation",
@@ -209,6 +245,7 @@ class StageFailureDiagnostic(BaseModel):
             or self.invocation_kind is not None
             or self.timing is not None
             or self.timeout_source is not None
+            or self.failure_facts is not None
         ):
             raise ValueError("VALIDATION_DIAGNOSTIC_INVALID")
         return self
@@ -216,6 +253,8 @@ class StageFailureDiagnostic(BaseModel):
     @model_serializer(mode="wrap")
     def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
         payload = cast(dict[str, object], handler(self))
+        if self.failure_facts is None:
+            payload.pop("failure_facts", None)
         if self.timeout_source is None:
             payload.pop("timeout_source", None)
         if self.timing is None:

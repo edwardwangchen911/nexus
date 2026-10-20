@@ -703,9 +703,19 @@ class StagedCodexCommittee(CodexCommittee):
                     payload, output_model=output_model, **invocation_options
                 )
         except Exception as error:
+            if isinstance(error, CodexInvocationError) and error.usage is not None:
+                self.usage = UsageSnapshot(
+                    input_tokens=self.usage.input_tokens + error.usage.input_tokens,
+                    output_tokens=self.usage.output_tokens + error.usage.output_tokens,
+                    provider_calls=self.usage.provider_calls,
+                )
+                self.failure_reason = "model_execution_failed"
             self.failure_diagnostic = StageFailureDiagnostic(
                 stage=stage,
                 boundary="invocation",
+                failure_facts=error.failure_facts
+                if isinstance(error, CodexInvocationError)
+                else None,
                 response_hash=None,
                 invocation_phase=error.phase
                 if isinstance(error, CodexInvocationError)
