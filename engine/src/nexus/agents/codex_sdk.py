@@ -9,14 +9,14 @@ import hashlib
 import json
 import math
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
-from typing import Literal, cast, get_args
+from typing import Any, Literal, cast, get_args
 
 from codex_cli_bin import bundled_codex_path  # type: ignore[import-untyped]
 from openai import pydantic_function_tool
@@ -137,6 +137,9 @@ class _InvocationState:
     stage_deadline: float | None = None
     phase_elapsed_ms: dict[InvocationPhase, int] = field(default_factory=dict)
     stream_observer: SdkStreamObserver | None = None
+    cleanup_deadline: float | None = None
+    on_usage: Callable[[UsageSnapshot], None] | None = None
+    measured_usage: UsageSnapshot | None = None
 
 
 class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
@@ -165,6 +168,84 @@ async def _close_sdk_client(client: AsyncCodex) -> None:
         close_task.cancel()
 
 
+async def _close_portfolio_client(
+    client: AsyncCodex, run_task: asyncio.Task[object] | None, *, deadline: float
+) -> None:
+    """Close and observe within one fixed envelope, despite repeated parent cancellation."""
+    loop = asyncio.get_running_loop()
+    sync = getattr(getattr(client, "_client", None), "_sync", None)
+    # SDK close clears _proc before waiting: retain the exact owned child so a
+    # stalled close cannot hide it from force-stop/observation.
+    process = getattr(sync, "_proc", None)
+
+    async def finish() -> None:
+        close_task = asyncio.create_task(client.close())
+        failure: BaseException | None = None
+        # Leave one second for force-stop and stream observation. Never create
+        # a fresh seven-second cleanup allowance after a slow work phase.
+        close_wait = max(0.0, min(CLIENT_CLOSE_TIMEOUT_SECONDS, deadline - loop.time() - 1))
+        done, _ = await asyncio.wait((close_task,), timeout=close_wait)
+        if close_task in done:
+            try:
+                await close_task
+            except BaseException as error:
+                failure = error
+        else:
+            failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase="client_close")
+        if (
+            close_task not in done
+            or failure is not None
+            or (run_task is not None and not run_task.done())
+        ):
+            if process is not None and process.poll() is None:
+                with suppress(Exception):
+                    process.kill()
+            # Reader failure normally wakes these queues. Explicitly wake them
+            # on forced shutdown before stream cancellation, including the
+            # SDK's to_thread(queue.get) waiter.
+            router = getattr(sync, "_router", None)
+            if router is not None:
+                router.fail_all(ConnectionError("SDK client stopped"))
+        tasks: set[asyncio.Task[Any]] = {close_task}
+        if run_task is not None:
+            tasks.add(run_task)
+        # Closing/killing the client wakes the SDK's registered notification
+        # queue before its streaming task is cancelled (it may use to_thread).
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time() - 0.25))
+        for task in pending:
+            task.cancel()
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=max(0.0, deadline - loop.time()))
+        for task in tasks - pending:
+            with suppress(BaseException):
+                task.result()
+        while process is not None and process.poll() is None and loop.time() < deadline:
+            await asyncio.sleep(min(0.01, max(0.0, deadline - loop.time())))
+        if pending:
+            raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="client_close")
+        if process is not None and process.poll() is None:
+            raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="client_close")
+        if failure is not None:
+            raise failure
+
+    cleanup = asyncio.create_task(finish())
+    parent = asyncio.current_task()
+    cancelled = parent is not None and parent.cancelling() > 0
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+        except BaseException:
+            break
+    if cancelled:
+        # Retrieve a possible cleanup failure, but preserve parent cancellation.
+        with suppress(BaseException):
+            cleanup.result()
+        raise asyncio.CancelledError
+    cleanup.result()
+
+
 @contextmanager
 def _invocation_boundary(
     phase: InvocationPhase, *, state: _InvocationState | None = None
@@ -176,18 +257,22 @@ def _invocation_boundary(
         if state is not None:
             error.provider_call_started = state.provider_call_started
             error.phase_elapsed_ms = dict(state.phase_elapsed_ms)
+            if state.measured_usage is not None:
+                error.usage = state.measured_usage
         raise
     except TimeoutError:
         raise _CodexInvocationTimeout(
             "CODEX_TIMEOUT",
             phase=phase,
             provider_call_started=None if state is None else state.provider_call_started,
+            usage=None if state is None else state.measured_usage,
         ) from None
     except Exception:
         raise CodexInvocationError(
             "CODEX_UNEXPECTED_EXCEPTION",
             phase=phase,
             provider_call_started=None if state is None else state.provider_call_started,
+            usage=None if state is None else state.measured_usage,
         ) from None
     finally:
         if state is not None and phase != "preflight":
@@ -440,9 +525,34 @@ async def invoke_codex_portfolio(
     *,
     output_model: type[BaseModel] = _Batch,
     max_wire_bytes: int = 55808,
+    lifecycle_version: str | None = None,
+    deadline_at: float | None = None,
+    cleanup_deadline_at: float | None = None,
+    on_usage: Callable[[UsageSnapshot], None] | None = None,
 ) -> tuple[str, UsageSnapshot]:
     """Run one portfolio turn without changing the default research deadline."""
-    state = _InvocationState()
+    if lifecycle_version is None:
+        if deadline_at is not None or cleanup_deadline_at is not None or on_usage is not None:
+            raise ValueError("CODEX_PORTFOLIO_LIFECYCLE_INVALID")
+    else:
+        now = asyncio.get_running_loop().time()
+        if (
+            lifecycle_version != "portfolio_synthesis_job_v2"
+            or type(deadline_at) not in {int, float}
+            or type(cleanup_deadline_at) not in {int, float}
+            or not math.isfinite(cast(float, deadline_at))
+            or not math.isfinite(cast(float, cleanup_deadline_at))
+            or not 0 < cast(float, deadline_at) - now <= 83
+            or not cast(float, deadline_at)
+            < cast(float, cleanup_deadline_at)
+            <= cast(float, deadline_at) + 7
+            or on_usage is not None
+            and not callable(on_usage)
+        ):
+            raise ValueError("CODEX_PORTFOLIO_LIFECYCLE_INVALID")
+    state = _InvocationState(
+        stage_deadline=deadline_at, cleanup_deadline=cleanup_deadline_at, on_usage=on_usage
+    )
     with _invocation_boundary("preflight", state=state):
         return await _invoke_codex(
             payload,
@@ -533,18 +643,66 @@ async def _invoke_codex(
                 ):
                     # Mark before entering thread.run; any later cleanup/stream
                     # failure must retain uncertainty even without reported usage.
+                    if (
+                        invocation_state.cleanup_deadline is not None
+                        and stage_deadline is not None
+                        and asyncio.get_running_loop().time() >= stage_deadline
+                    ):
+                        failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
+                        failure.timeout_source = "stage_deadline"
+                        raise failure
                     invocation_state.provider_call_started = True
+
+                    async def run_turn() -> Any:
+                        response = await thread.run(
+                            wire,
+                            output_schema=output_schema,
+                            approval_mode=ApprovalMode.deny_all,
+                            sandbox=Sandbox.read_only,
+                        )
+                        # Store in the SDK task itself: a deadline/cancellation
+                        # may win the race with the parent's shield result.
+                        if (
+                            invocation_state.cleanup_deadline is not None
+                            and response.usage is not None
+                        ):
+                            reported = response.usage.total
+                            if (
+                                type(reported.input_tokens) is int
+                                and type(reported.output_tokens) is int
+                                and reported.input_tokens >= 0
+                                and reported.output_tokens >= 0
+                            ):
+                                invocation_state.measured_usage = UsageSnapshot(
+                                    input_tokens=reported.input_tokens,
+                                    output_tokens=reported.output_tokens,
+                                    provider_calls=1,
+                                )
+                                if invocation_state.on_usage is not None:
+                                    invocation_state.on_usage(invocation_state.measured_usage)
+                        return response
+
                     run_task = asyncio.create_task(
-                        thread.run(
+                        run_turn()
+                        if invocation_state.cleanup_deadline is not None
+                        else thread.run(
                             wire,
                             output_schema=output_schema,
                             approval_mode=ApprovalMode.deny_all,
                             sandbox=Sandbox.read_only,
                         )
                     )
-                    # SDK streaming blocks in to_thread(queue.get). Keep its queue registered
-                    # until close wakes the reader; cancellation first would orphan the waiter.
+                    # Keep its queue registered until close wakes the reader;
+                    # cancellation first would orphan the to_thread waiter.
                     result = await asyncio.shield(run_task)
+                    if (
+                        invocation_state.cleanup_deadline is not None
+                        and stage_deadline is not None
+                        and asyncio.get_running_loop().time() >= stage_deadline
+                    ):
+                        failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
+                        failure.timeout_source = "stage_deadline"
+                        raise failure
         except TimeoutError as error:
             if invocation_timer.expired():
                 failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
@@ -556,9 +714,15 @@ async def _invoke_codex(
                 raise
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
         finally:
-            with _invocation_boundary("client_close", state=invocation_state):
-                await _close_sdk_client(client)
-            if run_task is not None:
+            if invocation_state.cleanup_deadline is not None:
+                with _invocation_boundary("client_close", state=invocation_state):
+                    await _close_portfolio_client(
+                        client, run_task, deadline=invocation_state.cleanup_deadline
+                    )
+            else:
+                with _invocation_boundary("client_close", state=invocation_state):
+                    await _close_sdk_client(client)
+            if run_task is not None and invocation_state.cleanup_deadline is None:
                 done, _ = await asyncio.wait((run_task,), timeout=1)
                 if run_task in done:
                     with suppress(Exception, asyncio.CancelledError):
@@ -568,8 +732,8 @@ async def _invoke_codex(
                     # SDK stream. The child process is already closed or killed here.
                     run_task.cancel()
     with _invocation_boundary("response_check", state=invocation_state):
-        measured_usage = None
-        if result.usage is not None:
+        measured_usage = invocation_state.measured_usage
+        if invocation_state.cleanup_deadline is None and result.usage is not None:
             reported = result.usage.total
             if reported.input_tokens >= 0 and reported.output_tokens >= 0:
                 measured_usage = UsageSnapshot(
