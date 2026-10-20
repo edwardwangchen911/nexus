@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
@@ -39,6 +40,12 @@ from nexus.agents.portfolio_synthesis_persistence import (
     persist_portfolio_synthesis_terminal,
 )
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.synthesis_lifecycle import (
+    BOUNDED_SYNTHESIS_JOB,
+    SYNTHESIS_JOB_VERSIONS,
+    SYNTHESIS_LEASE_SECONDS,
+    SynthesisDeadline,
+)
 from nexus.jobs.models import JOB_PRIORITIES, JobType, QueueName
 from nexus.jobs.repository import (
     ClaimedJob,
@@ -64,10 +71,23 @@ from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job
 
 
+class SynthesisHandlerResultUnknown(ValueError):
+    """An interrupted handler needs persisted-state readback, never replay."""
+
+    def __init__(self) -> None:
+        super().__init__("PORTFOLIO_SYNTHESIS_HANDLER_RESULT_UNKNOWN")
+
+
 class SynthesisTransport(Protocol):
     def supports(self, model: AgentModelConfigRecord) -> bool: ...
 
-    async def invoke(self, payload: Mapping[str, object]) -> tuple[str, UsageSnapshot]: ...
+    async def invoke(
+        self,
+        payload: Mapping[str, object],
+        *,
+        lifecycle: SynthesisDeadline | None = None,
+        on_usage: Callable[[UsageSnapshot], None] | None = None,
+    ) -> tuple[str, UsageSnapshot]: ...
 
 
 class CodexSynthesisTransport:
@@ -99,7 +119,25 @@ class CodexSynthesisTransport:
             and model.input_usd_per_million == model.output_usd_per_million == 0
         )
 
-    async def invoke(self, payload: Mapping[str, object]) -> tuple[str, UsageSnapshot]:
+    async def invoke(
+        self,
+        payload: Mapping[str, object],
+        *,
+        lifecycle: SynthesisDeadline | None = None,
+        on_usage: Callable[[UsageSnapshot], None] | None = None,
+    ) -> tuple[str, UsageSnapshot]:
+        if lifecycle is not None:
+            if not self._formal_stage_capacity:
+                raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
+            return await invoke_codex_portfolio(
+                project_portfolio_payload(payload),
+                output_model=PortfolioSynthesisIntentV1,
+                max_wire_bytes=64000,
+                lifecycle_version=BOUNDED_SYNTHESIS_JOB,
+                deadline_at=lifecycle.work_at,
+                cleanup_deadline_at=lifecycle.cleanup_at,
+                on_usage=on_usage,
+            )
         return await invoke_codex_portfolio(
             project_portfolio_payload(payload),
             output_model=PortfolioSynthesisIntentV1,
@@ -214,14 +252,22 @@ async def candidate_synthesis_job_qualified(
 
 
 async def formal_synthesis_job_qualified(
-    session: AsyncSession, job: Job, *, now: datetime, claimed: bool = False
+    session: AsyncSession,
+    job: Job,
+    *,
+    now: datetime,
+    claimed: bool = False,
+    expired_recovery: bool = False,
 ) -> bool:
     """Verify frozen formal synthesis authority under the selected Job lock."""
     if (
         type(claimed) is not bool
+        or type(expired_recovery) is not bool
+        or expired_recovery
+        and not claimed
         or job.job_type != JobType.AGENT_PORTFOLIO_SYNTHESIS.value
         or job.queue != QueueName.GENERAL.value
-        or job.schema_version != "portfolio_synthesis_job_v1"
+        or job.schema_version not in SYNTHESIS_JOB_VERSIONS
         or job.priority != JOB_PRIORITIES[JobType.AGENT_PORTFOLIO_SYNTHESIS]
         or job.retry_policy != "never"
         or job.max_attempts != 1
@@ -242,8 +288,15 @@ async def formal_synthesis_job_qualified(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if run is None or run.status != "prepared":
+    if run is None or run.status != ("running" if expired_recovery else "prepared"):
         return False
+    if expired_recovery:
+        # Historical identity proof only; the caller separately fences actual lease expiry.
+        # This timestamp must never grant a new execution permission.
+        try:
+            now = (await load_frozen_synthesis_authority(session, run)).admitted_at
+        except ValueError:
+            return False
     model = await session.scalar(
         select(AgentModelConfigRecord)
         .where(AgentModelConfigRecord.id == run.model_config_id)
@@ -413,6 +466,42 @@ async def run_synthesis_job_once(
     job_ids: tuple[UUID, ...] = (),
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    preclaim: Callable[[], Awaitable[None]] | None = None,
+) -> bool:
+    """Bound the formal handler from before claim through terminal commit.
+
+    A timeout can race COMMIT. Never infer rollback or write a replacement terminal;
+    the caller receives UNKNOWN and normal exact-job readback/recovery resolves it.
+    """
+    lifecycle = SynthesisDeadline(asyncio.get_running_loop().time())
+    try:
+        async with asyncio.timeout_at(lifecycle.handler_at if formal_stage_capacity else None):
+            if preclaim is not None:
+                await preclaim()
+            return await _run_synthesis_job_once(
+                factory,
+                transport=transport,
+                worker_id=worker_id,
+                clock=clock,
+                job_ids=job_ids,
+                candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
+                lifecycle=lifecycle,
+            )
+    except TimeoutError as error:
+        raise SynthesisHandlerResultUnknown() from error
+
+
+async def _run_synthesis_job_once(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    transport: SynthesisTransport,
+    worker_id: str,
+    clock: Callable[[], datetime],
+    job_ids: tuple[UUID, ...] = (),
+    candidate_stage_capacity: bool = False,
+    formal_stage_capacity: bool = False,
+    lifecycle: SynthesisDeadline | None = None,
 ) -> bool:
     """Dispatch only explicitly selected Jobs; persist running before any model I/O."""
     if type(formal_stage_capacity) is not bool or (
@@ -467,7 +556,7 @@ async def run_synthesis_job_once(
             queue=QueueName.GENERAL,
             worker_id=worker_id,
             now=clock(),
-            lease_seconds=120,
+            lease_seconds=SYNTHESIS_LEASE_SECONDS,
             job_types=(JobType.AGENT_PORTFOLIO_SYNTHESIS.value,),
             job_ids=job_ids,
             locked_job_guard=(
@@ -536,7 +625,7 @@ async def run_synthesis_job_once(
             or claim.max_attempts != 1
             or claim.retry_policy != "never"
             or claim.queue != QueueName.GENERAL.value
-            or claim.schema_version != "portfolio_synthesis_job_v1"
+            or claim.schema_version not in SYNTHESIS_JOB_VERSIONS
             or claim.priority != JOB_PRIORITIES[JobType.AGENT_PORTFOLIO_SYNTHESIS]
             or not claim.dependencies_satisfied
             or claim.dependency_result_code is not None
@@ -608,13 +697,28 @@ async def run_synthesis_job_once(
             input_hash = run.input_hash
         await _finish(factory, claim, run_id, input_hash, "failed", None, None, clock)
         return True
-    usage = None
+    usage: UsageSnapshot | None = None
+    cancelled = False
+
+    def retain_usage(observed: UsageSnapshot) -> None:
+        nonlocal usage
+        usage = observed
+
     intent = None
     status: Literal["completed", "abstained", "failed"] = "failed"
     pre_dispatch = False
     error_code = "PORTFOLIO_SYNTHESIS_FAILED"
     try:
-        raw, usage = await transport.invoke(payload)
+        if claim.schema_version == BOUNDED_SYNTHESIS_JOB:
+            if not formal_stage_capacity or lifecycle is None:
+                raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_INVALID")
+            if asyncio.get_running_loop().time() >= lifecycle.work_at:
+                raise CodexInvocationError(
+                    "CODEX_TIMEOUT", phase="preflight", provider_call_started=False
+                )
+            raw, usage = await transport.invoke(payload, lifecycle=lifecycle, on_usage=retain_usage)
+        else:
+            raw, usage = await transport.invoke(payload)
         if usage.input_tokens > limits[0] or usage.output_tokens > limits[1]:
             usage = None
             error_code = "PORTFOLIO_SYNTHESIS_TOKEN_LIMIT_EXCEEDED"
@@ -630,8 +734,21 @@ async def run_synthesis_job_once(
                 error_code = "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED"
                 raise ValueError(error_code)
         status = "completed"
+    except asyncio.CancelledError:
+        if (
+            claim.schema_version != BOUNDED_SYNTHESIS_JOB
+            or lifecycle is None
+            or asyncio.get_running_loop().time() >= lifecycle.handler_at
+        ):
+            raise
+        # The SDK has already bounded child cleanup and delivered any trusted usage.
+        # This remains under the original handler deadline; a second cancellation
+        # rolls back the pending write, leaving exact-job orphan recovery to read it.
+        cancelled = True
+        intent = None
+        error_code = "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"
     except CodexInvocationError as error:
-        usage = error.usage
+        usage = error.usage if error.usage is not None else usage
         pre_dispatch = usage is None and error.provider_call_started is False
         error_code = (
             "PORTFOLIO_SYNTHESIS_PRE_DISPATCH_" + error.phase.upper()
@@ -667,6 +784,8 @@ async def run_synthesis_job_once(
         pre_dispatch=pre_dispatch,
         error_code=error_code,
     )
+    if cancelled:
+        raise asyncio.CancelledError
     return True
 
 

@@ -542,7 +542,7 @@ async def invoke_codex_portfolio(
             or type(cleanup_deadline_at) not in {int, float}
             or not math.isfinite(cast(float, deadline_at))
             or not math.isfinite(cast(float, cleanup_deadline_at))
-            or not 0 < cast(float, deadline_at) - now <= 83
+            or cast(float, deadline_at) - now > 83
             or not cast(float, deadline_at)
             < cast(float, cleanup_deadline_at)
             <= cast(float, deadline_at) + 7
@@ -550,6 +550,10 @@ async def invoke_codex_portfolio(
             and not callable(on_usage)
         ):
             raise ValueError("CODEX_PORTFOLIO_LIFECYCLE_INVALID")
+        if cast(float, deadline_at) <= now:
+            raise _CodexInvocationTimeout(
+                "CODEX_TIMEOUT", phase="preflight", provider_call_started=False
+            )
     state = _InvocationState(
         stage_deadline=deadline_at, cleanup_deadline=cleanup_deadline_at, on_usage=on_usage
     )

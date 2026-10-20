@@ -10,6 +10,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.synthesis_lifecycle import SYNTHESIS_JOB_VERSIONS
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
 from nexus.audit.service import append_audit_event
 from nexus.domain.time import require_utc
@@ -319,7 +320,7 @@ async def _collect_proof(
             or job.manual_retry_count != 0
             or job.finished_at is None
             or job.finished_at > now
-            or job.status != ("failed" if synthesis else "succeeded")
+            or job.status not in ({"failed", "dead_letter"} if synthesis else {"succeeded"})
             or job.job_type
             not in ({"agent.portfolio_synthesis"} if synthesis else {"agent.paper.research"})
         ):
@@ -329,9 +330,13 @@ async def _collect_proof(
             or job.input_hash != run.input_hash
             or job.scope_kind != "portfolio"
             or job.scope_id != str(cycle.portfolio_id)
-            or job.schema_version != "portfolio_synthesis_job_v1"
+            or job.schema_version not in SYNTHESIS_JOB_VERSIONS
             or job.effective_at != run.decision_time
-            or job.last_error_code != "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"
+            or (job.status, job.last_error_code)
+            not in {
+                ("failed", "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"),
+                ("dead_letter", "LEASE_EXPIRED"),
+            }
             or job.job_key
             != canonical_job_key(
                 JobKeyV1(
@@ -353,7 +358,15 @@ async def _collect_proof(
         attempt, lease = attempts[0], leases[0]
         if (
             attempt.attempt_no != 1
-            or attempt.outcome != ("failed" if synthesis else "succeeded")
+            or attempt.outcome
+            != (
+                "lost"
+                if synthesis and job.status == "dead_letter"
+                else "failed"
+                if synthesis
+                else "succeeded"
+            )
+            or attempt.error_code != job.last_error_code
             or attempt.started_at != job.started_at
             or attempt.finished_at != job.finished_at
             or attempt.worker_id != lease.worker_id

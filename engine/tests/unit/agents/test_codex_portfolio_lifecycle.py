@@ -346,11 +346,16 @@ async def test_v2_rejects_expanded_or_expired_absolute_envelope(monkeypatch, kin
         "cleanup_long": (now + 80, now + 88),
         "cleanup_equal": (now + 80, now + 80),
     }[kind]
-    with pytest.raises(ValueError, match="CODEX_PORTFOLIO_LIFECYCLE_INVALID"):
+    with pytest.raises(
+        ValueError, match="CODEX_TIMEOUT" if kind == "past" else "CODEX_PORTFOLIO_LIFECYCLE_INVALID"
+    ) as caught:
         await codex_sdk.invoke_codex_portfolio(
             {},
             lifecycle_version="portfolio_synthesis_job_v2",
             deadline_at=work,
             cleanup_deadline_at=cleanup,
         )
+    if kind == "past":
+        assert caught.value.phase == "preflight"
+        assert caught.value.provider_call_started is False
     assert configs == []

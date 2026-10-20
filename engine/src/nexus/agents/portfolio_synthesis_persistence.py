@@ -32,6 +32,7 @@ from nexus.agents.portfolio_synthesis_contracts import (
     validate_portfolio_synthesis_intent,
 )
 from nexus.agents.synthesis import usage_cost
+from nexus.agents.synthesis_lifecycle import BOUNDED_SYNTHESIS_JOB, LEGACY_SYNTHESIS_JOB
 from nexus.domain.time import require_utc
 from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy
 from nexus.jobs.repository import enqueue_job
@@ -642,7 +643,11 @@ async def admit_portfolio_synthesis(
                 effective_at=cycle.decision_time,
                 input_hash=run.input_hash,
             ),
-            schema_version="portfolio_synthesis_job_v1",
+            schema_version=(
+                BOUNDED_SYNTHESIS_JOB
+                if formal_stage_capacity and economic is None
+                else LEGACY_SYNTHESIS_JOB
+            ),
             payload={"run_id": str(run.id)},
             queue=QueueName.GENERAL,
             retry_policy=RetryPolicy.NEVER,

@@ -43,7 +43,15 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     fault=None,
     recover_unknown=False,
     decision_delay=None,
+    sdk_lifecycle_case=None,
 ):
+    if sdk_lifecycle_case == "legacy_success":
+        # Reproduce an old immutable admission through its original v1 version;
+        # no historical row is rewritten and the frozen request stays identical.
+        monkeypatch.setattr(
+            "nexus.agents.portfolio_synthesis_persistence.BOUNDED_SYNTHESIS_JOB",
+            "portfolio_synthesis_job_v1",
+        )
     post_research_at = AT + (decision_delay or timedelta())
     formal = profile in {"formal_v9", "formal_v10", "formal_v11"}
     consumer_mode = (
@@ -442,18 +450,240 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 input_tokens=100, output_tokens=100, provider_calls=1
             )
 
-        monkeypatch.setattr(
-            "nexus.agents.portfolio_synthesis_worker.invoke_codex_portfolio", invoke_portfolio
-        )
+        if sdk_lifecycle_case is None:
+            monkeypatch.setattr(
+                "nexus.agents.portfolio_synthesis_worker.invoke_codex_portfolio", invoke_portfolio
+            )
+        else:
+            import asyncio
+
+            from nexus.agents import portfolio_synthesis_worker
+            from unit.agents.test_codex_sdk import _sdk
+            from unit.agents.test_portfolio_synthesis_worker import _decode_portfolio_view
+
+            assert formal and profile == "formal_v11"
+            assert synth_job.schema_version == (
+                "portfolio_synthesis_job_v1"
+                if sdk_lifecycle_case == "legacy_success"
+                else "portfolio_synthesis_job_v2"
+            )
+            client, thread, response, _ = _sdk(monkeypatch)
+            response.final_response = intent.model_dump_json()
+            response.usage.total.input_tokens = 100
+            response.usage.total.output_tokens = 100
+            timers = []
+            original_timeout_at = asyncio.timeout_at
+
+            def capture_deadline(deadline):
+                timer = original_timeout_at(deadline)
+                timers.append(timer)
+                return timer
+
+            monkeypatch.setattr(asyncio, "timeout_at", capture_deadline)
+            closed = asyncio.Event()
+            client.close.side_effect = closed.set
+            parent = [None]
+            original_invoke = portfolio_synthesis_worker.invoke_codex_portfolio
+            if sdk_lifecycle_case == "preparation_deadline":
+                # Simulate time already consumed before model dispatch without
+                # a fragile wall-clock wait or allowing another model budget.
+                deadline_type = portfolio_synthesis_worker.SynthesisDeadline
+                monkeypatch.setattr(
+                    portfolio_synthesis_worker,
+                    "SynthesisDeadline",
+                    lambda started_at: deadline_type(started_at - 84),
+                )
+
+            async def observed_invoke(payload, **kwargs):
+                parent[0] = asyncio.current_task()
+                if sdk_lifecycle_case == "legacy_success":
+                    assert "lifecycle_version" not in kwargs and "deadline_at" not in kwargs
+                    return await original_invoke(payload, **kwargs)
+                assert kwargs["lifecycle_version"] == "portfolio_synthesis_job_v2"
+                remaining = kwargs["deadline_at"] - asyncio.get_running_loop().time()
+                assert 0 < remaining <= 83
+                assert kwargs["cleanup_deadline_at"] - kwargs["deadline_at"] == 7
+                return await original_invoke(payload, **kwargs)
+
+            monkeypatch.setattr(
+                portfolio_synthesis_worker, "invoke_codex_portfolio", observed_invoke
+            )
+
+            async def turn(wire, **kwargs):
+                document = json.loads(wire)
+                assert document["input_hash"] == synth.input_hash
+                assert (
+                    len(_decode_portfolio_view(document["frozen_input"])["security_outputs"]) == 3
+                )
+                portfolio_calls.append(synth.input_hash)
+                if sdk_lifecycle_case == "timeout":
+                    # Expire the actual SDK deadline, not an interface stub.
+                    work = min(
+                        (timer for timer in timers if timer.when() is not None),
+                        key=lambda timer: timer.when(),
+                    )
+                    work.reschedule(asyncio.get_running_loop().time())
+                    await closed.wait()
+                    raise ConnectionError("isolated SDK stopped without response")
+                if sdk_lifecycle_case == "cancelled":
+                    parent[0].cancel()
+                    await closed.wait()
+                    raise ConnectionError("isolated SDK stopped without response")
+                if sdk_lifecycle_case == "incomplete":
+                    response.final_response = None
+                return response
+
+            thread.run.side_effect = turn
+            if sdk_lifecycle_case == "commit_ack_unknown":
+                original_finish = portfolio_synthesis_worker._finish
+
+                async def committed_but_acknowledgement_lost(*args, **kwargs):
+                    await original_finish(*args, **kwargs)
+                    raise TimeoutError("isolated lost commit acknowledgement")
+
+                monkeypatch.setattr(
+                    portfolio_synthesis_worker, "_finish", committed_but_acknowledgement_lost
+                )
+            if sdk_lifecycle_case == "cleanup_error":
+                client.close.side_effect = RuntimeError("isolated close failed")
+            elif sdk_lifecycle_case == "cancelled_known":
+
+                async def cancel_during_close():
+                    parent[0].cancel()
+
+                client.close.side_effect = cancel_during_close
         clock_at[0] = post_research_at + timedelta(seconds=3)
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             state = await _consume_manual_host_action(settings, "RUN_RESEARCH_JOB")
             assert state.research_job_id == synth_job.id
+        elif sdk_lifecycle_case == "commit_ack_unknown":
+            with pytest.raises(ValueError, match="^PORTFOLIO_SYNTHESIS_HANDLER_RESULT_UNKNOWN$"):
+                await run_portfolio_synthesis_worker_once(
+                    settings, job_ids=(synth_job.id,), **consumer_mode
+                )
+        elif sdk_lifecycle_case in {"cancelled", "cancelled_known"}:
+            with pytest.raises(asyncio.CancelledError):
+                await run_portfolio_synthesis_worker_once(
+                    settings, job_ids=(synth_job.id,), **consumer_mode
+                )
         else:
             assert await run_portfolio_synthesis_worker_once(
                 settings, job_ids=(synth_job.id,), **consumer_mode
             )
+        if sdk_lifecycle_case == "preparation_deadline":
+            from nexus.persistence.models.agents import (
+                AgentPortfolioSynthesisBudgetReservationRecord,
+            )
+
+            client.account.assert_not_awaited()
+            thread.run.assert_not_awaited()
+            client.close.assert_not_awaited()
+            async with sessions() as session:
+                terminal = await session.get(AgentPortfolioSynthesisRunRecord, synth.id)
+                job = await session.get(Job, synth_job.id)
+                reservation = await session.scalar(
+                    select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+                        AgentPortfolioSynthesisBudgetReservationRecord.run_id == synth.id
+                    )
+                )
+                assert terminal.status == job.status == "failed"
+                assert job.last_error_code == "PORTFOLIO_SYNTHESIS_PRE_DISPATCH_PREFLIGHT"
+                assert terminal.input_tokens is None
+                assert terminal.settled_cost_usd == 0
+                assert reservation.state == "released"
+                assert job.attempt_count == 1
+            assert portfolio_calls == []
+            assert not await run_portfolio_synthesis_worker_once(
+                settings, job_ids=(synth_job.id,), **consumer_mode
+            )
+            thread.run.assert_not_awaited()
+            return
+        if sdk_lifecycle_case is not None:
+            client.close.assert_awaited_once()
+            thread.run.assert_awaited_once()
+            assert portfolio_calls == [synth.input_hash]
+            if sdk_lifecycle_case not in {
+                "success",
+                "success_buy",
+                "legacy_success",
+                "commit_ack_unknown",
+            }:
+                from nexus.persistence.models.agents import (
+                    AgentPortfolioSynthesisBudgetReservationRecord,
+                    AgentPortfolioSynthesisOutputRecord,
+                )
+                from nexus.persistence.models.runtime import JobAttempt
+                from sqlalchemy import func
+
+                async with sessions() as session:
+                    terminal = await session.get(AgentPortfolioSynthesisRunRecord, synth.id)
+                    output = await session.scalar(
+                        select(AgentPortfolioSynthesisOutputRecord).where(
+                            AgentPortfolioSynthesisOutputRecord.run_id == synth.id
+                        )
+                    )
+                    reservation = await session.scalar(
+                        select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+                            AgentPortfolioSynthesisBudgetReservationRecord.run_id == synth.id
+                        )
+                    )
+                    job = await session.get(Job, synth_job.id)
+                    assert terminal.status == "failed"
+                    assert (
+                        terminal.input_tokens is None
+                        if sdk_lifecycle_case in {"timeout", "cancelled"}
+                        else terminal.input_tokens == 100
+                    )
+                    assert (
+                        reservation.state == "reserved"
+                        if terminal.input_tokens is None
+                        else reservation.state == "settled"
+                    )
+                    assert job.status == "failed"
+                    assert (
+                        await session.scalar(
+                            select(func.count())
+                            .select_from(JobAttempt)
+                            .where(JobAttempt.job_id == job.id)
+                        )
+                        == 1
+                    )
+                assert not await run_portfolio_synthesis_worker_once(
+                    settings, job_ids=(synth_job.id,), **consumer_mode
+                )
+                assert portfolio_calls == [synth.input_hash]
+                assert output.status == "failed"
+                from nexus.paper.manual_request import (
+                    require_manual_account_available,
+                    require_settled_account_cycle_history,
+                )
+
+                async with sessions.begin() as session:
+                    closed_cycle = await resume_schwab_agent_paper_cycle(
+                        session,
+                        cycle_id=result.cycle_id,
+                        idempotency_key="sdk-failure-closeout",
+                        now=post_research_at + timedelta(seconds=4),
+                        **consumer_mode,
+                    )
+                    assert closed_cycle.status == "unavailable"
+                    assert closed_cycle.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+                after_leases = post_research_at + timedelta(minutes=10)
+                async with sessions.begin() as session:
+                    if terminal.settled_cost_usd is None:
+                        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                            await require_manual_account_available(
+                                session, account_id=authority.account_id, now=after_leases
+                            )
+                    else:
+                        await require_manual_account_available(
+                            session, account_id=authority.account_id, now=after_leases
+                        )
+                        await require_settled_account_cycle_history(
+                            session, account_id=authority.account_id, now=after_leases
+                        )
+                return
         if fault in {"synthesis_unknown", "synthesis_preflight"}:
             assert manual is not None
             await _verify_synthesis_retry_refused(settings, sessions, synth.id, synth_job.id, fault)
@@ -1811,3 +2041,31 @@ async def _verify_http_reads(database_url, cycle_id, orders, api_now, *, formal=
     assert envelopes[1]["data_state"] == "READY" and len(envelopes[1]["positions"]) == 2
     assert envelopes[2]["cycle"]["cycle_id"] == str(cycle_id)
     assert envelopes[2]["cycle"]["execution_locked"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "legacy_success",
+        "preparation_deadline",
+        "success",
+        "success_buy",
+        "commit_ack_unknown",
+        "timeout",
+        "cancelled",
+        "incomplete",
+        "cleanup_error",
+        "cancelled_known",
+    ],
+)
+async def test_v11_formal_synthesis_sdk_lifecycle(migrated_database_url, monkeypatch, outcome):
+    """Formal immutable model/job authority, actual Worker and SDK; only SDK client doubled."""
+    await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
+        migrated_database_url,
+        monkeypatch,
+        3,
+        outcome == "success_buy",
+        "formal_v11",
+        sdk_lifecycle_case=outcome,
+    )
