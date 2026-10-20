@@ -155,11 +155,13 @@ async def run_portfolio_synthesis_worker_once(
             await require_candidate_database(
                 session, configured_database=make_url(cast(str, settings.database_url)).database
             )
-    if formal_stage_capacity:
+
+    async def formal_database_guard() -> None:
         async with factory() as session:
             actual = await session.scalar(select(func.current_database()))
             if actual != make_url(cast(str, settings.database_url)).database:
                 raise ValueError("CODEX_FORMAL_WORKER_DATABASE_INVALID")
+
     return await run_synthesis_job_once(
         factory,
         transport=CodexSynthesisTransport(formal_stage_capacity=True)
@@ -172,6 +174,7 @@ async def run_portfolio_synthesis_worker_once(
         job_ids=job_ids,
         candidate_stage_capacity=candidate_stage_capacity,
         formal_stage_capacity=formal_stage_capacity,
+        preclaim=formal_database_guard if formal_stage_capacity else None,
     )
 
 

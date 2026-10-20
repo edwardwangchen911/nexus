@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
+from nexus.agents.synthesis_lifecycle import SYNTHESIS_JOB_VERSIONS
 from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.models import (
@@ -455,7 +456,10 @@ async def claim_next_job(
         return None
     if (candidate_synthesis_profile or formal_synthesis_profile) and (
         job.job_type != JobType.AGENT_PORTFOLIO_SYNTHESIS.value
-        or job.schema_version != "portfolio_synthesis_job_v1"
+        or job.schema_version
+        not in (
+            SYNTHESIS_JOB_VERSIONS if formal_synthesis_profile else {"portfolio_synthesis_job_v1"}
+        )
         or job.max_attempts != 1
         or job.attempt_count != 0
         or job.manual_retry_count != 0

@@ -2231,7 +2231,8 @@ async def test_timeout_wakes_sdk_notification_thread_before_unregister(
 
 
 @pytest.mark.asyncio
-async def test_timeout_force_stops_sdk_process_when_close_stalls(monkeypatch):
+@pytest.mark.parametrize("portfolio", [False, True])
+async def test_timeout_force_stops_sdk_process_when_close_stalls(monkeypatch, portfolio):
     client, thread, _, _ = _sdk(monkeypatch)
     stopped = asyncio.Event()
 
@@ -2273,8 +2274,9 @@ async def test_timeout_force_stops_sdk_process_when_close_stalls(monkeypatch):
         asyncio, "timeout", lambda delay: original_timeout_at(asyncio.get_running_loop().time())
     )
     monkeypatch.setattr(asyncio, "wait", stalled_close_wait)
+    invoke = codex_sdk.invoke_codex_portfolio if portfolio else codex_sdk.invoke_codex
     with pytest.raises(TimeoutError):
-        await codex_sdk.invoke_codex({})
+        await invoke({})
     assert process.killed
     client.close.assert_awaited_once()
 

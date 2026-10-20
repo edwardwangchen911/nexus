@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from nexus.agents.codex_sdk import sdk_status
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.agents.snapshots import prepare_research_snapshot
+from nexus.agents.synthesis_lifecycle import SYNTHESIS_JOB_VERSIONS
 from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
 from nexus.jobs.models import JobType, QueueName
@@ -2099,6 +2100,18 @@ def _emit_agent_paper_unknown_failure(
                 failure_code="CODEX_CAPACITY_PRECLAIM_TIMEOUT",
                 failure_kind="timeout",
             )
+        from nexus.agents.portfolio_synthesis_worker import SynthesisHandlerResultUnknown
+
+        if (
+            stage == "execute"
+            and action == AgentPaperLoopAction.RUN_RESEARCH_JOB
+            and isinstance(error, SynthesisHandlerResultUnknown)
+        ):
+            payload.update(
+                failure_phase="portfolio_synthesis_handler",
+                failure_code="PORTFOLIO_SYNTHESIS_HANDLER_RESULT_UNKNOWN",
+                failure_kind="timeout",
+            )
         payload.update(preparation_failure_fields(error))
         print(
             json.dumps(payload, sort_keys=True),
@@ -4140,7 +4153,7 @@ async def _inspect_portfolio_batch(
         or job.scope_id != str(frozen.portfolio_id)
         or job.effective_at != frozen.decision_time
         or job.queue != QueueName.GENERAL.value
-        or job.schema_version != "portfolio_synthesis_job_v1"
+        or job.schema_version not in SYNTHESIS_JOB_VERSIONS
         or job.retry_policy != "never"
         or job.max_attempts != 1
         or job.manual_retry_count != 0

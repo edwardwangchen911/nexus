@@ -178,3 +178,79 @@ async def test_candidate_synthesis_claim_profile_requires_exact_locked_scope(cha
         match="CANDIDATE_SYNTHESIS_PROFILE_REQUIRES_LOCKED_SCOPE|LOCKED_JOB_GUARD_REQUIRES_EXACT_SCOPE",
     ):
         await claim_next_job(None, **(args | changed))
+
+
+@pytest.mark.asyncio
+async def test_formal_handler_deadline_includes_setup_and_does_not_fabricate_terminal(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from nexus.agents import portfolio_synthesis_worker as worker
+
+    timers = []
+    timeout_at = asyncio.timeout_at
+
+    def capture(at):
+        timer = timeout_at(at)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(asyncio, "timeout_at", capture)
+
+    async def blocked(*args, **kwargs):
+        lifecycle = kwargs["lifecycle"]
+        assert lifecycle.work_at - lifecycle.started_at == 83
+        assert lifecycle.cleanup_at - lifecycle.started_at == 90
+        assert lifecycle.handler_at - lifecycle.started_at == 105
+        timers[0].reschedule(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "_run_synthesis_job_once", blocked)
+    finish = AsyncMock()
+    monkeypatch.setattr(worker, "_finish", finish)
+    with pytest.raises(ValueError, match="^PORTFOLIO_SYNTHESIS_HANDLER_RESULT_UNKNOWN$"):
+        await worker.run_synthesis_job_once(
+            None, transport=None, worker_id="isolated", clock=None, formal_stage_capacity=True
+        )
+    finish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_commit_timeout_does_not_write_replacement_terminal(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from nexus.agents import portfolio_synthesis_worker as worker
+
+    async def uncertain(*args, **kwargs):
+        raise TimeoutError("commit acknowledgement unknown")
+
+    monkeypatch.setattr(worker, "_run_synthesis_job_once", uncertain)
+    finish = AsyncMock()
+    monkeypatch.setattr(worker, "_finish", finish)
+    with pytest.raises(ValueError, match="^PORTFOLIO_SYNTHESIS_HANDLER_RESULT_UNKNOWN$"):
+        await worker.run_synthesis_job_once(
+            None, transport=None, worker_id="isolated", clock=None, formal_stage_capacity=True
+        )
+    finish.assert_not_called()
+
+
+def test_handler_unknown_emits_only_fixed_safe_diagnostic(capsys):
+    import json
+    from datetime import UTC, datetime
+
+    from nexus.agents.portfolio_synthesis_worker import SynthesisHandlerResultUnknown
+    from nexus.ops.agent_paper_loop import AgentPaperLoopAction, _emit_agent_paper_unknown_failure
+
+    error = SynthesisHandlerResultUnknown()
+    error.__cause__ = TimeoutError("PRIVATE_COMMIT_DETAILS")
+    _emit_agent_paper_unknown_failure(
+        "execute",
+        datetime(2026, 10, 20, tzinfo=UTC),
+        action=AgentPaperLoopAction.RUN_RESEARCH_JOB,
+        error=error,
+    )
+    raw = capsys.readouterr().err
+    payload = json.loads(raw)
+    assert payload["failure_phase"] == "portfolio_synthesis_handler"
+    assert payload["failure_code"] == "PORTFOLIO_SYNTHESIS_HANDLER_RESULT_UNKNOWN"
+    assert "PRIVATE_COMMIT_DETAILS" not in raw

@@ -146,6 +146,9 @@ jobs:
             engine/tests/integration/test_manual_paper_api_pg.py \
             engine/tests/integration/test_manual_paper_job_binding_pg.py \
             engine/tests/integration/test_synthesis_usage_acceptance_pg.py \
+            engine/tests/integration/test_synthesis_sdk_lifecycle_pg.py \
+            engine/tests/integration/test_formal_synthesis_orphan_pg.py \
+            engine/tests/integration/test_candidate_multistock_path.py::test_v11_formal_synthesis_sdk_lifecycle \
             engine/tests/integration/test_current_preparation_recovery_pg.py \
             engine/tests/integration/test_agent_paper_identity_preparation.py \
             engine/tests/integration/test_manual_paper_cycle_pg.py \
@@ -259,6 +262,7 @@ jobs:
         run: >-
           uv run --package nexus-engine pytest -q --import-mode=importlib
           'engine/tests/integration/test_candidate_multistock_path.py::test_v11_manual_entry_to_result[buy-3]'
+          'engine/tests/integration/test_candidate_multistock_path.py::test_v11_formal_synthesis_sdk_lifecycle[success_buy]'
       - name: Verify unknown recovery through configured entry and Workspace
         env:
           NEXUS_ENV: test

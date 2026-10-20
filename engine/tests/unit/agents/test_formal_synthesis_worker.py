@@ -107,3 +107,45 @@ async def test_formal_claim_requires_locked_exact_scope_before_queries(change):
     with pytest.raises(ValueError, match="FORMAL_SYNTHESIS|LOCKED_JOB_GUARD"):
         await claim_next_job(session, **(args | change))
     assert session.mock_calls == []
+
+
+@pytest.mark.asyncio
+async def test_formal_database_identity_check_shares_handler_deadline(monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from nexus.agents import portfolio_synthesis_worker
+
+    timers = []
+    original = asyncio.timeout_at
+
+    def capture(deadline):
+        timer = original(deadline)
+        timers.append(timer)
+        return timer
+
+    async def stalled_identity(*args, **kwargs):
+        assert len(timers) == 1
+        timers[0].reschedule(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
+
+    session = SimpleNamespace(scalar=stalled_identity)
+
+    @asynccontextmanager
+    async def factory():
+        yield session
+
+    monkeypatch.setattr(asyncio, "timeout_at", capture)
+    monkeypatch.setattr("nexus.worker.session_factory", lambda settings: factory)
+    claim = AsyncMock()
+    monkeypatch.setattr(portfolio_synthesis_worker, "claim_next_job", claim)
+    with pytest.raises(ValueError, match="^PORTFOLIO_SYNTHESIS_HANDLER_RESULT_UNKNOWN$"):
+        await run_portfolio_synthesis_worker_once(
+            EngineSettings(
+                database_url="postgresql+psycopg://localhost/nexus_test_formal",
+                agent_runtime_mode="codex_sdk",
+            ),
+            job_ids=(UUID(int=1),),
+            formal_stage_capacity=True,
+        )
+    claim.assert_not_called()

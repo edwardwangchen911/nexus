@@ -990,6 +990,31 @@ async def resume_schwab_agent_paper_cycle(
         or cycle.execution_session != cycle.decision_session
     ):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    if formal_stage_capacity and now is not None:
+        from nexus.paper.synthesis_orphan import recover_formal_synthesis_orphan
+        from nexus.paper.target_service import lock_portfolio_account
+
+        await lock_portfolio_account(session, cycle.account_id)
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+            {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
+        )
+        recovery_events = await _events(session, cycle.id)
+        if (
+            recovery_events
+            and recovery_events[-1].to_status == "researching"
+            and await recover_formal_synthesis_orphan(session, cycle_id=cycle.id, now=now)
+        ):
+            await _append_event(
+                session,
+                cycle,
+                "researching",
+                "unavailable",
+                "PORTFOLIO_SYNTHESIS_UNAVAILABLE",
+                {"failure_phase": "synthesis_readback", "failure_code": "LEASE_EXPIRED"},
+                occurred_at=now,
+            )
+            return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     await _require_cycle_candidate_profile(
         session,
         cycle=cycle,
