@@ -210,3 +210,37 @@ async def test_typed_cleanup_timeout_keeps_exact_category(monkeypatch):
         await codex_sdk.invoke_codex({})
     assert caught.value.phase == "turn_run"
     assert caught.value.failure_facts.cleanup_kind == "timeout"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("portfolio", [False, True])
+async def test_legacy_timeout_does_not_settle_usage_returned_during_close(monkeypatch, portfolio):
+    import asyncio
+
+    client, thread, result, _ = _sdk(monkeypatch)
+    closed = asyncio.Event()
+    client.close.side_effect = closed.set
+    timers = []
+    original_timeout = asyncio.timeout
+
+    def capture(delay):
+        timer = original_timeout(delay)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(asyncio, "timeout", capture)
+
+    async def late_result(*args, **kwargs):
+        timers[0].reschedule(asyncio.get_running_loop().time())
+        await closed.wait()
+        return result
+
+    thread.run.side_effect = late_result
+    invoke = codex_sdk.invoke_codex_portfolio if portfolio else codex_sdk.invoke_codex
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await invoke({})
+    assert caught.value.kind == "timeout"
+    assert caught.value.usage is None
+    assert caught.value.provider_call_started is True
+    thread.run.assert_awaited_once()
+    client.close.assert_awaited_once()

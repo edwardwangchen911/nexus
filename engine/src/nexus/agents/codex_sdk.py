@@ -704,10 +704,12 @@ async def _invoke_codex(
                         # may win the race with the parent's shield result.
                         if response.usage is not None and (
                             invocation_state.cleanup_deadline is not None
-                            or stage_deadline is None
                             or (
                                 not invocation_timer.expired()
-                                and asyncio.get_running_loop().time() < stage_deadline
+                                and (
+                                    stage_deadline is None
+                                    or asyncio.get_running_loop().time() < stage_deadline
+                                )
                             )
                         ):
                             reported = response.usage.total

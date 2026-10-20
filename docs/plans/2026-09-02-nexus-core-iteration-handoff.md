@@ -891,3 +891,16 @@ failed终态前已报告的用量仅在收到同一turn终态后认定完整；�
 定向最终回归198项通过，Ruff与四源文件Mypy通过；独立只读审查指出的interrupted终态遗漏、
 typed清理超时类别覆盖均已修复并补回归。完整Agent单测首次以不适用的导入方式运行，
 9项因相对导入失败；改用importlib模式复核，业务断言未删减。原AVGO请求零重放。
+
+
+### 2026-10-21 同版 CI 失败修复：legacy 超时晚到用量保持未知
+
+PR #7 首次 head f7e4bbe3 六项 CI 已汇总：五项通过，engine-postgres 两项失败。
+正常隔离 PostgreSQL Worker 回归先复现 sdk_timeout 的 reserved→settled 缺陷；新增研究/组合
+legacy 两条无阶段期限路径同样 RED。根因是 run_turn 的 stage_deadline=None 分支绕过
+invocation_timer.expired()，把关闭时晚到响应用量提前记录。修复只收紧该分支，超时仍未知且
+保留预算，不改数据库断言；及时响应后 close 失败的已知用量保留，v2 显式清理期合同不变。
+CI 浮点起点201.463161707已固定复现：改为精确校验绝对83/90/105秒边界，保留handler超时
+不写替代终态断言，不放宽实际工作时限。正常SDK生命周期整组及相关单测42通过；完整agents
+1101通过/6原有跳过，Ruff/Mypy/diff检查通过，独立定向审查无阻塞。未调用真实模型或重放AVGO。
+本段仅证明本地修复验证；新head CI、合入与运行生效仍须分别读回。
