@@ -22,6 +22,26 @@ from pydantic import ValidationError
 PORTFOLIO_ID = UUID("67000000-0000-0000-0000-000000000001")
 
 
+def test_synthesis_usage_disposition_is_strict_and_not_execution_authority() -> None:
+    from nexus.api.schemas import paper
+
+    schema = paper.SynthesisUsageDispositionResponse
+    values = {
+        "status": "accepted", "usage": "unknown",
+        "budget_preserved": True, "execution_allowed": False,
+    }
+    for status in ("not_accepted", "accepted", "invalid"):
+        assert schema.model_validate({**values, "status": status}).status == status
+    for change in (
+        {"usage": "known"}, {"budget_preserved": False},
+        {"execution_allowed": True}, {"status": "success"}, {"account_id": "private"},
+    ):
+        with pytest.raises(ValidationError):
+            schema.model_validate({**values, **change})
+    field = paper.AgentPaperManagementCycleResponse.model_fields["synthesis_usage_disposition"]
+    assert field.default is None
+
+
 def test_paper_cancel_request_is_strict_and_versioned() -> None:
     request = PaperCancelRequest.model_validate({"expected_event_seq": 4})
     assert request.expected_event_seq == 4

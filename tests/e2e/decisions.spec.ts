@@ -4,6 +4,36 @@ import type { components } from "../../app/lib/generated/schema";
 import { agentPaperCycle, cancellableOrder, meta, paperPortfolio } from "../unit/paper/fixtures";
 import { assertReleaseAccessibility } from "./helpers/accessibility";
 import { managementDetail, managementPlan } from "../unit/paper/management-fixtures";
+import { synthesisUsageDetail } from "../unit/paper/synthesis-usage-fixture";
+
+for (const [status, label] of [
+  ["accepted", "历史未知已接受，预算保留"],
+  ["not_accepted", "历史未知尚未接受，预算保留"],
+  ["invalid", "历史接受证明失效，预算保留"],
+] as const) {
+  test(`historical synthesis usage ${status} stays failed and refresh is read-only`, async ({ page }) => {
+    const methods: string[] = [];
+    await installFixtures(page, methods);
+    const detail = structuredClone(synthesisUsageDetail);
+    detail.synthesis_usage_disposition!.status = status;
+    await page.route(`**/api/v1/paper/management/cycles/${agentPaperCycle.cycle_id}`, (route) => {
+      methods.push(route.request().method());
+      return route.fulfill({ json: { data: detail, meta: meta() } });
+    });
+    await page.goto(`/decisions/${agentPaperCycle.cycle_id}`);
+    const notice = page.getByRole("note", { name: "组合用量历史处置" });
+    await expect(notice).toContainText("组合失败／用量未知／未执行");
+    await expect(notice).toContainText(label);
+    await expect(notice).toContainText("后续周期仍须独立通过准入校验");
+    await expect(page.getByRole("note", { name: "目标生效结论" })).toContainText("阻断原因待核对");
+    await page.getByRole("button", { name: "刷新记录" }).click();
+    await expect(notice).toContainText(label);
+    expect(methods.filter((method) => method === "GET").length).toBeGreaterThanOrEqual(2);
+    expect(methods.every((method) => method === "GET")).toBe(true);
+    await expect(page.getByRole("button", { name: /批准|运行|重试/ })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+}
 
 for (const viewport of [{ width: 1280, height: 910 }, { width: 390, height: 844 }]) {
   test(`portfolio proposal authority fits ${viewport.width} and disclosures work by keyboard`, async ({ page }) => {

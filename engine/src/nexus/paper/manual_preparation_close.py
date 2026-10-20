@@ -107,10 +107,8 @@ class PreparationCloseReceipt(BaseModel):
     execution_locked: Literal[True] = True
 
 
-def preparation_service_control_lock(
-    repo_root: Path, revision: str | None
-) -> AbstractContextManager[None]:
-    """Share the normal launchd lifecycle fence through the database commit."""
+def require_preparation_inspector_source(repo_root: Path, revision: str | None) -> Path:
+    """Keep the executable inspector bound to the caller's original revision."""
     script = repo_root / "scripts/macos/agent-paper-loop-service.py"
     try:
         if revision is None or script.is_symlink():
@@ -135,6 +133,25 @@ def preparation_service_control_lock(
             raise PreparationCloseDiagnosticError(
                 "service_control_source", "SOURCE_IDENTITY_INVALID"
             )
+        return script
+    except PreparationCloseDiagnosticError:
+        raise
+    except subprocess.TimeoutExpired:
+        raise PreparationCloseDiagnosticError(
+            "service_control_source", "INSPECTION_TIMEOUT"
+        ) from None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise PreparationCloseDiagnosticError(
+            "service_control_source", "INSPECTION_FAILED"
+        ) from None
+
+
+def preparation_service_control_lock(
+    repo_root: Path, revision: str | None
+) -> AbstractContextManager[None]:
+    """Share the normal launchd lifecycle fence through the database commit."""
+    script = require_preparation_inspector_source(repo_root, revision)
+    try:
         namespace = runpy.run_path(str(script))
         return cast(AbstractContextManager[None], namespace["_service_control_lock"]())
     except PreparationCloseDiagnosticError:
@@ -149,13 +166,23 @@ def preparation_service_control_lock(
         ) from None
 
 
-def require_preparation_producers_stopped(repo_root: Path, env_file: Path) -> None:
+def require_preparation_producers_stopped(
+    repo_root: Path,
+    env_file: Path,
+    *,
+    inspector_repo_root: Path | None = None,
+    inspector_revision: str | None = None,
+) -> None:
     """Use the normal owner-aware status, never equate a stale heartbeat with exit."""
+    if inspector_repo_root is not None:
+        require_preparation_inspector_source(inspector_repo_root, inspector_revision)
     try:
         result = subprocess.run(
             [
                 sys.executable,
-                str(repo_root / "scripts/macos/agent-paper-loop-service.py"),
+                str(
+                    (inspector_repo_root or repo_root) / "scripts/macos/agent-paper-loop-service.py"
+                ),
                 "status",
                 "--repo-root",
                 str(repo_root),
@@ -174,6 +201,8 @@ def require_preparation_producers_stopped(repo_root: Path, env_file: Path) -> No
         raise PreparationCloseDiagnosticError("host_status", "INSPECTION_FAILED") from None
     if result.returncode != 0:
         raise PreparationCloseDiagnosticError("host_status", "INSPECTION_FAILED")
+    if inspector_repo_root is not None:
+        require_preparation_inspector_source(inspector_repo_root, inspector_revision)
     try:
         status = json.loads(result.stdout)
     except ValueError:

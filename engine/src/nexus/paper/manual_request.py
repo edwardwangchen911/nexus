@@ -231,6 +231,25 @@ async def require_manual_account_available(
     await require_acknowledged_native_claims(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
     )
+    await require_manual_request_history(
+        session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
+    )
+    await require_settled_account_cycle_history(session, account_id=account_id, now=now)
+    projection = await load_paper_projection(session, account_id=account_id, as_of=now)
+    await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
+    await require_activation_projection_unoccupied(
+        session, account_id=account_id, projection=projection
+    )
+
+
+async def require_manual_request_history(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    now: datetime,
+    excluding_request_id: UUID | None = None,
+) -> None:
+    """Shared request-history check; no cycle usage exemption is implied."""
     requests = (
         await session.scalars(
             select(ManualPaperRequest).where(ManualPaperRequest.account_id == account_id)
@@ -253,12 +272,6 @@ async def require_manual_account_available(
                 continue
         if view.status not in _TERMINAL or view.status == "unknown":
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
-    await require_settled_account_cycle_history(session, account_id=account_id, now=now)
-    projection = await load_paper_projection(session, account_id=account_id, as_of=now)
-    await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
-    await require_activation_projection_unoccupied(
-        session, account_id=account_id, projection=projection
-    )
 
 
 async def require_settled_account_cycle_history(
@@ -303,7 +316,9 @@ async def require_settled_account_cycle_history(
                 or detail.cycle.result_code != "PAPER_CYCLE_COMPLETED"
             ):
                 raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
-        await _require_cycle_jobs_settled(session, cycle_id=cycle_id, now=now)
+        await _require_cycle_jobs_settled(
+            session, cycle_id=cycle_id, now=now, allow_accepted_synthesis=True
+        )
 
 
 async def admit_manual_request(
@@ -359,7 +374,12 @@ async def admit_manual_request(
 
 
 async def _require_cycle_jobs_settled(
-    session: AsyncSession, *, cycle_id: UUID, now: datetime, require_no_live_lease: bool = True
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    now: datetime,
+    require_no_live_lease: bool = True,
+    allow_accepted_synthesis: bool = False,
 ) -> None:
     """A terminal cycle cannot hide a queued job, lease, or unknown model usage."""
     events = (
@@ -398,6 +418,17 @@ async def _require_cycle_jobs_settled(
     if len(research) != len(run_ids):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     for candidate_run in runs:
+        if isinstance(candidate_run, AgentPortfolioSynthesisRunRecord):
+            from nexus.paper.synthesis_usage_acceptance import synthesis_usage_accepted
+
+            if await synthesis_usage_accepted(
+                session, cycle_id=cycle_id, run_id=candidate_run.id, now=now
+            ):
+                if not allow_accepted_synthesis:
+                    raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+                # Scheduling only; never report financial settlement or output qualification.
+                continue
+
         if (
             candidate_run.status in {"completed", "failed", "abstained"}
             and candidate_run.settled_cost_usd is not None
@@ -405,9 +436,9 @@ async def _require_cycle_jobs_settled(
             continue
         from nexus.paper.history_seal import legacy_research_sealed
 
-        if not isinstance(
-            candidate_run, AgentResearchRunRecord
-        ) or not await legacy_research_sealed(
+        if isinstance(candidate_run, AgentPortfolioSynthesisRunRecord):
+            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+        if not await legacy_research_sealed(
             session, cycle_id=cycle_id, run_id=candidate_run.id, now=now
         ):
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")

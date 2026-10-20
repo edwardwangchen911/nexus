@@ -445,8 +445,16 @@ class HistoricalAssessmentSourceResponse(_StrictSchema):
     execution_allowed: Literal[False] = False
 
 
+class SynthesisUsageDispositionResponse(_StrictSchema):
+    status: Literal["not_accepted", "accepted", "invalid"]
+    usage: Literal["unknown"]
+    budget_preserved: Literal[True]
+    execution_allowed: Literal[False]
+
+
 class AgentPaperManagementCycleResponse(_StrictSchema):
     historical_source: HistoricalAssessmentSourceResponse | None = None
+    synthesis_usage_disposition: SynthesisUsageDispositionResponse | None = None
     cycle: AgentPaperCycleResponse
     orders: tuple[PaperOrderResponse, ...] = Field(max_length=50)
     candidate_batch: AgentPaperCandidateBatchResponse | None

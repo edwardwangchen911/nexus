@@ -31,9 +31,18 @@ from nexus.settings import EngineSettings
 
 
 async def execute(
-    database_url: str, archive_path: Path, *, settings: EngineSettings | None = None
+    database_url: str,
+    archive_path: Path,
+    *,
+    settings: EngineSettings | None = None,
+    synthesis_observation: bool = False,
 ) -> dict[str, object]:
-    archive = read_archive(archive_path)
+    if synthesis_observation:
+        from nexus.ops.synthesis_observation import read_observation
+
+        archive = read_observation(archive_path)
+    else:
+        archive = read_archive(archive_path)
     engine = create_async_engine(database_url)
     runtime = (settings or EngineSettings()).model_copy(update={"database_url": database_url})
     sessions = async_sessionmaker(engine, expire_on_commit=False, info={"engine_settings": runtime})
@@ -99,9 +108,16 @@ async def execute(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case-dir", type=Path, required=True)
+    sources = parser.add_mutually_exclusive_group(required=True)
+    sources.add_argument("--case-dir", type=Path)
+    sources.add_argument("--observation-dir", type=Path)
     parser.add_argument("--source-repo", type=Path, required=True)
     args = parser.parse_args()
+    safe_codes = SAFE_ARCHIVE_CODES
+    if args.observation_dir is not None:
+        from nexus.ops.synthesis_observation import SAFE_CODES as OBSERVATION_CODES
+
+        safe_codes = safe_codes | OBSERVATION_CODES
     try:
         from nexus.ops.openai_local import local_settings
 
@@ -109,13 +125,14 @@ def main() -> int:
         result = asyncio.run(
             execute(
                 EngineSettings().database_url or "",
-                args.case_dir / "case.sqlite3",
+                args.observation_dir if args.observation_dir else args.case_dir / "case.sqlite3",
+                synthesis_observation=args.observation_dir is not None,
                 settings=runtime,
             )
         )
     except Exception as error:
         code = error.args[0] if len(error.args) == 1 else None
-        safe = code if isinstance(code, str) and code in SAFE_ARCHIVE_CODES else "UNKNOWN"
+        safe = code if isinstance(code, str) and code in safe_codes else "UNKNOWN"
         print(json.dumps({"status": "failed", "code": safe}))
         return 1
     print(json.dumps(result))

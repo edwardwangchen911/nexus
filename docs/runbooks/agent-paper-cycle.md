@@ -832,3 +832,83 @@ Job 和一个组合 Job，再调用正常组合收尾。相同来源/归档不�
 下一次模型研究均已通过。不得伪造将来时间、修改原失败或补造行情来通过下一轮准入。
 有新增来源事实时 0081 拒绝降级；回退保留数据并使用兼容消费者。本地迁移和此入口
 不包含任何正式服务更新授权。
+
+### 失败组合调用的未知用量接受（本地候选，未部署）
+
+这是一项显式维护动作，只解除精确失败 synthesis 对后续调度的历史占用；不是费用结算、
+研究合格、组合成功、合理不交易或执行许可。原 Run/Job/Output、unknown 用量和全部
+reserved 预算保持不变。当前预算核算仍包含原预留，新请求仍可能因额度不足被拒绝。
+
+正常入口（须在批准部署及真实处置后使用；本地隔离验证不授予真实写入权限）：
+
+```bash
+uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-file infra/.env.local check-synthesis-acceptance --cycle-id <UUID> --run-id <UUID>
+uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-file infra/.env.local accept-failed-synthesis-usage --cycle-id <UUID> --run-id <UUID> --accept-unknown-usage
+```
+
+隔离原生数据库快照验收时，可在这两个命令显式成对附加
+`--recovery-producer-repo-root <原宿主仓库>` 与
+`--recovery-producer-env-file <原宿主受保护配置>`。命令自身的 `--repo-root` 与
+`--env-file` 仍指向已提交候选及隔离库配置；目标必须为本机不同源库的
+`nexus_recovery_*`，实际数据库名须匹配。默认正式路径不变。
+只运行候选提交中校验过的检查脚本，按原宿主路径检查注册与退出状态；不会连接源数据库。
+检查前后及提交前重验原提交脚本，源配置身份与目标库也在提交前重验；漂移整笔回滚。
+该模式仍使用原生命周期互斥、进程/租约/账户/订单/证明门禁，不允许跳过检查，
+隔离通过不等于获准处置真实记录。
+
+只接受原生周期中唯一 failed synthesis、单次失败 Job/attempt、failed/null intent Output、
+未知用量和完整 reserved 绑定；关联研究必须按原合同成功终态并已结算，partial 不升级。
+周期必须已 unavailable/failed 且无本轮策略决策及其下游执行产品。旧手动请求若仍 active、
+其他任务、有效租约、订单或计划占用存在，仍拒绝，不顺带处置其他记录。
+
+首次接受重验代码/schema、数据库时间、相关生产者退出；生命周期互斥、账户锁、审计锁和
+关联表 NOWAIT 写入围栏保持到提交。check 不追加审计，结果不构成稍后 accept 的授权证据。
+只追加 `paper.synthesis.unknown_usage_accepted` 审计，之后再走正常账户准入作提交前校验；
+任一失败整体回滚。固定诊断区分历史绑定、接受证明及写入者冲突，不输出原异常正文。
+
+审计读回绑定旧周期、模型/提示/输入、完整输出/任务/attempt/lease/预算关联集合及原时间。
+迟到事实、哈希或审计变化使证明失效；审计不可删除、改写或换键重新接受。合法新周期的任务、
+预算及新审计不使该历史证明自我失效。重复接受只验证原证明并返回原结果，不要求停止合法
+新生产者。无论证明有效与否，旧调用均由终态、非重试策略、唯一身份、fencing 和接受墓碑拒绝。
+
+管理详情只读展示“组合失败／用量未知／未执行”及未接受、已接受或证明失效；不得展示为
+completed 或有依据的不调整。只对调度历史检查启用接受证明，其他财务结算和输出资格检查
+继续拒绝。页面和 check 不采集、不调用模型、不释放资源。
+
+无迁移。代码回退不得删除新审计或改动历史数据；旧消费者不认识该审计时仍会阻断下一轮，
+因此不能将回退代码描述为恢复调度。需要运行生效时须单独批准部署及具体真实处置。
+
+## 独立组合耗时观察（本地隔离入口）
+
+`nexus.ops.synthesis_observation` 只读已完成的真实 `assessment-v1` 三股票归档，
+复用三份研究及其原始证据时点；只新增一次组合模型调用。它不是正式 Worker 的预算切换，
+不重跑旧观察，不创建正式周期、订单或账本。原研究的 partial 缺口必须保留，输出只接受 defer。
+
+```bash
+uv run --project engine python -m nexus.ops.synthesis_observation prepare \
+  --repo-root '<受保护配置所在主仓库>' --source '<既有assessment目录>/case.sqlite3'
+uv run --project engine python -m nexus.ops.synthesis_observation run \
+  --observation-dir '<prepare返回的固定目录>'
+uv run --project engine python -m nexus.ops.synthesis_observation read \
+  --observation-dir '<同一固定目录>'
+```
+
+身份固定绑定来源 completion、原件摘要、完整本地引擎源码及预算。认领先独占写入并落盘；
+已认领、取消、失败、未知或成功均不得再次调用，不能换目录重试。SDK工作最多83秒，
+清理预留7秒，总观察上限90秒，准备耗时扣减共同截止时间；一次调用最多64k输入、8192输出、0工具。
+每股原研究的累计96k限制不改变，也不将原研究费用算作本次零费用。
+完整请求和原始响应仅保存在私有目录；用户输出只含安全状态、阶段、时间、用量及摘要。
+配置、来源时间、身份或回执拒绝即停止；未知用量不按零结算。
+
+成功的新结果可通过显式入口消费到独立 `nexus_test_` / `nexus_recovery_` 数据库：
+
+```bash
+# DATABASE_URL 必须已经指向隔离数据库；正式数据库会拒绝。
+uv run --project engine python -m nexus.ops.historical_assessment \
+  --source-repo '<受保护配置所在主仓库>' --observation-dir '<同一固定目录>'
+```
+
+消费阶段复用四个正常归档 Job、持久化和暂缓收尾，不再调用模型；消费的0调用与前一步的
+1次真实调用分别记录。派生来源显式保存原研究观察时间和新组合时间；处理窗口不续期交易权限。
+验收应继续核对API、四页面、收尾及下一轮账户准入。该路径不证明正式45秒组合 Worker
+已更改、不证明自然成交或长期稳定性；105秒handler/120秒lease仅是配套合同建议，未在此入口冒充生效。

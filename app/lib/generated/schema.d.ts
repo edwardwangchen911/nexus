@@ -1597,6 +1597,7 @@ export interface components {
             /** Security Research */
             security_research: components["schemas"]["AgentPaperSecurityResearchResponse"][];
             synthesis: components["schemas"]["AgentPaperSynthesisResponse"] | null;
+            synthesis_usage_disposition?: components["schemas"]["SynthesisUsageDispositionResponse"] | null;
         };
         /** AgentPaperPortfolioProposalResponse */
         AgentPaperPortfolioProposalResponse: {
@@ -7991,6 +7992,29 @@ export interface components {
              * @enum {string}
              */
             status: "accepted" | "rejected" | "unresolved";
+        };
+        /** SynthesisUsageDispositionResponse */
+        SynthesisUsageDispositionResponse: {
+            /**
+             * Budget Preserved
+             * @constant
+             */
+            budget_preserved: true;
+            /**
+             * Execution Allowed
+             * @constant
+             */
+            execution_allowed: false;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_accepted" | "accepted" | "invalid";
+            /**
+             * Usage
+             * @constant
+             */
+            usage: "unknown";
         };
         /**
          * TypedMetric

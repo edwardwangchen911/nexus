@@ -485,19 +485,36 @@ class PaperReadService:
         )
         plan_summary = None if batch is None else await self._plan_summary(batch.id)
         blocking_plan = await self._blocking_plan_summary(activation_event)
-        from nexus.api.schemas.paper import HistoricalAssessmentSourceResponse
+        from nexus.api.schemas.paper import (
+            HistoricalAssessmentSourceResponse,
+            SynthesisUsageDispositionResponse,
+        )
         from nexus.paper.historical_assessment import source_for_cycle
+        from nexus.paper.synthesis_usage_acceptance import read_synthesis_usage_disposition
 
         historical = await source_for_cycle(self._session, cycle_id)
-        provenance = None if historical is None else HistoricalAssessmentSourceResponse(
-            observation_id=historical.id, archive_hash=historical.archive_hash,
-            evidence_at=historical.evidence_at,
-            observed_started_at=historical.observed_started_at,
-            observed_finished_at=historical.observed_finished_at,
-            imported_at=historical.imported_at,
+        usage_disposition = await read_synthesis_usage_disposition(
+            self._session, cycle_id=cycle_id, now=self._request_time
+        )
+        provenance = (
+            None
+            if historical is None
+            else HistoricalAssessmentSourceResponse(
+                observation_id=historical.id,
+                archive_hash=historical.archive_hash,
+                evidence_at=historical.evidence_at,
+                observed_started_at=historical.observed_started_at,
+                observed_finished_at=historical.observed_finished_at,
+                imported_at=historical.imported_at,
+            )
         )
         return AgentPaperManagementCycleResponse(
             historical_source=provenance,
+            synthesis_usage_disposition=(
+                None
+                if usage_disposition is None
+                else SynthesisUsageDispositionResponse(**usage_disposition.model_dump())
+            ),
             cycle=cycle_response,
             orders=await self._orders_for_cycle(cycle_id),
             candidate_batch=candidate_batch,

@@ -1059,6 +1059,16 @@
                 "type": "null"
               }
             ]
+          },
+          "synthesis_usage_disposition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisUsageDispositionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -17568,6 +17578,43 @@
           "prevented_conclusion"
         ],
         "title": "SynthesisClaimReview",
+        "type": "object"
+      },
+      "SynthesisUsageDispositionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_preserved": {
+            "const": true,
+            "title": "Budget Preserved",
+            "type": "boolean"
+          },
+          "execution_allowed": {
+            "const": false,
+            "title": "Execution Allowed",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "not_accepted",
+              "accepted",
+              "invalid"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "usage": {
+            "const": "unknown",
+            "title": "Usage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "usage",
+          "budget_preserved",
+          "execution_allowed"
+        ],
+        "title": "SynthesisUsageDispositionResponse",
         "type": "object"
       },
       "TypedMetric": {
