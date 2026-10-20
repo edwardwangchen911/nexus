@@ -875,3 +875,32 @@ Candidate 92276fa3 fixes primary trigger diagnostics lost by manual dispatch, in
 #### 原生产者归档核对（2026-10-15，只读）
 
 启动归档确认 7617eded 部署；故障日志只有 execute/TRIGGER_MANUAL 结果未知及时间，无 request/producer 身份和原异常。只读业务事务确认 queued→preparing→unknown、无周期绑定、原生认领0、匹配请求审计0；事件表没有 producer 身份字段。最近历史心跳早于 preparing 481.946ms，其他历史版本心跳更早。部署身份不代替逐请求执行身份，现有候选仍不可用于真实旧记录；不能靠等下一周期补历史证据，也不重放或回填。原准备失败原因仍未知。证据 `.secrets/unstarted-preparation-close-qualification/origin-archive-diagnostic.json`。如后续讨论人工明确接受准备结果未知的处置，须与已证明无副作用的收尾分开，保留未知事实并保守覆盖可能消耗，另行评审合同；本轮未实施或授权该替代。
+
+## 2026-10-21 SDK 安全失败信息保留（候选，等待同版 CI）
+
+离线 RED 已复现：turn_run 的 transport 异常被 client_close RuntimeError 覆盖；
+正常返回的用量在清理失败时变为未知。最小修复在现有 SDK adapter 内保留白名单异常类别、
+主失败阶段、清理失败类别，以及精确 turn 绑定的 typed 终态和 provider error discriminator；
+不保存 message、additionalDetails、原始异常或通知正文。成功返回的合法用量在清理前保存，
+failed终态前已报告的用量仅在收到同一turn终态后认定完整；没有终态的中途用量不晋升。
+研究三阶段共用持久化 StageFailureDiagnostic 的可选 failure_facts，旧记录缺字段仍未知。
+原研究/组合预算、重试策略、历史请求与执行锁不变。新事实产生后旧消费者不保证可读，
+回滚须先停止生产者并核对新事实，不能仅降级镜像。
+真实SDK收集器离线覆盖 research/critique/synthesis 与清理失败组合；没有重放AVGO请求。
+此修复解决错误信息丢失，不证明旧AVGO具体上游原因；其既有unexpected_exception保持未知。
+定向最终回归198项通过，Ruff与四源文件Mypy通过；独立只读审查指出的interrupted终态遗漏、
+typed清理超时类别覆盖均已修复并补回归。完整Agent单测首次以不适用的导入方式运行，
+9项因相对导入失败；改用importlib模式复核，业务断言未删减。原AVGO请求零重放。
+
+
+### 2026-10-21 同版 CI 失败修复：legacy 超时晚到用量保持未知
+
+PR #7 首次 head f7e4bbe3 六项 CI 已汇总：五项通过，engine-postgres 两项失败。
+正常隔离 PostgreSQL Worker 回归先复现 sdk_timeout 的 reserved→settled 缺陷；新增研究/组合
+legacy 两条无阶段期限路径同样 RED。根因是 run_turn 的 stage_deadline=None 分支绕过
+invocation_timer.expired()，把关闭时晚到响应用量提前记录。修复只收紧该分支，超时仍未知且
+保留预算，不改数据库断言；及时响应后 close 失败的已知用量保留，v2 显式清理期合同不变。
+CI 浮点起点201.463161707已固定复现：改为精确校验绝对83/90/105秒边界，保留handler超时
+不写替代终态断言，不放宽实际工作时限。正常SDK生命周期整组及相关单测42通过；完整agents
+1101通过/6原有跳过，Ruff/Mypy/diff检查通过，独立定向审查无阻塞。未调用真实模型或重放AVGO。
+本段仅证明本地修复验证；新head CI、合入与运行生效仍须分别读回。

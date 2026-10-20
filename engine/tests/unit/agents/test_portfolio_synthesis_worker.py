@@ -187,6 +187,10 @@ async def test_formal_handler_deadline_includes_setup_and_does_not_fabricate_ter
 
     from nexus.agents import portfolio_synthesis_worker as worker
 
+    # Reproduce the CI clock value whose subtraction loses float precision.
+    from nexus.agents.synthesis_lifecycle import SynthesisDeadline
+
+    monkeypatch.setattr(worker, "SynthesisDeadline", lambda _: SynthesisDeadline(201.463161707))
     timers = []
     timeout_at = asyncio.timeout_at
 
@@ -199,9 +203,9 @@ async def test_formal_handler_deadline_includes_setup_and_does_not_fabricate_ter
 
     async def blocked(*args, **kwargs):
         lifecycle = kwargs["lifecycle"]
-        assert lifecycle.work_at - lifecycle.started_at == 83
-        assert lifecycle.cleanup_at - lifecycle.started_at == 90
-        assert lifecycle.handler_at - lifecycle.started_at == 105
+        assert lifecycle.work_at == lifecycle.started_at + 83
+        assert lifecycle.cleanup_at == lifecycle.started_at + 90
+        assert lifecycle.handler_at == lifecycle.started_at + 105
         timers[0].reschedule(asyncio.get_running_loop().time())
         await asyncio.Event().wait()
 

@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from typing import Any, Literal, cast, get_args
 from codex_cli_bin import bundled_codex_path  # type: ignore[import-untyped]
 from openai import pydantic_function_tool
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
+from openai_codex.errors import JsonRpcError, TransportClosedError
 from openai_codex.generated.v2_all import ChatgptAccount, ConfigReadResponse, TurnStatus
 from openai_codex.models import JsonObject
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,6 +46,8 @@ from nexus.agents.committee import (
     InvocationKind,
     InvocationPhase,
     PromptAsset,
+    SdkExceptionKind,
+    SdkFailureFacts,
     TimeoutSource,
 )
 from nexus.agents.models import ResearchRequest
@@ -125,6 +129,7 @@ class CodexInvocationError(ValueError):
             phase if phase in get_args(InvocationPhase.__value__) else "preflight"
         )
         super().__init__(self.reason)
+        self.failure_facts: SdkFailureFacts | None = None
         self.usage = usage
         self.provider_call_started = provider_call_started
         self.phase_elapsed_ms: dict[InvocationPhase, int] = {}
@@ -246,6 +251,18 @@ async def _close_portfolio_client(
     cleanup.result()
 
 
+def _exception_kind(error: BaseException) -> SdkExceptionKind:
+    if isinstance(error, TransportClosedError):
+        return "transport_closed"
+    if isinstance(error, JsonRpcError):
+        return "rpc_error"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, RuntimeError):
+        return "runtime_error"
+    return "other"
+
+
 @contextmanager
 def _invocation_boundary(
     phase: InvocationPhase, *, state: _InvocationState | None = None
@@ -257,6 +274,8 @@ def _invocation_boundary(
         if state is not None:
             error.provider_call_started = state.provider_call_started
             error.phase_elapsed_ms = dict(state.phase_elapsed_ms)
+            if error.failure_facts is None and state.stream_observer is not None:
+                error.failure_facts = state.stream_observer.failure_facts
             if state.measured_usage is not None:
                 error.usage = state.measured_usage
         raise
@@ -267,13 +286,28 @@ def _invocation_boundary(
             provider_call_started=None if state is None else state.provider_call_started,
             usage=None if state is None else state.measured_usage,
         ) from None
-    except Exception:
-        raise CodexInvocationError(
+    except Exception as original:
+        failure = CodexInvocationError(
             "CODEX_UNEXPECTED_EXCEPTION",
             phase=phase,
             provider_call_started=None if state is None else state.provider_call_started,
             usage=None if state is None else state.measured_usage,
-        ) from None
+        )
+        observed = (
+            None
+            if state is None or state.stream_observer is None
+            else state.stream_observer.failure_facts
+        )
+        if (
+            state is not None
+            and state.stream_observer is not None
+            and state.stream_observer.measured_usage is not None
+        ):
+            failure.usage = state.stream_observer.measured_usage
+        failure.failure_facts = (observed or SdkFailureFacts()).model_copy(
+            update={"exception_kind": _exception_kind(original)}
+        )
+        raise failure from None
     finally:
         if state is not None and phase != "preflight":
             state.phase_elapsed_ms[phase] = max(0, int((perf_counter() - started) * 1000))
@@ -575,6 +609,8 @@ async def _invoke_codex(
     timeout_seconds: float,
     invocation_state: _InvocationState,
 ) -> tuple[str, UsageSnapshot]:
+    if invocation_state.stream_observer is None:
+        invocation_state.stream_observer = SdkStreamObserver()
     wire = codex_request_wire(payload)
     if type(max_wire_bytes) is not int or max_wire_bytes not in {
         55808,
@@ -666,9 +702,15 @@ async def _invoke_codex(
                         )
                         # Store in the SDK task itself: a deadline/cancellation
                         # may win the race with the parent's shield result.
-                        if (
+                        if response.usage is not None and (
                             invocation_state.cleanup_deadline is not None
-                            and response.usage is not None
+                            or (
+                                not invocation_timer.expired()
+                                and (
+                                    stage_deadline is None
+                                    or asyncio.get_running_loop().time() < stage_deadline
+                                )
+                            )
                         ):
                             reported = response.usage.total
                             if (
@@ -686,16 +728,7 @@ async def _invoke_codex(
                                     invocation_state.on_usage(invocation_state.measured_usage)
                         return response
 
-                    run_task = asyncio.create_task(
-                        run_turn()
-                        if invocation_state.cleanup_deadline is not None
-                        else thread.run(
-                            wire,
-                            output_schema=output_schema,
-                            approval_mode=ApprovalMode.deny_all,
-                            sandbox=Sandbox.read_only,
-                        )
-                    )
+                    run_task = asyncio.create_task(run_turn())
                     # Keep its queue registered until close wakes the reader;
                     # cancellation first would orphan the to_thread waiter.
                     result = await asyncio.shield(run_task)
@@ -718,14 +751,31 @@ async def _invoke_codex(
                 raise
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
         finally:
-            if invocation_state.cleanup_deadline is not None:
-                with _invocation_boundary("client_close", state=invocation_state):
-                    await _close_portfolio_client(
-                        client, run_task, deadline=invocation_state.cleanup_deadline
+            primary = sys.exc_info()[1]
+            try:
+                if invocation_state.cleanup_deadline is not None:
+                    with _invocation_boundary("client_close", state=invocation_state):
+                        await _close_portfolio_client(
+                            client, run_task, deadline=invocation_state.cleanup_deadline
+                        )
+                else:
+                    with _invocation_boundary("client_close", state=invocation_state):
+                        await _close_sdk_client(client)
+            except CodexInvocationError as cleanup:
+                if isinstance(primary, CodexInvocationError):
+                    primary.failure_facts = (primary.failure_facts or SdkFailureFacts()).model_copy(
+                        update={
+                            "cleanup_kind": "timeout"
+                            if cleanup.kind == "timeout"
+                            else cleanup.failure_facts.exception_kind
+                            if cleanup.failure_facts
+                            else "other"
+                        }
                     )
-            else:
-                with _invocation_boundary("client_close", state=invocation_state):
-                    await _close_sdk_client(client)
+                elif isinstance(primary, asyncio.CancelledError):
+                    raise primary
+                else:
+                    raise
             if run_task is not None and invocation_state.cleanup_deadline is None:
                 done, _ = await asyncio.wait((run_task,), timeout=1)
                 if run_task in done:

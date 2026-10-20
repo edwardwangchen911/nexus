@@ -1306,7 +1306,7 @@ async def test_staged_real_sdk_failure_builds_invocation_diagnostic(monkeypatch,
     )
     diagnostic = model.failure_diagnostic
     assert diagnostic is not None
-    assert diagnostic.model_dump(mode="json") == {
+    assert diagnostic.model_dump(mode="json", exclude={"failure_facts"}) == {
         "stage": "research",
         "boundary": "invocation",
         "role": None,
@@ -1638,8 +1638,12 @@ async def test_staged_sdk_rejection_retains_safe_typed_reason_not_raw(monkeypatc
     assert model.failure_diagnostic.invocation_phase == "response_check"
     assert model.failure_diagnostic.response_hash is None
     assert "private-canary" not in model.failure_diagnostic.model_dump_json()
-    assert model.usage == UsageSnapshot(provider_calls=1)  # Existing uncertain-call accounting.
-    assert model.failure_reason == "model_usage_uncertain"
+    if kind in {"response_incomplete", "unexpected_tool", "output_too_large"}:
+        assert model.usage == UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1)
+        assert model.failure_reason == "model_execution_failed"
+    else:
+        assert model.usage == UsageSnapshot(provider_calls=1)
+        assert model.failure_reason == "model_usage_uncertain"
     thread.run.assert_awaited_once()
 
 
