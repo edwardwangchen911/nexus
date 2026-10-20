@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 from typing import Literal, Protocol
@@ -42,6 +43,7 @@ from nexus.jobs.models import JOB_PRIORITIES, JobType, QueueName
 from nexus.jobs.repository import (
     ClaimedJob,
     JobCompletion,
+    LeaseLostError,
     _not_candidate_agent_job,
     checkpoint_job,
     claim_next_job,
@@ -581,7 +583,8 @@ async def run_synthesis_job_once(
 
     try:
         async with factory.begin() as session:
-            await checkpoint_job(session, claim=claim, now=clock(), apply=start)
+            lease_expires_at = await checkpoint_job(session, claim=claim, now=clock(), apply=start)
+        terminal_claim = replace(claim, expires_at=lease_expires_at)
     except ValueError:
         async with factory.begin() as session:
             run = await session.get(AgentPortfolioSynthesisRunRecord, run_id)
@@ -603,7 +606,7 @@ async def run_synthesis_job_once(
                 )
                 return True
             input_hash = run.input_hash
-        await _finish(factory, claim, run_id, input_hash, "failed", None, None, clock())
+        await _finish(factory, claim, run_id, input_hash, "failed", None, None, clock)
         return True
     usage = None
     intent = None
@@ -653,13 +656,14 @@ async def run_synthesis_job_once(
         error_code = "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED"
     await _finish(
         factory,
-        claim,
+        terminal_claim,
         run_id,
         input_hash,
         status,
         intent,
         usage,
-        clock(),
+        clock,
+        expires_at=expires_at,
         pre_dispatch=pre_dispatch,
         error_code=error_code,
     )
@@ -674,12 +678,22 @@ async def _finish(
     status: Literal["completed", "abstained", "failed"],
     intent: PortfolioSynthesisIntentV1 | None,
     usage: UsageSnapshot | None,
-    now: datetime,
+    clock: Callable[[], datetime],
     *,
+    expires_at: datetime | None = None,
     pre_dispatch: bool = False,
     error_code: str = "PORTFOLIO_SYNTHESIS_FAILED",
 ) -> None:
+    class EvidenceExpired(Exception):
+        """Abort a tentative terminal; never escape this local finalization."""
+
+    def require_evidence(at: datetime) -> None:
+        if status != "failed" and expires_at is not None and at >= expires_at:
+            raise EvidenceExpired
+
     async def complete(session: AsyncSession) -> JobCompletion:
+        started_at = clock()
+        require_evidence(started_at)
         await persist_portfolio_synthesis_terminal(
             session,
             run_id=run_id,
@@ -688,9 +702,11 @@ async def _finish(
             intent=intent,
             input_tokens=None if usage is None else usage.input_tokens,
             output_tokens=None if usage is None else usage.output_tokens,
-            now=now,
+            now=started_at,
             provider_call_started=False if pre_dispatch else None,
         )
+        finished_at = clock()
+        require_evidence(finished_at)
         outcome: Literal["succeeded", "skipped", "failed"] = (
             "succeeded"
             if status == "completed"
@@ -701,9 +717,28 @@ async def _finish(
         return JobCompletion(
             outcome=outcome,
             result_code="PORTFOLIO_SYNTHESIS_" + status.upper(),
-            finished_at=now,
+            # Recheck the lease after terminal locks/writes, not with entry time.
+            finished_at=finished_at,
             error_code=error_code if status == "failed" else None,
         )
 
-    async with factory.begin() as session:
-        await execute_and_finalize_job(session, claim=claim, checked_at=now, execute=complete)
+    async def finalize() -> None:
+        async with factory.begin() as session:
+            await execute_and_finalize_job(
+                session, claim=claim, checked_at=clock(), execute=complete
+            )
+            # Include the final Job/attempt flush before the transaction commits.
+            boundary_at = clock()
+            if boundary_at >= claim.expires_at:
+                raise LeaseLostError("job lease expired during synthesis terminal flush")
+            require_evidence(boundary_at)
+
+    try:
+        await finalize()
+    except EvidenceExpired:
+        # The entire tentative terminal (including settlement/Job) rolled back.
+        # Save one failure with the same trusted usage under the original fence;
+        # loss of that lease still rolls everything back. No provider redispatch.
+        status, intent = "failed", None
+        error_code = "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED"
+        await finalize()
