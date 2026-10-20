@@ -167,15 +167,24 @@ describe("decision-first trading workbench", () => {
   });
 
   it("retains valid facts when refresh fails and marks them stale", async () => {
-    const fetchMock = vi.fn()
+    const workbenchRead = vi.fn()
       .mockResolvedValueOnce(Response.json(readyPayload()))
       .mockResolvedValueOnce(Response.json({ error: { code: "UNAVAILABLE" } }, { status: 503 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/workbench") return workbenchRead();
+      if (String(input) === "/api/v1/paper/management/portfolio") {
+        return Response.json({ data: managementSummary, meta: meta() });
+      }
+      throw new Error("Unexpected test request");
+    });
     vi.stubGlobal("fetch", fetchMock);
     render(<WorkspacePage />);
     expect(await screen.findByText("AAPL")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("region", { name: "内部模拟目标与计划摘要" })).toHaveTextContent("目标 V7"));
 
     fireEvent.click(screen.getByRole("button", { name: "刷新工作台" }));
     await waitFor(() => expect(screen.getByRole("region", { name: "交易工作台页面" })).toHaveAttribute("data-state", "stale"));
+    expect(workbenchRead).toHaveBeenCalledTimes(2);
     expect(screen.getByText("AAPL")).toBeVisible();
     expect(screen.getByRole("status", { name: "工作台状态" })).toHaveTextContent("显示上次数据");
   });
