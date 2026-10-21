@@ -502,7 +502,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert kwargs["lifecycle_version"] == "portfolio_synthesis_job_v2"
                 remaining = kwargs["deadline_at"] - asyncio.get_running_loop().time()
                 assert 0 < remaining <= 83
-                assert kwargs["cleanup_deadline_at"] - kwargs["deadline_at"] == 7
+                # Compare absolute deadlines: subtraction across a float
+                # precision boundary can round a valid seven-second window.
+                assert kwargs["cleanup_deadline_at"] == kwargs["deadline_at"] + 7
                 return await original_invoke(payload, **kwargs)
 
             monkeypatch.setattr(
@@ -2067,6 +2069,7 @@ async def _verify_http_reads(database_url, cycle_id, orders, api_now, *, formal=
         "commit_ack_unknown",
         "timeout",
         "cancelled",
+        "cancelled_clock_boundary",
         "incomplete",
         "cleanup_error",
         "cancelled_known",
@@ -2074,6 +2077,32 @@ async def _verify_http_reads(database_url, cycle_id, orders, api_now, *, formal=
 )
 async def test_v11_formal_synthesis_sdk_lifecycle(migrated_database_url, monkeypatch, outcome):
     """Formal immutable model/job authority, actual Worker and SDK; only SDK client doubled."""
+    if outcome == "cancelled_clock_boundary":
+        import asyncio
+        import math
+
+        from nexus.agents import portfolio_synthesis_worker
+
+        loop = asyncio.get_running_loop()
+        monotonic = loop.time
+        deadline_type = portfolio_synthesis_worker.SynthesisDeadline
+        shifted = False
+
+        def at_clock_boundary(started_at):
+            nonlocal shifted
+            if not shifted:
+                # Monotonic origins are arbitrary. Exercise the actual Worker
+                # across a binary-float precision boundary without consuming
+                # extra time or changing any lifecycle duration.
+                origin = math.nextafter(2048.0 - 86.0, math.inf)
+                real_origin = monotonic()
+                monkeypatch.setattr(loop, "time", lambda: origin + (monotonic() - real_origin))
+                started_at = origin
+                shifted = True
+            return deadline_type(started_at)
+
+        monkeypatch.setattr(portfolio_synthesis_worker, "SynthesisDeadline", at_clock_boundary)
+        outcome = "cancelled"
     await test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         migrated_database_url,
         monkeypatch,
