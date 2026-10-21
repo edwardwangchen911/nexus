@@ -31,6 +31,9 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
   const intent = research.intent;
   const isHongKongGap = intent?.display_symbol === "00656.HK";
   const terminalReason = research.budget_reason ?? research.abstention_reason;
+  const hasStageAssessment = research.stage_trace?.stages.some((stage) =>
+    stage.roles.some((role) => role.role === "portfolio" && role.synthesis_assessment != null),
+  ) ?? false;
 
   function openEvidence(evidence: Evidence, excerpt: string | null, opener: HTMLButtonElement): void {
     openerRef.current = opener;
@@ -114,6 +117,12 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
 
       {intent ? (
         <>
+          {!hasStageAssessment && intent.synthesis_assessment ? (
+            <section className="decision-card__section" aria-label="已保存的综合审查">
+              <h3>已保存的综合审查</h3>
+              <SynthesisReviews assessment={intent.synthesis_assessment} systemStance={intent.stance} onOpen={openEvidence} />
+            </section>
+          ) : null}
           <div className="decision-card__arguments">
             <ClaimList title="支持论点" claims={intent.theses} onOpen={openEvidence} />
             <ClaimList title="反方论点" claims={intent.counter_theses} onOpen={openEvidence} />

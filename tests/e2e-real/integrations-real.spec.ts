@@ -107,6 +107,7 @@ test("proves the real BFF fixture CAS replay and persisted integration state", a
       });
       const region = page.getByRole("region", { name: "个股研究证据页" });
       await expect(region).toHaveAttribute("data-state", "partial");
+      await region.getByText("逐项审查（模型自评）", { exact: true }).click();
       for (const text of [
         "合成财报只支持历史收入观察。", "合成反方异议：缺少同口径盈利预测。",
         "合成缺口：同口径盈利预测缺失。", "合成受阻结论：无法判断是否增加敞口。",
