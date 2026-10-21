@@ -1827,6 +1827,13 @@ async def _resume_research(
         formal_stage_capacity=formal_stage_capacity,
     )
     run_ids = _fact_uuids(events, "research_run_ids")
+    recovered_research = 0
+    if formal_stage_capacity and now is not None:
+        from nexus.paper.research_orphan import recover_formal_research_orphans
+
+        recovered_research = await recover_formal_research_orphans(
+            session, cycle=cycle, run_ids=run_ids, now=now
+        )
     jobs = tuple(
         await session.scalars(
             select(Job).where(
@@ -1841,7 +1848,11 @@ async def _resume_research(
         job.status not in {"queued", "running", "succeeded"} for job in jobs
     ):
         return await _stop_unavailable(
-            session, cycle, events, cleanup_at=now if formal_stage_capacity else None
+            session,
+            cycle,
+            events,
+            cleanup_at=now if formal_stage_capacity else None,
+            recovered_research=recovered_research > 0,
         )
     if any(job.status in {"queued", "running"} for job in jobs):
         return _result(cycle.id, events, replayed=True)
@@ -2408,6 +2419,7 @@ async def _stop_unavailable(
     events: tuple[AgentPaperCycleEventRecord, ...],
     *,
     cleanup_at: datetime | None = None,
+    recovered_research: bool = False,
 ) -> AgentPaperCycleResult:
     facts: dict[str, object] = {}
     if cleanup_at is not None and events[-1].to_status == "researching":
@@ -2415,6 +2427,11 @@ async def _stop_unavailable(
         from nexus.persistence.models.economic import EconomicLaneCycleRecord
         from nexus.persistence.models.manual_paper import ManualPaperRequestEvent
 
+        economic = await session.scalar(
+            select(EconomicLaneCycleRecord.id)
+            .where(EconomicLaneCycleRecord.cycle_id == cycle.id)
+            .limit(1)
+        )
         ordinary = (
             not any("manual_request_id" in event.fact_ids for event in events)
             and await session.scalar(
@@ -2423,14 +2440,9 @@ async def _stop_unavailable(
                 .limit(1)
             )
             is None
-            and await session.scalar(
-                select(EconomicLaneCycleRecord.id)
-                .where(EconomicLaneCycleRecord.cycle_id == cycle.id)
-                .limit(1)
-            )
-            is None
+            and economic is None
         )
-        if ordinary:
+        if ordinary or (recovered_research and economic is None):
             try:
                 async with session.begin_nested():
                     cancelled = await cancel_unused_manual_research(

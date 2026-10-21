@@ -4119,6 +4119,14 @@ async def _inspect_portfolio_batch(
         if legacy_policy_block or activation_pending or proposal_unavailable:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         job = await _read_portfolio_security_job(session, cycle)
+        lease = None
+        status = job.status
+        if status == "running":
+            lease = await session.scalar(select(JobLease).where(JobLease.job_id == job.id))
+            if lease is None:
+                raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            if lease.expires_at <= now:
+                status = "running_expired"
         return AgentPaperLoopSnapshot(
             now=now,
             calendar_authority_id=calendar.calendar_authority_id,
@@ -4131,7 +4139,8 @@ async def _inspect_portfolio_batch(
             cycle_status=event.to_status,
             cycle_slot_at=cycle.decision_slot_at,
             research_job_id=job.id,
-            research_job_status=job.status,
+            research_job_status=status,
+            research_job_lease_expires_at=None if lease is None else lease.expires_at,
             performance_due_at=performance_due_at,
         )
     run = await session.get(AgentPortfolioSynthesisRunRecord, UUID(str(job.payload["run_id"])))
