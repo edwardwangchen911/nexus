@@ -130,6 +130,11 @@ describe("research evidence docket", () => {
     expect(screen.getAllByText(/不能支持策略目标/).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /运行冻结研究|重新运行冻结研究/ })).not.toBeInTheDocument();
   });
+  it("labels saved quality without claiming independent evidence completeness", () => {
+    render(<DecisionCard research={researchData()} />);
+    expect(screen.queryByText("证据完整度")).not.toBeInTheDocument();
+    expect(screen.getByText(/完整输出不代表所有证据充分/)).toBeVisible();
+  });
   it("keeps completed stage work separate from an unverified historical intent", () => {
     render(<DecisionCard research={researchData({ status: "completed", intent: null, quality_status: "partial", abstention_reason: "staged_action_semantics_unverified" })} />);
     expect(screen.getByText(/研究流程已完成，意图一致性未通过/)).toBeVisible();

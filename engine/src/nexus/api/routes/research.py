@@ -19,13 +19,13 @@ from nexus.agents.committee import StageInputIdentity
 from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
+from nexus.agents.observation_readback import ObservationReadback, readable_semantics
 from nexus.agents.persistence import (
     admit_research_run,
     load_complete_prompt_authority,
     select_authoritative_snapshot,
 )
 from nexus.agents.portfolio_context import PortfolioResearchContext, read_portfolio_context
-from nexus.agents.synthesis import staged_intent_semantics_valid
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
@@ -301,6 +301,8 @@ async def _hydrate_response(
     session: AsyncSession,
     run: AgentResearchRunRecord,
     output: AgentResearchOutputRecord | None,
+    *,
+    observation_reader: ObservationReadback | None = None,
 ) -> ResearchRunResponse:
     evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = ()
     if output is not None:
@@ -320,7 +322,15 @@ async def _hydrate_response(
     context = await read_portfolio_context(
         session, run.data_snapshot_id, run.instrument_id, run.decision_time
     )
-    response = _response(run, output, evidence_records, portfolio_context=context)
+    reader = observation_reader or ObservationReadback(session, read_at=utc_now())
+    observation_verified = await reader.verified(run, output, evidence_records)
+    response = _response(
+        run,
+        output,
+        evidence_records,
+        portfolio_context=context,
+        observation_verified=observation_verified,
+    )
     return response.model_copy(
         update={
             "stage_trace": await read_stage_trace(session, run),
@@ -348,6 +358,7 @@ def _response(
     evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = (),
     *,
     portfolio_context: PortfolioResearchContext | None = None,
+    observation_verified: bool = False,
 ) -> ResearchRunResponse:
     intent = None
     abstention_reason = None
@@ -379,8 +390,8 @@ def _response(
     if intent is not None and not condition_evaluations_match(intent, portfolio_context):
         intent = None
         abstention_reason = "condition_evaluation_invalid"
-    semantics_invalid = intent is not None and not staged_intent_semantics_valid(
-        intent, run.pricing_version
+    semantics_invalid = intent is not None and not readable_semantics(
+        intent, run.pricing_version, observation_verified=observation_verified
     )
     if semantics_invalid:
         intent = None

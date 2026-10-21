@@ -3,6 +3,7 @@
 from datetime import UTC, date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends
+from nexus.agents.observation_readback import ObservationReadback
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.routes.research import _hydrate_response, _latest_output
@@ -54,9 +55,13 @@ async def get_daily_brief(
     )
     truncated = len(selected) > _MAX_SESSION_RUNS
     responses: list[ResearchRunResponse] = []
+    reader = ObservationReadback(session, read_at=utc_now())
+    await reader.prime(selected[:_MAX_SESSION_RUNS])
     for run in selected[:_MAX_SESSION_RUNS]:
         responses.append(
-            await _hydrate_response(session, run, await _latest_output(session, run.id))
+            await _hydrate_response(
+                session, run, await _latest_output(session, run.id), observation_reader=reader
+            )
         )
     candidates = tuple(
         _item(response)

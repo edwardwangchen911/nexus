@@ -54,8 +54,10 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
         <div><dt>标的</dt><dd>{intent?.display_symbol ?? research.instrument_id}</dd></div>
         <div><dt>截止时间</dt><dd className="numeric-data">{formatUtc(research.decision_time)}</dd></div>
         <div><dt>运行状态</dt><dd>{statusLabel(research.status)}</dd></div>
-        <div><dt>证据完整度</dt><dd>{research.quality_status ? statusLabel(research.quality_status) : "未形成"}</dd></div>
+        <div><dt>保存的研究状态</dt><dd>{research.quality_status === "complete" ? "完整输出" : research.quality_status === "partial" ? "有限输出" : "未形成"}</dd></div>
       </dl>
+
+      <p role="note">完整输出不代表所有证据充分；请结合逐项审查中的缺口、受阻结论与不确定性阅读。</p>
 
       {research.billing_mode === "chatgpt_subscription" ? (
         <p className="research-page__gate" role="note">

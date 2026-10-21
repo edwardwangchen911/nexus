@@ -88,8 +88,8 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
       <div className="portfolio-summary__section">
         <h3>持仓</h3>
         {researchPositions.some((position) => position.research) ? <p className="portfolio-evidence-note">
-          AI 研究输出已生成 {completeResearch + partialResearch} / {researchPositions.length} 个可研究持仓；其中证据完整 {completeResearch}，证据不完整 {partialResearch}。
-          研究按各自冻结时点展示，不等于当前组合诊断通过；交易保持锁定。打开报告不会调用模型。
+          AI 研究输出已生成 {completeResearch + partialResearch} / {researchPositions.length} 个可研究持仓；其中完整输出 {completeResearch}，有限输出 {partialResearch}。
+          研究按各自冻结时点展示，完整输出不代表所有证据充分，也不等于当前组合诊断通过；交易保持锁定。打开报告不会调用模型。
           状态读取：{formatTime(positions.find((position) => position.research)?.research?.read_at ?? null)}。
         </p> : null}
         {positions.length === 0 ? <p className="portfolio-summary__empty">该原币种没有持仓事实。</p> : (
@@ -172,7 +172,7 @@ function PositionResearch({ position }: { position: Position }): React.ReactElem
     not_started: research.data_snapshot_id ? "研究资料已冻结 · 待研究" : "研究证据待补齐",
     prepared: "研究已登记 · 待执行", running: "研究执行中", validated: "研究核验中",
     audited: "证据审计中", synthesized: "研究汇总中", completed: research.quality_status === "complete"
-      ? "研究输出已生成 · 证据完整" : research.quality_status === "partial" ? "研究输出已生成 · 证据不完整" : "结果待核验",
+      ? "研究输出已生成 · 完整输出" : research.quality_status === "partial" ? "研究输出已生成 · 有限输出" : "结果待核验",
     failed: "研究失败 · 保持观望", abstained: "证据不足 · 未形成研究",
   } as const;
   const href = research.run_id
