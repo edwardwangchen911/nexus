@@ -575,6 +575,14 @@ async def test_expired_claim_is_terminalized_without_second_dispatch(
                 )
             )
             assert recovered.status == "failed"
+            from nexus.agents.portfolio_synthesis_diagnostics import read_synthesis_failure
+
+            diagnostic = await read_synthesis_failure(session, run_id=run.id)
+            assert diagnostic.state == "valid"
+            assert diagnostic.diagnostic.observation.local == (
+                "orphan_running" if running else "orphan_prepared"
+            )
+
             assert reservation.state == ("reserved" if running else "released")
             assert (await session.get(Job, job_id)).status == "dead_letter"
     finally:

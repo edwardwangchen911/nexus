@@ -31,6 +31,11 @@ from nexus.agents.portfolio_synthesis_contracts import (
     canonical_portfolio_synthesis_hash,
     validate_portfolio_synthesis_intent,
 )
+from nexus.agents.portfolio_synthesis_diagnostics import (
+    FailureObservation,
+    SynthesisDiagnosticConflict,
+    bind_failure_diagnostic,
+)
 from nexus.agents.synthesis import usage_cost
 from nexus.agents.synthesis_lifecycle import BOUNDED_SYNTHESIS_JOB, LEGACY_SYNTHESIS_JOB
 from nexus.domain.time import require_utc
@@ -669,6 +674,10 @@ async def persist_portfolio_synthesis_terminal(
     output_tokens: int | None,
     now: datetime,
     provider_call_started: bool | None = None,
+    failure_observation: FailureObservation | None = None,
+    diagnostic_job_id: UUID | None = None,
+    diagnostic_attempt_no: int | None = None,
+    diagnostic_fence_token: int | None = None,
 ) -> AgentPortfolioSynthesisOutputRecord:
     """Commit one bound terminal; unknown post-call usage retains the full reservation."""
     require_utc(now)
@@ -728,6 +737,23 @@ async def persist_portfolio_synthesis_terminal(
             or run.output_tokens != output_tokens
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_TERMINAL_CONFLICT")
+        if existing.failure_diagnostic is not None and failure_observation is not None:
+            proposed = (
+                await bind_failure_diagnostic(
+                    session,
+                    run=run,
+                    output_id=existing.id,
+                    binding_hash=binding_hash,
+                    observation=failure_observation,
+                    job_id=diagnostic_job_id,
+                    attempt_no=diagnostic_attempt_no,
+                    fence_token=diagnostic_fence_token,
+                )
+                if diagnostic_job_id is not None
+                else None
+            )
+            if proposed != existing.failure_diagnostic:
+                raise SynthesisDiagnosticConflict()
         return existing
     if (
         run.status not in {"prepared", "running"}
@@ -773,7 +799,24 @@ async def persist_portfolio_synthesis_terminal(
         run.output_tokens = output_tokens
         run.settled_cost_usd = cost
         run.completed_at = now
+        from nexus.domain.ids import new_uuid7
+
+        output_id = new_uuid7()
+        diagnostic = None
+        if status == "failed" and failure_observation is not None and diagnostic_job_id is not None:
+            diagnostic = await bind_failure_diagnostic(
+                session,
+                run=run,
+                output_id=output_id,
+                binding_hash=binding_hash,
+                observation=failure_observation,
+                job_id=diagnostic_job_id,
+                attempt_no=diagnostic_attempt_no,
+                fence_token=diagnostic_fence_token,
+            )
         output = AgentPortfolioSynthesisOutputRecord(
+            id=output_id,
+            failure_diagnostic=diagnostic,
             run_id=run.id,
             status=status,
             intent=content["intent"],

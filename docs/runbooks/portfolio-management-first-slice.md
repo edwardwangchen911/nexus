@@ -167,3 +167,29 @@ uv run pytest engine/tests/integration/test_portfolio_management_e2e.py -q
 
 此项通过只证明冻结的两笔成交样例能贯通 PostgreSQL、Engine API、Web 接口和浏览器；真实行情、
 正式多股票候选池、自然时间窗及用户账户的验收仍须分别核对。
+
+
+### 正式综合失败诊断（0082 起）
+
+新失败终态将安全诊断与输出、Run、用量及 Job 完结原子保存。原业务结果、
+terminal_v1 内容/绑定哈希和预算依据不变；未知及晚到用量继续保留原预留。
+主异常和 cleanup 分开记录，只含白名单元数据，不含原异常文本、提示词或 lease token。
+正式 orphan 恢复只记录本地观察，不据此推断上游原因。历史缺失不回填、不重放。
+
+正常只读入口（精确综合 Run，不接受研究 Run）：
+
+```sh
+uv run nexus-engine-research-workload-inspection --repo-root . --portfolio-synthesis-run-id <RUN_UUID>
+```
+
+返回 `failure_diagnostic.state`：`valid`、`missing`、`invalid` 或 `unsupported`。
+缺失不等于未调用；无效/不支持只返回固定原因，不阻断原业务状态及用量读回。
+该入口使用只读一致快照，零模型调用、零事件/输出写入；可使用已有
+`--database-url-file` 隔离数据库配置机制。旧 `--run-id` 行为不变。
+
+0082 仅增加可空 JSONB 列；旧消费者和旧应用 INSERT 不需要提供该列。部署前备份并
+确认无活跃业务占用，升级 schema 后更新应用。回滚应用时保留 0082 schema 及已有诊断。回滚镜像须保留 0082 迁移和运行时版本声明，
+其余应用源码使用上一版；声明 0081 的旧镜像会被现有精确版本门禁拒绝，不能直接使用；
+若已有诊断，Alembic downgrade 会拒绝删除事实。只有尚无诊断时才允许降到 0081。
+诊断冲突使用固定 `PORTFOLIO_SYNTHESIS_DIAGNOSTIC_CONFLICT` 信号，Worker 拒绝新诊断
+并保留原业务事实，不重新排队或调用 SDK。每个输出只保留首次终态时的事实。
