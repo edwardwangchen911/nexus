@@ -13,8 +13,8 @@ from pathlib import Path
 EXPIRES_AT = datetime(2026, 10, 22, tzinfo=UTC)
 APPROVED_AT = datetime(2026, 10, 15, tzinfo=UTC)
 ADVISORY = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm"
-LOCK_SHA256 = "23825ee3b82a03fc22c45ba985fe30dba786596ad8b1e6d389ffa50518947e9a"
-SURFACE_SHA256 = "016066ee4b927c84328101cd43bc4b4fc611bcfb4440594669b65920071f8d72"
+LOCK_SHA256 = "f82d9d8deb646f0ab7d3a3ba5fc81305ee26321984b8872aa15c1945d830e2e1"
+SURFACE_SHA256 = "3cebba5ecc7ca386abd74eb94027648f7412fa68af899105a6968fe941b4d4e6"
 # Node paths are part of the acceptance, including the second fast-glob installation.
 CHAIN = {
     "@next/eslint-plugin-next": ("fast-glob",),
