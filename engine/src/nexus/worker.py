@@ -695,6 +695,10 @@ def _agent_registry(
                 )
         except ToolInputError:
             committee = _UnavailableResponsesCommittee()
+        from nexus.agents.codex_sdk import CodexCommittee
+
+        if isinstance(committee, CodexCommittee):
+            committee.dispatch_guard = context.require_dispatch_lease
         result = await execute_research_run(
             context.session,
             run_id=run.id,

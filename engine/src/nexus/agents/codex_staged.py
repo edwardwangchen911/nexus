@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
 from math import inf, isfinite, nextafter
 from time import perf_counter
@@ -245,6 +245,7 @@ def _stage_model_for_prior_claims(stage: str, claim_ids: tuple[str, ...]) -> typ
 
 
 class _StageInvocationOptions(TypedDict, total=False):
+    dispatch_guard: Callable[[], None]
     timeout_seconds: float
     stage_budget_version: str
     diagnostic_profile: str
@@ -660,6 +661,8 @@ class StagedCodexCommittee(CodexCommittee):
         if allowance_reason is not None:
             self.failure_reason = allowance_reason
             raise ValueError("CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED")
+        if self.dispatch_guard is not None:
+            self.dispatch_guard()
         self.failure_reason = "model_usage_uncertain"
         self.last_stage_input = StageInputIdentity(
             stage=stage,
@@ -672,6 +675,8 @@ class StagedCodexCommittee(CodexCommittee):
             provider_calls=self.usage.provider_calls + 1,
         )
         invocation_options: _StageInvocationOptions = {}
+        if self.dispatch_guard is not None:
+            invocation_options["dispatch_guard"] = self.dispatch_guard
         if allocated_timeout is not None:
             invocation_options["timeout_seconds"] = allocated_timeout
             assert allocated_deadline is not None
