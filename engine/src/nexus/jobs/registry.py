@@ -27,7 +27,7 @@ from nexus.jobs.models import (
     QueueName,
     RetryPolicy,
 )
-from nexus.jobs.repository import ClaimedJob
+from nexus.jobs.repository import ClaimedJob, LeaseLostError
 
 HandlerOutcome = Literal["succeeded", "skipped", "failed"]
 Clock = Callable[[], datetime]
@@ -68,6 +68,11 @@ class JobHandlerContext:
     def finished_at(self) -> datetime:
         """Return the injected worker clock without exposing runtime configuration."""
         return self._clock()
+
+    def require_dispatch_lease(self) -> None:
+        """Reject another external call once wall time reaches the frozen lease."""
+        if self._clock() >= self.claim.expires_at:
+            raise LeaseLostError("job lease expired before dispatch")
 
     def monotonic_deadline(self) -> float | None:
         """Return the worker-owned absolute deadline when invoked by a real worker."""

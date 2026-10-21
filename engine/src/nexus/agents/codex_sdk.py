@@ -17,7 +17,7 @@ from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal, TypedDict, cast, get_args
 
 from codex_cli_bin import bundled_codex_path  # type: ignore[import-untyped]
 from openai import pydantic_function_tool
@@ -145,6 +145,7 @@ class _InvocationState:
     cleanup_deadline: float | None = None
     on_usage: Callable[[UsageSnapshot], None] | None = None
     measured_usage: UsageSnapshot | None = None
+    dispatch_guard: Callable[[], None] | None = None
 
 
 class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
@@ -471,6 +472,7 @@ async def invoke_codex(
     deadline_at: float | None = None,
     phase_elapsed_ms: dict[InvocationPhase, int] | None = None,
     stream_observer: SdkStreamObserver | None = None,
+    dispatch_guard: Callable[[], None] | None = None,
 ) -> tuple[str, UsageSnapshot]:
     if diagnostic_profile is not None:
         now = asyncio.get_running_loop().time()
@@ -543,8 +545,11 @@ async def invoke_codex(
         else None,
         phase_elapsed_ms={} if phase_elapsed_ms is None else phase_elapsed_ms,
         stream_observer=stream_observer,
+        dispatch_guard=dispatch_guard,
     )
     with _invocation_boundary("preflight", state=state):
+        if dispatch_guard is not None:
+            dispatch_guard()
         return await _invoke_codex(
             payload,
             invocation_state=state,
@@ -691,9 +696,13 @@ async def _invoke_codex(
                         failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
                         failure.timeout_source = "stage_deadline"
                         raise failure
-                    invocation_state.provider_call_started = True
+                    if invocation_state.dispatch_guard is not None:
+                        invocation_state.dispatch_guard()
 
                     async def run_turn() -> Any:
+                        if invocation_state.dispatch_guard is not None:
+                            invocation_state.dispatch_guard()
+                        invocation_state.provider_call_started = True
                         response = await thread.run(
                             wire,
                             output_schema=output_schema,
@@ -811,6 +820,10 @@ async def _invoke_codex(
         return result.final_response, measured_usage
 
 
+class _DispatchOptions(TypedDict, total=False):
+    dispatch_guard: Callable[[], None]
+
+
 class CodexCommittee:
     """Batch the same eight roles once; host code owns facts, citations and lifecycle."""
 
@@ -831,6 +844,7 @@ class CodexCommittee:
         self._request: ResearchRequest | None = None
         self._evidence: tuple[EvidenceRef, ...] = ()
         self.usage = UsageSnapshot()
+        self.dispatch_guard: Callable[[], None] | None = None
 
     async def analyze(
         self,
@@ -847,6 +861,9 @@ class CodexCommittee:
             self._attempted = True
             self._request, self._evidence = request, evidence_refs
             inputs = await self._inputs(request)
+            options: _DispatchOptions = {}
+            if self.dispatch_guard is not None:
+                options["dispatch_guard"] = self.dispatch_guard
             raw, self.usage = await invoke_codex(
                 {
                     "instructions": (
@@ -864,7 +881,8 @@ class CodexCommittee:
                     "request": request.model_dump(mode="json"),
                     "evidence": [item.model_dump(mode="json") for item in evidence_refs],
                     "frozen_inputs": inputs,
-                }
+                },
+                **options,
             )
             batch = _Batch.model_validate_json(raw)
             if (
