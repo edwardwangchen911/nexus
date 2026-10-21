@@ -130,12 +130,23 @@ describe("research evidence docket", () => {
     expect(screen.getAllByText(/不能支持策略目标/).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /运行冻结研究|重新运行冻结研究/ })).not.toBeInTheDocument();
   });
-  it("retains saved review limitations when stage detail is unavailable", () => {
+  it.each(["absent", "empty"])("retains saved review limitations when stage detail is %s", (kind) => {
     const data = synthesisResearchData({ review_conclusion: "limited" });
-    render(<DecisionCard research={{ ...data, stage_trace: null }} />);
+    const trace = kind === "empty" && data.stage_trace
+      ? { ...data.stage_trace, stages: data.stage_trace.stages.map((stage) => ({
+        ...stage, status: "unavailable" as const, roles: [], input_tokens: 0, output_tokens: 0,
+      })) }
+      : null;
+    render(<DecisionCard research={{ ...data, stage_trace: trace }} />);
     fireEvent.click(screen.getByText("逐项审查（模型自评）"));
     expect(screen.getByText("模型自评的审查充分性：有限")).toBeVisible();
     expect(screen.getByText("估值依据仍未验证。")).toBeVisible();
+  });
+  it("does not use terminal review fallback for an invalid empty stage trace", () => {
+    const data = synthesisResearchData();
+    render(<DecisionCard research={{ ...data, stage_trace: data.stage_trace
+      ? { ...data.stage_trace, status: "invalid", stages: [] } : null }} />);
+    expect(screen.queryByText("逐项审查（模型自评）")).not.toBeInTheDocument();
   });
   it("labels saved quality without claiming independent evidence completeness", () => {
     render(<DecisionCard research={researchData()} />);
