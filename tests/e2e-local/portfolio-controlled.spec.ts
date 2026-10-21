@@ -240,13 +240,27 @@ test("partial assessment closes without execution through normal BFF and pages",
     const current = await request.get("/api/v1/workbench");
     expect(current.status()).toBe(200);
     const currentData = (await current.json()).data;
+    const cycles = await request.get("/api/v1/paper/cycles?limit=20");
+    expect(cycles.status()).toBe(200);
+    const currentCycles = (await cycles.json()).data;
+    expect(currentData.latest_cycle).toEqual(currentCycles.items[0] ?? null);
     // Real clock stays intact: a historical import is not today's scheduled cycle.
     if (currentData.latest_cycle === null) {
       await expect(page.getByRole("region", { name: "最新决策" })).toContainText("尚无已保存");
       expect(currentData.session.decision_session).not.toBe(original.cycle.decision_session);
     } else {
-      expect(currentData.latest_cycle.cycle_id).toBe(id);
-      await expect(page.getByRole("region", { name: "最新决策" })).toContainText("暂缓");
+      const latest = currentData.latest_cycle;
+      expect(latest.decision_session).toBe(currentData.session.decision_session);
+      const latestRegion = page.getByRole("region", { name: "最新决策" });
+      await expect(latestRegion.getByRole("link", { name: "查看完整决策" }))
+        .toHaveAttribute("href", `/decisions/${latest.cycle_id}`);
+      await expect(latestRegion.locator("time")).toHaveAttribute("datetime", latest.decision_time);
+      if (latest.cycle_id === id) {
+        await expect(latestRegion).toContainText("暂缓");
+      } else {
+        expect(Date.parse(latest.decision_time)).toBeGreaterThan(Date.parse(original.cycle.decision_time));
+        await expect(latestRegion.locator(`a[href="/decisions/${id}"]`)).toHaveCount(0);
+      }
     }
   } else {
     await expect(page.getByRole("region", { name: "最新决策" })).toContainText("暂缓");
