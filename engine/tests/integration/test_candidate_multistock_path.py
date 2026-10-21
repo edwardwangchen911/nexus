@@ -567,6 +567,19 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 await run_portfolio_synthesis_worker_once(
                     settings, job_ids=(synth_job.id,), **consumer_mode
                 )
+                # Distinguish an undispatched fixture from lost cancellation.
+                async with sessions() as session:
+                    terminal_job = await session.get(Job, synth_job.id)
+                    from nexus.agents.portfolio_synthesis_diagnostics import read_synthesis_failure
+
+                    diagnostic = await read_synthesis_failure(session, run_id=synth.id)
+                    assert portfolio_calls == [synth.input_hash], (
+                        terminal_job.status,
+                        terminal_job.last_error_code,
+                        client.account.await_count,
+                        thread.run.await_count,
+                        diagnostic.model_dump(mode="json"),
+                    )
         else:
             assert await run_portfolio_synthesis_worker_once(
                 settings, job_ids=(synth_job.id,), **consumer_mode
