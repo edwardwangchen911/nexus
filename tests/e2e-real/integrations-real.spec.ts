@@ -86,6 +86,47 @@ test("proves the real BFF fixture CAS replay and persisted integration state", a
   await expect(page.getByText("非交易连接测试已完成。")).toHaveCount(0);
   await expect(page.getByLabel("fosun 集成（只读）").getByText("1", { exact: true })).toBeVisible();
 
+  for (const version of [10, 11]) {
+    await test.step(`v${version} persisted observation survives real GET and refresh`, async () => {
+      const instrumentId = "0198d500-1000-7000-8000-000000009001";
+      const runId = `0198d500-1000-7000-8000-0000000090${version}`;
+      const path = `/api/v1/research-runs/${runId}`;
+      const read = () => page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.origin === webOrigin && url.pathname === path && response.request().method() === "GET";
+      });
+      const initialRead = read();
+      await page.goto(`/research/${instrumentId}?run_id=${runId}`);
+      const saved = await json<{ data: Record<string, unknown> }>(await initialRead);
+      expect(saved.data).toMatchObject({
+        run_id: runId, status: "completed", quality_status: "partial", abstention_reason: null,
+        intent: {
+          stance: "watch", exposure_action: "none", quality_status: "partial",
+          synthesis_assessment: { review_conclusion: "limited" },
+        },
+      });
+      const region = page.getByRole("region", { name: "个股研究证据页" });
+      await expect(region).toHaveAttribute("data-state", "partial");
+      await region.getByText("逐项审查（模型自评）", { exact: true }).click();
+      for (const text of [
+        "合成财报只支持历史收入观察。", "合成反方异议：缺少同口径盈利预测。",
+        "合成缺口：同口径盈利预测缺失。", "合成受阻结论：无法判断是否增加敞口。",
+        "合成不确定性：盈利持续性尚未证实。", "模型自评的审查充分性：有限",
+      ]) await expect(region.getByText(text, { exact: true }).first()).toBeVisible();
+      await expect(page.getByRole("button", { name: /运行冻结研究|重跑|下单|买入|卖出/ })).toHaveCount(0);
+      const refreshedRead = read();
+      await page.getByRole("button", { name: "重新读取", exact: true }).click();
+      const refreshed = await json<{ data: Record<string, unknown> }>(await refreshedRead);
+      expect(refreshed.data).toEqual(saved.data);
+      await expect(region).toHaveAttribute("data-state", "partial");
+      await expect(region.getByText("合成缺口：同口径盈利预测缺失。", { exact: true }).first()).toBeVisible();
+      await expect(page.getByRole("button", { name: /运行冻结研究|重跑/ })).toHaveCount(0);
+    });
+  }
+  expect(observedRequests.filter((request) => (
+    new URL(request.url()).pathname.includes("research") && request.method() !== "GET"
+  ))).toEqual([]);
+
   expect(observedRequests.map((request) => new URL(request.url()).origin)).toEqual(
     expect.arrayContaining([webOrigin]),
   );

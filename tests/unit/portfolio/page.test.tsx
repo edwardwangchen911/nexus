@@ -49,9 +49,9 @@ describe("portfolio vertical slice", () => {
       newer_inputs_available: true,
     } };
     render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
-    expect(screen.getByText(/AI 研究输出已生成 1 \/ 1/)).toHaveTextContent("证据完整 0，证据不完整 1");
+    expect(screen.getByText(/AI 研究输出已生成 1 \/ 1/)).toHaveTextContent("完整输出 0，有限输出 1");
     expect(screen.getByText(/AI 研究输出已生成 1 \/ 1/)).toHaveTextContent("不等于当前组合诊断通过；交易保持锁定");
-    expect(screen.getByText("研究输出已生成 · 证据不完整")).toBeVisible();
+    expect(screen.getByText("研究输出已生成 · 有限输出")).toBeVisible();
     expect(screen.getByText("已有更新的冻结资料，当前报告未使用")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看 TEST 研究报告" })).toHaveAttribute("href", `/research/${position.instrument_id}?run_id=${position.research.run_id}`);
     expect(screen.getByRole("link", { name: "查看 TEST 更新资料" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T08%3A00%3A00Z`);
@@ -152,8 +152,8 @@ describe("portfolio vertical slice", () => {
       { ...snapshot.positions[0], instrument_id: "test-a", symbol: "TESTA", research },
       { ...snapshot.positions[0], instrument_id: "test-b", symbol: "TESTB", research: { ...research, quality_status: "partial" } },
     ] }} currency="HKD" />);
-    expect(screen.getByText(/AI 研究输出已生成 2 \/ 2/)).toHaveTextContent("证据完整 1，证据不完整 1");
-    expect(screen.getByText("研究输出已生成 · 证据完整")).toBeVisible();
+    expect(screen.getByText(/AI 研究输出已生成 2 \/ 2/)).toHaveTextContent("完整输出 1，有限输出 1");
+    expect(screen.getByText("研究输出已生成 · 完整输出")).toBeVisible();
     expect(screen.getByText("只读展示，不生成基本面判断")).toBeVisible();
   });
 

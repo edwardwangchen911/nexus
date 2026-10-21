@@ -9,7 +9,7 @@ import { EvidenceDrawer } from "../../../app/components/evidence-drawer";
 import { ResearchInputs } from "../../../app/components/research-inputs";
 import type { DataStateKind } from "../../../app/components/data-state";
 import type { components } from "../../../app/lib/generated/schema";
-import { briefData, evidence, researchAdmissionData, researchData } from "./fixtures";
+import { briefData, evidence, researchAdmissionData, researchData, synthesisResearchData } from "./fixtures";
 
 const states: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
@@ -129,6 +129,29 @@ describe("research evidence docket", () => {
     expect(screen.getByText(/研究阶段输出未通过内容校验/)).toBeVisible();
     expect(screen.getAllByText(/不能支持策略目标/).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /运行冻结研究|重新运行冻结研究/ })).not.toBeInTheDocument();
+  });
+  it.each(["absent", "empty"])("retains saved review limitations when stage detail is %s", (kind) => {
+    const data = synthesisResearchData({ review_conclusion: "limited" });
+    const trace = kind === "empty" && data.stage_trace
+      ? { ...data.stage_trace, stages: data.stage_trace.stages.map((stage) => ({
+        ...stage, status: "unavailable" as const, roles: [], input_tokens: 0, output_tokens: 0,
+      })) }
+      : null;
+    render(<DecisionCard research={{ ...data, stage_trace: trace }} />);
+    fireEvent.click(screen.getByText("逐项审查（模型自评）"));
+    expect(screen.getByText("模型自评的审查充分性：有限")).toBeVisible();
+    expect(screen.getByText("估值依据仍未验证。")).toBeVisible();
+  });
+  it("does not use terminal review fallback for an invalid empty stage trace", () => {
+    const data = synthesisResearchData();
+    render(<DecisionCard research={{ ...data, stage_trace: data.stage_trace
+      ? { ...data.stage_trace, status: "invalid", stages: [] } : null }} />);
+    expect(screen.queryByText("逐项审查（模型自评）")).not.toBeInTheDocument();
+  });
+  it("labels saved quality without claiming independent evidence completeness", () => {
+    render(<DecisionCard research={researchData()} />);
+    expect(screen.queryByText("证据完整度")).not.toBeInTheDocument();
+    expect(screen.getByText(/完整输出不代表所有证据充分/)).toBeVisible();
   });
   it("keeps completed stage work separate from an unverified historical intent", () => {
     render(<DecisionCard research={researchData({ status: "completed", intent: null, quality_status: "partial", abstention_reason: "staged_action_semantics_unverified" })} />);

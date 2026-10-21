@@ -7,11 +7,14 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy import select, true
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from nexus.agents.synthesis import STAGED_SEMANTICS_UNCERTAINTY, staged_intent_semantics_valid
+from nexus.agents.observation_readback import ObservationReadback, readable_semantics
+from nexus.agents.synthesis import STAGED_SEMANTICS_UNCERTAINTY
 from nexus.api.schemas.portfolio import PositionResearchResponse, PositionResearchStatus
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
+    AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
@@ -25,7 +28,7 @@ async def read_position_research(
     *,
     read_at: datetime,
 ) -> dict[UUID, PositionResearchResponse]:
-    """Two bounded queries; no model/provider calls, writes, or readiness promotion."""
+    """Batch local reads; no model/provider calls, writes, or readiness promotion."""
     if not instrument_ids:
         return {}
     binding = AgentDataSnapshotEvidenceRecord
@@ -54,7 +57,7 @@ async def read_position_research(
     latest_inputs = {row.instrument_id: row for row in inputs}
     run = AgentResearchRunRecord
     output = (
-        select(AgentResearchOutputRecord.intent)
+        select(AgentResearchOutputRecord)
         .where(
             AgentResearchOutputRecord.run_id == run.id,
             AgentResearchOutputRecord.status == "completed",
@@ -64,9 +67,10 @@ async def read_position_research(
         .limit(1)
         .lateral()
     )
+    selected_output = aliased(AgentResearchOutputRecord, output)
     records = (
         await session.execute(
-            select(run, output.c.intent)
+            select(run, selected_output)
             .outerjoin(output, true())
             .where(
                 run.instrument_id.in_(instrument_ids),
@@ -91,7 +95,19 @@ async def read_position_research(
         )
         for instrument_id in instrument_ids
     }
-    for record, raw_intent in records:
+    output_ids = [item.id for _, item in records if item is not None]
+    bound: dict[UUID, list[AgentResearchOutputEvidenceRecord]] = {}
+    if output_ids:
+        for output_binding in await session.scalars(
+            select(AgentResearchOutputEvidenceRecord).where(
+                AgentResearchOutputEvidenceRecord.output_id.in_(output_ids)
+            )
+        ):
+            bound.setdefault(output_binding.output_id, []).append(output_binding)
+    reader = ObservationReadback(session, read_at=read_at)
+    await reader.prime([record for record, _ in records])
+    for record, selected in records:
+        raw_intent = None if selected is None else selected.intent
         intent = None
         if record.status == "completed" and raw_intent is not None:
             try:
@@ -104,8 +120,11 @@ async def read_position_research(
                     intent = parsed
             except ValidationError:
                 pass
-        semantics_invalid = intent is not None and not staged_intent_semantics_valid(
-            intent, record.pricing_version
+        observation_verified = await reader.verified(
+            record, selected, () if selected is None else bound.get(selected.id, ())
+        )
+        semantics_invalid = intent is not None and not readable_semantics(
+            intent, record.pricing_version, observation_verified=observation_verified
         )
         if semantics_invalid:
             intent = None
