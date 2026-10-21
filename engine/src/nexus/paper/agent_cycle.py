@@ -2427,11 +2427,6 @@ async def _stop_unavailable(
         from nexus.persistence.models.economic import EconomicLaneCycleRecord
         from nexus.persistence.models.manual_paper import ManualPaperRequestEvent
 
-        economic = await session.scalar(
-            select(EconomicLaneCycleRecord.id)
-            .where(EconomicLaneCycleRecord.cycle_id == cycle.id)
-            .limit(1)
-        )
         ordinary = (
             not any("manual_request_id" in event.fact_ids for event in events)
             and await session.scalar(
@@ -2440,9 +2435,12 @@ async def _stop_unavailable(
                 .limit(1)
             )
             is None
-            and economic is None
         )
-        if ordinary or (recovered_research and economic is None):
+        if (ordinary or recovered_research) and await session.scalar(
+            select(EconomicLaneCycleRecord.id)
+            .where(EconomicLaneCycleRecord.cycle_id == cycle.id)
+            .limit(1)
+        ) is None:
             try:
                 async with session.begin_nested():
                     cancelled = await cancel_unused_manual_research(
