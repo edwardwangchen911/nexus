@@ -123,7 +123,7 @@ describe("real fixture runner", () => {
     ]) expect(child).not.toHaveProperty(key);
   });
 
-  it("holds the database guard across migration, Playwright, and result verification", async () => {
+  it("holds the database guard across migration, offline seed, Playwright, and verification", async () => {
     const calls: Array<{ executable: string; args: string[]; env: Record<string, string> }> = [];
     const lifecycle: string[] = [];
     const exit = await runRealFixture({
@@ -143,13 +143,15 @@ describe("real fixture runner", () => {
     expect(exit).toBe(0);
     expect(calls.map(({ executable, args }) => [executable, args])).toEqual([
       ["uv", ["run", "--package", "nexus-engine", "alembic", "-c", "engine/alembic.ini", "upgrade", "head"]],
+      ["uv", ["run", "--package", "nexus-engine", "python", "scripts/e2e/seed_observation_readback.py"]],
       [process.execPath, ["./node_modules/@playwright/test/cli.js", "test", "--config", "playwright.real.config.ts"]],
       [process.execPath, ["scripts/e2e/verify-real-fixture-result.mjs"]],
     ]);
     expect(calls[0]?.env).toEqual(calls[1]?.env);
     expect(calls[1]?.env).toEqual(calls[2]?.env);
+    expect(calls[2]?.env).toEqual(calls[3]?.env);
     expect(calls[0]?.env).not.toHaveProperty("OPENAI_API_KEY");
-    expect(lifecycle).toEqual(["guard-start", "migration", "playwright", "result-verifier", "guard-stop"]);
+    expect(lifecycle).toEqual(["guard-start", "migration", "observation-seed", "playwright", "result-verifier", "guard-stop"]);
   });
 
   it("stops after a migration failure and propagates the Playwright exit code", async () => {
@@ -232,7 +234,7 @@ describe("real fixture runner", () => {
   );
 
   it("releases the database guard when migration or Playwright fails", async () => {
-    for (const failureStage of ["migration", "playwright"]) {
+    for (const failureStage of ["migration", "observation-seed", "playwright"]) {
       const lifecycle: string[] = [];
       const exit = await runRealFixture({
         env: { NEXUS_REAL_E2E_DATABASE_URL: safeUrl },
@@ -246,7 +248,7 @@ describe("real fixture runner", () => {
       expect(exit).toBe(17);
       expect(lifecycle.at(-1)).toBe("guard-stop");
       expect(lifecycle).not.toContain("result-verifier");
-      if (failureStage === "migration") expect(lifecycle).not.toContain("playwright");
+      if (failureStage !== "playwright") expect(lifecycle).not.toContain("playwright");
     }
   });
 

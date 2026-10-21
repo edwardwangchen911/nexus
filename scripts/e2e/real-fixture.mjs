@@ -292,6 +292,12 @@ export async function runRealFixture({
       "migration",
     );
     if (migrationExitCode !== 0) return migrationExitCode;
+    const seedExitCode = await runStage(
+      "uv",
+      ["run", "--package", "nexus-engine", "python", "scripts/e2e/seed_observation_readback.py"],
+      "observation-seed",
+    );
+    if (seedExitCode !== 0) return seedExitCode;
     const playwrightExitCode = await runStage(
       process.execPath,
       ["./node_modules/@playwright/test/cli.js", "test", "--config", "playwright.real.config.ts"],
