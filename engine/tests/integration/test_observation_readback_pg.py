@@ -40,7 +40,9 @@ def digest(value):
     ).hexdigest()
 
 
-async def seed_observation(factory, version, defect=None):
+async def seed_observation(
+    factory, version, defect=None, *, status="completed", usage=(None, None)
+):
     prompt_ids = await _seed_authority(factory, model_version=version, include_base_evidence=False)
     prompts = load_prompt_assets()
     async with factory() as session, session.begin():
@@ -122,7 +124,9 @@ async def seed_observation(factory, version, defect=None):
             prompt_version_id=prompt_ids["orchestrator"],
             model_config_id=_MODEL_ID,
             decision_time=_NOW,
-            status="completed",
+            status=status,
+            input_tokens=usage[0],
+            output_tokens=usage[1],
             actor_id="synthetic-readback",
             idempotency_key="one",
             schema_hash="a" * 64,
@@ -140,10 +144,14 @@ async def seed_observation(factory, version, defect=None):
         session.add(run)
         await session.flush()
         content = {
-            "status": "completed",
+            "status": status,
             "role": None,
-            "payload": {"quality_status": doc["quality_status"]},
-            "intent": doc,
+            "payload": {"quality_status": doc["quality_status"]}
+            if status == "completed"
+            else {"reason": "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"}
+            if status == "failed"
+            else {"reason": "manual_unused_research_cancelled"},
+            "intent": doc if status == "completed" else None,
         }
         output = AgentResearchOutputRecord(
             run_id=run.id,
@@ -340,4 +348,53 @@ async def test_cached_authority_does_not_accept_another_frozen_hash(migrated_dat
             run.prompt_hash = old_prompt
             run.evidence_hash = "0" * 64
             assert not await reader.verified(run, output, bound)
+    assert await business_digest(factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "version,expected_billing",
+    [
+        ("codex-sdk-chatgpt-v6-stage-time-budget", "chatgpt_subscription"),
+        ("codex-sdk-chatgpt-v7-stage-capacity-candidate", "chatgpt_subscription"),
+        ("codex-sdk-chatgpt-v8-stage-capacity", "chatgpt_subscription"),
+        ("codex-sdk-chatgpt-v9-full-input-capacity", "chatgpt_subscription"),
+        (V10, "chatgpt_subscription"),
+        (V11, "chatgpt_subscription"),
+        ("codex-sdk-chatgpt-v999-unrecognized", None),
+        ("fixture-model-v1", None),
+    ],
+)
+@pytest.mark.parametrize(
+    "status,usage",
+    [
+        ("completed", (123, 45)),
+        ("failed", (None, None)),
+        ("abstained", (0, 0)),
+    ],
+)
+async def test_research_readback_preserves_billing_and_usage(
+    migrated_database_url, version, expected_billing, status, usage
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    run_id, _ = await seed_observation(factory, version, status=status, usage=usage)
+    before = await business_digest(factory)
+    path = f"/internal/v1/research-runs/{run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://test"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["billing_mode"] == expected_billing
+    assert (data["input_tokens"], data["output_tokens"]) == usage
+    assert data["settled_cost_usd"] is None
+    if status != "completed":
+        assert data["status"] == status
+        assert data["intent"] is None
+        assert data["abstention_reason"] == (
+            "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"
+            if status == "failed"
+            else "manual_unused_research_cancelled"
+        )
     assert await business_digest(factory) == before

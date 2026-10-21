@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.codex_versions import (
     CANDIDATE_BUDGET_CONFIG_VERSION,
+    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    ISOLATED_CAPACITY_CONFIG_VERSIONS,
     PORTFOLIO_DECISION_CONFIG_VERSION,
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
@@ -59,6 +61,16 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
+
+# Billing display follows the stored exact SDK version, independently of admission.
+_SUBSCRIPTION_RESEARCH_VERSIONS = (
+    SDK_CONFIG_VERSIONS
+    | ISOLATED_CAPACITY_CONFIG_VERSIONS
+    | {
+        CANDIDATE_BUDGET_CONFIG_VERSION,
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+    }
+)
 
 
 @router.get(
@@ -418,7 +430,7 @@ def _response(
         status=cast(AgentRunStatus, status),
         retry_count=run.retry_count,
         billing_mode="chatgpt_subscription"
-        if run.pricing_version in (SDK_CONFIG_VERSIONS | {CANDIDATE_BUDGET_CONFIG_VERSION})
+        if run.pricing_version in _SUBSCRIPTION_RESEARCH_VERSIONS
         else None,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
