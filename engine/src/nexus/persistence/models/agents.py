@@ -372,6 +372,7 @@ class AgentPortfolioSynthesisOutputRecord(ImmutableCreatedAt, Base):
     intent: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
     content_hash: Mapped[str] = mapped_column(String(64))
     binding_hash: Mapped[str] = mapped_column(String(64))
+    failure_diagnostic: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class AgentPortfolioSynthesisBudgetReservationRecord(ImmutableCreatedAt, Base):

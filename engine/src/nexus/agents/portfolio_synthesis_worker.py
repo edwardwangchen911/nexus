@@ -35,6 +35,11 @@ from nexus.agents.portfolio_synthesis_contracts import (
     canonical_portfolio_synthesis_hash,
     validate_portfolio_synthesis_intent,
 )
+from nexus.agents.portfolio_synthesis_diagnostics import (
+    FailureObservation,
+    SynthesisDiagnosticConflict,
+    freeze_failure_observation,
+)
 from nexus.agents.portfolio_synthesis_persistence import (
     load_frozen_synthesis_authority,
     persist_portfolio_synthesis_terminal,
@@ -68,7 +73,7 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.paper import AgentPaperCycleRecord
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import Job, JobAttempt
 
 
 class SynthesisHandlerResultUnknown(ValueError):
@@ -445,6 +450,15 @@ async def reconcile_synthesis_orphans(
             )
         )
         if output is None:
+            attempt = await session.scalar(
+                select(JobAttempt).where(
+                    JobAttempt.job_id == job.id,
+                    JobAttempt.attempt_no == job.attempt_count,
+                )
+            )
+            observation = FailureObservation(
+                local="orphan_prepared" if run.status == "prepared" else "orphan_running"
+            )
             await persist_portfolio_synthesis_terminal(
                 session,
                 run_id=run.id,
@@ -454,6 +468,10 @@ async def reconcile_synthesis_orphans(
                 input_tokens=None,
                 output_tokens=None,
                 now=now,
+                failure_observation=observation,
+                diagnostic_job_id=job.id,
+                diagnostic_attempt_no=None if attempt is None else attempt.attempt_no,
+                diagnostic_fence_token=None if attempt is None else attempt.fence_token,
             )
 
 
@@ -695,10 +713,21 @@ async def _run_synthesis_job_once(
                 )
                 return True
             input_hash = run.input_hash
-        await _finish(factory, claim, run_id, input_hash, "failed", None, None, clock)
+        await _finish(
+            factory,
+            claim,
+            run_id,
+            input_hash,
+            "failed",
+            None,
+            None,
+            clock,
+            failure_observation=FailureObservation(local="authority_rejected"),
+        )
         return True
     usage: UsageSnapshot | None = None
     cancelled = False
+    failure_observation: FailureObservation | None = None
 
     def retain_usage(observed: UsageSnapshot) -> None:
         nonlocal usage
@@ -745,9 +774,18 @@ async def _run_synthesis_job_once(
         # This remains under the original handler deadline; a second cancellation
         # rolls back the pending write, leaving exact-job orphan recovery to read it.
         cancelled = True
+        failure_observation = FailureObservation(local="cancelled")
         intent = None
         error_code = "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"
     except CodexInvocationError as error:
+        failure_observation = freeze_failure_observation(
+            {
+                "invocation_phase": error.phase,
+                "invocation_kind": error.kind,
+                "timeout_source": error.timeout_source,
+                "failure_facts": error.failure_facts,
+            }
+        )
         usage = error.usage if error.usage is not None else usage
         pre_dispatch = usage is None and error.provider_call_started is False
         error_code = (
@@ -756,6 +794,7 @@ async def _run_synthesis_job_once(
             else "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"
         )
     except ValueError:
+        failure_observation = FailureObservation(local="validation")
         status = (
             "abstained"
             if usage is not None and error_code != "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED"
@@ -764,6 +803,7 @@ async def _run_synthesis_job_once(
         intent = None
     except Exception:
         # Provider errors carry no trusted raw text and never trigger another call.
+        failure_observation = FailureObservation(local="exception")
         intent = None
     if usage is not None and (usage.input_tokens > limits[0] or usage.output_tokens > limits[1]):
         status, intent, usage = "failed", None, None
@@ -771,6 +811,8 @@ async def _run_synthesis_job_once(
     if not pre_dispatch and expires_at is not None and clock() >= expires_at:
         status, intent = "failed", None
         error_code = "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED"
+        if failure_observation is None:
+            failure_observation = FailureObservation(local="evidence_expired")
     await _finish(
         factory,
         terminal_claim,
@@ -783,6 +825,7 @@ async def _run_synthesis_job_once(
         expires_at=expires_at,
         pre_dispatch=pre_dispatch,
         error_code=error_code,
+        failure_observation=failure_observation,
     )
     if cancelled:
         raise asyncio.CancelledError
@@ -802,7 +845,11 @@ async def _finish(
     expires_at: datetime | None = None,
     pre_dispatch: bool = False,
     error_code: str = "PORTFOLIO_SYNTHESIS_FAILED",
+    failure_observation: FailureObservation | None = None,
 ) -> None:
+    if failure_observation is not None:
+        failure_observation = freeze_failure_observation(failure_observation)
+
     class EvidenceExpired(Exception):
         """Abort a tentative terminal; never escape this local finalization."""
 
@@ -813,17 +860,28 @@ async def _finish(
     async def complete(session: AsyncSession) -> JobCompletion:
         started_at = clock()
         require_evidence(started_at)
-        await persist_portfolio_synthesis_terminal(
-            session,
-            run_id=run_id,
-            input_hash=input_hash,
-            status=status,
-            intent=intent,
-            input_tokens=None if usage is None else usage.input_tokens,
-            output_tokens=None if usage is None else usage.output_tokens,
-            now=started_at,
-            provider_call_started=False if pre_dispatch else None,
-        )
+        try:
+            await persist_portfolio_synthesis_terminal(
+                session,
+                run_id=run_id,
+                input_hash=input_hash,
+                status=status,
+                intent=intent,
+                input_tokens=None if usage is None else usage.input_tokens,
+                output_tokens=None if usage is None else usage.output_tokens,
+                now=started_at,
+                provider_call_started=False if pre_dispatch else None,
+                failure_observation=failure_observation,
+                diagnostic_job_id=claim.job_id,
+                diagnostic_attempt_no=claim.attempt_no,
+                diagnostic_fence_token=claim.fence_token,
+            )
+        except SynthesisDiagnosticConflict:
+            # Business/hash/usage already matched; reject only the new diagnostic.
+            # This fixed signal must not escape into any generic job retry path.
+            import logging
+
+            logging.getLogger(__name__).warning("PORTFOLIO_SYNTHESIS_DIAGNOSTIC_CONFLICT")
         finished_at = clock()
         require_evidence(finished_at)
         outcome: Literal["succeeded", "skipped", "failed"] = (
@@ -860,4 +918,6 @@ async def _finish(
         # loss of that lease still rolls everything back. No provider redispatch.
         status, intent = "failed", None
         error_code = "PORTFOLIO_SYNTHESIS_SESSION_EXPIRED"
+        if failure_observation is None:
+            failure_observation = FailureObservation(local="evidence_expired")
         await finalize()

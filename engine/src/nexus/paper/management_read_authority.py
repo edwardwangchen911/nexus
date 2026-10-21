@@ -24,6 +24,10 @@ from nexus.agents.portfolio_synthesis_contracts import (
     canonical_portfolio_synthesis_hash,
     validate_portfolio_synthesis_intent,
 )
+from nexus.agents.portfolio_synthesis_diagnostics import (
+    SynthesisFailureRead,
+    read_synthesis_failure,
+)
 from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
 from nexus.paper.agent_decision_store import (
     PersistedPortfolioProposal,
@@ -51,6 +55,7 @@ class SynthesisReadAuthority:
     output: AgentPortfolioSynthesisOutputRecord
     frozen: PortfolioSynthesisInputV1
     intent: PortfolioSynthesisIntentV1 | None
+    failure_diagnostic: SynthesisFailureRead | None = None
 
 
 @dataclass(frozen=True)
@@ -254,7 +259,13 @@ async def load_synthesis_read_authority(
         raise ValueError("PORTFOLIO_SYNTHESIS_OUTPUT_CONFLICT")
     if intent is not None:
         validate_portfolio_synthesis_intent(intent, frozen)
-    return SynthesisReadAuthority(run=run, output=output, frozen=frozen, intent=intent)
+    return SynthesisReadAuthority(
+        run=run,
+        output=output,
+        frozen=frozen,
+        intent=intent,
+        failure_diagnostic=await read_synthesis_failure(session, run_id=run.id),
+    )
 
 
 async def load_proposal_read_authority(

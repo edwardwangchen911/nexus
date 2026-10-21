@@ -1,5 +1,6 @@
 """Accept one failed synthesis scheduling hold; never settle usage or replay it."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -16,7 +17,7 @@ from nexus.audit.service import append_audit_event
 from nexus.domain.time import require_utc
 from nexus.jobs.models import JobKeyV1, JobType, canonical_job_key, job_input_hash
 from nexus.paper.agent_cycle_models import CycleStatus, canonical_cycle_event_hash
-from nexus.paper.history_seal import _row_hash
+from nexus.paper.history_seal import _row_hash as _legacy_row_hash
 from nexus.paper.manual_preparation_close import require_preparation_producers_stopped
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.base import Base
@@ -43,6 +44,27 @@ ACTION = "paper.synthesis.unknown_usage_accepted"
 SCHEMA = "synthesis_usage_acceptance_v1"
 ACTOR = "local-user:synthesis-usage-acceptance"
 BLOCKED = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+
+
+def _row_hash(row: Base) -> str:
+    # The v1 acceptance proof predates diagnostics. Freeze its original business
+    # columns so nullable additions cannot revoke historical acceptance or make
+    # diagnostic metadata a budget/scheduling-release authority.
+    if isinstance(row, AgentPortfolioSynthesisOutputRecord):
+        values = {
+            key: getattr(row, key)
+            for key in (
+                "id",
+                "run_id",
+                "status",
+                "intent",
+                "content_hash",
+                "binding_hash",
+                "created_at",
+            )
+        }
+        return job_input_hash(json.loads(json.dumps(values, default=str)))
+    return _legacy_row_hash(row)
 
 
 class SynthesisUsageDiagnosticError(ValueError):

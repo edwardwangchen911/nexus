@@ -424,6 +424,39 @@ async def inspect_run(
         await factory.kw["bind"].dispose()
 
 
+async def inspect_portfolio_synthesis_run(
+    settings: EngineSettings, *, run_id: UUID
+) -> dict[str, object]:
+    """Read persisted formal synthesis facts only; never reconstruct or dispatch a call."""
+    from nexus.agents.portfolio_synthesis_diagnostics import read_synthesis_failure
+    from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
+
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            run = await session.get(AgentPortfolioSynthesisRunRecord, run_id)
+            if run is None:
+                raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+            diagnostic = await read_synthesis_failure(session, run_id=run_id)
+            return {
+                "status": "persisted_synthesis_observed",
+                "run_id": str(run.id),
+                "run_status": run.status,
+                "input_tokens": run.input_tokens,
+                "output_tokens": run.output_tokens,
+                "settled_cost_usd": None
+                if run.settled_cost_usd is None
+                else str(run.settled_cost_usd),
+                "failure_diagnostic": diagnostic.model_dump(mode="json"),
+                "model_calls": 0,
+            }
+    finally:
+        bind = factory.kw.get("bind")
+        if bind is not None:
+            await bind.dispose()
+
+
 async def inspect_capacity_cycle(settings: EngineSettings, *, cycle_id: UUID) -> dict[str, object]:
     from nexus.ops.research_capacity_pool import inspect_cycle
 
@@ -435,6 +468,7 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, required=True)
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--run-id", type=UUID)
+    target.add_argument("--portfolio-synthesis-run-id", type=UUID)
     target.add_argument("--capacity-cycle-id", type=UUID)
     parser.add_argument("--database-url-file", type=Path)
     parser.add_argument(
@@ -443,7 +477,9 @@ def main() -> int:
         help="Compare a readonly presentation candidate; never invoke or activate it.",
     )
     args = parser.parse_args()
-    if args.capacity_cycle_id is not None and args.financial_table_candidate:
+    if (
+        args.capacity_cycle_id is not None or args.portfolio_synthesis_run_id is not None
+    ) and args.financial_table_candidate:
         parser.error("cycle qualification already selects the fixed v9 profile")
     try:
         settings = local_settings(args.repo_root.resolve(), backend="codex_sdk")
@@ -452,7 +488,9 @@ def main() -> int:
                 update={"database_url": read_database_url(args.database_url_file)}
             )
         result = asyncio.run(
-            inspect_capacity_cycle(settings, cycle_id=args.capacity_cycle_id)
+            inspect_portfolio_synthesis_run(settings, run_id=args.portfolio_synthesis_run_id)
+            if args.portfolio_synthesis_run_id is not None
+            else inspect_capacity_cycle(settings, cycle_id=args.capacity_cycle_id)
             if args.capacity_cycle_id is not None
             else inspect_run(
                 settings,

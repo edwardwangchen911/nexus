@@ -848,3 +848,66 @@ async def test_isolated_normal_cli_uses_owner_and_rolls_back_identity_change(
             await session.rollback()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_acceptance_proof_survives_nullable_diagnostic_column(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    """An actual pre-diagnostic receipt remains valid without rewriting its facts."""
+    import hashlib
+    import json
+
+    from nexus.agents import portfolio_synthesis_worker
+
+    acceptance = _acceptance(monkeypatch)
+    # Old workers emitted no diagnostic; preserve that first-insert behavior.
+    with monkeypatch.context() as legacy_worker:
+        legacy_worker.setattr(
+            portfolio_synthesis_worker, "freeze_failure_observation", lambda _: None
+        )
+        engine, sessions, _, scope, calls = await _failed_case(migrated_database_url, monkeypatch)
+
+    def legacy_hash(row):
+        values = {
+            col.key: getattr(row, col.key)
+            for col in inspect(type(row)).columns
+            if col.key != "failure_diagnostic"
+        }
+        normalized = json.loads(json.dumps(values, default=str))
+        return hashlib.sha256(
+            json.dumps(
+                normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+
+    try:
+        async with sessions.begin() as session:
+            output = await session.scalar(select(AgentPortfolioSynthesisOutputRecord))
+            assert output.failure_diagnostic is None
+            before = await _facts(session)
+            with monkeypatch.context() as legacy_reader:
+                legacy_reader.setattr(acceptance, "_row_hash", legacy_hash)
+                await acceptance.accept_failed_synthesis_usage(
+                    session,
+                    **scope,
+                    repo_root=tmp_path,
+                    env_file=tmp_path / "fixture.env",
+                    accept_unknown_usage=True,
+                )
+        async with sessions.begin() as session:
+            assert await acceptance.synthesis_usage_accepted(
+                session, cycle_id=scope["cycle_id"], run_id=scope["run_id"], now=scope["now"]
+            )
+            await manual_request.require_manual_account_available(
+                session, account_id=scope["account_id"], now=scope["now"]
+            )
+            assert await _facts(session) == before
+            assert await _audit_count(session) == 1
+            run = await session.get(AgentPortfolioSynthesisRunRecord, scope["run_id"])
+            reserve = await session.scalar(select(AgentPortfolioSynthesisBudgetReservationRecord))
+            assert run.status == "failed" and run.input_tokens is None
+            assert reserve.state == "reserved" and reserve.settled_usd is None
+        assert len(calls) == 1
+    finally:
+        await engine.dispose()

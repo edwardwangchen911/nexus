@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.portfolio_synthesis_diagnostics import FailureObservation
 from nexus.agents.portfolio_synthesis_persistence import persist_portfolio_synthesis_terminal
 from nexus.agents.portfolio_synthesis_worker import (
     formal_synthesis_job_qualified,
@@ -102,5 +103,11 @@ async def recover_formal_synthesis_orphan(
         input_tokens=None,
         output_tokens=None,
         now=now,
+        failure_observation=FailureObservation(
+            local="orphan_prepared" if run.status == "prepared" else "orphan_running"
+        ),
+        diagnostic_job_id=job.id,
+        diagnostic_attempt_no=attempt.attempt_no,
+        diagnostic_fence_token=attempt.fence_token,
     )
     return True

@@ -255,6 +255,22 @@ async def test_normal_synthesis_sdk_terminal_and_lease_boundaries(
             )
             if outcome not in {"success", "checkpoint_extended"}:
                 assert output.intent is None
+                from nexus.agents.portfolio_synthesis_diagnostics import read_synthesis_failure
+
+                diagnostic = await read_synthesis_failure(session, run_id=run_id)
+                assert diagnostic.state == "valid"
+                observation = diagnostic.diagnostic.observation
+                if outcome == "sdk_timeout":
+                    assert observation.invocation_kind == "timeout"
+                    assert observation.invocation_phase == "turn_run"
+                if outcome in {
+                    "cancelled",
+                    "lease_expired",
+                    "terminal_lease_expired",
+                    "finalize_lease_expired",
+                }:
+                    assert observation.local == "orphan_running"
+
             if unknown:
                 assert stored.settled_cost_usd is None
             assert job.attempt_count == 1

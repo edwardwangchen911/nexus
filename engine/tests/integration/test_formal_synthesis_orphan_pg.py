@@ -172,6 +172,16 @@ async def test_formal_exited_synthesis_recovers_only_expired_claim(
             assert job.attempt_count == 1
             if expired:
                 assert run.status == output.status == "failed" and output.intent is None
+                from nexus.agents.portfolio_synthesis_diagnostics import read_synthesis_failure
+
+                diagnostic = await read_synthesis_failure(session, run_id=run.id)
+                assert diagnostic.state == "valid"
+                assert diagnostic.diagnostic.observation.local == "orphan_running"
+                assert diagnostic.diagnostic.attempt_no == 1
+                diagnostic_attempt = await session.get(JobAttempt, diagnostic.diagnostic.attempt_id)
+                assert diagnostic_attempt.job_id == job.id
+                assert diagnostic_attempt.fence_token == diagnostic.diagnostic.fence_token
+
                 assert job.status == "dead_letter" and job.last_error_code == "LEASE_EXPIRED"
                 assert attempt.outcome == "lost" and attempt.error_code == "LEASE_EXPIRED"
             else:
