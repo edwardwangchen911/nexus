@@ -138,7 +138,7 @@ def test_recovery_pair_and_default(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "state,exit_code", [("running", 0), ("stopped", 0), ("unknown", 0), ("inactive", 1)]
+    "state,exit_code", [("running", 0), ("stopped", 1), ("unknown", 0), ("inactive", 1)]
 )
 def test_alternate_inspector_keeps_host_rejections(tmp_path, monkeypatch, state, exit_code):
     from nexus.paper import manual_preparation_close as close
@@ -157,14 +157,17 @@ def test_alternate_inspector_keeps_host_rejections(tmp_path, monkeypatch, state,
         )
 
 
-def test_alternate_inspector_keeps_research_process_gate(tmp_path, monkeypatch):
+@pytest.mark.parametrize("state", ["inactive", "stopped"])
+def test_alternate_inspector_keeps_research_process_gate(tmp_path, monkeypatch, state):
     from nexus.paper import manual_preparation_close as close
 
     monkeypatch.setattr(close, "require_preparation_inspector_source", lambda *_a: None)
     monkeypatch.setattr(
         close.subprocess,
         "run",
-        lambda *a, **kw: SimpleNamespace(returncode=0, stdout='{"status":"inactive"}'),
+        lambda *a, **kw: SimpleNamespace(
+            returncode=0, stdout=__import__("json").dumps({"status": state})
+        ),
     )
 
     def busy():

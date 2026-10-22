@@ -140,6 +140,44 @@ def _calls(root):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+@pytest.mark.parametrize("busy", [False, True])
+def test_normal_stopped_service_reaches_preparation_process_guard(tmp_path, monkeypatch, busy):
+    from types import SimpleNamespace
+
+    from nexus.paper import manual_preparation_close as close
+
+    root, environment = _service_root(tmp_path)
+    assert json.loads(_invoke(root, environment, "stop").stdout)["status"] == "stopped"
+    calls = []
+
+    def inspect(command, **kwargs):
+        return subprocess.run(command, env=environment, **kwargs)
+
+    def quiescent():
+        calls.append(True)
+        if busy:
+            raise ValueError("research producer still active")
+
+    monkeypatch.setattr(
+        close,
+        "subprocess",
+        SimpleNamespace(
+            run=inspect,
+            TimeoutExpired=subprocess.TimeoutExpired,
+            SubprocessError=subprocess.SubprocessError,
+        ),
+    )
+    monkeypatch.setattr(close, "require_research_processes_quiescent", quiescent)
+    if busy:
+        with pytest.raises(close.PreparationCloseDiagnosticError) as caught:
+            close.require_preparation_producers_stopped(root, root / "infra/.env.test")
+        assert caught.value.stage == "research_processes"
+        assert caught.value.code == "QUIESCENCE_UNCONFIRMED"
+    else:
+        close.require_preparation_producers_stopped(root, root / "infra/.env.test")
+    assert calls == [True]
+
+
 def _register(root, *, state="running", legacy=False, exit_code=None):
     args = [RUNTIME, str(root / "scripts/macos" / SOURCE.name), "run"]
     if not legacy:
