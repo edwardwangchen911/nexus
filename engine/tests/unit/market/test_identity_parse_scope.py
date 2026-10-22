@@ -112,3 +112,17 @@ async def test_interleaved_requests_have_independent_parse_scopes():
     ) as feed:
         await asyncio.gather(first(), second())
         assert feed.call_count == 2
+
+
+def test_exited_scope_cannot_be_refilled_by_inherited_context():
+    from contextvars import copy_context
+
+    with patch.object(
+        identity._Cover, "feed", autospec=True, side_effect=identity._Cover.feed
+    ) as feed:
+        with identity.identity_parse_scope():
+            parse()
+            inherited = copy_context()
+        inherited.run(parse)
+        inherited.run(parse)
+        assert feed.call_count == 3

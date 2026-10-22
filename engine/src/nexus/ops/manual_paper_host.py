@@ -460,6 +460,13 @@ async def finish_configured_manual_request(
 
 
 async def dispatch_pure_research_request(settings: EngineSettings, *, request_id: UUID) -> bool:
+    from nexus.agents.preparation_reuse import research_preparation_scope
+
+    with research_preparation_scope():
+        return await _dispatch_pure_research_request(settings, request_id=request_id)
+
+
+async def _dispatch_pure_research_request(settings: EngineSettings, *, request_id: UUID) -> bool:
     """Execute a new claimed manifest once. Restart only closes; it never replays."""
     from nexus.ops.agent_paper_once import run_cycle_job_once
     from nexus.paper.research_request import finish_research_request, prepare_research_request

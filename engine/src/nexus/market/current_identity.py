@@ -1095,17 +1095,24 @@ def _single_exchange_record(
 
 # Opt-in per-read memoization of pure parsing only. Storage bytes, receipts,
 # database bindings and current aliases are still verified by every caller.
-_PARSE_CACHE: ContextVar[dict[tuple[str, str, str], CurrentCommonStockIdentity] | None] = (
+class _IdentityParseCache(dict[tuple[str, str, str], CurrentCommonStockIdentity]):
+    active: bool = True
+
+
+_PARSE_CACHE: ContextVar[_IdentityParseCache | None] = (
     ContextVar("identity_parse_cache", default=None)
 )
 
 
 @contextmanager
 def identity_parse_scope() -> Iterator[None]:
-    token = _PARSE_CACHE.set({})
+    cache = _IdentityParseCache()
+    token = _PARSE_CACHE.set(cache)
     try:
         yield
     finally:
+        cache.active = False
+        cache.clear()
         _PARSE_CACHE.reset(token)
 
 
@@ -1119,7 +1126,10 @@ def parse_current_common_stock(
 ) -> CurrentCommonStockIdentity:
     cache = _PARSE_CACHE.get()
     # Custom member policies continue through their original uncached path.
-    use_cache = cache is not None and _member_definition is None and not _allow_outside_definition
+    use_cache = (
+        cache is not None and cache.active
+        and _member_definition is None and not _allow_outside_definition
+    )
     key = (symbol, sha256(fmp_raw).hexdigest(), sha256(sec_raw).hexdigest()) if use_cache else None
     if cache is not None and key is not None and key in cache:
         return cache[key].model_copy(deep=True)

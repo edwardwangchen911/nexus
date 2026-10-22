@@ -94,7 +94,22 @@ def payload_input_units(text: str, *, model: str) -> int:
         if data is None:
             return fallback
         encoding = _validated_encoding(tiktoken.Encoding, data)
-        return len(encoding.encode_ordinary(text))
+        from nexus.agents.preparation_reuse import MAX_ENCODINGS, current_reuse
+
+        # Authority and factory were revalidated above, even for a cached count.
+        state = current_reuse()
+        key = (model, id(encoding), hashlib.sha256(text.encode("utf-8")).digest())
+        if state is not None and key in state.encodings:
+            cached_encoder, count = state.encodings[key]
+            if cached_encoder is encoding:
+                state.counts["token_hits"] += 1
+                return count
+        if state is not None:
+            state.counts["token_misses"] += 1
+        count = len(encoding.encode_ordinary(text))
+        if state is not None and len(state.encodings) < MAX_ENCODINGS:
+            state.encodings[key] = (encoding, count)
+        return count
     except Exception:
         # No download/alternate encoding, and no exception text containing inputs.
         return fallback
