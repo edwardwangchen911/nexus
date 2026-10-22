@@ -263,9 +263,15 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
     )
     settings = settings.model_copy(update={"release_revision": "a" * 40})
     calls = []
+    reuse_states = []
     client, thread, result, _ = _sdk(monkeypatch)
 
     async def invoke(payload, **options):
+        from nexus.agents.preparation_reuse import current_reuse
+
+        reuse = current_reuse()
+        assert reuse is not None and reuse.active
+        reuse_states.append(reuse)
         calls.append(payload["stage"])
         result.final_response = json.dumps(
             _assessment_payload(payload["previous_claims"])
@@ -290,6 +296,13 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
     )
     try:
         view = await run_pure_research_once(settings, idempotency_key="normal-v11")
+        from nexus.agents.preparation_reuse import current_reuse
+
+        assert current_reuse() is None
+        assert len(reuse_states) == 9 and len({id(state) for state in reuse_states}) == 1
+        reused = reuse_states[0]
+        assert reused.counts["projection_hits"] > 0
+        assert not reused.active and not reused.projections and not reused.encodings
         assert view.status == "completed" and view.cycle_id is None
         assert {m.instrument_id for m in view.research.members} == set(ids)
         assert all(m.status == "completed" and m.usage_known for m in view.research.members)

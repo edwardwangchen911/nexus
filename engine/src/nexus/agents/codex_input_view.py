@@ -1,8 +1,10 @@
 """Lossless, temporary JSON view for staged research; never changes frozen facts."""
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import cast
 
 from nexus.agents.codex_sdk import codex_request_wire
@@ -231,6 +233,53 @@ def _inline_citation_payload(payload: dict[str, object]) -> dict[str, object]:
 
 
 def project_staged_payload(
+    payload: dict[str, object],
+    *,
+    inline_citations: bool = False,
+    financial_table_candidate: bool = False,
+) -> dict[str, object]:
+    from nexus.agents.preparation_reuse import (
+        MAX_PROJECTION_BYTES,
+        MAX_PROJECTIONS,
+        current_reuse,
+    )
+
+    state = current_reuse()
+    key = None
+    if (
+        state is not None
+        and type(inline_citations) is type(financial_table_candidate) is bool
+        and _safe_json(payload)
+    ):
+        try:
+            # Preserve mapping order: it affects the exact projected wire and string table.
+            raw = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ).encode()
+        except (ValueError, TypeError):
+            pass  # Keep the original uncached behavior for unsupported inputs.
+        else:
+            if len(raw) <= MAX_PROJECTION_BYTES:
+                key = (inline_citations, financial_table_candidate, hashlib.sha256(raw).digest())
+                if key in state.projections:
+                    state.counts["projection_hits"] += 1
+                    return deepcopy(state.projections[key])
+        state.counts["projection_misses"] += 1
+    result = _project_staged_payload(
+        payload,
+        inline_citations=inline_citations,
+        financial_table_candidate=financial_table_candidate,
+    )
+    if state is not None and key is not None and len(state.projections) < MAX_PROJECTIONS:
+        size = len(codex_request_wire(result).encode())
+        if state.projection_bytes + size <= MAX_PROJECTION_BYTES:
+            state.projections[key] = deepcopy(result)
+            state.projection_bytes += size
+            return deepcopy(result)
+    return result
+
+
+def _project_staged_payload(
     payload: dict[str, object],
     *,
     inline_citations: bool = False,

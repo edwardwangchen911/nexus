@@ -133,13 +133,18 @@ async def test_pool_preflight_rejects_omitted_candidate_and_binds_exact_requests
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", [False, True])
-async def test_pool_binding_reaches_sdk_only_after_verified_unchanged_inputs(monkeypatch, drift):
+@pytest.mark.parametrize("reuse", [False, True])
+async def test_pool_binding_reaches_sdk_only_after_verified_unchanged_inputs(
+    monkeypatch, drift, reuse
+):
     import asyncio
     import json
+    from contextlib import nullcontext
     from unittest.mock import AsyncMock
 
     from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_pool
     from nexus.agents.committee import ROLE_ORDER
+    from nexus.agents.preparation_reuse import research_preparation_scope
     from unit.agents.test_codex_sdk import _sdk, _staged_batch
 
     _, thread, result, configs = _sdk(monkeypatch)
@@ -151,21 +156,22 @@ async def test_pool_binding_reaches_sdk_only_after_verified_unchanged_inputs(mon
     monkeypatch.setattr(
         model, "_inputs", AsyncMock(side_effect=[inputs, changed if drift else inputs])
     )
-    await preflight_capacity_pool(
-        [CapacityPoolMember(model, request, evidence)],
-        expected_instrument_ids=(request.instrument_id,),
-    )
-    if drift:
-        with pytest.raises(ValueError, match="^CODEX_CAPACITY_POOL_BINDING_INVALID$"):
-            await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
-        thread.run.assert_not_awaited()
-        assert not configs
-        assert model.usage.provider_calls == 0
-    else:
-        output = await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
-        assert output.role == "orchestrator"
-        thread.run.assert_awaited_once()
-        assert model.usage.provider_calls == 1
+    with research_preparation_scope() if reuse else nullcontext():
+        await preflight_capacity_pool(
+            [CapacityPoolMember(model, request, evidence)],
+            expected_instrument_ids=(request.instrument_id,),
+        )
+        if drift:
+            with pytest.raises(ValueError, match="^CODEX_CAPACITY_POOL_BINDING_INVALID$"):
+                await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+            thread.run.assert_not_awaited()
+            assert not configs
+            assert model.usage.provider_calls == 0
+        else:
+            output = await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+            assert output.role == "orchestrator"
+            thread.run.assert_awaited_once()
+            assert model.usage.provider_calls == 1
 
 
 @pytest.mark.asyncio
