@@ -135,7 +135,7 @@ async def run_job_worker_once(
 
     async with (
         factory() as session,
-        dispatch_failure_boundary(),
+        dispatch_failure_boundary(session),
         session.begin(),
         dispatch_failure_boundary(),
     ):
@@ -234,7 +234,7 @@ async def run_job_worker_once(
                 raise TimeoutError
             async with (
                 factory() as session,
-                dispatch_failure_boundary(),
+                dispatch_failure_boundary(session),
                 session.begin(),
                 dispatch_failure_boundary(),
             ):

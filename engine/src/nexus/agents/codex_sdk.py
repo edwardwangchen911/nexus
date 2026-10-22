@@ -296,7 +296,7 @@ def _invocation_boundary(
     except CodexInvocationError as error:
         from nexus.agents.research_dispatch import stop_current_dispatch
 
-        stop_current_dispatch()
+        stop_current_dispatch(error)
         if state is not None:
             error.provider_call_started = state.provider_call_started
             error.phase_elapsed_ms = dict(state.phase_elapsed_ms)
@@ -308,17 +308,18 @@ def _invocation_boundary(
     except TimeoutError:
         from nexus.agents.research_dispatch import stop_current_dispatch
 
-        stop_current_dispatch()
-        raise _CodexInvocationTimeout(
+        failure = _CodexInvocationTimeout(
             "CODEX_TIMEOUT",
             phase=phase,
             provider_call_started=None if state is None else state.provider_call_started,
             usage=None if state is None else state.measured_usage,
-        ) from None
+        )
+        stop_current_dispatch(failure)
+        raise failure from None
     except Exception as original:
         from nexus.agents.research_dispatch import stop_current_dispatch
 
-        stop_current_dispatch()
+        stop_current_dispatch(original)
         failure = CodexInvocationError(
             "CODEX_UNEXPECTED_EXCEPTION",
             phase=phase,
@@ -736,12 +737,15 @@ async def _invoke_codex(
                         if invocation_state.dispatch_guard is not None:
                             invocation_state.dispatch_guard()
                         invocation_state.provider_call_started = True
-                        response = await thread.run(
-                            wire,
-                            output_schema=output_schema,
-                            approval_mode=ApprovalMode.deny_all,
-                            sandbox=Sandbox.read_only,
-                        )
+                        from nexus.agents.research_dispatch import sdk_submission_trace
+
+                        with sdk_submission_trace(str(payload.get("stage"))):
+                            response = await thread.run(
+                                wire,
+                                output_schema=output_schema,
+                                approval_mode=ApprovalMode.deny_all,
+                                sandbox=Sandbox.read_only,
+                            )
                         # Store in the SDK task itself: a deadline/cancellation
                         # may win the race with the parent's shield result.
                         if response.usage is not None and (
@@ -786,6 +790,13 @@ async def _invoke_codex(
             with _invocation_boundary("response_check", state=invocation_state):
                 validated = _checked_codex_response(result, invocation_state)
         except TimeoutError as error:
+            from nexus.agents.research_dispatch import stop_current_dispatch
+
+            stop_current_dispatch(
+                error
+                if isinstance(error, CodexInvocationError)
+                else CodexInvocationError("CODEX_TIMEOUT", phase=phase)
+            )
             if invocation_timer.expired():
                 failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
                 failure.timeout_source = (
@@ -859,8 +870,7 @@ def _checked_codex_response(result: Any, state: _InvocationState) -> tuple[str, 
     if result.status is not TurnStatus.completed or not result.final_response:
         raise CodexInvocationError("CODEX_RESPONSE_INCOMPLETE", usage=measured_usage)
     if any(
-        item.root.type not in {"userMessage", "agentMessage", "reasoning"}
-        for item in result.items
+        item.root.type not in {"userMessage", "agentMessage", "reasoning"} for item in result.items
     ):
         raise CodexInvocationError("CODEX_UNEXPECTED_TOOL", usage=measured_usage)
     if len(result.final_response.encode()) > _MAX_OUTPUT_BYTES:

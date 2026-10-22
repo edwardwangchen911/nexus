@@ -115,7 +115,49 @@ async def test_normal_entry_overlaps_two_stocks_and_settles_all_three(
             if payload["stage"] == "research":
                 if not first_started.is_set():
                     first_started.set()
-                else:
+                elif not second_started.is_set():
+                    from dataclasses import replace
+                    from uuid import uuid4
+
+                    from nexus.agents.research_dispatch import (
+                        current_dispatch,
+                        require_dispatch_pool,
+                    )
+                    from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+                    state = current_dispatch()
+                    assert state is not None and len(state.claims) == 2
+                    first, selected = list(state.claims)
+                    original = state.claims[first]
+                    async with factory.begin() as session:
+                        row = await session.get(ManualPaperRequest, state.request_id)
+                        assert row is not None
+                        await require_dispatch_pool(session, row, state.manifest, selected)
+                        for changes in (
+                            {"fence_token": original.fence_token + 1},
+                            {"lease_token": uuid4()},
+                            {"worker_id": "wrong-synthetic-worker"},
+                        ):
+                            state.claims[first] = replace(original, **changes)
+                            try:
+                                with pytest.raises(
+                                    ValueError, match="RESEARCH_ONLY_POOL_BINDING_INVALID"
+                                ):
+                                    await require_dispatch_pool(
+                                        session, row, state.manifest, selected
+                                    )
+                            finally:
+                                state.claims[first] = original
+                        expected_request = state.request_id
+                        state.request_id = uuid4()
+                        try:
+                            with pytest.raises(
+                                ValueError, match="RESEARCH_ONLY_POOL_BINDING_INVALID"
+                            ):
+                                await require_dispatch_pool(session, row, state.manifest, selected)
+                        finally:
+                            state.request_id = expected_request
+                        await require_dispatch_pool(session, row, state.manifest, selected)
                     second_started.set()
                 await release.wait()
             body = (
@@ -317,4 +359,267 @@ async def test_first_failure_drains_peer_stage_and_never_starts_third(
                     session, account_id=settings.agent_paper_account_id, now=now
                 )
     finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True])
+async def test_database_commit_failure_stops_before_driver_rollback(migrated_database_url, nested):
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from nexus.agents.research_dispatch import (
+        ResearchDispatch,
+        dispatch_failure_boundary,
+        dispatch_member,
+    )
+    from nexus.paper.manual_request import ResearchManifestView, ResearchMemberView
+    from nexus.persistence.session import session_factory
+    from nexus.settings import EngineSettings
+    from sqlalchemy import event, text
+    from sqlalchemy.util.concurrency import await_only
+
+    run_id = uuid4()
+    state = ResearchDispatch(
+        uuid4(),
+        ResearchManifestView(
+            manifest_id=uuid4(),
+            manifest_hash="a" * 64,
+            research_as_of=datetime.now(UTC),
+            members=[
+                ResearchMemberView(
+                    instrument_id=uuid4(),
+                    run_id=run_id,
+                    job_id=uuid4(),
+                    status="prepared",
+                    quality=None,
+                    usage_known=False,
+                )
+            ],
+        ),
+    )
+    state.start(run_id)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    engine = factory.kw["bind"].sync_engine
+    rolling_back, release = asyncio.Event(), asyncio.Event()
+
+    def fail_commit(*_):
+        raise RuntimeError("synthetic_commit_failure")
+
+    def delay_rollback(*_):
+        rolling_back.set()
+        await_only(release.wait())
+
+    rollback_event = "rollback_savepoint" if nested else "rollback"
+
+    async def transaction():
+        with dispatch_member(state, run_id):
+            async with factory() as session, dispatch_failure_boundary(session):
+                # The hook observes the actual SQLAlchemy transaction manager's
+                # rollback before its DBAPI I/O, not a simplified fake manager.
+                event.listen(session.sync_session, "before_commit", fail_commit)
+                event.listen(engine, rollback_event, delay_rollback)
+                try:
+                    async with session.begin():
+                        if nested:
+                            async with session.begin_nested():
+                                await session.execute(text("SELECT 1"))
+                        else:
+                            await session.execute(text("SELECT 1"))
+                finally:
+                    event.remove(session.sync_session, "before_commit", fail_commit)
+                    event.remove(engine, rollback_event, delay_rollback)
+
+    task = asyncio.create_task(transaction())
+    try:
+        done, _ = await asyncio.wait(
+            [task, asyncio.create_task(rolling_back.wait())],
+            timeout=30,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if task in done:
+            await task
+        assert rolling_back.is_set()
+        assert state.stopped, "commit failure entered driver rollback with peers still enabled"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_inflight_final_stage_survives_peer_failure(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus.agents.codex_sdk import CodexInvocationError
+
+    factory, settings, store, _ = await prepare_scope(migrated_database_url, tmp_path, bounded=True)
+    settings = settings.model_copy(update={"release_revision": "a" * 40})
+    synthesis_started, failure_seen = asyncio.Event(), asyncio.Event()
+    calls, first_instrument = [], []
+
+    async def invoke(payload, **options):
+        options["dispatch_guard"]()
+        instrument, stage = payload["request"]["instrument_id"], payload["stage"]
+        calls.append((instrument, stage))
+        if not first_instrument:
+            first_instrument.append(instrument)
+        if instrument == first_instrument[0]:
+            await asyncio.wait_for(synthesis_started.wait(), 60)
+            failure_seen.set()
+            raise CodexInvocationError(
+                "CODEX_TIMEOUT",
+                provider_call_started=True,
+                usage=UsageSnapshot(input_tokens=300, output_tokens=80),
+            )
+        if stage == "synthesis":
+            synthesis_started.set()
+            await failure_seen.wait()
+        body = (
+            _assessment_payload(payload["previous_claims"])
+            if stage == "synthesis"
+            else _staged_batch(stage, payload["requested_roles"])
+        )
+        return json.dumps(body), UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1)
+
+    monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
+    monkeypatch.setattr(
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+    )
+    try:
+        view = await run_pure_research_once(settings, idempotency_key="peer-final-inflight")
+        assert view.status == "unavailable"
+        assert [stage for _, stage in calls] == ["research", "research", "critique", "synthesis"]
+        assert len({instrument for instrument, _ in calls}) == 2
+        assert [m.status for m in view.research.members] == ["failed", "completed", "abstained"]
+        assert all(m.usage_known for m in view.research.members)
+        async with factory.begin() as session:
+            budgets = list(await session.scalars(select(AgentDailyBudgetReservationRecord)))
+            assert sorted(b.state for b in budgets) == ["released", "settled", "settled"]
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_two_workers_drains_before_exit_and_preserves_unknown(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus.persistence.models.runtime import ManualHostExit
+    from sqlalchemy import func
+
+    factory, settings, store, _ = await prepare_scope(migrated_database_url, tmp_path, bounded=True)
+    settings = settings.model_copy(update={"release_revision": "a" * 40})
+    both_started, release_cleanup = asyncio.Event(), asyncio.Event()
+    calls, drained = [], []
+
+    async def invoke(payload, **options):
+        options["dispatch_guard"]()
+        calls.append(payload["request"]["instrument_id"])
+        if len(calls) == 2:
+            both_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await release_cleanup.wait()
+            drained.append(payload["request"]["instrument_id"])
+
+    monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
+    monkeypatch.setattr(
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+    )
+    task = asyncio.create_task(run_pure_research_once(settings, idempotency_key="cancel-two"))
+    try:
+        await asyncio.wait_for(both_started.wait(), 60)
+        task.cancel()
+        async with factory.begin() as session:
+            assert await session.scalar(select(func.count()).select_from(ManualHostExit)) == 0
+        assert not task.done()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 60)
+        assert len(calls) == len(drained) == 2
+        async with factory.begin() as session:
+            assert await session.scalar(select(func.count()).select_from(ManualHostExit)) == 1
+            budgets = list(await session.scalars(select(AgentDailyBudgetReservationRecord)))
+            assert sorted(b.state for b in budgets) == ["released", "reserved", "reserved"]
+            assert all(b.settled_usd is None for b in budgets if b.state == "reserved")
+        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+            await run_pure_research_once(settings, idempotency_key="cancel-next-blocked")
+        assert len(calls) == 2
+    finally:
+        release_cleanup.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_handler_commit_failure_never_refills_and_keeps_reservation(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus.agents.research_dispatch import current_dispatch
+    from nexus.persistence.models.manual_paper import ManualPaperRequest
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+
+    factory, settings, store, _ = await prepare_scope(migrated_database_url, tmp_path, bounded=True)
+    settings = settings.model_copy(update={"release_revision": "a" * 40})
+    peer_started, commit_failed = asyncio.Event(), asyncio.Event()
+    first_instrument, commit_target, calls = [], [], []
+    fired = False
+
+    def fail_once(session):
+        nonlocal fired
+        if (
+            not fired
+            and commit_target
+            and current_dispatch(commit_target[0]) is not None
+            and not session.in_nested_transaction()
+        ):
+            fired = True
+            commit_failed.set()
+            raise RuntimeError("synthetic_handler_commit_failure")
+
+    async def invoke(payload, **options):
+        options["dispatch_guard"]()
+        instrument, stage = payload["request"]["instrument_id"], payload["stage"]
+        calls.append((instrument, stage))
+        if not first_instrument:
+            first_instrument.append(instrument)
+        if instrument == first_instrument[0]:
+            await asyncio.wait_for(peer_started.wait(), 60)
+            if stage == "synthesis":
+                state = current_dispatch()
+                assert state is not None
+                commit_target.append(next(iter(state.claims)))
+        else:
+            peer_started.set()
+            await asyncio.wait_for(commit_failed.wait(), 60)
+        body = (
+            _assessment_payload(payload["previous_claims"])
+            if stage == "synthesis"
+            else _staged_batch(stage, payload["requested_roles"])
+        )
+        return json.dumps(body), UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1)
+
+    event.listen(Session, "before_commit", fail_once)
+    monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
+    monkeypatch.setattr(
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+    )
+    try:
+        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+            await run_pure_research_once(settings, idempotency_key="handler-commit-failed")
+        assert fired
+        assert [stage for _, stage in calls] == ["research", "research", "critique", "synthesis"]
+        assert len({instrument for instrument, _ in calls}) == 2
+        async with factory.begin() as session:
+            budgets = list(await session.scalars(select(AgentDailyBudgetReservationRecord)))
+            assert sorted(b.state for b in budgets) == ["released", "reserved", "settled"]
+            assert next(b for b in budgets if b.state == "reserved").settled_usd is None
+            row = await session.scalar(select(ManualPaperRequest))
+            assert row is not None
+    finally:
+        event.remove(Session, "before_commit", fail_once)
         await factory.kw["bind"].dispose()

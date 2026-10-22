@@ -672,6 +672,8 @@ def _agent_registry(
             return _agent_result(run.status)
         if run.status != "prepared":
             raise UnsafeJobError("RUN_STATE_INVALID")
+        from nexus.agents.codex_sdk import CodexInvocationError
+
         committee: CommitteeModel
         try:
             if full_input_capacity or formal_full_input_capacity:
@@ -698,6 +700,20 @@ def _agent_registry(
                     candidate_stage_capacity=candidate_stage_capacity,
                     formal_stage_capacity=formal_stage_capacity,
                 )
+        except CodexInvocationError as error:
+            if (
+                dispatch is None
+                or error.reason != "CODEX_RESEARCH_STOPPED"
+                or error.provider_call_started is not False
+            ):
+                raise
+            # Capacity preparation is pure and precedes committee execution.
+            # A claimed member stopped here has made no provider invocation.
+            from nexus.agents.execution import stop_uncalled_research
+
+            context.require_dispatch_lease()
+            stopped = await stop_uncalled_research(context.session, run_id=run.id)
+            return _agent_result(stopped.status)
         except ToolInputError:
             committee = _UnavailableResponsesCommittee()
         from nexus.agents.codex_sdk import CodexCommittee

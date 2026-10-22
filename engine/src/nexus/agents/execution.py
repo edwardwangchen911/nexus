@@ -395,10 +395,10 @@ async def _analyze_with_one_retry(
     for _attempt in range(2):
         try:
             return await committee.analyze(role, request, evidence_refs, prompt)
-        except Exception:
+        except Exception as error:
             from nexus.agents.research_dispatch import stop_current_dispatch
 
-            stop_current_dispatch()
+            stop_current_dispatch(error)
             if getattr(committee, "retry_on_error", True) is False or run.retry_count >= 1:
                 return None
             run.retry_count += 1
@@ -476,6 +476,32 @@ async def _append_output(
     session.add(output)
     await session.flush()
     return output
+
+
+async def stop_uncalled_research(session: AsyncSession, *, run_id: UUID) -> ResearchRunResult:
+    """Only the claimed handler's pure preparation may prove zero SDK calls."""
+    from nexus.agents.research_dispatch import current_dispatch
+
+    state = current_dispatch(run_id)
+    run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
+    if (
+        state is None
+        or not state.stopped
+        or run_id not in state.claims
+        or run is None
+        or run.status != "prepared"
+    ):
+        raise ValueError("RESEARCH_DISPATCH_INVALID")
+    await require_reserved_daily_budget(session, run_id=run.id)
+    await _append_event(session, run, 1, "prepared", {})
+    return await _terminal_without_usage(
+        session,
+        run,
+        output_sequence=1,
+        event_sequence=2,
+        status="abstained",
+        reason="model_research_stopped",
+    )
 
 
 async def _terminal_without_usage(
@@ -601,7 +627,11 @@ async def _settle_or_hold_usage(
     from nexus.agents.research_dispatch import dispatch_failure_boundary, stop_current_dispatch
 
     try:
-        async with session.begin_nested(), dispatch_failure_boundary():
+        async with (
+            dispatch_failure_boundary(session),
+            session.begin_nested(),
+            dispatch_failure_boundary(),
+        ):
             actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
             await settle_daily_budget(
                 session,

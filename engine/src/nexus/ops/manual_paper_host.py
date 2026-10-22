@@ -596,13 +596,15 @@ async def _dispatch_two_flight_members(
                         m for m in result.research.members if m.run_id == member.run_id
                     )
                     if not worked or completed.status != "completed" or not completed.usage_known:
-                        state.stopped = True
-            except BaseException:
-                state.stopped = True
+                        state.stop(member.run_id)
+                    state.trace("terminal_readback", member.run_id)
+            except BaseException as error:
+                state.stop(member.run_id, error)
                 raise
             finally:
                 ready.set()
                 state.active.pop(member.run_id)
+                state.trace("slot_released", member.run_id)
 
     try:
         remaining = iter(view.research.members)
@@ -630,7 +632,7 @@ async def _dispatch_two_flight_members(
                     if primary is None:
                         primary = error
         if primary is not None:
-            raise primary
+            raise state.first_error or primary
     except BaseException:
         state.stopped = True
         # Only caller cancellation/exit reaches here with live siblings.

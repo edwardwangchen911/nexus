@@ -1,10 +1,14 @@
 """One foreground request's bounded slots and final SDK submission barrier."""
 
 import asyncio
+import json
+import logging
+import sys
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from time import monotonic_ns
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +53,38 @@ class ResearchDispatch:
     stopped: bool = False
     active: dict[UUID, asyncio.Event] = field(default_factory=dict)
     claims: dict[UUID, ClaimedJob] = field(default_factory=dict)
+    sequence: int = 0
+    first_error: BaseException | None = None
+    first_failure_run: UUID | None = None
+
+    def trace(
+        self, event: str, run_id: UUID, *, code: str | None = None, stage: str | None = None
+    ) -> None:
+        self.sequence += 1
+        row: dict[str, object] = {
+            "event": event,
+            "sequence": self.sequence,
+            "monotonic_ns": monotonic_ns(),
+            "request_id": str(self.request_id),
+            "run_id": str(run_id),
+        }
+        if code is not None:
+            row["code"] = code
+        if stage in {"research", "critique", "synthesis"}:
+            row["stage"] = stage
+        logging.getLogger("nexus.research_dispatch").info(json.dumps(row))
+
+    def stop(self, run_id: UUID, error: BaseException | None = None) -> None:
+        if not self.stopped:
+            self.first_error = error
+            self.first_failure_run = run_id
+            code = (
+                error.reason
+                if isinstance(error, CodexInvocationError)
+                else "RESEARCH_EXECUTION_FAILED"
+            )
+            self.trace("first_failure", run_id, code=code)
+        self.stopped = True
 
     def start(self, run_id: UUID) -> None:
         if self.stopped or len(self.active) >= 2 or run_id in self.active:
@@ -56,6 +92,7 @@ class ResearchDispatch:
         if run_id not in {m.run_id for m in self.manifest.members}:
             raise ValueError("RESEARCH_DISPATCH_INVALID")
         self.active[run_id] = asyncio.Event()
+        self.trace("slot_acquired", run_id)
 
     def bind_claim(self, run_id: UUID, claim: ClaimedJob) -> None:
         member = next((m for m in self.manifest.members if m.run_id == run_id), None)
@@ -85,20 +122,38 @@ def current_dispatch(run_id: UUID | None = None) -> ResearchDispatch | None:
     return state
 
 
-def stop_current_dispatch() -> None:
+def stop_current_dispatch(error: BaseException | None = None) -> None:
     state = current_dispatch()
     if state is not None:
-        state.stopped = True
+        run_id = _RUN.get()
+        assert run_id is not None
+        state.stop(run_id, error)
 
 
 @asynccontextmanager
-async def dispatch_failure_boundary() -> AsyncIterator[None]:
-    """Observe errors before an enclosing transaction's asynchronous rollback."""
+async def dispatch_failure_boundary(session: AsyncSession | None = None) -> AsyncIterator[None]:
+    """Stop before body cleanup and SQLAlchemy's internal rollback I/O."""
+    from sqlalchemy import event
+
+    state, run_id = current_dispatch(), _RUN.get()
+    engine = session.get_bind() if session is not None and state is not None else None
+
+    def before_rollback(*_: object) -> None:
+        if current_dispatch(run_id) is state:
+            stop_current_dispatch(sys.exc_info()[1])
+
+    if engine is not None:
+        event.listen(engine, "rollback", before_rollback)
+        event.listen(engine, "rollback_savepoint", before_rollback)
     try:
         yield
-    except BaseException:
-        stop_current_dispatch()
+    except BaseException as error:
+        stop_current_dispatch(error)
         raise
+    finally:
+        if engine is not None:
+            event.remove(engine, "rollback", before_rollback)
+            event.remove(engine, "rollback_savepoint", before_rollback)
 
 
 @contextmanager
@@ -205,3 +260,33 @@ async def require_dispatch_pool(
             or lease.expires_at <= now
         ):
             raise ValueError(invalid)
+
+
+@contextmanager
+def sdk_submission_trace(stage: str) -> Iterator[None]:
+    state, run_id = current_dispatch(), _RUN.get()
+    if state is not None and run_id is not None:
+        state.trace("sdk_submitted", run_id, stage=stage)
+    try:
+        yield
+    finally:
+        if state is not None and run_id is not None:
+            state.trace("sdk_returned", run_id, stage=stage)
+
+
+@contextmanager
+def dispatch_trace_output() -> Iterator[None]:
+    """CLI-only safe diagnostics; no account facts, prompts or SDK identities."""
+    logger = logging.getLogger("nexus.research_dispatch")
+    handler = logging.StreamHandler()
+    previous_level, previous_propagate = logger.level, logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagate
+        handler.close()
