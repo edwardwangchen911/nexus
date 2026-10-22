@@ -42,11 +42,11 @@ PR19 的最终退出审计、原进程句柄确认、取消主因保护及真实
 
 完整回归还暴露已claim但纯capacity准备尚未调用SDK时被stop会误留预算。仅此固定错误+provider_call_started=False路径复核原lease、dispatch/claim/prepared和精确预留后走既有零调用收尾；已调用unknown路径不进入。原PR19未知预算断言未改。
 
-当前35项PG通过：真实两股重叠/第三股补位/日预算锁不跨SDK、精确错request/lease/fence/worker拒绝、首失败已知/unknown、在途最后阶段可完成、实际handler commit失败不补第三股且保留未知预算、双任务取消等待drain、宿主退出/下一正常完整准备、旧四字段profile和退出审计。SDK/退出/停止回归及Ruff/Mypy检查通过；198项policy通过。私有归档对照九阶段wire/hash/schema/引用序列与既有验收一致，原stage/frozen hash一致，模型调用0、数据库写入0。
+当前37项PG通过：真实两股重叠/第三股补位/日预算锁不跨SDK、精确错request/lease/fence/worker拒绝、首失败已知/unknown、在途最后阶段可完成、实际handler commit失败不补第三股且保留未知预算、双任务取消等待drain、宿主退出/下一正常完整准备、旧四字段profile和退出审计。169项SDK/退出/停止回归及Ruff/Mypy596检查通过；198项policy通过。私有归档对照九阶段wire/hash/schema/引用序列与既有验收一致，原stage/frozen hash一致，模型调用0、数据库写入0。
 
 新增安全诊断输出：正常CLI stderr只包含request/run UUID、固定事件/阶段/原因、单调时钟及序号；记录slot取得/释放、SDK提交/返回、终态读回和首失败。SDK返回事件不代表子进程退出，退出继续由PR19独立核验。首异常只记录一次，后续兄弟屏障不覆盖。
 
-整体实际diff终审已提交原Chat会话，标记nexus-research-two-flight-final-20261022-01；回复尚未完成。同head全部必需CI、合入部署、最终镜像与兼容回滚、唯一新真实三股验收仍待完成。当前不可宣称真实提速或新一轮连续运行已通过。运行仍为已部署PR19，未发起任何新真实模型请求，不重放485.408秒串行基线。
+整体实际diff终审已提交原Chat会话，标记nexus-research-two-flight-final-20261022-01；已取回原终审的一项P1及一项P2并修复：独立终态读回的事务体及内部rollback也复用提前stop边界（真实PG两项RED→GREEN，已提交成功/900输入240输出及settled保留）；空停止通知只允许同一首失败run补异常，追加关联事件、不回写旧日志，兄弟或后续cleanup不覆盖。定向复核标记nexus-research-two-flight-readback-fix-20261022-01仍待返回。首次CI候选baacba35的fast因新超时分支变量类型推断冲突失败，已局部重命名并重新通过类型检查和169回归；该head全部9项已结束，7通过、fast与汇总失败、0取消，其他失败不存在；本地完整fast组6170通过、6既有skip、1既有performance排除，最终类型检查通过。修正候选统一推送后需重验全部必需CI。同head全部必需CI、合入部署、最终镜像与兼容回滚、唯一新真实三股验收仍待完成。当前不可宣称真实提速或新一轮连续运行已通过。运行仍为已部署PR19，未发起任何新真实模型请求，不重放485.408秒串行基线。
 
 变更大小：已将独立退出迁移拆为PR19并部署；余下两槽调度、动态兄弟资格、预留检查、失败结算及SDK最终屏障构成不可部分启用的一个最小安全切片。测试按纯逻辑、SDK边界、真实PG及正常入口分层，避免将缺少一半保护的调度先上线。
 

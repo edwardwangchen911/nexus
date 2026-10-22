@@ -623,3 +623,90 @@ async def test_handler_commit_failure_never_refills_and_keeps_reservation(
     finally:
         event.remove(Session, "before_commit", fail_once)
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_at", ["body", "commit"])
+async def test_terminal_readback_failure_stops_before_rollback_and_retains_success(
+    migrated_database_url, tmp_path, monkeypatch, failure_at
+):
+    from nexus.agents.research_dispatch import current_dispatch
+    from nexus.ops import manual_paper_host
+    from nexus.persistence.models.agents import AgentResearchRunRecord
+    from sqlalchemy import event
+    from sqlalchemy.util.concurrency import await_only
+
+    factory, settings, store, _ = await prepare_scope(migrated_database_url, tmp_path, bounded=True)
+    settings = settings.model_copy(update={"release_revision": "a" * 40})
+    peer_started, rolling_back, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls, first_instrument, observed, listeners = [], [], [], []
+    original_read = manual_paper_host.read_manual_request
+    primary = RuntimeError("synthetic_terminal_readback_failure")
+
+    def failed_commit(*_):
+        raise primary
+
+    def delay_rollback(*_):
+        rolling_back.set()
+        await_only(release.wait())
+
+    async def read(session, row):
+        result = await original_read(session, row)
+        state = current_dispatch()
+        if state is not None and not observed:
+            observed.append(state)
+            engine = session.get_bind()
+            event.listen(engine, "rollback", delay_rollback)
+            listeners.append((engine, "rollback", delay_rollback))
+            if failure_at == "body":
+                raise primary
+            event.listen(session.sync_session, "before_commit", failed_commit)
+            listeners.append((session.sync_session, "before_commit", failed_commit))
+        return result
+
+    async def invoke(payload, **options):
+        options["dispatch_guard"]()
+        instrument, stage = payload["request"]["instrument_id"], payload["stage"]
+        calls.append((instrument, stage))
+        if not first_instrument:
+            first_instrument.append(instrument)
+        if instrument == first_instrument[0]:
+            await asyncio.wait_for(peer_started.wait(), 60)
+        else:
+            peer_started.set()
+            await asyncio.wait_for(rolling_back.wait(), 60)
+        body = (
+            _assessment_payload(payload["previous_claims"])
+            if stage == "synthesis"
+            else _staged_batch(stage, payload["requested_roles"])
+        )
+        return json.dumps(body), UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1)
+
+    monkeypatch.setattr(manual_paper_host, "read_manual_request", read)
+    monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
+    monkeypatch.setattr(
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+    )
+    task = asyncio.create_task(run_pure_research_once(settings, idempotency_key="readback-failure"))
+    try:
+        await asyncio.wait_for(rolling_back.wait(), 60)
+        assert observed[0].stopped, "readback failure waited for rollback before stop"
+        assert len(calls) == 4
+        release.set()
+        with pytest.raises(RuntimeError) as caught:
+            await asyncio.wait_for(task, 60)
+        assert caught.value is primary
+        assert len(calls) == 4
+        async with factory.begin() as session:
+            runs = list(await session.scalars(select(AgentResearchRunRecord)))
+            assert sum(run.status == "completed" for run in runs) == 1
+            success = next(run for run in runs if run.status == "completed")
+            assert success.input_tokens == 900 and success.output_tokens == 240
+            budgets = list(await session.scalars(select(AgentDailyBudgetReservationRecord)))
+            assert next(b for b in budgets if b.run_id == success.id).state == "settled"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        for target, name, listener in listeners:
+            event.remove(target, name, listener)
+        await factory.kw["bind"].dispose()

@@ -83,8 +83,16 @@ class ResearchDispatch:
                 if isinstance(error, CodexInvocationError)
                 else "RESEARCH_EXECUTION_FAILED"
             )
+            self.stopped = True
             self.trace("first_failure", run_id, code=code)
-        self.stopped = True
+        elif self.first_error is None and error is not None and run_id == self.first_failure_run:
+            self.first_error = error
+            code = (
+                error.reason
+                if isinstance(error, CodexInvocationError)
+                else "RESEARCH_EXECUTION_FAILED"
+            )
+            self.trace("first_failure_cause", run_id, code=code)
 
     def start(self, run_id: UUID) -> None:
         if self.stopped or len(self.active) >= 2 or run_id in self.active:

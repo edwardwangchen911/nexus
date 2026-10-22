@@ -570,7 +570,11 @@ async def _dispatch_two_flight_members(
 ) -> None:
     import asyncio
 
-    from nexus.agents.research_dispatch import ResearchDispatch, dispatch_member
+    from nexus.agents.research_dispatch import (
+        ResearchDispatch,
+        dispatch_failure_boundary,
+        dispatch_member,
+    )
     from nexus.ops.agent_paper_once import run_cycle_job_once
     from nexus.paper.manual_request import ResearchMemberView
 
@@ -587,7 +591,12 @@ async def _dispatch_two_flight_members(
                 worked = await run_cycle_job_once(
                     settings, job_id=member.job_id, formal_stage_capacity=True
                 )
-                async with factory.begin() as session:
+                async with (
+                    factory() as session,
+                    dispatch_failure_boundary(session),
+                    session.begin(),
+                    dispatch_failure_boundary(),
+                ):
                     row = await session.get(ManualPaperRequest, view.request_id)
                     assert row is not None
                     result = await read_manual_request(session, row)

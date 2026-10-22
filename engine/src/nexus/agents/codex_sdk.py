@@ -308,14 +308,14 @@ def _invocation_boundary(
     except TimeoutError:
         from nexus.agents.research_dispatch import stop_current_dispatch
 
-        failure = _CodexInvocationTimeout(
+        timeout_failure = _CodexInvocationTimeout(
             "CODEX_TIMEOUT",
             phase=phase,
             provider_call_started=None if state is None else state.provider_call_started,
             usage=None if state is None else state.measured_usage,
         )
-        stop_current_dispatch(failure)
-        raise failure from None
+        stop_current_dispatch(timeout_failure)
+        raise timeout_failure from None
     except Exception as original:
         from nexus.agents.research_dispatch import stop_current_dispatch
 

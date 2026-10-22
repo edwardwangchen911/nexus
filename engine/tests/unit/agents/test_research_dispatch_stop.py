@@ -336,3 +336,47 @@ async def test_first_failure_trace_keeps_origin_and_order(caplog):
         set(row) <= {"event", "sequence", "monotonic_ns", "request_id", "run_id", "code", "stage"}
         for row in rows
     )
+
+
+@pytest.mark.asyncio
+async def test_first_failure_empty_notice_only_origin_can_fill_cause(caplog):
+    import logging
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from nexus.agents.research_dispatch import ResearchDispatch
+    from nexus.paper.manual_request import ResearchManifestView, ResearchMemberView
+
+    runs = [uuid4(), uuid4()]
+    state = ResearchDispatch(
+        uuid4(),
+        ResearchManifestView(
+            manifest_id=uuid4(),
+            manifest_hash="a" * 64,
+            research_as_of=datetime.now(UTC),
+            members=[
+                ResearchMemberView(
+                    instrument_id=uuid4(),
+                    run_id=run,
+                    job_id=uuid4(),
+                    status="prepared",
+                    quality=None,
+                    usage_known=False,
+                )
+                for run in runs
+            ],
+        ),
+    )
+    caplog.set_level(logging.INFO, logger="nexus.research_dispatch")
+    state.stop(runs[0])
+    state.stop(runs[1], RuntimeError("secondary"))
+    assert state.first_error is None
+    original = codex_sdk.CodexInvocationError("CODEX_TIMEOUT")
+    state.stop(runs[0], original)
+    assert state.first_error is original and state.first_failure_run == runs[0]
+    state.stop(runs[0], RuntimeError("later cleanup"))
+    assert state.first_error is original
+    rows = [json.loads(record.message) for record in caplog.records]
+    assert [row["event"] for row in rows] == ["first_failure", "first_failure_cause"]
+    assert rows[0]["sequence"] == 1 and rows[1]["sequence"] == 2
+    assert rows[1]["run_id"] == rows[0]["run_id"] == str(runs[0])
