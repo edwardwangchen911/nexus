@@ -3756,6 +3756,9 @@ export interface components {
              * Format: date-time
              */
             requested_at: string;
+            research?: components["schemas"]["ResearchManifestView"] | null;
+            /** Research Contract */
+            research_contract?: "research_only_v2" | null;
             /**
              * Status
              * @enum {string}
@@ -7122,6 +7125,59 @@ export interface components {
              * Format: date-time
              */
             valid_until: string;
+        };
+        /** ResearchManifestView */
+        ResearchManifestView: {
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /** Manifest Hash */
+            manifest_hash: string;
+            /**
+             * Manifest Id
+             * Format: uuid
+             */
+            manifest_id: string;
+            /** Members */
+            members: components["schemas"]["ResearchMemberView"][];
+            /**
+             * Remote Latest Verified
+             * @default false
+             * @constant
+             */
+            remote_latest_verified: false;
+            /**
+             * Research As Of
+             * Format: date-time
+             */
+            research_as_of: string;
+        };
+        /** ResearchMemberView */
+        ResearchMemberView: {
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /**
+             * Job Id
+             * Format: uuid
+             */
+            job_id: string;
+            /** Quality */
+            quality: string | null;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Status */
+            status: string;
+            /** Usage Known */
+            usage_known: boolean;
         };
         /** ResearchRunCreateRequest */
         ResearchRunCreateRequest: {

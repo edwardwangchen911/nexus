@@ -199,6 +199,14 @@ def parser() -> argparse.ArgumentParser:
     start = commands.add_parser("start")
     start.add_argument("--mode", choices=("research_only", "research_and_paper"), required=True)
     start.add_argument("--idempotency-key", required=True)
+    bounded = commands.add_parser(
+        "run-research", help="Run one complete pure-research request without scheduling"
+    )
+    bounded.add_argument("--idempotency-key", required=True)
+    finish = commands.add_parser(
+        "finish-research", help="Close persisted pure-research work without a model call"
+    )
+    finish.add_argument("--request-id", type=UUID, required=True)
     read = commands.add_parser("read")
     read.add_argument("--request-id", type=UUID, required=True)
     recover = commands.add_parser("recover-preparation")
@@ -257,6 +265,19 @@ async def run(
     lifecycle_guards = ExitStack()
     diagnostic = _OperationDiagnostic()
     try:
+        if args.action == "run-research":
+            from nexus.ops.manual_paper_host import run_pure_research_once
+
+            return await run_pure_research_once(settings, idempotency_key=args.idempotency_key)
+        if args.action == "finish-research":
+            from nexus.ops.agent_paper_loop import acquire_agent_paper_lock
+            from nexus.ops.manual_paper_host import finish_configured_manual_request
+
+            with acquire_agent_paper_lock():
+                async with factory.begin() as session:
+                    return await finish_configured_manual_request(
+                        session, settings, request_id=args.request_id, cancel_unused=True
+                    )
         if (
             args.action == "seal-failed-research" and getattr(args, "expired_attempt", False)
         ) or args.action in {

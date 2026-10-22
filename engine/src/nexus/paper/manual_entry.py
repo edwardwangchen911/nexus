@@ -102,6 +102,8 @@ async def _read_presented_manual_request(
     # Keep the canonical event reader independent: acknowledgement validation
     # uses it to verify the original unknown facts and must never recurse.
     view = await read_manual_request(session, row)
+    if row.contract_version == 2:
+        return view
     from nexus.paper.current_preparation_acceptance import current_unknown_accepted
 
     if await current_unknown_accepted(session, row):
@@ -203,16 +205,17 @@ async def start_configured_manual_request(
         release_revision=settings.release_revision,
         scope_hash=manual_host_scope(settings),
     )
-    try:
-        calendar = await select_agent_paper_service_calendar_authority(session, now=now)
-    except ValueError:
-        raise ValueError("MANUAL_SESSION_UNAVAILABLE") from None
-    # Current same-session quote reader does not support an overnight research
-    # contract. Reject it explicitly; a queued click is never tomorrow's order.
-    if calendar.local_date != calendar.session or not (
-        calendar.market_open_at <= now < calendar.market_close_at
-    ):
-        raise ValueError("MANUAL_SESSION_UNAVAILABLE")
+    if mode != "research_only":
+        try:
+            calendar = await select_agent_paper_service_calendar_authority(session, now=now)
+        except ValueError:
+            raise ValueError("MANUAL_SESSION_UNAVAILABLE") from None
+        # Current same-session quote reader does not support an overnight research
+        # contract. Reject it explicitly; a queued click is never tomorrow's order.
+        if calendar.local_date != calendar.session or not (
+            calendar.market_open_at <= now < calendar.market_close_at
+        ):
+            raise ValueError("MANUAL_SESSION_UNAVAILABLE")
     return await admit_manual_request(
         session,
         account_id=account_id,
@@ -220,4 +223,9 @@ async def start_configured_manual_request(
         model_config_id=model_id,
         mode=mode,
         idempotency_key=idempotency_key,
+        contract_version=2 if mode == "research_only" else 1,
+        runtime_mode=""
+        if settings.agent_runtime_mode is None
+        else settings.agent_runtime_mode.value,
+        daily_limit_usd=settings.agent_daily_budget_usd,
     )

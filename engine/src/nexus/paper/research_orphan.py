@@ -16,15 +16,38 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 
 
 async def recover_formal_research_orphans(
-    session: AsyncSession, *, cycle: AgentPaperCycleRecord, run_ids: tuple[UUID, ...], now: datetime
+    session: AsyncSession,
+    *,
+    cycle: AgentPaperCycleRecord | None,
+    run_ids: tuple[UUID, ...],
+    now: datetime,
+    research_request: ManualPaperRequest | None = None,
 ) -> int:
     """Caller holds the cycle/account lock; the expired fence never grants execution."""
     require_utc(now)
+    if research_request is not None:
+        from nexus.paper.research_request import read_research_manifest
+
+        manifest = await read_research_manifest(session, research_request)
+        if (
+            cycle is not None
+            or manifest is None
+            or set(run_ids) != {m.run_id for m in manifest.members}
+        ):
+            raise ValueError("AGENT_PAPER_RESEARCH_ORPHAN_BINDING_INVALID")
+        owner_id, cutoff = research_request.id, manifest.research_as_of
+        actor, prefix = "local-research-only-v2", "research-only"
+    elif cycle is not None:
+        owner_id, cutoff = cycle.id, cycle.decision_time
+        actor, prefix = "local-agent-paper-cycle", "agent-paper"
+    else:
+        raise ValueError("AGENT_PAPER_RESEARCH_ORPHAN_BINDING_INVALID")
     rows = (
         await session.execute(
             select(Job, JobLease)
@@ -64,9 +87,9 @@ async def recover_formal_research_orphans(
         )
         if (
             run.id not in run_ids
-            or run.actor_id != "local-agent-paper-cycle"
-            or run.idempotency_key != f"agent-paper:{cycle.id}:{run.instrument_id}"
-            or run.decision_time != cycle.decision_time
+            or run.actor_id != actor
+            or run.idempotency_key != f"{prefix}:{owner_id}:{run.instrument_id}"
+            or run.decision_time != cutoff
             or any(
                 value is not None
                 for value in (run.input_tokens, run.output_tokens, run.settled_cost_usd)

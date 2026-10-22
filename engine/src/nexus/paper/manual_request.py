@@ -1,6 +1,7 @@
 """Normal manual request admission. No provider/model calls or execution in GET/POST."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from hashlib import sha256
 from typing import Literal, cast
 from uuid import UUID
@@ -39,6 +40,8 @@ _SAFE_CODES = {
     "MANUAL_REQUEST_QUEUED",
     "MANUAL_PREPARATION_STARTED",
     "MANUAL_CYCLE_CREATED",
+    "MANUAL_RESEARCH_STARTED",
+    "MANUAL_RESEARCH_FINISHED",
     "MANUAL_RESEARCH_COMPLETED",
     "MANUAL_PAPER_COMPLETED",
     "MANUAL_INPUTS_UNAVAILABLE",
@@ -52,6 +55,26 @@ class ManualRequestInput(BaseModel):
     mode: ManualMode
 
 
+class ResearchMemberView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    instrument_id: UUID
+    run_id: UUID
+    job_id: UUID
+    status: str
+    quality: str | None
+    usage_known: bool
+
+
+class ResearchManifestView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    manifest_id: UUID
+    research_as_of: datetime
+    manifest_hash: str
+    members: list[ResearchMemberView]
+    remote_latest_verified: Literal[False] = False
+    execution_locked: Literal[True] = True
+
+
 class ManualRequestView(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     request_id: UUID
@@ -61,6 +84,12 @@ class ManualRequestView(BaseModel):
     code: str
     cycle_id: UUID | None
     execution_locked: Literal[True] = True
+    research_contract: Literal["research_only_v2"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    research: ResearchManifestView | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     preparation_recovery: PreparationRecoveryView | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -79,13 +108,23 @@ class ManualRequestView(BaseModel):
         return self
 
 
-def manual_request_hash(*, account_id: UUID, batch_id: UUID, mode: ManualMode) -> str:
+def manual_request_hash(
+    *,
+    account_id: UUID,
+    batch_id: UUID,
+    mode: ManualMode,
+    contract_version: int = 1,
+    research_profile: dict[str, object] | None = None,
+) -> str:
+    if contract_version not in {1, 2} or contract_version == 2 and mode != "research_only":
+        raise ValueError("MANUAL_REQUEST_INVALID")
     return job_input_hash(
         {
-            "contract": "manual_paper_v1",
+            "contract": "manual_paper_v1" if contract_version == 1 else "research_only_v2",
             "account_id": str(account_id),
             "candidate_batch_id": str(batch_id),
             "mode": mode,
+            **({"research_profile": research_profile} if contract_version == 2 else {}),
         }
     )
 
@@ -101,7 +140,11 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
     if row.mode not in {"research_only", "research_and_paper"}:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     if row.request_hash != manual_request_hash(
-        account_id=row.account_id, batch_id=row.candidate_batch_id, mode=cast(ManualMode, row.mode)
+        account_id=row.account_id,
+        batch_id=row.candidate_batch_id,
+        mode=cast(ManualMode, row.mode),
+        contract_version=row.contract_version,
+        research_profile=row.research_profile,
     ):
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     previous = None
@@ -116,7 +159,16 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     if events[-1].cycle_id is not None:
         await _require_manual_cycle_binding(session, row, events[-1].cycle_id)
+    research = None
+    if row.contract_version == 2:
+        from nexus.paper.research_request import read_research_manifest
+
+        research = await read_research_manifest(session, row)
+        if events[-1].status in {"active", "completed"} and research is None:
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
     return ManualRequestView(
+        research_contract="research_only_v2" if row.contract_version == 2 else None,
+        research=research,
         request_id=row.id,
         mode=cast(ManualMode, row.mode),
         requested_at=row.requested_at,
@@ -131,11 +183,16 @@ def _validate_event(
     event: ManualPaperRequestEvent,
     prior: ManualPaperRequestEvent | None,
 ) -> None:
+    pure = getattr(row, "contract_version", 1) == 2
+    if pure and row.mode != "research_only":
+        raise ValueError("MANUAL_RESULT_UNKNOWN")
     codes = {
         "queued": {"MANUAL_REQUEST_QUEUED"},
         "preparing": {"MANUAL_PREPARATION_STARTED"},
-        "active": {"MANUAL_CYCLE_CREATED"},
-        "completed": {"MANUAL_RESEARCH_COMPLETED"}
+        "active": {"MANUAL_RESEARCH_STARTED"} if pure else {"MANUAL_CYCLE_CREATED"},
+        "completed": {"MANUAL_RESEARCH_FINISHED"}
+        if pure
+        else {"MANUAL_RESEARCH_COMPLETED"}
         if row.mode == "research_only"
         else {"MANUAL_PAPER_COMPLETED"},
         "unavailable": {"MANUAL_INPUTS_UNAVAILABLE", "MANUAL_PREPARATION_CANCELLED"},
@@ -155,7 +212,8 @@ def _validate_event(
             )
         )
         or (event.status in {"queued", "preparing"} and event.cycle_id is not None)
-        or (event.status in {"active", "completed"} and event.cycle_id is None)
+        or (pure and event.cycle_id is not None)
+        or (not pure and event.status in {"active", "completed"} and event.cycle_id is None)
     ):
         raise ValueError("MANUAL_RESULT_UNKNOWN")
 
@@ -259,6 +317,10 @@ async def require_manual_request_history(
         if request.id == excluding_request_id:
             continue
         view = await read_manual_request(session, request)
+        if request.contract_version == 2 and view.research is not None:
+            from nexus.paper.research_request import require_research_jobs_settled
+
+            await require_research_jobs_settled(session, row=request, view=view.research, now=now)
         if view.code == "MANUAL_PREPARATION_CANCELLED":
             from nexus.paper.current_preparation_recovery import read_preparation_recovery
 
@@ -329,20 +391,33 @@ async def admit_manual_request(
     model_config_id: UUID,
     mode: ManualMode,
     idempotency_key: str,
+    contract_version: int = 1,
+    runtime_mode: str = "codex_sdk",
+    daily_limit_usd: Decimal = Decimal("3.00"),
 ) -> ManualRequestView:
     ManualRequestInput(mode=mode)
     if not idempotency_key.strip() or len(idempotency_key) > 255:
         raise ValueError("MANUAL_REQUEST_INVALID")
     await lock_portfolio_account(session, account_id)
     key_hash = sha256(idempotency_key.encode()).hexdigest()
-    identity = manual_request_hash(account_id=account_id, batch_id=batch_id, mode=mode)
+    identity = manual_request_hash(
+        account_id=account_id, batch_id=batch_id, mode=mode, contract_version=contract_version
+    )
     existing = await session.scalar(
         select(ManualPaperRequest).where(
             ManualPaperRequest.account_id == account_id, ManualPaperRequest.key_hash == key_hash
         )
     )
     if existing is not None:
-        if existing.request_hash != identity:
+        if existing.request_hash != (
+            manual_request_hash(
+                account_id=account_id,
+                batch_id=batch_id,
+                mode=mode,
+                contract_version=contract_version,
+                research_profile=existing.research_profile,
+            )
+        ):
             raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         # Read historical receipt before validating today's model/batch/availability.
         return await read_manual_request(session, existing)
@@ -357,7 +432,29 @@ async def admit_manual_request(
     model = await require_formal_stage_model_profile(
         session, model_config_id=model_config_id, now=now
     )
+    profile: dict[str, object] | None = None
+    if contract_version == 2:
+        from nexus.agents.research_only import ensure_research_only_prompts
+
+        if runtime_mode != "codex_sdk":
+            raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+        prompts = await ensure_research_only_prompts(session)
+        profile = {
+            "runtime_mode": runtime_mode,
+            "daily_limit_usd": format(daily_limit_usd.normalize(), "f"),
+            "orchestrator_id": str(prompts["orchestrator"].id),
+            "prompt_hashes": {role: prompt.content_hash for role, prompt in prompts.items()},
+        }
+        identity = manual_request_hash(
+            account_id=account_id,
+            batch_id=batch_id,
+            mode=mode,
+            contract_version=contract_version,
+            research_profile=profile,
+        )
     row = ManualPaperRequest(
+        research_profile=profile,
+        contract_version=contract_version,
         account_id=account_id,
         candidate_batch_id=batch_id,
         model_config_id=model.id,

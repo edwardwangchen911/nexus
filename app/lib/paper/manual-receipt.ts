@@ -1,17 +1,7 @@
 import { validate as validateUuid } from "uuid";
 import type { components } from "../generated/schema";
-export type ManualResearch = {
-  manifest_id: string;
-  research_as_of: string;
-  manifest_hash: string;
-  members: { instrument_id: string; run_id: string; job_id: string; status: string; quality: string | null; usage_known: boolean }[];
-  remote_latest_verified: false;
-  execution_locked: true;
-};
-export type ManualReceipt = components["schemas"]["ManualRequestView"] & {
-  research_contract?: "research_only_v2" | null;
-  research?: ManualResearch | null;
-};
+export type ManualReceipt = components["schemas"]["ManualRequestView"];
+export type ManualResearch = NonNullable<ManualReceipt["research"]>;
 export type ManualMode = ManualReceipt["mode"];
 export const manualEntryErrors: Record<string, string> = {
   MANUAL_ENTRY_DISABLED: "手动入口尚未启用。",

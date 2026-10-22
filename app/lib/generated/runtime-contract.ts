@@ -5881,6 +5881,28 @@ export const runtimeContractSchemas = {
         "title": "Requested At",
         "type": "string"
       },
+      "research": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchManifestView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "research_contract": {
+        "anyOf": [
+          {
+            "const": "research_only_v2",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Research Contract"
+      },
       "status": {
         "enum": [
           "queued",
@@ -13817,6 +13839,101 @@ export const runtimeContractSchemas = {
       "evidence_refs"
     ],
     "title": "ResearchIntent",
+    "type": "object"
+  },
+  "ResearchManifestView": {
+    "additionalProperties": false,
+    "properties": {
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "manifest_hash": {
+        "title": "Manifest Hash",
+        "type": "string"
+      },
+      "manifest_id": {
+        "format": "uuid",
+        "title": "Manifest Id",
+        "type": "string"
+      },
+      "members": {
+        "items": {
+          "$ref": "#/components/schemas/ResearchMemberView"
+        },
+        "title": "Members",
+        "type": "array"
+      },
+      "remote_latest_verified": {
+        "const": false,
+        "default": false,
+        "title": "Remote Latest Verified",
+        "type": "boolean"
+      },
+      "research_as_of": {
+        "format": "date-time",
+        "title": "Research As Of",
+        "type": "string"
+      }
+    },
+    "required": [
+      "manifest_id",
+      "research_as_of",
+      "manifest_hash",
+      "members"
+    ],
+    "title": "ResearchManifestView",
+    "type": "object"
+  },
+  "ResearchMemberView": {
+    "additionalProperties": false,
+    "properties": {
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "job_id": {
+        "format": "uuid",
+        "title": "Job Id",
+        "type": "string"
+      },
+      "quality": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Quality"
+      },
+      "run_id": {
+        "format": "uuid",
+        "title": "Run Id",
+        "type": "string"
+      },
+      "status": {
+        "title": "Status",
+        "type": "string"
+      },
+      "usage_known": {
+        "title": "Usage Known",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "run_id",
+      "job_id",
+      "status",
+      "quality",
+      "usage_known"
+    ],
+    "title": "ResearchMemberView",
     "type": "object"
   },
   "ResearchRunResponse": {
