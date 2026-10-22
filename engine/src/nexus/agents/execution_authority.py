@@ -91,6 +91,34 @@ async def load_frozen_evidence(
         )
     ) != set(identity_ids):
         return ()
+    observation_ids = tuple(
+        ref.id for ref in ordered if ref.source == "research_observation_identity"
+    )
+    if observation_ids:
+        from nexus.agents.research_only import require_research_only_snapshot
+        from nexus.persistence.models.data import DataSnapshot
+
+        snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+        try:
+            require_research_only_snapshot(snapshot)
+        except ValueError:
+            return ()
+        from nexus.research.observation_identity_storage import read_observation_identity_bindings
+
+        if (
+            identity_ids
+            or len(observation_ids) != 1
+            or set(
+                await read_observation_identity_bindings(
+                    session,
+                    instrument_id=run.instrument_id,
+                    as_of=run.decision_time,
+                    evidence_ids=observation_ids,
+                )
+            )
+            != set(observation_ids)
+        ):
+            return ()
     return ordered
 
 

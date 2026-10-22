@@ -40,6 +40,7 @@ async def prepare_research_snapshot(
     news_evidence_id: UUID | None = None,
     macro_series: frozenset[str] | None = None,
     macro_vintage: date | None = None,
+    research_only: bool = False,
 ) -> DataSnapshot | None:
     """Bind real filing references; the caller owns the transaction.
 
@@ -47,6 +48,10 @@ async def prepare_research_snapshot(
     Display-only price manifests cannot satisfy research ownership. Price authority
     is selected separately by the existing admission/worker code, never promoted here.
     """
+    if type(research_only) is not bool:
+        raise ValueError("RESEARCH_ONLY_ARGUMENT_INVALID")
+    if research_only and portfolio_snapshot_id is not None:
+        raise ValueError("RESEARCH_ONLY_CONTEXT_FORBIDDEN")
     require_utc(as_of)
     if as_of > datetime.now(UTC):
         raise ValueError("OPENAI_RESEARCH_TIME_IN_FUTURE")
@@ -220,7 +225,26 @@ async def prepare_research_snapshot(
             if len(evidence) < research_capacity:
                 evidence.append(classification_ref)
     identity_capacity_exhausted = False
-    identities = await read_identity_bindings(session, instrument_id=instrument_id, as_of=as_of)
+    if research_only:
+        from nexus.research.observation_identity_storage import read_observation_identity_bindings
+
+        identities = tuple(
+            await read_observation_identity_bindings(
+                session,
+                instrument_id=instrument_id,
+                as_of=as_of,
+            )
+        )
+    else:
+        identities = tuple(
+            await read_identity_bindings(
+                session,
+                instrument_id=instrument_id,
+                as_of=as_of,
+            )
+        )
+    if research_only and len(identities) != 1:
+        raise ValueError("RESEARCH_ONLY_IDENTITY_UNAVAILABLE")
     if identities:
         identity_ref = await session.get(ResearchEvidenceRef, next(iter(identities)))
         if identity_ref is not None:
@@ -231,11 +255,17 @@ async def prepare_research_snapshot(
                 # Supplemental identity must never evict research limitations,
                 # including unresolved amendments or their required evidence.
                 identity_capacity_exhausted = True
-    context = await freeze_portfolio_context(
-        session,
-        instrument_id,
-        as_of,
-        portfolio_snapshot_id=portfolio_snapshot_id,
+    if research_only and identity_capacity_exhausted:
+        raise ValueError("RESEARCH_ONLY_IDENTITY_CAPACITY_EXHAUSTED")
+    context = (
+        None
+        if research_only
+        else await freeze_portfolio_context(
+            session,
+            instrument_id,
+            as_of,
+            portfolio_snapshot_id=portfolio_snapshot_id,
+        )
     )
     if portfolio_snapshot_id is not None and context is None:
         raise ValueError("OPENAI_PORTFOLIO_CONTEXT_UNAVAILABLE")
@@ -247,6 +277,8 @@ async def prepare_research_snapshot(
         if distributions
         else "persisted_sec_filings",
     }
+    if research_only:
+        payload["purpose"] = "research_only_v2"
     if identity_capacity_exhausted:
         payload["research_identity_diagnostic"] = {"status": "unknown", "reason": CAPACITY_REASON}
     if observations:
@@ -268,13 +300,13 @@ async def prepare_research_snapshot(
     snapshot_id = await session.scalar(
         insert(DataSnapshot)
         .values(
-            source="nexus_research",
+            source="nexus_research_only" if research_only else "nexus_research",
             provider_object_id=str(instrument_id),
             revision=revision,
             observed_at=as_of,
             available_at=as_of,
             received_at=as_of,
-            schema_version="research_filings_v1",
+            schema_version="research_only_v2" if research_only else "research_filings_v1",
             payload=payload,
         )
         .on_conflict_do_nothing(index_elements=["source", "provider_object_id", "revision"])
@@ -285,7 +317,8 @@ async def prepare_research_snapshot(
             DataSnapshot | None,
             await session.scalar(
                 select(DataSnapshot).where(
-                    DataSnapshot.source == "nexus_research",
+                    DataSnapshot.source
+                    == ("nexus_research_only" if research_only else "nexus_research"),
                     DataSnapshot.provider_object_id == str(instrument_id),
                     DataSnapshot.revision == revision,
                 )

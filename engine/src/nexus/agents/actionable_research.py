@@ -124,6 +124,16 @@ def admit_actionable_research_output(
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
     try:
+        if (
+            any(row.source == "research_observation_identity" for row in bound_evidence)
+            or isinstance(run.prompt_manifest, dict)
+            and any(
+                isinstance(item, dict)
+                and str(item.get("version", "")).startswith("research-only-v2-")
+                for item in run.prompt_manifest.values()
+            )
+        ):
+            raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         from nexus.agents.codex_versions import (
             ACTIONABLE_CONFIG_VERSIONS,
             BOUNDED_STAGE_BUDGET_CONFIG_VERSION,

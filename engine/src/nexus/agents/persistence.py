@@ -116,6 +116,9 @@ async def load_actionable_research_output(
         run = await session.get(AgentResearchRunRecord, run_id, populate_existing=True)
         if run is None:
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+        from nexus.agents.research_only import require_formal_research
+
+        await require_formal_research(session, run)
         candidate_verified = False
         if candidate_stage_capacity:
             from nexus.agents.codex_candidate import candidate_output_qualified
@@ -602,9 +605,28 @@ async def admit_research_run(
     version_source_run_id: UUID | None = None,
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
+    research_only: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Keep version-inheriting admission failures atomic inside caller transactions."""
+
+    if (
+        type(research_only) is not bool
+        or research_only
+        and (
+            not formal_stage_capacity
+            or job_type is not JobType.AGENT_PAPER_RESEARCH
+            or not isinstance(model_config_id, UUID)
+            or prompt_version_id is None
+            or full_input_capacity
+            or economic_allocation is not None
+            or reuse_latest_actor_agent_version
+            or reuse_latest_actor_prompts_only
+            or version_source_run_id is not None
+            or allow_fixture_price_authority
+        )
+    ):
+        raise ValueError("RESEARCH_ONLY_ADMISSION_ARGUMENT_INVALID")
 
     async def admit() -> ResearchAdmission:
         return await _admit_research_run(
@@ -626,6 +648,7 @@ async def admit_research_run(
             version_source_run_id=version_source_run_id,
             formal_stage_capacity=formal_stage_capacity,
             full_input_capacity=full_input_capacity,
+            research_only=research_only,
             economic_allocation=economic_allocation,
         )
 
@@ -697,6 +720,7 @@ async def _admit_research_run(
     version_source_run_id: UUID | None = None,
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
+    research_only: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
@@ -825,6 +849,13 @@ async def _admit_research_run(
         run = await session.get(AgentResearchRunRecord, UUID(raw_run_id), populate_existing=True)
         if run is None:
             raise RuntimeError("Agent idempotency run is missing")
+        from nexus.agents.research_only import is_research_only, require_research_only_snapshot
+
+        replay_snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+        if research_only:
+            require_research_only_snapshot(replay_snapshot)
+        elif is_research_only(replay_snapshot, run.evidence_manifest):
+            raise ValueError("RESEARCH_ONLY_ADMISSION_REQUIRED")
         await _verify_capacity_replay_binding(
             session,
             run,
@@ -848,6 +879,18 @@ async def _admit_research_run(
         )
     instrument = await session.get(Instrument, request.instrument_id)
     snapshot = await session.get(DataSnapshot, request.data_snapshot_id)
+    from nexus.agents.research_only import (
+        is_research_only,
+        require_research_only_snapshot,
+        research_only_prompts_valid,
+    )
+
+    if research_only:
+        require_research_only_snapshot(snapshot)
+        if snapshot is None or snapshot.observed_at != request.decision_time:
+            raise ValueError("RESEARCH_ONLY_SNAPSHOT_INVALID")
+    elif is_research_only(snapshot):
+        raise ValueError("RESEARCH_ONLY_ADMISSION_REQUIRED")
     if version_source_run_id is not None:
         prior_run = await session.get(AgentResearchRunRecord, version_source_run_id)
     elif reuse_latest_actor_agent_version:
@@ -879,6 +922,18 @@ async def _admit_research_run(
         prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
     if protected_authority is not None:
         prompts = cast(dict[AgentRole, AgentPromptVersionRecord], protected_authority[0])
+    if research_only and (
+        prompts is None
+        or not research_only_prompts_valid(prompts)
+        or any(row.created_at > request.decision_time for row in prompts.values())
+    ):
+        raise ValueError("RESEARCH_ONLY_PROMPT_INVALID")
+    if (
+        not research_only
+        and prompts is not None
+        and any(row.version.startswith("research-only-v2-") for row in prompts.values())
+    ):
+        raise ValueError("RESEARCH_ONLY_ADMISSION_REQUIRED")
     if prior_run is not None:
         model = await session.get(AgentModelConfigRecord, prior_run.model_config_id)
         if model is None or (
@@ -988,6 +1043,25 @@ async def _admit_research_run(
         or model.pricing_expires_at <= now
     ):
         raise ValueError("point-in-time data authority is invalid")
+    if research_only:
+        from nexus.research.observation_identity_storage import read_observation_identity_bindings
+
+        ids = tuple(
+            row.evidence_ref_id
+            for row in evidence_records
+            if row.source == "research_observation_identity"
+        )
+        if len(ids) != 1 or set(
+            await read_observation_identity_bindings(
+                session,
+                instrument_id=request.instrument_id,
+                as_of=request.decision_time,
+                evidence_ids=ids,
+            )
+        ) != set(ids):
+            raise ValueError("RESEARCH_ONLY_IDENTITY_UNAVAILABLE")
+    elif any(row.source == "research_observation_identity" for row in evidence_records):
+        raise ValueError("RESEARCH_ONLY_ADMISSION_REQUIRED")
     prompt_manifest = {
         role: {
             "id": str(prompts[role].id),

@@ -506,6 +506,12 @@ class StagedCodexCommittee(CodexCommittee):
                     "conflict; name exactly which conclusion each unresolved issue prevents. "
                     "Do not infer missing portfolio facts, assign weights or grant execution."
                 )
+        if isinstance(security, dict) and security.get("purpose") == "research_only_v2":
+            from nexus.agents.research_only import RESEARCH_ONLY_INSTRUCTIONS
+
+            payload["instructions"] = (
+                cast(str, payload["instructions"]) + " " + RESEARCH_ONLY_INSTRUCTIONS
+            )
         if financial_table_candidate:
             # Audit identity stays in the frozen authority/output manifests. The
             # diagnostic candidate sends unchanged role text, not audit hashes.
