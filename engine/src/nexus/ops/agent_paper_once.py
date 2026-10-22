@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from collections.abc import Mapping, Sequence
@@ -1000,6 +1001,13 @@ async def trigger_in_session(
     )
 
 
+def _safe_trigger_failure_code(error: Exception) -> str:
+    from nexus.paper.agent_cycle import _TRIGGER_FAILURE_CODES
+
+    code = str(error)
+    return code if code in _TRIGGER_FAILURE_CODES else "AGENT_PAPER_TRIGGER_FAILED"
+
+
 async def trigger_once(
     settings: AgentPaperTriggerSettings,
     request: AgentPaperTriggerRequest,
@@ -1042,8 +1050,29 @@ async def trigger_once(
         if reservation.replay is not None:
             return reservation.replay
         phase = "trigger_provider"
-        store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
         try:
+            if request.formal_stage_capacity and request.trigger_mode in {"manual", "scheduled"}:
+                from nexus.ops.formal_research_preparation import (
+                    FormalPreparationContext,
+                    prepare_formal_trigger_inputs,
+                )
+
+                await prepare_formal_trigger_inputs(
+                    settings,
+                    context=FormalPreparationContext(
+                        request.account_id,
+                        reservation,
+                        request.idempotency_key,
+                        expected_calendar_authority_id,
+                    ),
+                    repo_root=repo_root,
+                    process_environment=(
+                        process_environment
+                        if process_environment is not None
+                        else load_local_environment(repo_root, os.environ)
+                    ),
+                )
+            store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
             async with (
                 factory() as session,
                 session.begin(),
@@ -1074,10 +1103,25 @@ async def trigger_once(
                     await finish_schwab_agent_paper_trigger(
                         failure_session,
                         reservation=reservation,
-                        error_code=str(error),
+                        error_code=_safe_trigger_failure_code(error),
                     )
-            except Exception:
-                pass
+            except Exception as secondary:
+                from nexus.ops.preparation_diagnostics import exception_code
+
+                try:
+                    print(
+                        json.dumps(
+                            {
+                                "stage": "trigger_failure_receipt",
+                                "code": exception_code(secondary),
+                                "external_effects": "unknown",
+                            }
+                        ),
+                        file=sys.stderr,
+                    )
+                except Exception:
+                    # A broken diagnostic sink must not replace the primary failure.
+                    pass
             raise
     except Exception as error:
         from nexus.ops.manual_paper_host import annotate_manual_trigger_failure

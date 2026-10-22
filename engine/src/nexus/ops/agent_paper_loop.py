@@ -1385,7 +1385,7 @@ async def _prepare_current_trends_research_snapshot(
     instrument_id: UUID,
     now: datetime,
     macro_vintage: date | None = None,
-) -> None:
+) -> UUID:
     """Bind already-persisted trends into the normal authoritative research snapshot."""
     if not settings.database_url:
         raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -1466,6 +1466,7 @@ async def _prepare_current_trends_research_snapshot(
             )
             if snapshot is None:
                 raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+            return snapshot.id
     finally:
         await engine.dispose()
 
@@ -3280,56 +3281,57 @@ async def execute_agent_paper_loop_action(
             _FileDailySettings if env_file is not None else DailyOnceSettings
         ).model_validate(environment)
         batch_id = _candidate_batch_setting(environment)
-        candidates = await _load_loop_candidates(
-            trigger_settings,
-            account_id=account_id,
-            batch_id=batch_id,
-            expected_calendar_authority_id=expected_calendar_authority_id,
-        )
-        for candidate in candidates:
-            prior_daily = await prepare_prior_daily_once(
+        if trigger_settings.agent_paper_formal_model_config_id is None:
+            candidates = await _load_loop_candidates(
                 trigger_settings,
                 account_id=account_id,
-                repo_root=repo_root,
-                now=snapshot.now,
+                batch_id=batch_id,
                 expected_calendar_authority_id=expected_calendar_authority_id,
-                candidate=candidate,
             )
-            if prior_daily == "prepared":
-                return None
-            if prior_daily == "unavailable":
-                return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
-            if prior_daily != "ready":
-                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        for candidate in candidates:
-            macro = await prepare_macro_once(
-                macro_settings,
-                fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
-                account_id=account_id,
-                repo_root=repo_root,
-                now=snapshot.now,
-                expected_calendar_authority_id=expected_calendar_authority_id,
-                candidate=candidate,
-            )
-            if macro == "prepared":
-                return None
-            if macro not in {"ready", "unavailable"}:
-                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
-        for candidate in candidates:
-            current_trends = await prepare_current_trends_once(
-                trigger_settings,
-                account_id=account_id,
-                repo_root=repo_root,
-                now=snapshot.now,
-                expected_calendar_authority_id=expected_calendar_authority_id,
-                candidate=candidate,
-            )
-            if current_trends == "prepared":
-                return None
-            if current_trends == "unavailable":
-                return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
-            if current_trends != "ready":
-                return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+            for candidate in candidates:
+                prior_daily = await prepare_prior_daily_once(
+                    trigger_settings,
+                    account_id=account_id,
+                    repo_root=repo_root,
+                    now=snapshot.now,
+                    expected_calendar_authority_id=expected_calendar_authority_id,
+                    candidate=candidate,
+                )
+                if prior_daily == "prepared":
+                    return None
+                if prior_daily == "unavailable":
+                    return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+                if prior_daily != "ready":
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+            for candidate in candidates:
+                macro = await prepare_macro_once(
+                    macro_settings,
+                    fred_key=SecretStr(environment.get("FRED_API_KEY", "")),
+                    account_id=account_id,
+                    repo_root=repo_root,
+                    now=snapshot.now,
+                    expected_calendar_authority_id=expected_calendar_authority_id,
+                    candidate=candidate,
+                )
+                if macro == "prepared":
+                    return None
+                if macro not in {"ready", "unavailable"}:
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+            for candidate in candidates:
+                current_trends = await prepare_current_trends_once(
+                    trigger_settings,
+                    account_id=account_id,
+                    repo_root=repo_root,
+                    now=snapshot.now,
+                    expected_calendar_authority_id=expected_calendar_authority_id,
+                    candidate=candidate,
+                )
+                if current_trends == "prepared":
+                    return None
+                if current_trends == "unavailable":
+                    return AgentPaperLoopAction.STOP_PREREQUISITE_UNAVAILABLE
+                if current_trends != "ready":
+                    return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
         decision_slot_at = floor_decision_slot(snapshot.now)
         try:
             await trigger_once(

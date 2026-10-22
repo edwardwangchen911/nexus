@@ -14,6 +14,7 @@ from nexus.ops.openai_local import prepare_database
 from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.settings import EngineSettings
@@ -40,6 +41,17 @@ async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
     try:
         await _set_test_insert_clock(sessions, preparation_at)
         async with sessions.begin() as session:
+            next_day = AT + timedelta(days=3)
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=authority.calendar_authority_id,
+                    session=next_day.date(),
+                    decision_at=next_day.replace(hour=21),
+                    market_open_at=next_day.replace(hour=13, minute=30),
+                    market_close_at=next_day.replace(hour=20),
+                    created_at=preparation_at,
+                )
+            )
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
                     AgentModelConfigRecord.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
@@ -97,6 +109,36 @@ async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
             ("prepare_agent_paper_identity_once", "identity"),
         ):
             monkeypatch.setattr(loop, name, preparation(phase))
+        from nexus.ops import formal_research_preparation as formal_preparation
+
+        async def already_seeded_identity(*_args, **kwargs):
+            assert kwargs["account_id"] == authority.account_id
+            assert kwargs["batch_id"] == batch.batch_id
+            assert kwargs["execution"].reservation.candidate_batch_id == batch.batch_id
+            return "ready"
+
+        async def already_seeded_snapshots(_settings, context, scope):
+            assert context.reservation.candidate_batch_id == batch.batch_id
+            assert tuple(item.instrument_id for item in scope.candidates) == batch.instrument_ids
+            # seed_normal_path supplied real immutable authoritative snapshots;
+            # this test owns trigger/cycle wiring, not source/archive preparation.
+            async with sessions() as session:
+                from nexus.agents.persistence import select_authoritative_snapshot
+
+                for item in scope.candidates:
+                    assert (
+                        await select_authoritative_snapshot(
+                            session, instrument_id=item.instrument_id, as_of=AT
+                        )
+                        is not None
+                    )
+
+        monkeypatch.setattr(
+            formal_preparation, "prepare_agent_paper_identity_once", already_seeded_identity
+        )
+        monkeypatch.setattr(
+            formal_preparation, "freeze_prepared_snapshots", already_seeded_snapshots
+        )
         source_calls = []
 
         async def controlled_authority(*args, **kwargs):

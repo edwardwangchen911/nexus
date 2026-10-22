@@ -4102,13 +4102,15 @@ def test_executor_uses_slot_derived_trigger_key(
         )
     )
     request = requests[0]
-    assert len(received_settings) == 3
-    assert received_settings[0] is received_settings[1]
-    assert received_settings[1] is received_settings[2]
+    # Formal preparation now runs inside trigger_once after its native claim;
+    # this test substitutes that boundary and must not collect twice outside it.
+    assert len(received_settings) == (1 if formal else 3)
+    assert all(item is received_settings[0] for item in received_settings)
     assert isinstance(received_settings[0], loop.AgentPaperTriggerSettings)
-    assert preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
-    assert macro_preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
-    assert trend_preparations == [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
+    expected = [] if formal else [(UUID(int=1), datetime(2026, 9, 14, 14, 7, 12, tzinfo=UTC))]
+    assert preparations == expected
+    assert macro_preparations == expected
+    assert trend_preparations == expected
     assert request.account_id == UUID(int=1)
     assert request.idempotency_key == "agent-paper-loop:2026-09-14T14:05:00+00:00"
 

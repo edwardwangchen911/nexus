@@ -567,6 +567,11 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
                 source_calls.append(kwargs["idempotency_key"])
                 return authority
 
+            from helpers.formal_preparation import use_seeded_formal_preparation
+
+            use_seeded_formal_preparation(
+                monkeypatch, account_id=authority.account_id, batch_id=batch.batch_id
+            )
             monkeypatch.setattr(
                 agent_paper_once, "prepare_schwab_decision_authority", controlled_authority
             )

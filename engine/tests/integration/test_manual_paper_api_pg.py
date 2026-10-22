@@ -308,6 +308,11 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
                     calls.append(kwargs["idempotency_key"])
                     return authority
 
+                from helpers.formal_preparation import use_seeded_formal_preparation
+
+                use_seeded_formal_preparation(
+                    monkeypatch, account_id=authority.account_id, batch_id=batch.batch_id
+                )
                 monkeypatch.setattr(
                     agent_paper_once, "prepare_schwab_decision_authority", controlled_authority
                 )

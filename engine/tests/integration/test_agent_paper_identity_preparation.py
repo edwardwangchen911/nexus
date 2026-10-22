@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime, time, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,8 @@ from unit.market.test_object_store import FakeS3Client
     "case",
     [
         "ready",
+        "manual_after_slot",
+        "scheduled_after_slot",
         "partially_registered",
         "source_failure",
         "import_mismatch",
@@ -208,6 +211,8 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             "AsyncClient",
             lambda **kw: original_client(**kw, transport=httpx.MockTransport(response)),
         )
+        if case in {"manual_after_slot", "scheduled_after_slot"}:
+            clock[0] = now + timedelta(minutes=26)
         if case == "closed_window":
             clock[0] = now + timedelta(minutes=26)
         if case == "existing_incomplete":
@@ -234,6 +239,31 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             repo_root=tmp_path,
             contact="synthetic@example.invalid",
         )
+        if case in {"manual_after_slot", "scheduled_after_slot"}:
+            from nexus.ops import formal_research_preparation as preparation
+            from nexus.paper.agent_cycle_authority import (
+                load_agent_paper_service_calendar_authority,
+            )
+
+            # This test isolates the source/archive/builder boundary. Native claim
+            # ownership and request-hash validation have separate focused coverage.
+            async def authorized_execution(session, context, *, now):
+                assert context is args["execution"]
+                return await load_agent_paper_service_calendar_authority(
+                    session, now=now, expected_calendar_authority_id=calendar_id
+                )
+
+            monkeypatch.setattr(preparation, "require_preparation_scope", authorized_execution)
+            args["execution"] = SimpleNamespace(
+                account_id=ACCOUNT_ID,
+                calendar_id=calendar_id,
+                reservation=SimpleNamespace(
+                    candidate_batch_id=batch.batch_id,
+                    decision_session=day,
+                    trigger_mode="manual" if case == "manual_after_slot" else "scheduled",
+                    decision_slot_at=now + timedelta(minutes=25),
+                ),
+            )
         if case == "partially_registered":
             scope = await identity._read_scope(
                 settings, account_id=ACCOUNT_ID, batch_id=batch.batch_id, calendar_id=calendar_id
@@ -259,7 +289,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             result = "unavailable"
         else:
             result = await identity.prepare_agent_paper_identity_once(settings, **args)
-        success = case in ("ready", "partially_registered")
+        success = case in ("ready", "partially_registered", "manual_after_slot")
         assert result == ("prepared" if success else "unavailable")
         diagnostics = [
             json.loads(line)
@@ -275,6 +305,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     "source_failure": "collect",
                     "import_mismatch": "import",
                     "closed_window": "scope",
+                    "scheduled_after_slot": "scope",
                     "closed_during_collect": "readback",
                     "closed_during_import": "import",
                     "existing_incomplete": "archive",
@@ -286,13 +317,43 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             )
         assert len(calls) == (
             0
-            if case in ("closed_window", "existing_incomplete", "unsafe_parent")
+            if case
+            in ("closed_window", "existing_incomplete", "unsafe_parent", "scheduled_after_slot")
             else 1
             if case == "source_failure"
             else 6
             if case == "partially_registered"
             else 3
         )
+        if case == "manual_after_slot":
+            # Freeze with the normal builder after all sources, then prove exact
+            # selection and current-session identity on the persisted snapshot.
+            context = args["execution"]
+            scope = await preparation.read_preparation_scope(settings, context)
+            clock[0] += timedelta(seconds=1)
+            await preparation.freeze_prepared_snapshots(settings, context, scope)
+            async with factory() as session:
+                for instrument_id in (AAPL_ID, NVDA_ID):
+                    snapshot = await identity.select_authoritative_snapshot(
+                        session, instrument_id=instrument_id, as_of=clock[0]
+                    )
+                    assert snapshot.observed_at == clock[0]
+                    diagnosis = await identity.inspect_identity_binding_snapshot(
+                        session,
+                        instrument_id=instrument_id,
+                        snapshot=snapshot,
+                        as_of=clock[0],
+                        decision_session=day,
+                    )
+                    assert diagnosis["snapshot_status"] == "ready"
+                    bindings = await identity.read_identity_bindings(
+                        session,
+                        instrument_id=instrument_id,
+                        as_of=clock[0],
+                        decision_session=day,
+                    )
+                    assert bindings
+                    assert all(item.decision_session == day for item in bindings.values())
         async with factory() as session:
             assert await session.scalar(
                 select(func.count())
