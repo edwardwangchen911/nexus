@@ -406,6 +406,7 @@ async def _seed_two_candidate_authority(
     source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
     authority_instruments=INSTRUMENTS,
     candidate_instruments=INSTRUMENTS[:2],
+    candidate_symbols=None,
 ):
     from nexus.paper.agent_cycle_authority import CycleAuthority
     from nexus.persistence.models.data import PriceBarRecord
@@ -424,6 +425,7 @@ async def _seed_two_candidate_authority(
         quote_received_at=decision_time,
         price_available_at=decision_time if same_day else None,
         instruments=authority_instruments,
+        candidate_symbols=candidate_symbols,
     )
     authority = CycleAuthority(
         account_id=registered.decision.account_id,
@@ -2112,6 +2114,7 @@ async def _seed_cycle_research_authority(
     base_payload: dict[str, object] | None = None,
     prompt_bundle_version: str | None = None,
     instruments=INSTRUMENTS,
+    candidate_symbols=None,
 ) -> None:
     authority_time = price_available_at or DECISION_TIME
     await session.execute(text("ALTER TABLE instrument_aliases DISABLE TRIGGER USER"))
@@ -2198,7 +2201,13 @@ async def _seed_cycle_research_authority(
                 ),
                 {
                     "instrument_id": instrument_id,
-                    "symbol": "AAPL" if index == 1 else f"T{index}",
+                    "symbol": (
+                        candidate_symbols[index - 1]
+                        if candidate_symbols
+                        else "AAPL"
+                        if index == 1
+                        else f"T{index}"
+                    ),
                 },
             )
     finally:
