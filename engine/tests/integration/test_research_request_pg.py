@@ -254,8 +254,13 @@ async def test_three_stock_atomic_manifest_readback_cancel_and_next_admission(
 async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_scheduling(
     migrated_database_url, tmp_path, monkeypatch
 ):
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
     from nexus.agents.codex_sdk import invoke_codex as real_invoke
     from nexus.ops.manual_paper_host import run_pure_research_once
+    from nexus.persistence.models.runtime import ManualHostExit
     from unit.agents.test_codex_sdk import _assessment_payload, _sdk, _staged_batch
 
     factory, settings, store, ids = await prepare_scope(
@@ -265,6 +270,34 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
     calls = []
     reuse_states = []
     client, thread, result, _ = _sdk(monkeypatch)
+    processes = []
+    client._client._sync = SimpleNamespace(_proc=None)
+
+    async def account(**_):
+        # Model SDK initialization with an owned local child, not an invented
+        # successful poll(). No network, Codex process or model is invoked.
+        assert client._client._sync._proc is None
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        processes.append(process)
+        client._client._sync._proc = process
+        return client.account.return_value
+
+    async def close():
+        process = client._client._sync._proc
+        assert process is not None
+        # The SDK clears its handle before waiting. The production close guard
+        # must retain and observe the original child across this transition.
+        client._client._sync._proc = None
+        process.stdin.close()
+        await asyncio.to_thread(process.wait, timeout=5)
+
+    client.account.side_effect = account
+    client.close.side_effect = close
 
     async def invoke(payload, **options):
         from nexus.agents.preparation_reuse import current_reuse
@@ -307,6 +340,10 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
         assert {m.instrument_id for m in view.research.members} == set(ids)
         assert all(m.status == "completed" and m.usage_known for m in view.research.members)
         assert calls == ["research", "critique", "synthesis"] * 3
+        assert len(processes) == 9 and all(p.poll() == 0 for p in processes)
+        assert client.close.await_count == 9
+        async with factory.begin() as session:
+            assert await session.scalar(select(func.count()).select_from(ManualHostExit)) == 1
         import httpx
         from helpers.paper_api import headers
         from helpers.paper_api import settings as api_settings
@@ -340,6 +377,19 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
                 assert response.status_code == 200 and response.json()["data"] == view.model_dump(
                     mode="json"
                 )
+                # The completed foreground host has retired. A new API request
+                # needs a genuinely live host, not the old host's recent heartbeat.
+                from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
+
+                async with factory.begin() as session:
+                    host_now = await session.scalar(select(func.clock_timestamp()))
+                await heartbeat_agent_paper_loop(
+                    settings,
+                    worker_id=f"agent-paper-loop-{uuid4()}",
+                    started_at=host_now,
+                    seen_at=host_now,
+                    account_id=settings.agent_paper_account_id,
+                )
                 response = await client.post(
                     path,
                     content=body,
@@ -358,6 +408,10 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
             )
             assert await session.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
     finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
         await factory.kw["bind"].dispose()
 
 
