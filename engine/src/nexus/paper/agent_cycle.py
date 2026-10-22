@@ -118,6 +118,7 @@ class AgentPaperCycleError(ValueError):
 
 _TRIGGER_FAILURE_CODES = frozenset(
     {
+        "AGENT_PAPER_TRIGGER_FAILED",
         "AGENT_PAPER_ACCOUNT_INVALID",
         "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH",
         "AGENT_PAPER_CALENDAR_UNAVAILABLE",
@@ -583,6 +584,18 @@ async def finish_schwab_agent_paper_trigger(
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     if error_code is not None and error_code not in _TRIGGER_FAILURE_CODES:
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    if reservation.trigger_mode == "manual":
+        from nexus.paper.current_preparation_acceptance import require_execution_not_accepted
+        from nexus.paper.target_service import lock_portfolio_account
+        from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+        if reservation.manual_request_id is None:
+            raise ValueError("MANUAL_REQUEST_INVALID")
+        row = await session.get(ManualPaperRequest, reservation.manual_request_id)
+        if row is None:
+            raise ValueError("MANUAL_REQUEST_INVALID")
+        await lock_portfolio_account(session, row.account_id)
+        await require_execution_not_accepted(session, row.id)
     claim = await session.scalar(
         select(IdempotencyRecord)
         .where(IdempotencyRecord.id == reservation.claim_id)
@@ -629,6 +642,8 @@ async def finish_schwab_agent_paper_trigger(
         payload = {"outcome": "completed", "result": result.model_dump(mode="json")}
     else:
         payload = {"outcome": "failed", "error_code": cast(str, error_code)}
+        if error_code == "AGENT_PAPER_TRIGGER_FAILED":
+            payload["external_effects"] = "unknown"
     if claim.response_payload and claim.response_payload != payload:
         raise ValueError("AGENT_PAPER_IDEMPOTENCY_CONFLICT")
     claim.response_payload = payload

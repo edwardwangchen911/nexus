@@ -378,12 +378,18 @@ async def require_acknowledged_native_claims(
     current_trigger_key: str | None = None,
 ) -> None:
     audits = await _audits(session, account_id)
-    if not audits:
+    from nexus.paper.current_preparation_acceptance import accepted_claim_ids
+
+    allowed = await accepted_claim_ids(session, account_id)
+    if not audits and not allowed:
         return
-    if len(audits) != 1:
-        raise ValueError(BLOCKED)
-    proof = await _validate(session, audits[0], now=now)
-    allowed = set(_claim_ids(proof))
+    prior_request_id = None
+    if audits:
+        if len(audits) != 1:
+            raise ValueError(BLOCKED)
+        proof = await _validate(session, audits[0], now=now)
+        allowed.update(_claim_ids(proof))
+        prior_request_id = proof["request_id"]
     allowed_current = current_trigger_key
     current_route, current_schema = (
         ("agent-paper-manual-trigger-v1", "agent_paper_manual_trigger_v1")
@@ -392,7 +398,7 @@ async def require_acknowledged_native_claims(
         if current_trigger_key and current_trigger_key.startswith("synthesis-recovery:")
         else ("agent-paper-schwab-trigger-v2", "agent_paper_schwab_trigger_v2")
     )
-    if excluding_request_id is not None and str(excluding_request_id) != proof["request_id"]:
+    if excluding_request_id is not None and str(excluding_request_id) != prior_request_id:
         from nexus.paper.manual_request import read_manual_request
 
         row = await session.get(ManualPaperRequest, excluding_request_id)

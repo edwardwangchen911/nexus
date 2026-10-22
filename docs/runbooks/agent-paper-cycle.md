@@ -622,13 +622,13 @@ uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-fil
 uv run --project engine nexus-engine-manual-paper --repo-root <主仓库> --env-file infra/.env.local recover-preparation --request-id <UUID> --accept-unknown-effects
 ```
 
-默认不带此参数的恢复语义不变。该参数仅支持已有完整当前生产者 STARTED/EFFECTS 执行日志、没有认领或周期的 unknown 请求（包括已追加 unknown_preserved 恢复回执的请求）；不替代历史五项未知处置。首次接受须核验生产者退出、原证据、其他认领、研究任务/Run/有效租约及账户订单占用。既有生命周期/schema/账户锁持有至提交；全局审计锁及短时 Jobs/leases/Run 表锁采用非阻塞获取，竞争时整笔拒绝并回滚，不等待、重试或干预正常研究。
+默认不带此参数的恢复语义不变。该参数支持已有完整当前生产者 STARTED/EFFECTS 执行日志且没有周期的 unknown 请求（包括已追加 unknown_preserved 恢复回执的请求）。无认领时沿用 v1 证明；存在唯一 explicit-manual 空响应认领时，v2 从原请求、preparing 时刻和 execution 重建原生请求哈希，并绑定认领 ID、actor、route、schema、key、内容与创建时间。其他或损坏认领仍拒绝，不回填原响应，不替代历史五项未知处置。首次接受须核验生产者退出、原证据、其他认领、研究任务/Run/有效租约及账户订单占用。既有生命周期/schema/账户锁持有至提交；全局审计锁及短时 Jobs/leases/Run 表锁采用非阻塞获取，竞争时整笔拒绝并回滚，不等待、重试或干预正常研究。
 
 只追加 `paper.manual_preparation.unknown_accepted` 审计。原请求、unknown 事件、执行日志、未知费用及全部预留保持原样；正常 GET 复用 `preparation_disposition=unknown_acknowledged`，不增加业务终态或执行权限。后续合法新周期不改变旧审计；重复操作返回同一接受结果，无需再次停止新的合法生产者。新请求仍独立检查账户、任务、预算、数据与执行条件，不能通过本次接受直接判定账户可用。
 
 执行占用检查不把所有历史 `prepared` 都当作活跃研究：仅当唯一研究 Job 的身份、输入哈希、scope 和时间精确绑定，单次自动尝试已经 `failed/dead_letter`，当前 attempt 已结束且与失效 lease 的 token/fence 对应、无重试路径时，才视为没有执行占用。无 Job、多 Job、身份或时点不符、有效 lease、其他非终态仍拒绝；真实进程退出检查独立保留。此判断不封存该 Run，也不结算或释放未知用量/预算；账户周期仍须通过原有完整准入及有效历史封存验证。
 
-读回只验证该请求的原事实及审计，不绑定全局空闲状态或最新版本。迟到认领/周期、原事件或审计变更均使接受证明失效；即使证明失效，已经存在的接受审计仍永久阻止旧执行身份继续认领或建周期。旧 key 只读旧 unknown，不可重放。
+读回只验证该请求的原事实及审计，不绑定全局空闲状态或最新版本。迟到认领/周期、原事件或审计变更均使接受证明失效；即使证明失效，已经存在的接受审计仍永久阻止旧执行身份继续认领、建周期或补写触发结果；触发收尾与接受使用同一账户锁。旧 key 只读旧 unknown，不可重放。正常手动、宿主和原生触发准入仅豁免当前仍有效证明绑定的精确认领，之后合法新请求不使旧证明失效。
 
 无迁移、依赖或配置变更；当前授权仅本地实现和隔离验收，未处置真实记录、启动宿主或新周期。未来部署须同步兼容消费者与生产者；有接受审计后，回退先停新入口及生产者、保留全部事实并核验旧消费者兼容性，不可删除审计或直接恢复不认识该执行拦截的旧版本。
 
