@@ -668,7 +668,15 @@ class StagedCodexCommittee(CodexCommittee):
             self.failure_reason = allowance_reason
             raise ValueError("CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED")
         if self.dispatch_guard is not None:
-            self.dispatch_guard()
+            try:
+                self.dispatch_guard()
+            except CodexInvocationError as error:
+                if (
+                    error.reason == "CODEX_RESEARCH_STOPPED"
+                    and error.provider_call_started is False
+                ):
+                    self.failure_reason = "model_research_stopped"
+                raise
         self.failure_reason = "model_usage_uncertain"
         self.last_stage_input = StageInputIdentity(
             stage=stage,
@@ -721,6 +729,17 @@ class StagedCodexCommittee(CodexCommittee):
                     provider_calls=self.usage.provider_calls,
                 )
                 self.failure_reason = "model_execution_failed"
+            if (
+                isinstance(error, CodexInvocationError)
+                and error.reason == "CODEX_RESEARCH_STOPPED"
+                and error.provider_call_started is False
+            ):
+                self.failure_reason = "model_research_stopped"
+                self.usage = UsageSnapshot(
+                    input_tokens=self.usage.input_tokens,
+                    output_tokens=self.usage.output_tokens,
+                    provider_calls=self.usage.provider_calls - 1,
+                )
             self.failure_diagnostic = StageFailureDiagnostic(
                 stage=stage,
                 boundary="invocation",

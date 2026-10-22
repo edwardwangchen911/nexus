@@ -220,6 +220,10 @@ async def start_configured_manual_request(
             calendar.market_open_at <= now < calendar.market_close_at
         ):
             raise ValueError("MANUAL_SESSION_UNAVAILABLE")
+    from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+
+    model = await session.get(AgentModelConfigRecord, model_id)
     return await admit_manual_request(
         session,
         account_id=account_id,
@@ -232,4 +236,9 @@ async def start_configured_manual_request(
         if settings.agent_runtime_mode is None
         else settings.agent_runtime_mode.value,
         daily_limit_usd=settings.agent_daily_budget_usd,
+        two_flight=(
+            mode == "research_only"
+            and model is not None
+            and model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+        ),
     )

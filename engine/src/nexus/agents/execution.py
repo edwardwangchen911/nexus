@@ -70,6 +70,7 @@ TERMINAL: Final[frozenset[str]] = frozenset({"completed", "failed", "abstained"}
 SAFE_MODEL_FAILURES: Final[frozenset[str]] = frozenset(
     {
         "model_usage_uncertain",
+        "model_research_stopped",
         "model_stage_allowance_exhausted",
         "model_stage_wire_bytes_exceeded",
         "model_stage_input_allowance_exhausted",
@@ -394,7 +395,10 @@ async def _analyze_with_one_retry(
     for _attempt in range(2):
         try:
             return await committee.analyze(role, request, evidence_refs, prompt)
-        except Exception:
+        except Exception as error:
+            from nexus.agents.research_dispatch import stop_current_dispatch
+
+            stop_current_dispatch(error)
             if getattr(committee, "retry_on_error", True) is False or run.retry_count >= 1:
                 return None
             run.retry_count += 1
@@ -474,6 +478,32 @@ async def _append_output(
     return output
 
 
+async def stop_uncalled_research(session: AsyncSession, *, run_id: UUID) -> ResearchRunResult:
+    """Only the claimed handler's pure preparation may prove zero SDK calls."""
+    from nexus.agents.research_dispatch import current_dispatch
+
+    state = current_dispatch(run_id)
+    run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
+    if (
+        state is None
+        or not state.stopped
+        or run_id not in state.claims
+        or run is None
+        or run.status != "prepared"
+    ):
+        raise ValueError("RESEARCH_DISPATCH_INVALID")
+    await require_reserved_daily_budget(session, run_id=run.id)
+    await _append_event(session, run, 1, "prepared", {})
+    return await _terminal_without_usage(
+        session,
+        run,
+        output_sequence=1,
+        event_sequence=2,
+        status="abstained",
+        reason="model_research_stopped",
+    )
+
+
 async def _terminal_without_usage(
     session: AsyncSession,
     run: AgentResearchRunRecord,
@@ -483,6 +513,9 @@ async def _terminal_without_usage(
     status: Literal["failed", "abstained"],
     reason: str,
 ) -> ResearchRunResult:
+    from nexus.agents.research_dispatch import stop_current_dispatch
+
+    stop_current_dispatch()
     if any(
         value not in (None, 0)
         for value in (run.settled_cost_usd, run.input_tokens, run.output_tokens)
@@ -516,6 +549,9 @@ async def _terminal_after_committee(
     status: Literal["failed", "abstained"],
     reason: str,
 ) -> ResearchRunResult:
+    from nexus.agents.research_dispatch import stop_current_dispatch
+
+    stop_current_dispatch()
     usage = _committee_usage(committee, role_outputs)
     if reason == "model_usage_uncertain":
         # Saved stages are a known lower bound. An invocation without complete
@@ -530,6 +566,10 @@ async def _terminal_after_committee(
             reason = "usage_accounting_failed"
     else:
         await release_daily_budget_if_reserved(session, run_id=run.id)
+        if reason == "model_research_stopped":
+            run.settled_cost_usd = Decimal("0")
+            run.input_tokens = 0
+            run.output_tokens = 0
     stage_input = getattr(committee, "last_stage_input", None)
     diagnostic = getattr(committee, "failure_diagnostic", None)
     return await _persist_terminal(
@@ -584,8 +624,14 @@ async def _settle_or_hold_usage(
     usage: UsageSnapshot,
 ) -> bool:
     """Settle known usage, retaining the full reservation if exact settlement rejects."""
+    from nexus.agents.research_dispatch import dispatch_failure_boundary, stop_current_dispatch
+
     try:
-        async with session.begin_nested():
+        async with (
+            dispatch_failure_boundary(session),
+            session.begin_nested(),
+            dispatch_failure_boundary(),
+        ):
             actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
             await settle_daily_budget(
                 session,
@@ -595,6 +641,7 @@ async def _settle_or_hold_usage(
                 output_tokens=usage.output_tokens,
             )
     except Exception:
+        stop_current_dispatch()
         run.input_tokens = usage.input_tokens
         run.output_tokens = usage.output_tokens
         await session.flush()
@@ -614,6 +661,9 @@ async def _persist_terminal(
     diagnostic: StageFailureDiagnostic | None = None,
     timing_payload: dict[str, object] | None = None,
 ) -> ResearchRunResult:
+    from nexus.agents.research_dispatch import stop_current_dispatch
+
+    stop_current_dispatch()
     await _append_output(
         session,
         run,

@@ -552,7 +552,22 @@ async def require_reserved_daily_budget(
 ) -> AgentDailyBudgetReservationRecord:
     """Lock and require the exact open reservation before any provider work starts."""
     reservation = await _locked_reservation(session, run_id)
-    await _lock_budget_day(session, reservation.business_date.isoformat())
+    from nexus.agents.research_dispatch import current_dispatch
+
+    dispatch = current_dispatch(run_id)
+    if dispatch is None:
+        await _lock_budget_day(session, reservation.business_date.isoformat())
+    else:
+        # This is only a check of an already committed, whole-batch reservation.
+        # Keep the exact row locked; monetary mutations still take the day lock.
+        run = await session.get(AgentResearchRunRecord, run_id)
+        if (
+            run is None
+            or run_id not in dispatch.claims
+            or run.reserved_cost_usd != reservation.reserved_usd
+            or run.pricing_version != reservation.pricing_version
+        ):
+            raise BudgetExhausted("reservation authority does not match run")
     if reservation.state != "reserved":
         raise BudgetExhausted("research run has no open budget reservation")
     return reservation

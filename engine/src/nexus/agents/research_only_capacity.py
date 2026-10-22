@@ -56,13 +56,19 @@ async def prepare_research_only_capacity_pool(
         or run.id not in {item.run_id for item in manifest.members}
     ):
         raise ValueError(invalid)
+    from nexus.agents.research_dispatch import require_dispatch_pool, uses_two_flight
+
+    parallel = uses_two_flight(request.research_profile)
+    if parallel:
+        await require_dispatch_pool(session, request, manifest, run.id)
     members = []
     selected = None
     for item in manifest.members:
         member = await session.get(AgentResearchRunRecord, item.run_id, populate_existing=True)
         if (
             member is None
-            or member.status not in {"prepared", "completed"}
+            or member.status
+            not in ({"prepared", "running", "completed"} if parallel else {"prepared", "completed"})
             or member.model_config_id != run.model_config_id
             or member.model_hash != run.model_hash
             or member.pricing_version != run.pricing_version

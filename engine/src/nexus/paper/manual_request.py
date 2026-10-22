@@ -394,8 +394,15 @@ async def admit_manual_request(
     contract_version: int = 1,
     runtime_mode: str = "codex_sdk",
     daily_limit_usd: Decimal = Decimal("3.00"),
+    two_flight: bool = False,
 ) -> ManualRequestView:
     ManualRequestInput(mode=mode)
+    if (
+        type(two_flight) is not bool
+        or two_flight
+        and (contract_version != 2 or mode != "research_only")
+    ):
+        raise ValueError("MANUAL_REQUEST_INVALID")
     if not idempotency_key.strip() or len(idempotency_key) > 255:
         raise ValueError("MANUAL_REQUEST_INVALID")
     await lock_portfolio_account(session, account_id)
@@ -432,6 +439,11 @@ async def admit_manual_request(
     model = await require_formal_stage_model_profile(
         session, model_config_id=model_config_id, now=now
     )
+    if two_flight:
+        from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+
+        if model.version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
+            raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     profile: dict[str, object] | None = None
     if contract_version == 2:
         from nexus.agents.research_only import ensure_research_only_prompts
@@ -445,6 +457,10 @@ async def admit_manual_request(
             "orchestrator_id": str(prompts["orchestrator"].id),
             "prompt_hashes": {role: prompt.content_hash for role, prompt in prompts.items()},
         }
+        if two_flight:
+            from nexus.agents.research_dispatch import two_flight_policy
+
+            profile["execution_policy"] = two_flight_policy()
         identity = manual_request_hash(
             account_id=account_id,
             batch_id=batch_id,

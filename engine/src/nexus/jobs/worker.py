@@ -131,7 +131,14 @@ async def run_job_worker_once(
         + 15,
     )
     loop = asyncio.get_running_loop()
-    async with factory() as session, session.begin():
+    from nexus.agents.research_dispatch import dispatch_failure_boundary, stop_current_dispatch
+
+    async with (
+        factory() as session,
+        dispatch_failure_boundary(session),
+        session.begin(),
+        dispatch_failure_boundary(),
+    ):
         if preclaim_guard is not None:
             await preclaim_guard(session)
         # Preparation has not claimed a Job yet. Anchor its lease to the actual
@@ -225,7 +232,12 @@ async def run_job_worker_once(
         async with asyncio.timeout_at(handler_deadline):
             if loop.time() >= handler_deadline:
                 raise TimeoutError
-            async with factory() as session, session.begin():
+            async with (
+                factory() as session,
+                dispatch_failure_boundary(session),
+                session.begin(),
+                dispatch_failure_boundary(),
+            ):
 
                 async def execute(target_session: AsyncSession) -> JobCompletion:
                     context = JobHandlerContext(
@@ -255,6 +267,7 @@ async def run_job_worker_once(
                     execute=execute,
                 )
     except TimeoutError:
+        stop_current_dispatch()
         await _fail(
             factory,
             claim=claim,
@@ -262,6 +275,7 @@ async def run_job_worker_once(
             error_code="HANDLER_TIMEOUT",
         )
     except RetryableJobError as error:
+        stop_current_dispatch()
         await _fail(
             factory,
             claim=claim,
@@ -269,6 +283,7 @@ async def run_job_worker_once(
             error_code=error.error_code,
         )
     except UnsafeJobError as error:
+        stop_current_dispatch()
         await _dead_letter(
             factory,
             claim=claim,
@@ -276,8 +291,9 @@ async def run_job_worker_once(
             error_code=error.error_code,
         )
     except LeaseLostError:
-        pass
+        stop_current_dispatch()
     except Exception:
+        stop_current_dispatch()
         await _fail(
             factory,
             claim=claim,

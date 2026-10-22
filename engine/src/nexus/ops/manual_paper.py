@@ -509,7 +509,10 @@ def main(argv: list[str] | None = None) -> int:
         if revision is not None:
             environment["NEXUS_RELEASE_REVISION"] = revision
         settings = _FileEngineSettings.model_validate(environment)
-        view = asyncio.run(run(settings, args))
+        from nexus.agents.research_dispatch import dispatch_trace_output
+
+        with dispatch_trace_output():
+            view = asyncio.run(run(settings, args))
     except Exception as error:
         code = str(error) if str(error) in SAFE_ENTRY_CODES else "MANUAL_RESULT_UNKNOWN"
         report: dict[str, object] = {
