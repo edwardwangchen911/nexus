@@ -237,3 +237,34 @@ for (const kind of ["cancelled_before_call", "unknown_preserved", "cycle_reconci
     expect(methods.every((method) => method === "GET")).toBe(true);
   });
 }
+
+for (const width of [390, 1440]) {
+  test(`pure three-stock research readback at width ${width} stays read-only`, async ({ page }) => {
+    const { researchReceipt } = await import("../unit/manual-paper/research-fixture");
+    await page.setViewportSize({ width, height: 1000 });
+    await installFixtures(page, readyWorkbench(), []);
+    await page.addInitScript(() => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "pure-new", mode: "research_only" })));
+    const methods: string[] = [];
+    await page.route("**/api/v1/paper/manual-requests", async (route) => {
+      methods.push(route.request().method());
+      await route.fulfill({ json: { data: researchReceipt, meta: meta() } });
+    });
+    await page.goto("/workspace");
+    const panel = page.getByRole("region", { name: "开始研究与内部模拟" });
+    await expect(panel.getByText("研究处理已完成", { exact: true })).toBeVisible();
+    await expect(panel.getByText("内容受限", { exact: true })).toHaveCount(2);
+    await expect(panel).toContainText("远端最新状态未核实");
+    await expect(panel).toContainText("正式决策仍须重新核验当时资料与风控");
+    const links = panel.getByRole("link", { name: /查看第.*只证券研究/ });
+    await expect(links).toHaveCount(3);
+    for (const [index, member] of researchReceipt.research.members.entries()) {
+      await expect(links.nth(index)).toHaveAttribute("href", `/research/${member.instrument_id}?run_id=${member.run_id}`);
+    }
+    await page.reload();
+    await expect(panel.getByText("研究处理已完成", { exact: true })).toBeVisible();
+    expect(methods.length).toBeGreaterThan(1);
+    expect(methods.every((method) => method === "GET")).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await panel.screenshot({ path: `test-results/pure-research-${width}.png` });
+  });
+}

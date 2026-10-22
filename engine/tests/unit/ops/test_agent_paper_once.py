@@ -1722,7 +1722,7 @@ def test_trigger_reservation_failure_annotated_before_any_provider(monkeypatch, 
 
 
 @pytest.mark.parametrize("cleanup_failure", [False, True])
-@pytest.mark.parametrize("failure_boundary", ["trigger", "journal", "effects", "claim"])
+@pytest.mark.parametrize("failure_boundary", ["trigger", "journal", "effects", "claim", "routing"])
 def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
     monkeypatch, cleanup_failure, failure_boundary
 ):
@@ -1730,6 +1730,7 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
     from sqlalchemy.exc import SQLAlchemyError
 
     readbacks = []
+    routing_reads = []
 
     class Session:
         async def __aenter__(self):
@@ -1739,6 +1740,10 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
             return None
 
         async def get(self, *_args):
+            if not routing_reads:
+                routing_reads.append(True)
+                if failure_boundary != "routing":
+                    return SimpleNamespace(contract_version=1)
             readbacks.append(True)
             raise SQLAlchemyError("private-database-canary")
 
@@ -1807,7 +1812,7 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
         "trigger_reservation"
         if failure_boundary == "trigger"
         else "preparation_journal"
-        if failure_boundary == "claim"
+        if failure_boundary in {"claim", "routing"}
         else "preparation_" + failure_boundary
     )
     assert caught.value._nexus_agent_paper_failure_code == (
@@ -1817,4 +1822,66 @@ def test_manual_failure_survives_unknown_record_write_and_cleanup_failure(
         "validation" if failure_boundary in {"trigger", "claim"} else "database"
     )
     assert "private" not in str(caught.value)
+    assert len(routing_reads) == 1
     assert len(readbacks) == (0 if failure_boundary in {"claim", "journal"} else 1)
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("cleanup_cancelled", [False, True])
+def test_pure_dispatch_primary_survives_outer_cleanup(monkeypatch, cancelled, cleanup_cancelled):
+    from nexus.ops import manual_paper_host as host
+
+    primary = asyncio.CancelledError() if cancelled else RuntimeError("private-primary-canary")
+    calls = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args):
+            return SimpleNamespace(contract_version=2)
+
+    class Engine:
+        async def dispose(self):
+            if cleanup_cancelled:
+                raise asyncio.CancelledError()
+            raise RuntimeError("private-cleanup-canary")
+
+    class Factory:
+        kw = {"bind": Engine()}
+
+        def begin(self):
+            return Session()
+
+    async def dispatch(*_args, **_kwargs):
+        calls.append(True)
+        raise primary
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("pure research must not enter formal preparation")
+
+    monkeypatch.setattr(host, "session_factory", lambda *_args: Factory())
+    monkeypatch.setattr(host, "dispatch_pure_research_request", dispatch)
+    monkeypatch.setattr(host, "claim_configured_manual_request", forbidden)
+    settings = EngineSettings()
+    trigger_settings = cli.AgentPaperTriggerSettings.model_validate(
+        settings.model_dump()
+        | {
+            "database_url": "postgresql+asyncpg://u:p@127.0.0.1/nexus",
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "alpaca_key": "fixture",
+            "alpaca_secret": "fixture",
+        }
+    )
+    with pytest.raises(type(primary)) as caught:
+        asyncio.run(
+            host.dispatch_manual_request(
+                settings, trigger_settings, request_id=UUID(int=3),
+                repo_root=Path("/unused"), calendar_authority_id=None, process_environment={},
+            )
+        )
+    assert caught.value is primary
+    assert calls == [True]

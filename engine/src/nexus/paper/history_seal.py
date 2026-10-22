@@ -230,7 +230,28 @@ def require_research_processes_quiescent() -> None:
 
 
 def _row_hash(row: Base) -> str:
-    values = {item.key: getattr(row, item.key) for item in row.__mapper__.column_attrs}
+    keys: tuple[str, ...]
+    if isinstance(row, ManualPaperRequest) and row.contract_version == 1:
+        # v1 audit proofs predate 0084. Keep their exact original column set;
+        # new pure-research metadata cannot revoke or broaden historical acceptance.
+        if row.research_profile is not None:
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
+        keys = (
+            "id",
+            "account_id",
+            "candidate_batch_id",
+            "model_config_id",
+            "mode",
+            "key_hash",
+            "request_hash",
+            "batch_hash",
+            "model_hash",
+            "requested_at",
+            "created_at",
+        )
+    else:
+        keys = tuple(item.key for item in row.__mapper__.column_attrs)
+    values = {key: getattr(row, key) for key in keys}
     return job_input_hash(json.loads(json.dumps(values, default=str)))
 
 

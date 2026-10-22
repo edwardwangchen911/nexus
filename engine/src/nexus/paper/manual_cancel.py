@@ -33,7 +33,7 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.manual_paper import ManualPaperRequestEvent
+from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPaperRequestEvent
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 
@@ -48,11 +48,12 @@ class TerminalCycleCancelReceipt(BaseModel):
 async def cancel_unused_manual_research(
     session: AsyncSession,
     *,
-    cycle: AgentPaperCycleRecord,
+    cycle: AgentPaperCycleRecord | None,
     events: tuple[AgentPaperCycleEventRecord, ...],
     now: datetime,
     allow_legacy: bool = False,
     nonblocking: bool = False,
+    research_request: ManualPaperRequest | None = None,
 ) -> int:
     # Caller holds account/cycle locks and validated this manual terminal event chain.
     run_ids: set[UUID] = set()
@@ -64,6 +65,20 @@ async def cancel_unused_manual_research(
             run_ids.update(UUID(str(item)) for item in raw)
     except (ValueError, TypeError):
         raise ValueError("MANUAL_RESULT_UNKNOWN") from None
+    if research_request is not None:
+        from nexus.paper.research_request import read_research_manifest
+
+        manifest = await read_research_manifest(session, research_request)
+        if cycle is not None or events or manifest is None:
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
+        run_ids = {member.run_id for member in manifest.members}
+        owner_id, cutoff = research_request.id, manifest.research_as_of
+        actor, prefix = "local-research-only-v2", "research-only"
+    elif cycle is not None:
+        owner_id, cutoff = cycle.id, cycle.decision_time
+        actor, prefix = "local-agent-paper-cycle", "agent-paper"
+    else:
+        raise ValueError("MANUAL_RESULT_UNKNOWN")
     if len(run_ids) > 5:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     query = (
@@ -114,14 +129,14 @@ async def cancel_unused_manual_research(
             or run.settled_cost_usd is not None
             or run.input_tokens is not None
             or run.output_tokens is not None
-            or run.actor_id != "local-agent-paper-cycle"
-            or run.idempotency_key != f"agent-paper:{cycle.id}:{run.instrument_id}"
-            or run.decision_time != cycle.decision_time
+            or run.actor_id != actor
+            or run.idempotency_key != f"{prefix}:{owner_id}:{run.instrument_id}"
+            or run.decision_time != cutoff
             or job.attempt_count != 0
             or job.manual_retry_count != 0
             or job.payload != {"run_id": str(run.id)}
             or job.scope_id != str(run.instrument_id)
-            or job.effective_at != cycle.decision_time
+            or job.effective_at != cutoff
             or job.input_hash
             != job_input_hash(
                 {
@@ -181,7 +196,7 @@ async def cancel_unused_manual_research(
         claim = await claim_next_job(
             session,
             queue=QueueName.GENERAL,
-            worker_id=f"manual-cancel:{cycle.id}",
+            worker_id=f"manual-cancel:{owner_id}",
             now=now,
             lease_seconds=30
             if legacy

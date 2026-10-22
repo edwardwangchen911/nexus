@@ -1,6 +1,6 @@
 """Code-side database compatibility authority."""
 
-CURRENT_MIGRATION_HEAD = "0082_synthesis_failure_facts"
+CURRENT_MIGRATION_HEAD = "0084_research_only_requests"
 SCHEMA_ADMISSION_LOCK_KEY = "nexus:intraday-schema-admission:v1"
 CURRENT_GENERAL_WORKER_PROCESS_VERSION = "nexus-engine-phase3-intraday"
 CURRENT_BROKER_WORKER_PROCESS_VERSION = "nexus-broker-phase3a"

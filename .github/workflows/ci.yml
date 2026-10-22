@@ -144,6 +144,10 @@ jobs:
             engine/tests/integration/test_portfolio_decision_e2e.py \
             engine/tests/integration/test_portfolio_decision_admission_pg.py \
             engine/tests/integration/test_manual_paper_api_pg.py \
+            engine/tests/integration/test_research_request_pg.py \
+            engine/tests/integration/test_research_only_runtime.py \
+            engine/tests/integration/test_observation_identity.py \
+            engine/tests/integration/test_observation_identity_migration.py \
             engine/tests/integration/test_manual_paper_job_binding_pg.py \
             engine/tests/integration/test_synthesis_usage_acceptance_pg.py \
             engine/tests/integration/test_synthesis_sdk_lifecycle_pg.py \

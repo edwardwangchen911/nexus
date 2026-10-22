@@ -186,6 +186,21 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
                 "reason_code"
             ] == "MANUAL_HOST_NOT_READY"
             settings.agent_paper_candidate_batch_id = batch.batch_id
+            if mode == "research_only":
+                # Historical v1 readback/dispatch remains supported. New pure POSTs
+                # are covered by test_research_request_pg's v2 normal producer.
+                from nexus.paper.manual_request import admit_manual_request
+
+                async with sessions.begin() as session:
+                    await admit_manual_request(
+                        session,
+                        account_id=authority.account_id,
+                        batch_id=batch.batch_id,
+                        model_config_id=model.id,
+                        mode=mode,
+                        idempotency_key="click",
+                        contract_version=1,
+                    )
             result = await post(client)
             assert result.status_code == 200, result.text
             receipt = result.json()["data"]
@@ -508,9 +523,13 @@ async def test_manual_http_and_cli_bind_protected_scope_and_read_persisted_only(
             clock_at[0] = at.replace(hour=20, minute=1)
             async with sessions.begin() as session:
                 await session.execute(update(WorkerHeartbeat).values(seen_at=clock_at[0]))
-            assert (await post(client, key="after-close")).json()["error"]["details"][
-                "reason_code"
-            ] == "MANUAL_SESSION_UNAVAILABLE"
+            assert (
+                await post(
+                    client,
+                    key="after-close",
+                    payload=json.dumps({"mode": "research_and_paper"}).encode(),
+                )
+            ).json()["error"]["details"]["reason_code"] == "MANUAL_SESSION_UNAVAILABLE"
             assert (await post(client)).json()["data"] == expected_receipt
         async with sessions.begin() as session:
             row = await session.get(ManualPaperRequest, request_id)

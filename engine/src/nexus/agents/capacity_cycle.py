@@ -186,6 +186,16 @@ async def prepare_cycle_capacity_pool(
             raise ValueError(invalid)
     else:
         await require_candidate_database(session)
+    from nexus.agents.research_only import is_research_only
+    from nexus.persistence.models.data import DataSnapshot
+
+    snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    if is_research_only(snapshot):
+        if not formal_stage_capacity:
+            raise ValueError(invalid)
+        from nexus.agents.research_only_capacity import prepare_research_only_capacity_pool
+
+        return await prepare_research_only_capacity_pool(session, settings, run, deadline=deadline)
     context = await read_agent_paper_research_context(
         session,
         snapshot_id=run.data_snapshot_id,

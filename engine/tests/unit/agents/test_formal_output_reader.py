@@ -31,7 +31,13 @@ async def test_reader_consumes_only_qualified_formal_content(monkeypatch, mode, 
     run.created_at = run.decision_time
     output = case["output"]
     output.created_at = run.decision_time
-    snapshot = SimpleNamespace(available_at=run.decision_time, received_at=run.decision_time)
+    snapshot = SimpleNamespace(
+        available_at=run.decision_time,
+        received_at=run.decision_time,
+        source="nexus_research",
+        schema_version="research_filings_v1",
+        payload={},
+    )
 
     async def get(model, *_args, **_kwargs):
         return (

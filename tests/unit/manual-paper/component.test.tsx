@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ManualPaperStart } from "../../../app/components/workbench/manual-paper-start";
+import { researchReceipt } from "./research-fixture";
 const id = "0198f7a0-1111-7777-8111-111111111111";
 const receipt = { request_id: id, mode: "research_only", requested_at: "2026-10-09T14:00:00Z", status: "queued", code: "MANUAL_REQUEST_QUEUED", cycle_id: null, execution_locked: true };
 const fetchMock = vi.fn();
@@ -126,5 +127,69 @@ it("keeps uncertain preparation blocked after maintenance and links a reconciled
   fetchMock.mockResolvedValueOnce(Response.json({ data: { ...receipt, status: "unknown", code: "MANUAL_RESULT_UNKNOWN", preparation_recovery: { disposition: "unknown_preserved", external_effects: "unknown", cycle_id: null } } }));
   render(<ManualPaperStart />);
   await screen.findByText(/费用和预算继续保留/);
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+});
+
+it("shows completed processing separately from per-stock quality and frozen research limitations", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "pure-research", mode: "research_only" }));
+  fetchMock.mockImplementation(async () => Response.json({ data: researchReceipt }));
+  render(<ManualPaperStart />);
+  await screen.findByText("研究处理已完成");
+  expect(screen.getAllByText("内容受限")).toHaveLength(2);
+  expect(screen.getByText(/历史观察资料/)).toBeVisible();
+  expect(screen.getByText(/远端最新状态未核实/)).toBeVisible();
+  expect(screen.getByText(/不构成正式决策/)).toBeVisible();
+  expect(screen.getByText(researchReceipt.research.research_as_of)).toHaveAttribute("dateTime", researchReceipt.research.research_as_of);
+  const links = screen.getAllByRole("link", { name: /查看第.*只证券研究/ });
+  expect(links).toHaveLength(3);
+  for (const [index, member] of researchReceipt.research.members.entries()) {
+    expect(links[index]).toHaveAttribute("href", `/research/${member.instrument_id}?run_id=${member.run_id}`);
+  }
+  expect(screen.queryByRole("link", { name: /周期决策/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "核对原请求" }));
+  await screen.findByText("研究处理已完成");
+  expect(fetchMock.mock.calls.every((call) => call[1].method === "GET")).toBe(true);
+});
+
+it("retains unknown usage and blocks a new start after pure research closeout", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "pure-unknown", mode: "research_only" }));
+  fetchMock.mockResolvedValue(Response.json({ data: {
+    ...researchReceipt, status: "unknown", code: "MANUAL_RESULT_UNKNOWN",
+    research: { ...researchReceipt.research, members: researchReceipt.research.members.map((member, index) => index === 1 ? { ...member, status: "failed", quality: null, usage_known: false } : member) },
+  } }));
+  render(<ManualPaperStart />);
+  await screen.findByText("研究结果尚未确认");
+  expect(screen.getByText("用量未知，保留预算占用")).toBeVisible();
+  expect(screen.getByText("内容质量未知")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "仅研究" })).toBeDisabled();
+  expect(fetchMock.mock.calls[0][1].method).toBe("GET");
+});
+
+it("does not present request time as the frozen cutoff while pure research is queued", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "pure-queued", mode: "research_only" }));
+  fetchMock.mockResolvedValue(Response.json({ data: {
+    ...researchReceipt, status: "queued", code: "MANUAL_REQUEST_QUEUED", research: null,
+  } }));
+  render(<ManualPaperStart />);
+  await screen.findByText("已登记，等待宿主处理");
+  expect(screen.getByText(/研究资料尚未冻结/)).toBeVisible();
+  expect(screen.queryByText(researchReceipt.research.research_as_of)).not.toBeInTheDocument();
+  expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+  expect(fetchMock.mock.calls[0][1].method).toBe("GET");
+});
+
+it("renders unrecognized member state and quality as unknown without exposing raw strings", async () => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "pure-active", mode: "research_only" }));
+  fetchMock.mockResolvedValue(Response.json({ data: {
+    ...researchReceipt, status: "active", code: "MANUAL_RESEARCH_STARTED",
+    research: { ...researchReceipt.research, members: [{ ...researchReceipt.research.members[0], status: "private-status", quality: "private-quality" }] },
+  } }));
+  render(<ManualPaperStart />);
+  await screen.findByText("研究正在处理");
+  expect(screen.getByText("处理状态未知")).toBeVisible();
+  expect(screen.getByText("内容质量未知")).toBeVisible();
+  expect(screen.queryByText(/private/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
 });

@@ -287,6 +287,7 @@ class AgentPaperLoopSnapshot:
     manual_finish_request_id: UUID | None = None
     manual_pending_request_id: UUID | None = None
     manual_pending_status: str | None = None
+    manual_research_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1818,6 +1819,12 @@ def choose_loop_action(
         return AgentPaperLoopAction.STOP_DISABLED
     if snapshot.manual_pending_status in {"preparing", "unknown"}:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    if snapshot.manual_research_only and snapshot.manual_pending_request_id is not None:
+        if snapshot.manual_pending_status == "queued":
+            return AgentPaperLoopAction.TRIGGER_MANUAL
+        if snapshot.manual_pending_status == "active":
+            return AgentPaperLoopAction.FINISH_MANUAL
+        return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     if snapshot.manual_finish_request_id is not None:
         if (
             snapshot.evaluation_id is not None
@@ -2821,7 +2828,7 @@ async def execute_agent_paper_loop_action(
         if (
             choose_loop_action(snapshot) != action
             or snapshot.manual_pending_request_id is None
-            or snapshot.calendar_authority_id is None
+            or (not snapshot.manual_research_only and snapshot.calendar_authority_id is None)
             or account_id != settings.agent_paper_account_id
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
@@ -2850,7 +2857,7 @@ async def execute_agent_paper_loop_action(
 
         if (
             snapshot.manual_finish_request_id is None
-            or snapshot.cycle_id is None
+            or (not snapshot.manual_research_only and snapshot.cycle_id is None)
             or account_id != settings.agent_paper_account_id
             or choose_loop_action(snapshot) != action
         ):
@@ -2864,7 +2871,7 @@ async def execute_agent_paper_loop_action(
                     request_id=snapshot.manual_finish_request_id,
                     cancel_unused=True,
                 )
-                if view.cycle_id != snapshot.cycle_id:
+                if not snapshot.manual_research_only and view.cycle_id != snapshot.cycle_id:
                     raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
         finally:
             await factory.kw["bind"].dispose()

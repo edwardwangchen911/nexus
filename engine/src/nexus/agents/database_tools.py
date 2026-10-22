@@ -227,6 +227,23 @@ class _BoundDatabaseExecutors:
             ref.id for ref in self._evidence if ref.source == RESEARCH_IDENTITY_SOURCE
         } != identities.keys():
             return self._invalid_frozen_evidence_authority("get_security_snapshot")
+        observation_bindings = {}
+        observation_ids = tuple(
+            ref.id for ref in self._evidence if ref.source == "research_observation_identity"
+        )
+        if observation_ids:
+            from nexus.research.observation_identity_storage import (
+                read_observation_identity_bindings,
+            )
+
+            observation_bindings = await read_observation_identity_bindings(
+                self._session,
+                instrument_id=self._instrument_id,
+                as_of=self._decision_time,
+                evidence_ids=observation_ids,
+            )
+            if len(observation_ids) != 1 or set(observation_ids) != observation_bindings.keys():
+                return self._invalid_frozen_evidence_authority("get_security_snapshot")
         news = await read_news_evidence(
             self._session,
             instrument_id=self._instrument_id,
@@ -277,6 +294,15 @@ class _BoundDatabaseExecutors:
                         else {}
                     ),
                     **(
+                        {
+                            "research_observation_identity_binding": observation_bindings[
+                                record.id
+                            ].model_dump(mode="json")
+                        }
+                        if record.id in observation_bindings
+                        else {}
+                    ),
+                    **(
                         {"research_identity_binding": identities[record.id].model_dump(mode="json")}
                         if record.id in identities
                         else {}
@@ -307,6 +333,14 @@ class _BoundDatabaseExecutors:
             ],
         )
         snapshot = await self._session.get(DataSnapshot, self._snapshot_id)
+        if snapshot is not None and snapshot.payload.get("purpose") == "research_only_v2":
+            if not observation_bindings:
+                return self._invalid_frozen_evidence_authority("get_security_snapshot")
+            result = {
+                **result,
+                "purpose": "research_only_v2",
+                "portfolio_context_status": "not_applicable",
+            }
         diagnostic = {"status": "unknown", "reason": CAPACITY_REASON}
         if (
             not identities

@@ -19,6 +19,8 @@ async def seed_filing(
     created_at=NOW,
     instrument_id=INSTRUMENT,
     seed_instrument=True,
+    provider_object_id="filing:test",
+    accession_number="0000000001-26-000001",
 ):
     if seed_instrument:
         session.add(
@@ -43,7 +45,7 @@ async def seed_filing(
         )
     evidence = ResearchEvidenceRef(
         source=source,
-        provider_object_id="filing:test",
+        provider_object_id=provider_object_id,
         revision="test-v1",
         available_at=NOW,
         created_at=created_at,
@@ -60,7 +62,7 @@ async def seed_filing(
             source=source,
             provider_object_id=evidence.provider_object_id,
             revision=evidence.revision,
-            accession_number="0000000001-26-000001",
+            accession_number=accession_number,
             form="10-Q",
             filed_at=NOW,
             accepted_at=accepted_at,

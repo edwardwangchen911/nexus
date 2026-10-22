@@ -141,6 +141,10 @@ async def freeze_formal_research(
 ) -> tuple[FormalResearchBinding, ResearchIntent]:
     """Read one explicit final output, its original R and all original evidence."""
     run = await session.get(AgentResearchRunRecord, reference.run_id)
+    if run is not None:
+        from nexus.agents.research_only import require_formal_research
+
+        await require_formal_research(session, run)
     output = await session.get(AgentResearchOutputRecord, reference.output_id)
     jobs = tuple(
         await session.scalars(
